@@ -167,6 +167,67 @@ where
     Ok(Some(acceptance))
 }
 
+/// What the poll loop is allowed to do with a pair.
+///
+/// The live handler must not decide this inline. Every "never ACKs" rule in the
+/// design is a property of this one value, so it is computed in one place and
+/// unit-tested against real durable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AckDecision {
+    /// The pair reached `Accepted`. The acceptance kind is carried, NOT collapsed:
+    /// `AcceptedFresh` is the semantic finality path, `AcceptedDuplicate` is the
+    /// idempotent convergence path and must never mint a second value result.
+    Ack(Acceptance),
+    /// Not ACK-able, with the reason. Covers every non-accepted state — a single
+    /// half, `ready_to_verify` before apply, and `terminal_reject`.
+    DoNotAck(String),
+}
+
+/// The whole per-pair decision: complete the pair if it is ready, then report
+/// whether (and how) it may be acknowledged.
+///
+/// A failing apply is propagated as `Err`, deliberately distinct from
+/// `DoNotAck`: the pair stays retryable and un-ACK-able, and the caller should
+/// log it rather than treat it as a decision about the transfer.
+pub fn decide_ack<F>(
+    correlation_key: &str,
+    sender_ak_pk: &[u8],
+    apply: F,
+) -> Result<AckDecision, String>
+where
+    F: FnOnce(&crate::handlers::recipient_accept::VerifiedTransfer) -> Result<ApplyOutcome, String>,
+{
+    let state = recipient_staging::staging_state(correlation_key)
+        .map_err(|e| format!("staging state load failed for {correlation_key}: {e}"))?;
+
+    // ALREADY ACCEPTED. This is the crash-after-apply-before-ACK window: the
+    // canonical apply committed durably but the acknowledgement never went out.
+    // The pair must re-ACK so the sender converges, and it must NOT re-apply —
+    // so it reports Duplicate, which is exactly what a fresh apply attempt would
+    // have returned anyway (the canonical apply is keyed on authenticated
+    // material, not on this delivery).
+    if state == StagingState::Accepted {
+        return Ok(AckDecision::Ack(Acceptance::AcceptedDuplicate));
+    }
+
+    match try_complete(correlation_key, sender_ak_pk, apply)? {
+        Some(acceptance) => {
+            // Belt and braces: the ACK is gated on DURABLE state, never on the
+            // fact that a call returned Ok.
+            if !may_ack(correlation_key)? {
+                return Ok(AckDecision::DoNotAck(format!(
+                    "{correlation_key} reported acceptance but durable state is not Accepted"
+                )));
+            }
+            Ok(AckDecision::Ack(acceptance))
+        }
+        None => Ok(AckDecision::DoNotAck(format!(
+            "{correlation_key} is {} — not ACK-able",
+            state.as_str()
+        ))),
+    }
+}
+
 /// Whether a completed pair may be acknowledged on the wire.
 ///
 /// The ACK decision is deliberately NOT `outcome.is_ok()`. Only a pair that
@@ -182,7 +243,9 @@ pub fn may_ack(correlation_key: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::recipient_accept::tests::{setup, signed_receipt_bytes, signed_transfer_bytes};
+    use crate::handlers::recipient_accept::tests::{
+        setup, signed_receipt_bytes, signed_transfer_bytes, stub_advance,
+    };
     use crate::storage::client_db::{evidence_content_digest, ArtifactRole};
     use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
     use serial_test::serial;
@@ -322,6 +385,226 @@ mod tests {
         assert!(
             may_ack(key).expect("ack gate"),
             "ACK-able only after accept"
+        );
+    }
+
+    /// A stub apply that records whether it ran, so "no second apply" is an
+    /// assertion about EXECUTION, not merely about the returned label.
+    fn counting_apply(
+        ran: &std::cell::Cell<u32>,
+        outcome: ApplyOutcome,
+    ) -> impl FnOnce(
+        &crate::handlers::recipient_accept::VerifiedTransfer,
+    ) -> Result<ApplyOutcome, String>
+           + '_ {
+        move |_| {
+            ran.set(ran.get() + 1);
+            Ok(outcome)
+        }
+    }
+
+    fn fresh_outcome() -> ApplyOutcome {
+        ApplyOutcome::AlreadyAppliedSameOperation {
+            record: crate::storage::client_db::CanonicalApplyRecord {
+                relationship_key: [0x01; 32],
+                parent_tip: [0x02; 32],
+                child_tip: [0x03; 32],
+                precommit_digest: [0x04; 32],
+                operation_digest: [0x05; 32],
+                sender_device: [0x06; 32],
+                recipient_device: [0x07; 32],
+                nonce_hash: [0x08; 32],
+                applied_parent_root_b: [0x09; 32],
+                applied_child_root_b: [0x0A; 32],
+            },
+        }
+    }
+
+    /// MATRIX 1-3: the three never-ACK states, asserted through the same
+    /// decision function the live loop uses.
+    #[test]
+    #[serial]
+    fn a_single_half_ready_to_verify_and_terminal_reject_never_ack() {
+        let (ak_pk, transfer, evidence, _, bad_evidence) = pair();
+
+        // (1) one half only
+        let k1 = "MX-ONE-HALF";
+        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
+        let ran = std::cell::Cell::new(0);
+        assert!(matches!(
+            decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
+            AckDecision::DoNotAck(_)
+        ));
+        assert_eq!(ran.get(), 0, "apply must not run for a single half");
+
+        // (2) ready_to_verify, before any apply, is not ACK-able on its own:
+        // proven by an apply that FAILS, leaving the pair ready and un-ACKed.
+        let k2 = "MX-READY";
+        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
+        assert_eq!(
+            recipient_staging::staging_state(k2).expect("s"),
+            StagingState::ReadyToVerify
+        );
+        assert!(!may_ack(k2).expect("ack"), "ready_to_verify must never ACK");
+        assert!(decide_ack(k2, &ak_pk, |_| Err("disk on fire".into())).is_err());
+        assert!(
+            !may_ack(k2).expect("ack"),
+            "a failed apply must still not ACK"
+        );
+
+        // (3) terminal_reject never ACKs. Reached by a digest that does not bind.
+        let k3 = "MX-REJECT";
+        let wrong_digest = evidence_content_digest(ArtifactRole::EvidenceA, &bad_evidence);
+        let (_, ak_sk2) = generate_ephemeral_keypair(&[0xC4; 32]).expect("ak");
+        let mismatched = signed_transfer_bytes(&ak_sk2, &wrong_digest);
+        dispatch_transfer_half(k3, &mismatched, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk).expect("e");
+        let st = recipient_staging::staging_state(k3).expect("s");
+        assert_eq!(st, StagingState::TerminalReject, "digest must not bind");
+        assert!(!may_ack(k3).expect("ack"), "terminal_reject must never ACK");
+        assert!(matches!(
+            decide_ack(k3, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
+            AckDecision::DoNotAck(_)
+        ));
+    }
+
+    /// MATRIX 4: the two acceptance kinds stay distinct all the way out of the
+    /// decision function -- never collapsed into one "ok to ACK".
+    #[test]
+    #[serial]
+    fn fresh_and_duplicate_stay_distinct_through_the_decision() {
+        let (ak_pk, transfer, evidence, _, _) = pair();
+        let k = "MX-FRESH";
+        dispatch_transfer_half(k, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk).expect("e");
+
+        let decision = decide_ack(k, &ak_pk, |_| {
+            Ok(ApplyOutcome::Applied {
+                record: match fresh_outcome() {
+                    ApplyOutcome::AlreadyAppliedSameOperation { record } => record,
+                    _ => unreachable!(),
+                },
+                advance: Box::new(stub_advance()),
+            })
+        })
+        .expect("decide");
+        assert_eq!(decision, AckDecision::Ack(Acceptance::AcceptedFresh));
+        assert_ne!(
+            decision,
+            AckDecision::Ack(Acceptance::AcceptedDuplicate),
+            "a fresh acceptance must never read as a duplicate"
+        );
+    }
+
+    /// MATRIX 5-6: order independence. A tampered replica first still converges,
+    /// and so do evidence-first and transfer-first.
+    #[test]
+    #[serial]
+    fn every_arrival_order_converges() {
+        let (ak_pk, transfer, evidence, bad_transfer, _) = pair();
+
+        // transfer-first
+        let k1 = "MX-ORD-T";
+        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk).expect("e");
+        assert_eq!(
+            recipient_staging::staging_state(k1).expect("s"),
+            StagingState::ReadyToVerify
+        );
+
+        // evidence-first
+        let k2 = "MX-ORD-E";
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
+        assert_eq!(
+            recipient_staging::staging_state(k2).expect("s"),
+            StagingState::ReadyToVerify
+        );
+
+        // tampered replica FIRST, honest second
+        let k3 = "MX-ORD-BAD";
+        assert!(matches!(
+            dispatch_transfer_half(k3, &bad_transfer, &ak_pk).expect("bad"),
+            DispatchOutcome::DiscardedCandidate(_)
+        ));
+        dispatch_transfer_half(k3, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk).expect("e");
+        assert_eq!(
+            recipient_staging::staging_state(k3).expect("s"),
+            StagingState::ReadyToVerify,
+            "a poisoned replica arriving first must not block convergence"
+        );
+    }
+
+    /// MATRIX 7-8: restart after ONE half persists, and after BOTH halves stage
+    /// but before apply. Staging is durable, so a restart is modelled by
+    /// re-reading it -- which is what the poll loop does on the next tick.
+    #[test]
+    #[serial]
+    fn restart_after_either_half_and_before_apply_converges() {
+        let (ak_pk, transfer, evidence, _, _) = pair();
+
+        // restart with only the transfer half persisted
+        let k1 = "MX-RESTART-HALF";
+        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
+        assert_eq!(
+            recipient_staging::staging_state(k1).expect("reload"),
+            StagingState::StagedTransfer
+        );
+        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk).expect("e");
+        let ran = std::cell::Cell::new(0);
+        assert_eq!(
+            decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
+            AckDecision::Ack(Acceptance::AcceptedDuplicate)
+        );
+        assert_eq!(ran.get(), 1);
+
+        // restart with BOTH halves staged but no apply yet
+        let k2 = "MX-RESTART-READY";
+        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
+        assert_eq!(
+            recipient_staging::staging_state(k2).expect("reload"),
+            StagingState::ReadyToVerify
+        );
+        let ran2 = std::cell::Cell::new(0);
+        assert!(matches!(
+            decide_ack(k2, &ak_pk, counting_apply(&ran2, fresh_outcome())).expect("d"),
+            AckDecision::Ack(_)
+        ));
+        assert_eq!(ran2.get(), 1, "the apply runs exactly once");
+    }
+
+    /// MATRIX 9: restart AFTER apply but BEFORE the ACK went out. Must re-ACK so
+    /// the sender converges, must report Duplicate, and must NOT apply again.
+    #[test]
+    #[serial]
+    fn restart_after_apply_before_ack_reacks_as_duplicate_without_reapplying() {
+        let (ak_pk, transfer, evidence, _, _) = pair();
+        let k = "MX-CRASH-ACK";
+        dispatch_transfer_half(k, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk).expect("e");
+
+        let ran = std::cell::Cell::new(0);
+        assert!(matches!(
+            decide_ack(k, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
+            AckDecision::Ack(_)
+        ));
+        assert_eq!(ran.get(), 1);
+
+        // ...the process dies before the ACK is emitted. Next poll tick:
+        let ran2 = std::cell::Cell::new(0);
+        let again = decide_ack(k, &ak_pk, counting_apply(&ran2, fresh_outcome())).expect("d");
+        assert_eq!(
+            again,
+            AckDecision::Ack(Acceptance::AcceptedDuplicate),
+            "a re-ACK after a crash must converge, and must be a DUPLICATE"
+        );
+        assert_eq!(
+            ran2.get(),
+            0,
+            "THE POINT: no second apply -- the canonical apply must not run again"
         );
     }
 
