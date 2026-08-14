@@ -258,6 +258,95 @@ async fn hydrate_missing_sender_kyber_capability(
 /// Every failure path leaves the gate intact: an unmatched, stale, or invalid
 /// artifact must never release a pending transition. Idempotent — a redelivered
 /// reply finds the proposal already finalized and does nothing.
+/// Glue for one polled ADR 0003 transfer half.
+///
+/// FAILS CLOSED on missing raw bytes. There is deliberately no re-encode
+/// fallback: staging freezes what it is handed, and SIG A is later checked
+/// against that frozen copy, so reconstructing the request from decoded fields
+/// would mean verifying bytes the sender never signed. An entry that reached
+/// here without its originals is a bug in the fetch path, and the only safe
+/// response is to refuse it and say so.
+fn stage_polled_transfer_half(entry: &crate::sdk::b0x_sdk::B0xEntry) {
+    use crate::handlers::recipient_dispatch::{dispatch_transfer_half, DispatchOutcome};
+
+    let key = entry.transaction_id.as_str();
+    if entry.transfer_wire_bytes.is_empty() {
+        log::error!(
+            "[storage.sync] ❌ REJECTING split transfer {key}: the original \
+             OnlineTransferRequest bytes were not retained. Refusing to reconstruct them — \
+             staging freezes what it is given and SIG A is verified against that copy."
+        );
+        return;
+    }
+    let ak = match resolve_trusted_sender_ak(
+        &entry.sender_device_id,
+        &entry.sender_signing_public_key,
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            log::warn!("[storage.sync] ❌ REJECTING split transfer {key}: {e}");
+            return;
+        }
+    };
+    match dispatch_transfer_half(key, &entry.transfer_wire_bytes, &ak) {
+        Ok(DispatchOutcome::Staged(state)) => {
+            log::info!(
+                "[storage.sync] ADR 0003 transfer {key} staged → {}",
+                state.as_str()
+            )
+        }
+        Ok(DispatchOutcome::DiscardedCandidate(why)) => {
+            log::warn!("[storage.sync] ADR 0003 transfer {key} discarded: {why}")
+        }
+        Ok(other) => log::warn!("[storage.sync] ADR 0003 transfer {key}: unexpected {other:?}"),
+        Err(e) => log::error!("[storage.sync] ADR 0003 transfer {key} dispatch failed: {e}"),
+    }
+}
+
+/// Glue for one polled ADR 0003 evidence half.
+///
+/// The sender identity comes from the receipt's own `devid_a`, and the AK from
+/// the STORED contact for that device — never from the artifact. Everything
+/// after that is the dispatcher's decision, including whether the bytes are
+/// allowed to occupy a staging slot at all.
+fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA) {
+    use crate::handlers::recipient_dispatch::{dispatch_evidence_half, DispatchOutcome};
+
+    let key = evidence.transfer_submission_id.as_str();
+    // Read devid_a only to name the trust root. The bytes are re-decoded and
+    // fully verified inside the dispatcher against that root.
+    let sender = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &evidence.full_receipt_bytes,
+    ) {
+        Ok(r) => crate::util::text_id::encode_base32_crockford(&r.devid_a),
+        Err(e) => {
+            log::warn!("[storage.sync] ADR 0003 evidence {key}: receipt does not decode: {e}");
+            return;
+        }
+    };
+    let ak = match resolve_trusted_sender_ak(&sender, &[]) {
+        Ok(k) => k,
+        Err(e) => {
+            log::warn!("[storage.sync] ADR 0003 evidence {key}: {e}");
+            return;
+        }
+    };
+    match dispatch_evidence_half(evidence, &ak) {
+        Ok(DispatchOutcome::Staged(state)) => {
+            log::info!(
+                "[storage.sync] ADR 0003 evidence {key} staged → {}",
+                state.as_str()
+            )
+        }
+        Ok(DispatchOutcome::DiscardedCandidate(why)) => {
+            // No slot was taken, so an honest copy of this half can still arrive.
+            log::warn!("[storage.sync] ADR 0003 evidence {key} discarded: {why}")
+        }
+        Ok(other) => log::warn!("[storage.sync] ADR 0003 evidence {key}: unexpected {other:?}"),
+        Err(e) => log::error!("[storage.sync] ADR 0003 evidence {key} dispatch failed: {e}"),
+    }
+}
+
 async fn finalize_from_acceptance_artifact(
     artifact: &dsm::types::proto::AcceptanceReceiptArtifact,
 ) {
@@ -878,6 +967,13 @@ impl AppRouterImpl {
                                 for artifact in b0x_sdk.take_reply_artifacts() {
                                     finalize_from_acceptance_artifact(&artifact).await;
                                 }
+                                // ADR 0003 evidence halves ride the same spool under their
+                                // own explicit method. Glue only: resolve the trust root,
+                                // hand the artifact to the dispatcher, log. No verification
+                                // or acceptance logic lives here.
+                                for evidence in b0x_sdk.take_evidence_artifacts() {
+                                    stage_polled_evidence_half(&evidence);
+                                }
                                 // Cert-resync control messages ride the same spool,
                                 // discriminated by their explicit method. Dispatch each
                                 // to the matching leg; errors are logged, never fatal to
@@ -1035,6 +1131,17 @@ impl AppRouterImpl {
                                     // signed canonical operation — decoded from `canonical_operation_bytes`
                                     // and bound to the verified signature — never from the structured
                                     // fields a relay could tamper while leaving the signature intact.
+                                    // ADR 0003 SPLIT TRANSFER. A non-empty evidence reference
+                                    // means the receipt travels as its own artifact, so this
+                                    // entry is only one half and MUST NOT take the legacy
+                                    // inline path. Glue only: require the retained wire bytes,
+                                    // resolve the trust root, hand off. The dispatcher decides
+                                    // everything else.
+                                    if !entry.receipt_evidence_digest.is_empty() {
+                                        stage_polled_transfer_half(&entry);
+                                        continue;
+                                    }
+
                                     if let dsm::types::operations::Operation::Transfer { .. } =
                                         &entry.transaction
                                     {

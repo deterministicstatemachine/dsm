@@ -175,6 +175,11 @@ pub struct B0xEntry {
     /// Empty for entries not decoded from an `OnlineTransferRequest` (locally
     /// built entries, fixtures). The split path requires it and fails closed.
     pub transfer_wire_bytes: Vec<u8>,
+    /// ADR 0003: the A-side evidence reference carried by the request (proto
+    /// field 12). NON-EMPTY is the recipient's discriminator that this entry is
+    /// only ONE HALF of a split transfer and must not take the legacy inline
+    /// path. Empty means the legacy whole-receipt-inline composition.
+    pub receipt_evidence_digest: Vec<u8>,
 }
 
 /// The product of pure envelope construction: the exact canonical wire bytes
@@ -3457,6 +3462,9 @@ impl B0xSDK {
                                 return Some(B0xEntry {
                                     // Verbatim, from the SAME buffer the decode read.
                                     transfer_wire_bytes: arg_pack.body.clone(),
+                                    receipt_evidence_digest: transfer_req
+                                        .receipt_evidence_digest
+                                        .clone(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
@@ -3540,8 +3548,12 @@ impl B0xSDK {
                                         .unwrap_or_else(|| vec![0u8; 32])
                                 };
                                 return Some(B0xEntry {
-                                    // Verbatim, from the SAME buffer the decode read.
-                                    transfer_wire_bytes: arg_pack.body.clone(),
+                                    // This branch decoded an OnlineMessageRequest, not a
+                                    // transfer: there is no transfer half and no evidence
+                                    // reference, so both stay empty and the split path
+                                    // can never mistake a message for a half.
+                                    transfer_wire_bytes: Vec::new(),
+                                    receipt_evidence_digest: Vec::new(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
