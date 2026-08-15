@@ -104,15 +104,18 @@ jobs:
           # inside macro expansions, so losing expansion deletes the query
           # outright rather than shrinking it.
           #
-          # `rustup component add rust-src` was TRIED AND MEASURED, and is not
-          # the fix: with the component installed, the run was byte-identical
-          # (15,081 failures, 439/113, same 64 results). The extractor still
-          # reported `sysroot: None, sysroot_src: None, rustc_src: None,
-          # proc_macro_server: None, extract_dependencies_as_source: false` —
-          # those are unset options, not failed discovery. Next candidates are
-          # the explicit CODEQL_EXTRACTOR_RUST_OPTION_* overrides and fetched
-          # dependency sources, one variable at a time against the frozen
-          # baseline of 64.
+          # Cause: the bundle's rust-analyzer cannot expand std macros from
+          # Rust >= 1.95.0, and rust-toolchain.toml pins 1.96.0. Addressed by
+          # the sysroot pin in the steps below; see that comment for detail.
+          #
+          # Two hypotheses were tried and refuted, recorded so they are not
+          # retried: `rustup component add rust-src` (byte-identical run —
+          # the extractor already installs that component itself), and a
+          # `build-mode` change (the extractor never reads build output, it
+          # re-derives everything through rust-analyzer and hits the same
+          # sysroot). `sysroot: None` in the extractor's config dump means the
+          # option is unset and discovery ran, NOT that discovery failed —
+          # misreading that line is what sent the first attempt wrong.
           #
           # Separately, 31 files under dsm_sdk/src/jni/ and platform/{android,
           # ios} got "semantic analyzer unavailable (not included as a module)"
@@ -146,6 +149,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # The CodeQL bundle's vendored rust-analyzer cannot expand std macros
+      # from Rust >= 1.95.0. Bundle 2.26.3 pins ra_ap_* 0.0.301; the upgrade to
+      # 0.328 that fixes it (github/codeql#21714) merged upstream on
+      # 2026-08-14 and is in no released bundle yet.
+      #
+      # rust-toolchain.toml pins channel = "1.96.0", and the extractor resolves
+      # its sysroot by running `rustc --print sysroot` in the checkout root —
+      # where rustup honours that file — so it lands on exactly the broken
+      # version. Both variables are required: SYSROOT_SRC alone keeps the
+      # discovered 1.96 binary sysroot, and SYSROOT alone skips the automatic
+      # rust-src install and then errors when the sources are absent.
+      #
+      # This redirects ONLY the extractor. It does not change the toolchain any
+      # other job builds with, and rust-toolchain.toml is untouched.
+      #
+      # Revert this once a bundle ships ra_ap >= 0.328, and confirm the numbers
+      # hold rather than assuming they do.
+      - name: Pin the Rust sysroot read by the CodeQL extractor
+        if: matrix.language == 'rust'
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rust-src
+          SYSROOT="$(rustup run 1.94.0 rustc --print sysroot)"
+          echo "CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT=$SYSROOT" >> "$GITHUB_ENV"
+          echo "CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC=$SYSROOT/lib/rustlib/src/rust/library" >> "$GITHUB_ENV"
 
       # Mirrors the existing `android-unit-tests` job in ci.yml, which builds
       # this module green on ubuntu-latest with the same JDK.
