@@ -1,0 +1,246 @@
+# CodeQL security analysis — advanced setup, in-repo and reviewable.
+#
+# No untrusted GitHub event inputs are used: the only expressions are
+# `matrix.language` / `matrix.build-mode`, both defined in this file.
+#
+# WHY THIS FILE EXISTS
+#
+# CodeQL *security* analysis has not run on this repository since 2026-03-26.
+# A workflow named "CodeQL" has been green every day since, which is why the
+# gap was invisible. The green run is a different product:
+#
+#   Initialize CodeQL:  analysis-kinds: code-quality
+#                       disable-default-queries: true
+#                       - uses: code-quality
+#
+# That is GitHub's *code quality* default setup. It runs the maintainability
+# suite over javascript-typescript and python and uploads `*.quality.sarif`.
+# It produces no security results, and `code-scanning/default-setup` reports
+# `state: not-configured` — the security half was switched off and only the
+# quality half kept running.
+#
+# What the last real security scan (2026-03-26) covered, and found:
+#
+#   /language:rust                   178 results  -> 100 alerts
+#   /language:actions                  4 results
+#   /language:javascript-typescript    4 results
+#   /language:python                   0 results
+#   /language:c-cpp                    0 results
+#
+# All 100 rust alerts were triaged by the owner on 2026-03-26 and 2026-03-29
+# (50 "false positive", 50 "won't fix"). Dismissals are keyed by alert
+# fingerprint and survive re-enablement, so restoring this workflow does not
+# resurrect them — but it also means the current "0 open alerts" reflects that
+# triage, not five months of clean scans.
+#
+# Everything merged since 2026-03-26 — the FORS address collision, the
+# forged-signature verifier, the domain-separation cut, the Kyber binding
+# enforcement, the BLE trust-root work — has never been seen by a security
+# query. A settings toggle can be flipped with no diff and no notification;
+# a committed workflow can only change through review. That is the fix.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets a full-tree scan be forced without waiting for a push or the cron.
+  # Worth knowing when reading a PR check: codeql-action restricts alerts to
+  # the PR diff ("Persisted N diff range(s)"), so a PR that touches no Rust
+  # reports no Rust alerts by construction. A green PR check is not evidence
+  # of coverage — the push, dispatch and cron runs are the full-tree ones.
+  workflow_dispatch:
+  schedule:
+    # Weekly, so a language that stops analyzing surfaces as a failing
+    # scheduled run rather than as silence.
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # Rust and Kotlin are large here; give them room rather than letting a
+    # timeout masquerade as a language that "doesn't work".
+    timeout-minutes: 90
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      # One language failing must not hide the others' results.
+      fail-fast: false
+      matrix:
+        include:
+          # build-mode: none analyses read source directly. That matters here:
+          # a full --all-features workspace build takes ~30 minutes, and
+          # requiring one is how Rust coverage gets quietly dropped again the
+          # next time the build is slow or breaks.
+          #
+          # Rust coverage depends on macro expansion working, and it silently
+          # did not. Measured progression on this branch, full-tree runs:
+          #
+          #                        macro fails   files w/ warnings   results
+          #   before sysroot pin        15,081        439 / 113          64
+          #   after sysroot pin             18         48 / 504         259
+          #
+          #   rule                              March   before   after
+          #   rust/cleartext-logging              105        0     145
+          #   rust/hard-coded-cryptographic-value  71       64     112
+          #   rust/cleartext-transmission           2        0       2
+          #
+          # cleartext-logging's sinks — log::__private_api::log,
+          # std::io::stdio::_print, core::panicking::panic_fmt — exist only
+          # inside macro expansions, so a broken expander deleted that query
+          # outright instead of shrinking it. A rule returning 0 is the signal
+          # to check extraction health, not evidence of clean code.
+          #
+          # Two hypotheses were tried and refuted, recorded so they are not
+          # retried: `rustup component add rust-src` (byte-identical run — the
+          # extractor already installs that component itself), and a
+          # `build-mode` change (the extractor never reads build output, it
+          # re-derives everything through rust-analyzer and hits the same
+          # sysroot). `sysroot: None` in the extractor's config dump means the
+          # option is unset and discovery ran, NOT that discovery failed —
+          # misreading that line is what sent the first attempt wrong.
+          #
+          # Residual, tracked separately: 18 macro failures remain, all in the
+          # no_std embedded crates (hal::binary_info::* in dsm-anchor-pico),
+          # which need their thumb target to resolve. Separately, ~31 files
+          # under dsm_sdk/src/jni/ and platform/{android,ios} are cfg-gated to
+          # non-host targets and get no semantic analysis at all, so the JNI
+          # boundary is still invisible; the lever there is CARGO_CFG_OVERRIDES
+          # or a second matrix entry with a distinct category.
+          #
+          # Separately, 31 files under dsm_sdk/src/jni/ and platform/{android,
+          # ios} got "semantic analyzer unavailable (not included as a module)"
+          # because they are cfg-gated to non-host targets. The JNI boundary is
+          # invisible to every security query until that is addressed.
+          - language: rust
+            build-mode: none
+          # java-kotlin was never in the pre-2026-03-26 matrix, so the Android
+          # client (85 Kotlin files) has never been analyzed at all.
+          #
+          # This one CANNOT use build-mode: none. Buildless Java extracts Java
+          # source only — the extractor announces "Extracting Java with
+          # build-mode=none." and GitHub documents that Kotlin is skipped in
+          # that mode because "Kotlin analysis requires a build". This repo has
+          # 0 .java files and 85 .kt, so buildless extracts nothing at all: the
+          # first attempt died in `database finalize` with "CodeQL could not
+          # process any code written in Java/Kotlin." (exit code 32).
+          - language: java-kotlin
+            build-mode: manual
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+          # c-cpp is deliberately NOT restored. It returned 0 results on
+          # 2026-03-26 because there is no first-party C to extract: the repo
+          # tracks 3 headers and no .c/.cpp. It also cannot run build-mode:
+          # none. Add it back with a real build mode if firmware C lands here.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The CodeQL bundle's vendored rust-analyzer cannot expand std macros
+      # from Rust >= 1.95.0. Bundle 2.26.3 pins ra_ap_* 0.0.301; the upgrade to
+      # 0.328 that fixes it (github/codeql#21714) merged upstream on
+      # 2026-08-14 and is in no released bundle yet.
+      #
+      # rust-toolchain.toml pins channel = "1.96.0", and the extractor resolves
+      # its sysroot by running `rustc --print sysroot` in the checkout root —
+      # where rustup honours that file — so it lands on exactly the broken
+      # version. Both variables are required: SYSROOT_SRC alone keeps the
+      # discovered 1.96 binary sysroot, and SYSROOT alone skips the automatic
+      # rust-src install and then errors when the sources are absent.
+      #
+      # This redirects ONLY the extractor. It does not change the toolchain any
+      # other job builds with, and rust-toolchain.toml is untouched.
+      #
+      # Revert this once a bundle ships ra_ap >= 0.328, and confirm the numbers
+      # hold rather than assuming they do.
+      - name: Pin the Rust sysroot read by the CodeQL extractor
+        if: matrix.language == 'rust'
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component rust-src
+          SYSROOT="$(rustup run 1.94.0 rustc --print sysroot)"
+          echo "CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT=$SYSROOT" >> "$GITHUB_ENV"
+          echo "CODEQL_EXTRACTOR_RUST_OPTION_SYSROOT_SRC=$SYSROOT/lib/rustlib/src/rust/library" >> "$GITHUB_ENV"
+
+      # Mirrors the existing `android-unit-tests` job in ci.yml, which builds
+      # this module green on ubuntu-latest with the same JDK.
+      - name: Set up JDK 17
+        if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Cache Gradle caches
+        if: matrix.language == 'java-kotlin'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('dsm_client/android/**/*.gradle*', 'dsm_client/android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # No `queries:` override — this is the same default suite that ran
+          # before 2026-03-26. Restoring coverage and changing the query suite
+          # in one step would make the resulting alert delta unattributable.
+
+      # Must run AFTER init and BEFORE analyze: manual mode only captures what
+      # the CodeQL tracer observes between those two steps.
+      #
+      # Compile tasks, not `assembleDebug`: app/build.gradle.kts hooks
+      # refreshDsmJniLibs onto merge*JniLibFolders, and that task hard-fails
+      # when the cargo-ndk .so artifacts are absent — which they always are
+      # here, since this job builds no Rust. Compile tasks never touch jniLibs.
+      # The three tasks together cover all 85 .kt files (main 58, test 20,
+      # androidTest 7).
+      #
+      # --no-daemon is required for correctness, not just hygiene: a reused
+      # Gradle daemon starts outside the CodeQL tracer, and compilations it
+      # performs would go unobserved.
+      #
+      # androidTest is deliberately EXCLUDED. Those 7 instrumented-test files
+      # do not compile today — :app:compileDebugAndroidTestKotlin fails with 14
+      # "Unresolved reference" errors against protobuf accessors that no longer
+      # exist (reserveAU128, reserveBU128, setReserveAU128, setTokenId) in
+      # SoFiCrossDeviceOwnerTest.kt, SoFiTestHelpers.kt and SoFiTradeRealHwTest
+      # .kt. Nothing in CI compiles them: ci.yml runs :app:testDebugUnitTest,
+      # which covers main and test but never androidTest. That breakage is
+      # pre-existing and tracked separately — it is not this workflow's to fix,
+      # and blocking all Kotlin security coverage on it would be the wrong
+      # trade. The two tasks below cover the 78 files that matter: all 58
+      # production sources plus the 20 unit tests.
+      - name: Compile Kotlin under the CodeQL tracer
+        if: matrix.language == 'java-kotlin'
+        working-directory: dsm_client/android
+        run: |
+          ./gradlew --no-daemon --stacktrace \
+            :app:compileDebugKotlin \
+            :app:compileDebugUnitTestKotlin
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          # Same category strings as the 2026-03-26 analyses, so alerts land in
+          # the existing namespace and prior triage still applies.
+          category: "/language:${{ matrix.language }}"
