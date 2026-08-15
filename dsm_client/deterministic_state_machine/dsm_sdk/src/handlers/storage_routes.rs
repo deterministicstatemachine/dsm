@@ -3195,4 +3195,352 @@ mod tests {
             "the forgery under test is the canonical child, nothing else"
         );
     }
+
+    // =====================================================================
+    // RUNTIME RECOVERY OF AN UNCERTAIN SEND
+    //
+    // The durable outbox promises two things. It keeps the SAFETY half today:
+    // a failed send is committed as `submission_uncertain`, the exact wire
+    // bytes are frozen, and a restart neither rebuilds them nor debits again.
+    // Hardware confirmed all of that.
+    //
+    // It also promises LIVENESS — the user is told the send "will be retried
+    // automatically", `unsettled_sender_outbox()` documents itself as driving
+    // "the startup/periodic resubmit sweep", and `StorageSyncRequest` carries
+    // a `push_pending` field commented "submit local pending transactions".
+    //
+    // This test drives the REAL periodic hook — `run_storage_sync_request`,
+    // the same call production makes from three sites — against a seeded
+    // uncertain row. It deliberately does NOT call `unsettled_sender_outbox()`
+    // itself: proving the query returns rows would pass today and would test
+    // the wrong layer entirely. What must be observed is a network submission.
+    //
+    // The recorders are intentionally dumb. They authenticate nothing, parse
+    // no protobuf, and verify no signature — every one of those would give the
+    // test a way to fail for reasons unrelated to the missing wiring.
+    // =====================================================================
+
+    #[derive(Debug, Clone)]
+    struct RecordedPost {
+        endpoint: String,
+        path: String,
+        body: Vec<u8>,
+    }
+
+    /// A loopback listener that records `POST /api/v2/b0x/submit` and answers
+    /// `204 No Content`. Returns its `http://127.0.0.1:PORT` base URL.
+    fn spawn_recorder(
+        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
+    ) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let mine = endpoint.clone();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                // Read headers, then exactly Content-Length bytes of body.
+                let (mut head_end, mut content_len) = (None, 0usize);
+                while head_end.is_none() {
+                    match s.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                head_end = Some(p + 4);
+                                let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                                for line in head.lines() {
+                                    if let Some(v) = line.strip_prefix("content-length:") {
+                                        content_len = v.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let Some(hs) = head_end else { continue };
+                while buf.len() < hs + content_len {
+                    match s.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..hs]).to_string();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                if head.to_uppercase().starts_with("POST") {
+                    log.lock().unwrap_or_else(|p| p.into_inner()).push(RecordedPost {
+                        endpoint: mine.clone(),
+                        path,
+                        body: buf[hs..].to_vec(),
+                    });
+                }
+                let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+                let _ = s.flush();
+            }
+        });
+        Ok(endpoint)
+    }
+
+    /// A frozen uncertain send: the transfer envelope plus its ADR 0003
+    /// A-side evidence, both already encoded and committed.
+    struct FrozenSend {
+        transfer_submission_id: String,
+        transfer_bytes: Vec<u8>,
+        evidence_submission_id: String,
+        evidence_bytes: Vec<u8>,
+    }
+
+    fn seed_uncertain_send() -> FrozenSend {
+        use crate::storage::client_db::{
+            commit_send_prerequisites_atomically, set_sender_outbox_status, ArtifactRole,
+            SenderOnlineProposal, SenderOutboxArtifact, SenderOutboxRecord,
+            OUTBOX_PENDING_SUBMIT, OUTBOX_SUBMISSION_UNCERTAIN,
+        };
+
+        // The commit path refuses an unknown counterparty, so the relationship
+        // must exist before a send can be frozen against it.
+        seed_sender_contact([0x0Bu8; 32], vec![0xA1u8; 64]);
+
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
+            &[0x0Au8; 32],
+            &[0x0Bu8; 32],
+        );
+        let (cp, cc) = ([0x71u8; 32], [0x72u8; 32]);
+        let (pp, pt) = ([0u8; 32], [0x74u8; 32]);
+        let nonce = [0x75u8; 32];
+        let commitment = [0x76u8; 32];
+
+        // Deterministic, byte-exact, and distinguishable from each other.
+        let transfer_submission_id = "TESTTRANSFER0000000000000A".to_string();
+        let evidence_submission_id = "TESTEVIDENCEA000000000000B".to_string();
+        let transfer_bytes = vec![0xC1u8; 4096];
+        let evidence_bytes = vec![0xE1u8; 8192];
+
+        let proposal = SenderOnlineProposal {
+            relationship_key: rel,
+            canonical_parent: cp,
+            canonical_child: cc,
+            projection_parent: pp,
+            projection_target: pt,
+            commitment,
+            operation_digest: [0x77u8; 32],
+            nonce_hash: nonce,
+            message_id: None,
+            tx_id: "tx:recovery-test".to_string(),
+            counterparty_device_id: [0x0Bu8; 32],
+            amount: 5,
+            token_id: "ERA".to_string(),
+            status: "proposed".to_string(),
+            created_at: 0,
+        };
+
+        let outbox = SenderOutboxRecord {
+            relationship_key: rel,
+            canonical_parent: cp,
+            proposal_nonce: nonce,
+            canonical_child: cc,
+            commitment,
+            projection_parent: pp,
+            projection_target: pt,
+            routing_address: "TESTROUTINGADDRESS".to_string(),
+            submission_id: transfer_submission_id.clone(),
+            envelope_bytes: transfer_bytes.clone(),
+            local_expected_prev: None,
+            is_first_ek_step: true,
+            status: OUTBOX_PENDING_SUBMIT.to_string(),
+            message_ids: None,
+            created_at: 0,
+        };
+
+        let evidence = SenderOutboxArtifact {
+            relationship_key: rel,
+            canonical_parent: cp,
+            proposal_nonce: nonce,
+            role: ArtifactRole::EvidenceA,
+            submission_id: evidence_submission_id.clone(),
+            envelope_bytes: evidence_bytes.clone(),
+            content_digest: [0x78u8; 32],
+        };
+
+        commit_send_prerequisites_atomically(
+            &proposal,
+            &outbox,
+            "GATE-RECOVERY",
+            &[0xD1u8; 64],
+            &[0xD2u8; 64],
+            &[0x42u8; 32],
+            true,
+            std::slice::from_ref(&evidence),
+        )
+        .expect("seed frozen send");
+
+        // The send entered the network and the outcome is unknown — exactly
+        // the state a 402/timeout leaves behind.
+        set_sender_outbox_status(&rel, &cp, &nonce, OUTBOX_SUBMISSION_UNCERTAIN)
+            .expect("mark uncertain");
+
+        FrozenSend {
+            transfer_submission_id,
+            transfer_bytes,
+            evidence_submission_id,
+            evidence_bytes,
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn submission_uncertain_is_replayed_from_frozen_artifacts_on_runtime_recovery() {
+        use crate::storage::client_db::{unsettled_sender_outbox, OUTBOX_SUBMISSION_UNCERTAIN};
+
+        trust_root_test_db();
+
+        // Three recorders, because the production submit path is quorum-shaped;
+        // one endpoint could not distinguish "called submit" from "reached K".
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let endpoints: Vec<String> = (0..3)
+            .map(|_| spawn_recorder(log.clone()).expect("recorder"))
+            .collect();
+
+        let device_id = vec![0x0Au8; 32];
+        let genesis_hash = vec![0x31u8; 32];
+        let binding_key = vec![0x41u8; 32];
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            dsm::merkle::sparse_merkle_tree::empty_root(
+                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            )
+            .to_vec(),
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+
+        let frozen = seed_uncertain_send();
+
+        // Precondition: the sweep query can see it. If this ever fails the test
+        // is mis-seeded, and the real assertions below would be vacuous.
+        assert_eq!(
+            unsettled_sender_outbox().expect("query").len(),
+            1,
+            "fixture must present exactly one unsettled send"
+        );
+
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "recovery-test".to_string(),
+            storage_endpoints: endpoints.clone(),
+            enable_offline: false,
+        })
+        .expect("router init");
+
+        // THE PRODUCTION HOOK. No wallet.send, no manual resubmit helper.
+        let _ = router
+            .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
+                pull_inbox: false,
+                push_pending: true,
+                limit: 0,
+            })
+            .await;
+
+        let posts = log.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let submits: Vec<&RecordedPost> = posts
+            .iter()
+            .filter(|p| p.path.contains("/api/v2/b0x/submit"))
+            .collect();
+
+        // ---- the defect this test exists for ----
+        assert!(
+            !submits.is_empty(),
+            "periodic storage sync with push_pending=true performed ZERO b0x \
+             submissions while a submission_uncertain send was durably stored. \
+             The durable record survives and the UI promises automatic retry, \
+             but nothing re-drives it: unsettled_sender_outbox() has no \
+             production caller, and push_pending sweeps bilateral_sessions \
+             instead of sender_outbox."
+        );
+
+        // ---- exact frozen replay, both halves ----
+        let by_bytes = |want: &[u8]| -> Vec<&&RecordedPost> {
+            submits.iter().filter(|p| p.body == want).collect()
+        };
+        assert!(
+            !by_bytes(&frozen.transfer_bytes).is_empty(),
+            "the transfer half must be replayed BYTE-IDENTICALLY from the frozen \
+             envelope ({} bytes), never rebuilt from current state",
+            frozen.transfer_bytes.len()
+        );
+        assert!(
+            !by_bytes(&frozen.evidence_bytes).is_empty(),
+            "the ADR 0003 A-side evidence must also be replayed byte-identically \
+             ({} bytes). Replaying only the transfer resurrects a send the \
+             recipient can never complete",
+            frozen.evidence_bytes.len()
+        );
+
+        // Each half must reach the same quorum shape production requires.
+        for (label, want) in [
+            ("transfer", &frozen.transfer_bytes),
+            ("evidence_a", &frozen.evidence_bytes),
+        ] {
+            let reached: std::collections::BTreeSet<&str> = submits
+                .iter()
+                .filter(|p| p.body == *want)
+                .map(|p| p.endpoint.as_str())
+                .collect();
+            assert_eq!(
+                reached.len(),
+                endpoints.len(),
+                "{label} must reach all {} nodes; reached {:?}",
+                endpoints.len(),
+                reached
+            );
+        }
+
+        // ---- nothing was rebuilt, nothing was charged twice ----
+        let rows = unsettled_sender_outbox().expect("query");
+        assert!(
+            rows.len() <= 1,
+            "recovery must not create a second outbox row: {} present",
+            rows.len()
+        );
+        assert_eq!(
+            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
+                .expect("load")
+                .expect("proposal")
+                .amount,
+            5,
+            "recovery must not rebuild or re-price the proposal"
+        );
+        assert!(
+            frozen.transfer_submission_id != frozen.evidence_submission_id,
+            "fixture sanity: the two artifacts must carry distinct ids"
+        );
+
+        // ---- lifecycle moves forward only when everything landed ----
+        let still_uncertain = unsettled_sender_outbox()
+            .expect("query")
+            .iter()
+            .any(|r| r.status == OUTBOX_SUBMISSION_UNCERTAIN);
+        assert!(
+            !still_uncertain,
+            "once every frozen artifact reached quorum the logical send must \
+             leave submission_uncertain; leaving it there would replay forever"
+        );
+    }
 }
