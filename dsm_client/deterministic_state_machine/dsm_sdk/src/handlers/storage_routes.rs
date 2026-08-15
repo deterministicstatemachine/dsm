@@ -3278,11 +3278,13 @@ mod tests {
                     .unwrap_or("")
                     .to_string();
                 if head.to_uppercase().starts_with("POST") {
-                    log.lock().unwrap_or_else(|p| p.into_inner()).push(RecordedPost {
-                        endpoint: mine.clone(),
-                        path,
-                        body: buf[hs..].to_vec(),
-                    });
+                    log.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(RecordedPost {
+                            endpoint: mine.clone(),
+                            path,
+                            body: buf[hs..].to_vec(),
+                        });
                 }
                 let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
                 let _ = s.flush();
@@ -3303,18 +3305,16 @@ mod tests {
     fn seed_uncertain_send() -> FrozenSend {
         use crate::storage::client_db::{
             commit_send_prerequisites_atomically, set_sender_outbox_status, ArtifactRole,
-            SenderOnlineProposal, SenderOutboxArtifact, SenderOutboxRecord,
-            OUTBOX_PENDING_SUBMIT, OUTBOX_SUBMISSION_UNCERTAIN,
+            SenderOnlineProposal, SenderOutboxArtifact, SenderOutboxRecord, OUTBOX_PENDING_SUBMIT,
+            OUTBOX_SUBMISSION_UNCERTAIN,
         };
 
         // The commit path refuses an unknown counterparty, so the relationship
         // must exist before a send can be frozen against it.
         seed_sender_contact([0x0Bu8; 32], vec![0xA1u8; 64]);
 
-        let rel = dsm::verification::smt_replace_witness::compute_smt_key(
-            &[0x0Au8; 32],
-            &[0x0Bu8; 32],
-        );
+        let rel =
+            dsm::verification::smt_replace_witness::compute_smt_key(&[0x0Au8; 32], &[0x0Bu8; 32]);
         let (cp, cc) = ([0x71u8; 32], [0x72u8; 32]);
         let (pp, pt) = ([0u8; 32], [0x74u8; 32]);
         let nonce = [0x75u8; 32];
@@ -3397,7 +3397,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // Multi-threaded for the same reason as the scaffold above: once the sweep
+    // is wired this reaches the submit path, which calls `block_in_place` and
+    // panics on a single-threaded runtime. Set BEFORE the wiring so the first
+    // post-fix run cannot fail for a fixture reason and be read as the fix
+    // failing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn submission_uncertain_is_replayed_from_frozen_artifacts_on_runtime_recovery() {
         use crate::storage::client_db::{unsettled_sender_outbox, OUTBOX_SUBMISSION_UNCERTAIN};
@@ -3431,6 +3436,47 @@ mod tests {
             .to_vec(),
         );
         crate::sdk::app_state::AppState::set_has_identity(true);
+
+        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
+
+        // FIXTURE DEBT PAID UP FRONT. Once the sweep is wired this test reaches
+        // `submit_stored_envelope`, which calls `ensure_token_for_endpoint` and
+        // looks up (endpoint, device_id_b32, base32(local_genesis_hash())).
+        // `local_genesis_hash()` reads `genesis_records`, NOT AppState — so the
+        // record below is both the routing genesis and the genesis half of the
+        // token key. Miss either and the SDK falls through to a live
+        // registration handshake the recorders cannot answer.
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32.clone(),
+                device_id: sender_b32.clone(),
+                mpc_proof: "test".to_string(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 3,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: endpoints.clone(),
+                entropy_hash: String::new(),
+                protocol_version: "v1".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".to_string(),
+            },
+        )
+        .expect("seed genesis record");
+        for ep in &endpoints {
+            crate::storage::client_db::store_auth_token(
+                ep,
+                &sender_b32,
+                &genesis_b32,
+                "test-token",
+            )
+            .expect("seed auth token");
+        }
 
         let frozen = seed_uncertain_send();
 
@@ -3542,5 +3588,381 @@ mod tests {
             "once every frozen artifact reached quorum the logical send must \
              leave submission_uncertain; leaving it there would replay forever"
         );
+    }
+
+    // =====================================================================
+    // INITIAL-SEND DELIVERY COMPLETENESS
+    //
+    // A SEPARATE defect from the recovery gate above, on a separate production
+    // path. `wallet.send` builds BOTH halves of an ADR 0003 split send and
+    // commits both durably in one transaction — `sender_outbox` for the
+    // transfer, `sender_outbox_artifacts` for the A-side evidence. It then
+    // submits only the transfer: `app_router_impl.rs` destructures
+    // `extra_artifacts: _` and `submit_stored_envelope` is called once, with
+    // the transfer envelope alone.
+    //
+    // The recipient side is complete and waiting — `recipient_accept` and
+    // `recipient_dispatch` stage and pair both halves — so a send that
+    // delivers only the transfer leaves the recipient holding one half of a
+    // pair whose partner was never sent.
+    //
+    // THE RULE UNDER TEST, stated as the contract rather than as a POST count:
+    //
+    //   wallet.send MUST NOT report success unless the transfer envelope AND
+    //   every frozen A-side artifact have reached quorum.
+    //
+    // Asserting only "two POSTs happened" would pass a future best-effort
+    // implementation that fires the evidence and reports success without
+    // waiting for it. Premature success is the defect, not merely a missing
+    // request.
+    // =====================================================================
+
+    /// Serves the two endpoint families a first-time send touches, and records
+    /// every submission. Deliberately dumb: it authenticates nothing and
+    /// validates no protobuf, so this gate cannot fail for reasons unrelated
+    /// to delivery completeness.
+    fn spawn_send_recorder(
+        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
+        identity_bytes: std::sync::Arc<Vec<u8>>,
+    ) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let mine = endpoint.clone();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let (mut head_end, mut content_len) = (None, 0usize);
+                while head_end.is_none() {
+                    match s.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                                head_end = Some(p + 4);
+                                let head = String::from_utf8_lossy(&buf[..p]).to_lowercase();
+                                for line in head.lines() {
+                                    if let Some(v) = line.strip_prefix("content-length:") {
+                                        content_len = v.trim().parse().unwrap_or(0);
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let Some(hs) = head_end else { continue };
+                while buf.len() < hs + content_len {
+                    match s.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..hs]).to_string();
+                let mut parts = head.lines().next().unwrap_or("").split_whitespace();
+                let method = parts.next().unwrap_or("").to_uppercase();
+                let path = parts.next().unwrap_or("").to_string();
+
+                let resp: Vec<u8> = if method == "POST" {
+                    log.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(RecordedPost {
+                            endpoint: mine.clone(),
+                            path: path.clone(),
+                            body: buf[hs..].to_vec(),
+                        });
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec()
+                } else if path.contains("/api/v2/device/") {
+                    // Quorum identity lookup. Failure here is FATAL inside
+                    // wallet.send, so it must answer.
+                    let mut r = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                        identity_bytes.len()
+                    )
+                    .into_bytes();
+                    r.extend_from_slice(&identity_bytes);
+                    r
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+                };
+                let _ = s.write_all(&resp);
+                let _ = s.flush();
+            }
+        });
+        Ok(endpoint)
+    }
+
+    // SCAFFOLD — NOT EVIDENCE YET. Ignored on purpose.
+    //
+    // This does NOT currently prove defect #1. It halts one assertion early, at
+    // its own anti-vacuity guard, because the fixture cannot yet establish the
+    // in-memory bilateral state a first-time send requires: the
+    // BilateralTransactionManager Tripwire rejects with `ParentConsumed`
+    // (`anchor.chain_tip != pre.local_chain_tip_at_creation`), which is
+    // contact_manager state rather than a seedable row.
+    //
+    // Six real production dependencies ARE resolved here and are worth keeping:
+    // genesis via `genesis_records` (NOT AppState); endpoints via
+    // `DSM_ENV_CONFIG_PATH` (`SdkConfig.storage_endpoints` is ignored by
+    // wallet.send); the auth-token triple; the identity GET; a non-empty served
+    // pubkey matching the contact AK byte-for-byte; and a multi-threaded runtime
+    // for `block_in_place`.
+    //
+    // Do not un-ignore this to "see it fail" — a red here means fixture
+    // incompleteness, not the defect. It should be re-sited around the smallest
+    // production orchestration boundary that can prove the contract without
+    // rebuilding the bilateral state machine by hand.
+    //
+    // Multi-threaded on purpose: the send path calls `block_in_place`, which
+    // panics on the single-threaded runtime. Production runs multi-threaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    #[ignore = "scaffold: fixture cannot yet reach ADR 0003 split composition; not evidence for defect #1"]
+    async fn wallet_send_submits_transfer_and_frozen_evidence_a_before_reporting_delivery_success()
+    {
+        use crate::storage::client_db::{load_sender_outbox_artifacts, unsettled_sender_outbox};
+        use prost::Message;
+
+        trust_root_test_db();
+
+        let sender_device = [0x0Au8; 32];
+        let recipient_device = [0x0Bu8; 32];
+        let genesis = [0x31u8; 32];
+        let recipient_kyber = vec![0x9Au8; 1184];
+
+        // The served identity must MATCH the stored contact exactly so
+        // `repair_contact_decision` short-circuits to `Unchanged` and no
+        // SPHINCS+ binding signature has to be minted for this fixture.
+        // `pubkey` cannot be empty: `fetch_quorum_device_identity` rejects an
+        // empty pubkey before `authoritative_ak_permits_repair` is ever
+        // consulted, so the contact AK below is set to this same value.
+        let recipient_ak = vec![0xA1u8; 32];
+        let identity = dsm::types::proto::RegisterDeviceRequest {
+            device_id: recipient_device.to_vec(),
+            pubkey: recipient_ak.clone(),
+            genesis_hash: genesis.to_vec(),
+            kyber_public_key: recipient_kyber.clone(),
+            kyber_binding_sig: vec![0x5Au8; 64],
+        };
+        let identity_bytes = std::sync::Arc::new(identity.encode_to_vec());
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let endpoints: Vec<String> = (0..3)
+            .map(|_| spawn_send_recorder(log.clone(), identity_bytes.clone()).expect("recorder"))
+            .collect();
+
+        // `wallet.send` resolves endpoints through
+        // `StorageNodeConfig::from_env_config()`, NOT `SdkConfig` — under
+        // DSM_SDK_TEST_MODE that returns a hardcoded localhost set (:8080-8084)
+        // and the send would dial ports nothing is listening on. Point the
+        // loader at a real config naming the recorders.
+        let cfg_path =
+            std::env::temp_dir().join(format!("dsm_gate2_env_{}.toml", std::process::id()));
+        let mut cfg_toml = String::from(
+            "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
+             storage_node_mode = \"remote\"\nports = [8080]\n\
+             bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
+        );
+        for (i, ep) in endpoints.iter().enumerate() {
+            cfg_toml.push_str(&format!(
+                "\n[[nodes]]\nname = \"rec-{i}\"\nendpoint = \"{ep}\"\n"
+            ));
+        }
+        std::fs::write(&cfg_path, cfg_toml).expect("write env config");
+        unsafe {
+            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
+        }
+
+        let binding_key = vec![0x41u8; 32];
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &sender_device.to_vec(),
+            &genesis.to_vec(),
+            &binding_key,
+        )
+        .expect("signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            sender_device.to_vec(),
+            public_key.clone(),
+            genesis.to_vec(),
+            dsm::merkle::sparse_merkle_tree::empty_root(
+                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            )
+            .to_vec(),
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+
+        let sender_b32 = crate::util::text_id::encode_base32_crockford(&sender_device);
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis);
+
+        // `wallet.send` routes on `core_sdk.local_genesis_hash()`, which reads
+        // `genesis_records` — NOT AppState. It is also the genesis half of the
+        // auth-token key, so both must come from this one record or the token
+        // lookup misses and falls through to live registration.
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32.clone(),
+                device_id: sender_b32.clone(),
+                mpc_proof: "test".to_string(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 3,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: endpoints.clone(),
+                entropy_hash: String::new(),
+                protocol_version: "v1".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".to_string(),
+            },
+        )
+        .expect("seed genesis record");
+
+        // FIXTURE GUARD: `ensure_token_for_endpoint` looks up
+        // (endpoint, self.device_id, base32(core_sdk.local_genesis_hash())).
+        // Miss it and the SDK falls through to a live registration handshake
+        // this recorder cannot satisfy — a setup failure that would look
+        // exactly like the defect.
+        for ep in &endpoints {
+            crate::storage::client_db::store_auth_token(
+                ep,
+                &sender_b32,
+                &genesis_b32,
+                "test-token",
+            )
+            .expect("seed auth token");
+        }
+
+        // Recipient contact, matching the served identity exactly.
+        let mut contact = crate::storage::client_db::ContactRecord {
+            contact_id: "c-gate2".to_string(),
+            device_id: recipient_device.to_vec(),
+            alias: "recipient".to_string(),
+            genesis_hash: genesis.to_vec(),
+            public_key: recipient_ak.clone(),
+            kyber_public_key: recipient_kyber,
+            current_chain_tip: None,
+            added_at: 1,
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "BleCapable".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        };
+        contact.verified = true;
+        crate::storage::client_db::store_contact(&contact).expect("seed contact");
+
+        crate::storage::client_db::upsert_balance_projection(
+            &crate::storage::client_db::BalanceProjectionRecord {
+                balance_key: format!("{sender_b32}:ERA"),
+                device_id: sender_b32.clone(),
+                token_id: "ERA".to_string(),
+                policy_commit: crate::util::text_id::encode_base32_crockford(&[0x0Fu8; 32]),
+                available: 1000,
+                locked: 0,
+                source_state_hash: String::new(),
+                updated_at: 0,
+            },
+        )
+        .expect("seed balance");
+
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "gate2".to_string(),
+            storage_endpoints: endpoints.clone(),
+            enable_offline: false,
+        })
+        .expect("router init");
+
+        let body = dsm::types::proto::OnlineTransferRequest {
+            token_id: "ERA".to_string(),
+            to_device_id: recipient_device.to_vec(),
+            amount: 5,
+            from_device_id: sender_device.to_vec(),
+            seq: 1,
+            nonce: vec![0x7Eu8; 32],
+            ..Default::default()
+        };
+        let args = dsm::types::proto::ArgPack {
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: body.encode_to_vec(),
+            ..Default::default()
+        };
+
+        // THE PRODUCTION PATH. An ordinary first-time send.
+        use crate::bridge::AppRouter;
+        let result = router
+            .invoke(crate::bridge::AppInvoke {
+                method: "wallet.send".to_string(),
+                args: args.encode_to_vec(),
+            })
+            .await;
+
+        // What the send FROZE is the ground truth for what it owed the wire.
+        let frozen_artifacts: Vec<_> = unsettled_sender_outbox()
+            .expect("outbox")
+            .into_iter()
+            .flat_map(|r| {
+                load_sender_outbox_artifacts(
+                    &r.relationship_key,
+                    &r.canonical_parent,
+                    &r.proposal_nonce,
+                )
+                .unwrap_or_default()
+            })
+            .collect();
+
+        let posts = log.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let submits: Vec<&RecordedPost> = posts
+            .iter()
+            .filter(|p| p.path.contains("/api/v2/b0x/submit"))
+            .collect();
+
+        // Anti-vacuity: if the send never got as far as freezing an evidence
+        // artifact, this test is measuring the wrong thing and must say so
+        // rather than passing quietly.
+        assert!(
+            !frozen_artifacts.is_empty(),
+            "fixture did not reach ADR 0003 split composition — no A-side \
+             artifact was frozen, so delivery completeness cannot be judged. \
+             wallet.send returned success={} error={:?}",
+            result.success,
+            result.error_message
+        );
+
+        for art in &frozen_artifacts {
+            let reached: std::collections::BTreeSet<&str> = submits
+                .iter()
+                .filter(|p| p.body == art.envelope_bytes)
+                .map(|p| p.endpoint.as_str())
+                .collect();
+
+            // THE CONTRACT. Reporting success while a frozen artifact never
+            // reached quorum is the defect — whether it was never sent, or
+            // sent best-effort without waiting.
+            assert!(
+                !(result.success && reached.len() < endpoints.len()),
+                "wallet.send reported success=true while the frozen {:?} \
+                 artifact ({} bytes, submission_id={}) reached only {}/{} \
+                 nodes. A split send whose A-side evidence never reaches \
+                 quorum leaves the recipient holding one half of a pair whose \
+                 partner was never delivered.",
+                art.role,
+                art.envelope_bytes.len(),
+                art.submission_id,
+                reached.len(),
+                endpoints.len()
+            );
+        }
     }
 }
