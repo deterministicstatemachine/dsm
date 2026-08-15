@@ -258,6 +258,95 @@ async fn hydrate_missing_sender_kyber_capability(
 /// Every failure path leaves the gate intact: an unmatched, stale, or invalid
 /// artifact must never release a pending transition. Idempotent — a redelivered
 /// reply finds the proposal already finalized and does nothing.
+/// Glue for one polled ADR 0003 transfer half.
+///
+/// FAILS CLOSED on missing raw bytes. There is deliberately no re-encode
+/// fallback: staging freezes what it is handed, and SIG A is later checked
+/// against that frozen copy, so reconstructing the request from decoded fields
+/// would mean verifying bytes the sender never signed. An entry that reached
+/// here without its originals is a bug in the fetch path, and the only safe
+/// response is to refuse it and say so.
+fn stage_polled_transfer_half(entry: &crate::sdk::b0x_sdk::B0xEntry) {
+    use crate::handlers::recipient_dispatch::{dispatch_transfer_half, DispatchOutcome};
+
+    let key = entry.transaction_id.as_str();
+    if entry.transfer_wire_bytes.is_empty() {
+        log::error!(
+            "[storage.sync] ❌ REJECTING split transfer {key}: the original \
+             OnlineTransferRequest bytes were not retained. Refusing to reconstruct them — \
+             staging freezes what it is given and SIG A is verified against that copy."
+        );
+        return;
+    }
+    let ak = match resolve_trusted_sender_ak(
+        &entry.sender_device_id,
+        &entry.sender_signing_public_key,
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            log::warn!("[storage.sync] ❌ REJECTING split transfer {key}: {e}");
+            return;
+        }
+    };
+    match dispatch_transfer_half(key, &entry.transfer_wire_bytes, &ak) {
+        Ok(DispatchOutcome::Staged(state)) => {
+            log::info!(
+                "[storage.sync] ADR 0003 transfer {key} staged → {}",
+                state.as_str()
+            )
+        }
+        Ok(DispatchOutcome::DiscardedCandidate(why)) => {
+            log::warn!("[storage.sync] ADR 0003 transfer {key} discarded: {why}")
+        }
+        Ok(other) => log::warn!("[storage.sync] ADR 0003 transfer {key}: unexpected {other:?}"),
+        Err(e) => log::error!("[storage.sync] ADR 0003 transfer {key} dispatch failed: {e}"),
+    }
+}
+
+/// Glue for one polled ADR 0003 evidence half.
+///
+/// The sender identity comes from the receipt's own `devid_a`, and the AK from
+/// the STORED contact for that device — never from the artifact. Everything
+/// after that is the dispatcher's decision, including whether the bytes are
+/// allowed to occupy a staging slot at all.
+fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA) {
+    use crate::handlers::recipient_dispatch::{dispatch_evidence_half, DispatchOutcome};
+
+    let key = evidence.transfer_submission_id.as_str();
+    // Read devid_a only to name the trust root. The bytes are re-decoded and
+    // fully verified inside the dispatcher against that root.
+    let sender = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &evidence.full_receipt_bytes,
+    ) {
+        Ok(r) => crate::util::text_id::encode_base32_crockford(&r.devid_a),
+        Err(e) => {
+            log::warn!("[storage.sync] ADR 0003 evidence {key}: receipt does not decode: {e}");
+            return;
+        }
+    };
+    let ak = match resolve_trusted_sender_ak(&sender, &[]) {
+        Ok(k) => k,
+        Err(e) => {
+            log::warn!("[storage.sync] ADR 0003 evidence {key}: {e}");
+            return;
+        }
+    };
+    match dispatch_evidence_half(evidence, &ak) {
+        Ok(DispatchOutcome::Staged(state)) => {
+            log::info!(
+                "[storage.sync] ADR 0003 evidence {key} staged → {}",
+                state.as_str()
+            )
+        }
+        Ok(DispatchOutcome::DiscardedCandidate(why)) => {
+            // No slot was taken, so an honest copy of this half can still arrive.
+            log::warn!("[storage.sync] ADR 0003 evidence {key} discarded: {why}")
+        }
+        Ok(other) => log::warn!("[storage.sync] ADR 0003 evidence {key}: unexpected {other:?}"),
+        Err(e) => log::error!("[storage.sync] ADR 0003 evidence {key} dispatch failed: {e}"),
+    }
+}
+
 async fn finalize_from_acceptance_artifact(
     artifact: &dsm::types::proto::AcceptanceReceiptArtifact,
 ) {
@@ -878,6 +967,13 @@ impl AppRouterImpl {
                                 for artifact in b0x_sdk.take_reply_artifacts() {
                                     finalize_from_acceptance_artifact(&artifact).await;
                                 }
+                                // ADR 0003 evidence halves ride the same spool under their
+                                // own explicit method. Glue only: resolve the trust root,
+                                // hand the artifact to the dispatcher, log. No verification
+                                // or acceptance logic lives here.
+                                for evidence in b0x_sdk.take_evidence_artifacts() {
+                                    stage_polled_evidence_half(&evidence);
+                                }
                                 // Cert-resync control messages ride the same spool,
                                 // discriminated by their explicit method. Dispatch each
                                 // to the matching leg; errors are logged, never fatal to
@@ -1035,6 +1131,17 @@ impl AppRouterImpl {
                                     // signed canonical operation — decoded from `canonical_operation_bytes`
                                     // and bound to the verified signature — never from the structured
                                     // fields a relay could tamper while leaving the signature intact.
+                                    // ADR 0003 SPLIT TRANSFER. A non-empty evidence reference
+                                    // means the receipt travels as its own artifact, so this
+                                    // entry is only one half and MUST NOT take the legacy
+                                    // inline path. Glue only: require the retained wire bytes,
+                                    // resolve the trust root, hand off. The dispatcher decides
+                                    // everything else.
+                                    if !entry.receipt_evidence_digest.is_empty() {
+                                        stage_polled_transfer_half(&entry);
+                                        continue;
+                                    }
+
                                     if let dsm::types::operations::Operation::Transfer { .. } =
                                         &entry.transaction
                                     {
@@ -2822,6 +2929,270 @@ mod tests {
         assert!(
             err.contains("no locally trusted sender AK"),
             "unexpected error: {err}"
+        );
+    }
+
+    // =====================================================================
+    // #658 RECOVERY E2E — poisoned reply -> awaiting_valid_reply -> honest
+    // copy for the same step -> finalized.
+    //
+    // WHY THIS TEST EXISTS AND WHY IT DRIVES THE HANDLER.
+    //
+    // `sender_proposal.rs` already proves the DB state machine ALLOWS this
+    // path, but it does so by calling `mark_sender_proposal_awaiting_valid_
+    // reply` and `mark_sender_proposal_finalized_by_canonical` directly. That
+    // test stays green even if `finalize_from_acceptance_artifact` never makes
+    // the transition at all — it measures the storage layer, not the decision.
+    //
+    // The defect being guarded is a stranded sender: `finalized` is the only
+    // other state reachable from `submitted`, and reaching it requires the very
+    // reply that was just refused. One bad artifact therefore pinned the step
+    // forever. That is a property of the HANDLER, so the handler is what runs
+    // here.
+    //
+    // The poisoning is the real attack shape, not a synthetic one. Receipt
+    // fields 12-20 sit outside every signature, and `AcceptanceReceiptArtifact`
+    // carries its own unsigned `commitment` envelope field that the handler
+    // uses for proposal lookup. So a middlebox can address a reply at a genuine
+    // proposal while swapping the receipt bytes underneath. The poisoned
+    // artifact below does exactly that: a correct envelope commitment, a
+    // receipt whose per-step EK signature genuinely verifies, and a forged
+    // canonical child.
+    // =====================================================================
+
+    /// Mint a B-side receipt whose per-step EK artifacts genuinely verify, with
+    /// `b_ak_sk` acting as the relationship-genesis predecessor.
+    ///
+    /// Ordering matters: everything the commitment covers is set BEFORE the
+    /// commitment is computed, and `sig_b` — which signs a target derived from
+    /// that commitment — is attached last.
+    fn signed_b_receipt(
+        a: [u8; 32],
+        b: [u8; 32],
+        parent: [u8; 32],
+        child: [u8; 32],
+        b_ak_sk: &[u8],
+    ) -> dsm::types::receipt_types::StitchedReceiptV2 {
+        use crate::sdk::receipts::compute_receipt_challenge_response_target;
+        use dsm::crypto::ephemeral_key::sign_ek_cert;
+        use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+
+        let mut r = dsm::types::receipt_types::StitchedReceiptV2::new(
+            [0u8; 32],
+            a,
+            b,
+            parent,
+            child,
+            [0u8; 32],
+            [0u8; 32],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let (ek_pk_b, ek_sk_b) = generate_sphincs_keypair().expect("per-step EK keypair");
+        r.ek_pk_b = ek_pk_b.clone();
+        // Structural rule: ek_pk_b present => kyber_ct_b present.
+        r.kyber_ct_b = vec![0x5Au8; 1088];
+        // h_n is the receipt's own parent_tip, matching the verifier.
+        r.ek_cert_b = sign_ek_cert(b_ak_sk, &ek_pk_b, &parent).expect("ek_cert_b");
+
+        let commitment = r.compute_commitment().expect("commitment");
+        let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+        r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
+        r
+    }
+
+    /// Wrap a receipt as it travels on the wire.
+    ///
+    /// `to_full_protobuf` is mandatory here, not stylistic. `to_canonical_
+    /// protobuf` emits the commitment preimage only — fields 1-11 — so it
+    /// silently drops `ek_pk_b`, `ek_cert_b`, `sig_b` and `kyber_ct_b`. Those
+    /// bytes still decode cleanly (the commitment is unchanged, since the
+    /// commitment is computed over exactly that preimage), and the receipt then
+    /// fails verification for a missing countersignature it never lost on the
+    /// wire. An artifact built with the canonical encoder can therefore never
+    /// finalize.
+    fn artifact_for(
+        receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+        envelope_commitment: [u8; 32],
+        relationship_key: [u8; 32],
+        b: [u8; 32],
+    ) -> dsm::types::proto::AcceptanceReceiptArtifact {
+        dsm::types::proto::AcceptanceReceiptArtifact {
+            receipt_bytes: receipt.to_full_protobuf().expect("receipt bytes"),
+            commitment: envelope_commitment.to_vec(),
+            relationship_key: relationship_key.to_vec(),
+            recipient_device_id: b.to_vec(),
+            canonical_child_tip: receipt.child_tip.to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_poisoned_reply_parks_the_step_and_an_honest_copy_still_finalizes() {
+        use crate::storage::client_db::sender_proposal::{
+            get_sender_proposal_by_commitment, insert_sender_proposal,
+            mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_AWAITING_VALID_REPLY,
+            PROPOSAL_FINALIZED, PROPOSAL_PROPOSED, PROPOSAL_ROLLED_BACK,
+        };
+
+        trust_root_test_db();
+
+        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
+        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
+
+        // The recipient's AK is the cert-chain genesis root, and it comes from
+        // the contact book — never from the wire.
+        let (b_ak_pk, b_ak_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
+        seed_sender_contact(b, b_ak_pk.clone());
+
+        crate::sdk::app_state::AppState::set_identity_info(
+            a.to_vec(),
+            vec![0x01u8; 32],
+            vec![0xAAu8; 32],
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+
+        // The honest reply defines the commitment this step is bound to.
+        let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        let commitment = honest.compute_commitment().expect("commitment");
+
+        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
+        let proposal = SenderOnlineProposal {
+            relationship_key: rel_key,
+            canonical_parent: parent,
+            canonical_child: child,
+            // Genesis projection tip: a fresh relationship reads back an
+            // all-zero chain_tip, so this is the real first-transfer shape.
+            // Still deliberately DIVERGENT from the canonical pair — the two
+            // formula spaces must not be conflated, and any check that reads
+            // projection values where it should read canonical ones fails here.
+            projection_parent: [0u8; 32],
+            projection_target: [0xBBu8; 32],
+            commitment,
+            operation_digest: [0u8; 32],
+            nonce_hash: [0x88u8; 32],
+            message_id: None,
+            tx_id: "TX-658".to_string(),
+            counterparty_device_id: b,
+            amount: 7,
+            token_id: "ERA".to_string(),
+            status: PROPOSAL_PROPOSED.to_string(),
+            created_at: 0,
+        };
+        insert_sender_proposal(&proposal).expect("insert proposal");
+        mark_sender_proposal_submitted(&rel_key, &parent, "MSG-658").expect("submit");
+
+        // ---- 1. A poisoned reply arrives, addressed at the real proposal ----
+        // Same envelope commitment (so the lookup succeeds), genuinely signed
+        // receipt, forged canonical child.
+        let poisoned_receipt = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
+        let poisoned = artifact_for(&poisoned_receipt, commitment, rel_key, b);
+        super::finalize_from_acceptance_artifact(&poisoned).await;
+
+        let after_poison = get_sender_proposal_by_commitment(&commitment)
+            .expect("load")
+            .expect("proposal still present");
+        assert_eq!(
+            after_poison.status, PROPOSAL_AWAITING_VALID_REPLY,
+            "a rejected artifact must park the step in a state it can leave; \
+             the handler itself must make this transition, not just the DB layer"
+        );
+        assert_ne!(
+            after_poison.status, PROPOSAL_ROLLED_BACK,
+            "NOT a rollback — the recipient may already have applied and credited"
+        );
+        assert_eq!(
+            after_poison.message_id.as_deref(),
+            Some("MSG-658"),
+            "the step keeps its deterministic message id, so the honest copy \
+             addresses the same submitted step rather than a new one"
+        );
+
+        // ---- 2. The honest copy for the SAME step finalizes it ----
+        //
+        // Pin the positive case first: if the "honest" receipt did not actually
+        // verify, the finalize assertion below would be measuring the wrong
+        // thing — a second rejection looks identical to a step that simply
+        // never left `awaiting_valid_reply`.
+        match crate::handlers::online_finalize::verify_acceptance_receipt(
+            &a,
+            &b,
+            &honest,
+            &after_poison,
+            &b_ak_pk,
+            None,
+            None,
+        )
+        .expect("verification must not error")
+        {
+            crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. } => {}
+            crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason } => {
+                panic!("the honest replacement must verify, but was rejected: {reason}")
+            }
+        }
+
+        let good = artifact_for(&honest, commitment, rel_key, b);
+        super::finalize_from_acceptance_artifact(&good).await;
+
+        let after_honest = get_sender_proposal_by_commitment(&commitment)
+            .expect("load")
+            .expect("proposal still present");
+        assert_eq!(
+            after_honest.status, PROPOSAL_FINALIZED,
+            "recovery is only real if a valid replacement for the same \
+             commitment still finalizes the step through the live handler"
+        );
+    }
+
+    /// Anti-vacuity: the poisoned receipt must be refused for the RIGHT reason.
+    ///
+    /// Without this, the test above would still pass if the poisoned receipt
+    /// were rejected for something incidental — an unparseable body, a missing
+    /// signature — and it would then prove nothing about a well-formed forgery.
+    #[test]
+    #[serial_test::serial]
+    fn the_poisoned_receipt_is_well_formed_and_fails_only_on_the_forged_child() {
+        trust_root_test_db();
+
+        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
+        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
+        let (b_ak_pk, b_ak_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
+
+        let poisoned = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
+
+        // Its per-step EK countersignature is genuinely valid ...
+        crate::sdk::receipts::verify_per_step_ek_signing(
+            &poisoned,
+            crate::sdk::receipts::BilateralSide::B,
+            &b_ak_pk,
+            &poisoned.parent_tip,
+            &poisoned.compute_commitment().expect("commitment"),
+        )
+        .expect("the poisoned receipt must carry a genuinely valid sig_b");
+
+        // ... and it survives the exact wire round-trip the handler performs,
+        // countersignature intact. Encoding with `to_canonical_protobuf` here
+        // would silently zero ek_pk_b/ek_cert_b/sig_b/kyber_ct_b and the test
+        // would then be exercising an unsigned receipt, not a forgery.
+        let bytes = poisoned.to_full_protobuf().expect("encode");
+        let decoded = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&bytes)
+            .expect("the poisoned receipt must decode");
+        assert_eq!(
+            decoded.sig_b, poisoned.sig_b,
+            "the countersignature must survive the wire round-trip"
+        );
+        assert_eq!(decoded.ek_pk_b, poisoned.ek_pk_b);
+        assert_eq!(decoded.ek_cert_b, poisoned.ek_cert_b);
+        assert_eq!(decoded.kyber_ct_b, poisoned.kyber_ct_b);
+
+        assert_ne!(
+            poisoned.child_tip, child,
+            "the forgery under test is the canonical child, nothing else"
         );
     }
 }

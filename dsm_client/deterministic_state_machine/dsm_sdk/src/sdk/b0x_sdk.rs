@@ -161,6 +161,25 @@ pub struct B0xEntry {
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
     /// Receiver uses these directly for SPHINCS+ verification and tip computation.
     pub canonical_operation_bytes: Vec<u8>,
+    /// ADR 0003: the EXACT `OnlineTransferRequest` wire bytes this entry was
+    /// decoded from, retained verbatim.
+    ///
+    /// Not reconstructed fields, and NOT a protobuf re-encode. Recipient staging
+    /// FREEZES the bytes it is handed, and every later check — SIG A over the
+    /// canonical operation, the evidence digest binding — runs against that
+    /// frozen copy. Re-encoding here would mean verifying something the sender
+    /// never signed and the peer never sent, so the original must survive the
+    /// decode. Whether a re-encode would be byte-identical is beside the point:
+    /// the guarantee is that the question never has to be asked.
+    ///
+    /// Empty for entries not decoded from an `OnlineTransferRequest` (locally
+    /// built entries, fixtures). The split path requires it and fails closed.
+    pub transfer_wire_bytes: Vec<u8>,
+    /// ADR 0003: the A-side evidence reference carried by the request (proto
+    /// field 12). NON-EMPTY is the recipient's discriminator that this entry is
+    /// only ONE HALF of a split transfer and must not take the legacy inline
+    /// path. Empty means the legacy whole-receipt-inline composition.
+    pub receipt_evidence_digest: Vec<u8>,
 }
 
 /// The product of pure envelope construction: the exact canonical wire bytes
@@ -480,6 +499,9 @@ pub struct B0xSDK {
     /// stays stable; drained by the sender-finalization path via
     /// [`Self::take_reply_artifacts`].
     pending_reply_artifacts: Vec<dsm::types::proto::AcceptanceReceiptArtifact>,
+    /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
+    /// drained by [`Self::take_evidence_artifacts`].
+    pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
     /// Cert-resync control messages decoded on retrieve: (method, framed body).
     pending_cert_resync: Vec<(String, Vec<u8>)>,
 }
@@ -488,6 +510,13 @@ pub struct B0xSDK {
 /// Both sides key off this exact string — it is the discriminator that keeps
 /// replies and forward transfers structurally distinct inside UniversalTx.
 pub(crate) const ACCEPTANCE_RECEIPT_METHOD: &str = "wallet.acceptanceReceipt";
+
+/// Explicit invoke method that marks an ADR 0003 A-side evidence artifact.
+/// Same discriminator discipline as [`ACCEPTANCE_RECEIPT_METHOD`]: the evidence
+/// half is structurally distinct from both forward transfers and replies, and is
+/// NEVER trial-decoded. The producer (`build_evidence_envelope`) and this
+/// consumer key off this one constant so they cannot drift apart.
+pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
 
 static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -694,6 +723,7 @@ impl B0xSDK {
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
             pending_reply_artifacts: Vec::new(),
+            pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
         };
 
@@ -1358,6 +1388,45 @@ impl B0xSDK {
         None
     }
 
+    /// Decode an ADR 0003 A-side evidence half from a spooled envelope,
+    /// discriminated on the EXPLICIT invoke method — never trial-decoded.
+    ///
+    /// Returning the artifact does NOT mean it is trustworthy: nothing here is
+    /// verified. `full_receipt_bytes` and the digest it carries are unauthenticated
+    /// wire data until the dispatcher checks them against the transfer half's
+    /// reference, which is why this is a pure decoder with no side effects.
+    fn decode_receipt_evidence_a(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<dsm::types::proto::ReceiptEvidenceA> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RECEIPT_EVIDENCE_A_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            match dsm::types::proto::ReceiptEvidenceA::decode(&*args.body) {
+                Ok(a) => return Some(a),
+                Err(e) => warn!("receipt evidence: artifact decode failed: {e}"),
+            }
+        }
+        None
+    }
+
+    /// Drain the ADR 0003 evidence halves decoded by the most recent retrieve.
+    ///
+    /// Draining rather than cloning mirrors [`Self::take_reply_artifacts`], but the
+    /// durable idempotency guarantee is different and lives downstream: staging is
+    /// keyed on the transfer submission id, so a re-polled evidence half with the
+    /// SAME bytes is idempotent and one with DIFFERENT bytes fails closed.
+    pub fn take_evidence_artifacts(&mut self) -> Vec<dsm::types::proto::ReceiptEvidenceA> {
+        std::mem::take(&mut self.pending_evidence_artifacts)
+    }
+
     /// Drain the acceptance artifacts decoded by the most recent retrieve.
     /// Draining (rather than cloning) keeps a re-poll from re-finalizing the
     /// same reply within one process lifetime; durable idempotency is enforced
@@ -1807,7 +1876,7 @@ impl B0xSDK {
         };
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "receipt.evidence.a".to_string(),
+            method: RECEIPT_EVIDENCE_A_METHOD.to_string(),
             args: Some(arg_pack),
             pre_state_hash: None,
             post_state_hash: None,
@@ -2997,6 +3066,15 @@ impl B0xSDK {
                 self.pending_reply_artifacts.push(artifact);
                 continue;
             }
+            if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
+                info!(
+                    "📬 ADR 0003 evidence half for transfer={} ({}B receipt)",
+                    evidence.transfer_submission_id,
+                    evidence.full_receipt_bytes.len()
+                );
+                self.pending_evidence_artifacts.push(evidence);
+                continue;
+            }
             if let Some(mut e) = self.envelope_to_b0x_entry(env) {
                 e.inbox_key = b0x_address.to_string();
                 entries.push(e);
@@ -3382,6 +3460,11 @@ impl B0xSDK {
                                         .unwrap_or_else(|| vec![0u8; 32])
                                 };
                                 return Some(B0xEntry {
+                                    // Verbatim, from the SAME buffer the decode read.
+                                    transfer_wire_bytes: arg_pack.body.clone(),
+                                    receipt_evidence_digest: transfer_req
+                                        .receipt_evidence_digest
+                                        .clone(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
@@ -3465,6 +3548,12 @@ impl B0xSDK {
                                         .unwrap_or_else(|| vec![0u8; 32])
                                 };
                                 return Some(B0xEntry {
+                                    // This branch decoded an OnlineMessageRequest, not a
+                                    // transfer: there is no transfer half and no evidence
+                                    // reference, so both stay empty and the split path
+                                    // can never mistake a message for a half.
+                                    transfer_wire_bytes: Vec::new(),
+                                    receipt_evidence_digest: Vec::new(),
                                     transaction_id: tid,
                                     inbox_key: String::new(),
                                     sender_device_id: sender_dev,
