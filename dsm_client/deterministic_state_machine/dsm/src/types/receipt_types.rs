@@ -778,6 +778,80 @@ impl ParentConsumptionTracker {
 mod tests {
     use super::*;
 
+    /// TRANSPORT USES `to_full_protobuf`. COMMITMENT USES `to_canonical_protobuf`.
+    ///
+    /// These two are not interchangeable and the failure mode is silent, so the
+    /// difference is pinned here rather than left to the method names.
+    ///
+    /// `to_canonical_protobuf` emits the commitment PREIMAGE — fields 1-11 —
+    /// and therefore erases the countersignature evidence in fields 12-20. Bytes
+    /// produced that way still decode cleanly, and `compute_commitment()` over
+    /// them is UNCHANGED, because the commitment is defined over exactly that
+    /// preimage. Nothing at the decode boundary objects either:
+    /// `from_canonical_protobuf` accepts canonical OR full bytes by design.
+    ///
+    /// So a caller that ships canonical bytes as transport hands the far side a
+    /// receipt whose `sig_b` is simply gone. That receipt fails verification for
+    /// a signature it never lost on the wire, and — on the acceptance path — the
+    /// sender's step can never finalize, because reaching `finalized` requires
+    /// the very reply that just failed to verify.
+    ///
+    /// Any code constructing an `AcceptanceReceiptArtifact` or otherwise putting
+    /// a receipt on the wire must use `to_full_protobuf`.
+    #[test]
+    fn canonical_encoding_erases_countersignature_evidence_that_full_encoding_keeps() {
+        let mut receipt = StitchedReceiptV2::new(
+            [0x00; 32],
+            [0x11; 32],
+            [0x22; 32],
+            [0x33; 32],
+            [0x44; 32],
+            [0x55; 32],
+            [0x66; 32],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        receipt.ek_pk_b = vec![0xE1u8; 64];
+        receipt.ek_cert_b = vec![0xE2u8; 128];
+        receipt.sig_b = vec![0xE3u8; 128];
+        receipt.kyber_ct_b = vec![0xE4u8; 1088];
+
+        let canonical = receipt.to_canonical_protobuf().expect("canonical");
+        let full = receipt.to_full_protobuf().expect("full");
+        assert_ne!(
+            canonical, full,
+            "the two encoders must not be aliases; if they ever become equal, \
+             this whole hazard is gone and this test should be deleted"
+        );
+
+        // Full bytes preserve every countersignature field.
+        let from_full = StitchedReceiptV2::from_canonical_protobuf(&full).expect("decode full");
+        assert_eq!(from_full.ek_pk_b, receipt.ek_pk_b);
+        assert_eq!(from_full.ek_cert_b, receipt.ek_cert_b);
+        assert_eq!(from_full.sig_b, receipt.sig_b);
+        assert_eq!(from_full.kyber_ct_b, receipt.kyber_ct_b);
+
+        // Canonical bytes decode WITHOUT COMPLAINT and silently drop them all.
+        let from_canonical =
+            StitchedReceiptV2::from_canonical_protobuf(&canonical).expect("decode canonical");
+        assert!(from_canonical.ek_pk_b.is_empty());
+        assert!(from_canonical.ek_cert_b.is_empty());
+        assert!(
+            from_canonical.sig_b.is_empty(),
+            "this is the trap: the countersignature is gone and nothing errored"
+        );
+        assert!(from_canonical.kyber_ct_b.is_empty());
+
+        // And the commitment is identical across both, so a commitment check
+        // cannot be what catches the mistake.
+        assert_eq!(
+            from_canonical.compute_commitment().expect("c1"),
+            from_full.compute_commitment().expect("c2"),
+            "the commitment covers only fields 1-11, so it is blind to the loss"
+        );
+    }
+
     #[test]
     fn test_canonical_protobuf_includes_rel_replace_witness_field_11() {
         let mut receipt = StitchedReceiptV2::new(
