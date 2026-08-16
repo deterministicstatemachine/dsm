@@ -1641,6 +1641,12 @@ impl AppRouterImpl {
                                 // Draining happens regardless of `entries_res` — a poll that
                                 // yields no forward transfers can still carry the reply that
                                 // releases this device's pending gate.
+                                // A delta this device has finalized on (now or earlier) is
+                                // ACKed on the route it was pulled from, so the spool stops
+                                // re-serving it every poll. Durable idempotency lives in the
+                                // proposal's terminal status, not in this ACK — a lost ACK
+                                // costs one more `AlreadyFinalized` pass, nothing else.
+                                let mut consumed_deltas: Vec<String> = Vec::new();
                                 for delta in b0x_sdk.take_countersign_deltas() {
                                     let outcome = finalize_from_countersign_delta(&delta).await;
                                     log::info!(
@@ -1648,6 +1654,29 @@ impl AppRouterImpl {
                                         delta.message_id,
                                         outcome
                                     );
+                                    if matches!(
+                                        outcome,
+                                        CountersignOutcome::Finalized
+                                            | CountersignOutcome::AlreadyFinalized
+                                    ) {
+                                        consumed_deltas.push(delta.message_id.clone());
+                                    }
+                                }
+                                if !consumed_deltas.is_empty() {
+                                    let n = consumed_deltas.len();
+                                    match b0x_sdk
+                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_deltas)
+                                        .await
+                                    {
+                                        Ok(_) => log::info!(
+                                            "[storage.sync] ADR 0003 ACKed {n} consumed countersign delta(s) on {}..",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                        Err(e) => log::warn!(
+                                            "[storage.sync] ADR 0003 countersign delta ACK failed on {}.. (re-served next poll): {e}",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                    }
                                 }
                                 // ADR 0003 evidence halves ride the same spool under their
                                 // own explicit method. Glue only: resolve the trust root,
