@@ -699,6 +699,117 @@ pub fn set_sender_outbox_status_with_conn(
     Ok(n > 0)
 }
 
+/// Proposal identities whose delivery is in flight IN THIS PROCESS.
+///
+/// Duplicate-traffic suppression only — NOT a correctness mechanism. There is a
+/// scheduling window between the durable commit of a send and its insertion
+/// here in which the periodic sweep can observe the row first and drive it
+/// too. That is harmless by construction: both drivers submit the same
+/// deterministic ids with identical frozen bytes (the node collapses them), and
+/// both advance status through CAS. What this set buys is that the common case
+/// does not pay for two full quorum submissions of a ~118 KB artifact.
+static DELIVERY_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<([u8; 32], [u8; 32], [u8; 32])>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// RAII marker for an in-flight delivery. Dropping it releases the slot.
+pub struct DeliveryInFlight(([u8; 32], [u8; 32], [u8; 32]));
+
+impl DeliveryInFlight {
+    /// Claim the slot. Returns `None` if this process is already delivering
+    /// this proposal — the caller should skip, not fail.
+    pub fn claim(
+        relationship_key: &[u8; 32],
+        canonical_parent: &[u8; 32],
+        proposal_nonce: &[u8; 32],
+    ) -> Option<Self> {
+        let key = (*relationship_key, *canonical_parent, *proposal_nonce);
+        let mut set = DELIVERY_IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+        if set.insert(key) {
+            Some(Self(key))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for DeliveryInFlight {
+    fn drop(&mut self) {
+        DELIVERY_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Compare-and-set lifecycle advance: `from` → `to`, applied only when the row
+/// is currently in one of `from`.
+///
+/// Why this exists alongside `set_sender_outbox_status`: the plain setter is an
+/// unconditional UPDATE, and the delivery path is not the only writer. While a
+/// submission is on the wire the recipient can accept and reply, and a
+/// concurrent `storage.sync` can run `finalize_on_acceptance_atomically`, which
+/// moves the row to `gc_pending`. A delivery result landing after that must NOT
+/// drag the row back to `submitted` or `submission_uncertain` — that would leave
+/// it outside both the unsettled set and the GC set forever. So every writer
+/// that reacts to a delivery outcome names the states it is allowed to leave.
+///
+/// Returns `true` iff a row transitioned.
+pub fn advance_sender_outbox_status_if(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    proposal_nonce: &[u8; 32],
+    from: &[&str],
+    to: &str,
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    advance_sender_outbox_status_if_with_conn(
+        &conn,
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        from,
+        to,
+    )
+}
+
+/// Same, inside a caller-owned transaction.
+pub fn advance_sender_outbox_status_if_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    proposal_nonce: &[u8; 32],
+    from: &[&str],
+    to: &str,
+) -> Result<bool> {
+    if from.is_empty() {
+        return Ok(false);
+    }
+    // Build `?5, ?6, ...` for the IN list; rusqlite has no array binding.
+    let placeholders: Vec<String> = (0..from.len()).map(|i| format!("?{}", i + 5)).collect();
+    let sql = format!(
+        "UPDATE sender_outbox SET status = ?4
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND proposal_nonce = ?3
+           AND status IN ({})",
+        placeholders.join(", ")
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(relationship_key.to_vec()),
+        Box::new(canonical_parent.to_vec()),
+        Box::new(proposal_nonce.to_vec()),
+        Box::new(to.to_string()),
+    ];
+    for s in from {
+        params.push(Box::new(s.to_string()));
+    }
+    let n = conn.execute(
+        &sql,
+        rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+    )?;
+    Ok(n > 0)
+}
+
 /// Record the storage message ids a submission returned. GC metadata ONLY —
 /// finalization keys on the receipt commitment, never on these.
 pub fn bind_sender_outbox_message_ids(

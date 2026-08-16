@@ -636,7 +636,178 @@ async fn deliver_pending_acceptance_replies(
     Ok(())
 }
 
+/// Upper bound on frozen sends re-driven per poll, so a dead network cannot pin
+/// the poller for minutes replaying a backlog. Anything past the bound waits for
+/// the next poll; ordering by `created_at` keeps cross-transfer causality.
+const OUTBOX_RESUBMIT_ROWS_PER_POLL: usize = 8;
+
 impl AppRouterImpl {
+    /// §16.6 liveness — replay every unsettled frozen send through the shared
+    /// delivery primitive. Returns how many logical sends reached full quorum
+    /// on this pass.
+    ///
+    /// Selection is `unsettled_sender_outbox()`: `pending_submit`, `submitting`
+    /// and `submission_uncertain`. All three mean "may or may not have entered
+    /// the network"; replay is idempotent by id, so they are treated alike. Rows
+    /// this process is already delivering (first attempt still on the wire) are
+    /// skipped — that is traffic suppression, not a correctness guard.
+    ///
+    /// Per row: load the frozen artifacts, deliver the whole set, and only on
+    /// complete success CAS the row to `submitted`. A partial or failed delivery
+    /// leaves the row exactly as it was; the next sweep replays the whole
+    /// frozen set again. There is deliberately no half-delivered state.
+    pub(crate) async fn resubmit_unsettled_sender_outbox(
+        &self,
+        device_id_b32: &str,
+        storage_endpoints: &[String],
+    ) -> Result<u32, String> {
+        use crate::storage::client_db::{
+            advance_sender_outbox_status_if, bind_sender_outbox_message_ids,
+            load_sender_outbox_artifacts, mark_sender_proposal_submitted_if_proposed,
+            unsettled_sender_outbox, DeliveryInFlight, OUTBOX_PENDING_SUBMIT,
+            OUTBOX_SUBMISSION_UNCERTAIN, OUTBOX_SUBMITTED, OUTBOX_SUBMITTING,
+        };
+
+        let rows =
+            unsettled_sender_outbox().map_err(|e| format!("unsettled_sender_outbox: {e}"))?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        if storage_endpoints.is_empty() {
+            return Err("no storage endpoints configured; cannot resubmit".to_string());
+        }
+
+        let mut b0x = crate::sdk::b0x_sdk::B0xSDK::new(
+            device_id_b32.to_string(),
+            self.core_sdk.clone(),
+            storage_endpoints.to_vec(),
+        )
+        .map_err(|e| format!("B0xSDK init for resubmit: {e}"))?;
+        let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
+
+        let mut delivered = 0u32;
+        let total = rows.len();
+        for row in rows.into_iter().take(OUTBOX_RESUBMIT_ROWS_PER_POLL) {
+            let Some(_slot) = DeliveryInFlight::claim(
+                &row.relationship_key,
+                &row.canonical_parent,
+                &row.proposal_nonce,
+            ) else {
+                log::debug!(
+                    "[storage.sync] outbox resubmit: {} in flight in this process; skipping",
+                    row.submission_id
+                );
+                continue;
+            };
+
+            let artifacts = match load_sender_outbox_artifacts(
+                &row.relationship_key,
+                &row.canonical_parent,
+                &row.proposal_nonce,
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!(
+                        "[storage.sync] outbox resubmit: {} artifacts unreadable; leaving \
+                         {} for the next sweep: {e}",
+                        row.submission_id,
+                        row.status
+                    );
+                    continue;
+                }
+            };
+
+            log::info!(
+                "[storage.sync] outbox resubmit: replaying {} ({} bytes, {} artifact(s), \
+                 was {}) to frozen route {}..",
+                row.submission_id,
+                row.envelope_bytes.len(),
+                artifacts.len(),
+                row.status,
+                &row.routing_address[..row.routing_address.len().min(12)]
+            );
+
+            match b0x
+                .deliver_frozen_logical_send(&row, &artifacts, &retry)
+                .await
+            {
+                Ok(_) => {
+                    // The row may have moved on while we were on the wire
+                    // (recipient replied fast, another sync finalized it). CAS
+                    // from the unsettled states only; anything else is left.
+                    match advance_sender_outbox_status_if(
+                        &row.relationship_key,
+                        &row.canonical_parent,
+                        &row.proposal_nonce,
+                        &[
+                            OUTBOX_PENDING_SUBMIT,
+                            OUTBOX_SUBMITTING,
+                            OUTBOX_SUBMISSION_UNCERTAIN,
+                        ],
+                        OUTBOX_SUBMITTED,
+                    ) {
+                        Ok(true) => {
+                            delivered += 1;
+                            log::info!(
+                                "[storage.sync] ✅ outbox resubmit: {} now submitted",
+                                row.submission_id
+                            );
+                        }
+                        Ok(false) => log::info!(
+                            "[storage.sync] outbox resubmit: {} delivered but the row already \
+                             progressed past the unsettled states; leaving it",
+                            row.submission_id
+                        ),
+                        Err(e) => log::warn!(
+                            "[storage.sync] outbox resubmit: {} delivered but status CAS failed: {e}",
+                            row.submission_id
+                        ),
+                    }
+                    // Metadata binds. Guarded / non-authoritative; failure here
+                    // never un-delivers anything.
+                    if let Err(e) = mark_sender_proposal_submitted_if_proposed(
+                        &row.relationship_key,
+                        &row.canonical_parent,
+                        &row.submission_id,
+                    ) {
+                        log::warn!(
+                            "[storage.sync] outbox resubmit: {} proposal bind skipped: {e}",
+                            row.submission_id
+                        );
+                    }
+                    if row.message_ids.is_none() {
+                        let _ = bind_sender_outbox_message_ids(
+                            &row.relationship_key,
+                            &row.canonical_parent,
+                            &row.proposal_nonce,
+                            &row.submission_id,
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Not proof of non-delivery. Row stays exactly as it was —
+                    // no status write at all — and the whole frozen set is
+                    // replayed on the next sweep.
+                    log::warn!(
+                        "[storage.sync] outbox resubmit: {} not fully delivered (row unchanged, \
+                         will retry): {e}",
+                        row.submission_id
+                    );
+                }
+            }
+        }
+
+        if total > OUTBOX_RESUBMIT_ROWS_PER_POLL {
+            log::info!(
+                "[storage.sync] outbox resubmit: {} of {} unsettled rows attempted this poll; \
+                 remainder next poll",
+                OUTBOX_RESUBMIT_ROWS_PER_POLL,
+                total
+            );
+        }
+        Ok(delivered)
+    }
+
     pub(crate) async fn run_storage_sync_request(
         &self,
         req: generated::StorageSyncRequest,
@@ -2319,10 +2490,15 @@ impl AppRouterImpl {
                                 crate::storage::client_db::gc_pending_sender_outbox()
                             {
                                 for row in &collectable {
-                                    let Some(message_id) = row.message_ids.as_deref() else {
-                                        // No wire id was ever bound — nothing spooled to collect.
-                                        continue;
-                                    };
+                                    // The wire id IS the deterministic submission id;
+                                    // `message_ids` is a redundant bind that can be
+                                    // missing when the process died between
+                                    // `submitted` and the bind. Fall back rather than
+                                    // skipping the row forever.
+                                    let message_id = row
+                                        .message_ids
+                                        .as_deref()
+                                        .unwrap_or(row.submission_id.as_str());
                                     match b0x_sdk.is_message_acknowledged(message_id).await {
                                         Ok(true) => match crate::storage::client_db::set_sender_outbox_status(
                                             &row.relationship_key,
@@ -2354,6 +2530,37 @@ impl AppRouterImpl {
 
                             log::warn!("[DSM_SDK] inbox.pull: B0xSDK retrieve failed: {}", e);
                             return err(format!("inbox.pull: B0xSDK retrieve failed: {}", e));
+                        }
+                    }
+                }
+
+                // =============================================================
+                // §16.6 / ADR 0003 — SENDER OUTBOX RESUBMIT SWEEP.
+                //
+                // The liveness half of the durable outbox. A send that entered
+                // the network with an unknown outcome is retained as
+                // `submission_uncertain` with its exact wire bytes and every
+                // frozen artifact, and the user is told it "will be retried
+                // automatically". This is that retry.
+                //
+                // Placement is deliberate: OUTSIDE `if pull_inbox`, gated only on
+                // `push_pending`. An idle sender pulls nothing, and the recovery
+                // gate test drives `push_pending` alone; a sweep nested in the
+                // inbox branch would silently never run for either.
+                //
+                // Every row is re-driven through the SAME primitive the first
+                // attempt used, over the same frozen bytes, ids and route, so
+                // recovery cannot drift from delivery. All-or-nothing per row.
+                // =============================================================
+                if push_pending {
+                    match self
+                        .resubmit_unsettled_sender_outbox(&device_id_b32, &storage_endpoints)
+                        .await
+                    {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] outbox resubmit sweep errored: {e}");
+                            errors.push(format!("outbox resubmit sweep failed: {e}"));
                         }
                     }
                 }
@@ -3293,6 +3500,33 @@ mod tests {
         Ok(endpoint)
     }
 
+    /// Point the runtime's storage-endpoint resolver at the recorders.
+    ///
+    /// Both `wallet.send` and `storage.sync` resolve endpoints through
+    /// `StorageNodeConfig::from_env_config()`, NOT `SdkConfig`. Under
+    /// DSM_SDK_TEST_MODE that loader returns a hardcoded localhost set
+    /// (:8080-8084) unless DSM_ENV_CONFIG_PATH names a real file — so without
+    /// this, the code under test dials ports nothing is listening on and a
+    /// missing submission is indistinguishable from the defect.
+    fn point_env_config_at(endpoints: &[String], tag: &str) {
+        let cfg_path =
+            std::env::temp_dir().join(format!("dsm_{tag}_env_{}.toml", std::process::id()));
+        let mut cfg_toml = String::from(
+            "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
+             storage_node_mode = \"remote\"\nports = [8080]\n\
+             bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
+        );
+        for (i, ep) in endpoints.iter().enumerate() {
+            cfg_toml.push_str(&format!(
+                "\n[[nodes]]\nname = \"rec-{i}\"\nendpoint = \"{ep}\"\n"
+            ));
+        }
+        std::fs::write(&cfg_path, cfg_toml).expect("write env config");
+        unsafe {
+            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
+        }
+    }
+
     /// A frozen uncertain send: the transfer envelope plus its ADR 0003
     /// A-side evidence, both already encoded and committed.
     struct FrozenSend {
@@ -3415,6 +3649,7 @@ mod tests {
         let endpoints: Vec<String> = (0..3)
             .map(|_| spawn_recorder(log.clone()).expect("recorder"))
             .collect();
+        point_env_config_at(&endpoints, "gate1");
 
         let device_id = vec![0x0Au8; 32];
         let genesis_hash = vec![0x31u8; 32];
@@ -3755,32 +3990,12 @@ mod tests {
             .map(|_| spawn_send_recorder(log.clone(), identity_bytes.clone()).expect("recorder"))
             .collect();
 
-        // `wallet.send` resolves endpoints through
-        // `StorageNodeConfig::from_env_config()`, NOT `SdkConfig` — under
-        // DSM_SDK_TEST_MODE that returns a hardcoded localhost set (:8080-8084)
-        // and the send would dial ports nothing is listening on. Point the
-        // loader at a real config naming the recorders.
-        let cfg_path =
-            std::env::temp_dir().join(format!("dsm_gate2_env_{}.toml", std::process::id()));
-        let mut cfg_toml = String::from(
-            "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
-             storage_node_mode = \"remote\"\nports = [8080]\n\
-             bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
-        );
-        for (i, ep) in endpoints.iter().enumerate() {
-            cfg_toml.push_str(&format!(
-                "\n[[nodes]]\nname = \"rec-{i}\"\nendpoint = \"{ep}\"\n"
-            ));
-        }
-        std::fs::write(&cfg_path, cfg_toml).expect("write env config");
-        unsafe {
-            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
-        }
+        point_env_config_at(&endpoints, "gate2");
 
         let binding_key = vec![0x41u8; 32];
         let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &sender_device.to_vec(),
-            &genesis.to_vec(),
+            &sender_device,
+            &genesis,
             &binding_key,
         )
         .expect("signing keypair");
