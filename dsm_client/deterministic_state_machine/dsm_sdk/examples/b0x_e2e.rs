@@ -79,7 +79,6 @@ async fn main() {
         ttl_seconds: 3600,
         seq: 0, // Example uses seq=0 for simplicity
         next_chain_tip: Some(chain_state.hash.to_vec()),
-        receipt_commit: vec![],
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),

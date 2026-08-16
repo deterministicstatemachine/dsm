@@ -336,7 +336,6 @@ pub(crate) mod tests {
             from_device_id: vec![0x02; 32],
             chain_tip: vec![0xAA; 32],
             seq: 1,
-            receipt_commit: Vec::new(),
             canonical_operation_bytes: canonical,
             receipt_evidence_digest: evidence_digest.to_vec(),
         };

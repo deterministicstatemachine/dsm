@@ -17,43 +17,6 @@ pub(crate) fn build_protocol_transition_commitment(
     (payload, commitment)
 }
 
-/// Build receipt with real SMT roots and inclusion proofs (§4.2 compliant).
-///
-/// Use this variant when the caller has access to the `SparseMerkleTree` and has
-/// already performed the SMT-Replace, collecting pre/post roots and proofs.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_online_receipt_with_smt(
-    from_device: &[u8],
-    to_device: &[u8],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    parent_root: [u8; 32],
-    child_root: [u8; 32],
-    rel_proof_parent: Vec<u8>,
-    rel_proof_child: Vec<u8>,
-    device_tree_commitment: Option<crate::sdk::receipts::DeviceTreeAcceptanceCommitment>,
-) -> Option<Vec<u8>> {
-    let mut dev_a = [0u8; 32];
-    if from_device.len() >= 32 {
-        dev_a.copy_from_slice(&from_device[..32]);
-    }
-    let mut dev_b = [0u8; 32];
-    if to_device.len() >= 32 {
-        dev_b.copy_from_slice(&to_device[..32]);
-    }
-    crate::sdk::receipts::build_bilateral_receipt_with_smt(
-        dev_a,
-        dev_b,
-        parent_tip,
-        child_tip,
-        parent_root,
-        child_root,
-        rel_proof_parent,
-        rel_proof_child,
-        device_tree_commitment,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

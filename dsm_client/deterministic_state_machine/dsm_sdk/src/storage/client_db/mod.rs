@@ -42,7 +42,6 @@ pub mod recipient_staging;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
-mod stitched_receipts;
 mod system_peers;
 pub mod token_registry;
 mod tokens;
@@ -78,7 +77,6 @@ pub use manifold_seeds::*;
 pub use nonces::*;
 pub use online_outbox::*;
 pub use pending_transactions::*;
-pub use stitched_receipts::*;
 pub use vault_records::*;
 pub use system_peers::*;
 pub use tokens::*;
@@ -150,7 +148,6 @@ pub fn init_database() -> Result<()> {
         ensure_bitcoin_accounts_active_receive_index(&conn)?;
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
-        ensure_stitched_receipts_dual_signature_schema(&conn)?;
         ensure_bilateral_sessions_created_at_step(&conn)?;
         ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
         ensure_recipient_staging_retained_route(&conn)?;
@@ -1052,21 +1049,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_dlv_receipts_vault ON dlv_receipts(vault_id);
         CREATE INDEX IF NOT EXISTS idx_dlv_receipts_genesis ON dlv_receipts(genesis);
 
-        CREATE TABLE IF NOT EXISTS stitched_receipts (
-            tx_hash       BLOB NOT NULL PRIMARY KEY,
-            h_n           BLOB NOT NULL,
-            h_n1          BLOB NOT NULL,
-            device_id_a   BLOB NOT NULL,
-            device_id_b   BLOB NOT NULL,
-            sig_a         BLOB NOT NULL,
-            sig_b         BLOB NOT NULL,
-            receipt_commit BLOB NOT NULL,
-            smt_root_pre  BLOB,
-            smt_root_post BLOB
-        );
-        CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_a ON stitched_receipts(device_id_a);
-        CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_b ON stitched_receipts(device_id_b);
-
         CREATE TABLE IF NOT EXISTS in_flight_withdrawals(
             withdrawal_id    TEXT PRIMARY KEY,
             device_id        TEXT NOT NULL,
@@ -1536,58 +1518,6 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
             [],
         )?;
     }
-    Ok(())
-}
-
-/// Authority-sourcing migration: pre-existing acceptance_fold_journal rows
-/// predate the SYMMETRIC projection-CAS columns. Added with empty defaults —
-/// an empty pair means the row was prepared under metadata-derived keying and
-/// can no longer converge (inert; the strict apply refuses its lineage anyway).
-fn ensure_stitched_receipts_dual_signature_schema(conn: &Connection) -> Result<()> {
-    // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-    let mut stmt = conn.prepare("PRAGMA table_info(stitched_receipts)")?;
-    let mut sig_b_required = false;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, i32>(3)?))
-    })?;
-    for row in rows {
-        let (name, notnull) = row?;
-        if name == "sig_b" {
-            sig_b_required = notnull != 0;
-            break;
-        }
-    }
-    if sig_b_required {
-        return Ok(());
-    }
-
-    log::info!("[DSM_SDK] Rebuilding stitched_receipts with dual-signature enforcement");
-    conn.execute_batch(
-        "BEGIN;
-         ALTER TABLE stitched_receipts RENAME TO _stitched_receipts_old;
-         CREATE TABLE stitched_receipts (
-             tx_hash       BLOB NOT NULL PRIMARY KEY,
-             h_n           BLOB NOT NULL,
-             h_n1          BLOB NOT NULL,
-             device_id_a   BLOB NOT NULL,
-             device_id_b   BLOB NOT NULL,
-             sig_a         BLOB NOT NULL,
-             sig_b         BLOB NOT NULL,
-             receipt_commit BLOB NOT NULL,
-             smt_root_pre  BLOB,
-             smt_root_post BLOB
-         );
-         INSERT INTO stitched_receipts
-             SELECT tx_hash, h_n, h_n1, device_id_a, device_id_b,
-                    sig_a, sig_b, receipt_commit, smt_root_pre, smt_root_post
-             FROM _stitched_receipts_old
-             WHERE sig_b IS NOT NULL AND length(sig_b) > 0;
-         DROP TABLE _stitched_receipts_old;
-         CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_a ON stitched_receipts(device_id_a);
-         CREATE INDEX IF NOT EXISTS idx_stitched_receipts_devid_b ON stitched_receipts(device_id_b);
-         COMMIT;",
-    )?;
-    log::info!("[DSM_SDK] stitched_receipts dual-signature schema ready");
     Ok(())
 }
 

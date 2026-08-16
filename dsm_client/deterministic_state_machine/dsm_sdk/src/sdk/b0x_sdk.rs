@@ -166,8 +166,6 @@ pub struct B0xEntry {
     pub ttl_seconds: u64,
     // Envelope v3 signing context (AF-2 remediation)
     pub seq: u64,
-    /// Canonical ReceiptCommit bytes (§4.2) — SMT proofs for this transition.
-    pub receipt_commit: Vec<u8>,
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
     /// Receiver uses these directly for SPHINCS+ verification and tip computation.
     pub canonical_operation_bytes: Vec<u8>,
@@ -226,8 +224,6 @@ pub struct B0xSubmissionParams {
     pub seq: u64,
     /// Next chain tip bytes (32) anchoring this online transition (optional).
     pub next_chain_tip: Option<Vec<u8>>,
-    /// Canonical ReceiptCommit bytes (§4.2) — SMT proofs for this transition.
-    pub receipt_commit: Vec<u8>,
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
@@ -236,9 +232,8 @@ pub struct B0xSubmissionParams {
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
     /// ADR 0003: content address of the A-side receipt-evidence artifact this
-    /// transfer refers to, populated into proto field 12. Empty means the
-    /// legacy inline composition (the whole receipt in `receipt_commit`), which
-    /// exceeds the node's envelope cap and is retained only for fixtures.
+    /// transfer refers to, populated into proto field 12. Every transfer
+    /// carries one; the receipt never rides inline.
     pub receipt_evidence_digest: Vec<u8>,
     /// §16.6 defect zero: caller-supplied DETERMINISTIC submission id.
     ///
@@ -251,228 +246,6 @@ pub struct B0xSubmissionParams {
     /// `None` keeps the legacy random derivation for callers with no durable
     /// identity to key on (non-transfer submissions).
     pub submission_id: Option<String>,
-}
-
-impl B0xSubmissionParams {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // recipient_device_id
-        let r_dev = self.recipient_device_id.as_bytes();
-        bytes.extend_from_slice(&(r_dev.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(r_dev);
-
-        // recipient_genesis_hash
-        let r_gen = self.recipient_genesis_hash.as_bytes();
-        bytes.extend_from_slice(&(r_gen.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(r_gen);
-
-        // transaction
-        let tx_bytes = crate::storage::client_db::serialize_operation(&self.transaction);
-        bytes.extend_from_slice(&(tx_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&tx_bytes);
-
-        // signature
-        bytes.extend_from_slice(&(self.signature.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.signature);
-
-        // sender_signing_public_key (optional)
-        bytes.extend_from_slice(&(self.sender_signing_public_key.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.sender_signing_public_key);
-
-        // sender_genesis_hash
-        let s_gen = self.sender_genesis_hash.as_bytes();
-        bytes.extend_from_slice(&(s_gen.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(s_gen);
-
-        // sender_chain_tip
-        let s_tip = self.sender_chain_tip.as_bytes();
-        bytes.extend_from_slice(&(s_tip.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(s_tip);
-
-        // ttl_seconds
-        bytes.extend_from_slice(&self.ttl_seconds.to_le_bytes());
-
-        // seq (AF-2 canonical signing)
-        bytes.extend_from_slice(&self.seq.to_le_bytes());
-
-        // next_chain_tip (optional; length-prefixed)
-        if let Some(ref next_tip) = self.next_chain_tip {
-            bytes.extend_from_slice(&(next_tip.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(next_tip);
-        } else {
-            bytes.extend_from_slice(&0u32.to_le_bytes());
-        }
-
-        // receipt_commit (§4.2 ReceiptCommit canonical protobuf) — length-prefixed
-        bytes.extend_from_slice(&(self.receipt_commit.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.receipt_commit);
-
-        // routing_address (§16.4 tip-scoped b0x address) — length-prefixed
-        let addr_bytes = self.routing_address.as_bytes();
-        bytes.extend_from_slice(&(addr_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(addr_bytes);
-
-        bytes
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
-        let mut cursor = 0;
-
-        let read_string = |cursor: &mut usize| -> Result<String, DsmError> {
-            if *cursor + 4 > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let len = u32::from_le_bytes(
-                bytes[*cursor..*cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            *cursor += 4;
-            if *cursor + len > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let s = String::from_utf8(bytes[*cursor..*cursor + len].to_vec()).map_err(|e| {
-                DsmError::internal(format!("utf8 error: {}", e), None::<std::io::Error>)
-            })?;
-            *cursor += len;
-            Ok(s)
-        };
-
-        let read_bytes = |cursor: &mut usize| -> Result<Vec<u8>, DsmError> {
-            if *cursor + 4 > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let len = u32::from_le_bytes(
-                bytes[*cursor..*cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            *cursor += 4;
-            if *cursor + len > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let v = bytes[*cursor..*cursor + len].to_vec();
-            *cursor += len;
-            Ok(v)
-        };
-
-        let recipient_device_id = read_string(&mut cursor)?;
-        let recipient_genesis_hash = read_string(&mut cursor)?;
-
-        let tx_bytes = read_bytes(&mut cursor)?;
-        let transaction =
-            crate::storage::client_db::deserialize_operation(&tx_bytes).map_err(|e| {
-                DsmError::internal(
-                    format!("deserialize op failed: {}", e),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        let signature = read_bytes(&mut cursor)?;
-
-        let sender_signing_public_key = read_bytes(&mut cursor)?;
-        let sender_genesis_hash = read_string(&mut cursor)?;
-        let sender_chain_tip = read_string(&mut cursor)?;
-
-        if cursor + 8 > bytes.len() {
-            return Err(DsmError::internal(
-                "buffer underflow",
-                None::<std::io::Error>,
-            ));
-        }
-        let ttl_seconds = u64::from_le_bytes(
-            bytes[cursor..cursor + 8]
-                .try_into()
-                .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-        );
-        cursor += 8;
-
-        if cursor + 8 > bytes.len() {
-            return Err(DsmError::internal(
-                "buffer underflow",
-                None::<std::io::Error>,
-            ));
-        }
-        let seq = u64::from_le_bytes(
-            bytes[cursor..cursor + 8]
-                .try_into()
-                .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-        );
-
-        cursor += 8;
-
-        let next_chain_tip = if cursor + 4 <= bytes.len() {
-            let len = u32::from_le_bytes(
-                bytes[cursor..cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            cursor += 4;
-            if len > 0 {
-                if cursor + len > bytes.len() {
-                    return Err(DsmError::internal(
-                        "buffer underflow",
-                        None::<std::io::Error>,
-                    ));
-                }
-                let v = bytes[cursor..cursor + len].to_vec();
-                cursor += len;
-                Some(v)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // receipt_commit (§4.2)
-        let receipt_commit = read_bytes(&mut cursor)?;
-
-        // routing_address (§16.4) — mandatory
-        let routing_address = read_string(&mut cursor)?;
-        if routing_address.is_empty() {
-            return Err(DsmError::internal(
-                "routing_address cannot be empty",
-                None::<std::io::Error>,
-            ));
-        }
-
-        Ok(Self {
-            submission_id: None,
-            recipient_device_id,
-            recipient_genesis_hash,
-            transaction,
-            signature,
-            sender_signing_public_key,
-            sender_genesis_hash,
-            sender_chain_tip,
-            ttl_seconds,
-            seq,
-            next_chain_tip,
-            receipt_commit,
-            routing_address,
-            // This codec does not carry `canonical_operation_bytes` or
-            // `receipt_evidence_digest`; both are rebuilt by the caller. It is a
-            // partial serialization and is not the durable freeze -- the exact
-            // wire bytes live in `sender_outbox.envelope_bytes` and
-            // `sender_outbox_artifacts.envelope_bytes`.
-            canonical_operation_bytes: Vec::new(),
-            receipt_evidence_digest: Vec::new(),
-        })
-    }
 }
 
 fn anchor_tick_from_tip(tip: &[u8]) -> u64 {
@@ -2233,7 +2006,6 @@ impl B0xSDK {
                     from_device_id: actor_device_bytes.clone(),
                     chain_tip: sender_tip_bytes.clone(),
                     seq: params.seq,
-                    receipt_commit: params.receipt_commit.clone(),
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
                     receipt_evidence_digest: params.receipt_evidence_digest.clone(),
                 };
@@ -3730,7 +3502,6 @@ impl B0xSDK {
                                     tick: anchor_tick_from_tip(&tick_anchor_bytes),
                                     ttl_seconds: 0,
                                     seq: transfer_req.seq,
-                                    receipt_commit: transfer_req.receipt_commit.clone(),
                                     canonical_operation_bytes: transfer_req
                                         .canonical_operation_bytes
                                         .clone(),
@@ -3819,7 +3590,6 @@ impl B0xSDK {
                                     tick: anchor_tick_from_tip(&tick_anchor_bytes),
                                     ttl_seconds: 0,
                                     seq: msg_req.seq,
-                                    receipt_commit: Vec::new(),
                                     canonical_operation_bytes: Vec::new(),
                                 });
                             }
@@ -4016,7 +3786,6 @@ impl B0xSDK {
                 // NOTE: This is a stopgap until session rows capture the canonical seq.
                 seq: std::cmp::max(1, record.created_at_step),
                 next_chain_tip: None,
-                receipt_commit: Vec::new(),
                 routing_address,
                 canonical_operation_bytes: Vec::new(),
                 receipt_evidence_digest: Vec::new(),
@@ -4436,7 +4205,6 @@ mod tests {
             from_device_id: vec![0x22; 32],
             chain_tip: vec![0x33; 32],
             seq: 1,
-            receipt_commit: vec![],
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
         };
@@ -4515,7 +4283,6 @@ mod tests {
             from_device_id: vec![0x44; 32],
             chain_tip: vec![0x55; 32],
             seq: 2,
-            receipt_commit: vec![],
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
         };
@@ -4698,7 +4465,6 @@ mod tests {
             from_device_id: vec![0x22; 32],
             chain_tip: vec![0x33; 32],
             seq: 9,
-            receipt_commit: vec![],
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
         };
@@ -4834,13 +4600,11 @@ mod tests {
         out
     }
 
-    /// Submission params carrying production-sized SIG A and canonical op bytes.
-    /// `receipt_commit` is supplied by the caller so the same production encoder
-    /// measures both the inline shape and the split shape.
-    /// The ADR 0003 split composition: no inline receipt, a 32-byte reference.
+    /// Submission params carrying production-sized SIG A and canonical op bytes
+    /// in the ADR 0003 split composition: no inline receipt, a 32-byte reference.
     fn params_split_shape() -> B0xSubmissionParams {
         let digest = evidence_content_digest_for_test();
-        let mut p = params_with_receipt(Vec::new());
+        let mut p = params_base();
         p.receipt_evidence_digest = digest.to_vec();
         p
     }
@@ -4852,9 +4616,9 @@ mod tests {
         )
     }
 
-    /// The LEGACY inline composition, retained as a fixture so the evidence that
-    /// it exceeds the cap survives after production stops using it.
-    fn params_with_receipt(receipt_commit: Vec<u8>) -> B0xSubmissionParams {
+    /// A production-shaped transfer submission (ADR 0003 split: no inline
+    /// receipt; the evidence reference is set by `params_split_shape`).
+    fn params_base() -> B0xSubmissionParams {
         B0xSubmissionParams {
             recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
             recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
@@ -4880,7 +4644,6 @@ mod tests {
             ttl_seconds: 0,
             seq: 1,
             next_chain_tip: Some(vec![0x99; 32]),
-            receipt_commit,
             routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
             receipt_evidence_digest: Vec::new(),
@@ -4898,34 +4661,11 @@ mod tests {
             .len()
     }
 
-    /// The LEGACY inline composition -- the whole A-side receipt embedded in the
-    /// transfer message -- exceeds the node cap. Measured on hardware at 168,400
-    /// bytes before the split.
-    ///
-    /// Production no longer builds this shape. The fixture is retained
-    /// deliberately: deleting it would delete the evidence for WHY the split
-    /// exists, and nothing would then catch a regression that put the receipt
-    /// back inline.
-    #[test]
-    fn legacy_inline_composition_exceeds_the_node_cap() {
-        let bytes = encode_via_production_path(&params_with_receipt(production_sized_receipt_a()));
-        report_budget("legacy inline composition", bytes);
-        assert!(
-            bytes > NODE_MAX_ENVELOPE_BYTES,
-            "legacy inline composition measured {bytes} bytes; if this now fits, the fixture \
-             no longer reproduces the shape it exists to document"
-        );
-    }
-
     /// ADR 0003 shape 1, as PRODUCTION now builds it: no inline receipt, a
     /// 32-byte role-separated reference in field 12.
     #[test]
     fn adr0003_transfer_envelope_fits_the_node_cap() {
         let params = params_split_shape();
-        assert!(
-            params.receipt_commit.is_empty(),
-            "the split transfer must not carry an inline receipt"
-        );
         assert_eq!(
             params.receipt_evidence_digest.len(),
             32,
@@ -5130,11 +4870,6 @@ mod tests {
         )
         .expect("decode OnlineTransferRequest");
 
-        assert!(
-            req.receipt_commit.is_empty(),
-            "field 10 must be EMPTY on the wire: {} bytes present",
-            req.receipt_commit.len()
-        );
         assert_eq!(
             req.receipt_evidence_digest.len(),
             32,
