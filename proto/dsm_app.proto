@@ -3375,6 +3375,33 @@ message ReceiptEvidenceA {
   bytes  full_receipt_bytes = 3 [(dsm_max_len)=131072];
 }
 
+// ADR 0003 return leg: the B-side countersign DELTA. The sender retains the
+// full A-side receipt it authored (sender_outbox_artifacts, role evidence_a);
+// the recipient returns ONLY what the sender lacks. Carried as the ArgPack body
+// of a `receipt.countersign.b` invoke on the sender's projection-parent b0x
+// address. The sender reconstructs the countersigned receipt = ITS OWN retained
+// A bytes + these four fields, then runs the unchanged acceptance verifier.
+// That reconstruction is the load-bearing binding: B material can only ever be
+// judged against the A side the sender itself authored. `receipt_evidence_digest_a`
+// is advisory consistency evidence naming which A bytes the recipient
+// countersigned (nothing B signs covers it); a mismatch parks the step, it
+// does not authenticate anything.
+//
+// NORMATIVE (ADR 0003 wire budget): exactly TWO SPHINCS+ signature-sized
+// objects, sig_b and ek_cert_b. ~101 KB with production material against
+// the node's 128 KiB envelope cap; a third signature-sized field breaks it.
+//
+// receipt_evidence_digest_a == BLAKE3("DSM/receipt-evidence/A/v1\0" || A-side full_receipt_bytes)
+// A full ReceiptCommit body on this method is refused at the wire (unknown field 7+).
+message ReceiptCountersignB {
+  bytes commitment                = 1 [(dsm_fixed_len)=32]; // receipt/proposal commitment: the sender's lookup key
+  bytes receipt_evidence_digest_a = 2 [(dsm_fixed_len)=32]; // which A bytes B countersigned (advisory; see above)
+  bytes sig_b                     = 3 [(dsm_max_len)=65535];
+  bytes ek_cert_b                 = 4 [(dsm_max_len)=65535];
+  bytes ek_pk_b                   = 5 [(dsm_max_len)=65535];
+  bytes kyber_ct_b                = 6 [(dsm_max_len)=2048];
+}
+
 message OnlineTransferSmartRequest {
   string recipient = 1; // Alias or Base32 ID
   string amount = 2; // Decimal string
