@@ -47,6 +47,43 @@ pub(crate) fn status_message(status: &generated::RelationshipSendStatus) -> Stri
     }
 }
 
+/// Finality-barrier block on ORIGINATING toward `counterparty_device_id`, from
+/// either role, and the ONE check every originate chokepoint consults
+/// (`wallet.send`, the BLE prepare, the send-status authority below):
+///
+/// - our own prior send on the relationship has not reached its finality
+///   checkpoint (the pending online gate is armed), or
+/// - an inbound acceptance we journaled still awaits the peer's verified
+///   `RelationshipFinalizedV1` (`peer_finalized = 0`, not rejected).
+///
+/// Ordinary bilateral relationships allow ONE unresolved semantic predecessor
+/// per originator; both conditions mean ours is unresolved. `Ok(None)` ⇔ free
+/// to originate. Relationship-local, never wallet-global.
+pub(crate) fn finality_barrier_block(
+    counterparty_device_id: &[u8],
+) -> Result<Option<generated::RelationshipSendStatus>, String> {
+    let pending_outbox = client_db::get_pending_online_outbox(counterparty_device_id)
+        .map_err(|e| format!("Failed to load pending online catch-up state: {e}"))?;
+    if let Some(pending) = pending_outbox {
+        if pending.parent_tip.len() != 32 || pending.next_tip.len() != 32 {
+            return Err("Pending online catch-up gate is malformed".to_string());
+        }
+        return Ok(Some(blocked_status(
+            generated::RelationshipSendBlockReason::PendingCatchup,
+            "Waiting for prior transfer to settle",
+        )));
+    }
+    if client_db::counterparty_awaits_peer_finalization(counterparty_device_id)
+        .map_err(|e| format!("Failed to load acceptance finality state: {e}"))?
+    {
+        return Ok(Some(blocked_status(
+            generated::RelationshipSendBlockReason::PendingCatchup,
+            "Waiting for the peer to finalize a transfer you received",
+        )));
+    }
+    Ok(None)
+}
+
 pub(crate) fn derive_local_send_status_for_device_id(
     device_id: &[u8],
 ) -> generated::RelationshipSendStatus {
@@ -80,32 +117,16 @@ pub(crate) fn derive_local_send_status_for_contact(
         );
     }
 
-    let pending_outbox = match client_db::get_pending_online_outbox(&contact.device_id) {
-        Ok(v) => v,
+    match finality_barrier_block(&contact.device_id) {
+        Ok(Some(blocked)) => return blocked,
+        Ok(None) => {}
         Err(e) => {
-            return blocked_status(
-                generated::RelationshipSendBlockReason::InternalError,
-                format!("Failed to load pending online catch-up state: {e}"),
-            );
+            return blocked_status(generated::RelationshipSendBlockReason::InternalError, e);
         }
-    };
+    }
 
     let canonical_tip = client_db::get_contact_chain_tip_raw(&contact.device_id);
     let local_tip = client_db::get_local_bilateral_chain_tip(&contact.device_id);
-
-    if let Some(pending) = pending_outbox {
-        if pending.parent_tip.len() != 32 || pending.next_tip.len() != 32 {
-            return blocked_status(
-                generated::RelationshipSendBlockReason::InternalError,
-                "Pending online catch-up gate is malformed",
-            );
-        }
-
-        return blocked_status(
-            generated::RelationshipSendBlockReason::PendingCatchup,
-            "Waiting for prior transfer to settle",
-        );
-    }
 
     if contact.needs_online_reconcile {
         return blocked_status(

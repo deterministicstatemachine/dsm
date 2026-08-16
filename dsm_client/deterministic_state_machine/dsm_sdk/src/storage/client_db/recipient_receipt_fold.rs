@@ -80,6 +80,12 @@ pub struct RecipientAcceptanceJournal {
     /// pins `applied_child_tip_b` as B's lineage head.
     pub applied_parent_tip_b: [u8; 32],
     pub applied_child_tip_b: [u8; 32],
+    /// Finality barrier: whether the SENDER's `RelationshipFinalizedV1` for
+    /// this transition has been verified here. `false` from insertion; set to
+    /// `true` ONLY by `mark_peer_finalized_with_conn` after verification. While
+    /// any non-rejected journal on a relationship has it `false`, this device
+    /// may not originate on that relationship.
+    pub peer_finalized: bool,
     pub status: String,
     pub created_at: u64,
 }
@@ -125,7 +131,7 @@ const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterpart
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
      expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
      projection_parent_tip, projection_target_tip, applied_parent_tip_b, applied_child_tip_b, \
-     status, created_at";
+     peer_finalized, status, created_at";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -168,8 +174,9 @@ fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJo
         projection_target_tip: to32(g(16)?),
         applied_parent_tip_b: to32(g(17)?),
         applied_child_tip_b: to32(g(18)?),
-        status: row.get::<_, String>(19)?,
-        created_at: row.get::<_, i64>(20)? as u64,
+        peer_finalized: row.get::<_, i64>(19)? != 0,
+        status: row.get::<_, String>(20)?,
+        created_at: row.get::<_, i64>(21)? as u64,
     })
 }
 
@@ -211,7 +218,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -233,6 +240,8 @@ pub fn insert_prepared_acceptance_journal_with_conn(
             rec.projection_target_tip.as_slice(),
             rec.applied_parent_tip_b.as_slice(),
             rec.applied_child_tip_b.as_slice(),
+            // Never set here: only the verified certificate flips it.
+            0i64,
             STATUS_PREPARED,
             tick() as i64,
         ],
@@ -247,6 +256,95 @@ pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> R
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     insert_prepared_acceptance_journal_with_conn(&conn, rec)
+}
+
+/// The journal for `(relationship, receipt commitment)` — how the finality
+/// certificate names its transition.
+pub fn get_acceptance_journal_by_commitment(
+    relationship_key: &[u8; 32],
+    commitment: &[u8; 32],
+) -> Result<Option<RecipientAcceptanceJournal>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {JOURNAL_COLS} FROM acceptance_fold_journal \
+                 WHERE relationship_key = ?1 AND commitment = ?2"
+            ),
+            params![relationship_key.as_slice(), commitment.as_slice()],
+            row_to_journal,
+        )
+        .optional()?)
+}
+
+/// Finality barrier — the RECIPIENT's gate: does any non-rejected acceptance
+/// on this relationship still await the sender's verified
+/// `RelationshipFinalizedV1`? While it does, this device may not originate on
+/// the relationship (its local finality barrier is unresolved).
+pub fn relationship_awaits_peer_finalization(relationship_key: &[u8; 32]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    relationship_awaits_peer_finalization_with_conn(&conn, relationship_key)
+}
+
+pub fn relationship_awaits_peer_finalization_with_conn(
+    conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM acceptance_fold_journal \
+         WHERE relationship_key = ?1 AND status != ?2 AND peer_finalized = 0",
+        params![relationship_key.as_slice(), STATUS_REJECTED],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// [`relationship_awaits_peer_finalization`] keyed by the COUNTERPARTY device
+/// (one device per database, so this names the same relationship) — for the
+/// send-status authority, which knows the peer's device id and must not depend
+/// on process-global identity state.
+pub fn counterparty_awaits_peer_finalization(counterparty_device_id: &[u8]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM acceptance_fold_journal \
+         WHERE counterparty_device_id = ?1 AND status != ?2 AND peer_finalized = 0",
+        params![counterparty_device_id, STATUS_REJECTED],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Whether ANY relationship on this device awaits a peer certificate — the
+/// poller's liveness signal (a backgrounded recipient must keep polling to
+/// receive it).
+pub fn any_relationship_awaits_peer_finalization() -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM acceptance_fold_journal WHERE status != ?1 AND peer_finalized = 0",
+        params![STATUS_REJECTED],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Record that the sender's `RelationshipFinalizedV1` for `(relationship,
+/// commitment)` verified — the ONLY writer of `peer_finalized`. Idempotent;
+/// returns whether a row flipped.
+pub fn mark_peer_finalized_with_conn(
+    conn: &rusqlite::Connection,
+    relationship_key: &[u8; 32],
+    commitment: &[u8; 32],
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE acceptance_fold_journal SET peer_finalized = 1 \
+         WHERE relationship_key = ?1 AND commitment = ?2 AND peer_finalized = 0",
+        params![relationship_key.as_slice(), commitment.as_slice()],
+    )?;
+    Ok(n > 0)
 }
 
 pub fn get_acceptance_journal(
@@ -816,6 +914,7 @@ mod tests {
             projection_target_tip: [0xE2u8; 32],
             applied_parent_tip_b: [0xE3u8; 32],
             applied_child_tip_b: [0xE4u8; 32],
+            peer_finalized: false,
             relationship_key: rel,
             parent_tip: parent,
             child_tip: child,

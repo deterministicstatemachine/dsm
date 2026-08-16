@@ -357,6 +357,67 @@ pub fn decode_receipt_countersign_b_wire(
     Ok(delta)
 }
 
+/// `RelationshipFinalizedV1` (finality barrier): seven 32-byte fields plus the
+/// sender's per-step EK signature. Every field is required.
+const RELATIONSHIP_FINALIZED_TAGS: u32 = 8;
+
+fn relationship_finalized_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1..=7 => Some(FieldLimit::Fixed(32)),
+        8 => Some(FieldLimit::Max(65_535)),
+        _ => None,
+    }
+}
+
+/// Strict wire validation + prost decode + re-encode equality for a
+/// `RelationshipFinalizedV1` certificate: tags 1-8 only, all present, 1-7
+/// exactly 32 bytes, 8 at most 65,535, no unknown or duplicate fields.
+pub fn decode_relationship_finalized_wire(
+    bytes: &[u8],
+) -> Result<crate::types::proto::RelationshipFinalizedV1, DsmError> {
+    use prost::Message;
+    validate_length_delimited_wire(
+        bytes,
+        "relationship-finalized wire",
+        RELATIONSHIP_FINALIZED_TAGS,
+        relationship_finalized_field_limit,
+        |_| true,
+    )?;
+    let cert = crate::types::proto::RelationshipFinalizedV1::decode(bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("relationship-finalized decode: {e}")))?;
+    if cert.encode_to_vec() != bytes {
+        return Err(DsmError::invalid_operation(
+            "relationship-finalized wire: non-canonical field ordering or encoding",
+        ));
+    }
+    Ok(cert)
+}
+
+/// The signing target of a `RelationshipFinalizedV1`: BLAKE3 under
+/// `DSM/relationship-finalized/v1` over the canonical concatenation of its
+/// seven 32-byte fields, in tag order. Computed identically by the issuing
+/// sender and the verifying recipient; the signature field is not an input.
+pub fn relationship_finalized_signing_target(
+    cert: &crate::types::proto::RelationshipFinalizedV1,
+) -> [u8; 32] {
+    let mut input = Vec::with_capacity(7 * 32);
+    for field in [
+        &cert.relationship_key,
+        &cert.transition_commitment,
+        &cert.sender_device_id,
+        &cert.recipient_device_id,
+        &cert.sender_child_tip_a,
+        &cert.recipient_parent_tip_b,
+        &cert.recipient_child_tip_b,
+    ] {
+        input.extend_from_slice(field);
+    }
+    crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_RELATIONSHIP_FINALIZED,
+        &input,
+    )
+}
+
 /// The B-side receipt fields the recipient adds at acceptance (ADR 0003
 /// return leg): exactly what the sender lacks after authoring the A side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1795,6 +1856,109 @@ mod tests {
 
         // Positive control in the same shape: the untouched bytes decode.
         decode_receipt_countersign_b_wire(&good).unwrap();
+    }
+
+    // --- Finality barrier: RelationshipFinalizedV1 wire codec ---
+
+    fn production_shaped_certificate() -> crate::types::proto::RelationshipFinalizedV1 {
+        crate::types::proto::RelationshipFinalizedV1 {
+            relationship_key: vec![0x01; 32],
+            transition_commitment: vec![0x02; 32],
+            sender_device_id: vec![0x03; 32],
+            recipient_device_id: vec![0x04; 32],
+            sender_child_tip_a: vec![0x05; 32],
+            recipient_parent_tip_b: vec![0x06; 32],
+            recipient_child_tip_b: vec![0x07; 32],
+            signature_a: vec![0xAA; 49_856],
+        }
+    }
+
+    /// One SPHINCS+ signature plus seven tips: well under the node cap, and
+    /// the strict codec accepts exactly the canonical encoding.
+    #[test]
+    fn relationship_finalized_wire_accepts_canonical_encoding_under_the_cap() {
+        use prost::Message;
+        let cert = production_shaped_certificate();
+        let wire = cert.encode_to_vec();
+        assert!(wire.len() < 131_072, "{}", wire.len());
+        assert!(wire.len() > 49_856, "{}", wire.len());
+        let decoded = decode_relationship_finalized_wire(&wire).unwrap();
+        assert_eq!(decoded, cert);
+        assert_eq!(
+            relationship_finalized_signing_target(&decoded),
+            relationship_finalized_signing_target(&cert)
+        );
+    }
+
+    #[test]
+    fn relationship_finalized_wire_refuses_missing_short_unknown_and_duplicate_fields() {
+        use prost::Message;
+        let good = production_shaped_certificate().encode_to_vec();
+
+        let mut no_sig = production_shaped_certificate();
+        no_sig.signature_a.clear();
+        let err = decode_relationship_finalized_wire(&no_sig.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("missing required field 8"),
+            "{err}"
+        );
+
+        let mut short = production_shaped_certificate();
+        short.recipient_child_tip_b.truncate(31);
+        let err = decode_relationship_finalized_wire(&short.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("field 7 must be 32 bytes"),
+            "{err}"
+        );
+
+        // A countersign delta on the certificate method: refused at the wire
+        // (its tag 3 is a signature, not a 32-byte tip).
+        let delta = production_shaped_delta_wire(
+            [0x11; 32],
+            [0x22; 32],
+            &production_shaped_countersign_b(),
+        );
+        let err = decode_relationship_finalized_wire(&delta).unwrap_err();
+        assert!(
+            format!("{err}").contains("field 3 must be 32 bytes"),
+            "{err}"
+        );
+
+        let mut dup = good.clone();
+        let mut extra = crate::types::proto::RelationshipFinalizedV1 {
+            relationship_key: vec![0x33; 32],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        dup.append(&mut extra);
+        let err = decode_relationship_finalized_wire(&dup).unwrap_err();
+        assert!(format!("{err}").contains("duplicate field 1"), "{err}");
+
+        decode_relationship_finalized_wire(&good).unwrap();
+    }
+
+    /// The signing target covers every tip field and never the signature.
+    #[test]
+    fn relationship_finalized_signing_target_binds_every_field_but_the_signature() {
+        let base = production_shaped_certificate();
+        let t0 = relationship_finalized_signing_target(&base);
+        let mut sig_only = base.clone();
+        sig_only.signature_a = vec![0xBB; 49_856];
+        assert_eq!(relationship_finalized_signing_target(&sig_only), t0);
+        for i in 0..7 {
+            let mut c = base.clone();
+            let f: &mut Vec<u8> = match i {
+                0 => &mut c.relationship_key,
+                1 => &mut c.transition_commitment,
+                2 => &mut c.sender_device_id,
+                3 => &mut c.recipient_device_id,
+                4 => &mut c.sender_child_tip_a,
+                5 => &mut c.recipient_parent_tip_b,
+                _ => &mut c.recipient_child_tip_b,
+            };
+            f[0] ^= 0x01;
+            assert_ne!(relationship_finalized_signing_target(&c), t0, "field {i}");
+        }
     }
 
     // --- ReceiptVerificationContext ---

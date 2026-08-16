@@ -120,6 +120,7 @@ pub fn journal_row(
         projection_target_tip: projection_pair.1,
         applied_parent_tip_b: artifacts.applied_parent_tip_b,
         applied_child_tip_b: artifacts.applied_child_tip_b,
+        peer_finalized: false,
         status: STATUS_PREPARED.to_string(),
         created_at: 0,
     }
@@ -220,8 +221,6 @@ pub fn converge_accepted_locked(
         counterparty_device_id: journal.counterparty_device_id,
         expected_parent_tip: journal.projection_parent_tip,
         target_tip: journal.projection_target_tip,
-        observed_gate: None,
-        clear_gate_on_success: false,
     };
     match sync_tip_projection_and_record_acceptance_atomic(&request, &marker)? {
         TipSyncOutcome::Advanced { .. }

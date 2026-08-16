@@ -46,6 +46,14 @@ pub const TAG_DSM_RECEIPT_EVIDENCE_B: TaggedHashDomain<'static> =
 /// `sig_b` authenticates the pair the sender pins as the peer's head.
 pub const TAG_DSM_RECEIPT_B_CANONICAL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-b-canonical/v1");
+/// Signing target of a `RelationshipFinalizedV1` certificate: the canonical
+/// concatenation of its seven 32-byte fields.
+pub const TAG_DSM_RELATIONSHIP_FINALIZED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-finalized/v1");
+/// Content address of a frozen `RelationshipFinalizedV1` artifact (role-separated
+/// like the evidence tags above).
+pub const TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-finalized-artifact/v1");
 pub const TAG_DSM_SILICON_FP_V4: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/silicon_fp/v4");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");

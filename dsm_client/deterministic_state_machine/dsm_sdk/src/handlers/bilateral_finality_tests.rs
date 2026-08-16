@@ -7,18 +7,19 @@
 //! one device active at a time — every assertion helper below reads the
 //! database of whichever device is currently entered).
 //!
-//! # RED tests
+//! # The R-tests
 //!
-//! Tests marked `#[ignore = "green in Commit N: …"]` state the TARGET
-//! behaviour of the finality barrier and are red today; each is un-ignored by
-//! the commit that makes it green (red → green inside that commit, with the
-//! named mutation turning it red again). Tests that are NOT ignored pin what
-//! the shipped code does today; where that is the defect itself, the pin says
-//! so and names the commit that deletes it.
+//! Each `rN_…` test states one rule of the finality barrier and was written
+//! RED before the commit that made it green (the named mutation turns it red
+//! again): R1 role reversal, R2a/R2b the recipient gate and its release by
+//! the certificate, R3 the sender gate until checkpoint quorum, R4 ACK ≠
+//! release, R7 byte-identical checkpoint replay, R11 one deleter for the gate.
+//! R5/R6 live beside the code they pin (`storage_routes` / `core_sdk`).
 
 use crate::storage::client_db as cdb;
 use crate::test_support::two_device::{Pair, TestDevice};
 use dsm::types::proto as generated;
+use prost::Message;
 use serial_test::serial;
 
 /// `SELECT COUNT(*) FROM {table} WHERE relationship_key = ?` on the ENTERED
@@ -192,6 +193,26 @@ async fn generation(from: &TestDevice, to: &TestDevice, amount: u64) {
         "{}'s proposal finalized on the recipient's countersignature",
         from.slot
     );
+    // The same sync shipped the finality certificate to quorum: the sender's
+    // gate is released and the outbox is collecting.
+    assert!(
+        !gate_present(to),
+        "{}'s gate released once the checkpoint reached quorum",
+        from.slot
+    );
+    assert_eq!(
+        outbox_statuses(&rel).last().map(String::as_str),
+        Some(cdb::OUTBOX_GC_PENDING)
+    );
+
+    // The recipient absorbs the certificate on its next poll and is released.
+    let to_sync = to.sync().await;
+    assert!(to_sync.success, "{:?}", to_sync.errors);
+    assert!(
+        !cdb::relationship_awaits_peer_finalization(&rel).expect("await"),
+        "{} verified the certificate; its barrier is resolved",
+        to.slot
+    );
 }
 
 /// The harness itself must carry a full A→B generation through the shipped
@@ -321,7 +342,6 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
 /// peer_finalized on delta submit) / M7 (bypass the authority) → red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 4: send-ready authority + recipient gate"]
 async fn r2a_recipient_cannot_originate_before_the_peer_finalized() {
     let p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
@@ -339,6 +359,17 @@ async fn r2a_recipient_cannot_originate_before_the_peer_finalized() {
 
     let refused = p.b.send(&p.a, 5).await;
     assert!(!refused.success, "B's reverse send must be refused");
+    // Refused by the AUTHORITY, before any mutation was attempted — not by
+    // the in-tx defense in depth (which also holds; see below).
+    assert!(
+        refused
+            .error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("not send-ready"),
+        "refusal must come from the send-ready authority: {:?}",
+        refused.error_message
+    );
     assert_eq!(p.b.era_balance(), 10, "zero balance change");
     p.b.enter();
     assert_eq!(proposal_statuses(&rel).len(), 0, "zero proposal change");
@@ -355,7 +386,6 @@ async fn r2a_recipient_cannot_originate_before_the_peer_finalized() {
 /// it (`peer_finalized = 1`), B is send-ready and its reverse send applies on A.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 5: RelationshipFinalizedV1 certificate"]
 async fn r2b_the_certificate_releases_the_recipient() {
     let p = Pair::boot(1_000, 0).await;
     generation(&p.a, &p.b, 10).await;
@@ -380,7 +410,6 @@ async fn r2b_the_certificate_releases_the_recipient() {
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 5: RelationshipFinalizedV1 certificate"]
 async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
     let p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
@@ -436,7 +465,6 @@ async fn r3_sender_stays_gated_until_the_checkpoint_reaches_quorum() {
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 4: ACK is transport housekeeping, never a release"]
 async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
     let p = Pair::boot(1_000, 0).await;
     let sent = p.a.send(&p.b, 10).await;
@@ -459,17 +487,48 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
     assert!(gate_present(&p.b), "an ACK alone must not clear the gate");
     assert!(!calibrated.send_ready, "{calibrated:?}");
     assert_eq!(calibrated.send_block_reason, pending_catchup());
-    let refused = p.a.send(&p.b, 1).await;
-    assert!(!refused.success);
-    assert_eq!(p.a.era_balance(), 990);
+    // Calibrating again changes nothing: it is read-only now.
+    p.a.router()
+        .calibrate_local_relationship_send_status(&p.b.device_id)
+        .await;
+    assert!(gate_present(&p.b));
 
-    // Positive: the delta (already spooled by B) finalizes A on its next sync.
+    // Positive, and the anti-vacuity: the delta B spooled finalizes A on its
+    // next sync, the certificate reaches quorum, and ONLY THEN is the gate
+    // gone — with the certificate on the wire to prove which event did it.
+    let rel = p.a.rel_key_with(&p.b);
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);
     p.a.enter();
     assert_eq!(
-        proposal_statuses(&p.a.rel_key_with(&p.b)),
+        proposal_statuses(&rel),
         vec![cdb::PROPOSAL_FINALIZED.to_string()]
+    );
+    assert!(!gate_present(&p.b));
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_GC_PENDING.to_string()]
+    );
+    let certificates: Vec<_> = p
+        .submits()
+        .into_iter()
+        .filter(|s| {
+            dsm::types::proto::Envelope::decode(s.body.as_slice())
+                .ok()
+                .and_then(|env| crate::sdk::b0x_sdk::B0xSDK::decode_relationship_finalized(&env))
+                .is_some()
+        })
+        .collect();
+    assert_eq!(
+        certificates.len(),
+        3,
+        "exactly one certificate per node (deterministic id, quorum 3)"
+    );
+    assert!(
+        certificates
+            .iter()
+            .all(|c| c.message_id == certificates[0].message_id),
+        "the same deterministic id everywhere"
     );
 }
 
@@ -479,7 +538,6 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
 // =====================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 5: one deleter for the sender gate"]
 async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
     let p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
@@ -504,7 +562,7 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
             .await;
     assert!(gate_present(&p.b), "calibrate must not clear it");
     assert_eq!(calibrated.send_block_reason, pending_catchup());
-    let stale = cdb::clear_stale_pending_online_gate(&p.b.device_id, None).expect("stale check");
+    let stale = cdb::clear_stale_pending_online_gate(&p.b.device_id).expect("stale check");
     assert!(
         matches!(stale, cdb::StaleGateOutcome::StillPending),
         "clear_stale_pending_online_gate must report StillPending, got {stale:?}"
@@ -529,4 +587,97 @@ async fn r11_only_the_checkpoint_sweep_clears_the_gate() {
         outbox_statuses(&rel),
         vec![cdb::OUTBOX_GC_PENDING.to_string()]
     );
+}
+
+// =====================================================================
+// R7 — CRASH AFTER FINALIZE, BEFORE THE CHECKPOINT REACHED QUORUM. The
+// certificate is frozen in the finalize transaction; nothing rebuilds it.
+// When the fleet is back, the sweep replays the EXACT bytes under the SAME
+// deterministic id and route, releases the gate once, and no second debit or
+// proposal appears. The signing key is gone from the pending table the moment
+// the finalize committed, so a re-sign is impossible, not merely avoided.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_returns() {
+    let p = Pair::boot(1_000, 0).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+
+    p.override_all_submits(Some(503));
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    p.a.enter();
+    assert_eq!(
+        proposal_statuses(&rel),
+        vec![cdb::PROPOSAL_FINALIZED.to_string()]
+    );
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_FINALIZATION_CHECKPOINT_PENDING.to_string()]
+    );
+    let (frozen_bytes, frozen_id, frozen_route): (Vec<u8>, String, String) = {
+        let binding = cdb::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            "SELECT envelope_bytes, submission_id, routing_address FROM sender_outbox_artifacts \
+             WHERE relationship_key = ?1 AND role = 'relationship_finalized'",
+            rusqlite::params![rel.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("frozen certificate")
+    };
+    let pending_heads: i64 = {
+        let binding = cdb::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            "SELECT COUNT(*) FROM pending_local_cert_heads WHERE relationship_key = ?1",
+            rusqlite::params![rel.as_slice()],
+            |r| r.get(0),
+        )
+        .expect("count")
+    };
+    assert_eq!(
+        pending_heads, 0,
+        "the certificate's signing key was promoted and deleted"
+    );
+    let submits_before = p.submits().len();
+
+    // The fleet returns; the sweep replays.
+    p.override_all_submits(None);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    p.a.enter();
+    assert!(
+        !gate_present(&p.b),
+        "released once the replay reached quorum"
+    );
+    assert_eq!(
+        outbox_statuses(&rel),
+        vec![cdb::OUTBOX_GC_PENDING.to_string()]
+    );
+    assert_eq!(proposal_statuses(&rel).len(), 1, "no second proposal");
+    assert_eq!(p.a.era_balance(), 990, "no second debit");
+    let replayed: Vec<_> = p
+        .submits()
+        .into_iter()
+        .skip(submits_before)
+        .filter(|s| s.message_id == frozen_id)
+        .collect();
+    assert_eq!(replayed.len(), 3, "one replay per node under the frozen id");
+    for r in &replayed {
+        assert_eq!(
+            r.body, frozen_bytes,
+            "byte-identical to the frozen envelope"
+        );
+        assert_eq!(r.recipient, frozen_route, "under the frozen route");
+    }
+    // And B absorbs it and is released.
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    p.b.enter();
+    assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
 }

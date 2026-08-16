@@ -136,6 +136,18 @@ pub fn has_pending_settlement_work() -> bool {
     if crate::storage::client_db::has_outstanding_cert_resync().unwrap_or(false) {
         return true;
     }
+    // Finality barrier: a sender whose certificate has not reached quorum must
+    // keep sweeping; a recipient still awaiting a certificate must keep
+    // polling — a backgrounded device would otherwise never be released.
+    if crate::storage::client_db::finalization_checkpoint_pending_sender_outbox()
+        .map(|r| !r.is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if crate::storage::client_db::any_relationship_awaits_peer_finalization().unwrap_or(false) {
+        return true;
+    }
     crate::storage::client_db::pending_outbound_replies()
         .map(|r| !r.is_empty())
         .unwrap_or(false)
