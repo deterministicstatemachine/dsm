@@ -72,6 +72,52 @@ fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) {
     }
 }
 
+/// Non-authoritative history/UI residue after a split transfer is accepted.
+///
+/// The balance is already materialized by the full-state apply; the acceptance
+/// reply is already enqueued by convergence. This only writes the local
+/// transaction row the History tab reads and refreshes the in-memory caches.
+/// Every failure is non-fatal and logged — none of this is protocol state.
+fn record_accepted_split_history(
+    correlation_key: &str,
+    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    sender_b32: &str,
+    self_b32: &str,
+    amount: u64,
+    token_id: String,
+) {
+    use crate::storage::codecs::hash_blake3_bytes;
+
+    let tx_hash = crate::util::text_id::encode_base32_crockford(&hash_blake3_bytes(
+        correlation_key.as_bytes(),
+    ));
+    let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    meta.insert("token_id".to_string(), token_id.into_bytes());
+    meta.insert("adr0003_split".to_string(), b"true".to_vec());
+    let rec = crate::storage::client_db::TransactionRecord {
+        tx_id: correlation_key.to_string(),
+        tx_hash,
+        from_device: sender_b32.to_string(),
+        to_device: self_b32.to_string(),
+        amount,
+        tx_type: "online".to_string(),
+        status: "confirmed".to_string(),
+        chain_height: 0,
+        step_index: 0,
+        commitment_hash: None,
+        proof_data: receipt.to_full_protobuf().ok(),
+        metadata: meta,
+        created_at: 0,
+    };
+    if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
+        log::warn!("[storage.sync] ADR 0003 store_transaction failed for {correlation_key}: {e} (non-fatal)");
+    }
+    if let Some(router) = crate::bridge::app_router() {
+        router.sync_balance_cache();
+    }
+    emit_authoritative_wallet_refresh();
+}
+
 fn record_observed_remote_tip_and_refresh(device_id: &[u8], observed_tip: &[u8; 32]) {
     match crate::storage::client_db::record_observed_remote_chain_tip(
         device_id,
@@ -818,6 +864,332 @@ impl AppRouterImpl {
             );
         }
         Ok(delivered)
+    }
+
+    /// ADR 0003 — drive every complete-but-unfinished split pair through the
+    /// EXISTING acceptance machinery, and hand back the ACK coordinates for
+    /// every pair that reached durable `accepted`.
+    ///
+    /// Selection is `staging_rows_needing_completion()`: `ready_to_verify`
+    /// (needs verify + apply) and `accepted` (applied, needs its ACK). Read
+    /// from the database every poll — a process that died after both halves
+    /// landed, or after apply but before ACK, is driven forward by what is
+    /// durably true, never by which keys an earlier invocation happened to
+    /// touch. The `Accepted` branch of `decide_ack` is the crash-after-apply
+    /// re-ACK path, and enumerating durable rows is what makes it reachable
+    /// across restart.
+    ///
+    /// Per pair the sequence is the legacy inline one, unchanged in order:
+    ///
+    ///   PREPARE (persist the exact B countersignature, BEFORE apply)
+    ///   → APPLY (one atomic full-state tx, lookup-before-execute)
+    ///   → CONVERGE (projection sync, CAS both heads, enqueue reply)
+    ///   → history/UI
+    ///   → ACK both halves, then release the retained route.
+    ///
+    /// PREPARE runs INSIDE the apply closure `decide_ack` hands us, so it is
+    /// guaranteed to precede apply. If it ran after and the process died
+    /// between them there would be no journal; `recover_incomplete_acceptances`
+    /// iterates journals only, and once staging is `accepted` `decide_ack`
+    /// short-circuits without ever yielding a `VerifiedTransfer` again — the
+    /// pair would be credited on this side and unfinalizable on the sender's.
+    ///
+    /// Nothing here duplicates acceptance logic: verification, apply outcome
+    /// classification, terminal reject and `mark_accepted` all live in
+    /// `decide_ack → try_complete → verify_and_accept`. This is glue.
+    ///
+    /// Returns `(route, message_id)` pairs to ACK — two per accepted key, one
+    /// for each half — plus the keys whose route should be released once those
+    /// ACKs succeed.
+    pub(crate) async fn complete_ready_split_transfers(
+        &self,
+        storage_endpoints: &[String],
+    ) -> (Vec<(String, String)>, Vec<String>) {
+        use crate::handlers::recipient_dispatch::{decide_ack, AckDecision};
+        use crate::handlers::recipient_receipt as rr;
+        use crate::storage::client_db::recipient_staging::{
+            staging_rows_needing_completion, StagingState,
+        };
+
+        let mut acks: Vec<(String, String)> = Vec::new();
+        let mut release_after_ack: Vec<String> = Vec::new();
+
+        let rows = match staging_rows_needing_completion() {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[storage.sync] ADR 0003 completion: staging read failed: {e}");
+                return (acks, release_after_ack);
+            }
+        };
+        if rows.is_empty() {
+            return (acks, release_after_ack);
+        }
+
+        let Some(self_device_vec) = crate::sdk::app_state::AppState::get_device_id() else {
+            log::warn!("[storage.sync] ADR 0003 completion: local device id unavailable");
+            return (acks, release_after_ack);
+        };
+        let Ok(self_device) = <[u8; 32]>::try_from(self_device_vec.as_slice()) else {
+            log::warn!("[storage.sync] ADR 0003 completion: local device id is not 32 bytes");
+            return (acks, release_after_ack);
+        };
+        let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
+
+        for row in rows {
+            let key = row.correlation_key.clone();
+
+            // The evidence half carries the sender's identity and the trusted
+            // receipt; without it there is nothing to verify against.
+            let Some(evidence_bytes) = row.evidence_bytes.as_deref() else {
+                continue;
+            };
+            let Ok(evidence_receipt) =
+                dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                    evidence_bytes,
+                )
+            else {
+                log::warn!(
+                    "[storage.sync] ADR 0003 completion: {key} evidence does not decode; skipping"
+                );
+                continue;
+            };
+            let sender_device: [u8; 32] = evidence_receipt.devid_a;
+            let sender_b32 = crate::util::text_id::encode_base32_crockford(&sender_device);
+            if evidence_receipt.devid_b != self_device {
+                log::warn!(
+                    "[storage.sync] ADR 0003 completion: {key} names a different recipient; skipping"
+                );
+                continue;
+            }
+
+            // Trust root: the STORED contact AK, never the artifact.
+            let sender_ak = match resolve_trusted_sender_ak(&sender_b32, &[]) {
+                Ok(k) => k,
+                Err(e) => {
+                    log::warn!("[storage.sync] ADR 0003 completion: {key}: {e}");
+                    continue;
+                }
+            };
+
+            // Already applied: no prepare, no apply — just re-ACK from durable
+            // state. `decide_ack` returns `Ack(AcceptedDuplicate)` here without
+            // invoking the closure, which is why the closure below may assume
+            // it is running for a genuinely `ready_to_verify` pair.
+            if row.state != StagingState::Accepted {
+                // ---- async prerequisites, resolved BEFORE the sync closure ----
+                let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                    &sender_device,
+                    &self_device,
+                );
+                let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::error!("[storage.sync] ADR 0003 completion: {key}: AK keypair unavailable: {e}");
+                        continue;
+                    }
+                };
+                let sender_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(
+                    &sender_device,
+                ) {
+                    Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                    Ok(Some(c)) => {
+                        match hydrate_missing_sender_kyber_capability(
+                            storage_endpoints,
+                            sender_device,
+                            &c,
+                        )
+                        .await
+                        {
+                            Ok(k) => k,
+                            Err(e) => {
+                                log::error!("[storage.sync] ADR 0003 completion: {key}: sender Kyber capability missing and hydration failed: {e} — fail closed");
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        log::error!("[storage.sync] ADR 0003 completion: {key}: no contact for sender — fail closed");
+                        continue;
+                    }
+                };
+                let wrap_key = match crate::init::current_chain_head_at_rest_key() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        log::error!("[storage.sync] ADR 0003 completion: {key}: wrap key unavailable (wallet locked?): {e}");
+                        continue;
+                    }
+                };
+                let core_sdk = self.core_sdk.clone();
+
+                // Relationship exclusion across prepare → apply → converge.
+                let rel_lock = rr::relationship_lock(&rel_key);
+                let _rel_guard = rel_lock.lock_owned().await;
+
+                let sender_b32_for_apply = sender_b32.clone();
+                let key_for_apply = key.clone();
+                let decision = decide_ack(&key, &sender_ak, |v| {
+                    // Everything derives from the VERIFIED transfer, exactly as
+                    // the legacy path derives it from the verified entry.
+                    let signed_parent = v.receipt.parent_tip;
+                    let signed_child = v.receipt.child_tip;
+                    let nonce: Vec<u8> = match &v.signed_op {
+                        dsm::types::operations::Operation::Transfer { nonce, .. } => nonce.clone(),
+                        _ => return Err("split transfer is not a Transfer op".to_string()),
+                    };
+                    let signed_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+                        &signed_parent,
+                        &v.canonical_operation_bytes,
+                        &nonce,
+                    );
+                    let projection_parent: [u8; 32] =
+                        match crate::storage::client_db::get_contact_chain_tip_raw(&sender_device) {
+                            Some(t) if t != [0u8; 32] => t,
+                            _ => dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &self_device,
+                                &sender_device,
+                            ),
+                        };
+                    let projection_target: [u8; 32] = {
+                        let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
+                            &projection_parent,
+                            &v.canonical_operation_bytes,
+                            &nonce,
+                        );
+                        dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                            &projection_parent,
+                            &v.canonical_operation_bytes,
+                            &nonce,
+                            &sigma_sym,
+                        )
+                    };
+
+                    // PREPARE — BEFORE apply, idempotent, never re-signs.
+                    rr::prepare_bside_acceptance_receipt_locked(
+                        rel_key,
+                        signed_parent,
+                        (projection_parent, projection_target),
+                        || {
+                            rr::generate_b_artifacts_from_inbound(
+                                &v.receipt,
+                                &signed_sigma,
+                                &sender_kyber_pk,
+                                &ak_pk,
+                                &ak_sk,
+                                &wrap_key,
+                            )
+                        },
+                    )
+                    .map_err(|e| format!("prepare failed for {key_for_apply}: {e}"))?;
+
+                    // APPLY — the one production canonical apply.
+                    let tx_id =
+                        crate::types::identifiers::TransactionId::new(key_for_apply.clone());
+                    core_sdk
+                        .apply_incoming_transfer_full_state(
+                            v.signed_op.clone(),
+                            &tx_id,
+                            &sender_b32_for_apply,
+                            &v.canonical_operation_bytes,
+                            signed_parent,
+                            signed_child,
+                        )
+                        .map_err(|e| format!("apply failed for {key_for_apply}: {e}"))
+                });
+
+                match decision {
+                    Ok(AckDecision::Ack(acceptance)) => {
+                        log::info!("[storage.sync] ADR 0003 completion: {key} {acceptance:?}");
+                        // CONVERGE from durable state — tip sync, CAS both
+                        // heads, enqueue the B reply. Idempotent when already
+                        // complete. On failure the pair stays `accepted` and
+                        // `recover_incomplete_acceptances` converges it next
+                        // poll from the journal + apply record.
+                        let parent = evidence_receipt.parent_tip;
+                        let converged = match (
+                            crate::storage::client_db::get_acceptance_journal(&rel_key, &parent),
+                            crate::storage::client_db::get_canonical_apply_identity(
+                                &rel_key, &parent,
+                            ),
+                        ) {
+                            (Ok(Some(journal)), Ok(Some(record))) => {
+                                rr::converge_accepted_locked(&journal, &record, &wrap_key)
+                                    .map(|_| ())
+                                    .map_err(|e| e.to_string())
+                            }
+                            (j, r) => Err(format!(
+                                "journal/apply-record missing after accept (journal={} record={})",
+                                j.map(|x| x.is_some()).unwrap_or(false),
+                                r.map(|x| x.is_some()).unwrap_or(false)
+                            )),
+                        };
+                        if let Err(e) = converged {
+                            log::warn!("[storage.sync] ADR 0003 completion: {key} accepted but convergence deferred: {e}");
+                            mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                            // Do NOT ACK yet — the reply is not enqueued.
+                            continue;
+                        }
+                        // Amount/token from the FROZEN transfer half (SIG A already verified
+                        // over its canonical bytes by `verify_staged_transfer`).
+                        let (amount, token_id) = row
+                            .transfer_bytes
+                            .as_deref()
+                            .and_then(|b| {
+                                <dsm::types::proto::OnlineTransferRequest as prost::Message>::decode(b).ok()
+                            })
+                            .map(|r| (r.amount, r.token_id))
+                            .unwrap_or((0, "ERA".to_string()));
+                        record_accepted_split_history(
+                            &key,
+                            &evidence_receipt,
+                            &sender_b32,
+                            &self_device_b32,
+                            amount,
+                            token_id,
+                        );
+                    }
+                    Ok(AckDecision::DoNotAck(why)) => {
+                        log::info!("[storage.sync] ADR 0003 completion: {key} not ACK-able: {why}");
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!("[storage.sync] ADR 0003 completion: {key} failed: {e}");
+                        continue;
+                    }
+                }
+            } else {
+                // Durably accepted already; `decide_ack` re-ACKs without apply.
+                match decide_ack(&key, &sender_ak, |_| {
+                    Err("apply must not run for an already-accepted pair".to_string())
+                }) {
+                    Ok(AckDecision::Ack(_)) => {}
+                    other => {
+                        log::warn!("[storage.sync] ADR 0003 completion: {key} accepted row did not re-ACK: {other:?}");
+                        continue;
+                    }
+                }
+            }
+
+            // ACK BOTH HALVES on the retained route. The transfer's id is the
+            // correlation key; the evidence's id is derived from its digest the
+            // same way the sender derived it.
+            let Some(route) = row.retained_route.clone() else {
+                log::warn!(
+                    "[storage.sync] ADR 0003 completion: {key} accepted but no retained route \
+                     (staged before route retention?); cannot ACK by route"
+                );
+                continue;
+            };
+            acks.push((route.clone(), key.clone()));
+            if let Some(d) = row.evidence_digest {
+                acks.push((
+                    route,
+                    crate::storage::client_db::derive_artifact_submission_id(&d),
+                ));
+            }
+            release_after_ack.push(key);
+        }
+
+        (acks, release_after_ack)
     }
 
     pub(crate) async fn run_storage_sync_request(
@@ -2450,6 +2822,66 @@ impl AppRouterImpl {
                                 }
                             } else {
                                 log::info!("[DSM_SDK] No new inbox items to process");
+                            }
+
+                            // ═══════════════════════════════════════════════════════════
+                            // ADR 0003 SPLIT-TRANSFER COMPLETION — every poll, from durable
+                            // staging rows, regardless of whether anything was pulled above.
+                            //
+                            // Deliberately OUTSIDE the `if !all_items.is_empty()` block: a
+                            // pair whose halves both landed on earlier polls, or a pair that
+                            // was applied but died before its ACK, needs driving forward on
+                            // a poll that pulls nothing. The database says what is unfinished;
+                            // this invocation's item list does not.
+                            //
+                            // ACKs for BOTH halves go out on the retained route, and the
+                            // route is released ONLY after the ACK succeeded — an ACK failure
+                            // leaves it in place for the next pass to re-ACK.
+                            // ═══════════════════════════════════════════════════════════
+                            {
+                                let (split_acks, release_keys) = self
+                                    .complete_ready_split_transfers(&storage_endpoints)
+                                    .await;
+                                if !split_acks.is_empty() {
+                                    let mut groups: std::collections::BTreeMap<
+                                        String,
+                                        Vec<String>,
+                                    > = std::collections::BTreeMap::new();
+                                    for (route, id) in &split_acks {
+                                        groups.entry(route.clone()).or_default().push(id.clone());
+                                    }
+                                    let mut all_acked = true;
+                                    for (route, ids) in groups {
+                                        match b0x_sdk.acknowledge_b0x_v2(&route, ids.clone()).await {
+                                            Ok(_) => log::info!(
+                                                "[storage.sync] ADR 0003 ACKed {} id(s) on retained route {}..",
+                                                ids.len(),
+                                                &route[..route.len().min(12)]
+                                            ),
+                                            Err(e) => {
+                                                all_acked = false;
+                                                log::warn!(
+                                                    "[storage.sync] ADR 0003 ACK failed on {}.. (route retained, will re-ACK): {e}",
+                                                    &route[..route.len().min(12)]
+                                                );
+                                                errors.push(format!("ADR 0003 ack failed: {e}"));
+                                            }
+                                        }
+                                    }
+                                    // Release only when every ACK for this pass landed. A
+                                    // partial failure keeps every route: re-ACKing an
+                                    // already-acked id is idempotent at the node, and a
+                                    // released route on an un-ACKed id is a stranded sender.
+                                    if all_acked {
+                                        for key in release_keys {
+                                            match crate::storage::client_db::recipient_staging::release_retained_route(&key) {
+                                                Ok(true) => log::info!("[storage.sync] ADR 0003 released retained route for {key}"),
+                                                Ok(false) => {}
+                                                Err(e) => log::warn!("[storage.sync] ADR 0003 route release failed for {key}: {e}"),
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             // §16.6 ON-ACCESS acceptance recovery: once per poll, finish any
@@ -4191,5 +4623,148 @@ mod tests {
                 endpoints.len()
             );
         }
+    }
+
+    // =====================================================================
+    // RECIPIENT COMPLETION IS DRIVEN BY DURABLE STATE, NOT BY THIS POLL.
+    //
+    // The crash-after-apply-before-ACK window: a pair reached durable
+    // `accepted`, and the process died before its ACKs went out. On the next
+    // poll NOTHING is pulled that names this pair — the sender is not
+    // re-sending, and this device's in-memory "touched keys" from the last
+    // invocation are gone. If completion depended on either, the sender's gate
+    // would stay stranded forever. So the pass must find the row in the
+    // database and produce both ACK coordinates from it alone.
+    // =====================================================================
+
+    /// A durably `accepted` split pair with a retained route, and nothing
+    /// polled this invocation, must still yield ACKs for BOTH halves on that
+    /// route — and its route must be released only when told the ACKs landed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_accepted_but_unacked_pair_is_re_acked_from_the_database_alone() {
+        use crate::storage::client_db::recipient_staging::{
+            get_staging, mark_accepted, release_retained_route, retained_routes_for_polling,
+            stage_evidence_half, stage_transfer_half, StagingState,
+        };
+
+        trust_root_test_db();
+
+        let sender_device = [0x0Au8; 32];
+        let self_device = [0x0Bu8; 32];
+        crate::sdk::app_state::AppState::set_identity_info(
+            self_device.to_vec(),
+            vec![0x01u8; 32],
+            vec![0x31u8; 32],
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        // `AppRouterImpl::new` derives signing authority from the cached seed.
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
+        // The trust root the pass resolves the sender through.
+        seed_sender_contact(sender_device, vec![0xA1u8; 64]);
+
+        // A receipt naming (sender -> self). Signature validity is not what this
+        // test is about — the pair is already `accepted`, so `decide_ack`
+        // short-circuits without verifying — but the receipt must decode and
+        // must name this device as devid_b, because the pass reads both.
+        let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+            [0u8; 32],
+            sender_device,
+            self_device,
+            [0x41u8; 32],
+            [0x42u8; 32],
+            [0u8; 32],
+            [0u8; 32],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let evidence_bytes = receipt.to_full_protobuf().expect("encode");
+        let evidence_digest = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &evidence_bytes,
+        );
+
+        let key = "SPLITKEY0000000000000000A1";
+        let route = "RETAINEDROUTEXYZ";
+        // Reach ready_to_verify, then accepted — the state a crash after apply
+        // but before ACK leaves behind.
+        assert_eq!(
+            stage_transfer_half(key, b"transfer-half-bytes", &evidence_digest, route)
+                .expect("stage transfer"),
+            StagingState::StagedTransfer
+        );
+        assert_eq!(
+            stage_evidence_half(key, &evidence_bytes, route).expect("stage evidence"),
+            StagingState::ReadyToVerify
+        );
+        mark_accepted(key).expect("accepted");
+        assert_eq!(
+            get_staging(key)
+                .expect("load")
+                .expect("row")
+                .retained_route
+                .as_deref(),
+            Some(route)
+        );
+
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "completion-test".to_string(),
+            storage_endpoints: vec!["http://127.0.0.1:1".to_string()],
+            enable_offline: false,
+        })
+        .expect("router init");
+
+        // THE PASS, with nothing polled and no touched-key hint. It must find
+        // the row itself.
+        let (acks, release_keys) = router
+            .complete_ready_split_transfers(&["http://127.0.0.1:1".to_string()])
+            .await;
+
+        // Both halves, both on the retained route, ids as the sender derives them.
+        let expected_evidence_id =
+            crate::storage::client_db::derive_artifact_submission_id(&evidence_digest);
+        let mut got = acks.clone();
+        got.sort();
+        let mut want = vec![
+            (route.to_string(), key.to_string()),
+            (route.to_string(), expected_evidence_id.clone()),
+        ];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "an accepted pair must be re-ACKed for BOTH halves on its retained route, from \
+             durable state alone"
+        );
+        assert_eq!(release_keys, vec![key.to_string()]);
+
+        // The pass does NOT release the route itself — the caller does, and only
+        // after the ACKs succeed. Until then the route stays polled.
+        assert!(retained_routes_for_polling()
+            .expect("routes")
+            .contains(&route.to_string()));
+
+        // Simulate the caller's "all ACKs succeeded" step.
+        assert!(release_retained_route(key).expect("release"));
+        assert!(!retained_routes_for_polling()
+            .expect("routes")
+            .contains(&route.to_string()));
+
+        // Idempotent re-entry: the row is still `accepted`; running the pass
+        // again re-derives the same ACKs (re-ACKing is free at the node) and
+        // never touches apply. Route is now None, so the caller would skip.
+        let (acks2, _) = router
+            .complete_ready_split_transfers(&["http://127.0.0.1:1".to_string()])
+            .await;
+        assert!(
+            acks2.is_empty(),
+            "with the route released there is nothing to ACK by route; got {acks2:?}"
+        );
+        assert_eq!(
+            crate::storage::client_db::recipient_staging::staging_state(key).expect("state"),
+            StagingState::Accepted,
+            "re-entry must not disturb the durable acceptance"
+        );
     }
 }
