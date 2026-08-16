@@ -334,6 +334,57 @@ pub fn mark_sender_proposal_submitted(
     Ok(())
 }
 
+/// Like `mark_sender_proposal_submitted`, but only advances a step that is
+/// still `proposed`. Returns `Ok(false)` — not an error — when the step has
+/// already moved on.
+///
+/// This is the variant every DELIVERY-OUTCOME writer must use. Delivery can
+/// complete late: a slow first attempt, or the recovery sweep replaying a
+/// frozen send whose acceptance already arrived and finalized the step. An
+/// unconditional write there would drag `finalized` (or `awaiting_valid_reply`)
+/// back to `submitted`, and `get_finalized_proposal_for_relationship` — which
+/// cert resync depends on — would stop seeing it. The message-id bind is
+/// metadata; finalization keys on the commitment, so nothing is lost by
+/// declining to rewrite a step that has already progressed.
+pub fn mark_sender_proposal_submitted_if_proposed(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    message_id: &str,
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let existing: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT message_id, status FROM sender_online_proposal
+             WHERE relationship_key = ?1 AND canonical_parent = ?2",
+            params![relationship_key.as_slice(), canonical_parent.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match existing {
+        None => return Err(anyhow!("no sender proposal for this canonical step")),
+        Some((Some(existing_id), _)) if existing_id != message_id => {
+            return Err(anyhow!(
+                "sender proposal already bound to a different message id — refusing rebind"
+            ));
+        }
+        Some((_, status)) if status != PROPOSAL_PROPOSED => return Ok(false),
+        _ => {}
+    }
+    let n = conn.execute(
+        "UPDATE sender_online_proposal SET message_id = ?3, status = ?4
+         WHERE relationship_key = ?1 AND canonical_parent = ?2 AND status = ?5",
+        params![
+            relationship_key.as_slice(),
+            canonical_parent.as_slice(),
+            message_id,
+            PROPOSAL_SUBMITTED,
+            PROPOSAL_PROPOSED,
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 /// Record that the acceptance artifact for a SUBMITTED step was rejected, so
 /// the step is no longer stranded waiting for a reply that can never arrive.
 ///

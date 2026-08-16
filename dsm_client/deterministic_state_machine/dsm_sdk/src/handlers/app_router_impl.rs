@@ -2034,12 +2034,30 @@ impl AppRouterImpl {
             ek_material,
             envelope_bytes,
             receipt_canonical_bytes,
-            extra_artifacts: _,
+            extra_artifacts,
         } = artifacts;
-        let _ = (&new_state, &advance_outcome, &ek_material, &routing_address);
+        // The primitive reads route and bytes from `outbox_record` itself; these
+        // locals stay only for the log lines below.
+        let _ = (
+            &new_state,
+            &advance_outcome,
+            &ek_material,
+            &routing_address,
+            &envelope_bytes,
+        );
 
         let mut b0x_succeeded = false;
         let mut b0x_message_id: Option<String> = None;
+
+        // Duplicate-traffic suppression against the periodic sweep, which may
+        // observe the row while this call is on the wire. Optimization only:
+        // correctness rests on deterministic ids, frozen bytes, CAS status and
+        // node-side dedup, and a concurrent double-drive is merely wasteful.
+        let _in_flight = crate::storage::client_db::DeliveryInFlight::claim(
+            &outbox_record.relationship_key,
+            &outbox_record.canonical_parent,
+            &outbox_record.proposal_nonce,
+        );
 
         // Durably marked BEFORE entering the network call, so a crash
         // mid-call can never leave a row that merely LOOKS pre-submit.
@@ -2058,32 +2076,46 @@ impl AppRouterImpl {
             storage_endpoints,
         ) {
             Ok(mut b0x_sdk) => {
-                // Transmit the EXACT bytes frozen in the outbox — never a
-                // rebuild. The deterministic submission id makes a retry
-                // idempotent at the node.
-                let submit_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    b0x_sdk.submit_stored_envelope(
-                        &envelope_bytes,
-                        &routing_address,
-                        &submission_id,
-                    ),
-                )
-                .await
-                .map(|r| r.map(|()| submission_id.clone()));
-                match submit_result {
-                    Ok(Ok(msg_id)) => {
-                        log::info!("[wallet.send] ✅ Submitted to b0x: {}", msg_id);
+                // ONE delivery operation for the WHOLE frozen logical send —
+                // the transfer envelope AND every frozen A-side artifact —
+                // under the ids and route they were frozen with. This is the
+                // same call the recovery sweep makes, so first attempt and
+                // retry cannot drift. It reports success only when every half
+                // reached quorum; a transfer-only quorum is not delivery.
+                //
+                // No outer timeout: the transport bounds itself through its
+                // retry schedule. An arbitrary deadline sized for one envelope
+                // was how a still-viable quorum attempt got reported as
+                // uncertain.
+                let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
+                match b0x_sdk
+                    .deliver_frozen_logical_send(&outbox_record, &extra_artifacts, &retry)
+                    .await
+                {
+                    Ok(delivered) => {
+                        log::info!(
+                            "[wallet.send] ✅ Delivered frozen send to b0x: transfer={} artifacts={}",
+                            delivered.transfer_id,
+                            delivered.artifact_ids.len()
+                        );
                         b0x_succeeded = true;
-                        b0x_message_id = Some(msg_id.clone());
-                        // §16.6 proposal authority: bind the wire identity
-                        // to the persisted proposal (exactly once).
-                        if let Err(e) = crate::storage::client_db::mark_sender_proposal_submitted(
+                        b0x_message_id = Some(delivered.transfer_id.clone());
+                        // §16.6 proposal authority: bind the wire identity to
+                        // the persisted proposal (exactly once). Guarded on
+                        // `proposed` so a late completion can never drag a
+                        // step that already finalized back to `submitted`.
+                        match crate::storage::client_db::mark_sender_proposal_submitted_if_proposed(
                             &sender_proposal.relationship_key,
                             &sender_proposal.canonical_parent,
-                            &msg_id,
+                            &submission_id,
                         ) {
-                            log::error!("[wallet.send] §16.6 proposal message-id bind failed: {e}");
+                            Ok(true) => {}
+                            Ok(false) => log::info!(
+                                "[wallet.send] §16.6 proposal already past `proposed`; leaving it"
+                            ),
+                            Err(e) => log::error!(
+                                "[wallet.send] §16.6 proposal message-id bind failed: {e}"
+                            ),
                         }
                         // Wake our own inbox poller so we pick up the recipient's
                         // ACK faster — reduces tip-drift on subsequent sends.
@@ -2100,15 +2132,12 @@ impl AppRouterImpl {
                             log::warn!("[wallet.send] Failed to persist receipt locally: {}", e);
                         }
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         // Record network failure for connectivity monitoring
                         #[cfg(feature = "dev-discovery")]
                         network_gate.record_network_failure();
 
-                        log::error!("[wallet.send] ❌ B0x submission failed: {}", e);
-                    }
-                    Err(_elapsed) => {
-                        log::error!("[wallet.send] ❌ B0x submission timed out");
+                        log::error!("[wallet.send] ❌ frozen send not fully delivered: {}", e);
                     }
                 }
             }
@@ -2139,11 +2168,17 @@ impl AppRouterImpl {
         // sweep resubmits the byte-identical stored envelope; the node's
         // UNIQUE(message_id) makes that idempotent.
         // =====================================================================
+        // Both status writes below are compare-and-set FROM `submitting`. While
+        // this call was on the wire the recipient may already have accepted and
+        // replied, and a concurrent storage.sync may have finalized the row to
+        // `gc_pending`; an unconditional write here would drag it back and
+        // strand it outside both the unsettled set and the GC set.
         if !b0x_succeeded {
-            let _ = crate::storage::client_db::set_sender_outbox_status(
+            let _ = crate::storage::client_db::advance_sender_outbox_status_if(
                 &outbox_record.relationship_key,
                 &outbox_record.canonical_parent,
                 &outbox_record.proposal_nonce,
+                &[crate::storage::client_db::OUTBOX_SUBMITTING],
                 crate::storage::client_db::OUTBOX_SUBMISSION_UNCERTAIN,
             );
             log::warn!(
@@ -2156,10 +2191,11 @@ impl AppRouterImpl {
                     .to_string(),
             );
         }
-        let _ = crate::storage::client_db::set_sender_outbox_status(
+        let _ = crate::storage::client_db::advance_sender_outbox_status_if(
             &outbox_record.relationship_key,
             &outbox_record.canonical_parent,
             &outbox_record.proposal_nonce,
+            &[crate::storage::client_db::OUTBOX_SUBMITTING],
             crate::storage::client_db::OUTBOX_SUBMITTED,
         );
 
@@ -2770,6 +2806,36 @@ pub(crate) fn collect_tagged_inbox_addresses(
                 }
             }
         }
+    }
+
+    // 4. Retained routes from incomplete or unACKed split-transfer staging.
+    //
+    // A split send's two halves may land polls — or relationship advancements
+    // — apart. Sources 1-3 hold a route for one advancement at most, and a
+    // partner artifact replayed by the sender under its ORIGINAL frozen route
+    // (it is never re-routed: the node dedups on message id alone) would land
+    // where nobody is listening. So the route the first half arrived on stays
+    // in the poll set until the pair completes and both ACKs succeed. Read from
+    // the database every poll, so it survives restart. `Current`, not
+    // `PreviousTip`: the previous-tip adjacency filter would drop or mis-ACK a
+    // split half. Dedup below folds it into any live route it collides with.
+    match crate::storage::client_db::recipient_staging::retained_routes_for_polling() {
+        Ok(routes) => {
+            for route in routes {
+                log::info!(
+                    "[collect_tagged_inbox_addresses] retained split-transfer route added {}..",
+                    &route[..route.len().min(12)]
+                );
+                addresses.push(TaggedInboxAddress {
+                    address: route,
+                    freshness: RouteFreshness::Current,
+                });
+            }
+        }
+        Err(e) => log::warn!(
+            "[collect_tagged_inbox_addresses] retained-route lookup failed (continuing with \
+             tip-derived routes only): {e}"
+        ),
     }
 
     // Dedup by address: if current and previous collide, keep Current

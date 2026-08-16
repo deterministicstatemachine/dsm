@@ -153,6 +153,7 @@ pub fn init_database() -> Result<()> {
         ensure_stitched_receipts_dual_signature_schema(&conn)?;
         ensure_bilateral_sessions_created_at_step(&conn)?;
         ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
+        ensure_recipient_staging_retained_route(&conn)?;
         {
             let mut guard = DB_CONNECTION
                 .write()
@@ -727,6 +728,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             evidence_bytes           BLOB,
             evidence_digest          BLOB,
             reject_reason            TEXT,
+            -- The b0x inbox address the FIRST half arrived on. Kept in the
+            -- recipient's poll set while the pair is incomplete or unACKed, so
+            -- a partner artifact replayed by the sender under the same frozen
+            -- route is still received after the relationship tip advances.
+            -- Both halves must arrive on the same route (set-or-require-equal);
+            -- released to NULL only when this key's ACKs succeed.
+            retained_route           TEXT,
             created_at               INTEGER NOT NULL,
             updated_at               INTEGER NOT NULL,
             CHECK (state IN (
@@ -1292,6 +1300,25 @@ fn ensure_bilateral_sessions_stitched_receipt_bytes(conn: &Connection) -> Result
 
     conn.execute(
         "ALTER TABLE bilateral_sessions ADD COLUMN stitched_receipt_bytes BLOB;",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add `retained_route` to `recipient_staging` tables created before ADR 0003
+/// route retention landed. Existing rows get NULL, which the poll-address
+/// collector treats as "no retained route" — a pair that was staged before this
+/// column existed keeps whatever route the normal tip lookback provides.
+fn ensure_recipient_staging_retained_route(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(recipient_staging)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == "retained_route" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE recipient_staging ADD COLUMN retained_route TEXT;",
         [],
     )?;
     Ok(())
