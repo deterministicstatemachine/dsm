@@ -391,7 +391,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Cache elan toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('lean4/lean-toolchain') }}
