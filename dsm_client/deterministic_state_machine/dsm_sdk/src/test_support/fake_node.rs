@@ -59,6 +59,10 @@ struct NodeState {
     /// HTTP status to answer EVERY submit with (a node that is down for
     /// writes); per-id overrides take precedence.
     submit_override_all: Option<u16>,
+    /// Message ids spooled but NOT served on retrieve until released — a
+    /// message delayed in transit (e.g. a certificate the recipient has not
+    /// seen yet while the next transfer already arrived).
+    held: std::collections::HashSet<String>,
 }
 
 /// Handle to one running fake node.
@@ -218,7 +222,7 @@ impl FakeB0xNode {
                 let envelopes: Vec<dsm::types::proto::Envelope> = st
                     .spool
                     .iter()
-                    .filter(|e| e.route == route && !e.acked)
+                    .filter(|e| e.route == route && !e.acked && !st.held.contains(&e.message_id))
                     .filter_map(|e| dsm::types::proto::Envelope::decode(e.body.as_slice()).ok())
                     .collect();
                 if envelopes.is_empty() {
@@ -314,6 +318,24 @@ impl FakeB0xNode {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .submit_override_all = status;
+    }
+
+    /// Delay `message_id` in transit: spooled, but not served on retrieve
+    /// until [`release_message`](Self::release_message).
+    pub fn hold_message(&self, message_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .held
+            .insert(message_id.to_string());
+    }
+
+    pub fn release_message(&self, message_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .held
+            .remove(message_id);
     }
 
     pub fn clear_submit_override(&self, message_id: &str) {

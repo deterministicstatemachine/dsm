@@ -362,6 +362,19 @@ impl Pair {
         }
     }
 
+    /// Delay `message_id` in transit on every node (spooled, not served).
+    pub fn hold_message(&self, message_id: &str) {
+        for n in &self.nodes {
+            n.hold_message(message_id);
+        }
+    }
+
+    pub fn release_message(&self, message_id: &str) {
+        for n in &self.nodes {
+            n.release_message(message_id);
+        }
+    }
+
     /// Take the whole fleet down for writes (`Some(503)`) or back up (`None`).
     pub fn override_all_submits(&self, status: Option<u16>) {
         for n in &self.nodes {

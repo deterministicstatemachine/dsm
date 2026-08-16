@@ -681,3 +681,95 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
     p.b.enter();
     assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
 }
+
+// =====================================================================
+// R8 — REORDERED NEXT GENERATION. A's certificate for transfer #1 reached
+// quorum (A is free) but B has not seen it yet; A's transfer #2 arrives at B
+// first. B stages #2 and HOLDS it at ready_to_verify — not applied, not
+// ACKed, not rejected — until the certificate lands; then the SAME row
+// applies exactly once. The intended reordering behaviour.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
+    let p = Pair::boot(1_000, 0).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    p.a.enter();
+    assert!(!gate_present(&p.b), "certificate #1 at quorum: A is free");
+    // Certificate #1 is delayed in transit for B.
+    let cert_id: String = {
+        let binding = cdb::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            "SELECT submission_id FROM sender_outbox_artifacts \
+             WHERE relationship_key = ?1 AND role = 'relationship_finalized'",
+            rusqlite::params![rel.as_slice()],
+            |r| r.get(0),
+        )
+        .expect("certificate id")
+    };
+    p.hold_message(&cert_id);
+
+    // A's second transfer arrives at B before the certificate.
+    let sent2 = p.a.send(&p.b, 7).await;
+    assert!(sent2.success, "{:?}", sent2.error_message);
+    let transfer2_id = p
+        .submits()
+        .last()
+        .map(|s| s.message_id.clone())
+        .expect("a submit");
+    for _pass in 0..2 {
+        let b_sync = p.b.sync().await;
+        assert!(b_sync.success, "{:?}", b_sync.errors);
+        assert_eq!(p.b.era_balance(), 10, "held: not applied");
+        p.b.enter();
+        assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
+        assert_eq!(
+            staging_states(),
+            vec!["accepted".to_string(), "ready_to_verify".to_string()],
+            "held at ready_to_verify — not rejected, not accepted"
+        );
+        assert!(cdb::relationship_awaits_peer_finalization(&rel).unwrap());
+    }
+    assert_eq!(p.acked_count(&transfer2_id), 0, "held: not ACKed");
+    p.a.enter();
+    assert!(
+        gate_present(&p.b),
+        "A's gate #2 is still armed (no delta yet)"
+    );
+
+    // The certificate lands: the SAME row proceeds and applies exactly once.
+    p.release_message(&cert_id);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(p.b.era_balance(), 17, "applied once after the certificate");
+    p.b.enter();
+    assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 2);
+    assert_eq!(
+        staging_states(),
+        vec!["accepted".to_string(), "accepted".to_string()]
+    );
+    assert_eq!(p.acked_count(&transfer2_id), 3);
+    // And generation #2 finalizes normally on both sides.
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    p.a.enter();
+    assert_eq!(
+        proposal_statuses(&rel),
+        vec![
+            cdb::PROPOSAL_FINALIZED.to_string(),
+            cdb::PROPOSAL_FINALIZED.to_string()
+        ]
+    );
+    assert!(!gate_present(&p.b));
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    p.b.enter();
+    assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
+}
