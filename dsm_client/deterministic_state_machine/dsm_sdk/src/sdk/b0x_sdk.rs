@@ -282,6 +282,9 @@ pub struct B0xSDK {
     /// sites) stays stable; drained by the sender-finalization path via
     /// [`Self::take_countersign_deltas`].
     pending_countersign_deltas: Vec<CountersignDelta>,
+    /// Finality certificates (`relationship.finalized.v1`) decoded by the most
+    /// recent retrieve, drained by `take_relationship_finalized`.
+    pending_relationship_finalized: Vec<RelationshipFinalizedMessage>,
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
     pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
@@ -299,6 +302,18 @@ pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
 /// return leg. Same discipline: discriminated by this string alone, never
 /// trial-decoded, one constant shared by producer and consumer.
 pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
+
+/// Explicit invoke method of a `RelationshipFinalizedV1` finality certificate
+/// (finality barrier). Same discipline: discriminated by this string alone.
+pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
+
+/// One finality certificate as it came off the wire: the node message id it
+/// is ACKed under and the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipFinalizedMessage {
+    pub message_id: String,
+    pub body: Vec<u8>,
+}
 
 /// One B-side countersign delta as it came off the wire, kept whole so the
 /// sender can retain the exact envelope it finalized on.
@@ -518,6 +533,7 @@ impl B0xSDK {
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
             pending_countersign_deltas: Vec::new(),
+            pending_relationship_finalized: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
         };
@@ -1217,6 +1233,118 @@ impl B0xSDK {
     /// downstream by the proposal's terminal status.
     pub fn take_countersign_deltas(&mut self) -> Vec<CountersignDelta> {
         std::mem::take(&mut self.pending_countersign_deltas)
+    }
+
+    /// Decode a finality certificate from a spooled envelope, discriminated on
+    /// the EXPLICIT invoke method — never trial-decoded. Returns the raw body;
+    /// the strict wire codec and the signature check happen in the recipient's
+    /// certificate handler.
+    pub(crate) fn decode_relationship_finalized(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<Vec<u8>> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RELATIONSHIP_FINALIZED_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            return Some(args.body.clone());
+        }
+        None
+    }
+
+    /// Drain the finality certificates decoded by the most recent retrieve.
+    /// Durable idempotency lives in the journal's `peer_finalized` flag.
+    pub fn take_relationship_finalized(&mut self) -> Vec<RelationshipFinalizedMessage> {
+        std::mem::take(&mut self.pending_relationship_finalized)
+    }
+
+    /// Build the `relationship.finalized.v1` envelope for an already-signed
+    /// `RelationshipFinalizedV1` (finality barrier). PURE: every input is a
+    /// parameter, so the bytes are byte-identical on rebuild — though the
+    /// sender never rebuilds; it freezes THESE bytes at finalize and the sweep
+    /// replays them. `message_id` = the artifact submission id (16 bytes
+    /// derived from the certificate digest); `op_id` = the digest itself.
+    /// Refuses at construction if over the node cap.
+    pub(crate) fn build_relationship_finalized_envelope(
+        local_device_id: &[u8; 32],
+        local_genesis: &[u8; 32],
+        recipient_route_tip: &[u8; 32],
+        certificate_wire: &[u8],
+        certificate_digest: &[u8; 32],
+        message_id_b32: &str,
+    ) -> Result<BuiltEnvelope, DsmError> {
+        use prost::Message as _;
+        let local_device_bytes = local_device_id.to_vec();
+        let msg_id_bytes = crate::util::text_id::decode_base32_crockford(message_id_b32)
+            .filter(|m| m.len() == 16)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "build_relationship_finalized_envelope: message id must be base32(16)",
+                )
+            })?;
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: RELATIONSHIP_FINALIZED_METHOD.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: certificate_wire.to_vec(),
+            }),
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: certificate_digest.to_vec(),
+            }),
+            actor: local_device_bytes.clone(),
+            genesis_hash: local_genesis.to_vec(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis.to_vec(),
+                chain_tip: recipient_route_tip.to_vec(),
+                seq: 0,
+            }),
+            message_id: msg_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("finality certificate envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_relationship_finalized_envelope: encoded envelope is {} bytes, at or over \
+                 the node's {MAX_B0X_ENVELOPE_BYTES}-byte cap",
+                buf.len()
+            )));
+        }
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32: message_id_b32.to_string(),
+            to_device_id_bytes: Vec::new(),
+        })
     }
 
     /// Decode a cert-resync control message (method + framed body) from a spooled
@@ -2554,6 +2682,20 @@ impl B0xSDK {
 
         let mut artifact_ids = Vec::with_capacity(artifacts.len());
         for artifact in artifacts {
+            // Only initial-send artifacts ride the transfer's route. A received
+            // countersign delta or the finality certificate (own route, own
+            // sweep) reaching this primitive is a caller bug — refuse, never
+            // relocate it under a route the node would silently dedup.
+            if !artifact.role.is_initial_send_artifact() {
+                return Err(DsmError::internal(
+                    format!(
+                        "frozen send {}: artifact role {} is not part of the initial send",
+                        outbox.submission_id,
+                        artifact.role.as_str()
+                    ),
+                    None::<std::io::Error>,
+                ));
+            }
             self.submit_stored_envelope_with_retry(
                 &artifact.envelope_bytes,
                 route,
@@ -3100,6 +3242,19 @@ impl B0xSDK {
                     envelope_bytes: env.encode_to_vec(),
                     body,
                 });
+                continue;
+            }
+            if let Some(body) = Self::decode_relationship_finalized(&env) {
+                info!(
+                    "📬 finality certificate message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
+                );
+                self.pending_relationship_finalized
+                    .push(RelationshipFinalizedMessage {
+                        message_id: text_id::encode_base32_crockford(&env.message_id),
+                        body,
+                    });
                 continue;
             }
             if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {

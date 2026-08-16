@@ -282,8 +282,6 @@ impl UnilateralOpsSDK {
                         counterparty_device_id: recipient,
                         expected_parent_tip: sender_chain_tip_arr,
                         target_tip: next_tip,
-                        observed_gate: None,
-                        clear_gate_on_success: false,
                     };
                     match client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
                         Ok(outcome) => match outcome {

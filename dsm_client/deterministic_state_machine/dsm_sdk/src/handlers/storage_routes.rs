@@ -685,6 +685,33 @@ async fn finalize_from_countersign_delta(
         submission_id: derive_artifact_submission_id(&content_digest),
         envelope_bytes: delta.envelope_bytes.clone(),
         content_digest,
+        routing_address: None,
+    };
+
+    // ====================================================================
+    // FINALITY CERTIFICATE (finality barrier). Built and signed HERE, before
+    // the finalize transaction, with the PENDING A per-step EK for this
+    // commitment — the key the recipient chained `ek_pk_a` for and will verify
+    // under (its journal's `new_counterparty_a_head`). The transaction below
+    // promotes and deletes that pending row, so the signer must be read first.
+    // The exact envelope bytes are frozen with their own route (the recipient's,
+    // at the projection target it converged to); the checkpoint sweep replays
+    // them until quorum, and only THEN is the sender's gate released.
+    // ====================================================================
+    let finalized_artifact = match build_relationship_finalized_artifact(
+        &proposal,
+        &self_device_id,
+        bound.b_pair(),
+        &receipt.ek_pk_a,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!(
+                "[storage.sync] finality certificate for {short}.. could not be built — \
+                 refusing to finalize (retry from the durable outbox): {e}"
+            );
+            return CountersignOutcome::FinalizeFailed(format!("finality certificate: {e}"));
+        }
     };
 
     match crate::storage::client_db::finalize_on_acceptance_atomically(
@@ -701,13 +728,15 @@ async fn finalize_from_countersign_delta(
             peer_pair: bound.b_pair(),
             genesis_seed,
             countersign_b: &countersign_artifact,
+            finalized: &finalized_artifact,
         },
     ) {
         Ok(()) => {
             log::info!(
                 "[storage.sync] §16.6 FINALIZED atomically on acceptance proof: \
-                 commitment={short}.. tx={} (tip advanced, both cert heads promoted, \
-                 gate released, outbox gc_pending, countersign_b retained)",
+                 commitment={short}.. tx={} (tip advanced, both cert heads promoted, peer \
+                 head pinned, certificate frozen, outbox finalization_checkpoint_pending; \
+                 gate retained until the checkpoint reaches quorum)",
                 proposal.tx_id
             );
             // The retired §5.4 sweep emitted this on tip advance; the tip now
@@ -749,6 +778,221 @@ fn park_awaiting_valid_reply(
              retained, but recording the awaiting-valid-reply state FAILED: {e}"
         ),
     }
+}
+
+/// Build and sign the `RelationshipFinalizedV1` for a verified acceptance,
+/// frozen as an outbox artifact with its own route. PURE apart from DB reads:
+/// the pending A EK (signer), the recipient's genesis (route), the local
+/// genesis (envelope headers). Refuses if the pending EK's public key is not
+/// the `ek_pk_a` the recipient chained — that is the key it will verify under.
+fn build_relationship_finalized_artifact(
+    proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
+    self_device_id: &[u8; 32],
+    b_pair: ([u8; 32], [u8; 32]),
+    receipt_ek_pk_a: &[u8],
+) -> Result<crate::storage::client_db::SenderOutboxArtifact, String> {
+    use crate::storage::client_db::sender_outbox::{
+        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
+    };
+    use prost::Message;
+
+    let wrap_key = crate::init::current_chain_head_at_rest_key()
+        .map_err(|e| format!("chain-head key unavailable (wallet locked?): {e}"))?;
+    let (ek_pk_a, ek_sk_a) = crate::storage::client_db::pending_local_head_signer(
+        &proposal.relationship_key,
+        &proposal.commitment,
+        &wrap_key,
+    )
+    .map_err(|e| format!("pending Local EK head read: {e}"))?
+    .ok_or_else(|| "no pending Local EK head for this commitment".to_string())?;
+    if ek_pk_a != receipt_ek_pk_a {
+        return Err(
+            "pending Local EK head is not the ek_pk_a the recipient chained — refusing to sign \
+             a certificate the recipient could not verify"
+                .to_string(),
+        );
+    }
+    let mut cert = dsm::types::proto::RelationshipFinalizedV1 {
+        relationship_key: proposal.relationship_key.to_vec(),
+        transition_commitment: proposal.commitment.to_vec(),
+        sender_device_id: self_device_id.to_vec(),
+        recipient_device_id: proposal.counterparty_device_id.to_vec(),
+        sender_child_tip_a: proposal.canonical_child.to_vec(),
+        recipient_parent_tip_b: b_pair.0.to_vec(),
+        recipient_child_tip_b: b_pair.1.to_vec(),
+        signature_a: Vec::new(),
+    };
+    let target = dsm::types::receipt_types::relationship_finalized_signing_target(&cert);
+    cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
+        .map_err(|e| format!("certificate signing: {e}"))?;
+    let wire = cert.encode_to_vec();
+    // Self-check through the strict codec the recipient will apply.
+    dsm::types::receipt_types::decode_relationship_finalized_wire(&wire)
+        .map_err(|e| format!("certificate fails its own wire codec: {e}"))?;
+
+    let content_digest = evidence_content_digest(ArtifactRole::RelationshipFinalized, &wire);
+    let submission_id = derive_artifact_submission_id(&content_digest);
+
+    // Frozen route: the recipient polls at the tip it converged to — the
+    // proposal's projection target — under ITS genesis and device.
+    let recipient_genesis: [u8; 32] =
+        match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id)
+        {
+            Ok(Some(c)) => c
+                .genesis_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| "recipient contact genesis is not 32 bytes".to_string())?,
+            Ok(None) => return Err("no contact for the recipient".to_string()),
+            Err(e) => return Err(format!("recipient contact lookup: {e}")),
+        };
+    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+        &recipient_genesis,
+        &proposal.counterparty_device_id,
+        &proposal.projection_target,
+    )
+    .map_err(|e| format!("certificate route: {e}"))?;
+    let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or_else(|| "local genesis unavailable".to_string())?;
+    let built = crate::sdk::b0x_sdk::B0xSDK::build_relationship_finalized_envelope(
+        self_device_id,
+        &local_genesis,
+        &proposal.projection_target,
+        &wire,
+        &content_digest,
+        &submission_id,
+    )
+    .map_err(|e| format!("certificate envelope: {e}"))?;
+
+    Ok(SenderOutboxArtifact {
+        relationship_key: proposal.relationship_key,
+        canonical_parent: proposal.canonical_parent,
+        proposal_nonce: proposal.nonce_hash,
+        role: ArtifactRole::RelationshipFinalized,
+        submission_id,
+        envelope_bytes: built.bytes,
+        content_digest,
+        routing_address: Some(route),
+    })
+}
+
+/// Finality-barrier checkpoint sweep: replay every frozen
+/// `RelationshipFinalizedV1` whose outbox row is `finalization_checkpoint_pending`
+/// under its own frozen route and deterministic id until it reaches storage
+/// quorum, then — the ONE deleter — release the sender's gate and move the row
+/// to `gc_pending` in one transaction. Failure leaves the row for the next
+/// sweep; nothing is rebuilt.
+async fn deliver_pending_finalization_checkpoints(
+    storage_endpoints: &[String],
+    core_sdk: std::sync::Arc<crate::sdk::core_sdk::CoreSDK>,
+) -> Result<u32, String> {
+    use crate::storage::client_db::{
+        finalization_checkpoint_pending_sender_outbox, get_sender_proposal_by_commitment,
+        load_sender_outbox_artifacts, release_gate_on_finalization_checkpoint_atomically,
+        ArtifactRole,
+    };
+
+    let rows = finalization_checkpoint_pending_sender_outbox().map_err(|e| e.to_string())?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let local_device_b32 = match crate::sdk::app_state::AppState::get_device_id() {
+        Some(d) if d.len() == 32 => crate::util::text_id::encode_base32_crockford(&d),
+        _ => return Err("local device_id unavailable for the checkpoint sweep".to_string()),
+    };
+    let mut b0x =
+        crate::sdk::b0x_sdk::B0xSDK::new(local_device_b32, core_sdk, storage_endpoints.to_vec())
+            .map_err(|e| format!("B0xSDK init: {e}"))?;
+    let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
+
+    let mut released = 0u32;
+    for row in rows {
+        let artifacts = match load_sender_outbox_artifacts(
+            &row.relationship_key,
+            &row.canonical_parent,
+            &row.proposal_nonce,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] checkpoint sweep: {} artifacts unreadable; retry next sweep: {e}",
+                    row.submission_id
+                );
+                continue;
+            }
+        };
+        let Some(cert) = artifacts
+            .into_iter()
+            .find(|a| a.role == ArtifactRole::RelationshipFinalized)
+        else {
+            log::error!(
+                "[storage.sync] checkpoint sweep: {} is finalization_checkpoint_pending with NO \
+                 frozen certificate — invariant violated; leaving for inspection",
+                row.submission_id
+            );
+            continue;
+        };
+        let Some(route) = cert.routing_address.as_deref() else {
+            log::error!(
+                "[storage.sync] checkpoint sweep: certificate {} has no frozen route — invariant \
+                 violated; leaving for inspection",
+                cert.submission_id
+            );
+            continue;
+        };
+        let proposal = match get_sender_proposal_by_commitment(&row.commitment) {
+            Ok(Some(p)) => p,
+            _ => {
+                log::error!(
+                    "[storage.sync] checkpoint sweep: no proposal for {} — leaving for inspection",
+                    row.submission_id
+                );
+                continue;
+            }
+        };
+        match b0x
+            .submit_stored_envelope_with_retry(
+                &cert.envelope_bytes,
+                route,
+                &cert.submission_id,
+                &retry,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] checkpoint sweep: certificate {} below quorum (will retry): {e}",
+                    cert.submission_id
+                );
+                continue;
+            }
+        }
+        match release_gate_on_finalization_checkpoint_atomically(
+            &row.relationship_key,
+            &row.canonical_parent,
+            &row.proposal_nonce,
+            &proposal.counterparty_device_id,
+            &row.projection_parent,
+            &row.projection_target,
+        ) {
+            Ok(true) => {
+                released += 1;
+                log::info!(
+                    "[storage.sync] finality checkpoint {} at quorum — gate released, outbox gc_pending",
+                    cert.submission_id
+                );
+                emit_authoritative_wallet_refresh();
+            }
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "[storage.sync] checkpoint sweep: release after quorum FAILED for {}: {e}",
+                cert.submission_id
+            ),
+        }
+    }
+    Ok(released)
 }
 
 /// §16.6 reply-window delivery sweep.
@@ -920,12 +1164,20 @@ impl AppRouterImpl {
                 continue;
             };
 
-            let artifacts = match load_sender_outbox_artifacts(
+            // Only the INITIAL-send artifacts are replayed here (the A-side
+            // evidence). The finality certificate has its own frozen route and
+            // sweep; a received delta is never re-sent. An unsettled row cannot
+            // hold either yet, but the resubmit sweep can race a finalize — so
+            // it must never see non-initial roles.
+            let artifacts: Vec<_> = match load_sender_outbox_artifacts(
                 &row.relationship_key,
                 &row.canonical_parent,
                 &row.proposal_nonce,
             ) {
-                Ok(a) => a,
+                Ok(a) => a
+                    .into_iter()
+                    .filter(|a| a.role.is_initial_send_artifact())
+                    .collect(),
                 Err(e) => {
                     log::warn!(
                         "[storage.sync] outbox resubmit: {} artifacts unreadable; leaving \
@@ -1743,6 +1995,45 @@ impl AppRouterImpl {
                                         ),
                                     }
                                 }
+                                // Finality certificates (finality barrier), processed BEFORE
+                                // split-transfer completion in this same poll so a next-
+                                // generation pair held behind them can proceed in one pass.
+                                let mut consumed_certs: Vec<String> = Vec::new();
+                                for cert in b0x_sdk.take_relationship_finalized() {
+                                    let outcome =
+                                        crate::handlers::relationship_finalized::apply_relationship_finalized(
+                                            &cert.body,
+                                        )
+                                        .await;
+                                    log::info!(
+                                        "[storage.sync] finality certificate {} -> {:?}",
+                                        cert.message_id,
+                                        outcome
+                                    );
+                                    use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
+                                    if matches!(
+                                        outcome,
+                                        O::Applied | O::AlreadyFinalized | O::NoJournal
+                                    ) {
+                                        consumed_certs.push(cert.message_id.clone());
+                                    }
+                                }
+                                if !consumed_certs.is_empty() {
+                                    let n = consumed_certs.len();
+                                    match b0x_sdk
+                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_certs)
+                                        .await
+                                    {
+                                        Ok(_) => log::info!(
+                                            "[storage.sync] ACKed {n} finality certificate(s) on {}..",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                        Err(e) => log::warn!(
+                                            "[storage.sync] finality certificate ACK failed on {}.. (re-served next poll): {e}",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                    }
+                                }
                                 // ADR 0003 evidence halves ride the same spool under their
                                 // own explicit method. Glue only: resolve the trust root,
                                 // hand the artifact to the dispatcher, log. No verification
@@ -2212,6 +2503,21 @@ impl AppRouterImpl {
                         Err(e) => {
                             log::warn!("[storage.sync] outbox resubmit sweep errored: {e}");
                             errors.push(format!("outbox resubmit sweep failed: {e}"));
+                        }
+                    }
+                    // Finality barrier: replay frozen certificates until quorum,
+                    // then release the sender's gate — the ONE deleter. Same
+                    // placement rule as the resubmit sweep: outside `if pull_inbox`.
+                    match deliver_pending_finalization_checkpoints(
+                        &storage_endpoints,
+                        self.core_sdk.clone(),
+                    )
+                    .await
+                    {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] checkpoint sweep errored: {e}");
+                            errors.push(format!("checkpoint sweep failed: {e}"));
                         }
                     }
                 }
@@ -2940,6 +3246,7 @@ mod tests {
         proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
         sender_b32: &str,
         recipient_b32: &str,
+        ek_a: (&[u8], &[u8]),
     ) -> [u8; 32] {
         use crate::storage::client_db::{
             commit_send_prerequisites_atomically, evidence_content_digest, ArtifactRole,
@@ -2991,14 +3298,19 @@ mod tests {
             submission_id: evidence_sid,
             envelope_bytes: built.bytes,
             content_digest: digest_a,
+            routing_address: None,
         };
+        // The pending A EK head is stashed under the REAL at-rest key (the
+        // certificate builder decrypts it with the same derivation), holding
+        // the REAL per-step EK the receipt's `ek_pk_a` names.
+        let wrap = crate::init::current_chain_head_at_rest_key().expect("at-rest key");
         commit_send_prerequisites_atomically(
             proposal,
             &outbox,
             "GATE-658",
-            &[0xD1u8; 64],
-            &[0xD2u8; 64],
-            &[0x42u8; 32],
+            ek_a.0,
+            ek_a.1,
+            &wrap,
             true,
             std::slice::from_ref(&evidence),
         )
@@ -3063,6 +3375,20 @@ mod tests {
     /// recipient-side fixture can share it (the AK is the cert-chain genesis
     /// root both ends verify `ek_cert_b` against).
     fn seed_submitted_step_with_recipient_ak(b_ak_pk: Vec<u8>, b_ak_sk: Vec<u8>) -> SeededStep {
+        let (ek_pk_a, ek_sk_a) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
+        seed_submitted_step_with_keys(b_ak_pk, b_ak_sk, ek_pk_a, ek_sk_a)
+    }
+
+    /// As [`seed_submitted_step_with_recipient_ak`], with the sender's per-step
+    /// EK supplied so a recipient-side fixture can hold the same `ek_pk_a`
+    /// (the A bytes both halves digest must be identical).
+    fn seed_submitted_step_with_keys(
+        b_ak_pk: Vec<u8>,
+        b_ak_sk: Vec<u8>,
+        ek_pk_a: Vec<u8>,
+        ek_sk_a: Vec<u8>,
+    ) -> SeededStep {
         use crate::storage::client_db::sender_proposal::{
             mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_PROPOSED,
         };
@@ -3082,10 +3408,16 @@ mod tests {
             vec![0u8; 32],
         );
         crate::sdk::app_state::AppState::set_has_identity(true);
+        // The at-rest key that wraps the pending A EK derives from the wallet
+        // seed + genesis; the finalizer re-derives it to sign the certificate.
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
 
         // The honest reply defines the commitment this step is bound to; its A
-        // side is what the sender authored and froze.
-        let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        // side is what the sender authored and froze — including the sender's
+        // REAL per-step EK (`ek_pk_a`), which the recipient chains and the
+        // finality certificate is signed with.
+        let mut honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        honest.set_ek_pk_a(ek_pk_a.clone());
         let commitment = honest.compute_commitment().expect("commitment");
         let (a_side, _) = honest.split_countersign_b().expect("split");
 
@@ -3117,6 +3449,7 @@ mod tests {
             &proposal,
             &crate::util::text_id::encode_base32_crockford(&a),
             &crate::util::text_id::encode_base32_crockford(&b),
+            (&ek_pk_a, &ek_sk_a),
         );
         mark_sender_proposal_submitted(&rel_key, &parent, "MSG-658").expect("submit");
 
@@ -3225,7 +3558,11 @@ mod tests {
         let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
             .expect("outbox")
             .expect("present");
-        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            "finalized locally; the certificate still has to reach quorum"
+        );
         let retained = crate::storage::client_db::load_sender_outbox_artifacts(
             &st.rel_key,
             &st.parent,
@@ -3237,6 +3574,12 @@ mod tests {
                 == crate::storage::client_db::ArtifactRole::CountersignB
                 && a.envelope_bytes == good.envelope_bytes),
             "the delta the sender finalized on is retained beside its evidence_a"
+        );
+        assert!(
+            retained.iter().any(|a| a.role
+                == crate::storage::client_db::ArtifactRole::RelationshipFinalized
+                && a.routing_address.is_some()),
+            "the finality certificate is frozen with its own route in the same commit"
         );
 
         // A redelivered honest delta is an idempotent no-op.
@@ -3527,6 +3870,9 @@ mod tests {
         b: [u8; 32],
         b_ak_pk: Vec<u8>,
         b_ak_sk: Vec<u8>,
+        /// The sender's per-step EK the receipt names as `ek_pk_a`.
+        ek_pk_a: Vec<u8>,
+        ek_sk_a: Vec<u8>,
         commitment: [u8; 32],
         projection_parent: [u8; 32],
         full_bytes: Vec<u8>,
@@ -3583,9 +3929,12 @@ mod tests {
         crate::storage::client_db::store_auth_token(endpoint, &b_b32, &genesis_b32, "test-token")
             .expect("seed auth token");
 
-        // The countersigned receipt with REAL per-step EK material, stored in
-        // full — exactly what the fold persists.
-        let full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        // The countersigned receipt with REAL per-step EK material (both
+        // sides), stored in full — exactly what the fold persists.
+        let (ek_pk_a, ek_sk_a) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
+        let mut full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        full.set_ek_pk_a(ek_pk_a.clone());
         let full_bytes = full.to_full_protobuf().expect("full receipt");
         let commitment = full.compute_commitment().expect("commitment");
         let rel = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
@@ -3604,12 +3953,13 @@ mod tests {
             new_local_b_head: full.ek_pk_b.clone(),
             new_local_b_sk_enc: None,
             expected_counterparty_a_head: None,
-            new_counterparty_a_head: Vec::new(),
+            new_counterparty_a_head: ek_pk_a.clone(),
             receipt_bytes: full_bytes.clone(),
             projection_parent_tip: projection_parent,
             projection_target_tip: [0xBBu8; 32],
             applied_parent_tip_b: test_b_pair().0,
             applied_child_tip_b: test_b_pair().1,
+            peer_finalized: false,
             status: "prepared".to_string(),
             created_at: 0,
         };
@@ -3639,6 +3989,8 @@ mod tests {
             b,
             b_ak_pk,
             b_ak_sk,
+            ek_pk_a,
+            ek_sk_a,
             commitment,
             projection_parent,
             full_bytes,
@@ -3714,7 +4066,12 @@ mod tests {
         );
 
         // ---- sender half: the recorded body finalizes the step ----
-        let st = seed_submitted_step_with_recipient_ak(rh.b_ak_pk.clone(), rh.b_ak_sk.clone());
+        let st = seed_submitted_step_with_keys(
+            rh.b_ak_pk.clone(),
+            rh.b_ak_sk.clone(),
+            rh.ek_pk_a.clone(),
+            rh.ek_sk_a.clone(),
+        );
         assert_eq!(
             st.commitment, rh.commitment,
             "both halves describe the same step"
@@ -3785,7 +4142,10 @@ mod tests {
         let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
             .expect("outbox")
             .expect("present");
-        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING
+        );
         let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
         assert_eq!(
             crate::storage::client_db::load_cert_chain_head_pubkey(
@@ -4098,6 +4458,7 @@ mod tests {
             submission_id: evidence_submission_id.clone(),
             envelope_bytes: evidence_bytes.clone(),
             content_digest: [0x78u8; 32],
+            routing_address: None,
         };
 
         commit_send_prerequisites_atomically(

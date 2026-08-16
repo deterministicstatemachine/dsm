@@ -1095,4 +1095,40 @@ mod tests {
             "block must remain after abort"
         );
     }
+
+    /// Finality barrier: a send that is finalized locally but whose checkpoint
+    /// has not reached quorum (`finalization_checkpoint_pending`) is an
+    /// UNSETTLED obligation for cert resync — the relationship still owes the
+    /// peer a certificate signed by its current per-step lineage.
+    #[test]
+    #[serial_test::serial]
+    fn a_checkpoint_pending_send_is_a_pending_obligation() {
+        init();
+        {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO sender_outbox (relationship_key, canonical_parent, canonical_child, \
+                 commitment, projection_parent, projection_target, routing_address, submission_id, \
+                 envelope_bytes, proposal_nonce, local_expected_prev, is_first_ek_step, status, \
+                 message_ids, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'R', 'SID', X'00', ?7, \
+                 NULL, 1, ?8, NULL, 0)",
+                rusqlite::params![
+                    REL.as_slice(),
+                    vec![0x01u8; 32],
+                    vec![0x02u8; 32],
+                    vec![0x03u8; 32],
+                    vec![0x04u8; 32],
+                    vec![0x05u8; 32],
+                    vec![0x06u8; 32],
+                    crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+                ],
+            )
+            .expect("seed row");
+        }
+        assert!(
+            resync_pending_obligation(&REL).expect("query").is_some(),
+            "finalization_checkpoint_pending must count as an unsettled outbox row"
+        );
+    }
 }

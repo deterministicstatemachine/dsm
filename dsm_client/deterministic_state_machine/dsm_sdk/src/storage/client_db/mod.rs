@@ -555,6 +555,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- it (B-canonical target); the sender pins the child as B's head.
             applied_parent_tip_b         BLOB NOT NULL,
             applied_child_tip_b          BLOB NOT NULL,
+            -- Finality barrier (recipient gate): 1 once the SENDER's verified
+            -- RelationshipFinalizedV1 for this transition landed. Only the
+            -- certificate handler flips it. While any non-rejected row on a
+            -- relationship is 0, this device may not originate on it.
+            peer_finalized               INTEGER NOT NULL DEFAULT 0
+                                         CHECK(peer_finalized IN (0, 1)),
             status                       TEXT NOT NULL,
             created_at                   INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, parent_tip)
@@ -750,7 +756,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             UNIQUE (submission_id),
             CHECK (status IN (
                 'pending_submit', 'submitting', 'submitted',
-                'submission_uncertain', 'gc_pending', 'complete'
+                'submission_uncertain', 'finalization_checkpoint_pending',
+                'gc_pending', 'complete'
             ))
         );
 
@@ -777,13 +784,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             submission_id       TEXT NOT NULL,   -- deterministic; the node message_id
             envelope_bytes      BLOB NOT NULL,   -- exact submitted bytes; retry replays these
             content_digest      BLOB NOT NULL,   -- role-domain-separated address of the payload
+            -- Frozen route for artifacts that do NOT ride the owning outbox's
+            -- route (the finality certificate goes to the RECIPIENT's route);
+            -- NULL ⇒ the owning outbox route.
+            routing_address     TEXT,
             created_at          INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, canonical_parent, proposal_nonce, role),
             UNIQUE (submission_id),
             FOREIGN KEY (relationship_key, canonical_parent, proposal_nonce)
                 REFERENCES sender_outbox(relationship_key, canonical_parent, proposal_nonce)
                 ON DELETE CASCADE,
-            CHECK (role IN ('evidence_a', 'countersign_b'))
+            CHECK (role IN ('evidence_a', 'countersign_b', 'relationship_finalized'))
         );
 
         -- ADR 0003 step 3: the recipient's durable staging area.
@@ -2178,8 +2189,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&request).expect("sync should succeed");
 
@@ -2643,8 +2652,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: new_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2679,8 +2686,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2713,8 +2718,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip,
             target_tip: tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2747,8 +2750,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: wrong_parent,
             target_tip: new_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should not error");
@@ -2762,9 +2763,12 @@ mod tests {
         assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
     }
 
+    /// The tip sync NEVER touches the pending online gate (finality barrier:
+    /// the ONE deleter is the post-quorum checkpoint release). A gate seeded
+    /// beside a tip advance survives the advance untouched.
     #[test]
     #[serial]
-    fn test_sync_bilateral_tips_exact_gate_clear_on_success() {
+    fn test_sync_bilateral_tips_never_touches_the_gate() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -2781,81 +2785,26 @@ mod tests {
         store_pending_online_outbox(&device_id, "msg123", &parent_tip, &next_tip)
             .expect("insert gate");
 
-        let observed = bilateral_tip_sync::ObservedPendingGate {
-            counterparty_device_id: device_id,
-            parent_tip,
-            next_tip,
-        };
         let request = bilateral_tip_sync::TipSyncRequest {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: next_tip,
-            observed_gate: Some(observed),
-            clear_gate_on_success: true,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
-
         assert!(matches!(
             outcome,
-            bilateral_tip_sync::TipSyncOutcome::Advanced {
-                gate_cleared: true,
-                ..
-            }
+            bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
         ));
         assert_eq!(get_contact_chain_tip_raw(&device_id), Some(next_tip));
         assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
-        assert!(get_pending_online_outbox(&device_id)
-            .expect("load")
-            .is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn test_sync_bilateral_tips_gate_mismatch_does_not_clear() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let device_id = [0xE6u8; 32];
-        let genesis_hash = [0xF6u8; 32];
-        let parent_tip = [0x0Bu8; 32];
-        let next_tip = [0x0Cu8; 32];
-        let wrong_next = [0x0Du8; 32];
-
-        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
-        store_pending_online_outbox(&device_id, "msg456", &parent_tip, &next_tip)
-            .expect("insert gate");
-
-        // Observe a gate with wrong next_tip
-        let stale_observed = bilateral_tip_sync::ObservedPendingGate {
-            counterparty_device_id: device_id,
-            parent_tip,
-            next_tip: wrong_next,
-        };
-        let request = bilateral_tip_sync::TipSyncRequest {
-            counterparty_device_id: device_id,
-            expected_parent_tip: parent_tip,
-            target_tip: next_tip,
-            observed_gate: Some(stale_observed),
-            clear_gate_on_success: true,
-        };
-        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
-            .expect("sync should not error");
-
-        assert!(matches!(
-            outcome,
-            bilateral_tip_sync::TipSyncOutcome::GateMismatch
-        ));
-        // Gate still exists
-        assert!(get_pending_online_outbox(&device_id)
-            .expect("load")
-            .is_some());
-        // Tips unchanged
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(parent_tip));
+        assert_eq!(
+            get_pending_online_outbox(&device_id)
+                .expect("load")
+                .expect("gate survives the tip advance")
+                .message_id,
+            "msg123"
+        );
     }
 
     #[test]
@@ -3063,15 +3012,43 @@ mod tests {
         );
     }
 
-    /// THE RACE. A concurrent online send settles the old gate and arms a new one.
-    /// The decision must be made against the row that is actually in the table, and
-    /// a live newer gate must refuse — leaving the modal lock in place.
-    ///
-    /// The old shape read gate A, released the connection, then deleted by A's
-    /// identity. That delete matched nothing (gate B is there now), the bool was
-    /// dropped, the lock was cleared, and the offline transfer proceeded on top of
-    /// an in-flight online step. Reading and deciding in one transaction makes
-    /// acting on a stale identity impossible.
+    /// Finality-barrier staleness: the ONLY thing that keeps a gate alive is an
+    /// unsettled or checkpoint-pending online send behind it. Seeds a
+    /// `sender_outbox` row for the local↔`cp` relationship in `status`.
+    fn seed_outbox_row_for(
+        local: [u8; 32],
+        cp: [u8; 32],
+        projection: ([u8; 32], [u8; 32]),
+        status: &str,
+        tag: u8,
+    ) {
+        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &cp);
+        let binding = get_connection().expect("conn");
+        let conn = binding.lock().expect("lock");
+        conn.execute(
+            "INSERT INTO sender_outbox (relationship_key, canonical_parent, canonical_child, \
+             commitment, projection_parent, projection_target, routing_address, submission_id, \
+             envelope_bytes, proposal_nonce, local_expected_prev, is_first_ek_step, status, \
+             message_ids, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'R', ?7, X'00', ?8, NULL, 1, \
+             ?9, NULL, 0)",
+            rusqlite::params![
+                rel.as_slice(),
+                vec![tag; 32],
+                vec![tag ^ 1; 32],
+                vec![tag ^ 2; 32],
+                projection.0.as_slice(),
+                projection.1.as_slice(),
+                format!("SID{tag}"),
+                vec![tag ^ 5; 32],
+                status,
+            ],
+        )
+        .expect("seed outbox row");
+    }
+
+    /// The gate is read and deleted in ONE transaction: a gate replaced by a
+    /// concurrent online send (still unsettled) refuses and survives — the
+    /// decision is made against the row actually in the table.
     #[test]
     #[serial]
     fn a_gate_replaced_by_a_concurrent_online_send_still_refuses() {
@@ -3080,6 +3057,7 @@ mod tests {
         }
         reset_database_for_tests();
         init_database().expect("init db");
+        let local = [0xE0u8; 32];
 
         let device_id = [0xE8u8; 32];
         let old_parent = [0x20u8; 32];
@@ -3087,37 +3065,26 @@ mod tests {
         let new_parent = [0x22u8; 32];
         let new_next = [0x23u8; 32];
 
-        // Gate A, then a concurrent online send replaces it with gate B. The chain
-        // tip is gate B's parent, i.e. B is LIVE — nothing has caught up past it.
         seed_contact_for_chain_tip_tests(device_id, new_parent, "BleCapable");
         store_pending_online_outbox(&device_id, "old_msg", &old_parent, &old_next)
             .expect("insert gate A");
         clear_pending_online_outbox(&device_id).expect("clear A");
         store_pending_online_outbox(&device_id, "new_msg", &new_parent, &new_next)
             .expect("insert gate B");
+        seed_outbox_row_for(local, device_id, (new_parent, new_next), "submitted", 0x11);
 
-        let outcome = clear_stale_pending_online_gate(&device_id, Some(new_parent))
-            .expect("decision must not error");
-
-        assert_eq!(
-            outcome,
-            StaleGateOutcome::StillPending,
-            "the decision was made against a stale gate identity instead of the row \
-             actually in the table"
-        );
-        assert!(
-            !outcome.admits_offline(),
-            "an offline transfer was admitted while a newer online gate is still live"
-        );
-        // The newer gate must survive: nothing may delete a gate it did not read.
+        let outcome = clear_stale_pending_online_gate(&device_id).expect("decision must not error");
+        assert_eq!(outcome, StaleGateOutcome::StillPending);
+        assert!(!outcome.admits_offline());
         let gate = get_pending_online_outbox(&device_id)
             .expect("load")
             .expect("gate B must survive");
         assert_eq!(gate.message_id, "new_msg");
     }
 
-    /// ANTI-VACUITY. Without this, a decision that returned `StillPending`
-    /// unconditionally would satisfy every refusal test above.
+    /// ANTI-VACUITY. A gate with NO unsettled or checkpoint-pending online send
+    /// behind it is an orphan: cleared and admits. Without this, a decision that
+    /// returned `StillPending` unconditionally would satisfy every refusal test.
     #[test]
     #[serial]
     fn a_genuinely_stale_gate_is_cleared_and_admits() {
@@ -3126,20 +3093,19 @@ mod tests {
         }
         reset_database_for_tests();
         init_database().expect("init db");
+        let local = [0xE0u8; 32];
 
         let device_id = [0xE9u8; 32];
         let parent = [0x30u8; 32];
         let next = [0x31u8; 32];
-        let advanced = [0x32u8; 32];
 
-        // The chain moved off the gate's parent: the gated send has been caught up.
-        seed_contact_for_chain_tip_tests(device_id, advanced, "BleCapable");
+        seed_contact_for_chain_tip_tests(device_id, [0x32u8; 32], "BleCapable");
         store_pending_online_outbox(&device_id, "settled_msg", &parent, &next)
             .expect("insert gate");
+        // A fully released send (gc_pending) does not hold the gate.
+        seed_outbox_row_for(local, device_id, (parent, next), "gc_pending", 0x12);
 
-        let outcome = clear_stale_pending_online_gate(&device_id, Some(advanced))
-            .expect("decision must not error");
-
+        let outcome = clear_stale_pending_online_gate(&device_id).expect("decision must not error");
         assert_eq!(outcome, StaleGateOutcome::Cleared);
         assert!(outcome.admits_offline());
         assert!(
@@ -3150,26 +3116,37 @@ mod tests {
         );
     }
 
+    /// A gate whose send is unsettled — OR locally finalized but not yet at
+    /// its checkpoint quorum — refuses and survives. The former "chain tip
+    /// moved off the gate's parent" rule is gone: after finalization the tip
+    /// HAS moved (it sits at the target) while the send is not yet final for
+    /// the peer, and that must not admit an offline transfer.
     #[test]
     #[serial]
-    fn a_live_gate_refuses_and_survives() {
+    fn a_live_gate_refuses_and_survives_including_checkpoint_pending() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
         reset_database_for_tests();
         init_database().expect("init db");
+        let local = [0xE0u8; 32];
 
         let device_id = [0xEAu8; 32];
         let parent = [0x40u8; 32];
         let next = [0x41u8; 32];
 
-        // Chain tip still sits on the gate's parent: the online send has NOT settled.
-        seed_contact_for_chain_tip_tests(device_id, parent, "BleCapable");
+        // Tip already at the gate's TARGET (post-finalization shape).
+        seed_contact_for_chain_tip_tests(device_id, next, "BleCapable");
         store_pending_online_outbox(&device_id, "live_msg", &parent, &next).expect("insert gate");
+        seed_outbox_row_for(
+            local,
+            device_id,
+            (parent, next),
+            "finalization_checkpoint_pending",
+            0x13,
+        );
 
-        let outcome = clear_stale_pending_online_gate(&device_id, Some(parent))
-            .expect("decision must not error");
-
+        let outcome = clear_stale_pending_online_gate(&device_id).expect("decision must not error");
         assert_eq!(outcome, StaleGateOutcome::StillPending);
         assert!(!outcome.admits_offline());
         assert!(
@@ -3192,8 +3169,7 @@ mod tests {
         let device_id = [0xEBu8; 32];
         seed_contact_for_chain_tip_tests(device_id, [0x50u8; 32], "BleCapable");
 
-        let outcome = clear_stale_pending_online_gate(&device_id, Some([0x50u8; 32]))
-            .expect("decision must not error");
+        let outcome = clear_stale_pending_online_gate(&device_id).expect("decision must not error");
         assert_eq!(outcome, StaleGateOutcome::NoGate);
         assert!(outcome.admits_offline());
     }
@@ -3235,7 +3211,7 @@ mod tests {
             .expect("insert corrupt row");
         }
 
-        let err = clear_stale_pending_online_gate(&device_id, Some([0x60u8; 32]))
+        let err = clear_stale_pending_online_gate(&device_id)
             .expect_err("a malformed persisted tip must be an error");
         assert!(
             err.to_string().contains("parent_tip"),
@@ -3266,8 +3242,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_a,
             target_tip: tip_b,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req1).expect("advance A→B");
         assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_b));
@@ -3278,8 +3252,6 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_b,
             target_tip: tip_c,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req2).expect("advance B→C");
         assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_c));

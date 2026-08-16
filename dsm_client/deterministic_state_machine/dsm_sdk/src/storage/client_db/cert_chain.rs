@@ -600,6 +600,36 @@ pub fn load_local_chain_head_sk(
     }
 }
 
+/// The PENDING Local per-step EK for `(relationship, commitment)` — the key
+/// this device signed `sig_a` with for that transition, stashed at send time
+/// and promoted into `cert_chain_heads` on finalization — as a
+/// `(ek_pk, ek_sk)` pair with the secret decrypted under the at-rest key.
+///
+/// The finality certificate for that transition is signed with exactly this
+/// key (the recipient chained `ek_pk_a` for it and verifies under it), BEFORE
+/// the finalize transaction promotes and deletes the pending row. `None` ⇔ no
+/// pending row for that commitment.
+pub fn pending_local_head_signer(
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+    chain_head_wrap_key: &[u8; 32],
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row: Option<(Vec<u8>, Vec<u8>)> = conn
+        .query_row(
+            "SELECT ek_pubkey, ek_sk_encrypted FROM pending_local_cert_heads
+             WHERE relationship_key = ?1 AND commitment_hash = ?2",
+            params![relationship_key.as_slice(), commitment_hash.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        Some((pk, ct)) => Ok(Some((pk, decrypt_chain_sk(&ct, chain_head_wrap_key)?))),
+        None => Ok(None),
+    }
+}
+
 /// Wipe the local chain head's secret key after consumption. Sets
 /// `chain_head_sk_encrypted` to NULL. Pubkey and step_count are
 /// untouched — only the SK is removed.

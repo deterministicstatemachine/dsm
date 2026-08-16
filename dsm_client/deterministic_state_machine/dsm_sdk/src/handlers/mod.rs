@@ -43,6 +43,7 @@ pub mod prefs_routes;
 pub mod recipient_receipt;
 pub mod recovery_impl;
 pub mod recovery_routes;
+pub mod relationship_finalized;
 pub mod relationship_status;
 pub mod response_helpers;
 pub mod route_routes;

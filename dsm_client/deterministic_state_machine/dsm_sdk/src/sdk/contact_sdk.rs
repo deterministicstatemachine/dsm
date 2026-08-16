@@ -343,8 +343,6 @@ impl ContactManager {
                         counterparty_device_id: contact_device_id,
                         expected_parent_tip: initial_chain_tip,
                         target_tip: initial_chain_tip,
-                        observed_gate: None,
-                        clear_gate_on_success: false,
                     };
                     if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
                         log::warn!(
@@ -652,8 +650,6 @@ impl ContactManager {
                         counterparty_device_id: contact_device_id,
                         expected_parent_tip: initial_chain_tip,
                         target_tip: initial_chain_tip,
-                        observed_gate: None,
-                        clear_gate_on_success: false,
                     };
                     if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
                         log::error!(
@@ -804,8 +800,6 @@ impl ContactManager {
             counterparty_device_id: contact_device_id,
             expected_parent_tip,
             target_tip: new_chain_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
             Ok(outcome) => match outcome {

@@ -212,6 +212,16 @@ impl TestDevice {
             previous_chain_tip: None,
         })
         .expect("store contact");
+        // As `contact_sdk` does after `store_contact`: both tip columns at the
+        // initial tip, atomically.
+        client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(
+            &client_db::bilateral_tip_sync::TipSyncRequest {
+                counterparty_device_id: peer.device_id,
+                expected_parent_tip: initial_tip,
+                target_tip: initial_tip,
+            },
+        )
+        .expect("initial tip sync");
     }
 
     /// Symmetric relationship key with `peer` (the same value from either side).

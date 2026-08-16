@@ -38,8 +38,6 @@ impl ChainTipStore for SqliteChainTipStore {
             counterparty_device_id: *device_id,
             expected_parent_tip,
             target_tip: new_tip,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
         match client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
             Ok(outcome) => match outcome {
