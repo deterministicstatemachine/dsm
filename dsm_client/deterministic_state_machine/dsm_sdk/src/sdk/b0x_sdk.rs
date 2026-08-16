@@ -504,11 +504,11 @@ pub struct B0xSDK {
     tokens_by_endpoint: tokio::sync::RwLock<HashMap<String, String>>, // (endpoint|genesis|device) -> token
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
-    /// §16.6 reply-window artifacts decoded during the most recent retrieve.
-    /// Buffered rather than returned so the retrieve signature (5 call sites)
-    /// stays stable; drained by the sender-finalization path via
-    /// [`Self::take_reply_artifacts`].
-    pending_reply_artifacts: Vec<dsm::types::proto::AcceptanceReceiptArtifact>,
+    /// ADR 0003 B-side countersign deltas decoded during the most recent
+    /// retrieve. Buffered rather than returned so the retrieve signature (5 call
+    /// sites) stays stable; drained by the sender-finalization path via
+    /// [`Self::take_countersign_deltas`].
+    pending_countersign_deltas: Vec<CountersignDelta>,
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
     pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
@@ -527,6 +527,24 @@ pub(crate) const ACCEPTANCE_RECEIPT_METHOD: &str = "wallet.acceptanceReceipt";
 /// NEVER trial-decoded. The producer (`build_evidence_envelope`) and this
 /// consumer key off this one constant so they cannot drift apart.
 pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
+
+/// Explicit invoke method that marks an ADR 0003 B-side countersign DELTA — the
+/// return leg. Same discipline: discriminated by this string alone, never
+/// trial-decoded, one constant shared by producer and consumer.
+pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
+
+/// One B-side countersign delta as it came off the wire, kept whole so the
+/// sender can retain the exact envelope it finalized on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountersignDelta {
+    /// Node message id (Base32 Crockford) — the deterministic reply id.
+    pub message_id: String,
+    /// The whole envelope, re-encoded; what the sender persists as its
+    /// `countersign_b` artifact once the delta verifies.
+    pub envelope_bytes: Vec<u8>,
+    /// `ArgPack.body`: the `ReceiptCountersignB` wire bytes, unvalidated.
+    pub body: Vec<u8>,
+}
 
 static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -732,7 +750,7 @@ impl B0xSDK {
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
-            pending_reply_artifacts: Vec::new(),
+            pending_countersign_deltas: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
         };
@@ -1366,9 +1384,11 @@ impl B0xSDK {
     /// Discrimination is on the EXPLICIT invoke method name, so a forward
     /// transfer can never be mistaken for a reply (and vice versa) — the "no
     /// trial-decode" rule holds even though both ride UniversalTx.
-    fn decode_acceptance_artifact(
-        env: &dsm::types::proto::Envelope,
-    ) -> Option<dsm::types::proto::AcceptanceReceiptArtifact> {
+    ///
+    /// Returns the raw `ArgPack.body`; nothing here is validated or trusted.
+    /// The strict wire codec and the overlay onto the sender's OWN retained
+    /// A-side bytes happen in the finalization path.
+    pub(crate) fn decode_countersign_b(env: &dsm::types::proto::Envelope) -> Option<Vec<u8>> {
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
             return None;
         };
@@ -1376,24 +1396,11 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            if invoke.method != ACCEPTANCE_RECEIPT_METHOD {
+            if invoke.method != RECEIPT_COUNTERSIGN_B_METHOD {
                 continue;
             }
             let Some(args) = &invoke.args else { continue };
-            match dsm::types::proto::ReplyWindowArtifact::decode(&*args.body) {
-                Ok(rw) => {
-                    if let Some(
-                        dsm::types::proto::reply_window_artifact::Artifact::AcceptanceReceipt(a),
-                    ) = rw.artifact
-                    {
-                        return Some(a);
-                    }
-                    warn!("reply window: artifact oneof empty — ignoring");
-                }
-                Err(e) => {
-                    warn!("reply window: artifact decode failed: {e}");
-                }
-            }
+            return Some(args.body.clone());
         }
         None
     }
@@ -1405,7 +1412,7 @@ impl B0xSDK {
     /// verified. `full_receipt_bytes` and the digest it carries are unauthenticated
     /// wire data until the dispatcher checks them against the transfer half's
     /// reference, which is why this is a pure decoder with no side effects.
-    fn decode_receipt_evidence_a(
+    pub(crate) fn decode_receipt_evidence_a(
         env: &dsm::types::proto::Envelope,
     ) -> Option<dsm::types::proto::ReceiptEvidenceA> {
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
@@ -1429,7 +1436,7 @@ impl B0xSDK {
 
     /// Drain the ADR 0003 evidence halves decoded by the most recent retrieve.
     ///
-    /// Draining rather than cloning mirrors [`Self::take_reply_artifacts`], but the
+    /// Draining rather than cloning mirrors [`Self::take_countersign_deltas`], but the
     /// durable idempotency guarantee is different and lives downstream: staging is
     /// keyed on the transfer submission id, so a re-polled evidence half with the
     /// SAME bytes is idempotent and one with DIFFERENT bytes fails closed.
@@ -1437,12 +1444,12 @@ impl B0xSDK {
         std::mem::take(&mut self.pending_evidence_artifacts)
     }
 
-    /// Drain the acceptance artifacts decoded by the most recent retrieve.
+    /// Drain the B-side countersign deltas decoded by the most recent retrieve.
     /// Draining (rather than cloning) keeps a re-poll from re-finalizing the
     /// same reply within one process lifetime; durable idempotency is enforced
     /// downstream by the proposal's terminal status.
-    pub fn take_reply_artifacts(&mut self) -> Vec<dsm::types::proto::AcceptanceReceiptArtifact> {
-        std::mem::take(&mut self.pending_reply_artifacts)
+    pub fn take_countersign_deltas(&mut self) -> Vec<CountersignDelta> {
+        std::mem::take(&mut self.pending_countersign_deltas)
     }
 
     /// Decode a cert-resync control message (method + framed body) from a spooled
@@ -3205,14 +3212,17 @@ impl B0xSDK {
                 self.pending_cert_resync.push((method, body));
                 continue;
             }
-            if let Some(artifact) = Self::decode_acceptance_artifact(&env) {
+            if let Some(body) = Self::decode_countersign_b(&env) {
                 info!(
-                    "📬 reply window: acceptance artifact for commitment={}..",
-                    text_id::encode_base32_crockford(
-                        &artifact.commitment[..4.min(artifact.commitment.len())]
-                    )
+                    "📬 ADR 0003 countersign delta message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
                 );
-                self.pending_reply_artifacts.push(artifact);
+                self.pending_countersign_deltas.push(CountersignDelta {
+                    message_id: text_id::encode_base32_crockford(&env.message_id),
+                    envelope_bytes: env.encode_to_vec(),
+                    body,
+                });
                 continue;
             }
             if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
@@ -5106,6 +5116,15 @@ mod tests {
     /// Wrap an evidence body in the same Envelope framing the production
     /// submit path uses, and return the encoded wire length.
     fn envelope_bytes_for_evidence_body(body: Vec<u8>) -> usize {
+        let envelope = test_invoke_envelope("receipt.evidence", body);
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).expect("encode Envelope");
+        buf.len()
+    }
+
+    /// One UniversalTx invoke envelope with the given method and ArgPack body,
+    /// framed as the production submit path frames it.
+    fn test_invoke_envelope(method: &str, body: Vec<u8>) -> dsm::types::proto::Envelope {
         let arg_pack = dsm::types::proto::ArgPack {
             schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             codec: dsm::types::proto::Codec::Proto as i32,
@@ -5113,7 +5132,7 @@ mod tests {
         };
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "receipt.evidence".to_string(),
+            method: method.to_string(),
             args: Some(arg_pack),
             pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
@@ -5121,7 +5140,7 @@ mod tests {
             evidence: None,
             nonce: Some(dsm::types::proto::Hash16 { v: vec![0u8; 16] }),
         };
-        let envelope = dsm::types::proto::Envelope {
+        dsm::types::proto::Envelope {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0x11; 32],
@@ -5141,9 +5160,33 @@ mod tests {
                     atomic: true,
                 },
             )),
-        };
-        let mut buf = Vec::with_capacity(envelope.encoded_len());
-        envelope.encode(&mut buf).expect("encode Envelope");
-        buf.len()
+        }
+    }
+
+    /// The return leg is discriminated by its explicit method string and
+    /// nothing else: no trial decode, no size heuristic. An evidence half and a
+    /// legacy full-receipt reply on the retired `wallet.acceptanceReceipt`
+    /// method are both `None` here, and the legacy one is not a transfer either
+    /// — it matches no discriminator and is dropped, never consumed.
+    #[test]
+    fn retrieve_discriminates_a_countersign_delta_by_its_method_only() {
+        let body = vec![0xB0u8; 96];
+        let delta = test_invoke_envelope(RECEIPT_COUNTERSIGN_B_METHOD, body.clone());
+        assert_eq!(B0xSDK::decode_countersign_b(&delta), Some(body.clone()));
+        assert!(B0xSDK::decode_receipt_evidence_a(&delta).is_none());
+
+        let evidence = test_invoke_envelope(RECEIPT_EVIDENCE_A_METHOD, body.clone());
+        assert!(B0xSDK::decode_countersign_b(&evidence).is_none());
+
+        let legacy = test_invoke_envelope("wallet.acceptanceReceipt", body);
+        assert!(B0xSDK::decode_countersign_b(&legacy).is_none());
+        assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        assert!(
+            sdk.envelope_to_b0x_entry(legacy).is_none(),
+            "a legacy full-receipt reply is not a transfer and must be dropped, not consumed"
+        );
     }
 }

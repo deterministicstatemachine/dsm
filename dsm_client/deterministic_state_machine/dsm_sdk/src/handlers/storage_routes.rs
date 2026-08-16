@@ -405,66 +405,149 @@ fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA, ro
     }
 }
 
-async fn finalize_from_acceptance_artifact(
-    artifact: &dsm::types::proto::AcceptanceReceiptArtifact,
-) {
+/// What one B-side countersign delta did on the sender. Every arm is a
+/// distinct, testable fact — "nothing changed" is never the whole answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CountersignOutcome {
+    /// The body is not a canonical `ReceiptCountersignB` (a whole receipt on
+    /// this method lands here: "unknown field 7").
+    WireRejected(String),
+    /// No proposal for that commitment — not ours; nothing written.
+    NoProposal,
+    /// Already finalized — idempotent no-op.
+    AlreadyFinalized,
+    /// The proposal has NO frozen evidence_a row. On a clean install this
+    /// cannot happen (the artifact commits with the proposal); it is an
+    /// invariant violation, not a transient, and the step cannot finalize.
+    NoRetainedEvidence,
+    /// The sender's own retained A bytes are unusable (digest mismatch with
+    /// their stored digest, or not an A-side receipt). Nothing written.
+    LocalEvidenceCorrupt(String),
+    /// The delta names A bytes other than the ones this sender retained; the
+    /// step is parked awaiting a valid replacement, like a verifier rejection.
+    DigestMismatch(String),
+    /// Local identity / recipient AK unavailable; nothing written.
+    Unverifiable(String),
+    /// The reconstructed receipt failed the acceptance verifier; parked.
+    Rejected(String),
+    /// Verified and finalized atomically.
+    Finalized,
+    /// Verified, but the atomic commit failed; retried on the next poll.
+    FinalizeFailed(String),
+}
+
+/// Sender-side finalization from an ADR 0003 B-side countersign delta.
+///
+/// The recipient never ships the whole countersigned receipt (218 KB, over the
+/// node cap). It ships `ReceiptCountersignB`; this overlays it onto the A-side
+/// receipt the sender froze at send time and runs the UNCHANGED acceptance
+/// verifier and the UNCHANGED atomic finalization. That reconstruction is the
+/// load-bearing binding — B material is only ever judged against the A side the
+/// sender itself authored.
+async fn finalize_from_countersign_delta(
+    delta: &crate::sdk::b0x_sdk::CountersignDelta,
+) -> CountersignOutcome {
+    use crate::handlers::online_finalize::{
+        bind_countersign_delta, load_retained_evidence_a, DeltaBinding,
+    };
+    use crate::storage::client_db::sender_outbox::{
+        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
+    };
     use crate::storage::client_db::sender_proposal::{
         get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
     };
 
-    let commitment: [u8; 32] = match artifact.commitment.as_slice().try_into() {
+    let wire = match dsm::types::receipt_types::decode_receipt_countersign_b_wire(&delta.body) {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {} refused at the wire: {e}",
+                delta.message_id
+            );
+            return CountersignOutcome::WireRejected(e.to_string());
+        }
+    };
+    let commitment: [u8; 32] = match wire.commitment.as_slice().try_into() {
         Ok(c) => c,
         Err(_) => {
-            log::warn!("[storage.sync] §16.6 reply ignored: commitment is not 32 bytes");
-            return;
+            return CountersignOutcome::WireRejected("commitment is not 32 bytes".to_string())
         }
     };
     let short = crate::util::text_id::encode_base32_crockford(&commitment[..4]);
-
-    // Decode the signed receipt — every value used from here on comes from it,
-    // never from the unsigned artifact envelope.
-    let receipt = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-        &artifact.receipt_bytes,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("[storage.sync] §16.6 reply {short}..: receipt decode failed: {e}");
-            return;
-        }
-    };
 
     let proposal = match get_sender_proposal_by_commitment(&commitment) {
         Ok(Some(p)) => p,
         Ok(None) => {
             log::warn!(
-                "[storage.sync] §16.6 reply ignored: no proposal for commitment {short}.. \
-                 (not ours) — gate retained"
+                "[storage.sync] ADR 0003 countersign delta ignored: no proposal for commitment \
+                 {short}.. (not ours) — gate retained"
             );
-            return;
+            return CountersignOutcome::NoProposal;
         }
         Err(e) => {
-            log::warn!("[storage.sync] §16.6 reply lookup failed for {short}..: {e}");
-            return;
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta lookup failed for {short}..: {e}"
+            );
+            return CountersignOutcome::Unverifiable(format!("proposal lookup: {e}"));
         }
     };
 
     if proposal.status == PROPOSAL_FINALIZED {
-        log::info!("[storage.sync] §16.6 reply {short}.. already finalized — idempotent no-op");
-        return;
+        log::info!(
+            "[storage.sync] ADR 0003 countersign delta {short}.. already finalized — idempotent no-op"
+        );
+        return CountersignOutcome::AlreadyFinalized;
     }
+
+    let retained = match load_retained_evidence_a(&proposal) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: proposal has NO retained \
+                 evidence_a artifact — invariant violated (the artifact commits with the \
+                 proposal); this step cannot finalize"
+            );
+            return CountersignOutcome::NoRetainedEvidence;
+        }
+        Err(e) => {
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: retained evidence_a \
+                 unusable: {e}"
+            );
+            return CountersignOutcome::LocalEvidenceCorrupt(e.to_string());
+        }
+    };
+
+    // Reconstruct the countersigned receipt from OUR A bytes + the delta.
+    let receipt = match bind_countersign_delta(&retained, &wire) {
+        Ok(DeltaBinding::Bound(r)) => *r,
+        Ok(DeltaBinding::Rejected { reason }) => {
+            park_awaiting_valid_reply(&proposal, &short, &reason);
+            return CountersignOutcome::DigestMismatch(reason);
+        }
+        Err(e) => {
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: retained evidence_a \
+                 unusable: {e}"
+            );
+            return CountersignOutcome::LocalEvidenceCorrupt(e.to_string());
+        }
+    };
 
     let self_device_id: [u8; 32] = match crate::sdk::app_state::AppState::get_device_id()
         .and_then(|d| <[u8; 32]>::try_from(d.as_slice()).ok())
     {
         Some(d) => d,
         None => {
-            log::warn!("[storage.sync] §16.6 reply {short}..: local device_id unavailable");
-            return;
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: local device_id unavailable"
+            );
+            return CountersignOutcome::Unverifiable("local device_id unavailable".to_string());
         }
     };
 
     // The recipient's AK from the STORED contact — the cert-chain genesis root.
-    // Never taken from the wire artifact.
+    // Never taken from the wire.
     let recipient_ak_pk = match crate::storage::client_db::get_contact_public_key_by_device_id(
         &crate::util::text_id::encode_base32_crockford(&proposal.counterparty_device_id),
     ) {
@@ -476,10 +559,12 @@ async fn finalize_from_acceptance_artifact(
                 Ok(Some(c)) if !c.public_key.is_empty() => c.public_key,
                 _ => {
                     log::warn!(
-                        "[storage.sync] §16.6 reply {short}..: no stored AK for the recipient \
-                             — cannot verify sig_b, gate retained"
+                        "[storage.sync] ADR 0003 countersign delta {short}..: no stored AK for \
+                         the recipient — cannot verify sig_b, gate retained"
                     );
-                    return;
+                    return CountersignOutcome::Unverifiable(
+                        "no stored AK for the recipient".to_string(),
+                    );
                 }
             }
         }
@@ -499,38 +584,24 @@ async fn finalize_from_acceptance_artifact(
             // The gate is retained (correct — this artifact proved nothing), but
             // the step must NOT be left stranded at `submitted` with no exit.
             // Receipt fields 12-20 are outside every signature, so a middlebox or
-            // a single malicious replica can produce an artifact that passes the
-            // signature and the strict decode yet trips a structural check here.
-            // Without this transition, one such artifact pins the proposal at
-            // `submitted` forever: `finalized` is the only other reachable state
-            // and it needs the very reply that was just refused.
+            // a single malicious replica can produce a delta that passes the
+            // strict decode yet trips a check here. Without this transition, one
+            // such artifact pins the proposal at `submitted` forever: `finalized`
+            // is the only other reachable state and it needs the very reply that
+            // was just refused.
             //
             // This is NOT a rollback. The recipient may already have applied and
             // credited the transfer, so nothing is un-spent or reverted; the step
             // is simply marked as awaiting a VALID replacement artifact for the
             // same commitment, which can still finalize it.
-            match crate::storage::client_db::mark_sender_proposal_awaiting_valid_reply(
-                &proposal.relationship_key,
-                &proposal.canonical_parent,
-            ) {
-                Ok(true) => log::error!(
-                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained, \
-                     step now awaiting a valid replacement artifact"
-                ),
-                Ok(false) => log::error!(
-                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained; \
-                     proposal status unchanged (already finalized, or never submitted)"
-                ),
-                Err(e) => log::error!(
-                    "[storage.sync] §16.6 reply {short}.. REJECTED: {reason} — gate retained, \
-                     but recording the awaiting-valid-reply state FAILED: {e}"
-                ),
-            }
-            return;
+            park_awaiting_valid_reply(&proposal, &short, &reason);
+            return CountersignOutcome::Rejected(reason);
         }
         Err(e) => {
-            log::error!("[storage.sync] §16.6 reply {short}.. verification errored: {e}");
-            return;
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}.. verification errored: {e}"
+            );
+            return CountersignOutcome::Unverifiable(format!("verification errored: {e}"));
         }
     }
 
@@ -539,8 +610,9 @@ async fn finalize_from_acceptance_artifact(
     //
     // Verified. Everything this acceptance proof authorises now commits in a
     // SINGLE transaction: projection tip advance, Local EK-head promotion,
-    // Counterparty EK-head advance, proposal finalization, gate release, and
-    // the outbox moving to `gc_pending`.
+    // Counterparty EK-head advance, proposal finalization, gate release, the
+    // outbox moving to `gc_pending`, and the delta persisted as the sender's
+    // countersign_b artifact.
     //
     // The previous code finalized the proposal and deleted the gate HERE, and
     // left the tip advance and head promotion to the §5.4 ACK sweep — which
@@ -560,8 +632,19 @@ async fn finalize_from_acceptance_artifact(
                 "[storage.sync] §16.6 could not read counterparty head for {short}.. — \
                  refusing to finalize (retry from the durable outbox): {e}"
             );
-            return;
+            return CountersignOutcome::FinalizeFailed(format!("counterparty head read: {e}"));
         }
+    };
+
+    let content_digest = evidence_content_digest(ArtifactRole::CountersignB, &delta.body);
+    let countersign_artifact = SenderOutboxArtifact {
+        relationship_key: proposal.relationship_key,
+        canonical_parent: proposal.canonical_parent,
+        proposal_nonce: proposal.nonce_hash,
+        role: ArtifactRole::CountersignB,
+        submission_id: derive_artifact_submission_id(&content_digest),
+        envelope_bytes: delta.envelope_bytes.clone(),
+        content_digest,
     };
 
     match crate::storage::client_db::finalize_on_acceptance_atomically(
@@ -574,21 +657,52 @@ async fn finalize_from_acceptance_artifact(
         &proposal.projection_target,
         expected_counterparty_head.as_deref(),
         &receipt.ek_pk_b,
+        &countersign_artifact,
     ) {
         Ok(()) => {
             log::info!(
                 "[storage.sync] §16.6 FINALIZED atomically on acceptance proof: \
                  commitment={short}.. tx={} (tip advanced, both cert heads promoted, \
-                 gate released, outbox gc_pending)",
+                 gate released, outbox gc_pending, countersign_b retained)",
                 proposal.tx_id
             );
             // The retired §5.4 sweep emitted this on tip advance; the tip now
             // advances here, so the refresh belongs here.
             emit_authoritative_wallet_refresh();
+            CountersignOutcome::Finalized
         }
+        Err(e) => {
+            log::error!(
+                "[storage.sync] §16.6 atomic finalization failed for {short}.. — NOTHING \
+                 committed, retries from the durable outbox row: {e}"
+            );
+            CountersignOutcome::FinalizeFailed(e.to_string())
+        }
+    }
+}
+
+/// Park a step whose delta proved nothing: awaiting a VALID replacement
+/// artifact for the same commitment. Not a rollback — see the caller.
+fn park_awaiting_valid_reply(
+    proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
+    short: &str,
+    reason: &str,
+) {
+    match crate::storage::client_db::mark_sender_proposal_awaiting_valid_reply(
+        &proposal.relationship_key,
+        &proposal.canonical_parent,
+    ) {
+        Ok(true) => log::error!(
+            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
+             retained, step now awaiting a valid replacement artifact"
+        ),
+        Ok(false) => log::error!(
+            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
+             retained; proposal status unchanged (already finalized, or never submitted)"
+        ),
         Err(e) => log::error!(
-            "[storage.sync] §16.6 atomic finalization failed for {short}.. — NOTHING \
-             committed, retries from the durable outbox row: {e}"
+            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
+             retained, but recording the awaiting-valid-reply state FAILED: {e}"
         ),
     }
 }
@@ -1524,8 +1638,13 @@ impl AppRouterImpl {
                                 // Draining happens regardless of `entries_res` — a poll that
                                 // yields no forward transfers can still carry the reply that
                                 // releases this device's pending gate.
-                                for artifact in b0x_sdk.take_reply_artifacts() {
-                                    finalize_from_acceptance_artifact(&artifact).await;
+                                for delta in b0x_sdk.take_countersign_deltas() {
+                                    let outcome = finalize_from_countersign_delta(&delta).await;
+                                    log::info!(
+                                        "[storage.sync] ADR 0003 countersign delta {} -> {:?}",
+                                        delta.message_id,
+                                        outcome
+                                    );
                                 }
                                 // ADR 0003 evidence halves ride the same spool under their
                                 // own explicit method. Glue only: resolve the trust root,
@@ -3659,42 +3778,132 @@ mod tests {
         r
     }
 
-    /// Wrap a receipt as it travels on the wire.
-    ///
-    /// `to_full_protobuf` is mandatory here, not stylistic. `to_canonical_
-    /// protobuf` emits the commitment preimage only — fields 1-11 — so it
-    /// silently drops `ek_pk_b`, `ek_cert_b`, `sig_b` and `kyber_ct_b`. Those
-    /// bytes still decode cleanly (the commitment is unchanged, since the
-    /// commitment is computed over exactly that preimage), and the receipt then
-    /// fails verification for a missing countersignature it never lost on the
-    /// wire. An artifact built with the canonical encoder can therefore never
-    /// finalize.
-    fn artifact_for(
-        receipt: &dsm::types::receipt_types::StitchedReceiptV2,
-        envelope_commitment: [u8; 32],
-        relationship_key: [u8; 32],
-        b: [u8; 32],
-    ) -> dsm::types::proto::AcceptanceReceiptArtifact {
-        dsm::types::proto::AcceptanceReceiptArtifact {
-            receipt_bytes: receipt.to_full_protobuf().expect("receipt bytes"),
-            commitment: envelope_commitment.to_vec(),
-            relationship_key: relationship_key.to_vec(),
-            recipient_device_id: b.to_vec(),
-            canonical_child_tip: receipt.child_tip.to_vec(),
+    /// Freeze the sender's A-side evidence for `proposal` exactly as `wallet.send`
+    /// does: the A-only receipt bytes wrapped by the REAL evidence builder,
+    /// committed atomically with the proposal, outbox row, gate and EK head.
+    /// Returns the evidence content digest — what an honest delta names.
+    fn seed_frozen_send_with_evidence_a(
+        a_side: &dsm::types::receipt_types::StitchedReceiptV2,
+        proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
+        sender_b32: &str,
+        recipient_b32: &str,
+    ) -> [u8; 32] {
+        use crate::storage::client_db::{
+            commit_send_prerequisites_atomically, evidence_content_digest, ArtifactRole,
+            SenderOutboxArtifact, SenderOutboxRecord, OUTBOX_PENDING_SUBMIT,
+        };
+        use std::sync::Arc;
+
+        let a_bytes = a_side.to_full_protobuf().expect("A-side bytes");
+        let digest_a = evidence_content_digest(ArtifactRole::EvidenceA, &a_bytes);
+        let evidence_sid = crate::storage::client_db::derive_artifact_submission_id(&digest_a);
+        let transfer_sid = crate::storage::client_db::derive_submission_id(&proposal.commitment);
+
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        let sdk =
+            crate::sdk::b0x_sdk::B0xSDK::new(sender_b32.to_string(), core, vec![]).expect("B0xSDK");
+        let built = sdk
+            .build_evidence_envelope(
+                recipient_b32,
+                &crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]),
+                &transfer_sid,
+                &evidence_sid,
+                &digest_a,
+                &a_bytes,
+            )
+            .expect("real evidence envelope");
+
+        let outbox = SenderOutboxRecord {
+            relationship_key: proposal.relationship_key,
+            canonical_parent: proposal.canonical_parent,
+            proposal_nonce: proposal.nonce_hash,
+            canonical_child: proposal.canonical_child,
+            commitment: proposal.commitment,
+            projection_parent: proposal.projection_parent,
+            projection_target: proposal.projection_target,
+            routing_address: "TESTROUTINGADDRESS".to_string(),
+            submission_id: transfer_sid,
+            envelope_bytes: vec![0xC1u8; 512],
+            local_expected_prev: None,
+            is_first_ek_step: true,
+            status: OUTBOX_PENDING_SUBMIT.to_string(),
+            message_ids: None,
+            created_at: 0,
+        };
+        let evidence = SenderOutboxArtifact {
+            relationship_key: proposal.relationship_key,
+            canonical_parent: proposal.canonical_parent,
+            proposal_nonce: proposal.nonce_hash,
+            role: ArtifactRole::EvidenceA,
+            submission_id: evidence_sid,
+            envelope_bytes: built.bytes,
+            content_digest: digest_a,
+        };
+        commit_send_prerequisites_atomically(
+            proposal,
+            &outbox,
+            "GATE-658",
+            &[0xD1u8; 64],
+            &[0xD2u8; 64],
+            &[0x42u8; 32],
+            true,
+            std::slice::from_ref(&evidence),
+        )
+        .expect("seed frozen send");
+        digest_a
+    }
+
+    /// The recipient's delta for a countersigned receipt, as the sender's poll
+    /// hands it to the handler: the four B fields plus the two references.
+    /// `envelope_bytes` is what the sender persists on finalization; only the
+    /// body is decoded here, so a placeholder envelope keeps this fixture
+    /// honest about what it exercises.
+    fn delta_for(
+        receipt_with_b: &dsm::types::receipt_types::StitchedReceiptV2,
+        commitment: [u8; 32],
+        digest_a: [u8; 32],
+    ) -> crate::sdk::b0x_sdk::CountersignDelta {
+        use prost::Message;
+        let (_, b) = receipt_with_b
+            .split_countersign_b()
+            .expect("receipt carries a countersignature");
+        let body = dsm::types::proto::ReceiptCountersignB {
+            commitment: commitment.to_vec(),
+            receipt_evidence_digest_a: digest_a.to_vec(),
+            sig_b: b.sig_b,
+            ek_cert_b: b.ek_cert_b,
+            ek_pk_b: b.ek_pk_b,
+            kyber_ct_b: b.kyber_ct_b,
+        }
+        .encode_to_vec();
+        crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: "TESTDELTA000000000000000000".to_string(),
+            envelope_bytes: vec![0xEDu8; 64],
+            body,
         }
     }
 
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_poisoned_reply_parks_the_step_and_an_honest_copy_still_finalizes() {
+    struct SeededStep {
+        a: [u8; 32],
+        b: [u8; 32],
+        b_ak_pk: Vec<u8>,
+        b_ak_sk: Vec<u8>,
+        parent: [u8; 32],
+        honest: dsm::types::receipt_types::StitchedReceiptV2,
+        commitment: [u8; 32],
+        digest_a: [u8; 32],
+        rel_key: [u8; 32],
+        proposal: crate::storage::client_db::sender_proposal::SenderOnlineProposal,
+    }
+
+    /// One submitted step on the sender with its frozen A-side evidence, and
+    /// the honest countersigned receipt the recipient would hold for it.
+    fn seed_submitted_step() -> SeededStep {
         use crate::storage::client_db::sender_proposal::{
-            get_sender_proposal_by_commitment, insert_sender_proposal,
-            mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_AWAITING_VALID_REPLY,
-            PROPOSAL_FINALIZED, PROPOSAL_PROPOSED, PROPOSAL_ROLLED_BACK,
+            mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_PROPOSED,
         };
 
         trust_root_test_db();
-
         let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
         let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
 
@@ -3712,9 +3921,11 @@ mod tests {
         );
         crate::sdk::app_state::AppState::set_has_identity(true);
 
-        // The honest reply defines the commitment this step is bound to.
+        // The honest reply defines the commitment this step is bound to; its A
+        // side is what the sender authored and froze.
         let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
         let commitment = honest.compute_commitment().expect("commitment");
+        let (a_side, _) = honest.split_countersign_b().expect("split");
 
         let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
         let proposal = SenderOnlineProposal {
@@ -3739,17 +3950,63 @@ mod tests {
             status: PROPOSAL_PROPOSED.to_string(),
             created_at: 0,
         };
-        insert_sender_proposal(&proposal).expect("insert proposal");
+        let digest_a = seed_frozen_send_with_evidence_a(
+            &a_side,
+            &proposal,
+            &crate::util::text_id::encode_base32_crockford(&a),
+            &crate::util::text_id::encode_base32_crockford(&b),
+        );
         mark_sender_proposal_submitted(&rel_key, &parent, "MSG-658").expect("submit");
 
-        // ---- 1. A poisoned reply arrives, addressed at the real proposal ----
-        // Same envelope commitment (so the lookup succeeds), genuinely signed
-        // receipt, forged canonical child.
-        let poisoned_receipt = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
-        let poisoned = artifact_for(&poisoned_receipt, commitment, rel_key, b);
-        super::finalize_from_acceptance_artifact(&poisoned).await;
+        SeededStep {
+            a,
+            b,
+            b_ak_pk,
+            b_ak_sk,
+            parent,
+            honest,
+            commitment,
+            digest_a,
+            rel_key,
+            proposal,
+        }
+    }
 
-        let after_poison = get_sender_proposal_by_commitment(&commitment)
+    fn proposal_status(commitment: &[u8; 32]) -> String {
+        crate::storage::client_db::sender_proposal::get_sender_proposal_by_commitment(commitment)
+            .expect("load")
+            .expect("proposal still present")
+            .status
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_poisoned_delta_parks_the_step_and_an_honest_delta_still_finalizes() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+            PROPOSAL_ROLLED_BACK,
+        };
+        let st = seed_submitted_step();
+
+        // ---- 1. A poisoned delta arrives, addressed at the real proposal ----
+        // B material minted over a receipt with a FORGED canonical child, then
+        // carried in a delta naming the honest commitment and the honest A
+        // digest. Its ek_cert_b genuinely verifies (same h_n); its sig_b was
+        // signed over the forged commitment, so it cannot verify once overlaid
+        // onto the sender's OWN A side.
+        let poisoned_receipt = signed_b_receipt(st.a, st.b, st.parent, [0xEEu8; 32], &st.b_ak_sk);
+        let poisoned = delta_for(&poisoned_receipt, st.commitment, st.digest_a);
+        let outcome = super::finalize_from_countersign_delta(&poisoned).await;
+        match &outcome {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("sig_b"),
+                "the forgery must be refused on the countersignature, got: {reason}"
+            ),
+            other => panic!("poisoned delta must be Rejected by the verifier, got {other:?}"),
+        }
+
+        let after_poison = get_sender_proposal_by_commitment(&st.commitment)
             .expect("load")
             .expect("proposal still present");
         assert_eq!(
@@ -3768,18 +4025,18 @@ mod tests {
              addresses the same submitted step rather than a new one"
         );
 
-        // ---- 2. The honest copy for the SAME step finalizes it ----
+        // ---- 2. The honest delta for the SAME step finalizes it ----
         //
         // Pin the positive case first: if the "honest" receipt did not actually
         // verify, the finalize assertion below would be measuring the wrong
         // thing — a second rejection looks identical to a step that simply
         // never left `awaiting_valid_reply`.
         match crate::handlers::online_finalize::verify_acceptance_receipt(
-            &a,
-            &b,
-            &honest,
+            &st.a,
+            &st.b,
+            &st.honest,
             &after_poison,
-            &b_ak_pk,
+            &st.b_ak_pk,
             None,
             None,
         )
@@ -3791,27 +4048,48 @@ mod tests {
             }
         }
 
-        let good = artifact_for(&honest, commitment, rel_key, b);
-        super::finalize_from_acceptance_artifact(&good).await;
-
-        let after_honest = get_sender_proposal_by_commitment(&commitment)
-            .expect("load")
-            .expect("proposal still present");
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
         assert_eq!(
-            after_honest.status, PROPOSAL_FINALIZED,
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_FINALIZED,
             "recovery is only real if a valid replacement for the same \
              commitment still finalizes the step through the live handler"
         );
+        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
+            .expect("outbox")
+            .expect("present");
+        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
+            &st.rel_key,
+            &st.parent,
+            &st.proposal.nonce_hash,
+        )
+        .expect("artifacts");
+        assert!(
+            retained.iter().any(|a| a.role
+                == crate::storage::client_db::ArtifactRole::CountersignB
+                && a.envelope_bytes == good.envelope_bytes),
+            "the delta the sender finalized on is retained beside its evidence_a"
+        );
+
+        // A redelivered honest delta is an idempotent no-op.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::AlreadyFinalized
+        );
     }
 
-    /// Anti-vacuity: the poisoned receipt must be refused for the RIGHT reason.
-    ///
-    /// Without this, the test above would still pass if the poisoned receipt
-    /// were rejected for something incidental — an unparseable body, a missing
-    /// signature — and it would then prove nothing about a well-formed forgery.
+    /// Anti-vacuity: the poisoned B material must be refused for the RIGHT
+    /// reason. Without this, the test above would still pass if the delta were
+    /// rejected for something incidental — an unparseable body, a missing
+    /// field — and it would then prove nothing about a well-formed forgery.
     #[test]
     #[serial_test::serial]
-    fn the_poisoned_receipt_is_well_formed_and_fails_only_on_the_forged_child() {
+    fn the_poisoned_b_material_is_well_formed_and_fails_only_once_overlaid_on_the_honest_a_side() {
         trust_root_test_db();
 
         let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
@@ -3821,7 +4099,8 @@ mod tests {
 
         let poisoned = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
 
-        // Its per-step EK countersignature is genuinely valid ...
+        // Its per-step EK countersignature is genuinely valid over the receipt
+        // it was minted for ...
         crate::sdk::receipts::verify_per_step_ek_signing(
             &poisoned,
             crate::sdk::receipts::BilateralSide::B,
@@ -3831,25 +4110,146 @@ mod tests {
         )
         .expect("the poisoned receipt must carry a genuinely valid sig_b");
 
-        // ... and it survives the exact wire round-trip the handler performs,
-        // countersignature intact. Encoding with `to_canonical_protobuf` here
-        // would silently zero ek_pk_b/ek_cert_b/sig_b/kyber_ct_b and the test
-        // would then be exercising an unsigned receipt, not a forgery.
-        let bytes = poisoned.to_full_protobuf().expect("encode");
-        let decoded = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&bytes)
-            .expect("the poisoned receipt must decode");
+        // ... and its delta survives the exact wire codec the handler uses,
+        // countersignature intact.
+        let (_, poisoned_b) = poisoned.split_countersign_b().expect("split");
+        let delta = delta_for(&poisoned, [0x00u8; 32], [0x00u8; 32]);
+        let decoded = dsm::types::receipt_types::decode_receipt_countersign_b_wire(&delta.body)
+            .expect("the poisoned delta must pass the wire codec");
         assert_eq!(
-            decoded.sig_b, poisoned.sig_b,
+            dsm::types::receipt_types::CountersignB::from_wire(&decoded),
+            poisoned_b,
             "the countersignature must survive the wire round-trip"
         );
-        assert_eq!(decoded.ek_pk_b, poisoned.ek_pk_b);
-        assert_eq!(decoded.ek_cert_b, poisoned.ek_cert_b);
-        assert_eq!(decoded.kyber_ct_b, poisoned.kyber_ct_b);
 
+        // Overlaid onto the HONEST A side, the same material fails on sig_b
+        // and nothing else: ek_cert_b still verifies (same h_n), the shape is
+        // complete, only the countersignature target differs.
+        let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        let (honest_a, _) = honest.split_countersign_b().expect("split");
+        let reconstructed = honest_a
+            .with_countersign_b(poisoned_b)
+            .expect("overlay is structurally fine");
+        let err = crate::sdk::receipts::verify_per_step_ek_signing(
+            &reconstructed,
+            crate::sdk::receipts::BilateralSide::B,
+            &b_ak_pk,
+            &reconstructed.parent_tip,
+            &reconstructed.compute_commitment().expect("commitment"),
+        )
+        .expect_err("poisoned B material over the honest A side must not verify");
+        assert!(
+            format!("{err}").to_ascii_lowercase().contains("sig_b"),
+            "{err}"
+        );
         assert_ne!(
             poisoned.child_tip, child,
             "the forgery under test is the canonical child, nothing else"
         );
+    }
+
+    /// The delta's A-digest is advisory, but a delta naming A bytes this sender
+    /// never retained is refused BEFORE any signature work and parks the step.
+    /// Positive control in the same fixture: the true digest finalizes.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_delta_whose_digest_does_not_name_the_retained_evidence_is_rejected() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        let st = seed_submitted_step();
+
+        let mut wrong_digest = st.digest_a;
+        wrong_digest[0] ^= 0x01;
+        let mismatched = delta_for(&st.honest, st.commitment, wrong_digest);
+        match super::finalize_from_countersign_delta(&mismatched).await {
+            CountersignOutcome::DigestMismatch(reason) => {
+                assert!(reason.contains("this sender retained"), "{reason}")
+            }
+            other => panic!("expected DigestMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// A whole countersigned receipt on the countersign method is refused at
+    /// the wire ("unknown field 7") and changes nothing; the same fixture then
+    /// finalizes on the honest delta, so "nothing changed" is not vacuous.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED};
+        let st = seed_submitted_step();
+
+        let full_receipt = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: "TESTFULL0000000000000000000".to_string(),
+            envelope_bytes: vec![0xEDu8; 64],
+            body: st.honest.to_full_protobuf().expect("full receipt"),
+        };
+        match super::finalize_from_countersign_delta(&full_receipt).await {
+            CountersignOutcome::WireRejected(reason) => {
+                assert!(reason.contains("unknown field 7"), "{reason}")
+            }
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
+
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// A step with no frozen evidence_a cannot finalize under any delta — that
+    /// is a terminal invariant violation, reported as such, never a retry.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_delta_for_a_step_with_no_retained_evidence_is_a_terminal_invariant_violation() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::PROPOSAL_SUBMITTED;
+        let st = seed_submitted_step();
+
+        // Pin the precondition, then remove the row the design depends on.
+        assert!(
+            crate::handlers::online_finalize::load_retained_evidence_a(&st.proposal)
+                .expect("load")
+                .is_some(),
+            "fixture must start WITH the evidence row"
+        );
+        {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "DELETE FROM sender_outbox_artifacts WHERE role = 'evidence_a'",
+                [],
+            )
+            .expect("delete evidence_a");
+        }
+        assert!(
+            crate::handlers::online_finalize::load_retained_evidence_a(&st.proposal)
+                .expect("load")
+                .is_none()
+        );
+
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::NoRetainedEvidence
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
     }
 
     // =====================================================================
