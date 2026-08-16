@@ -22,6 +22,8 @@ pub use app_router_impl::AppRouterImpl;
 pub use bilateral_impl::BiImpl;
 pub use core_bridge_adapters::{install_app_router_adapter, is_app_router_installed};
 pub mod anchor_routes;
+#[cfg(test)]
+mod bilateral_finality_tests;
 pub mod bilateral_routes;
 pub mod bitcoin_helpers;
 pub mod bitcoin_invoke_routes;
