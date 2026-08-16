@@ -3384,6 +3384,15 @@ message ReceiptCountersignB {
   bytes ek_cert_b                 = 4 [(dsm_max_len)=65535];
   bytes ek_pk_b                   = 5 [(dsm_max_len)=65535];
   bytes kyber_ct_b                = 6 [(dsm_max_len)=2048];
+  // The recipient's own canonical relationship pair for the applied step: its
+  // local lineage head before this apply (parent) and after it (child) — the
+  // exact parent the recipient will sign under when IT next originates.
+  // Authenticated: `sig_b` is computed over
+  // BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent_tip || b_child_tip),
+  // so a substituted pair fails the sender's countersignature check. The
+  // sender CASes its counterparty-canonical-head record from parent to child.
+  bytes b_parent_tip              = 7 [(dsm_fixed_len)=32];
+  bytes b_child_tip               = 8 [(dsm_fixed_len)=32];
 }
 
 message OnlineTransferSmartRequest {

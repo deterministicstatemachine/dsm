@@ -1267,18 +1267,22 @@ impl B0xSDK {
     /// the same inputs are byte-identical (the deterministic reply id relies on
     /// that: the node keeps the first body per message id).
     ///
-    /// The delta carries the four B-side fields plus two references (the
+    /// The delta carries the four B-side fields, two references (the
     /// commitment the sender looks its proposal up by, and the digest of the
-    /// exact A-side bytes B countersigned). Nothing A-side rides back; the
-    /// sender overlays this onto the receipt it authored and froze. Refuses at
-    /// construction if the encoded envelope would not fit under the node cap —
-    /// the same guard `build_evidence_envelope` applies.
+    /// exact A-side bytes B countersigned) and the recipient's canonical pair
+    /// `b_pair` for the applied step — read from the DURABLE journal/reply row
+    /// by the caller, never from current state, because it is the pair `sig_b`
+    /// was computed over. Nothing A-side rides back; the sender overlays this
+    /// onto the receipt it authored and froze. Refuses at construction if the
+    /// encoded envelope would not fit under the node cap — the same guard
+    /// `build_evidence_envelope` applies.
     pub(crate) fn build_countersign_reply_envelope(
         &self,
         local_genesis: &[u8; 32],
         sender_projection_tip: &[u8; 32],
         expected_commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
     ) -> Result<BuiltEnvelope, DsmError> {
         use prost::Message as _;
 
@@ -1323,6 +1327,8 @@ impl B0xSDK {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: b_pair.0.to_vec(),
+            b_child_tip: b_pair.1.to_vec(),
         }
         .encode_to_vec();
         // Content address of the delta itself, role-separated (op_id, as the
@@ -1431,7 +1437,10 @@ impl B0xSDK {
     ///
     /// The recipient keeps the whole countersigned receipt locally; ONLY the
     /// delta goes on the wire (`build_countersign_reply_envelope`). Delivery
-    /// success is at least one endpoint answering 204.
+    /// success is the SAME quorum rule as frozen sends (`delivered >= K`): a
+    /// lost delta strands both sides — the sender's gate and, under the
+    /// finality barrier, the recipient's own next origination — so one replica
+    /// taking it is not delivery.
     pub async fn submit_acceptance_reply(
         &mut self,
         sender_genesis: &[u8; 32],
@@ -1439,6 +1448,7 @@ impl B0xSDK {
         sender_projection_tip: &[u8; 32],
         commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
     ) -> Result<String, DsmError> {
         let routing_key =
             Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
@@ -1448,12 +1458,13 @@ impl B0xSDK {
             sender_projection_tip,
             commitment,
             full_countersigned_receipt_bytes,
+            b_pair,
         )?;
         self.post_reply_envelope(&routing_key, &built).await
     }
 
-    /// POST an already-built reply envelope to every endpoint; success is >= 1
-    /// endpoint answering 204.
+    /// POST an already-built reply envelope to every endpoint; success is
+    /// `quorum_k` (capped at the fleet size) endpoints answering 204.
     async fn post_reply_envelope(
         &mut self,
         routing_key: &str,
@@ -1463,6 +1474,7 @@ impl B0xSDK {
         let message_id_b32 = built.message_id_b32.clone();
         let mut last_err: Option<String> = None;
         let mut delivered = 0usize;
+        let quorum = self.quorum_k.min(self.storage_node_endpoints.len()).max(1);
 
         for endpoint in self.storage_node_endpoints.clone() {
             let token = match self.ensure_token_for_endpoint(&endpoint).await {
@@ -1503,10 +1515,10 @@ impl B0xSDK {
             }
         }
 
-        if delivered == 0 {
+        if delivered < quorum {
             return Err(DsmError::network(
                 format!(
-                    "§16.6 reply delivery failed on all endpoints: {}",
+                    "§16.6 reply delivery below quorum: {delivered}/{quorum} endpoints took it: {}",
                     last_err.unwrap_or_else(|| "no endpoints configured".into())
                 ),
                 None::<std::io::Error>,
@@ -4923,6 +4935,10 @@ mod tests {
         B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK")
     }
 
+    /// The recipient's canonical pair the reply builder carries (delta-only
+    /// metadata; the receipt bytes are untouched by it).
+    const TEST_B_PAIR: ([u8; 32], [u8; 32]) = ([0x71u8; 32], [0x72u8; 32]);
+
     fn commitment_of(full_bytes: &[u8]) -> [u8; 32] {
         dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(full_bytes)
             .expect("decode")
@@ -4949,6 +4965,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&full),
                 &full,
+                TEST_B_PAIR,
             )
             .expect("real delta builder");
         report_budget("ADR0003 B-side countersign", built.bytes.len());
@@ -5010,6 +5027,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&full),
                 &full,
+                TEST_B_PAIR,
             )
             .expect("build");
         let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
@@ -5035,10 +5053,10 @@ mod tests {
         let sdk = test_reply_sdk();
         let c = commitment_of(&full);
         let one = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("one");
         let two = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("two");
         assert_eq!(one.bytes, two.bytes);
         assert_eq!(one.message_id_b32, two.message_id_b32);
@@ -5058,6 +5076,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&a_only),
                 &a_only,
+                TEST_B_PAIR,
             )
             .expect_err("A-only");
         assert!(
@@ -5068,7 +5087,13 @@ mod tests {
 
         // The stored receipt is not the one this reply is for.
         let err = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &[0x99; 32], &full)
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &[0x99; 32],
+                &full,
+                TEST_B_PAIR,
+            )
             .expect_err("wrong commitment");
         assert!(
             err.to_string().contains("commitment != reply commitment"),
@@ -5090,12 +5115,18 @@ mod tests {
             .to_full_protobuf()
             .expect("encode");
         let err = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &commitment_of(&fat), &fat)
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&fat),
+                &fat,
+                TEST_B_PAIR,
+            )
             .expect_err("over cap");
         assert!(err.to_string().contains("envelope cap"), "{err}");
 
         // Positive control in the same shape.
-        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("the production shape builds");
     }
 

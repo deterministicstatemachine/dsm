@@ -45,6 +45,13 @@ pub struct CanonicalApplyRecord {
     /// The EXECUTING device's (B's) authoritative post-state root
     /// (`advance_outcome.child_r_a`).
     pub applied_child_root_b: [u8; 32],
+    /// The EXECUTING device's (B's) canonical relationship pair for this apply
+    /// (`advance_outcome.relationship_pair()`): its local lineage head before
+    /// (`applied_parent_tip_b`) and after (`applied_child_tip_b`) the step. The
+    /// child is the exact parent B will sign under when it next originates on
+    /// this relationship; it is what B's countersignature authenticates to A.
+    pub applied_parent_tip_b: [u8; 32],
+    pub applied_child_tip_b: [u8; 32],
 }
 
 impl CanonicalApplyRecord {
@@ -72,6 +79,8 @@ impl CanonicalApplyRecord {
         h.update(&id);
         h.update(&self.applied_parent_root_b);
         h.update(&self.applied_child_root_b);
+        h.update(&self.applied_parent_tip_b);
+        h.update(&self.applied_child_tip_b);
         let mut out = [0u8; 32];
         out.copy_from_slice(&h.finalize().as_bytes()[..32]);
         out
@@ -158,8 +167,9 @@ pub fn insert_canonical_apply_identity_with_conn(
         "INSERT INTO canonical_apply_identity (
             canonical_apply_id, relationship_key, parent_tip, child_tip,
             precommit_digest, operation_digest, sender_device, recipient_device,
-            nonce_hash, applied_parent_root_b, applied_child_root_b, record_hash, created_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            nonce_hash, applied_parent_root_b, applied_child_root_b,
+            applied_parent_tip_b, applied_child_tip_b, record_hash, created_at
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             id.as_slice(),
             rec.relationship_key.as_slice(),
@@ -172,6 +182,8 @@ pub fn insert_canonical_apply_identity_with_conn(
             rec.nonce_hash.as_slice(),
             rec.applied_parent_root_b.as_slice(),
             rec.applied_child_root_b.as_slice(),
+            rec.applied_parent_tip_b.as_slice(),
+            rec.applied_child_tip_b.as_slice(),
             record_hash.as_slice(),
             tick() as i64,
         ],
@@ -214,18 +226,7 @@ fn ct_eq32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 fn hydrate_verified(
     stored_id: Vec<u8>,
     stored_record_hash: Vec<u8>,
-    fields: (
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-    ),
+    fields: RecordFields,
 ) -> Result<CanonicalApplyRecord> {
     let rec = CanonicalApplyRecord {
         relationship_key: arr32(fields.0, "relationship_key")?,
@@ -238,6 +239,8 @@ fn hydrate_verified(
         nonce_hash: arr32(fields.7, "nonce_hash")?,
         applied_parent_root_b: arr32(fields.8, "applied_parent_root_b")?,
         applied_child_root_b: arr32(fields.9, "applied_child_root_b")?,
+        applied_parent_tip_b: arr32(fields.10, "applied_parent_tip_b")?,
+        applied_child_tip_b: arr32(fields.11, "applied_child_tip_b")?,
     };
     let stored_id: [u8; 32] = arr32(stored_id, "canonical_apply_id")?;
     let stored_record_hash: [u8; 32] = arr32(stored_record_hash, "record_hash")?;
@@ -256,27 +259,30 @@ fn hydrate_verified(
 
 const RECORD_COLS: &str = "canonical_apply_id, record_hash, relationship_key, parent_tip, \
      child_tip, precommit_digest, operation_digest, sender_device, recipient_device, \
-     nonce_hash, applied_parent_root_b, applied_child_root_b";
+     nonce_hash, applied_parent_root_b, applied_child_root_b, \
+     applied_parent_tip_b, applied_child_tip_b";
 
-#[allow(clippy::type_complexity)]
-fn row_to_parts(
-    row: &rusqlite::Row,
-) -> rusqlite::Result<(
+/// The raw stored columns of one record, in `RECORD_COLS` order after the two
+/// hashes: relationship_key, parent_tip, child_tip, precommit_digest,
+/// operation_digest, sender_device, recipient_device, nonce_hash,
+/// applied_parent_root_b, applied_child_root_b, applied_parent_tip_b,
+/// applied_child_tip_b.
+type RecordFields = (
     Vec<u8>,
     Vec<u8>,
-    (
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-        Vec<u8>,
-    ),
-)> {
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+);
+
+fn row_to_parts(row: &rusqlite::Row) -> rusqlite::Result<(Vec<u8>, Vec<u8>, RecordFields)> {
     Ok((
         row.get(0)?,
         row.get(1)?,
@@ -291,6 +297,8 @@ fn row_to_parts(
             row.get(9)?,
             row.get(10)?,
             row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
         ),
     ))
 }
@@ -467,6 +475,8 @@ mod tests {
             nonce_hash: [nonce; 32],
             applied_parent_root_b: [0x08u8; 32],
             applied_child_root_b: [0x09u8; 32],
+            applied_parent_tip_b: [0x0Bu8; 32],
+            applied_child_tip_b: [0x0Cu8; 32],
         }
     }
 

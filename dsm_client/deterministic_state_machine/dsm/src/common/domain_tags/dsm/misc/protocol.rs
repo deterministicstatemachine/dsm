@@ -40,6 +40,12 @@ pub const TAG_DSM_RECEIPT_EVIDENCE_A: TaggedHashDomain<'static> =
 /// Content address of a B-side countersign delta artifact (ADR 0003).
 pub const TAG_DSM_RECEIPT_EVIDENCE_B: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-evidence/B/v1");
+/// The online recipient's B-side receipt response target: the standard
+/// session-bound target extended with the recipient's own canonical
+/// relationship pair (`b_parent_tip ‖ b_child_tip`) for the applied step, so
+/// `sig_b` authenticates the pair the sender pins as the peer's head.
+pub const TAG_DSM_RECEIPT_B_CANONICAL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/receipt-b-canonical/v1");
 pub const TAG_DSM_SILICON_FP_V4: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/silicon_fp/v4");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");

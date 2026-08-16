@@ -525,8 +525,8 @@ async fn finalize_from_countersign_delta(
     };
 
     // Reconstruct the countersigned receipt from OUR A bytes + the delta.
-    let receipt = match bind_countersign_delta(&retained, &wire) {
-        Ok(DeltaBinding::Bound(r)) => *r,
+    let bound = match bind_countersign_delta(&retained, &wire) {
+        Ok(DeltaBinding::Bound(b)) => *b,
         Ok(DeltaBinding::Rejected { reason }) => {
             park_awaiting_valid_reply(&proposal, &short, &reason);
             return CountersignOutcome::DigestMismatch(reason);
@@ -576,14 +576,16 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    let receipt = &bound.receipt;
     match crate::handlers::online_finalize::verify_acceptance_receipt(
         &self_device_id,
         &proposal.counterparty_device_id,
-        &receipt,
+        receipt,
         &proposal,
         &recipient_ak_pk,
         None,
         None,
+        bound.b_pair(),
     ) {
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
@@ -790,6 +792,7 @@ async fn deliver_pending_acceptance_replies(
                 &reply.projection_parent_tip,
                 &reply.commitment,
                 &reply.receipt_bytes,
+                (reply.applied_parent_tip_b, reply.applied_child_tip_b),
             )
             .await
         {
@@ -1187,35 +1190,55 @@ impl AppRouterImpl {
                         )
                     };
 
-                    // PREPARE — BEFORE apply, idempotent, never re-signs.
-                    rr::prepare_bside_acceptance_receipt_locked(
-                        rel_key,
-                        signed_parent,
-                        (projection_parent, projection_target),
-                        || {
-                            rr::generate_b_artifacts_from_inbound(
-                                &v.receipt,
-                                &signed_sigma,
-                                &sender_kyber_pk,
-                                &ak_pk,
-                                &ak_sk,
-                                &wrap_key,
-                            )
-                        },
-                    )
-                    .map_err(|e| format!("prepare failed for {key_for_apply}: {e}"))?;
-
-                    // APPLY — the one production canonical apply.
+                    // APPLY — the one production canonical apply, STAGED: the
+                    // B artifacts are generated in the pre-write window from the
+                    // exact AdvanceOutcome (its relationship pair is what sig_b
+                    // authenticates) and the journal is inserted INSIDE the apply
+                    // transaction with the nonce and the canonical record.
                     let tx_id =
                         crate::types::identifiers::TransactionId::new(key_for_apply.clone());
+                    let receipt = &v.receipt;
                     core_sdk
-                        .apply_incoming_transfer_full_state(
+                        .apply_incoming_transfer_staged(
                             v.signed_op.clone(),
                             &tx_id,
                             &sender_b32_for_apply,
                             &v.canonical_operation_bytes,
                             signed_parent,
                             signed_child,
+                            |_outcome, b_pair| {
+                                rr::generate_b_artifacts_from_inbound(
+                                    receipt,
+                                    &signed_sigma,
+                                    &sender_kyber_pk,
+                                    &ak_pk,
+                                    &ak_sk,
+                                    &wrap_key,
+                                    b_pair,
+                                )
+                                .map_err(|e| {
+                                    dsm::types::error::DsmError::invalid_operation(format!(
+                                        "B-side acceptance artifacts: {e}"
+                                    ))
+                                })
+                            },
+                            |tx, _outcome, artifacts| {
+                                crate::storage::client_db::insert_prepared_acceptance_journal_with_conn(
+                                    tx,
+                                    &rr::journal_row(
+                                        artifacts,
+                                        rel_key,
+                                        signed_parent,
+                                        (projection_parent, projection_target),
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    dsm::types::error::DsmError::internal(
+                                        format!("in-tx acceptance journal insert failed: {e}"),
+                                        None::<std::convert::Infallible>,
+                                    )
+                                })
+                            },
                         )
                         .map_err(|e| format!("apply failed for {key_for_apply}: {e}"))
                 });
@@ -2815,6 +2838,10 @@ mod tests {
     /// Ordering matters: everything the commitment covers is set BEFORE the
     /// commitment is computed, and `sig_b` — which signs a target derived from
     /// that commitment — is attached last.
+    /// The recipient's canonical pair every fixture in this module signs
+    /// under (B-canonical target) and carries in its delta.
+    const TEST_B_PAIR: ([u8; 32], [u8; 32]) = ([0x71u8; 32], [0x72u8; 32]);
+
     fn signed_b_receipt(
         a: [u8; 32],
         b: [u8; 32],
@@ -2822,7 +2849,7 @@ mod tests {
         child: [u8; 32],
         b_ak_sk: &[u8],
     ) -> dsm::types::receipt_types::StitchedReceiptV2 {
-        use crate::sdk::receipts::compute_receipt_challenge_response_target;
+        use crate::sdk::receipts::compute_receipt_b_canonical_target;
         use dsm::crypto::ephemeral_key::sign_ek_cert;
         use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
 
@@ -2847,7 +2874,13 @@ mod tests {
         r.ek_cert_b = sign_ek_cert(b_ak_sk, &ek_pk_b, &parent).expect("ek_cert_b");
 
         let commitment = r.compute_commitment().expect("commitment");
-        let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+        // Online B side: sig_b authenticates the recipient's canonical pair.
+        let target = compute_receipt_b_canonical_target(
+            &commitment,
+            &commitment,
+            &TEST_B_PAIR.0,
+            &TEST_B_PAIR.1,
+        );
         r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
         r
     }
@@ -2948,6 +2981,8 @@ mod tests {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: TEST_B_PAIR.0.to_vec(),
+            b_child_tip: TEST_B_PAIR.1.to_vec(),
         }
         .encode_to_vec();
         crate::sdk::b0x_sdk::CountersignDelta {
@@ -3120,6 +3155,7 @@ mod tests {
             &st.b_ak_pk,
             None,
             None,
+            TEST_B_PAIR,
         )
         .expect("verification must not error")
         {
@@ -3181,13 +3217,19 @@ mod tests {
         let poisoned = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
 
         // Its per-step EK countersignature is genuinely valid over the receipt
-        // it was minted for ...
-        crate::sdk::receipts::verify_per_step_ek_signing(
+        // (and pair) it was minted for ...
+        let poisoned_commitment = poisoned.compute_commitment().expect("commitment");
+        crate::sdk::receipts::verify_per_step_ek_signing_target(
             &poisoned,
             crate::sdk::receipts::BilateralSide::B,
             &b_ak_pk,
             &poisoned.parent_tip,
-            &poisoned.compute_commitment().expect("commitment"),
+            &crate::sdk::receipts::compute_receipt_b_canonical_target(
+                &poisoned_commitment,
+                &poisoned_commitment,
+                &TEST_B_PAIR.0,
+                &TEST_B_PAIR.1,
+            ),
         )
         .expect("the poisoned receipt must carry a genuinely valid sig_b");
 
@@ -3263,9 +3305,73 @@ mod tests {
         assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
     }
 
+    /// R5 — the recipient's canonical pair is covered by `sig_b`. A delta whose
+    /// B material is genuine but whose `b_parent_tip` or `b_child_tip` was
+    /// substituted (a middlebox, or a recipient lying about its lineage) fails
+    /// the countersignature check and finalizes NOTHING; the untouched delta
+    /// then finalizes the same step. Mutation M2 (drop the pair from the
+    /// target) turns this red: the flipped deltas would verify.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn r5_a_substituted_recipient_pair_fails_sig_b_and_finalizes_nothing() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        use prost::Message;
+        let st = seed_submitted_step();
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+
+        for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
+            let mut body =
+                dsm::types::proto::ReceiptCountersignB::decode(&*good.body).expect("delta");
+            if flip == 0 {
+                body.b_parent_tip[0] ^= 0x01;
+            } else {
+                body.b_child_tip[0] ^= 0x01;
+            }
+            let flipped = crate::sdk::b0x_sdk::CountersignDelta {
+                body: body.encode_to_vec(),
+                ..good.clone()
+            };
+            match super::finalize_from_countersign_delta(&flipped).await {
+                CountersignOutcome::Rejected(reason) => assert!(
+                    reason.contains("sig_b"),
+                    "{label}: a substituted pair must fail on the countersignature, got: {reason}"
+                ),
+                other => panic!("{label}: expected Rejected on sig_b, got {other:?}"),
+            }
+            assert_eq!(
+                proposal_status(&st.commitment),
+                PROPOSAL_AWAITING_VALID_REPLY,
+                "{label}: parked, not finalized"
+            );
+            assert!(
+                crate::storage::client_db::load_cert_chain_head_pubkey(
+                    &st.rel_key,
+                    crate::storage::client_db::CertChainSide::Counterparty,
+                )
+                .expect("head")
+                .is_none(),
+                "{label}: no head advanced"
+            );
+        }
+
+        // Positive control: the untouched delta finalizes the same step.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
     /// A whole countersigned receipt on the countersign method is refused at
-    /// the wire ("unknown field 7") and changes nothing; the same fixture then
-    /// finalizes on the honest delta, so "nothing changed" is not vacuous.
+    /// the wire and changes nothing; the same fixture then finalizes on the
+    /// honest delta, so "nothing changed" is not vacuous. (Which tag trips
+    /// first depends on the receipt's shape — this thin fixture carries no
+    /// proofs, so its first tag past the delta's 8 is `sig_a`'s 13; the
+    /// production-shaped receipt fails on tag 8's width. Both are refusals
+    /// of the same wire discriminator.)
     #[tokio::test]
     #[serial_test::serial]
     async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
@@ -3280,7 +3386,10 @@ mod tests {
         };
         match super::finalize_from_countersign_delta(&full_receipt).await {
             CountersignOutcome::WireRejected(reason) => {
-                assert!(reason.contains("unknown field 7"), "{reason}")
+                assert!(
+                    reason.contains("countersign wire: unknown field 13"),
+                    "{reason}"
+                )
             }
             other => panic!("expected WireRejected, got {other:?}"),
         }
@@ -3322,6 +3431,7 @@ mod tests {
                 &st.proposal.projection_parent,
                 &st.commitment,
                 &full_bytes,
+                TEST_B_PAIR,
             )
             .expect("real delta");
         assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
@@ -3452,6 +3562,8 @@ mod tests {
             receipt_bytes: full_bytes.clone(),
             projection_parent_tip: projection_parent,
             projection_target_tip: [0xBBu8; 32],
+            applied_parent_tip_b: TEST_B_PAIR.0,
+            applied_child_tip_b: TEST_B_PAIR.1,
             status: "prepared".to_string(),
             created_at: 0,
         };
@@ -3594,7 +3706,9 @@ mod tests {
             ..recorded.clone()
         };
         match super::finalize_from_countersign_delta(&m2).await {
-            CountersignOutcome::WireRejected(r) => assert!(r.contains("unknown field 7"), "{r}"),
+            CountersignOutcome::WireRejected(r) => {
+                assert!(r.contains("countersign wire: unknown field 13"), "{r}")
+            }
             other => panic!("expected WireRejected, got {other:?}"),
         }
 

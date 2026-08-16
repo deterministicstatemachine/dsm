@@ -385,6 +385,8 @@ mod tests {
                     nonce_hash: [0x08; 32],
                     applied_parent_root_b: [0x09; 32],
                     applied_child_root_b: [0x0A; 32],
+                    applied_parent_tip_b: [0x0Bu8; 32],
+                    applied_child_tip_b: [0x0Cu8; 32],
                 },
             })
         })
@@ -425,6 +427,8 @@ mod tests {
                 nonce_hash: [0x08; 32],
                 applied_parent_root_b: [0x09; 32],
                 applied_child_root_b: [0x0A; 32],
+                applied_parent_tip_b: [0x0Bu8; 32],
+                applied_child_tip_b: [0x0Cu8; 32],
             },
         }
     }

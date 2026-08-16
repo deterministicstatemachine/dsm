@@ -27,7 +27,9 @@
 //! relationship id; the relationship is identified by `compute_smt_key(devid_a,
 //! devid_b)` and matched to the pending gate by counterparty device id.
 
-use crate::sdk::receipts::{verify_per_step_ek_signing, BilateralSide};
+use crate::sdk::receipts::{
+    compute_receipt_b_canonical_target, verify_per_step_ek_signing_target, BilateralSide,
+};
 use crate::storage::client_db::sender_proposal::SenderOnlineProposal;
 use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 use anyhow::{anyhow, Result};
@@ -62,7 +64,11 @@ pub enum ReceiptVerifyOutcome {
 ///     until proposal storage lands — a `Some` mismatch is a hard reject);
 ///  4. B-side per-step EK: `ek_cert_b` chains `ek_pk_b` back to the sender's
 ///     stored Counterparty (recipient) cert head over `h_n` (or `recipient_ak_pk`
-///     at relationship genesis), then `sig_b` verifies under `ek_pk_b`;
+///     at relationship genesis), then `sig_b` verifies under `ek_pk_b` over the
+///     B-CANONICAL target — the session-bound commitment target extended with
+///     `b_pair`, the recipient's canonical relationship pair as carried in the
+///     delta. A pair the recipient did not sign fails here, so the pair the
+///     sender goes on to pin as the peer's head is authenticated;
 ///  5. Kyber consistency: `ek_pk_b` present ⇒ `kyber_ct_b` present.
 ///
 /// `proposal` is the sender's ONE persisted proposal for this canonical step —
@@ -75,6 +81,7 @@ pub enum ReceiptVerifyOutcome {
 ///
 /// This function does NOT mutate any state. A validly-signed receipt naming a
 /// different transition is `Rejected`.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_acceptance_receipt(
     self_device_id: &[u8; 32],
     counterparty_device_id: &[u8; 32],
@@ -83,6 +90,7 @@ pub fn verify_acceptance_receipt(
     recipient_ak_pk: &[u8],
     expected_parent_root: Option<&[u8; 32]>,
     expected_child_root: Option<&[u8; 32]>,
+    b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<ReceiptVerifyOutcome> {
     // ---- 1-2. Structural binding: the receipt must name THIS exact transition ----
     //
@@ -152,12 +160,16 @@ pub fn verify_acceptance_receipt(
         .compute_commitment()
         .map_err(|e| anyhow!("receipt commitment failed: {e}"))?;
 
-    if let Err(e) = verify_per_step_ek_signing(
+    // Online session binding is the commitment; the B-canonical target extends
+    // it with the recipient's pair from the delta.
+    let b_target =
+        compute_receipt_b_canonical_target(&commitment, &commitment, &b_pair.0, &b_pair.1);
+    if let Err(e) = verify_per_step_ek_signing_target(
         receipt,
         BilateralSide::B,
         &expected_prev_pk_b,
         &receipt.parent_tip,
-        &commitment,
+        &b_target,
     ) {
         return Ok(reject(&format!(
             "recipient per-step EK countersignature (sig_b) failed verification: {e}"
@@ -237,11 +249,26 @@ pub fn load_retained_evidence_a(
     }))
 }
 
+/// The reconstructed countersigned receipt plus the delta-only metadata the
+/// verifier needs: the recipient's canonical pair, authenticated by `sig_b`.
+#[derive(Debug, Clone)]
+pub struct BoundCountersignDelta {
+    pub receipt: StitchedReceiptV2,
+    pub b_parent_tip: [u8; 32],
+    pub b_child_tip: [u8; 32],
+}
+
+impl BoundCountersignDelta {
+    pub fn b_pair(&self) -> ([u8; 32], [u8; 32]) {
+        (self.b_parent_tip, self.b_child_tip)
+    }
+}
+
 /// Result of overlaying a delta onto the retained A side.
 #[derive(Debug)]
 pub enum DeltaBinding {
-    /// The reconstructed countersigned receipt, ready for the verifier.
-    Bound(Box<StitchedReceiptV2>),
+    /// The reconstructed countersigned receipt (+ pair), ready for the verifier.
+    Bound(Box<BoundCountersignDelta>),
     /// The delta names A bytes other than the ones this sender retained. The
     /// step is parked exactly like a verifier rejection: this artifact proved
     /// nothing, and an honest one for the same commitment can still arrive.
@@ -283,7 +310,23 @@ pub fn bind_countersign_delta(
     let full = a_side
         .with_countersign_b(CountersignB::from_wire(delta))
         .map_err(|e| anyhow!("retained evidence_a cannot take a countersign overlay: {e}"))?;
-    Ok(DeltaBinding::Bound(Box::new(full)))
+    // The strict wire decoder already required both tips at exactly 32 bytes;
+    // this conversion is the type boundary, not a second validation.
+    let b_parent_tip: [u8; 32] = delta
+        .b_parent_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("delta b_parent_tip is not 32 bytes"))?;
+    let b_child_tip: [u8; 32] = delta
+        .b_child_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("delta b_child_tip is not 32 bytes"))?;
+    Ok(DeltaBinding::Bound(Box::new(BoundCountersignDelta {
+        receipt: full,
+        b_parent_tip,
+        b_child_tip,
+    })))
 }
 
 #[cfg(test)]
@@ -352,7 +395,17 @@ mod tests {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
         let receipt = base_receipt([0x99u8; 32], b, parent, child);
         let g = proposal(b, parent, child);
-        let out = verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], None, None).unwrap();
+        let out = verify_acceptance_receipt(
+            &a,
+            &b,
+            &receipt,
+            &g,
+            &[0u8; 32],
+            None,
+            None,
+            ([0u8; 32], [0u8; 32]),
+        )
+        .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -362,12 +415,32 @@ mod tests {
         let g = proposal(b, parent, child);
         let r1 = base_receipt(a, b, [0xEEu8; 32], child);
         assert!(matches!(
-            verify_acceptance_receipt(&a, &b, &r1, &g, &[0u8; 32], None, None).unwrap(),
+            verify_acceptance_receipt(
+                &a,
+                &b,
+                &r1,
+                &g,
+                &[0u8; 32],
+                None,
+                None,
+                ([0u8; 32], [0u8; 32])
+            )
+            .unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
         let r2 = base_receipt(a, b, parent, [0xEEu8; 32]);
         assert!(matches!(
-            verify_acceptance_receipt(&a, &b, &r2, &g, &[0u8; 32], None, None).unwrap(),
+            verify_acceptance_receipt(
+                &a,
+                &b,
+                &r2,
+                &g,
+                &[0u8; 32],
+                None,
+                None,
+                ([0u8; 32], [0u8; 32])
+            )
+            .unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
         ));
     }
@@ -387,6 +460,7 @@ mod tests {
                 &[0u8; 32],
                 Some(&expected_parent_root),
                 None,
+                ([0u8; 32], [0u8; 32]),
             )
             .unwrap(),
             ReceiptVerifyOutcome::Rejected { .. }
@@ -414,7 +488,18 @@ mod tests {
         // Kyber gate is reachable with a stripped receipt.
         let commitment = receipt.compute_commitment().unwrap();
         let g = proposal_with_commitment(b, parent, child, commitment);
-        match verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], None, None).unwrap() {
+        match verify_acceptance_receipt(
+            &a,
+            &b,
+            &receipt,
+            &g,
+            &[0x55u8; 32],
+            None,
+            None,
+            ([0u8; 32], [0u8; 32]),
+        )
+        .unwrap()
+        {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
                     reason.contains("kyber_ct_b missing"),
@@ -434,8 +519,17 @@ mod tests {
         let mut receipt = base_receipt(a, b, parent, child);
         receipt.sig_b = vec![0xADu8; 64]; // present but no ek_pk_b/ek_cert_b
         let g = proposal(b, parent, child);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], None, None).unwrap();
+        let out = verify_acceptance_receipt(
+            &a,
+            &b,
+            &receipt,
+            &g,
+            &[0x55u8; 32],
+            None,
+            None,
+            ([0u8; 32], [0u8; 32]),
+        )
+        .unwrap();
         assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
     }
 
@@ -462,8 +556,17 @@ mod tests {
         assert_ne!(p.projection_parent, p.canonical_parent);
         assert_ne!(p.projection_target, p.canonical_child);
 
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], None, None).unwrap();
+        let out = verify_acceptance_receipt(
+            &a,
+            &b,
+            &receipt,
+            &p,
+            &[0x55u8; 32],
+            None,
+            None,
+            ([0u8; 32], [0u8; 32]),
+        )
+        .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(
@@ -486,8 +589,17 @@ mod tests {
         let receipt = base_receipt(a, b, parent, [0xEEu8; 32]);
         let commitment = receipt.compute_commitment().expect("commitment");
         let p = proposal_with_commitment(b, parent, child, commitment);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], None, None).unwrap();
+        let out = verify_acceptance_receipt(
+            &a,
+            &b,
+            &receipt,
+            &p,
+            &[0x55u8; 32],
+            None,
+            None,
+            ([0u8; 32], [0u8; 32]),
+        )
+        .unwrap();
         match out {
             ReceiptVerifyOutcome::Rejected { reason } => {
                 assert!(reason.contains("child_tip"), "unexpected reason: {reason}");
