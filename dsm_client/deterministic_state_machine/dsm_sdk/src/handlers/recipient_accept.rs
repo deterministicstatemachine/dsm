@@ -48,6 +48,10 @@ pub struct VerifiedTransfer {
     /// The ONLY trusted operation. Sourced from `decode_and_bind_signed`, never
     /// from the reconstructed protobuf fields.
     pub signed_op: Operation,
+    /// The exact signed bytes `signed_op` was bound from. Carried so the
+    /// canonical apply — which hashes them into the apply identity — receives
+    /// the bytes that were verified, not a re-read of staging.
+    pub canonical_operation_bytes: Vec<u8>,
     /// The receipt whose `sig_a` / `ek_cert_a` chain verified.
     pub receipt: StitchedReceiptV2,
 }
@@ -215,6 +219,7 @@ pub fn verify_staged_transfer(
     Ok(VerifiedTransfer {
         correlation_key: correlation_key.to_string(),
         signed_op,
+        canonical_operation_bytes: req.canonical_operation_bytes,
         receipt,
     })
 }
