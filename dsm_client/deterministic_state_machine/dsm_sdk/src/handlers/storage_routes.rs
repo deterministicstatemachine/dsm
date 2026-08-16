@@ -270,6 +270,18 @@ fn stage_polled_transfer_half(entry: &crate::sdk::b0x_sdk::B0xEntry) {
     use crate::handlers::recipient_dispatch::{dispatch_transfer_half, DispatchOutcome};
 
     let key = entry.transaction_id.as_str();
+    // The route this half was polled from. `inbox_key` is set to the b0x
+    // address by `retrieve_from_b0x_v2`; it is empty only for locally-built
+    // entries, which never reach this path. Retained on the staging row so
+    // the partner half — replayed under the same frozen route — is still
+    // received after the relationship tip advances.
+    let route = entry.inbox_key.as_str();
+    if route.is_empty() {
+        log::error!(
+            "[storage.sync] ❌ REJECTING split transfer {key}: no inbox route recorded on the              polled entry; a half with no route cannot anchor its partner"
+        );
+        return;
+    }
     if entry.transfer_wire_bytes.is_empty() {
         log::error!(
             "[storage.sync] ❌ REJECTING split transfer {key}: the original \
@@ -288,7 +300,7 @@ fn stage_polled_transfer_half(entry: &crate::sdk::b0x_sdk::B0xEntry) {
             return;
         }
     };
-    match dispatch_transfer_half(key, &entry.transfer_wire_bytes, &ak) {
+    match dispatch_transfer_half(key, &entry.transfer_wire_bytes, &ak, route) {
         Ok(DispatchOutcome::Staged(state)) => {
             log::info!(
                 "[storage.sync] ADR 0003 transfer {key} staged → {}",
@@ -309,7 +321,7 @@ fn stage_polled_transfer_half(entry: &crate::sdk::b0x_sdk::B0xEntry) {
 /// the STORED contact for that device — never from the artifact. Everything
 /// after that is the dispatcher's decision, including whether the bytes are
 /// allowed to occupy a staging slot at all.
-fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA) {
+fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA, route: &str) {
     use crate::handlers::recipient_dispatch::{dispatch_evidence_half, DispatchOutcome};
 
     let key = evidence.transfer_submission_id.as_str();
@@ -331,7 +343,7 @@ fn stage_polled_evidence_half(evidence: &dsm::types::proto::ReceiptEvidenceA) {
             return;
         }
     };
-    match dispatch_evidence_half(evidence, &ak) {
+    match dispatch_evidence_half(evidence, &ak, route) {
         Ok(DispatchOutcome::Staged(state)) => {
             log::info!(
                 "[storage.sync] ADR 0003 evidence {key} staged → {}",
@@ -1143,7 +1155,7 @@ impl AppRouterImpl {
                                 // hand the artifact to the dispatcher, log. No verification
                                 // or acceptance logic lives here.
                                 for evidence in b0x_sdk.take_evidence_artifacts() {
-                                    stage_polled_evidence_half(&evidence);
+                                    stage_polled_evidence_half(&evidence, &tagged_addr.address);
                                 }
                                 // Cert-resync control messages ride the same spool,
                                 // discriminated by their explicit method. Dispatch each
