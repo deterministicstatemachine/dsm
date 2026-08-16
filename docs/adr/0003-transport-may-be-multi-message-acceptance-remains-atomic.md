@@ -344,9 +344,55 @@ way the sibling route was: `MAX_ANCHOR_BYTES` = 256 KiB "because two SPHINCS+
 SPX256f signatures (~49.9 KiB each) … fit well under 256 KiB"
 (`recovery_anchor.rs:39-41`).
 
+### Finality barrier (2026-08-16 addendum)
+
+The first bidirectional run on the fresh fleet (A→B, A→B, then B→A) failed at
+the recipient's pin: A derived B's head from what A had *applied* — nothing —
+while B's local lineage had advanced by applying A's two transfers. A
+relationship chain tip is a per-device value that advances on the device's
+applies as well as its sends, so a peer's head can never be derived locally;
+it has to be learned from the peer, authenticated, on every generation. The
+barrier that fixes this changes three things about the return leg:
+
+- **The delta carries the recipient's canonical pair, authenticated.**
+  `ReceiptCountersignB` += `b_parent_tip` (7), `b_child_tip` (8): the
+  recipient's local lineage head before and after applying the step —
+  `AdvanceOutcome::relationship_pair()` of the very advance that committed,
+  journaled *in the apply transaction*. `sig_b` on the online path is computed
+  over `BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent ||
+  b_child)`, so a substituted pair fails the countersignature. The receipt
+  bytes and the split/overlay identity are untouched. Measured delta: 101,322
+  bytes (77.3% of cap).
+- **One authority for the peer's head.** `counterparty_canonical_heads` (one
+  row per relationship), CAS'd from BOTH roles inside the owning transaction:
+  the signed A pair on inbound apply, the `sig_b`-authenticated B pair on
+  sender finalize. The recipient's pin reads this table only; the
+  history-derived query is deleted.
+- **A signed finality certificate is the release event.** On finalize the
+  sender freezes `RelationshipFinalizedV1 {relationship, commitment, both
+  devices, sender child, recipient pair, signature_a}` — signed with the
+  pending per-step A EK for that commitment (the key the recipient chained
+  `ek_pk_a` for) — with its own frozen route (the recipient's), and moves the
+  outbox to `finalization_checkpoint_pending`. The sender's gate is released
+  ONLY when the certificate reaches storage quorum (one tx: exact-match gate
+  delete + `gc_pending`). The recipient may not originate on the relationship
+  until it verifies that certificate against its journal (`peer_finalized`).
+  Ordinary bilateral relationships thus allow ONE unresolved semantic
+  predecessor per originator; a next-generation transfer may be transported
+  early but is held at `ready_to_verify` until the predecessor's certificate
+  lands. ACKs, tip equality and BLE commits are no longer release authorities.
+
+Measured certificate: one SPHINCS+ signature + seven tips, ~50 KB, 38% of cap.
+Known limitations, pinned by test and not solved by the barrier: crossing
+sends after mutual finality (both proposals park; a deterministic turn rule is
+a protocol decision), and mixed BLE + online on one relationship (BLE
+settlement does not yet CAS `counterparty_canonical_heads`).
+
 ### Costs
 
 - Two round trips (or two spool entries) per transfer instead of one.
+- One more artifact per transfer (the finality certificate) and one more
+  round trip before the sender may originate again on the relationship.
 - More states to test. The failure modes move from "message too large" to
   "half present" — which is why the state machine above is fail-closed by
   default.

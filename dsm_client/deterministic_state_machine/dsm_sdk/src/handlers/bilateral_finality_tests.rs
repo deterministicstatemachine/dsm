@@ -773,3 +773,152 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     p.b.enter();
     assert!(!cdb::relationship_awaits_peer_finalization(&rel).unwrap());
 }
+
+// =====================================================================
+// R9 — RELATIONSHIP-LOCAL, NEVER WALLET-GLOBAL. A↔B pending on BOTH sides
+// (A's gate armed, B awaiting A's certificate) must not touch A↔C or B↔C.
+// Mutation M7' (make either barrier condition wallet-global) turns this red.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn r9_the_barrier_is_relationship_local() {
+    let p = Pair::boot(1_000, 500).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.nodes);
+    for (x, y) in [(&p.a, &c), (&p.b, &c)] {
+        x.enter();
+        x.add_contact(y);
+        y.enter();
+        y.add_contact(x);
+    }
+    c.sync().await;
+
+    // A↔B pending both ways: A sent, B applied, A has NOT finalized.
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    p.a.enter();
+    assert!(gate_present(&p.b), "A's gate toward B is armed");
+    p.b.enter();
+    assert!(!send_status(&p.a).send_ready, "B is blocked toward A");
+
+    // A→C and B→C are free.
+    p.a.enter();
+    assert!(send_status(&c).send_ready, "A is free toward C");
+    p.b.enter();
+    assert!(send_status(&c).send_ready, "B is free toward C");
+    generation(&p.a, &c, 3).await;
+    generation(&p.b, &c, 2).await;
+    assert_eq!(c.era_balance(), 5);
+
+    // A↔B settled along the way (A's syncs inside the generations consumed
+    // B's delta and shipped the certificate; B's synced too).
+    p.a.enter();
+    assert!(!gate_present(&p.b));
+    p.b.enter();
+    assert!(send_status(&p.a).send_ready);
+}
+
+// =====================================================================
+// R12 — CROSSING SENDS: KNOWN STATE (pinned, not solved here). Both sides
+// free on a fresh relationship, both originate before either polls. Each
+// applies the other's transfer (both signed under the genesis seed), then
+// each side's finalize hits `CanonicalMovedToDifferentTip` on the projection
+// tip its inbound converge already advanced — both proposals stay parked and
+// both gates armed. A deterministic turn rule is a protocol decision beyond
+// this barrier; the barrier's own contribution is the crossing MITIGATION:
+// once one side has even STAGED the other's inbound, it may no longer
+// originate toward that peer.
+// =====================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn r12_crossing_sends_are_pinned_and_a_staged_inbound_blocks_originating() {
+    let p = Pair::boot(1_000, 500).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let a_sent = p.a.send(&p.b, 10).await;
+    assert!(a_sent.success, "{:?}", a_sent.error_message);
+    // A true cross: B originates before A's halves reach it (held in transit;
+    // otherwise B's own preflight sync would apply them and the mitigation
+    // below would refuse B's send).
+    let a_halves: Vec<String> = p.submits().iter().map(|s| s.message_id.clone()).collect();
+    for id in &a_halves {
+        p.hold_message(id);
+    }
+    let b_sent = p.b.send(&p.a, 5).await;
+    assert!(b_sent.success, "{:?}", b_sent.error_message);
+    for id in &a_halves {
+        p.release_message(id);
+    }
+
+    // Both apply the other's transfer.
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    assert_eq!(p.a.era_balance(), 995);
+    assert_eq!(p.b.era_balance(), 505);
+
+    // KNOWN STATE: neither finalizes; both gates stay armed.
+    for _ in 0..2 {
+        p.a.sync().await;
+        p.b.sync().await;
+    }
+    p.a.enter();
+    assert_ne!(
+        proposal_statuses(&rel),
+        vec![cdb::PROPOSAL_FINALIZED.to_string()],
+        "A's proposal does not finalize after a cross (known limitation)"
+    );
+    assert!(gate_present(&p.b));
+    p.b.enter();
+    assert_ne!(
+        proposal_statuses(&rel),
+        vec![cdb::PROPOSAL_FINALIZED.to_string()],
+        "B's proposal does not finalize after a cross (known limitation)"
+    );
+    assert!(gate_present(&p.a));
+
+    // MITIGATION (fresh pair): with A's transfer merely STAGED on B — halves
+    // in, not applied — B is already blocked from originating toward A.
+    let q = Pair::boot(1_000, 500).await;
+    let sent = q.a.send(&q.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    // Stage only: withhold the evidence half so the pair cannot complete.
+    let evidence_id = q
+        .submits()
+        .iter()
+        .find(|s| {
+            dsm::types::proto::Envelope::decode(s.body.as_slice())
+                .ok()
+                .and_then(|env| crate::sdk::b0x_sdk::B0xSDK::decode_receipt_evidence_a(&env))
+                .is_some()
+        })
+        .map(|s| s.message_id.clone())
+        .expect("evidence half on the wire");
+    q.hold_message(&evidence_id);
+    let b_sync = q.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    q.b.enter();
+    assert_eq!(staging_states(), vec!["staged_transfer".to_string()]);
+    let status = send_status(&q.a);
+    assert!(
+        !status.send_ready,
+        "a staged inbound blocks originating: {status:?}"
+    );
+    assert_eq!(status.send_block_reason, pending_catchup());
+    let refused = q.b.send(&q.a, 1).await;
+    assert!(!refused.success);
+    assert_eq!(q.b.era_balance(), 500);
+    // Release: the pair completes and the relationship settles normally.
+    q.release_message(&evidence_id);
+    let b_sync = q.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(q.b.era_balance(), 510);
+    let a_sync = q.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    let b_sync = q.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    q.b.enter();
+    assert!(send_status(&q.a).send_ready);
+}
