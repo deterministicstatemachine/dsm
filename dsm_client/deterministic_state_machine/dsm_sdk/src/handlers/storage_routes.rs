@@ -762,15 +762,6 @@ async fn deliver_pending_acceptance_replies(
 
         // NOTE: the envelope is built from `dsm::types::proto`, which is a SEPARATE
         // prost generation from `crate::generated` — same schema, distinct Rust types.
-        let artifact = dsm::types::proto::AcceptanceReceiptArtifact {
-            receipt_bytes: reply.receipt_bytes.clone(),
-            commitment: reply.commitment.to_vec(),
-            relationship_key: reply.relationship_key.to_vec(),
-            recipient_device_id: crate::util::text_id::decode_base32_crockford(&local_device_b32)
-                .unwrap_or_default(),
-            canonical_child_tip: reply.child_tip.to_vec(),
-        };
-
         let mut b0x = match crate::sdk::b0x_sdk::B0xSDK::new(
             local_device_b32.clone(),
             core_sdk.clone(),
@@ -782,26 +773,38 @@ async fn deliver_pending_acceptance_replies(
                 continue;
             }
         };
+        // The stored row keeps the FULL countersigned receipt; only the B-side
+        // delta derived from it goes on the wire (ADR 0003 return leg). A row
+        // the builder refuses is a local defect, not a transport condition — it
+        // is logged at error and left unmarked so it stays visible.
         match b0x
             .submit_acceptance_reply(
                 &sender_genesis,
                 &reply.counterparty_device_id,
                 &reply.projection_parent_tip,
-                artifact,
+                &reply.commitment,
+                &reply.receipt_bytes,
             )
             .await
         {
             Ok(msg_id) => {
                 mark_reply_submitted(&reply.commitment).map_err(|e| e.to_string())?;
                 log::info!(
-                    "[storage.sync] §16.6 acceptance reply delivered msg={}.. commitment={}..",
+                    "[storage.sync] §16.6 countersign delta delivered msg={}.. commitment={}..",
                     &msg_id[..8.min(msg_id.len())],
                     crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
                 );
             }
-            Err(e) => {
+            Err(e) if matches!(e, dsm::types::error::DsmError::Network { .. }) => {
                 // Left unmarked on purpose — retried on the next sweep.
                 log::warn!("[storage.sync] §16.6 reply delivery failed (will retry): {e}");
+            }
+            Err(e) => {
+                log::error!(
+                    "[storage.sync] §16.6 reply for commitment {}.. could not be built from the                      stored receipt ({} bytes) — local defect, left unmarked: {e}",
+                    crate::util::text_id::encode_base32_crockford(&reply.commitment[..4]),
+                    reply.receipt_bytes.len(),
+                );
             }
         }
     }
@@ -3726,13 +3729,12 @@ mod tests {
     // here.
     //
     // The poisoning is the real attack shape, not a synthetic one. Receipt
-    // fields 12-20 sit outside every signature, and `AcceptanceReceiptArtifact`
-    // carries its own unsigned `commitment` envelope field that the handler
-    // uses for proposal lookup. So a middlebox can address a reply at a genuine
-    // proposal while swapping the receipt bytes underneath. The poisoned
-    // artifact below does exactly that: a correct envelope commitment, a
-    // receipt whose per-step EK signature genuinely verifies, and a forged
-    // canonical child.
+    // fields 12-20 sit outside every signature, and the delta's `commitment`
+    // is an unsigned reference the handler uses for proposal lookup. So a
+    // middlebox can address a delta at a genuine proposal while carrying B
+    // material minted over a different receipt. The poisoned delta below does
+    // exactly that: the honest commitment and A digest, and B fields whose
+    // per-step EK countersignature genuinely verifies — over a forged child.
     // =====================================================================
 
     /// Mint a B-side receipt whose per-step EK artifacts genuinely verify, with
@@ -4211,6 +4213,73 @@ mod tests {
             CountersignOutcome::Finalized
         );
         assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// Producer -> consumer with REAL per-step EK material: the recipient's
+    /// real builder over its stored full receipt, decoded by the sender's real
+    /// discriminator, finalized by the live handler. What the fixture-built
+    /// deltas above cannot prove — that the two ends agree byte for byte.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_real_delta_builder_output_finalizes_the_sender_through_the_live_handler() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::PROPOSAL_FINALIZED;
+        use prost::Message;
+        use std::sync::Arc;
+        let st = seed_submitted_step();
+
+        // Recipient side: identity b, its stored full countersigned receipt.
+        let full_bytes = st.honest.to_full_protobuf().expect("full receipt");
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        let recipient_sdk = crate::sdk::b0x_sdk::B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&st.b),
+            core,
+            vec![],
+        )
+        .expect("B0xSDK");
+        let built = recipient_sdk
+            .build_countersign_reply_envelope(
+                &[0xB6u8; 32],
+                &st.proposal.projection_parent,
+                &st.commitment,
+                &full_bytes,
+            )
+            .expect("real delta");
+        assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
+        assert!(
+            built.bytes.len() > 100_000,
+            "two real SPHINCS objects: {}",
+            built.bytes.len()
+        );
+
+        // Sender side: exactly what the poll does with the spooled envelope.
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
+            .expect("discriminated by method");
+        let delta = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: built.message_id_b32.clone(),
+            envelope_bytes: built.bytes.clone(),
+            body,
+        };
+        assert_eq!(
+            super::finalize_from_countersign_delta(&delta).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
+            &st.rel_key,
+            &st.parent,
+            &st.proposal.nonce_hash,
+        )
+        .expect("artifacts");
+        let kept = retained
+            .iter()
+            .find(|a| a.role == crate::storage::client_db::ArtifactRole::CountersignB)
+            .expect("countersign_b retained");
+        assert_eq!(
+            kept.envelope_bytes, built.bytes,
+            "the exact envelope it finalized on"
+        );
     }
 
     /// A step with no frozen evidence_a cannot finalize under any delta — that

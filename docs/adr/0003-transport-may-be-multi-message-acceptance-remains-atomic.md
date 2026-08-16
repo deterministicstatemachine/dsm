@@ -279,9 +279,19 @@ The sender deterministically reconstructs the countersigned receipt from its
 retained A-side object plus this delta, then verifies it. Nothing A-side is
 retransmitted.
 
-**This delta MUST be measured with real SPHINCS-sized material before
-implementation.** If it still exceeds the cap, split the B evidence again by
-content-addressed digest — do not raise the limit.
+**Measured, not estimated.** Built by the production builder
+(`B0xSDK::build_countersign_reply_envelope`) from the production shape of the
+stored full receipt — 218,541 bytes, the exact size observed on device 5GN on
+2026-08-16 — the encoded delta envelope is **101,254 bytes (77.3% of cap)**,
+pinned by `adr0003_b_side_countersign_delta_fits_the_node_cap`. The wire
+message is `ReceiptCountersignB { commitment, receipt_evidence_digest_a, sig_b,
+ek_cert_b, ek_pk_b, kyber_ct_b }` on the explicit `receipt.countersign.b`
+invoke; the recipient keeps its full receipt locally and derives the delta at
+send time; the sender overlays it onto the A-side evidence it froze at send and
+runs the unchanged verifier. B adds no proof material in practice, so the
+"B-side proof material" branch above is empty. If the delta ever exceeds the
+cap, split the B evidence again by content-addressed digest — do not raise the
+limit.
 
 ## Scope of this change
 
@@ -306,7 +316,7 @@ artifact                                    bytes    % of cap   headroom
 ────────────────────────────────────────────────────────────────────────
 TransferEnvelope                           50,770      38.7%     80,302
 ReceiptEvidenceEnvelope (A-side, full)    118,241      90.2%     12,831   ← NARROW
-ReceiptCountersignEnvelope (B delta)       must be measured with real material
+ReceiptCountersignB (B delta)             101,254      77.3%     29,818   ← measured, real builder
 ────────────────────────────────────────────────────────────────────────
 (rejected) countersigned full receipt     223,232     170.3%   −92,160   ← DOES NOT FIT
 ```
@@ -372,7 +382,7 @@ against `MAX_ENVELOPE_BYTES = 131,072`:
 |---|---|---|---|
 | `TransferEnvelope` | ~50,770 | 38.7% | 80,302 |
 | `ReceiptEvidenceEnvelope` (A-side) | ~118,241 | **90.2%** | 12,831 |
-| `ReceiptCountersignEnvelope` (B delta) | ~101,630 | 77.5% | 29,442 |
+| `ReceiptCountersignB` (B delta) | 101,254 | 77.3% | 29,818 |
 
 **Normative constraint.** The B-side countersign artifact contains exactly two
 SPHINCS+ signature-sized objects: `sig_b` and `ek_cert_b`. Adding any additional
