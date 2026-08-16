@@ -56,11 +56,15 @@ pub enum DispatchOutcome {
 /// Authenticate a candidate transfer half, then stage it.
 ///
 /// `sender_ak_pk` MUST come from the locally stored contact — never from the
-/// wire artifact.
+/// wire artifact. `route` is the b0x inbox address this half was polled from;
+/// it is retained on the staging row so the partner half — replayed by the
+/// sender under the same frozen route — is still received after the
+/// relationship tip advances. Both halves must arrive on the same route.
 pub fn dispatch_transfer_half(
     correlation_key: &str,
     transfer_bytes: &[u8],
     sender_ak_pk: &[u8],
+    route: &str,
 ) -> Result<DispatchOutcome, String> {
     let req = match dsm::types::proto::OnlineTransferRequest::decode(transfer_bytes) {
         Ok(r) => r,
@@ -94,7 +98,7 @@ pub fn dispatch_transfer_half(
             format!("transfer half for {correlation_key} has a malformed evidence reference")
         })?;
 
-    let state = stage_transfer_half(correlation_key, transfer_bytes, &digest)
+    let state = stage_transfer_half(correlation_key, transfer_bytes, &digest, route)
         .map_err(|e| format!("staging the transfer half for {correlation_key} failed: {e}"))?;
     Ok(DispatchOutcome::Staged(state))
 }
@@ -109,6 +113,7 @@ pub fn dispatch_transfer_half(
 pub fn dispatch_evidence_half(
     evidence: &dsm::types::proto::ReceiptEvidenceA,
     sender_ak_pk: &[u8],
+    route: &str,
 ) -> Result<DispatchOutcome, String> {
     let correlation_key = evidence.transfer_submission_id.as_str();
     if correlation_key.is_empty() {
@@ -141,7 +146,7 @@ pub fn dispatch_evidence_half(
         )));
     }
 
-    let state = stage_evidence_half(correlation_key, &evidence.full_receipt_bytes)
+    let state = stage_evidence_half(correlation_key, &evidence.full_receipt_bytes, route)
         .map_err(|e| format!("staging the evidence half for {correlation_key} failed: {e}"))?;
     Ok(DispatchOutcome::Staged(state))
 }
@@ -295,7 +300,8 @@ mod tests {
         let (ak_pk, transfer, evidence, bad_transfer, _) = pair();
 
         // Tampered copy arrives FIRST.
-        let out = dispatch_transfer_half(key, &bad_transfer, &ak_pk).expect("dispatch");
+        let out =
+            dispatch_transfer_half(key, &bad_transfer, &ak_pk, "TESTROUTE").expect("dispatch");
         assert!(
             matches!(out, DispatchOutcome::DiscardedCandidate(ref r) if r.contains("SIG A")
                 || r.contains("does not decode")),
@@ -309,11 +315,12 @@ mod tests {
 
         // The honest copy, right behind it in the same batch, still stages.
         assert!(matches!(
-            dispatch_transfer_half(key, &transfer, &ak_pk).expect("dispatch"),
+            dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("dispatch"),
             DispatchOutcome::Staged(_)
         ));
         assert!(matches!(
-            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk).expect("dispatch"),
+            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE")
+                .expect("dispatch"),
             DispatchOutcome::Staged(StagingState::ReadyToVerify)
         ));
     }
@@ -328,7 +335,8 @@ mod tests {
         let (ak_pk, transfer, evidence, _, bad_evidence) = pair();
 
         let out =
-            dispatch_evidence_half(&evidence_artifact(key, &bad_evidence), &ak_pk).expect("d");
+            dispatch_evidence_half(&evidence_artifact(key, &bad_evidence), &ak_pk, "TESTROUTE")
+                .expect("d");
         assert!(
             matches!(out, DispatchOutcome::DiscardedCandidate(_)),
             "a tampered evidence copy must be discarded, got {out:?}"
@@ -339,11 +347,12 @@ mod tests {
         );
 
         assert!(matches!(
-            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk).expect("d"),
+            dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE")
+                .expect("d"),
             DispatchOutcome::Staged(_)
         ));
         assert!(matches!(
-            dispatch_transfer_half(key, &transfer, &ak_pk).expect("d"),
+            dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("d"),
             DispatchOutcome::Staged(StagingState::ReadyToVerify)
         ));
     }
@@ -355,8 +364,8 @@ mod tests {
         let key = "DISP-OK";
         let (ak_pk, transfer, evidence, _, _) = pair();
 
-        dispatch_transfer_half(key, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE").expect("e");
 
         assert!(
             !may_ack(key).expect("ack gate"),
@@ -434,7 +443,7 @@ mod tests {
         let (ak_pk, transfer, evidence, _, _) = pair();
         let key = "MX-FREEZE";
 
-        dispatch_transfer_half(key, &transfer, &ak_pk).expect("t");
+        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
         let staged = recipient_staging::get_staging(key)
             .expect("load")
             .expect("row")
@@ -445,7 +454,7 @@ mod tests {
             "staging must hold the EXACT bytes it was handed, not a re-encode"
         );
 
-        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk).expect("e");
+        dispatch_evidence_half(&evidence_artifact(key, &evidence), &ak_pk, "TESTROUTE").expect("e");
         let row = recipient_staging::get_staging(key)
             .expect("load")
             .expect("row");
@@ -477,7 +486,7 @@ mod tests {
 
         // (1) one half only
         let k1 = "MX-ONE-HALF";
-        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
+        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
         let ran = std::cell::Cell::new(0);
         assert!(matches!(
             decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
@@ -488,8 +497,8 @@ mod tests {
         // (2) ready_to_verify, before any apply, is not ACK-able on its own:
         // proven by an apply that FAILS, leaving the pair ready and un-ACKed.
         let k2 = "MX-READY";
-        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
         assert_eq!(
             recipient_staging::staging_state(k2).expect("s"),
             StagingState::ReadyToVerify
@@ -506,8 +515,8 @@ mod tests {
         let wrong_digest = evidence_content_digest(ArtifactRole::EvidenceA, &bad_evidence);
         let (_, ak_sk2) = generate_ephemeral_keypair(&[0xC4; 32]).expect("ak");
         let mismatched = signed_transfer_bytes(&ak_sk2, &wrong_digest);
-        dispatch_transfer_half(k3, &mismatched, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k3, &mismatched, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk, "TESTROUTE").expect("e");
         let st = recipient_staging::staging_state(k3).expect("s");
         assert_eq!(st, StagingState::TerminalReject, "digest must not bind");
         assert!(!may_ack(k3).expect("ack"), "terminal_reject must never ACK");
@@ -524,8 +533,8 @@ mod tests {
     fn fresh_and_duplicate_stay_distinct_through_the_decision() {
         let (ak_pk, transfer, evidence, _, _) = pair();
         let k = "MX-FRESH";
-        dispatch_transfer_half(k, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk, "TESTROUTE").expect("e");
 
         let decision = decide_ack(k, &ak_pk, |_| {
             Ok(ApplyOutcome::Applied {
@@ -554,8 +563,8 @@ mod tests {
 
         // transfer-first
         let k1 = "MX-ORD-T";
-        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk, "TESTROUTE").expect("e");
         assert_eq!(
             recipient_staging::staging_state(k1).expect("s"),
             StagingState::ReadyToVerify
@@ -563,8 +572,8 @@ mod tests {
 
         // evidence-first
         let k2 = "MX-ORD-E";
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
-        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
+        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
         assert_eq!(
             recipient_staging::staging_state(k2).expect("s"),
             StagingState::ReadyToVerify
@@ -573,11 +582,11 @@ mod tests {
         // tampered replica FIRST, honest second
         let k3 = "MX-ORD-BAD";
         assert!(matches!(
-            dispatch_transfer_half(k3, &bad_transfer, &ak_pk).expect("bad"),
+            dispatch_transfer_half(k3, &bad_transfer, &ak_pk, "TESTROUTE").expect("bad"),
             DispatchOutcome::DiscardedCandidate(_)
         ));
-        dispatch_transfer_half(k3, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k3, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k3, &evidence), &ak_pk, "TESTROUTE").expect("e");
         assert_eq!(
             recipient_staging::staging_state(k3).expect("s"),
             StagingState::ReadyToVerify,
@@ -595,12 +604,12 @@ mod tests {
 
         // restart with only the transfer half persisted
         let k1 = "MX-RESTART-HALF";
-        dispatch_transfer_half(k1, &transfer, &ak_pk).expect("t");
+        dispatch_transfer_half(k1, &transfer, &ak_pk, "TESTROUTE").expect("t");
         assert_eq!(
             recipient_staging::staging_state(k1).expect("reload"),
             StagingState::StagedTransfer
         );
-        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk).expect("e");
+        dispatch_evidence_half(&evidence_artifact(k1, &evidence), &ak_pk, "TESTROUTE").expect("e");
         let ran = std::cell::Cell::new(0);
         assert_eq!(
             decide_ack(k1, &ak_pk, counting_apply(&ran, fresh_outcome())).expect("d"),
@@ -610,8 +619,8 @@ mod tests {
 
         // restart with BOTH halves staged but no apply yet
         let k2 = "MX-RESTART-READY";
-        dispatch_transfer_half(k2, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k2, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k2, &evidence), &ak_pk, "TESTROUTE").expect("e");
         assert_eq!(
             recipient_staging::staging_state(k2).expect("reload"),
             StagingState::ReadyToVerify
@@ -631,8 +640,8 @@ mod tests {
     fn restart_after_apply_before_ack_reacks_as_duplicate_without_reapplying() {
         let (ak_pk, transfer, evidence, _, _) = pair();
         let k = "MX-CRASH-ACK";
-        dispatch_transfer_half(k, &transfer, &ak_pk).expect("t");
-        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk).expect("e");
+        dispatch_transfer_half(k, &transfer, &ak_pk, "TESTROUTE").expect("t");
+        dispatch_evidence_half(&evidence_artifact(k, &evidence), &ak_pk, "TESTROUTE").expect("e");
 
         let ran = std::cell::Cell::new(0);
         assert!(matches!(
@@ -662,7 +671,7 @@ mod tests {
     fn one_half_never_completes_and_never_acks() {
         let key = "DISP-HALF";
         let (ak_pk, transfer, _, _, _) = pair();
-        dispatch_transfer_half(key, &transfer, &ak_pk).expect("t");
+        dispatch_transfer_half(key, &transfer, &ak_pk, "TESTROUTE").expect("t");
         assert_eq!(
             try_complete(key, &ak_pk, |_| panic!("apply must never run")).expect("complete"),
             None

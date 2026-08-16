@@ -2808,6 +2808,36 @@ pub(crate) fn collect_tagged_inbox_addresses(
         }
     }
 
+    // 4. Retained routes from incomplete or unACKed split-transfer staging.
+    //
+    // A split send's two halves may land polls — or relationship advancements
+    // — apart. Sources 1-3 hold a route for one advancement at most, and a
+    // partner artifact replayed by the sender under its ORIGINAL frozen route
+    // (it is never re-routed: the node dedups on message id alone) would land
+    // where nobody is listening. So the route the first half arrived on stays
+    // in the poll set until the pair completes and both ACKs succeed. Read from
+    // the database every poll, so it survives restart. `Current`, not
+    // `PreviousTip`: the previous-tip adjacency filter would drop or mis-ACK a
+    // split half. Dedup below folds it into any live route it collides with.
+    match crate::storage::client_db::recipient_staging::retained_routes_for_polling() {
+        Ok(routes) => {
+            for route in routes {
+                log::info!(
+                    "[collect_tagged_inbox_addresses] retained split-transfer route added {}..",
+                    &route[..route.len().min(12)]
+                );
+                addresses.push(TaggedInboxAddress {
+                    address: route,
+                    freshness: RouteFreshness::Current,
+                });
+            }
+        }
+        Err(e) => log::warn!(
+            "[collect_tagged_inbox_addresses] retained-route lookup failed (continuing with \
+             tip-derived routes only): {e}"
+        ),
+    }
+
     // Dedup by address: if current and previous collide, keep Current
     addresses.sort_by(|a, b| a.address.cmp(&b.address));
     addresses.dedup_by(|a, b| {

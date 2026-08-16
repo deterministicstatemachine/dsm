@@ -350,8 +350,8 @@ pub(crate) mod tests {
             &evidence,
         );
         let transfer = signed_transfer_bytes(&ak_sk, &digest);
-        stage_transfer_half(key, &transfer, &digest).expect("stage transfer");
-        stage_evidence_half(key, &evidence).expect("stage evidence");
+        stage_transfer_half(key, &transfer, &digest, "TESTROUTE").expect("stage transfer");
+        stage_evidence_half(key, &evidence, "TESTROUTE").expect("stage evidence");
         assert_eq!(
             recipient_staging::staging_state(key).expect("state"),
             StagingState::ReadyToVerify
@@ -520,8 +520,8 @@ pub(crate) mod tests {
         // Sign with the WRONG key: the digest still binds, SIG A does not.
         let (_, other_sk) = generate_ephemeral_keypair(&[0xD5; 32]).expect("other");
         let transfer = signed_transfer_bytes(&other_sk, &digest);
-        stage_transfer_half(key, &transfer, &digest).expect("stage transfer");
-        stage_evidence_half(key, &evidence).expect("stage evidence");
+        stage_transfer_half(key, &transfer, &digest, "TESTROUTE").expect("stage transfer");
+        stage_evidence_half(key, &evidence, "TESTROUTE").expect("stage evidence");
 
         let err = verify_and_accept(
             key,
@@ -563,8 +563,8 @@ pub(crate) mod tests {
             &tampered,
         );
         let transfer = signed_transfer_bytes(&ak_sk, &digest);
-        stage_transfer_half(key, &transfer, &digest).expect("stage transfer");
-        stage_evidence_half(key, &tampered).expect("stage evidence");
+        stage_transfer_half(key, &transfer, &digest, "TESTROUTE").expect("stage transfer");
+        stage_evidence_half(key, &tampered, "TESTROUTE").expect("stage evidence");
 
         let err = verify_and_accept(
             key,
@@ -597,8 +597,13 @@ pub(crate) mod tests {
             crate::storage::client_db::ArtifactRole::EvidenceA,
             &evidence,
         );
-        stage_transfer_half(key, &signed_transfer_bytes(&ak_sk, &digest), &digest)
-            .expect("stage transfer");
+        stage_transfer_half(
+            key,
+            &signed_transfer_bytes(&ak_sk, &digest),
+            &digest,
+            "TESTROUTE",
+        )
+        .expect("stage transfer");
 
         let err = verify_and_accept(
             key,
