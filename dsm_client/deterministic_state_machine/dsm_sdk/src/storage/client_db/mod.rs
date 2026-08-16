@@ -101,6 +101,59 @@ static TEST_DB_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 #[cfg(test)]
 static TEST_DB_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
+// --- two-device test harness: named DB "slots" in one process -------------
+//
+// A single process has ONE `DB_CONNECTION`. The bilateral protocol tests need
+// two devices (A and B) whose durable state (cert_chain_heads is keyed by the
+// SYMMETRIC relationship key, so A's and B's Local heads collide in one DB)
+// must persist across many round-trips. `switch_test_database_slot(slot)` parks
+// the live connection under its slot and installs the target slot's own named
+// in-memory database, so `get_connection()` resolves to a distinct DB per slot.
+//
+// STRICTLY SERIALIZED: exactly one slot is active while production code runs;
+// A-side and B-side calls must never overlap in-process, because AppState,
+// the cached wallet seed, and other identity context are process-global. This
+// harness proves protocol SEQUENCING, not concurrency.
+#[cfg(test)]
+static TEST_DB_SLOT: RwLock<Option<&'static str>> = RwLock::new(None);
+#[cfg(test)]
+static TEST_DB_PARKED: Mutex<
+    Option<std::collections::HashMap<&'static str, Arc<Mutex<Connection>>>>,
+> = Mutex::new(None);
+
+/// Activate a named database slot for the current thread of a test. Parks the
+/// currently installed connection (if any) under its slot so its shared-cache
+/// in-memory DB stays alive, then installs the target slot's connection —
+/// opening a fresh one on first use. Returns after the slot is active; the
+/// next `get_connection()` sees the slot's DB.
+#[cfg(test)]
+pub(crate) fn switch_test_database_slot(slot: &'static str) {
+    let _g = TEST_DB_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_slot = *TEST_DB_SLOT.read().unwrap_or_else(|e| e.into_inner());
+    if prev_slot == Some(slot) {
+        return;
+    }
+    let current = DB_CONNECTION
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+
+    let mut parked = TEST_DB_PARKED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = parked.get_or_insert_with(std::collections::HashMap::new);
+    if let (Some(ps), Some(conn)) = (prev_slot, current) {
+        map.insert(ps, conn);
+    }
+    *TEST_DB_SLOT.write().unwrap_or_else(|e| e.into_inner()) = Some(slot);
+    if let Some(conn) = map.get(slot).cloned() {
+        *DB_CONNECTION.write().unwrap_or_else(|e| e.into_inner()) = Some(conn);
+    }
+    // else: leave DB_CONNECTION empty so the next get_connection() opens the
+    // slot's URI and initializes its schema.
+}
+
 pub fn init_database() -> Result<()> {
     {
         #[cfg(test)]
@@ -227,6 +280,14 @@ pub fn reset_database_for_tests() {
     }
     #[cfg(test)]
     {
+        // Drop any parked two-device slots and clear the active slot so a fresh
+        // reset starts from the default (no-slot) database.
+        if let Ok(mut parked) = TEST_DB_PARKED.lock() {
+            *parked = None;
+        }
+        if let Ok(mut slot) = TEST_DB_SLOT.write() {
+            *slot = None;
+        }
         TEST_DB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -246,7 +307,14 @@ fn get_database_path() -> Result<PathBuf> {
         #[cfg(test)]
         let uri = {
             let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
-            format!("file:dsm_sdk_test_{pid}_{gen}?mode=memory&cache=shared")
+            // A two-device harness slot (if active) partitions the DB name so A
+            // and B resolve to distinct in-memory databases in one process.
+            let slot = TEST_DB_SLOT
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .map(|s| format!("_{s}"))
+                .unwrap_or_default();
+            format!("file:dsm_sdk_test_{pid}_{gen}{slot}?mode=memory&cache=shared")
         };
         #[cfg(not(test))]
         let uri = format!("file:dsm_sdk_test_{pid}?mode=memory&cache=shared");
