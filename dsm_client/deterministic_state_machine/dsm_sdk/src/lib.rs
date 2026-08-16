@@ -143,6 +143,7 @@ pub mod ble;
 // orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
 pub(crate) mod test_support {
+    pub mod fake_node;
     pub mod two_device;
 }
 #[cfg(test)]

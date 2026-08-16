@@ -3856,45 +3856,10 @@ mod tests {
         Ok(endpoint)
     }
 
-    /// Point the runtime's storage-endpoint resolver at the recorders.
-    ///
-    /// Both `wallet.send` and `storage.sync` resolve endpoints through
-    /// `StorageNodeConfig::from_env_config()`, NOT `SdkConfig`. Under
-    /// DSM_SDK_TEST_MODE that loader returns a hardcoded localhost set
-    /// (:8080-8084) unless DSM_ENV_CONFIG_PATH names a real file — so without
-    /// this, the code under test dials ports nothing is listening on and a
-    /// missing submission is indistinguishable from the defect.
-    fn point_env_config_at(endpoints: &[String]) {
-        // ONE fixed path per process, installed through the OnceLock the JNI
-        // layer uses in production. The env var is deliberately NOT relied on:
-        // other test modules in this binary `remove_var` it from NON-serial
-        // setup helpers, so under a full-binary run they can clear it between
-        // this call and the sweep's read — the sweep then dials the
-        // DSM_SDK_TEST_MODE fallback ports and a wiring test goes red for a
-        // fixture reason. The OnceLock is consulted before the env var and
-        // cannot be un-set, so it is immune to that race. Each test rewrites
-        // the FILE with its own recorders; the loader re-reads it every call.
-        let cfg_path = std::env::temp_dir().join(format!(
-            "dsm_storage_routes_test_env_{}.toml",
-            std::process::id()
-        ));
-        let mut cfg_toml = String::from(
-            "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
-             storage_node_mode = \"remote\"\nports = [8080]\n\
-             bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
-        );
-        for (i, ep) in endpoints.iter().enumerate() {
-            cfg_toml.push_str(&format!(
-                "\n[[nodes]]\nname = \"rec-{i}\"\nendpoint = \"{ep}\"\n"
-            ));
-        }
-        std::fs::write(&cfg_path, cfg_toml).expect("write env config");
-        crate::network::set_env_config_path(cfg_path.to_string_lossy().into_owned());
-        // Belt and braces for any reader that still prefers the env var.
-        unsafe {
-            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
-        }
-    }
+    /// Point the runtime's storage-endpoint resolver at the recorders — ONE
+    /// process-wide definition (the OnceLock path cannot be re-set, so every
+    /// test module must write the same file): see `test_support::fake_node`.
+    use crate::test_support::fake_node::point_env_config_at;
 
     /// A frozen uncertain send: the transfer envelope plus its ADR 0003
     /// A-side evidence, both already encoded and committed.
