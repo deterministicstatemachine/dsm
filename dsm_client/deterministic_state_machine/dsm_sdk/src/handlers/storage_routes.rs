@@ -3994,9 +3994,20 @@ mod tests {
     /// (:8080-8084) unless DSM_ENV_CONFIG_PATH names a real file — so without
     /// this, the code under test dials ports nothing is listening on and a
     /// missing submission is indistinguishable from the defect.
-    fn point_env_config_at(endpoints: &[String], tag: &str) {
-        let cfg_path =
-            std::env::temp_dir().join(format!("dsm_{tag}_env_{}.toml", std::process::id()));
+    fn point_env_config_at(endpoints: &[String]) {
+        // ONE fixed path per process, installed through the OnceLock the JNI
+        // layer uses in production. The env var is deliberately NOT relied on:
+        // other test modules in this binary `remove_var` it from NON-serial
+        // setup helpers, so under a full-binary run they can clear it between
+        // this call and the sweep's read — the sweep then dials the
+        // DSM_SDK_TEST_MODE fallback ports and a wiring test goes red for a
+        // fixture reason. The OnceLock is consulted before the env var and
+        // cannot be un-set, so it is immune to that race. Each test rewrites
+        // the FILE with its own recorders; the loader re-reads it every call.
+        let cfg_path = std::env::temp_dir().join(format!(
+            "dsm_storage_routes_test_env_{}.toml",
+            std::process::id()
+        ));
         let mut cfg_toml = String::from(
             "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
              storage_node_mode = \"remote\"\nports = [8080]\n\
@@ -4008,6 +4019,8 @@ mod tests {
             ));
         }
         std::fs::write(&cfg_path, cfg_toml).expect("write env config");
+        crate::network::set_env_config_path(cfg_path.to_string_lossy().into_owned());
+        // Belt and braces for any reader that still prefers the env var.
         unsafe {
             std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
         }
@@ -4135,7 +4148,7 @@ mod tests {
         let endpoints: Vec<String> = (0..3)
             .map(|_| spawn_recorder(log.clone()).expect("recorder"))
             .collect();
-        point_env_config_at(&endpoints, "gate1");
+        point_env_config_at(&endpoints);
 
         let device_id = vec![0x0Au8; 32];
         let genesis_hash = vec![0x31u8; 32];
@@ -4352,7 +4365,7 @@ mod tests {
                 spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder")
             })
             .collect();
-        point_env_config_at(&endpoints, "partial");
+        point_env_config_at(&endpoints);
 
         let device_id = vec![0x0Au8; 32];
         let genesis_hash = vec![0x31u8; 32];
@@ -4521,7 +4534,7 @@ mod tests {
         let endpoints: Vec<String> = (0..3)
             .map(|_| spawn_recorder(log.clone()).expect("recorder"))
             .collect();
-        point_env_config_at(&endpoints, "settled");
+        point_env_config_at(&endpoints);
         let device_id = vec![0x0Au8; 32];
         crate::sdk::app_state::AppState::set_identity_info(
             device_id,
@@ -4744,7 +4757,7 @@ mod tests {
             .map(|_| spawn_send_recorder(log.clone(), identity_bytes.clone()).expect("recorder"))
             .collect();
 
-        point_env_config_at(&endpoints, "gate2");
+        point_env_config_at(&endpoints);
 
         let binding_key = vec![0x41u8; 32];
         let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
