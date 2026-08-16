@@ -3901,6 +3901,15 @@ mod tests {
     /// One submitted step on the sender with its frozen A-side evidence, and
     /// the honest countersigned receipt the recipient would hold for it.
     fn seed_submitted_step() -> SeededStep {
+        let (b_ak_pk, b_ak_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
+        seed_submitted_step_with_recipient_ak(b_ak_pk, b_ak_sk)
+    }
+
+    /// As [`seed_submitted_step`], with the recipient's AK supplied so a
+    /// recipient-side fixture can share it (the AK is the cert-chain genesis
+    /// root both ends verify `ek_cert_b` against).
+    fn seed_submitted_step_with_recipient_ak(b_ak_pk: Vec<u8>, b_ak_sk: Vec<u8>) -> SeededStep {
         use crate::storage::client_db::sender_proposal::{
             mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_PROPOSED,
         };
@@ -3911,8 +3920,6 @@ mod tests {
 
         // The recipient's AK is the cert-chain genesis root, and it comes from
         // the contact book — never from the wire.
-        let (b_ak_pk, b_ak_sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
         seed_sender_contact(b, b_ak_pk.clone());
 
         crate::sdk::app_state::AppState::set_identity_info(
@@ -4279,6 +4286,323 @@ mod tests {
         assert_eq!(
             kept.envelope_bytes, built.bytes,
             "the exact envelope it finalized on"
+        );
+    }
+
+    /// The recipient half of the return leg, seeded exactly as the fold leaves
+    /// it: a completed acceptance journal row and its undelivered reply row,
+    /// both holding the FULL countersigned receipt, plus the endpoint auth the
+    /// sweep needs. Returns the receipt, its commitment, and the projection
+    /// parent the reply is addressed to.
+    struct RecipientHalf {
+        a: [u8; 32],
+        b: [u8; 32],
+        b_ak_pk: Vec<u8>,
+        b_ak_sk: Vec<u8>,
+        commitment: [u8; 32],
+        projection_parent: [u8; 32],
+        full_bytes: Vec<u8>,
+    }
+
+    fn seed_recipient_half(endpoint: &str) -> RecipientHalf {
+        use crate::storage::client_db::recipient_receipt_fold::{
+            insert_outbound_reply, insert_prepared_acceptance_journal, RecipientAcceptanceJournal,
+        };
+
+        trust_root_test_db();
+        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
+        let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
+        let (b_ak_pk, b_ak_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
+        let b_genesis = [0xB6u8; 32];
+
+        // Identity = B (the recipient). Its contact for A carries A's genesis,
+        // which is what the reply route is computed from.
+        crate::sdk::app_state::AppState::set_identity_info(
+            b.to_vec(),
+            vec![0x02u8; 32],
+            b_genesis.to_vec(),
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        seed_sender_contact(a, vec![0xA1u8; 64]);
+
+        // Endpoint auth: the sweep's B0xSDK looks the token up by the exact
+        // (endpoint, device, genesis) triple.
+        let b_b32 = crate::util::text_id::encode_base32_crockford(&b);
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&b_genesis);
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32.clone(),
+                device_id: b_b32.clone(),
+                mpc_proof: "test".to_string(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 3,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: vec![endpoint.to_string()],
+                entropy_hash: String::new(),
+                protocol_version: "v1".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".to_string(),
+            },
+        )
+        .expect("seed genesis record");
+        crate::storage::client_db::store_auth_token(endpoint, &b_b32, &genesis_b32, "test-token")
+            .expect("seed auth token");
+
+        // The countersigned receipt with REAL per-step EK material, stored in
+        // full — exactly what the fold persists.
+        let full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        let full_bytes = full.to_full_protobuf().expect("full receipt");
+        let commitment = full.compute_commitment().expect("commitment");
+        let rel = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
+        let projection_parent = [0u8; 32];
+        let rec = RecipientAcceptanceJournal {
+            relationship_key: rel,
+            parent_tip: parent,
+            child_tip: child,
+            counterparty_device_id: a,
+            commitment,
+            receipt_parent_root_a: [0u8; 32],
+            receipt_child_root_a: [0u8; 32],
+            precommit_digest: [0u8; 32],
+            prepared_receipt_artifact_hash: [0u8; 32],
+            expected_local_b_head: None,
+            new_local_b_head: full.ek_pk_b.clone(),
+            new_local_b_sk_enc: None,
+            expected_counterparty_a_head: None,
+            new_counterparty_a_head: Vec::new(),
+            receipt_bytes: full_bytes.clone(),
+            projection_parent_tip: projection_parent,
+            projection_target_tip: [0xBBu8; 32],
+            status: "prepared".to_string(),
+            created_at: 0,
+        };
+        insert_prepared_acceptance_journal(&rec).expect("journal");
+        {
+            // Test-only: the fold's Phase 3 marks the journal complete; the
+            // reply sweep joins on that status.
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "UPDATE acceptance_fold_journal SET status = 'complete' WHERE commitment = ?1",
+                rusqlite::params![commitment.as_slice()],
+            )
+            .expect("complete");
+        }
+        insert_outbound_reply(&commitment, &rel, &a, &child, &full_bytes).expect("reply row");
+        assert_eq!(
+            crate::storage::client_db::pending_outbound_replies()
+                .expect("pending")
+                .len(),
+            1,
+            "fixture must present exactly one undelivered reply"
+        );
+
+        RecipientHalf {
+            a,
+            b,
+            b_ak_pk,
+            b_ak_sk,
+            commitment,
+            projection_parent,
+            full_bytes,
+        }
+    }
+
+    /// The whole return leg, end to end, against a dumb recorder: the
+    /// recipient's REAL sweep posts a delta (not the 218 KB receipt) under the
+    /// deterministic reply id to the sender's route; the sender's REAL
+    /// discriminator + handler take that recorded body and finalize. The
+    /// mutations run on the same recorded body BEFORE the positive step, so
+    /// "status unchanged" is measured against a fixture that then finalizes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_reply_sweep_posts_a_sub_cap_delta_and_the_sender_finalizes_from_it() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        use prost::Message;
+        use std::sync::Arc;
+
+        // ---- recipient half: the sweep puts a delta on the wire ----
+        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let ep = spawn_recorder(log.clone()).expect("recorder");
+        let rh = seed_recipient_half(&ep);
+
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
+            .await
+            .expect("sweep");
+
+        let posts: Vec<RecordedPost> = log.lock().unwrap().clone();
+        let submits: Vec<&RecordedPost> = posts
+            .iter()
+            .filter(|p| p.path == "/api/v2/b0x/submit")
+            .collect();
+        assert_eq!(submits.len(), 1, "exactly one reply POST; got {posts:?}");
+        let post = submits[0];
+        assert_eq!(
+            post.message_id,
+            crate::util::text_id::encode_base32_crockford(&crate::sdk::b0x_sdk::reply_message_id(
+                &rh.commitment,
+                &rh.projection_parent
+            )),
+            "deterministic reply id"
+        );
+        assert_eq!(
+            post.recipient,
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+                &[0xAAu8; 32],
+                &rh.a,
+                &rh.projection_parent
+            )
+            .expect("route"),
+            "addressed to the tip the SENDER polls"
+        );
+        assert!(
+            post.body.len() < 131_072,
+            "the wire body must be under the node cap, got {}",
+            post.body.len()
+        );
+        assert!(
+            post.body.len() > 100_000,
+            "two real SPHINCS objects must be present, got {}",
+            post.body.len()
+        );
+        assert!(
+            crate::storage::client_db::pending_outbound_replies()
+                .expect("pending")
+                .is_empty(),
+            "the row is marked submitted once one endpoint took it"
+        );
+
+        // ---- sender half: the recorded body finalizes the step ----
+        let st = seed_submitted_step_with_recipient_ak(rh.b_ak_pk.clone(), rh.b_ak_sk.clone());
+        assert_eq!(
+            st.commitment, rh.commitment,
+            "both halves describe the same step"
+        );
+        assert_eq!((st.a, st.b), (rh.a, rh.b));
+
+        let env = dsm::types::proto::Envelope::decode(&*post.body).expect("Envelope");
+        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
+            .expect("the sender's discriminator recognises the sweep's output");
+        let recorded = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: post.message_id.clone(),
+            envelope_bytes: post.body.clone(),
+            body: body.clone(),
+        };
+
+        // m1: one bit of the A digest -> DigestMismatch, parked.
+        let mut m1 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        m1.receipt_evidence_digest_a[0] ^= 0x01;
+        let m1 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: m1.encode_to_vec(),
+            ..recorded.clone()
+        };
+        assert!(matches!(
+            super::finalize_from_countersign_delta(&m1).await,
+            CountersignOutcome::DigestMismatch(_)
+        ));
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        // m2: the whole receipt on the countersign method -> refused at the wire.
+        let m2 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: rh.full_bytes.clone(),
+            ..recorded.clone()
+        };
+        match super::finalize_from_countersign_delta(&m2).await {
+            CountersignOutcome::WireRejected(r) => assert!(r.contains("unknown field 7"), "{r}"),
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+
+        // m3: kyber_ct_b stripped -> refused at the wire, not by the live gate.
+        let mut m3 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        m3.kyber_ct_b.clear();
+        let m3 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: m3.encode_to_vec(),
+            ..recorded.clone()
+        };
+        match super::finalize_from_countersign_delta(&m3).await {
+            CountersignOutcome::WireRejected(r) => {
+                assert!(r.contains("missing required field 6"), "{r}")
+            }
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        // Positive: the recorded body as-is finalizes the step.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&recorded).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
+            .expect("outbox")
+            .expect("present");
+        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &st.rel_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+            )
+            .expect("head")
+            .expect("advanced"),
+            delta.ek_pk_b,
+            "the counterparty cert head advanced to the recipient's per-step EK"
+        );
+    }
+
+    /// A 413 from every node leaves the reply row for the next sweep — and,
+    /// since the delta is under the cap, documents that such a 413 could only
+    /// come from a node with a smaller cap than the protocol's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_413_on_the_delta_leaves_the_reply_row_for_the_next_sweep() {
+        use std::sync::Arc;
+        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let overrides = StatusOverrides::default();
+        let ep = spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder");
+        let rh = seed_recipient_half(&ep);
+        let reply_id = crate::util::text_id::encode_base32_crockford(
+            &crate::sdk::b0x_sdk::reply_message_id(&rh.commitment, &rh.projection_parent),
+        );
+        overrides.lock().unwrap().insert(reply_id, 413);
+
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
+            .await
+            .expect("sweep returns Ok; the failure is per-row");
+
+        let posts = log.lock().unwrap().clone();
+        assert_eq!(
+            posts
+                .iter()
+                .filter(|p| p.path == "/api/v2/b0x/submit")
+                .count(),
+            1,
+            "the sweep tried once"
+        );
+        assert_eq!(
+            crate::storage::client_db::pending_outbound_replies()
+                .expect("pending")
+                .len(),
+            1,
+            "a rejected delivery leaves the row unmarked for the next sweep"
         );
     }
 
