@@ -3314,14 +3314,11 @@ message OnlineTransferRequest {
   bytes from_device_id = 7 [(dsm_fixed_len)=32]; // REQUIRED: sender identity for key selection
   bytes chain_tip = 8 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK derives bilateral tip from SQLite; frontend must never supply this
   uint64 seq = 9; // REQUIRED: deterministic sequence counter
-  // LEGACY INLINE FORM (ADR 0003). Historically carried the FULL ReceiptCommit
-  // wire object — despite this comment saying "canonical" — which made the
-  // transfer envelope 168,400 bytes against the node's 128 KiB cap and failed
-  // every send with 413. Under the split it is EMPTY: the evidence travels as
-  // its own artifact, referenced by `receipt_evidence_digest` below. Field 10
-  // becomes reserved once the receiver no longer needs the intermediate build
-  // to compile.
-  bytes receipt_commit = 10 [(dsm_max_len)=131072];
+  // 10 was `receipt_commit`: the inline full-receipt composition (168,400 B
+  // against the node's 128 KiB cap, failing every send with 413). Deleted under
+  // ADR 0003 — the A-side receipt travels as its own artifact, referenced by
+  // `receipt_evidence_digest` (12). Reserved so the number is never reused.
+  reserved 10;
   // §4.2.1 Canonical unsigned Operation bytes (signing preimage).
   // Sender populates with signing_op.to_bytes() (signature field empty).
   // Receiver MUST use these bytes directly for SPHINCS+ verification and

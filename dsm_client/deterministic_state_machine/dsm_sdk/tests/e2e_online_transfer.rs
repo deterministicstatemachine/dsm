@@ -302,7 +302,6 @@ async fn e2e_online_transfer_era_and_custom_token() {
         from_device_id: alice_device_id.clone(),
         chain_tip: chain_tip.clone(),
         seq: 1,
-        receipt_commit: vec![],
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
     };
@@ -355,7 +354,6 @@ async fn e2e_online_transfer_era_and_custom_token() {
         from_device_id: alice_device_id.clone(),
         chain_tip: chain_tip.clone(),
         seq: 1,
-        receipt_commit: vec![],
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
     };
@@ -665,7 +663,6 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
             from_device_id: sender_device_id.clone(),
             chain_tip: relationship_tip.clone(),
             seq: 1,
-            receipt_commit: vec![],
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
         };

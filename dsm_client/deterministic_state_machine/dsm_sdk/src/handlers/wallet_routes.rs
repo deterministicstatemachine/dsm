@@ -1312,7 +1312,6 @@ impl AppRouterImpl {
                     from_device_id: self.device_id_bytes.to_vec(),
                     chain_tip: chain_tip_vec.clone(),
                     seq,
-                    receipt_commit: Vec::new(), // ReceiptCommit built in process_online_transfer_logic
                     canonical_operation_bytes: Vec::new(),
                     receipt_evidence_digest: Vec::new(),
                 };
