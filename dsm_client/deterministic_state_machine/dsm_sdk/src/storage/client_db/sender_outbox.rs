@@ -56,8 +56,12 @@ pub const OUTBOX_COMPLETE: &str = "complete";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactRole {
     /// A-side receipt evidence: the full `ReceiptCommit` the transfer references.
+    /// Frozen at send; the exact bytes the sender submits and replays.
     EvidenceA,
-    /// B-side countersign delta returned by the recipient.
+    /// B-side countersign delta returned by the recipient (ADR 0003 return
+    /// leg). Persisted by the sender inside the finalization transaction: the
+    /// exact envelope it verified and finalized on — its record of the
+    /// countersignature, since no full receipt ever crosses the wire.
     CountersignB,
 }
 
@@ -107,8 +111,9 @@ pub struct SenderOutboxArtifact {
     pub role: ArtifactRole,
     /// Deterministic; equals the node `message_id` for THIS artifact.
     pub submission_id: String,
-    /// EXACT bytes to submit. A retry replays these verbatim rather than
-    /// rebuilding an artifact from state that may have moved.
+    /// The exact envelope bytes. For `EvidenceA`: what the sender submits — a
+    /// retry replays these verbatim rather than rebuilding from state that may
+    /// have moved. For `CountersignB`: what the sender RECEIVED and finalized on.
     pub envelope_bytes: Vec<u8>,
     /// Role-domain-separated address of the payload this artifact carries.
     pub content_digest: [u8; 32],
@@ -532,7 +537,14 @@ pub fn finalize_on_acceptance_atomically(
     projection_target: &[u8; 32],
     expected_counterparty_head: Option<&[u8]>,
     new_counterparty_head: &[u8],
+    countersign_b: &SenderOutboxArtifact,
 ) -> Result<()> {
+    if countersign_b.role != ArtifactRole::CountersignB {
+        return Err(anyhow!(
+            "acceptance finalization: artifact role must be countersign_b, got {}",
+            countersign_b.role.as_str()
+        ));
+    }
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let tx = conn.transaction()?;
@@ -606,6 +618,12 @@ pub fn finalize_on_acceptance_atomically(
         proposal_nonce,
         OUTBOX_GC_PENDING,
     )?;
+
+    // (7) The recipient's countersign delta — the exact envelope this
+    // finalization was judged on — persists beside the frozen A-side evidence.
+    // The sender never receives a whole countersigned receipt (ADR 0003 return
+    // leg), so this row plus evidence_a IS its record of the countersignature.
+    insert_sender_outbox_artifact_with_conn(&tx, countersign_b)?;
 
     tx.commit()?;
     Ok(())
@@ -903,6 +921,24 @@ mod tests {
         }
     }
 
+    /// The recipient's countersign delta as the sender retains it at
+    /// finalization: role `countersign_b`, keyed to the same proposal.
+    fn countersign_b_for(r: &SenderOutboxRecord) -> SenderOutboxArtifact {
+        let body = vec![0xB0u8; 96];
+        SenderOutboxArtifact {
+            relationship_key: r.relationship_key,
+            canonical_parent: r.canonical_parent,
+            proposal_nonce: r.proposal_nonce,
+            role: ArtifactRole::CountersignB,
+            submission_id: derive_artifact_submission_id(&evidence_content_digest(
+                ArtifactRole::CountersignB,
+                &body,
+            )),
+            envelope_bytes: body.clone(),
+            content_digest: evidence_content_digest(ArtifactRole::CountersignB, &body),
+        }
+    }
+
     fn with_conn<T>(f: impl FnOnce(&Connection) -> T) -> T {
         let binding = crate::storage::client_db::get_connection().expect("conn");
         let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
@@ -1015,7 +1051,7 @@ mod tests {
         (proposal.status, outbox.status)
     }
 
-    /// The happy path: all six mutations land in one commit.
+    /// The happy path: all seven mutations land in one commit.
     #[test]
     #[serial]
     fn finalization_commits_all_six_mutations() {
@@ -1033,11 +1069,23 @@ mod tests {
             &T1,
             None,
             &EK_B,
+            &countersign_b_for(&r),
         )
         .expect("finalization");
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T1.to_vec(), "projection tip advanced");
+        let retained = load_sender_outbox_artifacts(
+            &r.relationship_key,
+            &r.canonical_parent,
+            &r.proposal_nonce,
+        )
+        .expect("artifacts");
+        assert_eq!(
+            retained,
+            vec![countersign_b_for(&r)],
+            "the recipient's countersign delta is persisted in the same commit"
+        );
         assert_eq!(local_tip, T1.to_vec(), "both spaces converge");
         assert_eq!(
             crate::storage::client_db::load_cert_chain_head_pubkey(
@@ -1102,11 +1150,22 @@ mod tests {
             &T1,
             Some(&[0xDEu8; 8]), // stale expectation — conflicts with 0xC0
             &EK_B,
+            &countersign_b_for(&r),
         );
         assert!(err.is_err(), "a conflicting head must abort finalization");
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T0.to_vec(), "tip advance ROLLED BACK");
+        assert!(
+            load_sender_outbox_artifacts(
+                &r.relationship_key,
+                &r.canonical_parent,
+                &r.proposal_nonce,
+            )
+            .expect("artifacts")
+            .is_empty(),
+            "the countersign delta is NOT persisted when finalization aborts"
+        );
         assert_eq!(local_tip, T1.to_vec(), "local tip untouched");
         assert_eq!(
             crate::storage::client_db::load_cert_chain_head_pubkey(
@@ -1158,6 +1217,7 @@ mod tests {
                 &T1,
                 None,
                 &EK_B,
+                &countersign_b_for(&r),
             )
         };
         call().expect("first finalization");
