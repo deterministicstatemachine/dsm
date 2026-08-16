@@ -3876,12 +3876,27 @@ mod tests {
         endpoint: String,
         path: String,
         body: Vec<u8>,
+        /// `x-dsm-recipient` — the route the caller submitted under.
+        recipient: String,
+        /// `x-dsm-message-id` — the deterministic id the caller submitted under.
+        message_id: String,
     }
+
+    /// Per-message-id HTTP status the recorder should answer with instead of
+    /// 204. Lets a test make ONE artifact fail while the other succeeds.
+    type StatusOverrides = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>;
 
     /// A loopback listener that records `POST /api/v2/b0x/submit` and answers
     /// `204 No Content`. Returns its `http://127.0.0.1:PORT` base URL.
     fn spawn_recorder(
         log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
+    ) -> std::io::Result<String> {
+        spawn_recorder_with_overrides(log, StatusOverrides::default())
+    }
+
+    fn spawn_recorder_with_overrides(
+        log: std::sync::Arc<std::sync::Mutex<Vec<RecordedPost>>>,
+        overrides: StatusOverrides,
     ) -> std::io::Result<String> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -3928,6 +3943,23 @@ mod tests {
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("")
                     .to_string();
+                let header = |name: &str| -> String {
+                    head.lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            k.trim()
+                                .eq_ignore_ascii_case(name)
+                                .then(|| v.trim().to_string())
+                        })
+                        .unwrap_or_default()
+                };
+                let message_id = header("x-dsm-message-id");
+                let status: u16 = overrides
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&message_id)
+                    .copied()
+                    .unwrap_or(204);
                 if head.to_uppercase().starts_with("POST") {
                     log.lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -3935,9 +3967,19 @@ mod tests {
                             endpoint: mine.clone(),
                             path,
                             body: buf[hs..].to_vec(),
+                            recipient: header("x-dsm-recipient"),
+                            message_id,
                         });
                 }
-                let _ = s.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+                let reason = match status {
+                    204 => "No Content",
+                    503 => "Service Unavailable",
+                    500 => "Internal Server Error",
+                    _ => "OK",
+                };
+                let _ = s.write_all(
+                    format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\n\r\n").as_bytes(),
+                );
                 let _ = s.flush();
             }
         });
@@ -4267,6 +4309,262 @@ mod tests {
             "once every frozen artifact reached quorum the logical send must \
              leave submission_uncertain; leaving it there would replay forever"
         );
+
+        // ---- the route invariant, observed on the wire ----
+        // Every half rides the OWNING outbox's frozen route, under its own
+        // frozen id. A replay under any other recipient would be silently
+        // discarded by the node's message-id dedup while returning success —
+        // so the route on the wire is what proves no relocation happened.
+        for p in &submits {
+            assert_eq!(
+                p.recipient, "TESTROUTINGADDRESS",
+                "every submission must carry the frozen routing_address as x-dsm-recipient; \
+                 got {:?} for message {}",
+                p.recipient, p.message_id
+            );
+        }
+        let ids: std::collections::BTreeSet<&str> =
+            submits.iter().map(|p| p.message_id.as_str()).collect();
+        assert!(
+            ids.contains(frozen.transfer_submission_id.as_str())
+                && ids.contains(frozen.evidence_submission_id.as_str()),
+            "both frozen ids must appear on the wire verbatim; saw {ids:?}"
+        );
+    }
+
+    /// Partial delivery is NOT delivery. If the transfer reaches quorum but the
+    /// evidence does not, the logical send stays `submission_uncertain`, no
+    /// status advances, and the next sweep replays the WHOLE frozen set — a
+    /// second debit never happens because nothing is rebuilt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_half_delivered_send_stays_uncertain_and_the_next_sweep_replays_everything() {
+        use crate::storage::client_db::{
+            unsettled_sender_outbox, OUTBOX_SUBMISSION_UNCERTAIN, OUTBOX_SUBMITTED,
+        };
+
+        trust_root_test_db();
+
+        let overrides: StatusOverrides = StatusOverrides::default();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let endpoints: Vec<String> = (0..3)
+            .map(|_| {
+                spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder")
+            })
+            .collect();
+        point_env_config_at(&endpoints, "partial");
+
+        let device_id = vec![0x0Au8; 32];
+        let genesis_hash = vec![0x31u8; 32];
+        let binding_key = vec![0x41u8; 32];
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            dsm::merkle::sparse_merkle_tree::empty_root(
+                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            )
+            .to_vec(),
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32.clone(),
+                device_id: sender_b32.clone(),
+                mpc_proof: "test".to_string(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 3,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: endpoints.clone(),
+                entropy_hash: String::new(),
+                protocol_version: "v1".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".to_string(),
+            },
+        )
+        .expect("seed genesis record");
+        for ep in &endpoints {
+            crate::storage::client_db::store_auth_token(
+                ep,
+                &sender_b32,
+                &genesis_b32,
+                "test-token",
+            )
+            .expect("seed auth token");
+        }
+
+        let frozen = seed_uncertain_send();
+        let proposal_before =
+            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
+                .expect("load")
+                .expect("proposal");
+
+        // The EVIDENCE fails everywhere; the transfer succeeds.
+        overrides
+            .lock()
+            .unwrap()
+            .insert(frozen.evidence_submission_id.clone(), 503);
+
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "partial-test".to_string(),
+            storage_endpoints: endpoints.clone(),
+            enable_offline: false,
+        })
+        .expect("router init");
+        async fn sync(r: &crate::handlers::app_router_impl::AppRouterImpl) {
+            let _ = r
+                .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
+                    pull_inbox: false,
+                    push_pending: true,
+                    limit: 0,
+                })
+                .await;
+        }
+
+        sync(&router).await;
+
+        // The transfer went out; the evidence was tried and refused. Neither
+        // is a delivery.
+        let posts = log.lock().unwrap().clone();
+        assert!(posts
+            .iter()
+            .any(|p| p.message_id == frozen.transfer_submission_id));
+        assert!(posts
+            .iter()
+            .any(|p| p.message_id == frozen.evidence_submission_id));
+
+        let rows = unsettled_sender_outbox().expect("query");
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one row, no duplicate created on partial delivery"
+        );
+        assert_eq!(
+            rows[0].status, OUTBOX_SUBMISSION_UNCERTAIN,
+            "a transfer-only quorum must NOT advance the logical send"
+        );
+        assert_eq!(
+            crate::storage::client_db::get_sender_proposal_by_commitment(&[0x76u8; 32])
+                .expect("load")
+                .expect("proposal")
+                .status,
+            proposal_before.status,
+            "proposal status must not move on partial delivery"
+        );
+
+        // Network heals. The next sweep replays BOTH halves — byte-identical,
+        // same ids — and only now does the send advance.
+        overrides.lock().unwrap().clear();
+        log.lock().unwrap().clear();
+        sync(&router).await;
+
+        let posts = log.lock().unwrap().clone();
+        let replayed_transfer = posts
+            .iter()
+            .filter(|p| p.body == frozen.transfer_bytes)
+            .count();
+        let replayed_evidence = posts
+            .iter()
+            .filter(|p| p.body == frozen.evidence_bytes)
+            .count();
+        assert!(
+            replayed_transfer >= 3 && replayed_evidence >= 3,
+            "the whole frozen set is replayed to full quorum, not just the missing half \
+             (transfer x{replayed_transfer}, evidence x{replayed_evidence})"
+        );
+        let rows = unsettled_sender_outbox().expect("query");
+        assert!(
+            rows.is_empty(),
+            "after full delivery the row leaves the unsettled set; got {:?}",
+            rows.iter().map(|r| r.status.as_str()).collect::<Vec<_>>()
+        );
+        // And it moved to `submitted`, not somewhere else.
+        let all: Vec<String> = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let mut st = conn
+                .prepare("SELECT status FROM sender_outbox")
+                .expect("prep");
+            st.query_map([], |r| r.get::<_, String>(0))
+                .expect("q")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rows")
+        };
+        assert_eq!(all, vec![OUTBOX_SUBMITTED.to_string()]);
+    }
+
+    /// Settled rows are never replayed. `submitted`, `gc_pending` and
+    /// `complete` produce ZERO submissions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn settled_outbox_rows_are_never_resubmitted() {
+        use crate::storage::client_db::{
+            set_sender_outbox_status, OUTBOX_COMPLETE, OUTBOX_GC_PENDING, OUTBOX_SUBMITTED,
+        };
+
+        trust_root_test_db();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let endpoints: Vec<String> = (0..3)
+            .map(|_| spawn_recorder(log.clone()).expect("recorder"))
+            .collect();
+        point_env_config_at(&endpoints, "settled");
+        let device_id = vec![0x0Au8; 32];
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            vec![0x01u8; 32],
+            vec![0x31u8; 32],
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
+
+        let _frozen = seed_uncertain_send();
+        let rel =
+            dsm::verification::smt_replace_witness::compute_smt_key(&[0x0Au8; 32], &[0x0Bu8; 32]);
+        let (cp, nonce) = ([0x71u8; 32], [0x75u8; 32]);
+
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "settled-test".to_string(),
+            storage_endpoints: endpoints.clone(),
+            enable_offline: false,
+        })
+        .expect("router init");
+
+        for settled in [OUTBOX_SUBMITTED, OUTBOX_GC_PENDING, OUTBOX_COMPLETE] {
+            set_sender_outbox_status(&rel, &cp, &nonce, settled).expect("set");
+            log.lock().unwrap().clear();
+            let _ = router
+                .run_storage_sync_request(dsm::types::proto::StorageSyncRequest {
+                    pull_inbox: false,
+                    push_pending: true,
+                    limit: 0,
+                })
+                .await;
+            let submits = log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.path.contains("/api/v2/b0x/submit"))
+                .count();
+            assert_eq!(
+                submits, 0,
+                "a `{settled}` row must never be replayed; the sweep replayed it {submits} time(s)"
+            );
+        }
     }
 
     // =====================================================================
@@ -4347,12 +4645,24 @@ mod tests {
                 let path = parts.next().unwrap_or("").to_string();
 
                 let resp: Vec<u8> = if method == "POST" {
+                    let header = |name: &str| -> String {
+                        head.lines()
+                            .find_map(|l| {
+                                let (k, v) = l.split_once(':')?;
+                                k.trim()
+                                    .eq_ignore_ascii_case(name)
+                                    .then(|| v.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
                     log.lock()
                         .unwrap_or_else(|p| p.into_inner())
                         .push(RecordedPost {
                             endpoint: mine.clone(),
                             path: path.clone(),
                             body: buf[hs..].to_vec(),
+                            recipient: header("x-dsm-recipient"),
+                            message_id: header("x-dsm-message-id"),
                         });
                     b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec()
                 } else if path.contains("/api/v2/device/") {
