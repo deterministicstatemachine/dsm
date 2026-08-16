@@ -1396,6 +1396,34 @@ impl AppRouterImpl {
                     &sender_device,
                     &self_device,
                 );
+
+                // FINALITY BARRIER — reordering hold. A next-generation transfer
+                // may be TRANSPORTED before this device has processed the
+                // sender's certificate for the predecessor it applied, but it
+                // may not be canonically APPLIED until then: while any accepted
+                // journal on this relationship still has `peer_finalized = 0`,
+                // the pair stays `ready_to_verify` (no decide_ack, no apply, no
+                // ACK, no reject; route retained). This pass re-runs every poll
+                // and certificates are drained BEFORE it, so once the
+                // certificate lands the same row proceeds through the normal
+                // pin. Intended behaviour, not a defect to widen the barrier for.
+                match crate::storage::client_db::relationship_awaits_peer_finalization(&rel_key) {
+                    Ok(true) => {
+                        log::info!(
+                            "[storage.sync] ADR 0003 completion: {key} HELD — a prior acceptance on \
+                             this relationship awaits the peer's finality certificate"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "[storage.sync] ADR 0003 completion: {key}: barrier read failed: {e}"
+                        );
+                        continue;
+                    }
+                }
+
                 let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                     Ok(p) => p,
                     Err(e) => {
