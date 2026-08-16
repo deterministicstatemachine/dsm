@@ -43,8 +43,10 @@ name: CodeQL
 on:
   push:
     branches: [main]
+  # Run on every PR regardless of base branch (see ci.yml) so stacked PRs get
+  # scanned. Note: codeql-action restricts alerts to the PR diff, so a PR that
+  # touches no Rust reports no Rust alerts by construction (see below).
   pull_request:
-    branches: [main]
   # Lets a full-tree scan be forced without waiting for a push or the cron.
   # Worth knowing when reading a PR check: codeql-action restricts alerts to
   # the PR diff ("Persisted N diff range(s)"), so a PR that touches no Rust
