@@ -3246,7 +3246,7 @@ impl B0xSDK {
             }
             if let Some(body) = Self::decode_relationship_finalized(&env) {
                 info!(
-                    "📬 finality certificate message_id={} ({}B body)",
+                    "📬 finality checkpoint message_id={} ({}B body)",
                     text_id::encode_base32_crockford(&env.message_id),
                     body.len()
                 );

@@ -922,7 +922,7 @@ async fn deliver_pending_finalization_checkpoints(
                 continue;
             }
         };
-        let Some(cert) = artifacts
+        let Some(checkpoint) = artifacts
             .into_iter()
             .find(|a| a.role == ArtifactRole::RelationshipFinalized)
         else {
@@ -933,11 +933,11 @@ async fn deliver_pending_finalization_checkpoints(
             );
             continue;
         };
-        let Some(route) = cert.routing_address.as_deref() else {
+        let Some(route) = checkpoint.routing_address.as_deref() else {
             log::error!(
                 "[storage.sync] checkpoint sweep: certificate {} has no frozen route — invariant \
                  violated; leaving for inspection",
-                cert.submission_id
+                checkpoint.submission_id
             );
             continue;
         };
@@ -953,9 +953,9 @@ async fn deliver_pending_finalization_checkpoints(
         };
         match b0x
             .submit_stored_envelope_with_retry(
-                &cert.envelope_bytes,
+                &checkpoint.envelope_bytes,
                 route,
-                &cert.submission_id,
+                &checkpoint.submission_id,
                 &retry,
             )
             .await
@@ -964,7 +964,7 @@ async fn deliver_pending_finalization_checkpoints(
             Err(e) => {
                 log::warn!(
                     "[storage.sync] checkpoint sweep: certificate {} below quorum (will retry): {e}",
-                    cert.submission_id
+                    checkpoint.submission_id
                 );
                 continue;
             }
@@ -981,14 +981,14 @@ async fn deliver_pending_finalization_checkpoints(
                 released += 1;
                 log::info!(
                     "[storage.sync] finality checkpoint {} at quorum — gate released, outbox gc_pending",
-                    cert.submission_id
+                    checkpoint.submission_id
                 );
                 emit_authoritative_wallet_refresh();
             }
             Ok(false) => {}
             Err(e) => log::error!(
                 "[storage.sync] checkpoint sweep: release after quorum FAILED for {}: {e}",
-                cert.submission_id
+                checkpoint.submission_id
             ),
         }
     }
