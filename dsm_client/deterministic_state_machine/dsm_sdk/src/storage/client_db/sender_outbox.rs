@@ -502,13 +502,40 @@ pub fn commit_send_prerequisites_with_conn(
 
 /// §16.6 DEFECT 1 — ATOMIC ACCEPTANCE-PROOF FINALIZATION.
 ///
+/// Everything one verified acceptance authorises the sender to commit — the
+/// inputs of [`finalize_on_acceptance_atomically`], all read from the durable
+/// proposal + the verified delta, never from current state.
+pub struct AcceptanceFinalization<'a> {
+    pub relationship_key: &'a [u8; 32],
+    pub canonical_parent: &'a [u8; 32],
+    pub proposal_nonce: &'a [u8; 32],
+    pub commitment: &'a [u8; 32],
+    pub counterparty_device_id: &'a [u8; 32],
+    pub projection_parent: &'a [u8; 32],
+    pub projection_target: &'a [u8; 32],
+    /// The Counterparty EK head observed before finalization (CAS expectation).
+    pub expected_counterparty_head: Option<&'a [u8]>,
+    /// The recipient's `ek_pk_b` — the new Counterparty EK head.
+    pub new_counterparty_head: &'a [u8],
+    /// The recipient's canonical pair from the delta, authenticated by `sig_b`:
+    /// its head before (`.0`) and after (`.1`) applying this step. CAS'd into
+    /// `counterparty_canonical_heads` (`.0` → `.1`) in the same transaction.
+    pub peer_pair: ([u8; 32], [u8; 32]),
+    /// `initial_chain_tip_from_device_ids(self, peer)` — the pair's `.0` must
+    /// equal it when no head row exists yet (the relationship's first step).
+    pub genesis_seed: [u8; 32],
+    /// The exact delta envelope this finalization was judged on.
+    pub countersign_b: &'a SenderOutboxArtifact,
+}
+
 /// The verified countersigned acceptance artifact is the SOLE protocol
 /// authority for finalizing an online send. This performs, as ONE literal
 /// SQLite transaction:
 ///
 ///   1. advance the projection tip (chain_tip = local_bilateral_chain_tip)
 ///   2. promote the pending Local EK head (keyed by commitment)
-///   3. CAS-advance the Counterparty EK head to the recipient's `ek_pk_b`
+///   3. CAS-advance the Counterparty EK head to the recipient's `ek_pk_b`,
+///      and the peer's CANONICAL head `peer_pair.0 → peer_pair.1`
 ///   4. finalize the proposal
 ///   5. release the gate
 ///   6. mark the outbox `gc_pending`
@@ -526,19 +553,21 @@ pub fn commit_send_prerequisites_with_conn(
 ///
 /// Idempotent: a redelivered acceptance finds the proposal already finalized
 /// and the heads already at target, and commits the same terminal state.
-#[allow(clippy::too_many_arguments)]
-pub fn finalize_on_acceptance_atomically(
-    relationship_key: &[u8; 32],
-    canonical_parent: &[u8; 32],
-    proposal_nonce: &[u8; 32],
-    commitment: &[u8; 32],
-    counterparty_device_id: &[u8; 32],
-    projection_parent: &[u8; 32],
-    projection_target: &[u8; 32],
-    expected_counterparty_head: Option<&[u8]>,
-    new_counterparty_head: &[u8],
-    countersign_b: &SenderOutboxArtifact,
-) -> Result<()> {
+pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Result<()> {
+    let AcceptanceFinalization {
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        commitment,
+        counterparty_device_id,
+        projection_parent,
+        projection_target,
+        expected_counterparty_head,
+        new_counterparty_head,
+        peer_pair,
+        genesis_seed,
+        countersign_b,
+    } = *f;
     if countersign_b.role != ArtifactRole::CountersignB {
         return Err(anyhow!(
             "acceptance finalization: artifact role must be countersign_b, got {}",
@@ -591,6 +620,35 @@ pub fn finalize_on_acceptance_atomically(
                 "acceptance finalization: counterparty head conflict (current={:?}..) — \
                  aborting",
                 current.as_ref().map(|c| &c[..4.min(c.len())])
+            ));
+        }
+    }
+
+    // (3b) The peer's CANONICAL head: the recipient signed (sig_b) that it
+    // applied this step under peer_pair.0 and now sits at peer_pair.1. That is
+    // the exact parent it will originate under next; pin it. AlreadyAtTarget
+    // (same step re-finalized) is success; a third value aborts — the caller
+    // parks the step and the gate is retained.
+    match super::counterparty_canonical_heads::cas_advance_counterparty_canonical_head_with_conn(
+        &tx,
+        relationship_key,
+        counterparty_device_id,
+        &peer_pair.0,
+        &peer_pair.1,
+        commitment,
+        &genesis_seed,
+    )? {
+        super::counterparty_canonical_heads::CasCanonicalHeadOutcome::Advanced
+        | super::counterparty_canonical_heads::CasCanonicalHeadOutcome::GenesisInit
+        | super::counterparty_canonical_heads::CasCanonicalHeadOutcome::AlreadyAtTarget => {}
+        super::counterparty_canonical_heads::CasCanonicalHeadOutcome::Conflict { current } => {
+            return Err(anyhow!(
+                "acceptance finalization: peer canonical head conflict (delta parent {}.., \
+                 pinned {}) — aborting",
+                crate::util::text_id::encode_base32_crockford(&peer_pair.0[..4]),
+                current
+                    .map(|c| crate::util::text_id::encode_base32_crockford(&c[..4]) + "..")
+                    .unwrap_or_else(|| "none".to_string()),
             ));
         }
     }
@@ -957,6 +1015,8 @@ mod tests {
     const T0: [u8; 32] = [0xAAu8; 32];
     const T1: [u8; 32] = [0xBBu8; 32];
     const EK_B: [u8; 8] = [0xB0u8; 8];
+    /// The relationship's genesis seed — the peer pair's parent on the first step.
+    const SEED: [u8; 32] = [0xA0u8; 32];
 
     /// Seed everything a send leaves behind just before its acceptance lands.
     fn seed_pre_finalization(r: &SenderOutboxRecord) {
@@ -1059,19 +1119,27 @@ mod tests {
         let r = rec(1);
         seed_pre_finalization(&r);
 
-        finalize_on_acceptance_atomically(
-            &r.relationship_key,
-            &r.canonical_parent,
-            &r.proposal_nonce,
-            &r.commitment,
-            &CP,
-            &T0,
-            &T1,
-            None,
-            &EK_B,
-            &countersign_b_for(&r),
-        )
+        finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: None,
+            new_counterparty_head: &EK_B,
+            peer_pair: (SEED, [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+        })
         .expect("finalization");
+        assert_eq!(
+            crate::storage::client_db::load_counterparty_canonical_head(&r.relationship_key)
+                .expect("head"),
+            Some([0xB1u8; 32]),
+            "the peer's canonical head is pinned at the delta's child"
+        );
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T1.to_vec(), "projection tip advanced");
@@ -1140,19 +1208,27 @@ mod tests {
         )
         .expect("seed counterparty head");
 
-        let err = finalize_on_acceptance_atomically(
-            &r.relationship_key,
-            &r.canonical_parent,
-            &r.proposal_nonce,
-            &r.commitment,
-            &CP,
-            &T0,
-            &T1,
-            Some(&[0xDEu8; 8]), // stale expectation — conflicts with 0xC0
-            &EK_B,
-            &countersign_b_for(&r),
-        );
+        let err = finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: Some(&[0xDEu8; 8]), // stale — conflicts with 0xC0
+            new_counterparty_head: &EK_B,
+            peer_pair: (SEED, [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+        });
         assert!(err.is_err(), "a conflicting head must abort finalization");
+        assert_eq!(
+            crate::storage::client_db::load_counterparty_canonical_head(&r.relationship_key)
+                .expect("head"),
+            None,
+            "peer canonical head CAS ROLLED BACK"
+        );
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T0.to_vec(), "tip advance ROLLED BACK");
@@ -1207,18 +1283,20 @@ mod tests {
         let r = rec(3);
         seed_pre_finalization(&r);
         let call = || {
-            finalize_on_acceptance_atomically(
-                &r.relationship_key,
-                &r.canonical_parent,
-                &r.proposal_nonce,
-                &r.commitment,
-                &CP,
-                &T0,
-                &T1,
-                None,
-                &EK_B,
-                &countersign_b_for(&r),
-            )
+            finalize_on_acceptance_atomically(&AcceptanceFinalization {
+                relationship_key: &r.relationship_key,
+                canonical_parent: &r.canonical_parent,
+                proposal_nonce: &r.proposal_nonce,
+                commitment: &r.commitment,
+                counterparty_device_id: &CP,
+                projection_parent: &T0,
+                projection_target: &T1,
+                expected_counterparty_head: None,
+                new_counterparty_head: &EK_B,
+                peer_pair: (SEED, [0xB1u8; 32]),
+                genesis_seed: SEED,
+                countersign_b: &countersign_b_for(&r),
+            })
         };
         call().expect("first finalization");
         let head_after_first = crate::storage::client_db::load_cert_chain_head(

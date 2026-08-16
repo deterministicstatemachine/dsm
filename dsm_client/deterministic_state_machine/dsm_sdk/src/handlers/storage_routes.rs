@@ -644,6 +644,38 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    // Pre-tx sanity on the peer's canonical head: the delta's `b_parent_tip`
+    // must be the head this sender pins for the recipient (the genesis seed
+    // when nothing has been learned yet). A mismatch means the recipient
+    // applied this step under a lineage this sender does not know — the
+    // artifact proves nothing for THIS relationship state; park it. The
+    // in-tx CAS below stays authoritative for the race.
+    let genesis_seed = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+        &self_device_id,
+        &proposal.counterparty_device_id,
+    );
+    match crate::storage::client_db::load_counterparty_canonical_head(&proposal.relationship_key) {
+        Ok(pinned) => {
+            let pinned = pinned.unwrap_or(genesis_seed);
+            if pinned != bound.b_parent_tip {
+                let reason = format!(
+                    "peer canonical head mismatch: delta parent {}.. but this sender pins {}..",
+                    crate::util::text_id::encode_base32_crockford(&bound.b_parent_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&pinned[..4]),
+                );
+                park_awaiting_valid_reply(&proposal, &short, &reason);
+                return CountersignOutcome::Rejected(reason);
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "[storage.sync] §16.6 could not read the peer canonical head for {short}.. — \
+                 refusing to finalize (retry from the durable outbox): {e}"
+            );
+            return CountersignOutcome::FinalizeFailed(format!("peer canonical head read: {e}"));
+        }
+    }
+
     let content_digest = evidence_content_digest(ArtifactRole::CountersignB, &delta.body);
     let countersign_artifact = SenderOutboxArtifact {
         relationship_key: proposal.relationship_key,
@@ -656,16 +688,20 @@ async fn finalize_from_countersign_delta(
     };
 
     match crate::storage::client_db::finalize_on_acceptance_atomically(
-        &proposal.relationship_key,
-        &proposal.canonical_parent,
-        &proposal.nonce_hash,
-        &proposal.commitment,
-        &proposal.counterparty_device_id,
-        &proposal.projection_parent,
-        &proposal.projection_target,
-        expected_counterparty_head.as_deref(),
-        &receipt.ek_pk_b,
-        &countersign_artifact,
+        &crate::storage::client_db::AcceptanceFinalization {
+            relationship_key: &proposal.relationship_key,
+            canonical_parent: &proposal.canonical_parent,
+            proposal_nonce: &proposal.nonce_hash,
+            commitment: &proposal.commitment,
+            counterparty_device_id: &proposal.counterparty_device_id,
+            projection_parent: &proposal.projection_parent,
+            projection_target: &proposal.projection_target,
+            expected_counterparty_head: expected_counterparty_head.as_deref(),
+            new_counterparty_head: &receipt.ek_pk_b,
+            peer_pair: bound.b_pair(),
+            genesis_seed,
+            countersign_b: &countersign_artifact,
+        },
     ) {
         Ok(()) => {
             log::info!(
@@ -2839,8 +2875,18 @@ mod tests {
     /// commitment is computed, and `sig_b` — which signs a target derived from
     /// that commitment — is attached last.
     /// The recipient's canonical pair every fixture in this module signs
-    /// under (B-canonical target) and carries in its delta.
-    const TEST_B_PAIR: ([u8; 32], [u8; 32]) = ([0x71u8; 32], [0x72u8; 32]);
+    /// under (B-canonical target) and carries in its delta: the relationship's
+    /// genesis seed (what the sender pins before any step is learned) → an
+    /// opaque first child.
+    fn test_b_pair() -> ([u8; 32], [u8; 32]) {
+        (
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &[0x0Au8; 32],
+                &[0x0Bu8; 32],
+            ),
+            [0x72u8; 32],
+        )
+    }
 
     fn signed_b_receipt(
         a: [u8; 32],
@@ -2878,8 +2924,8 @@ mod tests {
         let target = compute_receipt_b_canonical_target(
             &commitment,
             &commitment,
-            &TEST_B_PAIR.0,
-            &TEST_B_PAIR.1,
+            &test_b_pair().0,
+            &test_b_pair().1,
         );
         r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
         r
@@ -2981,8 +3027,8 @@ mod tests {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
-            b_parent_tip: TEST_B_PAIR.0.to_vec(),
-            b_child_tip: TEST_B_PAIR.1.to_vec(),
+            b_parent_tip: test_b_pair().0.to_vec(),
+            b_child_tip: test_b_pair().1.to_vec(),
         }
         .encode_to_vec();
         crate::sdk::b0x_sdk::CountersignDelta {
@@ -3155,7 +3201,7 @@ mod tests {
             &st.b_ak_pk,
             None,
             None,
-            TEST_B_PAIR,
+            test_b_pair(),
         )
         .expect("verification must not error")
         {
@@ -3227,8 +3273,8 @@ mod tests {
             &crate::sdk::receipts::compute_receipt_b_canonical_target(
                 &poisoned_commitment,
                 &poisoned_commitment,
-                &TEST_B_PAIR.0,
-                &TEST_B_PAIR.1,
+                &test_b_pair().0,
+                &test_b_pair().1,
             ),
         )
         .expect("the poisoned receipt must carry a genuinely valid sig_b");
@@ -3431,7 +3477,7 @@ mod tests {
                 &st.proposal.projection_parent,
                 &st.commitment,
                 &full_bytes,
-                TEST_B_PAIR,
+                test_b_pair(),
             )
             .expect("real delta");
         assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
@@ -3562,8 +3608,8 @@ mod tests {
             receipt_bytes: full_bytes.clone(),
             projection_parent_tip: projection_parent,
             projection_target_tip: [0xBBu8; 32],
-            applied_parent_tip_b: TEST_B_PAIR.0,
-            applied_child_tip_b: TEST_B_PAIR.1,
+            applied_parent_tip_b: test_b_pair().0,
+            applied_child_tip_b: test_b_pair().1,
             status: "prepared".to_string(),
             created_at: 0,
         };

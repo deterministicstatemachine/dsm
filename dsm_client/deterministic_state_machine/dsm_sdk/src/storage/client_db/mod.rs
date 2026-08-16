@@ -28,6 +28,7 @@ mod canonical_rebuild;
 pub mod cert_chain;
 mod cert_resync;
 mod contacts;
+pub mod counterparty_canonical_heads;
 mod dlv_receipts;
 mod export;
 mod genesis;
@@ -70,6 +71,7 @@ pub use projection_repair::*;
 pub use sender_outbox::*;
 pub use sender_proposal::*;
 pub use contacts::*;
+pub use counterparty_canonical_heads::*;
 pub use dlv_receipts::*;
 pub use export::*;
 pub use genesis::*;
@@ -1200,6 +1202,22 @@ fn create_schema(conn: &Connection) -> Result<()> {
             step_count              INTEGER NOT NULL DEFAULT 0,
             updated_at              INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, side)
+        );
+
+        -- The ONE authority for the PEER's canonical relationship head
+        -- (bilateral finality barrier). One row per relationship: the head the
+        -- peer will sign under when it next originates. Advanced by CAS from
+        -- BOTH roles — the signed A pair on inbound apply (in the apply tx),
+        -- the sig_b-authenticated B pair on sender finalize (in the finalize
+        -- tx). No row ⇔ fresh relationship (genesis seed). The recipient's
+        -- pin (`pinned_counterparty_a_head`) reads this table only.
+        CREATE TABLE IF NOT EXISTS counterparty_canonical_heads(
+            relationship_key       BLOB PRIMARY KEY,
+            counterparty_device_id BLOB NOT NULL,
+            head_tip               BLOB NOT NULL,
+            prev_tip               BLOB NOT NULL,
+            source_commitment      BLOB NOT NULL,
+            updated_at             INTEGER NOT NULL
         );
 
         -- §11.1 sender-side DEFERRED Local chain-head advance. The new

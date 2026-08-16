@@ -3195,6 +3195,42 @@ impl CoreSDK {
                         ))
                     }
                 }
+                // The peer's canonical head: signed parent → signed child, CAS'd
+                // in THIS transaction. The pre-execution pin above read the same
+                // authority outside the tx; the CAS closes that window — a head
+                // that moved underneath is a retryable apply error, never a
+                // sticky conflict, and nothing here commits.
+                match cdb::cas_advance_counterparty_canonical_head_with_conn(
+                    tx,
+                    &rel_key,
+                    &sender_arr,
+                    &parent_tip,
+                    &child_tip,
+                    &canonical_apply_id,
+                    &init_tip,
+                )
+                .map_err(|e| {
+                    DsmError::internal(
+                        format!("in-tx counterparty canonical head CAS failed: {e}"),
+                        None::<std::convert::Infallible>,
+                    )
+                })? {
+                    cdb::CasCanonicalHeadOutcome::Advanced
+                    | cdb::CasCanonicalHeadOutcome::GenesisInit
+                    | cdb::CasCanonicalHeadOutcome::AlreadyAtTarget => {}
+                    cdb::CasCanonicalHeadOutcome::Conflict { current } => {
+                        return Err(DsmError::internal(
+                            format!(
+                                "counterparty canonical head moved during apply (now {}..) — \
+                                 nothing committed; retry",
+                                current
+                                    .map(|c| crate::util::text_id::encode_base32_crockford(&c[..4]))
+                                    .unwrap_or_else(|| "none".to_string())
+                            ),
+                            None::<std::convert::Infallible>,
+                        ))
+                    }
+                }
                 // The recipient's acceptance artifacts (journal), same tx.
                 write_acceptance(tx, outcome, artifacts)
             }
