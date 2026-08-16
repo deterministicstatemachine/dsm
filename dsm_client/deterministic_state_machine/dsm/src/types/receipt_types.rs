@@ -162,14 +162,16 @@ fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
 }
 
 /// `ReceiptCountersignB` (ADR 0003 return leg): the four B-side receipt
-/// fields plus two 32-byte references. Every field is required.
-const RECEIPT_COUNTERSIGN_B_TAGS: u32 = 6;
+/// fields, two 32-byte references, and the recipient's authenticated
+/// canonical pair (`b_parent_tip`, `b_child_tip`). Every field is required.
+const RECEIPT_COUNTERSIGN_B_TAGS: u32 = 8;
 
 fn receipt_countersign_b_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
         1..=2 => Some(FieldLimit::Fixed(32)),
         3..=5 => Some(FieldLimit::Max(65_535)),
         6 => Some(FieldLimit::Max(2_048)),
+        7..=8 => Some(FieldLimit::Fixed(32)),
         _ => None,
     }
 }
@@ -323,9 +325,10 @@ fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
     )
 }
 
-/// Strict wire validation for `ReceiptCountersignB`: tags 1-6 only, all
-/// present, 1-2 exactly 32 bytes, 3-5 at most 65,535, 6 at most 2,048. A full
-/// `ReceiptCommit` body fed here fails on its first tag above 6.
+/// Strict wire validation for `ReceiptCountersignB`: tags 1-8 only, all
+/// present, 1-2 and 7-8 exactly 32 bytes, 3-5 at most 65,535, 6 at most
+/// 2,048. A full `ReceiptCommit` body fed here fails on its first tag above 8
+/// (or, before that, on tag 8 not being exactly 32 bytes).
 fn validate_receipt_countersign_b_wire(bytes: &[u8]) -> Result<(), DsmError> {
     validate_length_delimited_wire(
         bytes,
@@ -1580,6 +1583,8 @@ mod tests {
             ek_cert_b: b.ek_cert_b.clone(),
             ek_pk_b: b.ek_pk_b.clone(),
             kyber_ct_b: b.kyber_ct_b.clone(),
+            b_parent_tip: vec![0x77; 32],
+            b_child_tip: vec![0x78; 32],
         }
         .encode_to_vec()
     }
@@ -1679,9 +1684,13 @@ mod tests {
         let decoded = decode_receipt_countersign_b_wire(&wire).unwrap();
         assert_eq!(decoded.commitment, vec![0x11; 32]);
         assert_eq!(decoded.receipt_evidence_digest_a, vec![0x22; 32]);
+        assert_eq!(decoded.b_parent_tip, vec![0x77; 32]);
+        assert_eq!(decoded.b_child_tip, vec![0x78; 32]);
+        // The pair is delta-only metadata: it never enters the receipt, so the
+        // split/overlay byte identity above is untouched by it.
         assert_eq!(CountersignB::from_wire(&decoded), b);
         assert_eq!(decoded.encode_to_vec(), wire);
-        // Two SPHINCS objects plus ~1.2 KB of everything else: the normative
+        // Two SPHINCS objects plus ~1.3 KB of everything else: the normative
         // budget class (ADR 0003), well under the 131,072-byte node cap even
         // before the transport wrapper.
         assert!(
@@ -1691,9 +1700,11 @@ mod tests {
         );
     }
 
-    /// A full countersigned receipt fed to the delta decoder is refused on its
-    /// first tag past 6 — the sender can never mistake a whole receipt for a
-    /// delta, so no legacy full-receipt reply can be consumed by accident.
+    /// A full countersigned receipt fed to the delta decoder is refused — the
+    /// sender can never mistake a whole receipt for a delta, so no legacy
+    /// full-receipt reply can be consumed by accident. With the 8-tag delta
+    /// the first divergence is `ReceiptCommit` tag 8 (`rel_proof_parent`,
+    /// kilobytes long) where the delta requires a 32-byte `b_child_tip`.
     #[test]
     fn countersign_wire_refuses_a_full_receipt_commit_body() {
         let full_bytes = production_shaped_a_side()
@@ -1703,9 +1714,38 @@ mod tests {
             .unwrap();
         let err = decode_receipt_countersign_b_wire(&full_bytes).unwrap_err();
         assert!(
-            format!("{err}").contains("countersign wire: unknown field 7"),
+            format!("{err}").contains("countersign wire: field 8 must be 32 bytes"),
             "{err}"
         );
+    }
+
+    /// The recipient's canonical pair is REQUIRED and fixed-width: a delta
+    /// without it (the pre-barrier shape) or with a truncated tip is refused at
+    /// the wire, before any signature is examined.
+    #[test]
+    fn countersign_wire_requires_the_recipient_canonical_pair() {
+        use prost::Message;
+        let b = production_shaped_countersign_b();
+        let good = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+
+        let mut no_pair = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        no_pair.b_parent_tip.clear();
+        no_pair.b_child_tip.clear();
+        let err = decode_receipt_countersign_b_wire(&no_pair.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("missing required field 7"),
+            "{err}"
+        );
+
+        let mut short_child = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        short_child.b_child_tip.truncate(31);
+        let err = decode_receipt_countersign_b_wire(&short_child.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("field 8 must be 32 bytes"),
+            "{err}"
+        );
+
+        decode_receipt_countersign_b_wire(&good).unwrap();
     }
 
     #[test]

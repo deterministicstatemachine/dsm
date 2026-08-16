@@ -356,7 +356,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// upgraded in place. Bump this whenever a change would make an older database
 /// structurally invalid (a new NOT NULL column, a renamed/removed table, an
 /// altered key). See [`enforce_schema_version`].
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 2;
+///
+/// 3: bilateral finality barrier — B's canonical pair on
+/// `canonical_apply_identity` / `acceptance_fold_journal` /
+/// `accepted_transition_marker` (NOT NULL), plus the tables and columns the
+/// barrier's later commits add on the same generation.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 3;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -542,10 +547,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- the routing/addressing lineage and are never compared across.
             projection_parent_tip        BLOB NOT NULL,
             projection_target_tip        BLOB NOT NULL,
+            -- THIS device's (B's) canonical relationship pair for the applied
+            -- step, from the AdvanceOutcome the journal was written with, in the
+            -- SAME transaction as the canonical apply record. sig_b authenticates
+            -- it (B-canonical target); the sender pins the child as B's head.
+            applied_parent_tip_b         BLOB NOT NULL,
+            applied_child_tip_b          BLOB NOT NULL,
             status                       TEXT NOT NULL,
             created_at                   INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, parent_tip)
         );
+        CREATE INDEX IF NOT EXISTS idx_acceptance_fold_journal_commitment
+            ON acceptance_fold_journal(relationship_key, commitment);
 
         -- Immutable accepted-transition marker, keyed by (relationship_key, parent_tip):
         -- the recipient's durable attestation that it applied EXACTLY this transition.
@@ -573,6 +586,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             nonce_hash             BLOB NOT NULL,
             applied_parent_root_b  BLOB NOT NULL,
             applied_child_root_b   BLOB NOT NULL,
+            -- B's canonical relationship pair for this apply (see the journal).
+            applied_parent_tip_b   BLOB NOT NULL,
+            applied_child_tip_b    BLOB NOT NULL,
             record_hash            BLOB NOT NULL,
             created_at             INTEGER NOT NULL,
             UNIQUE (relationship_key, parent_tip),
@@ -595,6 +611,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             receipt_child_root_a           BLOB NOT NULL,
             applied_parent_root_b          BLOB NOT NULL,
             applied_child_root_b           BLOB NOT NULL,
+            applied_parent_tip_b           BLOB NOT NULL,
+            applied_child_tip_b            BLOB NOT NULL,
             precommit_digest               BLOB NOT NULL,
             prepared_receipt_commitment    BLOB NOT NULL,
             prepared_receipt_artifact_hash BLOB NOT NULL,

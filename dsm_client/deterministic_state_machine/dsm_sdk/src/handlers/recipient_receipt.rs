@@ -2,18 +2,25 @@
 //! Recipient B-side acceptance-receipt orchestrator (§16.6).
 //!
 //! The single authoritative recipient countersigning path, in three phases under
-//! one ASYNC relationship exclusion (see design doc): generate + persist BEFORE
-//! apply; authorize convergence only AFTER the durable `CanonicalApplyRecord`
-//! exists; never sign in recovery.
+//! one ASYNC relationship exclusion (see design doc): generate + journal WITH the
+//! apply (one transaction); authorize convergence only AFTER the durable
+//! `CanonicalApplyRecord` exists; never sign in recovery.
 //!
 //! Live sequence (accept path holds the tokio guard across all of it):
-//!   prepare_bside_acceptance_receipt_locked(...)      // before apply
-//!   CoreSDK::apply_incoming_transfer_full_state(...)  // single full-state tx
-//!   converge_accepted_locked(journal, record, ...)    // projection sync + marker
-//!                                                     // → promote → complete
+//!   CoreSDK::apply_incoming_transfer_full_state(   // ONE staged full-state tx:
+//!       build = generate_b_artifacts_from_inbound  //   pre-write, sees the exact
+//!               (…, outcome.relationship_pair()),  //   AdvanceOutcome, signs sig_b
+//!       write = journal_row(..) inserted in-tx     //   with nonce + apply record
+//!   )
+//!   converge_accepted_locked(journal, record, ...) // projection sync + marker
+//!                                                  // → promote → complete
 //!
-//! Startup / on-access recovery drives the SAME convergence from the durable
-//! `CanonicalApplyRecord` — redelivery is a valid trigger but never the only one.
+//! Journaling INSIDE the apply transaction is what makes "prepared without a
+//! record" unrepresentable: a failed apply leaves no journal, no inert row and no
+//! re-sign question, and the pair `sig_b` authenticates is the pair of the very
+//! advance that committed. Startup / on-access recovery drives the SAME
+//! convergence from the durable `CanonicalApplyRecord` — redelivery is a valid
+//! trigger but never the only one.
 
 use anyhow::{anyhow, Result};
 use once_cell::sync::Lazy;
@@ -25,10 +32,9 @@ use crate::storage::client_db::bilateral_tip_sync::{
 };
 use crate::storage::client_db::{
     complete_applied_acceptance, get_acceptance_journal, get_canonical_apply_identity,
-    get_incomplete_acceptance_journals, get_outbound_reply_bytes,
-    insert_prepared_acceptance_journal, promote_prepared_to_applied, AcceptancePhaseOutcome,
-    AcceptedTransition, CanonicalApplyRecord, PromoteOutcome, RecipientAcceptanceJournal,
-    STATUS_APPLIED, STATUS_COMPLETE, STATUS_PREPARED,
+    get_incomplete_acceptance_journals, get_outbound_reply_bytes, promote_prepared_to_applied,
+    AcceptancePhaseOutcome, AcceptedTransition, CanonicalApplyRecord, PromoteOutcome,
+    RecipientAcceptanceJournal, STATUS_APPLIED, STATUS_COMPLETE, STATUS_PREPARED,
 };
 
 /// Per-relationship ASYNC exclusion. The keyed registry's std mutex is held only
@@ -74,32 +80,27 @@ pub struct GeneratedBArtifacts {
     pub expected_counterparty_a_head: Option<Vec<u8>>,
     /// New counterparty (A) head (`ek_pk_a` from the inbound receipt).
     pub new_counterparty_a_head: Vec<u8>,
+    /// THIS device's canonical relationship pair for the apply these artifacts
+    /// were generated for — the pair `sig_b` authenticates.
+    pub applied_parent_tip_b: [u8; 32],
+    pub applied_child_tip_b: [u8; 32],
 }
 
-/// PHASE 1 (before apply) — SYNC, caller holds the relationship guard.
-/// Generate + self-verify the B receipt once and persist it PREPARED. Re-entry
-/// returns the exact stored bytes and NEVER re-signs. Advances nothing.
+/// The PREPARED journal row for `artifacts` — pure; the caller inserts it with
+/// `insert_prepared_acceptance_journal_with_conn` INSIDE the apply transaction.
 ///
 /// `parent_tip` is the SIGNED receipt's ASYMMETRIC canonical parent (the sole
 /// validation authority). `projection_pair` is the SYMMETRIC-space
 /// (parent, target) captured by the caller for the contacts.chain_tip CAS —
 /// derived from the locally stored symmetric tip + the SIGNED operation/nonce,
 /// never from wire routing metadata.
-pub fn prepare_bside_acceptance_receipt_locked<G>(
+pub fn journal_row(
+    artifacts: &GeneratedBArtifacts,
     relationship_key: [u8; 32],
     parent_tip: [u8; 32],
     projection_pair: ([u8; 32], [u8; 32]),
-    generate: G,
-) -> Result<Vec<u8>>
-where
-    G: FnOnce() -> Result<GeneratedBArtifacts>,
-{
-    if let Some(existing) = get_acceptance_journal(&relationship_key, &parent_tip)? {
-        return Ok(existing.receipt_bytes);
-    }
-
-    let artifacts = generate()?;
-    let rec = RecipientAcceptanceJournal {
+) -> RecipientAcceptanceJournal {
+    RecipientAcceptanceJournal {
         relationship_key,
         parent_tip,
         child_tip: artifacts.child_tip,
@@ -109,37 +110,19 @@ where
         receipt_child_root_a: artifacts.receipt_child_root_a,
         precommit_digest: artifacts.precommit_digest,
         prepared_receipt_artifact_hash: artifacts.prepared_receipt_artifact_hash,
-        expected_local_b_head: artifacts.expected_local_b_head,
-        new_local_b_head: artifacts.new_local_b_head,
-        new_local_b_sk_enc: Some(artifacts.new_local_b_sk_enc),
-        expected_counterparty_a_head: artifacts.expected_counterparty_a_head,
-        new_counterparty_a_head: artifacts.new_counterparty_a_head,
+        expected_local_b_head: artifacts.expected_local_b_head.clone(),
+        new_local_b_head: artifacts.new_local_b_head.clone(),
+        new_local_b_sk_enc: Some(artifacts.new_local_b_sk_enc.clone()),
+        expected_counterparty_a_head: artifacts.expected_counterparty_a_head.clone(),
+        new_counterparty_a_head: artifacts.new_counterparty_a_head.clone(),
         receipt_bytes: artifacts.receipt_bytes.clone(),
         projection_parent_tip: projection_pair.0,
         projection_target_tip: projection_pair.1,
+        applied_parent_tip_b: artifacts.applied_parent_tip_b,
+        applied_child_tip_b: artifacts.applied_child_tip_b,
         status: STATUS_PREPARED.to_string(),
         created_at: 0,
-    };
-    match insert_prepared_acceptance_journal(&rec) {
-        Ok(()) => Ok(rec.receipt_bytes),
-        Err(e) => {
-            // Journal PK is the uniqueness point: a winner that escaped the
-            // in-process lock arbitrates.
-            if let Some(winner) = get_acceptance_journal(&relationship_key, &parent_tip)? {
-                return Ok(winner.receipt_bytes);
-            }
-            Err(e)
-        }
     }
-}
-
-/// PHASE 2 — SYNC, caller holds the relationship guard. Promote the prepared
-/// journal to Applied on the full field-for-field marker match.
-pub fn mark_recipient_acceptance_applied_locked(
-    relationship_key: [u8; 32],
-    parent_tip: [u8; 32],
-) -> Result<PromoteOutcome> {
-    promote_prepared_to_applied(&relationship_key, &parent_tip)
 }
 
 /// PHASE 3 — SYNC, caller holds the relationship guard. Complete an Applied
@@ -181,12 +164,17 @@ pub fn converge_accepted_locked(
     record: &CanonicalApplyRecord,
     wrap_key: &[u8; 32],
 ) -> Result<Vec<u8>> {
-    // 1. Identity match (fail closed on any divergence).
+    // 1. Identity match (fail closed on any divergence). The B pair is part
+    //    of it: the journal's pair is what sig_b authenticates and the record's
+    //    pair is what the state mutation produced — they were written in ONE
+    //    transaction, so any difference is corruption.
     if record.relationship_key != journal.relationship_key
         || record.parent_tip != journal.parent_tip
         || record.child_tip != journal.child_tip
         || record.precommit_digest != journal.precommit_digest
         || record.sender_device != journal.counterparty_device_id
+        || record.applied_parent_tip_b != journal.applied_parent_tip_b
+        || record.applied_child_tip_b != journal.applied_child_tip_b
     {
         return Err(anyhow!(
             "canonical apply record does not match the prepared journal identity — fail closed"
@@ -210,6 +198,8 @@ pub fn converge_accepted_locked(
         receipt_child_root_a: journal.receipt_child_root_a,
         applied_parent_root_b: record.applied_parent_root_b,
         applied_child_root_b: record.applied_child_root_b,
+        applied_parent_tip_b: record.applied_parent_tip_b,
+        applied_child_tip_b: record.applied_child_tip_b,
         precommit_digest: journal.precommit_digest,
         prepared_receipt_commitment: journal.commitment,
         prepared_receipt_artifact_hash: journal.prepared_receipt_artifact_hash,
@@ -342,6 +332,12 @@ fn read_persisted_bytes(
 /// receipt (production generator; the symmetric signer yields the LOCAL/B side).
 /// Captures BOTH pre-step heads once, self-verifies before returning. The
 /// `ek_sk_b` plaintext is encrypted here and never returned in clear.
+///
+/// `b_pair` is THIS device's canonical relationship pair for the apply
+/// (`AdvanceOutcome::relationship_pair()`), taken from the exact outcome being
+/// committed — the builder runs in the staged advance's pre-write window.
+/// `sig_b` is computed over the B-canonical target (standard session-bound
+/// target ‖ pair), so the pair travels authenticated in the delta.
 pub fn generate_b_artifacts_from_inbound(
     inbound_receipt: &dsm::types::receipt_types::StitchedReceiptV2,
     c_pre: &[u8; 32],
@@ -349,10 +345,11 @@ pub fn generate_b_artifacts_from_inbound(
     recipient_ak_pk: &[u8],
     recipient_ak_sk: &[u8],
     wrap_key: &[u8; 32],
+    b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<GeneratedBArtifacts> {
     use crate::sdk::receipts::{
-        sign_receipt_with_per_step_ek, verify_per_step_ek_signing, BilateralSide,
-        PerStepSigningInputs,
+        compute_receipt_b_canonical_target, sign_receipt_with_per_step_ek_target,
+        verify_per_step_ek_signing_target, BilateralSide, PerStepSigningInputs,
     };
     use crate::storage::client_db::cert_chain::{
         encrypt_chain_sk, load_cert_chain_head_pubkey, CertChainSide,
@@ -369,16 +366,23 @@ pub fn generate_b_artifacts_from_inbound(
     let pre_step_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Local)?;
     let pre_step_a = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)?;
 
-    let out = sign_receipt_with_per_step_ek(&PerStepSigningInputs {
-        commitment: &commitment,
-        h_n: inbound_receipt.parent_tip,
-        c_pre: *c_pre,
-        devid_sender: inbound_receipt.devid_b,
-        relationship_key: rel_key,
-        root_ak_keypair: Some((recipient_ak_pk, recipient_ak_sk)),
-        recipient_kyber_pk: sender_kyber_pk,
-        session_binding: &commitment,
-    })
+    // Online session binding is the commitment itself; the B-canonical target
+    // extends it with the pair this apply commits.
+    let b_target =
+        compute_receipt_b_canonical_target(&commitment, &commitment, &b_pair.0, &b_pair.1);
+    let out = sign_receipt_with_per_step_ek_target(
+        &PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: inbound_receipt.parent_tip,
+            c_pre: *c_pre,
+            devid_sender: inbound_receipt.devid_b,
+            relationship_key: rel_key,
+            root_ak_keypair: Some((recipient_ak_pk, recipient_ak_sk)),
+            recipient_kyber_pk: sender_kyber_pk,
+            session_binding: &commitment,
+        },
+        &b_target,
+    )
     .map_err(|e| anyhow!("B-side per-step EK signing: {e}"))?;
 
     if pre_step_b.is_none() != out.used_root_ak {
@@ -419,12 +423,12 @@ pub fn generate_b_artifacts_from_inbound(
     let expected_prev_pk = pre_step_b
         .clone()
         .unwrap_or_else(|| recipient_ak_pk.to_vec());
-    verify_per_step_ek_signing(
+    verify_per_step_ek_signing_target(
         &receipt,
         BilateralSide::B,
         &expected_prev_pk,
         &receipt.parent_tip,
-        &commitment,
+        &b_target,
     )
     .map_err(|e| anyhow!("B-side EK self-verification failed before mutation: {e}"))?;
 
@@ -447,6 +451,8 @@ pub fn generate_b_artifacts_from_inbound(
         new_local_b_sk_enc,
         expected_counterparty_a_head: pre_step_a,
         new_counterparty_a_head: inbound_receipt.ek_pk_a.clone(),
+        applied_parent_tip_b: b_pair.0,
+        applied_child_tip_b: b_pair.1,
     })
 }
 
@@ -456,11 +462,13 @@ mod tests {
     use crate::storage::client_db::cert_chain::{
         encrypt_chain_sk, load_cert_chain_head_pubkey, CertChainSide,
     };
-    use crate::storage::client_db::{outbound_reply_exists, store_contact, ContactRecord};
+    use crate::storage::client_db::{
+        insert_prepared_acceptance_journal, outbound_reply_exists, store_contact, ContactRecord,
+    };
     use serial_test::serial;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const WRAP: [u8; 32] = [0x42u8; 32];
+    const B_PAIR: ([u8; 32], [u8; 32]) = ([0x1Du8; 32], [0x1Eu8; 32]);
 
     fn init_test_db() {
         unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
@@ -494,11 +502,31 @@ mod tests {
             new_local_b_sk_enc: encrypt_chain_sk(&[0xCCu8; 64], &WRAP).unwrap(),
             expected_counterparty_a_head: None,
             new_counterparty_a_head: vec![0xAAu8; 40],
+            applied_parent_tip_b: B_PAIR.0,
+            applied_child_tip_b: B_PAIR.1,
         }
     }
 
+    /// Journal a prepared row exactly as the in-tx writer does (here on the
+    /// shared connection, since these tests exercise convergence, not apply).
+    fn journal(
+        rel: [u8; 32],
+        parent: [u8; 32],
+        child: [u8; 32],
+        commitment: [u8; 32],
+        bytes: &[u8],
+    ) {
+        insert_prepared_acceptance_journal(&journal_row(
+            &make_artifacts(child, commitment, bytes),
+            rel,
+            parent,
+            (parent, child),
+        ))
+        .unwrap();
+    }
+
     /// A canonical apply record matching `make_artifacts` (as the full-state
-    /// apply would durably record it, with authoritative B roots).
+    /// apply would durably record it, with authoritative B roots + pair).
     fn make_record(rel: [u8; 32], parent: [u8; 32], child: [u8; 32]) -> CanonicalApplyRecord {
         CanonicalApplyRecord {
             relationship_key: rel,
@@ -511,6 +539,8 @@ mod tests {
             nonce_hash: [0x10u8; 32],
             applied_parent_root_b: [0x1Bu8; 32],
             applied_child_root_b: [0x1Cu8; 32],
+            applied_parent_tip_b: B_PAIR.0,
+            applied_child_tip_b: B_PAIR.1,
         }
     }
 
@@ -548,20 +578,18 @@ mod tests {
 
     #[test]
     #[serial]
-    fn prepare_persists_prepared_but_advances_nothing() {
+    fn a_prepared_journal_advances_nothing_until_converged() {
         init_test_db();
         let rel = [0x51u8; 32];
         let parent = [0x52u8; 32];
-        let bytes =
-            prepare_bside_acceptance_receipt_locked(rel, parent, (parent, [0xEEu8; 32]), || {
-                Ok(make_artifacts(
-                    [0x53u8; 32],
-                    [0x54u8; 32],
-                    b"PREPARED-BYTES",
-                ))
-            })
-            .unwrap();
-        assert_eq!(bytes, b"PREPARED-BYTES");
+        journal(rel, parent, [0x53u8; 32], [0x54u8; 32], b"PREPARED-BYTES");
+        assert_eq!(
+            get_acceptance_journal(&rel, &parent)
+                .unwrap()
+                .unwrap()
+                .receipt_bytes,
+            b"PREPARED-BYTES"
+        );
         assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
             .unwrap()
             .is_none());
@@ -578,17 +606,12 @@ mod tests {
         let rel = [0x61u8; 32];
         let parent = [0x62u8; 32];
         let child = [0x63u8; 32];
-        let calls = AtomicUsize::new(0);
-        let first = prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(make_artifacts(child, [0x64u8; 32], b"BYTES-3PHASE"))
-        })
-        .unwrap();
+        journal(rel, parent, child, [0x64u8; 32], b"BYTES-3PHASE");
         // Simulate the durable apply record + the counterparty projection at parent.
         seed_contact(&[0x0Au8; 32], &parent);
         let record = make_record(rel, parent, child);
-        let journal = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
-        let done = converge_accepted_locked(&journal, &record, &WRAP).unwrap();
+        let journal_row = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
+        let done = converge_accepted_locked(&journal_row, &record, &WRAP).unwrap();
         assert_eq!(done, b"BYTES-3PHASE");
         assert_eq!(
             load_cert_chain_head_pubkey(&rel, CertChainSide::Local).unwrap(),
@@ -604,14 +627,17 @@ mod tests {
             crate::storage::client_db::get_contact_chain_tip_raw(&[0x0Au8; 32]),
             Some(child)
         );
-        // Re-entry to prepare returns identical bytes; generator NOT called again.
-        let again =
-            prepare_bside_acceptance_receipt_locked(rel, parent, (parent, [0xEEu8; 32]), || {
-                panic!("must not regenerate");
-            })
+        // Convergence is idempotent and returns the identical bytes.
+        let again = converge_accepted_locked(&journal_row, &record, &WRAP).unwrap();
+        assert_eq!(done, again);
+        // The marker carries B's pair from the record.
+        let marker = crate::storage::client_db::get_accepted_transition(&rel, &parent)
+            .unwrap()
             .unwrap();
-        assert_eq!(first, again);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            (marker.applied_parent_tip_b, marker.applied_child_tip_b),
+            B_PAIR
+        );
     }
 
     #[test]
@@ -621,22 +647,43 @@ mod tests {
         let rel = [0x71u8; 32];
         let parent = [0x72u8; 32];
         let child = [0x73u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
-            Ok(make_artifacts(child, [0x74u8; 32], b"BYTES-MM"))
-        })
-        .unwrap();
+        journal(rel, parent, child, [0x74u8; 32], b"BYTES-MM");
         seed_contact(&[0x0Au8; 32], &parent);
-        let journal = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
+        let journal_row = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
         // Record with a DIFFERENT precommit — identity mismatch must fail closed.
         let mut record = make_record(rel, parent, child);
         record.precommit_digest = [0xEEu8; 32];
-        let err = converge_accepted_locked(&journal, &record, &WRAP).unwrap_err();
+        let err = converge_accepted_locked(&journal_row, &record, &WRAP).unwrap_err();
         assert!(err.to_string().contains("does not match"));
         // Nothing advanced.
         assert!(load_cert_chain_head_pubkey(&rel, CertChainSide::Local)
             .unwrap()
             .is_none());
         assert!(!outbound_reply_exists(&[0x74u8; 32]).unwrap());
+    }
+
+    /// The pair `sig_b` authenticates (journal) and the pair the state mutation
+    /// produced (record) are written in one transaction; a record carrying a
+    /// different pair is corruption and must never converge.
+    #[test]
+    #[serial]
+    fn converge_rejects_a_record_whose_b_pair_differs_from_the_journal() {
+        init_test_db();
+        let rel = [0x75u8; 32];
+        let parent = [0x76u8; 32];
+        let child = [0x77u8; 32];
+        journal(rel, parent, child, [0x78u8; 32], b"BYTES-PAIR");
+        seed_contact(&[0x0Au8; 32], &parent);
+        let journal_row = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
+        let mut record = make_record(rel, parent, child);
+        record.applied_child_tip_b = [0xEEu8; 32];
+        let err = converge_accepted_locked(&journal_row, &record, &WRAP).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert!(!outbound_reply_exists(&[0x78u8; 32]).unwrap());
+        // Positive control: the matching record converges.
+        let record = make_record(rel, parent, child);
+        converge_accepted_locked(&journal_row, &record, &WRAP).unwrap();
+        assert!(outbound_reply_exists(&[0x78u8; 32]).unwrap());
     }
 
     #[test]
@@ -646,10 +693,7 @@ mod tests {
         let rel = [0x81u8; 32];
         let parent = [0x82u8; 32];
         let child = [0x83u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel, parent, (parent, child), || {
-            Ok(make_artifacts(child, [0x84u8; 32], b"BYTES-RECOVER"))
-        })
-        .unwrap();
+        journal(rel, parent, child, [0x84u8; 32], b"BYTES-RECOVER");
         seed_contact(&[0x0Au8; 32], &parent);
         // Durably record the apply (as the single full-state tx would).
         {
@@ -684,10 +728,7 @@ mod tests {
         // And a prepared journal with NO record stays prepared:
         let rel2 = [0x91u8; 32];
         let parent2 = [0x92u8; 32];
-        prepare_bside_acceptance_receipt_locked(rel2, parent2, (parent2, [0xEEu8; 32]), || {
-            Ok(make_artifacts([0x93u8; 32], [0x94u8; 32], b"BYTES-NOREC"))
-        })
-        .unwrap();
+        journal(rel2, parent2, [0x93u8; 32], [0x94u8; 32], b"BYTES-NOREC");
         rt.block_on(recover_incomplete_acceptances(&WRAP)).unwrap();
         assert_eq!(
             get_acceptance_journal(&rel2, &parent2)
@@ -696,39 +737,5 @@ mod tests {
                 .status,
             STATUS_PREPARED
         );
-    }
-
-    #[test]
-    #[serial]
-    fn concurrent_prepare_generates_once_async_lock() {
-        init_test_db();
-        let rel = [0xA1u8; 32];
-        let parent = [0xA2u8; 32];
-        let calls = Arc::new(AtomicUsize::new(0));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut handles = Vec::new();
-            for _ in 0..4 {
-                let calls = calls.clone();
-                handles.push(tokio::spawn(async move {
-                    let lock = relationship_lock(&rel);
-                    let _guard = lock.lock_owned().await;
-                    prepare_bside_acceptance_receipt_locked(
-                        rel,
-                        parent,
-                        (parent, [0xEEu8; 32]),
-                        || {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            Ok(make_artifacts([0xA3u8; 32], [0xA4u8; 32], b"BYTES-CONC"))
-                        },
-                    )
-                    .unwrap()
-                }));
-            }
-            for h in handles {
-                assert_eq!(h.await.unwrap(), b"BYTES-CONC");
-            }
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

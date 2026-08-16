@@ -74,6 +74,12 @@ pub struct RecipientAcceptanceJournal {
     /// across. Wire routing metadata is NEVER an input here.
     pub projection_parent_tip: [u8; 32],
     pub projection_target_tip: [u8; 32],
+    /// THIS device's (B's) canonical relationship pair for the applied step —
+    /// `AdvanceOutcome::relationship_pair()` of the very apply this journal was
+    /// committed with (same transaction). `sig_b` authenticates it; the sender
+    /// pins `applied_child_tip_b` as B's lineage head.
+    pub applied_parent_tip_b: [u8; 32],
+    pub applied_child_tip_b: [u8; 32],
     pub status: String,
     pub created_at: u64,
 }
@@ -118,7 +124,8 @@ const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterpart
      commitment, receipt_parent_root_a, receipt_child_root_a, precommit_digest, artifact_hash, \
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
      expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
-     projection_parent_tip, projection_target_tip, status, created_at";
+     projection_parent_tip, projection_target_tip, applied_parent_tip_b, applied_child_tip_b, \
+     status, created_at";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -159,30 +166,39 @@ fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJo
         receipt_bytes: g(14)?,
         projection_parent_tip: to32(g(15)?),
         projection_target_tip: to32(g(16)?),
-        status: row.get::<_, String>(17)?,
-        created_at: row.get::<_, i64>(18)? as u64,
+        applied_parent_tip_b: to32(g(17)?),
+        applied_child_tip_b: to32(g(18)?),
+        status: row.get::<_, String>(19)?,
+        created_at: row.get::<_, i64>(20)? as u64,
     })
 }
 
-/// Phase 1: insert the PREPARED journal row (exact receipt bytes persisted before
-/// application). Idempotent for the identical row; FAILS CLOSED on a different
-/// commitment/child for the same consumed parent — one consumed step yields
-/// exactly one countersigned receipt.
-pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-
-    let existing: Option<(Vec<u8>, Vec<u8>)> = conn
+/// Phase 1: insert the PREPARED journal row (exact receipt bytes) on the
+/// caller's connection — production writes it INSIDE the canonical apply
+/// transaction (`CoreSDK::apply_incoming_transfer_full_state`'s in-tx writer),
+/// so the journal, the canonical apply record, the nonce and the state advance
+/// commit together or not at all: a failed apply leaves no journal, no inert
+/// row and no re-sign question. Idempotent for the identical row; FAILS CLOSED
+/// on a different commitment/child/pair for the same consumed parent — one
+/// consumed step yields exactly one countersigned receipt.
+pub fn insert_prepared_acceptance_journal_with_conn(
+    conn: &rusqlite::Connection,
+    rec: &RecipientAcceptanceJournal,
+) -> Result<()> {
+    let existing: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> = conn
         .query_row(
-            "SELECT commitment, child_tip FROM acceptance_fold_journal
+            "SELECT commitment, child_tip, applied_parent_tip_b, applied_child_tip_b \
+             FROM acceptance_fold_journal
              WHERE relationship_key = ?1 AND parent_tip = ?2",
             params![rec.relationship_key.as_slice(), rec.parent_tip.as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    if let Some((existing_commitment, existing_child)) = existing {
+    if let Some((existing_commitment, existing_child, existing_bp, existing_bc)) = existing {
         if existing_commitment.as_slice() == rec.commitment.as_slice()
             && existing_child.as_slice() == rec.child_tip.as_slice()
+            && existing_bp.as_slice() == rec.applied_parent_tip_b.as_slice()
+            && existing_bc.as_slice() == rec.applied_child_tip_b.as_slice()
         {
             return Ok(()); // idempotent re-entry
         }
@@ -195,7 +211,7 @@ pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> R
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -215,11 +231,22 @@ pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> R
             rec.receipt_bytes.as_slice(),
             rec.projection_parent_tip.as_slice(),
             rec.projection_target_tip.as_slice(),
+            rec.applied_parent_tip_b.as_slice(),
+            rec.applied_child_tip_b.as_slice(),
             STATUS_PREPARED,
             tick() as i64,
         ],
     )?;
     Ok(())
+}
+
+/// [`insert_prepared_acceptance_journal_with_conn`] on the shared connection —
+/// test fixtures that seed a journal outside an apply transaction.
+#[cfg(test)]
+pub fn insert_prepared_acceptance_journal(rec: &RecipientAcceptanceJournal) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    insert_prepared_acceptance_journal_with_conn(&conn, rec)
 }
 
 pub fn get_acceptance_journal(
@@ -285,6 +312,10 @@ pub struct AcceptedTransition {
     /// durable `CanonicalApplyRecord` produced by the state mutation itself.
     pub applied_parent_root_b: [u8; 32],
     pub applied_child_root_b: [u8; 32],
+    /// B's canonical relationship pair for the applied step, from the SAME
+    /// durable `CanonicalApplyRecord`.
+    pub applied_parent_tip_b: [u8; 32],
+    pub applied_child_tip_b: [u8; 32],
     /// `C_pre` (precommit over parent + op + entropy) — NOT the whole transition.
     pub precommit_digest: [u8; 32],
     /// Semantic receipt identity (receipt commitment over fields 1-10).
@@ -327,10 +358,10 @@ pub(crate) fn record_accepted_transition_in_tx(
     conn.execute(
         "INSERT INTO accepted_transition_marker (
             relationship_key, parent_tip, child_tip, receipt_parent_root_a, receipt_child_root_a,
-            applied_parent_root_b, applied_child_root_b,
+            applied_parent_root_b, applied_child_root_b, applied_parent_tip_b, applied_child_tip_b,
             precommit_digest, prepared_receipt_commitment, prepared_receipt_artifact_hash,
             sender_device, recipient_device, created_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![
             m.relationship_key.as_slice(),
             m.parent_tip.as_slice(),
@@ -339,6 +370,8 @@ pub(crate) fn record_accepted_transition_in_tx(
             m.receipt_child_root_a.as_slice(),
             m.applied_parent_root_b.as_slice(),
             m.applied_child_root_b.as_slice(),
+            m.applied_parent_tip_b.as_slice(),
+            m.applied_child_tip_b.as_slice(),
             m.precommit_digest.as_slice(),
             m.prepared_receipt_commitment.as_slice(),
             m.prepared_receipt_artifact_hash.as_slice(),
@@ -364,7 +397,8 @@ fn get_accepted_transition_locked(
     Ok(conn
         .query_row(
             "SELECT child_tip, receipt_parent_root_a, receipt_child_root_a, \
-             applied_parent_root_b, applied_child_root_b, precommit_digest, \
+             applied_parent_root_b, applied_child_root_b, \
+             applied_parent_tip_b, applied_child_tip_b, precommit_digest, \
              prepared_receipt_commitment, prepared_receipt_artifact_hash, \
              sender_device, recipient_device \
              FROM accepted_transition_marker WHERE relationship_key = ?1 AND parent_tip = ?2",
@@ -378,11 +412,13 @@ fn get_accepted_transition_locked(
                     receipt_child_root_a: to32(r.get(2)?),
                     applied_parent_root_b: to32(r.get(3)?),
                     applied_child_root_b: to32(r.get(4)?),
-                    precommit_digest: to32(r.get(5)?),
-                    prepared_receipt_commitment: to32(r.get(6)?),
-                    prepared_receipt_artifact_hash: to32(r.get(7)?),
-                    sender_device: to32(r.get(8)?),
-                    recipient_device: to32(r.get(9)?),
+                    applied_parent_tip_b: to32(r.get(5)?),
+                    applied_child_tip_b: to32(r.get(6)?),
+                    precommit_digest: to32(r.get(7)?),
+                    prepared_receipt_commitment: to32(r.get(8)?),
+                    prepared_receipt_artifact_hash: to32(r.get(9)?),
+                    sender_device: to32(r.get(10)?),
+                    recipient_device: to32(r.get(11)?),
                 })
             },
         )
@@ -444,6 +480,8 @@ pub fn promote_prepared_to_applied(
     let matches = marker.child_tip == rec.child_tip
         && marker.receipt_parent_root_a == rec.receipt_parent_root_a
         && marker.receipt_child_root_a == rec.receipt_child_root_a
+        && marker.applied_parent_tip_b == rec.applied_parent_tip_b
+        && marker.applied_child_tip_b == rec.applied_child_tip_b
         && marker.precommit_digest == rec.precommit_digest
         && marker.prepared_receipt_commitment == rec.commitment
         && recomputed_artifact == rec.prepared_receipt_artifact_hash
@@ -547,6 +585,11 @@ pub struct PendingOutboundReply {
     pub child_tip: [u8; 32],
     pub receipt_bytes: Vec<u8>,
     pub projection_parent_tip: [u8; 32],
+    /// B's canonical pair for the applied step, from the journal — what the
+    /// delta carries and `sig_b` authenticates. Read from the durable row,
+    /// never from current state.
+    pub applied_parent_tip_b: [u8; 32],
+    pub applied_child_tip_b: [u8; 32],
 }
 
 fn col32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]> {
@@ -574,7 +617,8 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT r.commitment, r.relationship_key, r.counterparty_device_id, r.child_tip,
-                r.receipt_bytes, j.projection_parent_tip
+                r.receipt_bytes, j.projection_parent_tip,
+                j.applied_parent_tip_b, j.applied_child_tip_b
          FROM recipient_outbound_reply r
          JOIN acceptance_fold_journal j
            ON j.commitment = r.commitment
@@ -591,6 +635,8 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
                 child_tip: col32(row, 3)?,
                 receipt_bytes: row.get::<_, Vec<u8>>(4)?,
                 projection_parent_tip: col32(row, 5)?,
+                applied_parent_tip_b: col32(row, 6)?,
+                applied_child_tip_b: col32(row, 7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -768,6 +814,8 @@ mod tests {
         RecipientAcceptanceJournal {
             projection_parent_tip: [0xE1u8; 32],
             projection_target_tip: [0xE2u8; 32],
+            applied_parent_tip_b: [0xE3u8; 32],
+            applied_child_tip_b: [0xE4u8; 32],
             relationship_key: rel,
             parent_tip: parent,
             child_tip: child,
@@ -799,6 +847,8 @@ mod tests {
             receipt_child_root_a: rec.receipt_child_root_a,
             applied_parent_root_b: [0x1Bu8; 32],
             applied_child_root_b: [0x1Cu8; 32],
+            applied_parent_tip_b: rec.applied_parent_tip_b,
+            applied_child_tip_b: rec.applied_child_tip_b,
             precommit_digest: rec.precommit_digest,
             prepared_receipt_commitment: rec.commitment,
             prepared_receipt_artifact_hash: rec.prepared_receipt_artifact_hash,
@@ -1016,6 +1066,8 @@ mod tests {
             receipt_child_root_a: [0xEEu8; 32], // WRONG root
             applied_parent_root_b: [0x1Bu8; 32],
             applied_child_root_b: [0x1Cu8; 32],
+            applied_parent_tip_b: rec.applied_parent_tip_b,
+            applied_child_tip_b: rec.applied_child_tip_b,
             precommit_digest: rec.precommit_digest,
             prepared_receipt_commitment: commitment,
             prepared_receipt_artifact_hash: rec.prepared_receipt_artifact_hash,
@@ -1063,6 +1115,8 @@ mod tests {
             receipt_child_root_a: rec.receipt_child_root_a,
             applied_parent_root_b: [0x1Bu8; 32],
             applied_child_root_b: [0x1Cu8; 32],
+            applied_parent_tip_b: rec.applied_parent_tip_b,
+            applied_child_tip_b: rec.applied_child_tip_b,
             precommit_digest: rec.precommit_digest,
             prepared_receipt_commitment: commitment,
             prepared_receipt_artifact_hash: [0x77u8; 32], // WRONG artifact hash

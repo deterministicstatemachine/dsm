@@ -2893,6 +2893,10 @@ impl CoreSDK {
     /// archive, the device head, the nonce consumption, the recovery index, and
     /// the `CanonicalApplyRecord` — all exist or none do. Token/UI projections
     /// stay best-effort post-commit and never invalidate the canonical commit.
+    /// TEST-ONLY: the apply with no acceptance artifacts (fixtures that credit
+    /// a device — the harness faucet — and the core apply regression suite).
+    /// Production always passes the recipient's builder/writer pair.
+    #[cfg(test)]
     pub fn apply_incoming_transfer_full_state(
         &self,
         op: dsm::types::operations::Operation,
@@ -2901,6 +2905,55 @@ impl CoreSDK {
         canonical_operation_bytes: &[u8],
         signed_parent_tip: [u8; 32],
         signed_child_tip: [u8; 32],
+    ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
+        self.apply_incoming_transfer_staged(
+            op,
+            tx_id,
+            sender_device_id,
+            canonical_operation_bytes,
+            signed_parent_tip,
+            signed_child_tip,
+            |_outcome, _pair| Ok(()),
+            |_tx, _outcome, _artifacts: &()| Ok(()),
+        )
+    }
+
+    /// The ONE production canonical apply for an inbound online transfer —
+    /// STAGED (§16.6 defect zero, recipient side).
+    ///
+    /// ```text
+    /// lookup (Duplicate/Conflict return HERE, nothing built)
+    ///   → pin (signed parent == pinned counterparty head)
+    ///   → prepare (pure)
+    ///   → build_acceptance(&AdvanceOutcome, outcome.relationship_pair())   pre-write:
+    ///                                                                     DB reads + signing OK
+    ///   → ONE tx { state advance, nonce, CanonicalApplyRecord (with B pair),
+    ///              write_acceptance(tx, &outcome, &artifacts) }
+    /// ```
+    ///
+    /// The builder sees the EXACT outcome that commits, so what it signs (the
+    /// recipient's canonical pair) is the pair of the very advance that lands;
+    /// the writer runs inside the same transaction, so a failed apply leaves no
+    /// journal, no inert row and no re-sign question. `Duplicate` returns
+    /// before the builder is invoked; `Conflict` never builds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_incoming_transfer_staged<A>(
+        &self,
+        op: dsm::types::operations::Operation,
+        tx_id: &crate::types::identifiers::TransactionId,
+        sender_device_id: &str,
+        canonical_operation_bytes: &[u8],
+        signed_parent_tip: [u8; 32],
+        signed_child_tip: [u8; 32],
+        build_acceptance: impl FnOnce(
+            &dsm::types::device_state::AdvanceOutcome,
+            ([u8; 32], [u8; 32]),
+        ) -> Result<A, DsmError>,
+        write_acceptance: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
     ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
         use crate::sdk::apply_outcome::ApplyOutcome;
         use crate::storage::client_db::{
@@ -3076,11 +3129,34 @@ impl CoreSDK {
             }]
         };
         let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
+        // The record every in-tx write derives from — built ONCE from the
+        // outcome so the durable row and the returned value cannot drift.
+        let record_for = |outcome: &dsm::types::device_state::AdvanceOutcome| {
+            let (applied_parent_tip_b, applied_child_tip_b) = outcome.relationship_pair();
+            CanonicalApplyRecord {
+                relationship_key: rel_key,
+                parent_tip,
+                child_tip,
+                precommit_digest,
+                operation_digest,
+                sender_device: sender_arr,
+                recipient_device: local_arr,
+                nonce_hash,
+                applied_parent_root_b: outcome.parent_r_a,
+                applied_child_root_b: outcome.child_r_a,
+                applied_parent_tip_b,
+                applied_child_tip_b,
+            }
+        };
+        let build = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<A, DsmError> {
+            build_acceptance(outcome, outcome.relationship_pair())
+        };
         let in_tx_extra = {
             let nonce = nonce.clone();
             let tx_id_str = tx_id_str.clone();
             move |tx: &rusqlite::Transaction<'_>,
-                  outcome: &dsm::types::device_state::AdvanceOutcome|
+                  outcome: &dsm::types::device_state::AdvanceOutcome,
+                  artifacts: &A|
                   -> Result<(), DsmError> {
                 // Nonce consumption INSIDE the full-state transaction.
                 let spent = cdb::is_nonce_spent_with_conn(tx, &nonce).map_err(|e| {
@@ -3102,46 +3178,40 @@ impl CoreSDK {
                         )
                     })?;
                 // Canonical apply record with the AUTHORITATIVE applied B roots
-                // from the state mutation itself.
-                let record = CanonicalApplyRecord {
-                    relationship_key: rel_key,
-                    parent_tip,
-                    child_tip,
-                    precommit_digest,
-                    operation_digest,
-                    sender_device: sender_arr,
-                    recipient_device: local_arr,
-                    nonce_hash,
-                    applied_parent_root_b: outcome.parent_r_a,
-                    applied_child_root_b: outcome.child_r_a,
-                };
+                // and B pair from the state mutation itself.
+                let record = record_for(outcome);
                 match cdb::insert_canonical_apply_identity_with_conn(tx, &record).map_err(|e| {
                     DsmError::internal(
                         format!("in-tx canonical apply insert failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
                 })? {
-                    CanonicalApplyInsertOutcome::Inserted => Ok(()),
+                    CanonicalApplyInsertOutcome::Inserted => {}
                     CanonicalApplyInsertOutcome::DuplicateSameOperation(_)
-                    | CanonicalApplyInsertOutcome::Conflict => Err(DsmError::invalid_operation(
-                        "full-state apply race: canonical apply identity inserted concurrently \
-                         (fail closed)",
-                    )),
+                    | CanonicalApplyInsertOutcome::Conflict => {
+                        return Err(DsmError::invalid_operation(
+                            "full-state apply race: canonical apply identity inserted \
+                             concurrently (fail closed)",
+                        ))
+                    }
                 }
+                // The recipient's acceptance artifacts (journal), same tx.
+                write_acceptance(tx, outcome, artifacts)
             }
         };
 
-        let exec = self.execute_on_relationship_guarded(
+        let exec = self.execute_on_relationship_staged(
             rel_key,
             sender_arr,
             op,
             &deltas,
             Some(init_tip),
-            Some(&in_tx_extra),
+            build,
+            in_tx_extra,
         );
 
         match exec {
-            Ok((new_state, advance)) => {
+            Ok((new_state, advance, _artifacts)) => {
                 // Post-commit convergence (best-effort projection; NEVER invalidates
                 // the committed canonical transition).
                 let local_b32 = crate::util::text_id::encode_base32_crockford(&local_arr);
@@ -3151,18 +3221,7 @@ impl CoreSDK {
                     &new_state,
                     "apply_full_state",
                 );
-                let record = CanonicalApplyRecord {
-                    relationship_key: rel_key,
-                    parent_tip,
-                    child_tip,
-                    precommit_digest,
-                    operation_digest,
-                    sender_device: sender_arr,
-                    recipient_device: local_arr,
-                    nonce_hash,
-                    applied_parent_root_b: advance.parent_r_a,
-                    applied_child_root_b: advance.child_r_a,
-                };
+                let record = record_for(&advance);
                 log::info!(
                     "[apply_full_state] ✅ applied transfer tx={} amount={} from={} (single full-state tx)",
                     tx_id_str,
@@ -3648,12 +3707,57 @@ mod tests {
         );
     }
 
+    /// The recipient's acceptance artifacts for a staged apply, as the live
+    /// path builds them: the journal row carries the pair the builder was
+    /// handed (the exact outcome's `relationship_pair()`), and the writer
+    /// inserts it INSIDE the apply transaction.
+    fn staged_b_artifacts(
+        b_pair: ([u8; 32], [u8; 32]),
+        child: [u8; 32],
+        sender: [u8; 32],
+        precommit: [u8; 32],
+        wrap: &[u8; 32],
+    ) -> crate::handlers::recipient_receipt::GeneratedBArtifacts {
+        crate::handlers::recipient_receipt::GeneratedBArtifacts {
+            receipt_bytes: b"RECEIPT-A".to_vec(),
+            commitment: [0x64u8; 32],
+            child_tip: child,
+            counterparty_device_id: sender,
+            receipt_parent_root_a: [0x0Bu8; 32],
+            receipt_child_root_a: [0x0Cu8; 32],
+            precommit_digest: precommit,
+            prepared_receipt_artifact_hash: crate::storage::client_db::acceptance_artifact_hash(
+                b"RECEIPT-A",
+            ),
+            expected_local_b_head: None,
+            new_local_b_head: vec![0xBBu8; 40],
+            new_local_b_sk_enc: crate::storage::client_db::cert_chain::encrypt_chain_sk(
+                &[0xCCu8; 64],
+                wrap,
+            )
+            .unwrap(),
+            expected_counterparty_a_head: None,
+            new_counterparty_a_head: vec![0xAAu8; 40],
+            applied_parent_tip_b: b_pair.0,
+            applied_child_tip_b: b_pair.1,
+        }
+    }
+
     /// MANDATORY regression A (crash after apply, before convergence): the
-    /// redelivery yields AlreadyAppliedSameOperation with the stored record and
-    /// the fold converges — exactly ONE marker, ONE outbox entry, no second EK.
+    /// staged apply journals the B artifacts WITH the canonical record in one
+    /// transaction; a redelivery yields AlreadyAppliedSameOperation with the
+    /// stored record WITHOUT invoking the builder (no second EK derivation),
+    /// and the fold converges from durable state — exactly ONE marker, ONE
+    /// outbox entry. R6 half 1: a forced in-tx writer failure leaves NOTHING
+    /// (no journal, no record, no nonce, no state advance) and the redelivery
+    /// then journals exactly one artifact whose pair equals the record's pair
+    /// — the pair of the very advance that committed.
     #[test]
     #[serial]
-    fn crash_after_apply_redelivery_converges_via_stored_record() {
+    fn staged_apply_journals_with_the_record_and_redelivery_never_rebuilds() {
+        use crate::storage::client_db::{
+            get_acceptance_journal, get_canonical_apply_identity, is_nonce_spent,
+        };
         let sdk = full_state_apply_harness();
         let local: [u8; 32] = sdk.device_info.device_id;
         let (sender, sender_b32) = sender_ids();
@@ -3684,82 +3788,126 @@ mod tests {
         let precommit =
             dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
         let wrap = [0x42u8; 32];
-
-        // PHASE 1 (prepare BEFORE apply, as the live path does).
+        let tx_id = crate::types::identifiers::TransactionId::new("tx-A");
         let gen_calls = std::sync::atomic::AtomicUsize::new(0);
-        let prepared = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
-            rel,
-            parent,
-            (sym_parent, sym_target),
-            || {
-                gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(crate::handlers::recipient_receipt::GeneratedBArtifacts {
-                    receipt_bytes: b"RECEIPT-A".to_vec(),
-                    commitment: [0x64u8; 32],
-                    child_tip: child,
-                    counterparty_device_id: sender,
-                    receipt_parent_root_a: [0x0Bu8; 32],
-                    receipt_child_root_a: [0x0Cu8; 32],
-                    precommit_digest: precommit,
-                    prepared_receipt_artifact_hash:
-                        crate::storage::client_db::acceptance_artifact_hash(b"RECEIPT-A"),
-                    expected_local_b_head: None,
-                    new_local_b_head: vec![0xBBu8; 40],
-                    new_local_b_sk_enc: crate::storage::client_db::cert_chain::encrypt_chain_sk(
-                        &[0xCCu8; 64],
-                        &wrap,
-                    )
-                    .unwrap(),
-                    expected_counterparty_a_head: None,
-                    new_counterparty_a_head: vec![0xAAu8; 40],
-                })
-            },
-        )
-        .unwrap();
-        assert_eq!(prepared, b"RECEIPT-A");
+        let root_before = device_root(&sdk);
 
-        // APPLY commits; then CRASH before convergence (we simply don't converge).
+        // ---- R6: a failed in-tx write leaves nothing at all ----
+        let failed = sdk.apply_incoming_transfer_staged(
+            op.clone(),
+            &tx_id,
+            &sender_b32,
+            &op_bytes,
+            parent,
+            child,
+            |_o, b_pair| {
+                gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(staged_b_artifacts(b_pair, child, sender, precommit, &wrap))
+            },
+            |_tx, _o, _a: &crate::handlers::recipient_receipt::GeneratedBArtifacts| {
+                Err(DsmError::internal(
+                    "forced write_extra failure",
+                    None::<std::convert::Infallible>,
+                ))
+            },
+        );
+        assert!(failed.is_err(), "a failing writer aborts the apply");
+        assert_eq!(device_root(&sdk), root_before, "no state advance");
+        assert!(
+            get_acceptance_journal(&rel, &parent).unwrap().is_none(),
+            "no journal"
+        );
+        assert!(
+            get_canonical_apply_identity(&rel, &parent)
+                .unwrap()
+                .is_none(),
+            "no record"
+        );
+        assert!(!is_nonce_spent(&nonce).unwrap(), "no nonce");
+        assert_eq!(gen_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // ---- APPLY commits (journal + record + nonce + advance, one tx) ----
         let out = sdk
-            .apply_incoming_transfer_full_state(
+            .apply_incoming_transfer_staged(
                 op.clone(),
-                &crate::types::identifiers::TransactionId::new("tx-A"),
+                &tx_id,
                 &sender_b32,
                 &op_bytes,
                 parent,
                 child,
+                |_o, b_pair| {
+                    gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(staged_b_artifacts(b_pair, child, sender, precommit, &wrap))
+                },
+                |tx, _o, a| {
+                    crate::storage::client_db::insert_prepared_acceptance_journal_with_conn(
+                        tx,
+                        &crate::handlers::recipient_receipt::journal_row(
+                            a,
+                            rel,
+                            parent,
+                            (sym_parent, sym_target),
+                        ),
+                    )
+                    .map_err(|e| {
+                        DsmError::internal(e.to_string(), None::<std::convert::Infallible>)
+                    })
+                },
             )
             .expect("fresh apply");
-        assert!(matches!(
-            out,
-            crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }
-        ));
+        let record = match out {
+            crate::sdk::apply_outcome::ApplyOutcome::Applied { record, advance } => {
+                assert_eq!(
+                    (record.applied_parent_tip_b, record.applied_child_tip_b),
+                    advance.relationship_pair(),
+                    "the record's B pair is the committed advance's pair"
+                );
+                record
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        let journal = get_acceptance_journal(&rel, &parent).unwrap().unwrap();
+        assert_eq!(journal.receipt_bytes, b"RECEIPT-A");
+        assert_eq!(
+            (journal.applied_parent_tip_b, journal.applied_child_tip_b),
+            (record.applied_parent_tip_b, record.applied_child_tip_b),
+            "journal pair == record pair (one transaction, one outcome)"
+        );
+        assert_ne!(
+            record.applied_parent_tip_b, record.applied_child_tip_b,
+            "the pair is a real advance"
+        );
 
-        // REDELIVERY after "restart": prepare returns the SAME bytes without
-        // re-signing; apply returns the stored record; convergence completes.
-        let again = crate::handlers::recipient_receipt::prepare_bside_acceptance_receipt_locked(
-            rel,
-            parent,
-            (sym_parent, sym_target),
-            || panic!("second EK derivation is forbidden on redelivery"),
-        )
-        .unwrap();
-        assert_eq!(again, b"RECEIPT-A");
-        let redelivered = sdk
-            .apply_incoming_transfer_full_state(
-                op,
-                &crate::types::identifiers::TransactionId::new("tx-A"),
-                &sender_b32,
-                &op_bytes,
-                parent,
-                child,
-            )
-            .expect("redelivery");
-        let record = match redelivered {
+        // ---- REDELIVERY after "restart" (crash before convergence): the
+        // builder is NOT invoked (Duplicate returns before it), the stored
+        // record comes back, and convergence completes from durable state.
+        let redelivered =
+            sdk
+                .apply_incoming_transfer_staged(
+                    op,
+                    &tx_id,
+                    &sender_b32,
+                    &op_bytes,
+                    parent,
+                    child,
+                    |_o,
+                     _p|
+                     -> Result<
+                        crate::handlers::recipient_receipt::GeneratedBArtifacts,
+                        DsmError,
+                    > {
+                        panic!("second EK derivation is forbidden on redelivery")
+                    },
+                    |_tx, _o, _a| panic!("no write on redelivery"),
+                )
+                .expect("redelivery");
+        let record2 = match redelivered {
             crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record } => {
                 record
             }
             other => panic!("expected AlreadyAppliedSameOperation, got {other:?}"),
         };
+        assert_eq!(record2, record);
 
         // Seed the contact row for the projection sync, then converge.
         {
@@ -3772,27 +3920,27 @@ mod tests {
             )
             .unwrap();
         }
-        let journal = crate::storage::client_db::get_acceptance_journal(&rel, &parent)
-            .unwrap()
-            .unwrap();
         let bytes =
             crate::handlers::recipient_receipt::converge_accepted_locked(&journal, &record, &wrap)
                 .unwrap();
         assert_eq!(bytes, b"RECEIPT-A");
         assert_eq!(
             gen_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "ONE EK derivation total"
+            2,
+            "one derivation for the aborted tx, one for the committed one; none on redelivery"
         );
-        // Exactly one marker + one outbox entry; journal Complete.
-        assert!(
-            crate::storage::client_db::get_accepted_transition(&rel, &parent)
-                .unwrap()
-                .is_some()
+        // Exactly one marker + one outbox entry; journal Complete; the marker
+        // carries the pair.
+        let marker = crate::storage::client_db::get_accepted_transition(&rel, &parent)
+            .unwrap()
+            .expect("marker");
+        assert_eq!(
+            (marker.applied_parent_tip_b, marker.applied_child_tip_b),
+            (record.applied_parent_tip_b, record.applied_child_tip_b)
         );
         assert!(crate::storage::client_db::outbound_reply_exists(&[0x64u8; 32]).unwrap());
         assert_eq!(
-            crate::storage::client_db::get_acceptance_journal(&rel, &parent)
+            get_acceptance_journal(&rel, &parent)
                 .unwrap()
                 .unwrap()
                 .status,
