@@ -173,6 +173,119 @@ fn reject(reason: &str) -> ReceiptVerifyOutcome {
     }
 }
 
+// ============================================================================
+// ADR 0003 return leg — reconstruct the countersigned receipt from what the
+// sender ALREADY holds plus the recipient's B-side delta.
+//
+// The recipient never ships the whole receipt back (218 KB, over the node
+// cap). It ships `ReceiptCountersignB`: the four B-side fields plus two
+// references. The sender overlays those onto the A-side receipt it authored
+// and froze at send time (`sender_outbox_artifacts`, role `evidence_a`) and
+// then runs the UNCHANGED verifier above. That reconstruction is the
+// load-bearing binding: B material is only ever judged against the A side the
+// sender itself produced, so no delta can be accepted "for" foreign A bytes.
+// The delta's `receipt_evidence_digest_a` is advisory consistency evidence
+// (nothing B signs covers it); a mismatch parks the step, it authenticates
+// nothing.
+// ============================================================================
+
+/// The A-side evidence the sender froze at send time — the exact bytes the
+/// recipient countersigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedEvidenceA {
+    /// `ReceiptEvidenceA.full_receipt_bytes` as frozen in the outbox artifact.
+    pub full_receipt_bytes: Vec<u8>,
+    /// `sender_outbox_artifacts.content_digest` for that row — role-separated
+    /// BLAKE3 over `full_receipt_bytes`, computed at send time.
+    pub content_digest: [u8; 32],
+}
+
+/// Load the proposal's frozen A-side evidence from `sender_outbox_artifacts`.
+///
+/// `Ok(None)` means the proposal has NO evidence_a row. On a clean install
+/// that cannot happen — the artifact is committed in the same transaction as
+/// the proposal — so callers treat it as an invariant violation, not a
+/// transient: nothing will ever create that row later, and without it the
+/// step can never finalize.
+pub fn load_retained_evidence_a(
+    proposal: &SenderOnlineProposal,
+) -> Result<Option<RetainedEvidenceA>> {
+    use crate::storage::client_db::sender_outbox::{load_sender_outbox_artifacts, ArtifactRole};
+    use prost::Message;
+
+    let artifacts = load_sender_outbox_artifacts(
+        &proposal.relationship_key,
+        &proposal.canonical_parent,
+        &proposal.nonce_hash,
+    )?;
+    let Some(row) = artifacts
+        .into_iter()
+        .find(|a| a.role == ArtifactRole::EvidenceA)
+    else {
+        return Ok(None);
+    };
+    let env = dsm::types::proto::Envelope::decode(row.envelope_bytes.as_slice())
+        .map_err(|e| anyhow!("retained evidence_a envelope does not decode: {e}"))?;
+    let Some(evidence) = crate::sdk::b0x_sdk::B0xSDK::decode_receipt_evidence_a(&env) else {
+        return Err(anyhow!(
+            "retained evidence_a envelope carries no receipt.evidence.a invoke"
+        ));
+    };
+    Ok(Some(RetainedEvidenceA {
+        full_receipt_bytes: evidence.full_receipt_bytes,
+        content_digest: row.content_digest,
+    }))
+}
+
+/// Result of overlaying a delta onto the retained A side.
+#[derive(Debug)]
+pub enum DeltaBinding {
+    /// The reconstructed countersigned receipt, ready for the verifier.
+    Bound(Box<StitchedReceiptV2>),
+    /// The delta names A bytes other than the ones this sender retained. The
+    /// step is parked exactly like a verifier rejection: this artifact proved
+    /// nothing, and an honest one for the same commitment can still arrive.
+    Rejected { reason: String },
+}
+
+/// Overlay `delta` onto `retained`. `Err` means the SENDER's own state is
+/// unusable (its retained bytes do not match their stored digest, or are not
+/// an A-side receipt) — that is local corruption, and nothing is written.
+pub fn bind_countersign_delta(
+    retained: &RetainedEvidenceA,
+    delta: &dsm::types::proto::ReceiptCountersignB,
+) -> Result<DeltaBinding> {
+    use crate::storage::client_db::sender_outbox::{evidence_content_digest, ArtifactRole};
+    use dsm::types::receipt_types::CountersignB;
+
+    let recomputed = evidence_content_digest(ArtifactRole::EvidenceA, &retained.full_receipt_bytes);
+    if recomputed != retained.content_digest {
+        return Err(anyhow!(
+            "retained evidence_a bytes ({} B) do not match their stored digest ({} vs {}) — \
+             local artifact corruption",
+            retained.full_receipt_bytes.len(),
+            crate::util::text_id::encode_base32_crockford(&recomputed),
+            crate::util::text_id::encode_base32_crockford(&retained.content_digest),
+        ));
+    }
+    if delta.receipt_evidence_digest_a.as_slice() != recomputed.as_slice() {
+        return Ok(DeltaBinding::Rejected {
+            reason: format!(
+                "delta names A-side evidence {} but this sender retained {} ({} B)",
+                crate::util::text_id::encode_base32_crockford(&delta.receipt_evidence_digest_a),
+                crate::util::text_id::encode_base32_crockford(&recomputed),
+                retained.full_receipt_bytes.len(),
+            ),
+        });
+    }
+    let a_side = StitchedReceiptV2::from_canonical_protobuf(&retained.full_receipt_bytes)
+        .map_err(|e| anyhow!("retained evidence_a is not a decodable receipt: {e}"))?;
+    let full = a_side
+        .with_countersign_b(CountersignB::from_wire(delta))
+        .map_err(|e| anyhow!("retained evidence_a cannot take a countersign overlay: {e}"))?;
+    Ok(DeltaBinding::Bound(Box::new(full)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

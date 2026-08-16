@@ -504,11 +504,11 @@ pub struct B0xSDK {
     tokens_by_endpoint: tokio::sync::RwLock<HashMap<String, String>>, // (endpoint|genesis|device) -> token
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
-    /// §16.6 reply-window artifacts decoded during the most recent retrieve.
-    /// Buffered rather than returned so the retrieve signature (5 call sites)
-    /// stays stable; drained by the sender-finalization path via
-    /// [`Self::take_reply_artifacts`].
-    pending_reply_artifacts: Vec<dsm::types::proto::AcceptanceReceiptArtifact>,
+    /// ADR 0003 B-side countersign deltas decoded during the most recent
+    /// retrieve. Buffered rather than returned so the retrieve signature (5 call
+    /// sites) stays stable; drained by the sender-finalization path via
+    /// [`Self::take_countersign_deltas`].
+    pending_countersign_deltas: Vec<CountersignDelta>,
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
     pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
@@ -516,17 +516,29 @@ pub struct B0xSDK {
     pending_cert_resync: Vec<(String, Vec<u8>)>,
 }
 
-/// Explicit invoke method that marks a §16.6 acceptance artifact on the wire.
-/// Both sides key off this exact string — it is the discriminator that keeps
-/// replies and forward transfers structurally distinct inside UniversalTx.
-pub(crate) const ACCEPTANCE_RECEIPT_METHOD: &str = "wallet.acceptanceReceipt";
-
-/// Explicit invoke method that marks an ADR 0003 A-side evidence artifact.
-/// Same discriminator discipline as [`ACCEPTANCE_RECEIPT_METHOD`]: the evidence
-/// half is structurally distinct from both forward transfers and replies, and is
-/// NEVER trial-decoded. The producer (`build_evidence_envelope`) and this
+/// Explicit invoke method that marks an ADR 0003 A-side evidence artifact. The
+/// evidence half is structurally distinct from both forward transfers and
+/// replies — discriminated by this exact string, NEVER trial-decoded. The producer (`build_evidence_envelope`) and this
 /// consumer key off this one constant so they cannot drift apart.
 pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
+
+/// Explicit invoke method that marks an ADR 0003 B-side countersign DELTA — the
+/// return leg. Same discipline: discriminated by this string alone, never
+/// trial-decoded, one constant shared by producer and consumer.
+pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
+
+/// One B-side countersign delta as it came off the wire, kept whole so the
+/// sender can retain the exact envelope it finalized on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountersignDelta {
+    /// Node message id (Base32 Crockford) — the deterministic reply id.
+    pub message_id: String,
+    /// The whole envelope, re-encoded; what the sender persists as its
+    /// `countersign_b` artifact once the delta verifies.
+    pub envelope_bytes: Vec<u8>,
+    /// `ArgPack.body`: the `ReceiptCountersignB` wire bytes, unvalidated.
+    pub body: Vec<u8>,
+}
 
 static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -732,7 +744,7 @@ impl B0xSDK {
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
-            pending_reply_artifacts: Vec::new(),
+            pending_countersign_deltas: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
         };
@@ -1366,9 +1378,11 @@ impl B0xSDK {
     /// Discrimination is on the EXPLICIT invoke method name, so a forward
     /// transfer can never be mistaken for a reply (and vice versa) — the "no
     /// trial-decode" rule holds even though both ride UniversalTx.
-    fn decode_acceptance_artifact(
-        env: &dsm::types::proto::Envelope,
-    ) -> Option<dsm::types::proto::AcceptanceReceiptArtifact> {
+    ///
+    /// Returns the raw `ArgPack.body`; nothing here is validated or trusted.
+    /// The strict wire codec and the overlay onto the sender's OWN retained
+    /// A-side bytes happen in the finalization path.
+    pub(crate) fn decode_countersign_b(env: &dsm::types::proto::Envelope) -> Option<Vec<u8>> {
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
             return None;
         };
@@ -1376,24 +1390,11 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            if invoke.method != ACCEPTANCE_RECEIPT_METHOD {
+            if invoke.method != RECEIPT_COUNTERSIGN_B_METHOD {
                 continue;
             }
             let Some(args) = &invoke.args else { continue };
-            match dsm::types::proto::ReplyWindowArtifact::decode(&*args.body) {
-                Ok(rw) => {
-                    if let Some(
-                        dsm::types::proto::reply_window_artifact::Artifact::AcceptanceReceipt(a),
-                    ) = rw.artifact
-                    {
-                        return Some(a);
-                    }
-                    warn!("reply window: artifact oneof empty — ignoring");
-                }
-                Err(e) => {
-                    warn!("reply window: artifact decode failed: {e}");
-                }
-            }
+            return Some(args.body.clone());
         }
         None
     }
@@ -1405,7 +1406,7 @@ impl B0xSDK {
     /// verified. `full_receipt_bytes` and the digest it carries are unauthenticated
     /// wire data until the dispatcher checks them against the transfer half's
     /// reference, which is why this is a pure decoder with no side effects.
-    fn decode_receipt_evidence_a(
+    pub(crate) fn decode_receipt_evidence_a(
         env: &dsm::types::proto::Envelope,
     ) -> Option<dsm::types::proto::ReceiptEvidenceA> {
         let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
@@ -1429,7 +1430,7 @@ impl B0xSDK {
 
     /// Drain the ADR 0003 evidence halves decoded by the most recent retrieve.
     ///
-    /// Draining rather than cloning mirrors [`Self::take_reply_artifacts`], but the
+    /// Draining rather than cloning mirrors [`Self::take_countersign_deltas`], but the
     /// durable idempotency guarantee is different and lives downstream: staging is
     /// keyed on the transfer submission id, so a re-polled evidence half with the
     /// SAME bytes is idempotent and one with DIFFERENT bytes fails closed.
@@ -1437,12 +1438,12 @@ impl B0xSDK {
         std::mem::take(&mut self.pending_evidence_artifacts)
     }
 
-    /// Drain the acceptance artifacts decoded by the most recent retrieve.
+    /// Drain the B-side countersign deltas decoded by the most recent retrieve.
     /// Draining (rather than cloning) keeps a re-poll from re-finalizing the
     /// same reply within one process lifetime; durable idempotency is enforced
     /// downstream by the proposal's terminal status.
-    pub fn take_reply_artifacts(&mut self) -> Vec<dsm::types::proto::AcceptanceReceiptArtifact> {
-        std::mem::take(&mut self.pending_reply_artifacts)
+    pub fn take_countersign_deltas(&mut self) -> Vec<CountersignDelta> {
+        std::mem::take(&mut self.pending_countersign_deltas)
     }
 
     /// Decode a cert-resync control message (method + framed body) from a spooled
@@ -1487,63 +1488,95 @@ impl B0xSDK {
     /// Delivery is at-least-once and the payload is byte-identical on every
     /// attempt (the receipt is signed once, at prepare, and only replayed), so a
     /// duplicate is harmless: the sender's finalization is idempotent.
-    pub async fn submit_acceptance_reply(
-        &mut self,
-        sender_genesis: &[u8; 32],
-        sender_device_id: &[u8; 32],
+    /// Build the ADR 0003 return-leg envelope: the B-side countersign DELTA
+    /// derived from the recipient's stored full countersigned receipt. PURE —
+    /// no I/O, no ambient state; every input is a parameter, so two calls with
+    /// the same inputs are byte-identical (the deterministic reply id relies on
+    /// that: the node keeps the first body per message id).
+    ///
+    /// The delta carries the four B-side fields plus two references (the
+    /// commitment the sender looks its proposal up by, and the digest of the
+    /// exact A-side bytes B countersigned). Nothing A-side rides back; the
+    /// sender overlays this onto the receipt it authored and froze. Refuses at
+    /// construction if the encoded envelope would not fit under the node cap —
+    /// the same guard `build_evidence_envelope` applies.
+    pub(crate) fn build_countersign_reply_envelope(
+        &self,
+        local_genesis: &[u8; 32],
         sender_projection_tip: &[u8; 32],
-        artifact: dsm::types::proto::AcceptanceReceiptArtifact,
-    ) -> Result<String, DsmError> {
+        expected_commitment: &[u8; 32],
+        full_countersigned_receipt_bytes: &[u8],
+    ) -> Result<BuiltEnvelope, DsmError> {
         use prost::Message as _;
-
-        let routing_key =
-            Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
-
-        // Transport-local id: 16 opaque bytes derived from the transition's own
-        // commitment (never wall-clock). Stable across reposts, so a redelivery
-        // collapses onto the same spool row instead of piling up duplicates.
-        let message_id_bytes = reply_message_id(&artifact.commitment, sender_projection_tip);
-        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         let local_device_bytes =
             crate::util::text_id::decode_base32_crockford(self.device_id.trim())
                 .filter(|b| b.len() == 32)
                 .ok_or_else(|| {
                     DsmError::invalid_parameter(
-                        "submit_acceptance_reply: local device_id not base32(32)",
+                        "build_countersign_reply_envelope: local device_id not base32(32)",
                     )
                 })?;
-        let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+
+        // The stored bytes must be the receipt this reply is for.
+        let full = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            full_countersigned_receipt_bytes,
+        )
+        .map_err(|e| {
+            DsmError::invalid_parameter(format!(
+                "build_countersign_reply_envelope: stored receipt does not decode: {e}"
+            ))
+        })?;
+        let commitment = full.compute_commitment()?;
+        if &commitment != expected_commitment {
+            return Err(DsmError::invalid_parameter(
+                "build_countersign_reply_envelope: stored receipt commitment != reply commitment",
+            ));
+        }
+        let (a_side, b) = full.split_countersign_b().map_err(|e| {
+            DsmError::invalid_parameter(format!("build_countersign_reply_envelope: {e}"))
+        })?;
+        // The exact A bytes B countersigned == what the sender froze at send.
+        let a_bytes = a_side.to_full_protobuf()?;
+        let digest_a = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &a_bytes,
+        );
+
+        let body = dsm::types::proto::ReceiptCountersignB {
+            commitment: commitment.to_vec(),
+            receipt_evidence_digest_a: digest_a.to_vec(),
+            sig_b: b.sig_b,
+            ek_cert_b: b.ek_cert_b,
+            ek_pk_b: b.ek_pk_b,
+            kyber_ct_b: b.kyber_ct_b,
+        }
+        .encode_to_vec();
+        // Content address of the delta itself, role-separated (op_id, as the
+        // A-side builder does).
+        let digest_b = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::CountersignB,
+            &body,
+        );
+
+        // Transport-local id: 16 opaque bytes derived from the transition's own
+        // commitment (never wall-clock). Stable across reposts, so a redelivery
+        // collapses onto the same spool row instead of piling up duplicates.
+        let message_id_bytes = reply_message_id(&commitment, sender_projection_tip);
+        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         // CARRIER CHOICE (deliberate): storage nodes validate transport envelopes
-        // against a COMPILED-IN allowlist of payload tags. A brand-new payload
-        // variant is rejected with HTTP 400 by every node still running an older
-        // build, so the artifact rides inside UniversalTx (an allowlisted tag) as
-        // an explicit `wallet.acceptanceReceipt` invoke. Discrimination is by that
-        // method name — still structural, never a trial-decode.
-        let artifact_bytes = {
-            let wrapped = dsm::types::proto::ReplyWindowArtifact {
-                artifact: Some(
-                    dsm::types::proto::reply_window_artifact::Artifact::AcceptanceReceipt(artifact),
-                ),
-            };
-            let mut b = Vec::with_capacity(wrapped.encoded_len());
-            wrapped.encode(&mut b).map_err(|e| {
-                DsmError::internal(
-                    format!("reply artifact encode failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-            b
-        };
-
+        // against a COMPILED-IN allowlist of payload tags, so the delta rides
+        // inside UniversalTx (an allowlisted tag) as an explicit
+        // `receipt.countersign.b` invoke. Discrimination is by that method name
+        // — structural, never a trial-decode.
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: ACCEPTANCE_RECEIPT_METHOD.to_string(),
+            method: RECEIPT_COUNTERSIGN_B_METHOD.to_string(),
             args: Some(dsm::types::proto::ArgPack {
-                schema_hash: None,
-                codec: 0,
-                body: artifact_bytes,
+                schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body,
             }),
             pre_state_hash: None,
             post_state_hash: None,
@@ -1551,21 +1584,19 @@ impl B0xSDK {
             evidence: None,
             nonce: None,
         };
-
         let op = dsm::types::proto::UniversalOp {
             op_id: Some(dsm::types::proto::Hash32 {
-                v: message_id_bytes.clone(),
+                v: digest_b.to_vec(),
             }),
             actor: local_device_bytes.clone(),
-            genesis_hash: local_genesis.clone(),
+            genesis_hash: local_genesis.to_vec(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
-
         let envelope = dsm::types::proto::Envelope {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: local_device_bytes,
-                genesis_hash: local_genesis,
+                genesis_hash: local_genesis.to_vec(),
                 // The tip this artifact is ADDRESSED to (the sender's projection
                 // parent), so the receiving side can correlate the route it polled.
                 chain_tip: sender_projection_tip.to_vec(),
@@ -1579,7 +1610,6 @@ impl B0xSDK {
                 },
             )),
         };
-
         let mut buf = Vec::with_capacity(envelope.encoded_len());
         envelope.encode(&mut buf).map_err(|e| {
             DsmError::internal(
@@ -1587,8 +1617,77 @@ impl B0xSDK {
                 None::<std::io::Error>,
             )
         })?;
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_countersign_reply_envelope: encoded envelope is {} bytes, at or over the \
+                 node's {MAX_B0X_ENVELOPE_BYTES}-byte envelope cap; it could never be \
+                 delivered — the B-side delta must carry exactly two SPHINCS+-sized objects",
+                buf.len()
+            )));
+        }
+        info!(
+            "build_countersign_reply_envelope: {} bytes ({}% of cap) msg={}..",
+            buf.len(),
+            100 * buf.len() / MAX_B0X_ENVELOPE_BYTES,
+            &message_id_b32[..8.min(message_id_b32.len())],
+        );
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes: Vec::new(),
+        })
+    }
 
+    /// The local genesis, from AppState when populated, otherwise from the
+    /// durable genesis record. Errors rather than encoding an empty genesis —
+    /// an envelope built without one would differ byte-for-byte from a later
+    /// rebuild under the SAME deterministic message id.
+    async fn resolve_local_genesis(&self) -> Result<[u8; 32], DsmError> {
+        let from_state =
+            crate::sdk::app_state::AppState::get_genesis_hash().filter(|g| g.len() == 32);
+        let bytes = match from_state {
+            Some(g) => g,
+            None => self.core_sdk.local_genesis_hash().await?,
+        };
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| DsmError::state("local genesis hash unavailable or not 32 bytes"))
+    }
+
+    /// ADR 0003 return leg: deliver the B-side countersign delta for
+    /// `full_countersigned_receipt_bytes` to the sender's b0x route.
+    ///
+    /// The recipient keeps the whole countersigned receipt locally; ONLY the
+    /// delta goes on the wire (`build_countersign_reply_envelope`). Delivery
+    /// success is at least one endpoint answering 204.
+    pub async fn submit_acceptance_reply(
+        &mut self,
+        sender_genesis: &[u8; 32],
+        sender_device_id: &[u8; 32],
+        sender_projection_tip: &[u8; 32],
+        commitment: &[u8; 32],
+        full_countersigned_receipt_bytes: &[u8],
+    ) -> Result<String, DsmError> {
+        let routing_key =
+            Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
+        let local_genesis = self.resolve_local_genesis().await?;
+        let built = self.build_countersign_reply_envelope(
+            &local_genesis,
+            sender_projection_tip,
+            commitment,
+            full_countersigned_receipt_bytes,
+        )?;
+        self.post_reply_envelope(&routing_key, &built).await
+    }
+
+    /// POST an already-built reply envelope to every endpoint; success is >= 1
+    /// endpoint answering 204.
+    async fn post_reply_envelope(
+        &mut self,
+        routing_key: &str,
+        built: &BuiltEnvelope,
+    ) -> Result<String, DsmError> {
         let auth_device_id = self.device_id.clone();
+        let message_id_b32 = built.message_id_b32.clone();
         let mut last_err: Option<String> = None;
         let mut delivered = 0usize;
 
@@ -1607,18 +1706,19 @@ impl B0xSDK {
                 .header("Content-Type", "application/protobuf")
                 .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
                 .header("x-dsm-message-id", message_id_b32.clone())
-                .header("x-dsm-recipient", routing_key.clone())
-                .body(buf.clone())
+                .header("x-dsm-recipient", routing_key.to_string())
+                .body(built.bytes.clone())
                 .send()
                 .await;
             match resp {
                 Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
                     delivered += 1;
                     info!(
-                        "§16.6 reply delivered -> {} route={}.. msg={}..",
+                        "§16.6 reply delivered -> {} route={}.. msg={}.. ({} bytes)",
                         endpoint,
                         &routing_key[..8.min(routing_key.len())],
                         &message_id_b32[..8.min(message_id_b32.len())],
+                        built.bytes.len(),
                     );
                 }
                 Ok(r) => {
@@ -3205,14 +3305,17 @@ impl B0xSDK {
                 self.pending_cert_resync.push((method, body));
                 continue;
             }
-            if let Some(artifact) = Self::decode_acceptance_artifact(&env) {
+            if let Some(body) = Self::decode_countersign_b(&env) {
                 info!(
-                    "📬 reply window: acceptance artifact for commitment={}..",
-                    text_id::encode_base32_crockford(
-                        &artifact.commitment[..4.min(artifact.commitment.len())]
-                    )
+                    "📬 ADR 0003 countersign delta message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
                 );
-                self.pending_reply_artifacts.push(artifact);
+                self.pending_countersign_deltas.push(CountersignDelta {
+                    message_id: text_id::encode_base32_crockford(&env.message_id),
+                    envelope_bytes: env.encode_to_vec(),
+                    body,
+                });
                 continue;
             }
             if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
@@ -5057,9 +5160,44 @@ mod tests {
         );
     }
 
-    /// ADR 0003 shape 3: the B-side countersign delta — the A-evidence
-    /// reference plus B-only authorization material. Measured at ~101,630
-    /// bytes (77.5% of cap).
+    /// The FULL countersigned receipt as the recipient stores it: the
+    /// production-shaped A side plus production-shaped B fields. 218,541 bytes
+    /// — the exact size observed on 5GN, and 170% of the node cap.
+    fn production_sized_full_countersigned_receipt() -> Vec<u8> {
+        let sig = sphincs_sig_len();
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            &production_sized_receipt_a(),
+        )
+        .expect("A side decodes");
+        let full = a
+            .with_countersign_b(dsm::types::receipt_types::CountersignB {
+                sig_b: vec![0xBB; sig],
+                ek_cert_b: vec![0xCB; sig],
+                ek_pk_b: vec![0xEB; EK_PK_LEN],
+                kyber_ct_b: vec![0x1B; KYBER_CT_LEN],
+            })
+            .expect("overlay");
+        let bytes = full.to_full_protobuf().expect("encode");
+        assert_eq!(bytes.len(), 218_541, "the 5GN specimen size");
+        bytes
+    }
+
+    fn test_reply_sdk() -> B0xSDK {
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK")
+    }
+
+    fn commitment_of(full_bytes: &[u8]) -> [u8; 32] {
+        dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(full_bytes)
+            .expect("decode")
+            .compute_commitment()
+            .expect("commitment")
+    }
+
+    /// ADR 0003 shape 3: the B-side countersign DELTA, built by the REAL
+    /// producer from the REAL stored shape (the full 218,541-byte receipt),
+    /// wrapped exactly as it goes on the wire.
     ///
     /// NORMATIVE (ADR 0003): this artifact carries exactly TWO SPHINCS+
     /// signature-sized objects, `sig_b` and `ek_cert_b`. Its headroom is less
@@ -5068,44 +5206,176 @@ mod tests {
     /// extension.
     #[test]
     fn adr0003_b_side_countersign_delta_fits_the_node_cap() {
-        let sig = sphincs_sig_len();
-        let delta = dsm::types::proto::ReceiptCommit {
-            // Reference to the A-side evidence being countersigned.
-            genesis: vec![0x11; 32],
-            devid_a: vec![0x22; 32],
-            devid_b: vec![0x33; 32],
-            child_tip: vec![0x44; 32],
-            child_root: vec![0x55; 32],
-            // B-only authorization material. No A-side signatures, and no
-            // proof material: the SMT proofs are shared, not per-side.
-            sig_b: vec![0xBB; sig],
-            ek_cert_b: vec![0xCC; sig],
-            ek_pk_b: vec![0xDD; EK_PK_LEN],
-            kyber_ct_b: vec![0xEE; KYBER_CT_LEN],
-            ..Default::default()
-        };
-        let mut body = Vec::with_capacity(delta.encoded_len());
-        delta.encode(&mut body).expect("encode B delta");
-
-        let two_signatures = 2 * sig;
+        let full = production_sized_full_countersigned_receipt();
+        let sdk = test_reply_sdk();
+        let built = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&full),
+                &full,
+            )
+            .expect("real delta builder");
+        report_budget("ADR0003 B-side countersign", built.bytes.len());
         assert!(
-            body.len() < two_signatures + 8 * 1024,
-            "B delta grew beyond two signatures plus reference material: {} bytes. \
-             ADR 0003 fixes this artifact at exactly two SPHINCS+-sized objects.",
+            built.bytes.len() < NODE_MAX_ENVELOPE_BYTES,
+            "B-side countersign delta measured {} bytes, over the cap",
+            built.bytes.len()
+        );
+
+        // Decode it the way the sender does: method-discriminated, then the
+        // strict wire codec.
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = B0xSDK::decode_countersign_b(&env).expect("discriminated by method");
+        let delta =
+            dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
+        let sig = sphincs_sig_len();
+        assert_eq!(delta.sig_b, vec![0xBB; sig]);
+        assert_eq!(delta.ek_cert_b, vec![0xCB; sig]);
+        assert_eq!(delta.ek_pk_b, vec![0xEB; EK_PK_LEN]);
+        assert_eq!(delta.kyber_ct_b, vec![0x1B; KYBER_CT_LEN]);
+        assert!(
+            body.len() < 2 * sig + 8 * 1024,
+            "B delta grew beyond two signatures plus reference material: {} bytes",
             body.len()
         );
-
-        let bytes = envelope_bytes_for_evidence_body(body);
-        report_budget("ADR0003 B-side countersign", bytes);
-        assert!(
-            bytes < NODE_MAX_ENVELOPE_BYTES,
-            "B-side ReceiptCountersignEnvelope measured {bytes} bytes, over the cap"
+        // Nothing A-side rides back: the sig_a / ek_cert_a filler runs are absent.
+        assert!(!built
+            .bytes
+            .windows(1024)
+            .any(|w| w.iter().all(|&b| b == 0xAA)));
+        assert!(!built
+            .bytes
+            .windows(1024)
+            .any(|w| w.iter().all(|&b| b == 0xCC)));
+        // Born canonical: the ArgPack codec is PROTO.
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            panic!("UniversalTx")
+        };
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(inv)) = &tx.ops[0].kind else {
+            panic!("Invoke")
+        };
+        assert_eq!(inv.method, RECEIPT_COUNTERSIGN_B_METHOD);
+        assert_eq!(
+            inv.args.as_ref().unwrap().codec,
+            dsm::types::proto::Codec::Proto as i32
         );
+        assert_eq!(env.headers.as_ref().unwrap().genesis_hash, vec![0x77; 32]);
+    }
+
+    /// The recipient-derived A digest equals the digest the sender computed at
+    /// send over the SAME bytes — the delta names exactly what was countersigned.
+    #[test]
+    fn the_countersign_reply_names_the_exact_a_side_bytes() {
+        let a_bytes = production_sized_receipt_a();
+        let full = production_sized_full_countersigned_receipt();
+        let built = test_reply_sdk()
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&full),
+                &full,
+            )
+            .expect("build");
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = B0xSDK::decode_countersign_b(&env).expect("method");
+        let delta =
+            dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
+        assert_eq!(
+            delta.receipt_evidence_digest_a,
+            crate::storage::client_db::evidence_content_digest(
+                crate::storage::client_db::ArtifactRole::EvidenceA,
+                &a_bytes
+            )
+            .to_vec()
+        );
+        assert_eq!(delta.commitment, commitment_of(&full).to_vec());
+    }
+
+    /// Two builds from the same inputs are byte-identical — required because
+    /// the reply id is deterministic and the node keeps the first body per id.
+    #[test]
+    fn the_countersign_reply_is_byte_stable_across_attempts() {
+        let full = production_sized_full_countersigned_receipt();
+        let sdk = test_reply_sdk();
+        let c = commitment_of(&full);
+        let one = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .expect("one");
+        let two = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .expect("two");
+        assert_eq!(one.bytes, two.bytes);
+        assert_eq!(one.message_id_b32, two.message_id_b32);
+    }
+
+    #[test]
+    fn the_countersign_builder_refuses_what_it_must() {
+        let sdk = test_reply_sdk();
+        let full = production_sized_full_countersigned_receipt();
+        let c = commitment_of(&full);
+
+        // Not countersigned: an A-only receipt has no delta to send.
+        let a_only = production_sized_receipt_a();
+        let err = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&a_only),
+                &a_only,
+            )
+            .expect_err("A-only");
+        assert!(
+            err.to_string()
+                .contains("no complete B-side countersignature"),
+            "{err}"
+        );
+
+        // The stored receipt is not the one this reply is for.
+        let err = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &[0x99; 32], &full)
+            .expect_err("wrong commitment");
+        assert!(
+            err.to_string().contains("commitment != reply commitment"),
+            "{err}"
+        );
+
+        // Over the cap: two 65,535-byte "signatures" cannot be delivered, so the
+        // builder refuses rather than handing the sweep a guaranteed 413.
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&a_only)
+            .expect("A");
+        let fat = a
+            .with_countersign_b(dsm::types::receipt_types::CountersignB {
+                sig_b: vec![0xBB; 65_535],
+                ek_cert_b: vec![0xCB; 65_535],
+                ek_pk_b: vec![0xEB; EK_PK_LEN],
+                kyber_ct_b: vec![0x1B; KYBER_CT_LEN],
+            })
+            .expect("overlay")
+            .to_full_protobuf()
+            .expect("encode");
+        let err = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &commitment_of(&fat), &fat)
+            .expect_err("over cap");
+        assert!(err.to_string().contains("envelope cap"), "{err}");
+
+        // Positive control in the same shape.
+        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .expect("the production shape builds");
     }
 
     /// Wrap an evidence body in the same Envelope framing the production
     /// submit path uses, and return the encoded wire length.
     fn envelope_bytes_for_evidence_body(body: Vec<u8>) -> usize {
+        let envelope = test_invoke_envelope("receipt.evidence", body);
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).expect("encode Envelope");
+        buf.len()
+    }
+
+    /// One UniversalTx invoke envelope with the given method and ArgPack body,
+    /// framed as the production submit path frames it.
+    fn test_invoke_envelope(method: &str, body: Vec<u8>) -> dsm::types::proto::Envelope {
         let arg_pack = dsm::types::proto::ArgPack {
             schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             codec: dsm::types::proto::Codec::Proto as i32,
@@ -5113,7 +5383,7 @@ mod tests {
         };
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "receipt.evidence".to_string(),
+            method: method.to_string(),
             args: Some(arg_pack),
             pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
             post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
@@ -5121,7 +5391,7 @@ mod tests {
             evidence: None,
             nonce: Some(dsm::types::proto::Hash16 { v: vec![0u8; 16] }),
         };
-        let envelope = dsm::types::proto::Envelope {
+        dsm::types::proto::Envelope {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
                 device_id: vec![0x11; 32],
@@ -5141,9 +5411,33 @@ mod tests {
                     atomic: true,
                 },
             )),
-        };
-        let mut buf = Vec::with_capacity(envelope.encoded_len());
-        envelope.encode(&mut buf).expect("encode Envelope");
-        buf.len()
+        }
+    }
+
+    /// The return leg is discriminated by its explicit method string and
+    /// nothing else: no trial decode, no size heuristic. An evidence half and a
+    /// legacy full-receipt reply on the retired `wallet.acceptanceReceipt`
+    /// method are both `None` here, and the legacy one is not a transfer either
+    /// — it matches no discriminator and is dropped, never consumed.
+    #[test]
+    fn retrieve_discriminates_a_countersign_delta_by_its_method_only() {
+        let body = vec![0xB0u8; 96];
+        let delta = test_invoke_envelope(RECEIPT_COUNTERSIGN_B_METHOD, body.clone());
+        assert_eq!(B0xSDK::decode_countersign_b(&delta), Some(body.clone()));
+        assert!(B0xSDK::decode_receipt_evidence_a(&delta).is_none());
+
+        let evidence = test_invoke_envelope(RECEIPT_EVIDENCE_A_METHOD, body.clone());
+        assert!(B0xSDK::decode_countersign_b(&evidence).is_none());
+
+        let legacy = test_invoke_envelope("wallet.acceptanceReceipt", body);
+        assert!(B0xSDK::decode_countersign_b(&legacy).is_none());
+        assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
+        ensure_test_storage_dir();
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK");
+        assert!(
+            sdk.envelope_to_b0x_entry(legacy).is_none(),
+            "a legacy full-receipt reply is not a transfer and must be dropped, not consumed"
+        );
     }
 }

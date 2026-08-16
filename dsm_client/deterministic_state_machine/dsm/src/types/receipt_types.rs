@@ -142,12 +142,34 @@ pub struct StitchedReceiptV2 {
     pub fork_witness: Option<crate::types::proto::ForkAwareWitness>,
 }
 
-fn receipt_commit_field_limit(tag: u32) -> Option<Option<usize>> {
+/// Per-field bound for a strict length-delimited wire message.
+#[derive(Clone, Copy)]
+enum FieldLimit {
+    /// The field must be exactly this many bytes.
+    Fixed(usize),
+    /// The field may be at most this many bytes.
+    Max(usize),
+}
+
+fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
-        1..=7 => Some(Some(32)),
-        8..=11 => Some(Some(128 * 1024)),
-        12..=17 => Some(Some(65_535)),
-        18..=19 => Some(Some(2_048)),
+        1..=7 => Some(FieldLimit::Fixed(32)),
+        8..=11 => Some(FieldLimit::Max(128 * 1024)),
+        12..=17 => Some(FieldLimit::Max(65_535)),
+        18..=19 => Some(FieldLimit::Max(2_048)),
+        _ => None,
+    }
+}
+
+/// `ReceiptCountersignB` (ADR 0003 return leg): the four B-side receipt
+/// fields plus two 32-byte references. Every field is required.
+const RECEIPT_COUNTERSIGN_B_TAGS: u32 = 6;
+
+fn receipt_countersign_b_field_limit(tag: u32) -> Option<FieldLimit> {
+    match tag {
+        1..=2 => Some(FieldLimit::Fixed(32)),
+        3..=5 => Some(FieldLimit::Max(65_535)),
+        6 => Some(FieldLimit::Max(2_048)),
         _ => None,
     }
 }
@@ -166,7 +188,12 @@ fn encode_varint(mut value: u64) -> Vec<u8> {
     out
 }
 
-fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result<u64, DsmError> {
+fn read_canonical_varint(
+    bytes: &[u8],
+    offset: &mut usize,
+    wire: &str,
+    what: &str,
+) -> Result<u64, DsmError> {
     let start = *offset;
     let mut value = 0u64;
     let mut shift = 0u32;
@@ -174,7 +201,7 @@ fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result
     for _ in 0..10 {
         if *offset >= bytes.len() {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: truncated {what} varint"
+                "{wire}: truncated {what} varint"
             )));
         }
         let byte = bytes[*offset];
@@ -183,7 +210,7 @@ fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result
         let low = (byte & 0x7f) as u64;
         if shift >= 64 || (shift == 63 && low > 1) {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: {what} varint overflow"
+                "{wire}: {what} varint overflow"
             )));
         }
         value |= low << shift;
@@ -192,7 +219,7 @@ fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result
             let encoded = encode_varint(value);
             if encoded.as_slice() != &bytes[start..*offset] {
                 return Err(DsmError::invalid_operation(format!(
-                    "receipt wire: non-canonical {what} varint"
+                    "{wire}: non-canonical {what} varint"
                 )));
             }
             return Ok(value);
@@ -202,76 +229,157 @@ fn read_canonical_varint(bytes: &[u8], offset: &mut usize, what: &str) -> Result
     }
 
     Err(DsmError::invalid_operation(format!(
-        "receipt wire: {what} varint too long"
+        "{wire}: {what} varint too long"
     )))
 }
 
-fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
+/// Strict validation of a length-delimited-only protobuf message BEFORE prost
+/// sees it: canonical varints, wire type 2 everywhere, no unknown tags, no
+/// duplicates, per-field fixed/max lengths, and every `required` tag present.
+/// `wire` names the message in error strings ("receipt wire", "countersign
+/// wire") so callers can pin the reason.
+fn validate_length_delimited_wire(
+    bytes: &[u8],
+    wire: &str,
+    max_tag: u32,
+    limit_for: impl Fn(u32) -> Option<FieldLimit>,
+    required: impl Fn(u32) -> bool,
+) -> Result<(), DsmError> {
     let mut offset = 0usize;
-    let mut seen = [false; 20];
+    let mut seen = vec![false; max_tag as usize + 1];
 
     while offset < bytes.len() {
-        let key = read_canonical_varint(bytes, &mut offset, "field key")?;
+        let key = read_canonical_varint(bytes, &mut offset, wire, "field key")?;
         let tag = (key >> 3) as u32;
         let wire_type = (key & 0x07) as u8;
 
         if wire_type != 2 {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: field {tag} has wire type {wire_type}, expected length-delimited"
+                "{wire}: field {tag} has wire type {wire_type}, expected length-delimited"
             )));
         }
 
-        let Some(limit) = receipt_commit_field_limit(tag) else {
+        let Some(limit) = limit_for(tag) else {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: unknown field {tag}"
+                "{wire}: unknown field {tag}"
             )));
         };
 
         let seen_idx = tag as usize;
         if seen[seen_idx] {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: duplicate field {tag}"
+                "{wire}: duplicate field {tag}"
             )));
         }
         seen[seen_idx] = true;
 
-        let len = read_canonical_varint(bytes, &mut offset, "field length")? as usize;
+        let len = read_canonical_varint(bytes, &mut offset, wire, "field length")? as usize;
         let Some(end) = offset.checked_add(len) else {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: field {tag} length exceeds remaining input"
+                "{wire}: field {tag} length exceeds remaining input"
             )));
         };
         if end > bytes.len() {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: field {tag} length exceeds remaining input"
+                "{wire}: field {tag} length exceeds remaining input"
             )));
         }
 
-        if let Some(limit) = limit {
-            if tag <= 7 && len != limit {
+        match limit {
+            FieldLimit::Fixed(exact) if len != exact => {
                 return Err(DsmError::invalid_operation(format!(
-                    "receipt wire: field {tag} must be {limit} bytes, got {len}"
+                    "{wire}: field {tag} must be {exact} bytes, got {len}"
                 )));
             }
-            if tag > 7 && len > limit {
+            FieldLimit::Max(max) if len > max => {
                 return Err(DsmError::invalid_operation(format!(
-                    "receipt wire: field {tag} exceeds max length {limit}, got {len}"
+                    "{wire}: field {tag} exceeds max length {max}, got {len}"
                 )));
             }
+            _ => {}
         }
 
         offset = end;
     }
 
-    for (tag, present) in seen.iter().enumerate().take(8).skip(1) {
-        if !present {
+    for tag in 1..=max_tag {
+        if required(tag) && !seen[tag as usize] {
             return Err(DsmError::invalid_operation(format!(
-                "receipt wire: missing required field {tag}"
+                "{wire}: missing required field {tag}"
             )));
         }
     }
 
     Ok(())
+}
+
+fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
+    validate_length_delimited_wire(
+        bytes,
+        "receipt wire",
+        19,
+        receipt_commit_field_limit,
+        |tag| (1..=7).contains(&tag),
+    )
+}
+
+/// Strict wire validation for `ReceiptCountersignB`: tags 1-6 only, all
+/// present, 1-2 exactly 32 bytes, 3-5 at most 65,535, 6 at most 2,048. A full
+/// `ReceiptCommit` body fed here fails on its first tag above 6.
+fn validate_receipt_countersign_b_wire(bytes: &[u8]) -> Result<(), DsmError> {
+    validate_length_delimited_wire(
+        bytes,
+        "countersign wire",
+        RECEIPT_COUNTERSIGN_B_TAGS,
+        receipt_countersign_b_field_limit,
+        |_| true,
+    )
+}
+
+/// Decode a `ReceiptCountersignB` from wire bytes: strict validation, prost
+/// decode, and re-encode equality (so the bytes are the canonical encoding
+/// and can be digested deterministically).
+pub fn decode_receipt_countersign_b_wire(
+    bytes: &[u8],
+) -> Result<crate::types::proto::ReceiptCountersignB, DsmError> {
+    use prost::Message;
+    validate_receipt_countersign_b_wire(bytes)?;
+    let delta = crate::types::proto::ReceiptCountersignB::decode(bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("countersign decode: {e}")))?;
+    if delta.encode_to_vec() != bytes {
+        return Err(DsmError::invalid_operation(
+            "countersign wire: non-canonical field ordering or encoding",
+        ));
+    }
+    Ok(delta)
+}
+
+/// The B-side receipt fields the recipient adds at acceptance (ADR 0003
+/// return leg): exactly what the sender lacks after authoring the A side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountersignB {
+    pub sig_b: Vec<u8>,
+    pub ek_cert_b: Vec<u8>,
+    pub ek_pk_b: Vec<u8>,
+    pub kyber_ct_b: Vec<u8>,
+}
+
+impl CountersignB {
+    pub fn from_wire(delta: &crate::types::proto::ReceiptCountersignB) -> Self {
+        Self {
+            sig_b: delta.sig_b.clone(),
+            ek_cert_b: delta.ek_cert_b.clone(),
+            ek_pk_b: delta.ek_pk_b.clone(),
+            kyber_ct_b: delta.kyber_ct_b.clone(),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        !self.sig_b.is_empty()
+            && !self.ek_cert_b.is_empty()
+            && !self.ek_pk_b.is_empty()
+            && !self.kyber_ct_b.is_empty()
+    }
 }
 
 impl StitchedReceiptV2 {
@@ -520,6 +628,63 @@ impl StitchedReceiptV2 {
     /// Set party B's per-step Kyber ciphertext (counterparty's contribution).
     pub fn set_kyber_ct_b(&mut self, ct: Vec<u8>) {
         self.kyber_ct_b = ct;
+    }
+
+    /// Split a countersigned receipt into the A-side receipt (fields 1-11 plus
+    /// the A-side authorization material) and the B-side `CountersignB` the
+    /// recipient added at acceptance. Errors if any B field is absent: a receipt
+    /// that was never countersigned has no delta to return.
+    ///
+    /// `split.0.to_full_protobuf()` is byte-identical to the A-side bytes the
+    /// receipt was built from — `to_full_protobuf` is a pure function of the
+    /// fields — which is what lets the recipient derive the digest binding the
+    /// sender will check against its retained artifact.
+    pub fn split_countersign_b(&self) -> Result<(Self, CountersignB), DsmError> {
+        let b = CountersignB {
+            sig_b: self.sig_b.clone(),
+            ek_cert_b: self.ek_cert_b.clone(),
+            ek_pk_b: self.ek_pk_b.clone(),
+            kyber_ct_b: self.kyber_ct_b.clone(),
+        };
+        if !b.is_complete() {
+            return Err(DsmError::invalid_operation(
+                "split_countersign_b: receipt carries no complete B-side countersignature",
+            ));
+        }
+        let mut a_side = self.clone();
+        a_side.sig_b.clear();
+        a_side.ek_cert_b.clear();
+        a_side.ek_pk_b.clear();
+        a_side.kyber_ct_b.clear();
+        Ok((a_side, b))
+    }
+
+    /// Overlay a B-side `CountersignB` onto an A-side receipt, producing the
+    /// countersigned receipt the recipient holds. Errors if `self` already
+    /// carries any B field (a delta is never applied twice, and never onto a
+    /// receipt that was not the sender's own A side) or if the delta is
+    /// incomplete.
+    pub fn with_countersign_b(&self, b: CountersignB) -> Result<Self, DsmError> {
+        if !self.sig_b.is_empty()
+            || !self.ek_cert_b.is_empty()
+            || !self.ek_pk_b.is_empty()
+            || !self.kyber_ct_b.is_empty()
+        {
+            return Err(DsmError::invalid_operation(
+                "with_countersign_b: receipt already carries B-side material",
+            ));
+        }
+        if !b.is_complete() {
+            return Err(DsmError::invalid_operation(
+                "with_countersign_b: incomplete B-side countersignature",
+            ));
+        }
+        let mut full = self.clone();
+        full.set_ek_pk_b(b.ek_pk_b);
+        full.set_ek_cert_b(b.ek_cert_b);
+        full.set_kyber_ct_b(b.kyber_ct_b);
+        full.add_sig_b(b.sig_b);
+        Ok(full)
     }
 
     /// Check if both signatures are present
@@ -796,8 +961,10 @@ mod tests {
     /// sender's step can never finalize, because reaching `finalized` requires
     /// the very reply that just failed to verify.
     ///
-    /// Any code constructing an `AcceptanceReceiptArtifact` or otherwise putting
-    /// a receipt on the wire must use `to_full_protobuf`.
+    /// Any code putting the A-side evidence on the wire must use
+    /// `to_full_protobuf`; the B side never ships a whole receipt at all — only
+    /// its `CountersignB` delta, which the sender overlays onto the retained A
+    /// bytes (`with_countersign_b`).
     #[test]
     fn canonical_encoding_erases_countersignature_evidence_that_full_encoding_keeps() {
         let mut receipt = StitchedReceiptV2::new(
@@ -1361,6 +1528,233 @@ mod tests {
         assert!(!acc.valid);
         assert_eq!(acc.reason.as_deref(), Some("bad signature"));
         assert!(acc.commitment.is_none());
+    }
+
+    // --- ADR 0003 return leg: CountersignB split / overlay / wire codec ---
+
+    /// Production-shaped receipt: SPHINCS+ SPX256f signature size, 64-byte
+    /// EK public keys, ML-KEM-768 ciphertexts, and the proof lengths measured
+    /// from a real bench envelope. Filler bytes — sizes are what matter here.
+    fn production_shaped_a_side() -> StitchedReceiptV2 {
+        const SIG: usize = 49_856;
+        let mut r = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            [0x07; 32],
+            vec![0x08; 8_261],
+            vec![0x09; 8_261],
+            vec![0x0A; 9],
+        );
+        r.rel_replace_witness = vec![0x0B; 4];
+        r.add_sig_a(vec![0xAA; SIG]);
+        r.set_ek_cert_a(vec![0xCA; SIG]);
+        r.set_ek_pk_a(vec![0xEA; 64]);
+        r.set_kyber_ct_a(vec![0x1A; 1_088]);
+        r
+    }
+
+    fn production_shaped_countersign_b() -> CountersignB {
+        const SIG: usize = 49_856;
+        CountersignB {
+            sig_b: vec![0xBB; SIG],
+            ek_cert_b: vec![0xCB; SIG],
+            ek_pk_b: vec![0xEB; 64],
+            kyber_ct_b: vec![0x1B; 1_088],
+        }
+    }
+
+    fn production_shaped_delta_wire(
+        commitment: [u8; 32],
+        digest_a: [u8; 32],
+        b: &CountersignB,
+    ) -> Vec<u8> {
+        use prost::Message;
+        crate::types::proto::ReceiptCountersignB {
+            commitment: commitment.to_vec(),
+            receipt_evidence_digest_a: digest_a.to_vec(),
+            sig_b: b.sig_b.clone(),
+            ek_cert_b: b.ek_cert_b.clone(),
+            ek_pk_b: b.ek_pk_b.clone(),
+            kyber_ct_b: b.kyber_ct_b.clone(),
+        }
+        .encode_to_vec()
+    }
+
+    /// The whole return-leg contract in one assertion chain: the recipient's
+    /// split gives back EXACTLY the A bytes it received, and the sender's
+    /// overlay of that delta onto its own A bytes gives back EXACTLY the
+    /// recipient's full receipt. Both directions byte-identical, so a digest
+    /// over either side is a digest over the same object.
+    #[test]
+    fn split_then_overlay_reproduces_the_full_wire_bytes_exactly() {
+        let a_side = production_shaped_a_side();
+        let a_bytes = a_side.to_full_protobuf().unwrap();
+        // The A side is what the sender ships and retains: 118 KB class.
+        assert!(
+            (117_000..119_000).contains(&a_bytes.len()),
+            "{}",
+            a_bytes.len()
+        );
+
+        // Recipient: countersign, encode, store.
+        let full = a_side
+            .with_countersign_b(production_shaped_countersign_b())
+            .unwrap();
+        let full_bytes = full.to_full_protobuf().unwrap();
+        // The observed 5GN specimen was 218,541 bytes with these exact shapes.
+        assert_eq!(full_bytes.len(), 218_541, "full countersigned receipt size");
+
+        // Recipient at reply time: decode its stored bytes and split.
+        let decoded = StitchedReceiptV2::from_canonical_protobuf(&full_bytes).unwrap();
+        let (a_again, b) = decoded.split_countersign_b().unwrap();
+        assert_eq!(
+            a_again.to_full_protobuf().unwrap(),
+            a_bytes,
+            "split A side must re-encode to the exact bytes the recipient received"
+        );
+        assert_eq!(b, production_shaped_countersign_b());
+
+        // Sender: overlay the delta onto its retained A bytes.
+        let reconstructed = StitchedReceiptV2::from_canonical_protobuf(&a_bytes)
+            .unwrap()
+            .with_countersign_b(b)
+            .unwrap();
+        assert_eq!(
+            reconstructed.to_full_protobuf().unwrap(),
+            full_bytes,
+            "overlay must reproduce the recipient's countersigned receipt byte for byte"
+        );
+        assert_eq!(
+            reconstructed.compute_commitment().unwrap(),
+            a_side.compute_commitment().unwrap(),
+            "commitment is blind to B fields"
+        );
+    }
+
+    #[test]
+    fn split_refuses_a_receipt_without_a_countersignature() {
+        let a_side = production_shaped_a_side();
+        let err = a_side.split_countersign_b().unwrap_err();
+        assert!(
+            format!("{err}").contains("no complete B-side countersignature"),
+            "{err}"
+        );
+
+        // Partial B material is not a countersignature either.
+        let mut half = a_side.clone();
+        half.add_sig_b(vec![0xBB; 16]);
+        assert!(half.split_countersign_b().is_err());
+    }
+
+    #[test]
+    fn overlay_refuses_an_already_countersigned_receipt_and_an_incomplete_delta() {
+        let full = production_shaped_a_side()
+            .with_countersign_b(production_shaped_countersign_b())
+            .unwrap();
+        let err = full
+            .with_countersign_b(production_shaped_countersign_b())
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("already carries B-side material"),
+            "{err}"
+        );
+
+        let mut incomplete = production_shaped_countersign_b();
+        incomplete.kyber_ct_b.clear();
+        let err = production_shaped_a_side()
+            .with_countersign_b(incomplete)
+            .unwrap_err();
+        assert!(format!("{err}").contains("incomplete"), "{err}");
+    }
+
+    #[test]
+    fn countersign_wire_accepts_the_canonical_encoding_and_reencodes_identically() {
+        use prost::Message;
+        let b = production_shaped_countersign_b();
+        let wire = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+        let decoded = decode_receipt_countersign_b_wire(&wire).unwrap();
+        assert_eq!(decoded.commitment, vec![0x11; 32]);
+        assert_eq!(decoded.receipt_evidence_digest_a, vec![0x22; 32]);
+        assert_eq!(CountersignB::from_wire(&decoded), b);
+        assert_eq!(decoded.encode_to_vec(), wire);
+        // Two SPHINCS objects plus ~1.2 KB of everything else: the normative
+        // budget class (ADR 0003), well under the 131,072-byte node cap even
+        // before the transport wrapper.
+        assert!(
+            wire.len() > 100_000 && wire.len() < 102_000,
+            "{}",
+            wire.len()
+        );
+    }
+
+    /// A full countersigned receipt fed to the delta decoder is refused on its
+    /// first tag past 6 — the sender can never mistake a whole receipt for a
+    /// delta, so no legacy full-receipt reply can be consumed by accident.
+    #[test]
+    fn countersign_wire_refuses_a_full_receipt_commit_body() {
+        let full_bytes = production_shaped_a_side()
+            .with_countersign_b(production_shaped_countersign_b())
+            .unwrap()
+            .to_full_protobuf()
+            .unwrap();
+        let err = decode_receipt_countersign_b_wire(&full_bytes).unwrap_err();
+        assert!(
+            format!("{err}").contains("countersign wire: unknown field 7"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn countersign_wire_refuses_missing_duplicate_and_oversized_fields() {
+        use prost::Message;
+        let b = production_shaped_countersign_b();
+        let good = production_shaped_delta_wire([0x11; 32], [0x22; 32], &b);
+
+        // Missing kyber_ct_b (field 6): the live gate is structural, so the
+        // wire must not let it through silently.
+        let mut no_ct = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        no_ct.kyber_ct_b.clear();
+        let err = decode_receipt_countersign_b_wire(&no_ct.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("missing required field 6"),
+            "{err}"
+        );
+
+        // Wrong fixed length on the digest binding.
+        let mut short_digest = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        short_digest.receipt_evidence_digest_a.truncate(31);
+        let err = decode_receipt_countersign_b_wire(&short_digest.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("field 2 must be 32 bytes"),
+            "{err}"
+        );
+
+        // Duplicate field: append a second field-1 to the canonical bytes.
+        let mut dup = good.clone();
+        let mut extra = crate::types::proto::ReceiptCountersignB {
+            commitment: vec![0x33; 32],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        dup.append(&mut extra);
+        let err = decode_receipt_countersign_b_wire(&dup).unwrap_err();
+        assert!(format!("{err}").contains("duplicate field 1"), "{err}");
+
+        // Oversized kyber_ct_b (cap 2,048).
+        let mut fat = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        fat.kyber_ct_b = vec![0x1B; 2_049];
+        let err = decode_receipt_countersign_b_wire(&fat.encode_to_vec()).unwrap_err();
+        assert!(
+            format!("{err}").contains("field 6 exceeds max length 2048"),
+            "{err}"
+        );
+
+        // Positive control in the same shape: the untouched bytes decode.
+        decode_receipt_countersign_b_wire(&good).unwrap();
     }
 
     // --- ReceiptVerificationContext ---
