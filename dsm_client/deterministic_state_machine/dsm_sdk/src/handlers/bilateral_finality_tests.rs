@@ -50,6 +50,46 @@ fn proposal_statuses(rel: &[u8; 32]) -> Vec<String> {
         .collect()
 }
 
+/// Every sender proposal's canonical CHILD for `rel` on the ENTERED device,
+/// in insertion order — the heads this device signed its sends under.
+fn proposal_children(rel: &[u8; 32]) -> Vec<[u8; 32]> {
+    let binding = cdb::get_connection().expect("conn");
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT canonical_child FROM sender_online_proposal WHERE relationship_key = ?1 \
+             ORDER BY rowid",
+        )
+        .expect("prepare");
+    stmt.query_map(rusqlite::params![rel.as_slice()], |r| {
+        let v: Vec<u8> = r.get(0)?;
+        Ok(<[u8; 32]>::try_from(v.as_slice()).expect("32"))
+    })
+    .expect("query")
+    .map(|r| r.expect("row"))
+    .collect()
+}
+
+/// The signed A-side PARENT of every canonical apply on `rel` on the ENTERED
+/// device — the head the sender signed under, as the recipient pinned it.
+fn applied_signed_parents(rel: &[u8; 32]) -> Vec<[u8; 32]> {
+    let binding = cdb::get_connection().expect("conn");
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn
+        .prepare(
+            "SELECT parent_tip FROM canonical_apply_identity WHERE relationship_key = ?1 \
+             ORDER BY rowid",
+        )
+        .expect("prepare");
+    stmt.query_map(rusqlite::params![rel.as_slice()], |r| {
+        let v: Vec<u8> = r.get(0)?;
+        Ok(<[u8; 32]>::try_from(v.as_slice()).expect("32"))
+    })
+    .expect("query")
+    .map(|r| r.expect("row"))
+    .collect()
+}
+
 /// Every sender outbox status for `rel` on the ENTERED device.
 fn outbox_statuses(rel: &[u8; 32]) -> Vec<String> {
     let binding = cdb::get_connection().expect("conn");
@@ -173,68 +213,79 @@ async fn harness_carries_one_generation_a_to_b_through_production_code() {
 // =====================================================================
 // R1 — ROLE REVERSAL. A→B, A→B, then B→A on the SAME relationship.
 //
-// TODAY (the hardware failure, reproduced in-process): A's
-// `pinned_counterparty_a_head(rel)` derives B's head only from
-// `canonical_apply_identity` rows where B was SENDER — there are none — so it
-// falls back to the genesis seed. But B's local relationship head advanced
-// B0→B1→B2 while it APPLIED A's two transfers, and B signs parent=B2. A sees
-// `Conflict` → terminal reject; B's 5 ERA are stuck. This pin documents that
-// and is DELETED by Commit 3, which un-ignores the target test below it.
+// The hardware failure this stack exists for: A's pin for B's head used to be
+// derived from what A had APPLIED (nothing), so it fell back to the genesis
+// seed while B's local lineage had advanced B0→B1→B2 by applying A's two
+// transfers — B signed parent=B2, A saw Conflict, B's 5 ERA were stuck. Now
+// the peer's head is ONE authority (`counterparty_canonical_heads`) advanced
+// from both roles: A learns B1 and B2 from B's sig_b-authenticated deltas.
 // =====================================================================
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn role_reversal_currently_fails_at_the_history_derived_pin() {
-    let p = Pair::boot(1_000, 0).await;
-    let rel = p.a.rel_key_with(&p.b);
-    generation(&p.a, &p.b, 10).await;
-    generation(&p.a, &p.b, 10).await;
-    assert_eq!(p.b.era_balance(), 20);
 
-    // B originates on the used relationship — its local send succeeds.
-    let sent = p.b.send(&p.a, 5).await;
-    assert!(sent.success, "B's local send: {:?}", sent.error_message);
-    assert_eq!(p.b.era_balance(), 15);
-
-    // A polls, stages both halves, verifies — and REJECTS at the pin.
-    let a_sync = p.a.sync().await;
-    assert!(a_sync.success, "{:?}", a_sync.errors);
-    assert_eq!(p.a.era_balance(), 980, "A never credited");
-    assert_eq!(
-        rows_for_relationship("canonical_apply_identity", &rel),
-        0,
-        "A applied nothing on the reverse leg"
-    );
-    assert_eq!(
-        staging_states(),
-        vec!["terminal_reject".to_string()],
-        "the reverse transfer is terminally rejected on A"
-    );
-
-    // No delta ever reaches B: its proposal never finalizes.
-    let b_sync = p.b.sync().await;
-    assert!(b_sync.success, "{:?}", b_sync.errors);
-    p.b.enter();
-    assert_eq!(
-        proposal_statuses(&rel),
-        vec![cdb::PROPOSAL_SUBMITTED.to_string()],
-        "B's proposal is stranded at submitted"
-    );
+/// The ENTERED device's pinned canonical head for its peer on `rel`.
+fn peer_head(rel: &[u8; 32]) -> Option<[u8; 32]> {
+    cdb::load_counterparty_canonical_head(rel).expect("head")
 }
 
-/// R1 target: the peer's canonical head is authenticated on every generation
-/// (Commit 3 sources the pin from `counterparty_canonical_heads`, advanced by
-/// BOTH roles' applies and finalizes), so B→A after A→B ×2 applies exactly
-/// once on A and finalizes on B. Mutation M1 (skip the B-head CAS in A's
-/// finalize) turns this red again.
+/// The ENTERED device's journaled B pair for its most recent apply on `rel`.
+fn last_applied_pair(rel: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let binding = cdb::get_connection().expect("conn");
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.query_row(
+        "SELECT applied_parent_tip_b, applied_child_tip_b FROM acceptance_fold_journal \
+         WHERE relationship_key = ?1 ORDER BY rowid DESC LIMIT 1",
+        rusqlite::params![rel.as_slice()],
+        |r| {
+            let p: Vec<u8> = r.get(0)?;
+            let c: Vec<u8> = r.get(1)?;
+            Ok((
+                <[u8; 32]>::try_from(p.as_slice()).expect("32"),
+                <[u8; 32]>::try_from(c.as_slice()).expect("32"),
+            ))
+        },
+    )
+    .expect("journal pair")
+}
+
+/// R1: the peer's canonical head is authenticated on every generation, so
+/// B→A after A→B ×2 applies exactly once on A and finalizes on B. Mutation M1
+/// (skip the peer-pair CAS in the sender's finalize) turns this red: A would
+/// still pin the genesis seed for B.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-#[ignore = "green in Commit 3: counterparty canonical head CAS from both roles"]
 async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
     let p = Pair::boot(1_000, 0).await;
     let rel = p.a.rel_key_with(&p.b);
     generation(&p.a, &p.b, 10).await;
     generation(&p.a, &p.b, 10).await;
     assert_eq!(p.b.era_balance(), 20);
+
+    // A pins B's head at exactly the child B journaled on its second apply —
+    // learned from B's delta, authenticated by sig_b — and that is the parent
+    // B will sign under.
+    let b_pair_2 = {
+        p.b.enter();
+        last_applied_pair(&rel)
+    };
+    p.a.enter();
+    assert_eq!(
+        peer_head(&rel),
+        Some(b_pair_2.1),
+        "A's pinned head for B == B's applied_child_tip_b of apply #2"
+    );
+    // And B pins A's head at A's signed child of send #2 (learned on apply).
+    let a_child_2 = {
+        p.a.enter();
+        proposal_children(&rel)
+            .last()
+            .copied()
+            .expect("A's proposals")
+    };
+    p.b.enter();
+    assert_eq!(
+        peer_head(&rel),
+        Some(a_child_2),
+        "B pins A's second signed child"
+    );
 
     generation(&p.b, &p.a, 5).await;
 
@@ -243,6 +294,11 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
     p.a.enter();
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
     assert_eq!(staging_states(), vec!["accepted".to_string()]);
+    assert_eq!(
+        applied_signed_parents(&rel),
+        vec![b_pair_2.1],
+        "B signed the reverse leg under exactly the head A pinned"
+    );
     p.b.enter();
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 2);
     assert_eq!(

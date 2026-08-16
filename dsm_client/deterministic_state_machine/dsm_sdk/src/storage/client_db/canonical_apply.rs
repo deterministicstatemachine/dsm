@@ -345,57 +345,44 @@ pub fn get_canonical_apply_identity(
     }
 }
 
-/// The counterparty's (A-side) lineage head as pinned by the transitions THIS
-/// device has durably applied for the relationship (§16.6 authority sourcing).
+/// The counterparty's (A-side) canonical head this device pins for the next
+/// inbound step — read from `counterparty_canonical_heads`, the ONE authority
+/// (advanced by CAS from both roles: the signed pair on inbound apply, the
+/// `sig_b`-authenticated pair on sender finalize).
 ///
-/// This is the space-correct successor check. A relationship chain tip is a
-/// per-device value (see `CoreSDK::execute_on_relationship_guarded`), so the
-/// recipient can never recompute the sender's child. What it CAN do is PIN the
-/// sender's asymmetric head: every stored `child_tip` is a signature-verified
-/// A-side value, so the head is the one applied child that no other applied
-/// record consumes as its parent. The next honest proposal must start exactly
-/// there — a stale, replayed, reordered, or forked sender lineage does not.
+/// A relationship chain tip is a per-device value: the peer's head advances on
+/// its applies of THIS device's sends as well as on its own sends, so it can
+/// never be derived from what this device applied. The history-derived query
+/// this replaced fell back to the genesis seed after the peer had applied two
+/// transfers (the role-reversal failure) and forked at generation three.
 ///
-/// Returns `None` when nothing has been applied yet; the caller pins the
-/// spec-canonical genesis seed instead (the one tip both sides derive
-/// identically, by sorted (genesis, devid) pair).
-///
-/// A relationship with more than one such head is a forked local history and
-/// fails closed rather than guessing.
+/// `None` ⇔ no row: a fresh relationship — the caller pins the spec-canonical
+/// genesis seed. Under beta (schema reset, no migration) "no row" and "no
+/// applied history" coincide; a relationship with applied history and no
+/// head row is corruption and fails closed rather than guessing.
 pub fn pinned_counterparty_a_head(relationship_key: &[u8; 32]) -> Result<Option<[u8; 32]>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let mut stmt = conn.prepare(
-        "SELECT a.child_tip FROM canonical_apply_identity a \
-         WHERE a.relationship_key = ?1 \
-           AND NOT EXISTS ( \
-                 SELECT 1 FROM canonical_apply_identity b \
-                 WHERE b.relationship_key = ?1 AND b.parent_tip = a.child_tip \
-           )",
-    )?;
-    let heads: Vec<Vec<u8>> = stmt
-        .query_map(params![relationship_key.as_slice()], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    match heads.len() {
-        0 => Ok(None),
-        1 => {
-            let h = &heads[0];
-            if h.len() != 32 {
-                return Err(anyhow!(
-                    "pinned A-side head is {} bytes, expected 32 (corrupt row)",
-                    h.len()
-                ));
-            }
-            let mut out = [0u8; 32];
-            out.copy_from_slice(h);
-            Ok(Some(out))
-        }
-        n => Err(anyhow!(
-            "relationship has {n} A-side lineage heads — forked applied history, fail closed"
-        )),
+    if let Some(head) =
+        super::counterparty_canonical_heads::load_counterparty_canonical_head_with_conn(
+            &conn,
+            relationship_key,
+        )?
+    {
+        return Ok(Some(head));
     }
+    let applied: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM canonical_apply_identity WHERE relationship_key = ?1",
+        params![relationship_key.as_slice()],
+        |r| r.get(0),
+    )?;
+    if applied != 0 {
+        return Err(anyhow!(
+            "relationship has {applied} applied transition(s) but no counterparty canonical \
+             head row — fail closed"
+        ));
+    }
+    Ok(None)
 }
 
 /// Load the verified record by its pre-execution identity id.
