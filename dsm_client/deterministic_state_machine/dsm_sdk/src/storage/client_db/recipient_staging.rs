@@ -368,18 +368,24 @@ pub fn stage_evidence_half(
 }
 
 /// Rows whose pair is complete but not yet done: `ready_to_verify` (needs
-/// verify + apply) or `accepted` (applied, may still need its ACK / release).
+/// verify + apply) or `accepted` WITH a retained route (applied, ACK not yet
+/// proven — the route is released only after both ACKs succeed, so a NULL route
+/// on an accepted row means the pair is finished and needs nothing).
 ///
 /// This is the recovery authority for the recipient completion pass. It is
 /// read from the database every poll so that a process that died after both
 /// halves landed — or after apply but before ACK — is driven forward by what is
 /// durably true, not by which keys happened to be touched in one invocation.
+/// Excluding released rows is what keeps that per-poll scan bounded by the
+/// number of transfers still in flight rather than by every transfer ever
+/// accepted.
 pub fn staging_rows_needing_completion() -> Result<Vec<StagingRecord>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(&format!(
         "SELECT {STAGING_COLS} FROM recipient_staging
-         WHERE state IN (?1, ?2) ORDER BY created_at"
+         WHERE state = ?1 OR (state = ?2 AND retained_route IS NOT NULL)
+         ORDER BY created_at"
     ))?;
     let rows = stmt
         .query_map(
@@ -878,6 +884,25 @@ mod tests {
             "incomplete and unACKed-accepted rows keep their route; a reject does not"
         );
 
+        // Completion candidates are the DB's view, not a touched-key vector:
+        // K-A once both halves land (ready_to_verify), K-B while its ACK is
+        // unproven (accepted + retained route). The reject never.
+        stage_evidence_half("K-A", &ev_a, "ROUTE-A").expect("stage");
+        let needing = |label: &str| -> Vec<String> {
+            let mut v: Vec<String> = staging_rows_needing_completion()
+                .expect(label)
+                .into_iter()
+                .map(|r| r.correlation_key)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            needing("before release"),
+            vec!["K-A".to_string(), "K-B".to_string()],
+            "ready_to_verify (K-A) and accepted-but-unACKed (K-B) both need completion work"
+        );
+
         // Explicit release after ACK success — the state alone never releases.
         assert!(release_retained_route("K-B").expect("release"));
         let mut routes = retained_routes_for_polling().expect("routes");
@@ -886,18 +911,12 @@ mod tests {
         // Releasing again is a no-op, not an error.
         assert!(!release_retained_route("K-B").expect("release"));
 
-        // Completion candidates are the DB's view, not a touched-key vector.
-        stage_evidence_half("K-A", &ev_a, "ROUTE-A").expect("stage");
-        let mut needing: Vec<String> = staging_rows_needing_completion()
-            .expect("rows")
-            .into_iter()
-            .map(|r| r.correlation_key)
-            .collect();
-        needing.sort();
+        // A released accepted row is FINISHED: it must leave the completion set,
+        // otherwise every transfer ever accepted is re-scanned on every poll.
         assert_eq!(
-            needing,
-            vec!["K-A".to_string(), "K-B".to_string()],
-            "ready_to_verify (K-A) and accepted (K-B) both need completion work; the reject does not"
+            needing("after release"),
+            vec!["K-A".to_string()],
+            "an accepted row whose route was released needs no further completion work"
         );
     }
 }

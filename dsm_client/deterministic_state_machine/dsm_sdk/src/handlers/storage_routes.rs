@@ -871,7 +871,8 @@ impl AppRouterImpl {
     /// every pair that reached durable `accepted`.
     ///
     /// Selection is `staging_rows_needing_completion()`: `ready_to_verify`
-    /// (needs verify + apply) and `accepted` (applied, needs its ACK). Read
+    /// (needs verify + apply) and `accepted` with a retained route (applied,
+    /// ACK not yet proven; a released route means finished). Read
     /// from the database every poll — a process that died after both halves
     /// landed, or after apply but before ACK, is driven forward by what is
     /// durably true, never by which keys an earlier invocation happened to
@@ -1172,10 +1173,14 @@ impl AppRouterImpl {
             // ACK BOTH HALVES on the retained route. The transfer's id is the
             // correlation key; the evidence's id is derived from its digest the
             // same way the sender derived it.
+            // The route is set with the FIRST staged half and released only after
+            // both ACKs succeed, and released rows are not selected — so an
+            // accepted row without a route here is an invariant violation, not a
+            // recoverable state.
             let Some(route) = row.retained_route.clone() else {
-                log::warn!(
-                    "[storage.sync] ADR 0003 completion: {key} accepted but no retained route \
-                     (staged before route retention?); cannot ACK by route"
+                log::error!(
+                    "[storage.sync] ADR 0003 completion: {key} is accepted with no retained \
+                     route — invariant violated; cannot ACK by route"
                 );
                 continue;
             };
