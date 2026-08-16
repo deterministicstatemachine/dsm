@@ -136,6 +136,16 @@ impl Default for B0xRetryConfig {
     }
 }
 
+/// What `deliver_frozen_logical_send` delivered — every id that reached quorum.
+/// Returned only on complete success; there is no partial variant on purpose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenSendDelivery {
+    /// The transfer envelope's deterministic submission id (== node message id).
+    pub transfer_id: String,
+    /// Every frozen outbound artifact's submission id, in delivery order.
+    pub artifact_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct B0xEntry {
     pub transaction_id: String,
@@ -2512,13 +2522,61 @@ impl B0xSDK {
         routing_address: &str,
         message_id_b32: &str,
     ) -> Result<(), DsmError> {
+        self.submit_stored_envelope_with_retry(
+            envelope_bytes,
+            routing_address,
+            message_id_b32,
+            &B0xRetryConfig::default(),
+        )
+        .await
+    }
+
+    /// The bounded time this transport call can take, derived from its own
+    /// retry schedule rather than guessed by the caller.
+    ///
+    /// Sequential per-endpoint attempts, each with up to `max_retries` retries
+    /// and exponential backoff capped at `max_delay_ms`. Callers that need to
+    /// bound a stored-envelope submission use THIS, so an outer deadline can
+    /// never expire before the quorum algorithm has legitimately exhausted the
+    /// configured fleet — that would manufacture `submission_uncertain` out of a
+    /// still-viable attempt.
+    ///
+    /// The per-request timeout is not modelled here (it is a property of the
+    /// HTTP client, not the retry config); the small fixed margin absorbs it.
+    pub fn stored_envelope_deadline(&self, retry: &B0xRetryConfig) -> std::time::Duration {
+        let mut per_endpoint_ms: u64 = 0;
+        let mut delay = std::time::Duration::from_millis(retry.base_delay_ms);
+        for _ in 0..retry.max_retries {
+            per_endpoint_ms += delay.as_millis() as u64;
+            delay = std::cmp::min(
+                delay.mul_f64(retry.backoff_multiplier),
+                std::time::Duration::from_millis(retry.max_delay_ms),
+            );
+        }
+        let endpoints = self.storage_node_endpoints.len().max(1) as u64;
+        // Attempts themselves are not free: allow a generous per-attempt margin
+        // on top of the sleeps, per endpoint, plus a fixed floor.
+        let per_attempt_margin_ms: u64 = 5_000 * (retry.max_retries as u64 + 1);
+        std::time::Duration::from_millis(
+            (per_endpoint_ms + per_attempt_margin_ms) * endpoints + 5_000,
+        )
+    }
+
+    /// `submit_stored_envelope` with an explicit retry schedule. The schedule
+    /// is what bounds the call — see `stored_envelope_deadline`.
+    pub async fn submit_stored_envelope_with_retry(
+        &mut self,
+        envelope_bytes: &[u8],
+        routing_address: &str,
+        message_id_b32: &str,
+        retry: &B0xRetryConfig,
+    ) -> Result<(), DsmError> {
         let auth_device_id = self.device_id.clone();
         let endpoints: Vec<String> = self.storage_node_endpoints.clone();
         let total = endpoints.len();
         let quorum = self.quorum_k.min(total.max(1));
         let mut successes = 0usize;
         let mut errors: Vec<String> = Vec::new();
-        let retry = B0xRetryConfig::default();
 
         for endpoint in endpoints {
             match self
@@ -2528,7 +2586,7 @@ impl B0xSDK {
                     &auth_device_id,
                     routing_address,
                     message_id_b32,
-                    &retry,
+                    retry,
                 )
                 .await
             {
@@ -2552,6 +2610,97 @@ impl B0xSDK {
             ),
             None::<std::io::Error>,
         ))
+    }
+
+    /// Deliver ONE frozen logical send — the transfer envelope plus every
+    /// frozen outbound artifact — under the ids and route it was frozen with.
+    ///
+    /// This is the single delivery path for both the first attempt in
+    /// `wallet.send` and the recovery sweep. Having one path is the point: the
+    /// initial send used to submit only the transfer and discard the ADR 0003
+    /// evidence, and the recovery sweep did not exist, so a split send could
+    /// never be completed by any code that ran. Two callers, one operation over
+    /// the same frozen bytes.
+    ///
+    /// Invariants, all enforced here and nowhere else:
+    ///
+    ///  - **No rebuilding.** Only `envelope_bytes` from the durable rows are
+    ///    sent. Nothing is re-encoded from current state.
+    ///  - **No route derivation.** Every artifact — transfer and evidence alike
+    ///    — is submitted under the OWNING outbox's frozen `routing_address`.
+    ///    An artifact's `content_digest` names its bytes; it never selects a
+    ///    route. Replaying the same message id under a different recipient is
+    ///    not a relocation: the node dedups on `message_id` alone and would
+    ///    silently keep the first row while returning success.
+    ///  - **All or nothing.** `Ok` only when every submission reached quorum.
+    ///    Any failure returns `Err`, and the caller leaves the logical send
+    ///    `submission_uncertain` so the next sweep replays the whole frozen
+    ///    set. Replaying an already-accepted half is free (deterministic id +
+    ///    node `DO NOTHING`), which is why no half-delivery lifecycle exists.
+    ///  - **The transport owns its deadline.** No outer timeout is imposed;
+    ///    the retry schedule bounds each submission (`stored_envelope_deadline`).
+    ///
+    /// Order is transfer first, then artifacts in role order. Correctness does
+    /// not depend on it — the recipient stages whichever half lands first — but
+    /// determinism makes logs and tests legible.
+    pub async fn deliver_frozen_logical_send(
+        &mut self,
+        outbox: &crate::storage::client_db::SenderOutboxRecord,
+        artifacts: &[crate::storage::client_db::SenderOutboxArtifact],
+        retry: &B0xRetryConfig,
+    ) -> Result<FrozenSendDelivery, DsmError> {
+        let route = outbox.routing_address.as_str();
+
+        self.submit_stored_envelope_with_retry(
+            &outbox.envelope_bytes,
+            route,
+            &outbox.submission_id,
+            retry,
+        )
+        .await
+        .map_err(|e| {
+            DsmError::internal(
+                format!(
+                    "frozen send {}: transfer half not delivered: {e}",
+                    outbox.submission_id
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        for artifact in artifacts {
+            self.submit_stored_envelope_with_retry(
+                &artifact.envelope_bytes,
+                route,
+                &artifact.submission_id,
+                retry,
+            )
+            .await
+            .map_err(|e| {
+                DsmError::internal(
+                    format!(
+                        "frozen send {}: {} artifact {} not delivered: {e}",
+                        outbox.submission_id,
+                        artifact.role.as_str(),
+                        artifact.submission_id
+                    ),
+                    None::<std::io::Error>,
+                )
+            })?;
+            artifact_ids.push(artifact.submission_id.clone());
+        }
+
+        info!(
+            "✅ frozen logical send delivered: transfer={} artifacts={} route={}..",
+            outbox.submission_id,
+            artifact_ids.len(),
+            &route[..route.len().min(12)]
+        );
+        Ok(FrozenSendDelivery {
+            transfer_id: outbox.submission_id.clone(),
+            artifact_ids,
+        })
     }
 
     /// Submit envelope to a single endpoint with retry logic
