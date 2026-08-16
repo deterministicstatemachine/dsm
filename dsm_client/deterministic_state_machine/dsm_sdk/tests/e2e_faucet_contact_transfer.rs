@@ -263,7 +263,6 @@ async fn e2e_flow_faucet_contact_transfer() {
         from_device_id: device_id.clone(),
         chain_tip: bob_chain_tip,
         seq: 1,
-        receipt_commit: vec![],
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
     };

@@ -1880,7 +1880,6 @@ impl AppRouterImpl {
                 // artifact, which travels separately. Field 10 stays empty --
                 // the two forms are different semantic types and must not share
                 // a field.
-                receipt_commit: Vec::new(),
                 receipt_evidence_digest: evidence_digest.to_vec(),
                 routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
@@ -2431,7 +2430,6 @@ impl AppRouterImpl {
             ttl_seconds: 0,
             seq,
             next_chain_tip: None,
-            receipt_commit: Vec::new(),
             routing_address,
             canonical_operation_bytes: Vec::new(),
             receipt_evidence_digest: Vec::new(),
@@ -2526,40 +2524,6 @@ fn online_chain_tip_from_sdk_context_b32() -> Result<(Vec<u8>, String), String> 
 #[cfg(any(test, feature = "test-utils"))]
 pub fn test_online_chain_tip_from_sdk_context_b32() -> Result<(Vec<u8>, String), String> {
     online_chain_tip_from_sdk_context_b32()
-}
-
-/// Ensure the inbox entry is actually targeted to this device.
-/// Validates both the envelope-recipient (base32 text) and the Operation.to_device_id bytes.
-pub(crate) fn ensure_inbox_recipient_targets_local(
-    entry_recipient_b32: &str,
-    op_recipient_bytes: &[u8],
-    local_device_bytes: &[u8],
-) -> Result<(), String> {
-    if local_device_bytes.len() != 32 {
-        return Err("local device_id must be 32 bytes".to_string());
-    }
-    if op_recipient_bytes.len() != 32 {
-        return Err("operation.to_device_id must be 32 bytes".to_string());
-    }
-
-    let entry_recipient_bytes = crate::util::text_id::decode_base32_crockford(entry_recipient_b32)
-        .ok_or_else(|| "recipient_device_id is not valid base32".to_string())?;
-    if entry_recipient_bytes.len() != 32 {
-        return Err(format!(
-            "recipient_device_id decoded length {} != 32",
-            entry_recipient_bytes.len()
-        ));
-    }
-
-    if entry_recipient_bytes.as_slice() != local_device_bytes {
-        return Err("recipient_device_id does not target this device".to_string());
-    }
-
-    if op_recipient_bytes != local_device_bytes {
-        return Err("operation.to_device_id does not target this device".to_string());
-    }
-
-    Ok(())
 }
 
 fn compute_initial_relationship_chain_tip(
@@ -3510,14 +3474,6 @@ impl AppRouter for AppRouterImpl {
 // Vault transfer via bilateral was removed — vaults live on storage nodes (dBTC §3.1, §7.3).
 // Withdrawal discovers vaults from storage nodes at exit time (dBTC §6.2).
 
-#[derive(Default)]
-pub(crate) struct InboxBatchState {
-    pub(crate) processed_entries: Vec<(String, String)>,
-    pub(crate) processed: u32,
-    pub(crate) errors: Vec<String>,
-    pub(crate) fatal_error: Option<String>,
-}
-
 /// Minimal resolved counterparty info used by the contact QR flow.
 pub(crate) struct ResolvedCounterparty {
     pub device_id: [u8; 32],
@@ -3807,48 +3763,14 @@ async fn verify_device_tree_evidence_quorum_once(
 mod tests {
     use super::{
         collect_rotated_inbox_addresses, collect_tagged_inbox_addresses,
-        compute_initial_relationship_chain_tip, ensure_inbox_recipient_targets_local,
-        format_registry_quorum_failure, registry_retry_delay, relationship_tip_for_contact_restore,
-        select_quorum_device_identity, AppRouterImpl, QuorumDeviceIdentity,
-        RegistryQuorumAttemptStats, RouteFreshness,
+        compute_initial_relationship_chain_tip, format_registry_quorum_failure,
+        registry_retry_delay, relationship_tip_for_contact_restore, select_quorum_device_identity,
+        AppRouterImpl, QuorumDeviceIdentity, RegistryQuorumAttemptStats, RouteFreshness,
     };
     use crate::storage::client_db::ContactRecord;
     use dsm::utils::time::Duration;
     use serial_test::serial;
     use std::collections::HashMap;
-
-    #[test]
-    fn inbox_recipient_matches_local() {
-        let local = [0xABu8; 32];
-        let recipient_b32 = crate::util::text_id::encode_base32_crockford(&local);
-        let op_recipient = local.to_vec();
-
-        assert!(
-            ensure_inbox_recipient_targets_local(&recipient_b32, &op_recipient, &local).is_ok()
-        );
-    }
-
-    #[test]
-    fn inbox_recipient_rejects_mismatched_entry() {
-        let local = [0x11u8; 32];
-        let other = [0x22u8; 32];
-        let recipient_b32 = crate::util::text_id::encode_base32_crockford(&other);
-        let op_recipient = local.to_vec();
-
-        let err = ensure_inbox_recipient_targets_local(&recipient_b32, &op_recipient, &local)
-            .expect_err("mismatch should fail");
-        assert!(err.contains("does not target this device"));
-    }
-
-    #[test]
-    fn inbox_recipient_rejects_invalid_base32() {
-        let local = [0x33u8; 32];
-        let op_recipient = local.to_vec();
-
-        let err = ensure_inbox_recipient_targets_local("not-valid-base32@", &op_recipient, &local)
-            .expect_err("invalid base32 should fail");
-        assert!(err.contains("not valid base32"));
-    }
 
     #[test]
     fn collect_rotated_inbox_addresses_returns_empty_when_no_contacts() {

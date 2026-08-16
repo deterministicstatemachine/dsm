@@ -200,7 +200,6 @@ impl UnilateralOpsSDK {
             // Sequence number must be provided by caller (no default substitution).
             seq,
             next_chain_tip: next_chain_tip_bytes.clone(),
-            receipt_commit: Vec::new(),
             routing_address: B0xSDK::compute_b0x_address(
                 &recipient_genesis_arr,
                 &recipient_device_arr,
@@ -549,7 +548,6 @@ mod tests {
             tick: 0,
             ttl_seconds: 0,
             seq: 0,
-            receipt_commit: Vec::new(),
             canonical_operation_bytes: Vec::new(),
         }
     }
