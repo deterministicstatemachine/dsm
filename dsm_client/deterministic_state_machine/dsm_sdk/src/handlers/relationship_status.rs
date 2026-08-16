@@ -54,7 +54,9 @@ pub(crate) fn status_message(status: &generated::RelationshipSendStatus) -> Stri
 /// - our own prior send on the relationship has not reached its finality
 ///   checkpoint (the pending online gate is armed), or
 /// - an inbound acceptance we journaled still awaits the peer's verified
-///   `RelationshipFinalizedV1` (`peer_finalized = 0`, not rejected).
+///   `RelationshipFinalizedV1` (`peer_finalized = 0`, not rejected), or
+/// - an inbound transfer from the peer is staged but not yet applied (crossing
+///   mitigation).
 ///
 /// Ordinary bilateral relationships allow ONE unresolved semantic predecessor
 /// per originator; both conditions mean ours is unresolved. `Ok(None)` ⇔ free
@@ -79,6 +81,18 @@ pub(crate) fn finality_barrier_block(
         return Ok(Some(blocked_status(
             generated::RelationshipSendBlockReason::PendingCatchup,
             "Waiting for the peer to finalize a transfer you received",
+        )));
+    }
+    // An inbound transfer from this peer is staged but not yet applied:
+    // originating now would cross it. Narrows the crossing window; the
+    // deterministic turn rule for a true simultaneous cross is a protocol
+    // decision outside this barrier.
+    if client_db::recipient_staging::counterparty_has_unconverged_inbound(counterparty_device_id)
+        .map_err(|e| format!("Failed to load inbound staging state: {e}"))?
+    {
+        return Ok(Some(blocked_status(
+            generated::RelationshipSendBlockReason::PendingCatchup,
+            "Waiting for a transfer from this peer to finish applying",
         )));
     }
     Ok(None)
