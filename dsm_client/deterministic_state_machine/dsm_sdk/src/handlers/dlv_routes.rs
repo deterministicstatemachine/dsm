@@ -3315,10 +3315,9 @@ mod funded_creation_tests {
         // receipt id occupies `(vault, 0)`, so a foreign receipt id resolves to a
         // typed Conflict rather than a silent double-fold (proven at the claim
         // level in vault_generation_consumption's unit tests).
-        let consumer =
-            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
-                .expect("load consumer")
-                .expect("generation 0 must be recorded as consumed");
+        let consumer = crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+            .expect("load consumer")
+            .expect("generation 0 must be recorded as consumed");
         assert_eq!(
             consumer.source_commitment, receipt.receipt_id,
             "the durable claim must name the settlement that actually consumed the generation"
@@ -3449,7 +3448,9 @@ mod funded_creation_tests {
             vault_id,
             &receipt_id,
         );
-        let siblings = head.inclusion_siblings(&key).expect("receipt leaf siblings");
+        let siblings = head
+            .inclusion_siblings(&key)
+            .expect("receipt leaf siblings");
         let trade = dsm::dlv::settlement_receipt_leaf::SettledTrade {
             x,
             parent_sequence: 0,
@@ -3541,9 +3542,7 @@ mod funded_creation_tests {
         let x_a = [0xA0u8; 32];
         let receipt_a = build_foreign_receipt(&vault_id, &pc_a, &pc_b, x_a, 0xC1);
         crate::runtime::get_runtime()
-            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(
-                &receipt_a,
-            ))
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt_a))
             .expect("publish winner receipt");
         let res = crate::runtime::get_runtime().block_on(async {
             r.invoke(AppInvoke {
@@ -3558,7 +3557,11 @@ mod funded_creation_tests {
             })
             .await
         });
-        assert!(res.success, "winner reconcile failed: {:?}", res.error_message);
+        assert!(
+            res.success,
+            "winner reconcile failed: {:?}",
+            res.error_message
+        );
 
         // Snapshot every durable surface AFTER the winner consumed the generation.
         let after_winner = r.core_sdk.device_head().expect("head");
@@ -3567,10 +3570,9 @@ mod funded_creation_tests {
             after_winner.vault_reserve(&vault_id, &pc_a),
             after_winner.vault_reserve(&vault_id, &pc_b),
         );
-        let claim_before =
-            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
-                .expect("load claim")
-                .expect("generation 0 is consumed by the winner");
+        let claim_before = crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+            .expect("load claim")
+            .expect("generation 0 is consumed by the winner");
         assert_eq!(
             claim_before.source_commitment, receipt_a.receipt_id,
             "the winner's receipt id owns generation 0"
@@ -3586,9 +3588,7 @@ mod funded_creation_tests {
             "the two settlements are distinct"
         );
         crate::runtime::get_runtime()
-            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(
-                &receipt_b,
-            ))
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt_b))
             .expect("publish loser receipt");
 
         let res = crate::runtime::get_runtime().block_on(async {
@@ -3638,10 +3638,9 @@ mod funded_creation_tests {
 
         // (3) NO consumption-row change: generation 0 still belongs to the winner;
         // the loser wrote no durable success marker of any kind.
-        let claim_after =
-            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
-                .expect("load claim")
-                .expect("generation 0 is still consumed");
+        let claim_after = crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+            .expect("load claim")
+            .expect("generation 0 is still consumed");
         assert_eq!(
             claim_after.source_commitment, receipt_a.receipt_id,
             "the loser must not overwrite or duplicate the winner's consumption claim"

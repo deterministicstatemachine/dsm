@@ -45,9 +45,7 @@ pub enum VaultGenerationConsumeOutcome {
     AlreadyConsumedSameSettlement,
     /// `(vault_id, parent_sequence)` was already consumed by a DIFFERENT
     /// settlement. Fail closed — a second trade cannot consume the same parent.
-    Conflict {
-        current: VaultGenerationConsumer,
-    },
+    Conflict { current: VaultGenerationConsumer },
 }
 
 fn col32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]> {
