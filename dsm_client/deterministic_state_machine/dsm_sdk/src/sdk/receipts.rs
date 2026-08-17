@@ -50,6 +50,32 @@ pub fn compute_receipt_challenge_response_target(
     )
 }
 
+/// The ONLINE recipient's B-side response target: the standard session-bound
+/// target extended with the recipient's own canonical relationship pair for
+/// the applied step —
+/// `BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent || b_child)`.
+///
+/// `sig_b` over this target authenticates the pair, so the sender can pin the
+/// peer's lineage head from the delta and a substituted pair fails the
+/// countersignature check. Used only by the online return leg; the BLE and
+/// A-side paths sign the standard target unchanged.
+pub fn compute_receipt_b_canonical_target(
+    receipt_commitment: &[u8; 32],
+    session_binding: &[u8; 32],
+    b_parent_tip: &[u8; 32],
+    b_child_tip: &[u8; 32],
+) -> [u8; 32] {
+    let standard = compute_receipt_challenge_response_target(receipt_commitment, session_binding);
+    let mut input = Vec::with_capacity(96);
+    input.extend_from_slice(&standard);
+    input.extend_from_slice(b_parent_tip);
+    input.extend_from_slice(b_child_tip);
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_RECEIPT_B_CANONICAL,
+        &input,
+    )
+}
+
 /// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1/§12 Eq.14).
 ///
 /// The signer's per-step EK is derived as:
@@ -265,6 +291,20 @@ pub struct PerStepSigningOutput {
 pub fn sign_receipt_with_per_step_ek(
     inputs: &PerStepSigningInputs,
 ) -> Result<PerStepSigningOutput, DsmError> {
+    let signing_target =
+        compute_receipt_challenge_response_target(inputs.commitment, inputs.session_binding);
+    sign_receipt_with_per_step_ek_target(inputs, &signing_target)
+}
+
+/// [`sign_receipt_with_per_step_ek`] over an EXPLICIT response target. The
+/// per-step EK derivation, Kyber encapsulation and cert are identical; only the
+/// bytes `EK_sk` signs differ. The online recipient passes
+/// [`compute_receipt_b_canonical_target`] so `sig_b` also authenticates its
+/// canonical pair; every other caller uses the standard-target wrapper.
+pub fn sign_receipt_with_per_step_ek_target(
+    inputs: &PerStepSigningInputs,
+    signing_target: &[u8; 32],
+) -> Result<PerStepSigningOutput, DsmError> {
     use crate::storage::client_db::load_local_chain_head_sk;
     use dsm::crypto::ephemeral_key::sign_ek_cert;
     use dsm::crypto::sphincs::sphincs_sign;
@@ -315,12 +355,10 @@ pub fn sign_receipt_with_per_step_ek(
     // 4. Sign cert.
     let cert = sign_ek_cert(&prior_sk, &ek_pk, &inputs.h_n)?;
 
-    // 5. Answer the receipt challenge with the new EK_sk. The bilateral
-    //    `commitment_hash` is part of the response target via the
-    //    "DSM/receipt-bind-session" domain tag.
-    let signing_target =
-        compute_receipt_challenge_response_target(inputs.commitment, inputs.session_binding);
-    let sig = sphincs_sign(&ek_sk, &signing_target).map_err(|e| {
+    // 5. Answer the receipt challenge with the new EK_sk over the caller's
+    //    response target (standard: session-bound commitment; online B side:
+    //    that plus the recipient's canonical pair).
+    let sig = sphincs_sign(&ek_sk, signing_target).map_err(|e| {
         DsmError::crypto(
             format!("per-step receipt challenge response sign failed: {e}"),
             None::<String>,
@@ -432,6 +470,23 @@ pub fn verify_per_step_ek_signing(
     h_n: &[u8; 32],
     session_binding: &[u8; 32],
 ) -> Result<(), DsmError> {
+    let commitment = receipt.compute_commitment()?;
+    let signing_target = compute_receipt_challenge_response_target(&commitment, session_binding);
+    verify_per_step_ek_signing_target(receipt, side, expected_prev_pk, h_n, &signing_target)
+}
+
+/// [`verify_per_step_ek_signing`] against an EXPLICIT response target: the
+/// cert-chain link is checked exactly as before; `sig_{side}` must verify
+/// under `ek_pk_{side}` over `signing_target`. The sender's online finalizer
+/// passes [`compute_receipt_b_canonical_target`] recomputed from the delta's
+/// pair, so a pair the recipient did not sign fails here.
+pub fn verify_per_step_ek_signing_target(
+    receipt: &StitchedReceiptV2,
+    side: BilateralSide,
+    expected_prev_pk: &[u8],
+    h_n: &[u8; 32],
+    signing_target: &[u8; 32],
+) -> Result<(), DsmError> {
     use dsm::crypto::ephemeral_key::verify_ek_cert;
     use dsm::crypto::sphincs::sphincs_verify;
 
@@ -476,12 +531,10 @@ pub fn verify_per_step_ek_signing(
         )));
     }
 
-    // Step 2: receipt response using ek_pk over the challenge-response
-    // target. Bilateral ingress requires a session binding so signatures
-    // cannot be replayed across sessions.
-    let commitment = receipt.compute_commitment()?;
-    let signing_target = compute_receipt_challenge_response_target(&commitment, session_binding);
-    let sig_ok = sphincs_verify(ek_pk, &signing_target, sig).map_err(|e| {
+    // Step 2: receipt response using ek_pk over the caller's response target.
+    // Bilateral ingress requires a session binding so signatures cannot be
+    // replayed across sessions.
+    let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
         DsmError::crypto(
             format!("verify_per_step_ek_signing: sig verify error ({label}-side): {e}"),
             None::<std::io::Error>,

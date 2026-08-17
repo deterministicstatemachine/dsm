@@ -6,8 +6,7 @@ use dsm::types::proto as generated;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::relationship_status::{
-    blocked_status, derive_local_send_status_for_contact, derive_local_send_status_for_device_id,
-    status_message,
+    blocked_status, derive_local_send_status_for_device_id, status_message,
 };
 use super::response_helpers::{pack_envelope_ok, err};
 
@@ -162,36 +161,19 @@ impl AppRouterImpl {
 }
 
 impl AppRouterImpl {
-    fn sync_calibrated_bilateral_cache_tip(
-        &self,
-        counterparty_device_id: &[u8; 32],
-        tip: &[u8; 32],
-    ) {
-        let counterparty_b32 =
-            crate::util::text_id::encode_base32_crockford(counterparty_device_id);
-        let tip_b32 = crate::util::text_id::encode_base32_crockford(tip);
-        if let Err(e) =
-            self.wallet
-                .update_bilateral_chain_tip(&counterparty_b32, &tip_b32, &tip_b32, 0)
-        {
-            log::warn!(
-                "[bilateral.reconcile] failed to sync in-memory bilateral cache for {}: {}",
-                counterparty_b32.get(..8).unwrap_or("?"),
-                e
-            );
-        }
-    }
-
-    async fn configured_storage_endpoints_for_send_calibration(&self) -> Vec<String> {
-        match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
-            Ok(cfg) if !cfg.node_urls.is_empty() => cfg.node_urls,
-            _ => match crate::network::list_storage_endpoints() {
-                Ok(endpoints) if !endpoints.is_empty() => endpoints,
-                _ => self._config.storage_endpoints.clone(),
-            },
-        }
-    }
-
+    /// The send-status calibration a UI or the offline-send path asks for
+    /// (`bilateral.reconcile` / `wallet.sendOffline`).
+    ///
+    /// Under the finality barrier this is READ-ONLY: it never releases the
+    /// pending online gate. Historically it cleared the gate on two signals —
+    /// `contacts.chain_tip == gate.next` and a storage-node "message
+    /// acknowledged" answer — both of which are transport/projection facts, not
+    /// finality: the tip equality is simply the normal
+    /// `finalization_checkpoint_pending` state now, and an ACK proves only that
+    /// the recipient consumed its spool copy. The ONE deleter is the
+    /// post-quorum checkpoint sweep. What remains here: while a gate is armed,
+    /// make sure the poller is running (it drives the sweep), then report the
+    /// authority's status.
     pub(crate) async fn calibrate_local_relationship_send_status(
         &self,
         counterparty_device_id: &[u8],
@@ -205,218 +187,17 @@ impl AppRouterImpl {
                 ),
             );
         }
-
-        let mut counterparty = [0u8; 32];
-        counterparty.copy_from_slice(counterparty_device_id);
-
-        let contact = match crate::storage::client_db::get_contact_by_device_id(&counterparty) {
-            Ok(Some(contact)) => contact,
-            Ok(None) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    "Relationship not found",
-                )
-            }
-            Err(e) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Failed to load relationship state: {e}"),
-                )
-            }
-        };
-
-        let pending = match crate::storage::client_db::get_pending_online_outbox(&counterparty) {
-            Ok(v) => v,
+        match crate::storage::client_db::get_pending_online_outbox(counterparty_device_id) {
+            Ok(Some(_)) => crate::sdk::inbox_poller::resume_poller(),
+            Ok(None) => {}
             Err(e) => {
                 return blocked_status(
                     generated::RelationshipSendBlockReason::InternalError,
                     format!("Failed to load pending online catch-up state: {e}"),
                 )
             }
-        };
-
-        let Some(pending) = pending else {
-            return derive_local_send_status_for_contact(&contact);
-        };
-
-        crate::sdk::inbox_poller::resume_poller();
-
-        let pending_parent: [u8; 32] = match pending.parent_tip.as_slice().try_into() {
-            Ok(arr) => arr,
-            Err(_) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    "Pending online catch-up parent tip is malformed",
-                )
-            }
-        };
-        let pending_next: [u8; 32] = match pending.next_tip.as_slice().try_into() {
-            Ok(arr) => arr,
-            Err(_) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    "Pending online catch-up next tip is malformed",
-                )
-            }
-        };
-
-        let observed_gate = crate::storage::client_db::bilateral_tip_sync::ObservedPendingGate {
-            counterparty_device_id: counterparty,
-            parent_tip: pending_parent,
-            next_tip: pending_next,
-        };
-
-        if crate::storage::client_db::get_contact_chain_tip_raw(&counterparty) == Some(pending_next)
-        {
-            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                counterparty_device_id: counterparty,
-                expected_parent_tip: pending_next,
-                target_tip: pending_next,
-                observed_gate: Some(observed_gate.clone()),
-                clear_gate_on_success: true,
-            };
-            return match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                Ok(
-                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { new_tip, .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { tip: new_tip, .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { tip: new_tip, .. },
-                ) => {
-                    self.sync_calibrated_bilateral_cache_tip(&counterparty, &new_tip);
-                    derive_local_send_status_for_device_id(&counterparty)
-                }
-                Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip { current_tip })
-                | Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::ParentMismatch { current_tip }) => {
-                    blocked_status(
-                        generated::RelationshipSendBlockReason::StateDivergence,
-                        format!(
-                            "Relationship tip changed to {} while clearing a stale online gate",
-                            crate::util::text_id::encode_base32_crockford(&current_tip)
-                                .get(..8)
-                                .unwrap_or("?")
-                        ),
-                    )
-                }
-                Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::GateMismatch) => blocked_status(
-                    generated::RelationshipSendBlockReason::StateDivergence,
-                    "Pending online catch-up gate changed under calibration",
-                ),
-                Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::InvariantViolation { message }) => blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Relationship calibration invariant failed: {message}"),
-                ),
-                Err(e) => blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Failed to clear stale online gate: {e}"),
-                ),
-            };
         }
-
-        let storage_endpoints = self
-            .configured_storage_endpoints_for_send_calibration()
-            .await;
-        if storage_endpoints.is_empty() {
-            return blocked_status(
-                generated::RelationshipSendBlockReason::PendingCatchup,
-                "Waiting for prior transfer to settle",
-            );
-        }
-
-        let sender_device_id_b32 =
-            crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-        let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
-            sender_device_id_b32,
-            self.core_sdk.clone(),
-            storage_endpoints,
-        ) {
-            Ok(sdk) => sdk,
-            Err(e) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Failed to initialize sender inbox status client: {e}"),
-                )
-            }
-        };
-
-        let recipient_caught_up = match b0x_sdk.is_message_acknowledged(&pending.message_id).await {
-            Ok(acked) => acked,
-            Err(e) => {
-                return blocked_status(
-                    generated::RelationshipSendBlockReason::InternalError,
-                    format!("Failed to verify prior transfer status: {e}"),
-                )
-            }
-        };
-
-        if !recipient_caught_up {
-            return blocked_status(
-                generated::RelationshipSendBlockReason::PendingCatchup,
-                "Waiting for prior transfer to settle",
-            );
-        }
-
-        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-            counterparty_device_id: counterparty,
-            expected_parent_tip: pending_parent,
-            target_tip: pending_next,
-            observed_gate: Some(observed_gate),
-            clear_gate_on_success: true,
-        };
-
-        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(
-            &request,
-        ) {
-            Ok(
-                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { new_tip, .. }
-                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { tip: new_tip, .. }
-                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { tip: new_tip, .. },
-            ) => {
-                self.sync_calibrated_bilateral_cache_tip(&counterparty, &new_tip);
-                derive_local_send_status_for_device_id(&counterparty)
-            }
-            Ok(
-                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip {
-                    current_tip,
-                },
-            ) => {
-                if let Err(e) = crate::storage::client_db::clear_pending_online_outbox_if_matches(
-                    &counterparty,
-                    &pending_parent,
-                    &pending_next,
-                ) {
-                    return blocked_status(
-                        generated::RelationshipSendBlockReason::InternalError,
-                        format!("Failed to clear stale online gate after confirmed catch-up: {e}"),
-                    );
-                }
-                self.sync_calibrated_bilateral_cache_tip(&counterparty, &current_tip);
-                derive_local_send_status_for_device_id(&counterparty)
-            }
-            Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::ParentMismatch {
-                current_tip,
-            }) => blocked_status(
-                generated::RelationshipSendBlockReason::StateDivergence,
-                format!(
-                    "Relationship tip changed to {} while finalizing the prior transfer",
-                    crate::util::text_id::encode_base32_crockford(&current_tip)
-                        .get(..8)
-                        .unwrap_or("?")
-                ),
-            ),
-            Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::GateMismatch) => blocked_status(
-                generated::RelationshipSendBlockReason::StateDivergence,
-                "Pending online catch-up gate changed under calibration",
-            ),
-            Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::InvariantViolation {
-                message,
-            }) => blocked_status(
-                generated::RelationshipSendBlockReason::InternalError,
-                format!("Relationship calibration invariant failed: {message}"),
-            ),
-            Err(e) => blocked_status(
-                generated::RelationshipSendBlockReason::InternalError,
-                format!("Failed to finalize prior transfer: {e}"),
-            ),
-        }
+        derive_local_send_status_for_device_id(counterparty_device_id)
     }
 
     pub(crate) async fn handle_bilateral_reconcile_invoke(&self, i: AppInvoke) -> AppResult {

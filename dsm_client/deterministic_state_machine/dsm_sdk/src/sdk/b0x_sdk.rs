@@ -282,6 +282,9 @@ pub struct B0xSDK {
     /// sites) stays stable; drained by the sender-finalization path via
     /// [`Self::take_countersign_deltas`].
     pending_countersign_deltas: Vec<CountersignDelta>,
+    /// Finality certificates (`relationship.finalized.v1`) decoded by the most
+    /// recent retrieve, drained by `take_relationship_finalized`.
+    pending_relationship_finalized: Vec<RelationshipFinalizedMessage>,
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
     pending_evidence_artifacts: Vec<dsm::types::proto::ReceiptEvidenceA>,
@@ -299,6 +302,18 @@ pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
 /// return leg. Same discipline: discriminated by this string alone, never
 /// trial-decoded, one constant shared by producer and consumer.
 pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
+
+/// Explicit invoke method of a `RelationshipFinalizedV1` finality certificate
+/// (finality barrier). Same discipline: discriminated by this string alone.
+pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
+
+/// One finality certificate as it came off the wire: the node message id it
+/// is ACKed under and the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipFinalizedMessage {
+    pub message_id: String,
+    pub body: Vec<u8>,
+}
 
 /// One B-side countersign delta as it came off the wire, kept whole so the
 /// sender can retain the exact envelope it finalized on.
@@ -518,6 +533,7 @@ impl B0xSDK {
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
             quorum_k: 3,
             pending_countersign_deltas: Vec::new(),
+            pending_relationship_finalized: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
         };
@@ -1219,6 +1235,118 @@ impl B0xSDK {
         std::mem::take(&mut self.pending_countersign_deltas)
     }
 
+    /// Decode a finality certificate from a spooled envelope, discriminated on
+    /// the EXPLICIT invoke method — never trial-decoded. Returns the raw body;
+    /// the strict wire codec and the signature check happen in the recipient's
+    /// certificate handler.
+    pub(crate) fn decode_relationship_finalized(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<Vec<u8>> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RELATIONSHIP_FINALIZED_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            return Some(args.body.clone());
+        }
+        None
+    }
+
+    /// Drain the finality certificates decoded by the most recent retrieve.
+    /// Durable idempotency lives in the journal's `peer_finalized` flag.
+    pub fn take_relationship_finalized(&mut self) -> Vec<RelationshipFinalizedMessage> {
+        std::mem::take(&mut self.pending_relationship_finalized)
+    }
+
+    /// Build the `relationship.finalized.v1` envelope for an already-signed
+    /// `RelationshipFinalizedV1` (finality barrier). PURE: every input is a
+    /// parameter, so the bytes are byte-identical on rebuild — though the
+    /// sender never rebuilds; it freezes THESE bytes at finalize and the sweep
+    /// replays them. `message_id` = the artifact submission id (16 bytes
+    /// derived from the certificate digest); `op_id` = the digest itself.
+    /// Refuses at construction if over the node cap.
+    pub(crate) fn build_relationship_finalized_envelope(
+        local_device_id: &[u8; 32],
+        local_genesis: &[u8; 32],
+        recipient_route_tip: &[u8; 32],
+        certificate_wire: &[u8],
+        certificate_digest: &[u8; 32],
+        message_id_b32: &str,
+    ) -> Result<BuiltEnvelope, DsmError> {
+        use prost::Message as _;
+        let local_device_bytes = local_device_id.to_vec();
+        let msg_id_bytes = crate::util::text_id::decode_base32_crockford(message_id_b32)
+            .filter(|m| m.len() == 16)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "build_relationship_finalized_envelope: message id must be base32(16)",
+                )
+            })?;
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: RELATIONSHIP_FINALIZED_METHOD.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: certificate_wire.to_vec(),
+            }),
+            pre_state_hash: None,
+            post_state_hash: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: certificate_digest.to_vec(),
+            }),
+            actor: local_device_bytes.clone(),
+            genesis_hash: local_genesis.to_vec(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis.to_vec(),
+                chain_tip: recipient_route_tip.to_vec(),
+                seq: 0,
+            }),
+            message_id: msg_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("finality certificate envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_relationship_finalized_envelope: encoded envelope is {} bytes, at or over \
+                 the node's {MAX_B0X_ENVELOPE_BYTES}-byte cap",
+                buf.len()
+            )));
+        }
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32: message_id_b32.to_string(),
+            to_device_id_bytes: Vec::new(),
+        })
+    }
+
     /// Decode a cert-resync control message (method + framed body) from a spooled
     /// envelope, discriminated on the EXPLICIT invoke method — never trial-decoded.
     fn decode_cert_resync_message(env: &dsm::types::proto::Envelope) -> Option<(String, Vec<u8>)> {
@@ -1267,18 +1395,22 @@ impl B0xSDK {
     /// the same inputs are byte-identical (the deterministic reply id relies on
     /// that: the node keeps the first body per message id).
     ///
-    /// The delta carries the four B-side fields plus two references (the
+    /// The delta carries the four B-side fields, two references (the
     /// commitment the sender looks its proposal up by, and the digest of the
-    /// exact A-side bytes B countersigned). Nothing A-side rides back; the
-    /// sender overlays this onto the receipt it authored and froze. Refuses at
-    /// construction if the encoded envelope would not fit under the node cap —
-    /// the same guard `build_evidence_envelope` applies.
+    /// exact A-side bytes B countersigned) and the recipient's canonical pair
+    /// `b_pair` for the applied step — read from the DURABLE journal/reply row
+    /// by the caller, never from current state, because it is the pair `sig_b`
+    /// was computed over. Nothing A-side rides back; the sender overlays this
+    /// onto the receipt it authored and froze. Refuses at construction if the
+    /// encoded envelope would not fit under the node cap — the same guard
+    /// `build_evidence_envelope` applies.
     pub(crate) fn build_countersign_reply_envelope(
         &self,
         local_genesis: &[u8; 32],
         sender_projection_tip: &[u8; 32],
         expected_commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
     ) -> Result<BuiltEnvelope, DsmError> {
         use prost::Message as _;
 
@@ -1323,6 +1455,8 @@ impl B0xSDK {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: b_pair.0.to_vec(),
+            b_child_tip: b_pair.1.to_vec(),
         }
         .encode_to_vec();
         // Content address of the delta itself, role-separated (op_id, as the
@@ -1431,7 +1565,10 @@ impl B0xSDK {
     ///
     /// The recipient keeps the whole countersigned receipt locally; ONLY the
     /// delta goes on the wire (`build_countersign_reply_envelope`). Delivery
-    /// success is at least one endpoint answering 204.
+    /// success is the SAME quorum rule as frozen sends (`delivered >= K`): a
+    /// lost delta strands both sides — the sender's gate and, under the
+    /// finality barrier, the recipient's own next origination — so one replica
+    /// taking it is not delivery.
     pub async fn submit_acceptance_reply(
         &mut self,
         sender_genesis: &[u8; 32],
@@ -1439,6 +1576,7 @@ impl B0xSDK {
         sender_projection_tip: &[u8; 32],
         commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
     ) -> Result<String, DsmError> {
         let routing_key =
             Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
@@ -1448,12 +1586,13 @@ impl B0xSDK {
             sender_projection_tip,
             commitment,
             full_countersigned_receipt_bytes,
+            b_pair,
         )?;
         self.post_reply_envelope(&routing_key, &built).await
     }
 
-    /// POST an already-built reply envelope to every endpoint; success is >= 1
-    /// endpoint answering 204.
+    /// POST an already-built reply envelope to every endpoint; success is
+    /// `quorum_k` (capped at the fleet size) endpoints answering 204.
     async fn post_reply_envelope(
         &mut self,
         routing_key: &str,
@@ -1463,6 +1602,7 @@ impl B0xSDK {
         let message_id_b32 = built.message_id_b32.clone();
         let mut last_err: Option<String> = None;
         let mut delivered = 0usize;
+        let quorum = self.quorum_k.min(self.storage_node_endpoints.len()).max(1);
 
         for endpoint in self.storage_node_endpoints.clone() {
             let token = match self.ensure_token_for_endpoint(&endpoint).await {
@@ -1503,10 +1643,10 @@ impl B0xSDK {
             }
         }
 
-        if delivered == 0 {
+        if delivered < quorum {
             return Err(DsmError::network(
                 format!(
-                    "§16.6 reply delivery failed on all endpoints: {}",
+                    "§16.6 reply delivery below quorum: {delivered}/{quorum} endpoints took it: {}",
                     last_err.unwrap_or_else(|| "no endpoints configured".into())
                 ),
                 None::<std::io::Error>,
@@ -2542,6 +2682,20 @@ impl B0xSDK {
 
         let mut artifact_ids = Vec::with_capacity(artifacts.len());
         for artifact in artifacts {
+            // Only initial-send artifacts ride the transfer's route. A received
+            // countersign delta or the finality certificate (own route, own
+            // sweep) reaching this primitive is a caller bug — refuse, never
+            // relocate it under a route the node would silently dedup.
+            if !artifact.role.is_initial_send_artifact() {
+                return Err(DsmError::internal(
+                    format!(
+                        "frozen send {}: artifact role {} is not part of the initial send",
+                        outbox.submission_id,
+                        artifact.role.as_str()
+                    ),
+                    None::<std::io::Error>,
+                ));
+            }
             self.submit_stored_envelope_with_retry(
                 &artifact.envelope_bytes,
                 route,
@@ -3088,6 +3242,19 @@ impl B0xSDK {
                     envelope_bytes: env.encode_to_vec(),
                     body,
                 });
+                continue;
+            }
+            if let Some(body) = Self::decode_relationship_finalized(&env) {
+                info!(
+                    "📬 finality checkpoint message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
+                );
+                self.pending_relationship_finalized
+                    .push(RelationshipFinalizedMessage {
+                        message_id: text_id::encode_base32_crockford(&env.message_id),
+                        body,
+                    });
                 continue;
             }
             if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
@@ -4923,6 +5090,10 @@ mod tests {
         B0xSDK::new(dev_id32_b32(), core, vec![]).expect("B0xSDK")
     }
 
+    /// The recipient's canonical pair the reply builder carries (delta-only
+    /// metadata; the receipt bytes are untouched by it).
+    const TEST_B_PAIR: ([u8; 32], [u8; 32]) = ([0x71u8; 32], [0x72u8; 32]);
+
     fn commitment_of(full_bytes: &[u8]) -> [u8; 32] {
         dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(full_bytes)
             .expect("decode")
@@ -4949,6 +5120,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&full),
                 &full,
+                TEST_B_PAIR,
             )
             .expect("real delta builder");
         report_budget("ADR0003 B-side countersign", built.bytes.len());
@@ -5010,6 +5182,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&full),
                 &full,
+                TEST_B_PAIR,
             )
             .expect("build");
         let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
@@ -5035,10 +5208,10 @@ mod tests {
         let sdk = test_reply_sdk();
         let c = commitment_of(&full);
         let one = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("one");
         let two = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("two");
         assert_eq!(one.bytes, two.bytes);
         assert_eq!(one.message_id_b32, two.message_id_b32);
@@ -5058,6 +5231,7 @@ mod tests {
                 &[0x22; 32],
                 &commitment_of(&a_only),
                 &a_only,
+                TEST_B_PAIR,
             )
             .expect_err("A-only");
         assert!(
@@ -5068,7 +5242,13 @@ mod tests {
 
         // The stored receipt is not the one this reply is for.
         let err = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &[0x99; 32], &full)
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &[0x99; 32],
+                &full,
+                TEST_B_PAIR,
+            )
             .expect_err("wrong commitment");
         assert!(
             err.to_string().contains("commitment != reply commitment"),
@@ -5090,12 +5270,18 @@ mod tests {
             .to_full_protobuf()
             .expect("encode");
         let err = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &commitment_of(&fat), &fat)
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&fat),
+                &fat,
+                TEST_B_PAIR,
+            )
             .expect_err("over cap");
         assert!(err.to_string().contains("envelope cap"), "{err}");
 
         // Positive control in the same shape.
-        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full)
+        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
             .expect("the production shape builds");
     }
 
