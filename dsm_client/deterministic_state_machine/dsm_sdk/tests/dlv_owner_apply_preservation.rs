@@ -174,9 +174,33 @@ fn try_apply_settlement(
             input_amount: 100,
             output_policy_commit: sofi(),
             output_amount: 60,
+            parent_sequence: 0,
             new_sequence: 1,
         }),
     )
+}
+
+/// A DISTINCT second settlement against the SAME vault parent generation,
+/// differing only in settlement identity (a different receipt id / external
+/// commitment) and, optionally, amount — exactly what two independent traders
+/// racing one vault parent produce. Same `parent_sequence: 0`, so it competes
+/// for the same generation the winner consumes.
+fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operation {
+    Operation::DlvOwnerApply {
+        vault_id: VAULT.to_vec(),
+        settlement_receipt_id: receipt_id,
+        pending_pointer_x: pointer_x,
+        parent_sequence: 0,
+        new_sequence: 1,
+        parent_reserves_digest: [0u8; 32],
+        new_reserves_digest: [0u8; 32],
+        input_policy_commit: era(),
+        output_policy_commit: sofi(),
+        input_amount: 100,
+        output_amount: 60,
+        signature: Vec::new(),
+        mode: TransactionMode::Unilateral,
+    }
 }
 
 /// THE PRESERVATION INVARIANT.
@@ -257,6 +281,89 @@ fn owner_apply_preserves_every_field_the_settlement_does_not_own() {
         reserves_after.len(),
         reserves_before.len(),
         "a settlement neither creates nor destroys reserve legs"
+    );
+}
+
+/// INVARIANT 3 (core / device-root layer): two individually-valid settlements
+/// built against the SAME vault parent generation — exactly one may consume it.
+///
+/// The winner consumes generation 0 and moves the vault to generation 1. The
+/// loser, a DIFFERENT settlement still naming parent generation 0, then finds
+/// the vault a generation ahead and is REFUSED at the canonical state
+/// transition. No sequence advances twice; no reserve moves twice. This is the
+/// hard parent-consumption claim in the authority that owns vault generation:
+/// the device root — NOT a storage-node listing.
+///
+/// The mutation test for this guard lives beside it
+/// (`removing_the_generation_check_lets_the_race_double_consume`, kept red-on-
+/// demand by commenting the CAS in device_state.rs `ApplySettlement`).
+#[test]
+fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
+    let funded = rich_owner_head();
+
+    // BOTH settlements are individually valid against parent generation 0 — each,
+    // applied first to the fresh funded head, succeeds. So the loser's later
+    // refusal is about the consumed parent, not about being malformed.
+    let winner_first = apply_settlement(
+        &funded,
+        sign_as_owner(owner_apply_op_as_built_by_reconcile()),
+    );
+    let loser_first = apply_settlement(
+        &funded,
+        sign_as_owner(distinct_owner_apply_op([0x99; 32], [0xAA; 32])),
+    );
+    assert_eq!(
+        winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("out").sequence,
+        1,
+        "either settlement, applied first, validly consumes generation 0"
+    );
+    assert_eq!(
+        loser_first.vault_reserve_entry(&VAULT, &sofi()).expect("out").sequence,
+        1,
+        "the loser is a fully valid settlement — it only loses by arriving second"
+    );
+
+    // THE WINNER consumes generation 0. Exactly one child generation is installed,
+    // and each reserve leg reflects exactly ONE settlement.
+    let out = winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("output leg");
+    let inp = winner_first.vault_reserve_entry(&VAULT, &era()).expect("input leg");
+    assert_eq!(out.sequence, 1, "the vault advanced by exactly one generation");
+    assert_eq!(inp.sequence, 1);
+    assert_eq!(out.amount, 340, "output reserve reflects exactly one settlement (400 - 60)");
+    assert_eq!(inp.amount, 600, "input reserve reflects exactly one settlement (500 + 100)");
+
+    // THE RACE: the loser, a distinct settlement still naming parent generation 0,
+    // is applied AFTER the winner. It MUST be refused — the parent it consumes has
+    // already been consumed. (Both amounts match, so the refusal cannot be a
+    // conservation/amount failure — it is purely the generation claim.)
+    let loser = try_apply_settlement(
+        &winner_first,
+        sign_as_owner(distinct_owner_apply_op([0x99; 32], [0xAA; 32])),
+    );
+    let err = loser.expect_err(
+        "a second settlement consuming an already-consumed vault parent must be refused",
+    );
+    assert!(
+        format!("{err:?}").to_lowercase().contains("generation"),
+        "the refusal must name the stale/already-consumed generation, not an unrelated \
+         failure that would mask a double-consume: {err:?}"
+    );
+
+    // THE LOSER MOVED NOTHING: no canonical mutation, no reserve mutation. The
+    // vault is still at generation 1 with the winner's amounts.
+    let out_after = winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("output leg");
+    assert_eq!(out_after.sequence, 1, "the refused settlement did not advance the generation");
+    assert_eq!(out_after.amount, 340, "the refused settlement moved no reserve");
+
+    // REPLAY OF THE LOSER stays rejected after the winner is committed: naming the
+    // already-consumed parent 0 is refused however many times it is retried.
+    let replay = try_apply_settlement(
+        &winner_first,
+        sign_as_owner(distinct_owner_apply_op([0x99; 32], [0xAA; 32])),
+    );
+    assert!(
+        replay.is_err(),
+        "the loser's replay must remain rejected once the winner has consumed the parent"
     );
 }
 

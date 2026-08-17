@@ -1391,23 +1391,44 @@ impl AppRouterImpl {
             ));
         };
 
-        let Some(head) = self.core_sdk.device_head() else {
+        // Precondition: a reconcile needs a device head to advance.
+        if self.core_sdk.device_head().is_none() {
             return err("dlv.reconcile: no device head".into());
-        };
-        // IDEMPOTENCE, checked against the leaves rather than a bookkeeping
-        // table: the reserve leaf already carries the sequence this receipt
-        // would advance to, so a repeat is visible in the state itself.
-        let already = head
-            .vault_reserve_entry(&vault_id, &receipt.trade.input_policy_commit)
-            .map(|e| e.sequence >= receipt.trade.new_sequence)
-            .unwrap_or(false);
-        if already {
-            return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
-                generated::AppStateResponse {
-                    key: "dlv.reconcile".to_string(),
-                    value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
-                },
-            ));
+        }
+        // CONSUME-ONCE, by settlement IDENTITY — not by sequence alone. The
+        // reserve leaf carries the generation but not WHICH settlement produced
+        // it, so a sequence-only check (`leaf.sequence >= new_sequence`) cannot
+        // tell the winner's idempotent replay from a DIFFERENT settlement that
+        // raced the same parent — it reports both as success, which is exactly the
+        // marker a loser must never be able to mistake for a fold. The durable
+        // consume-once claim can tell them apart.
+        match crate::storage::client_db::load_vault_generation_consumer(
+            &vault_id,
+            receipt.trade.parent_sequence,
+        ) {
+            Ok(Some(existing)) => {
+                if existing.source_commitment == receipt.receipt_id {
+                    // The SAME settlement, already folded: idempotent success, and
+                    // nothing is re-applied.
+                    return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                        generated::AppStateResponse {
+                            key: "dlv.reconcile".to_string(),
+                            value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+                        },
+                    ));
+                }
+                // A DIFFERENT settlement already consumed this generation — refuse
+                // with a typed error. This is never a success the loser could later
+                // be mistaken as having folded.
+                return err(format!(
+                    "dlv.reconcile: vault {} generation {} was already consumed by a \
+                     different settlement — this settlement cannot consume it",
+                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                    receipt.trade.parent_sequence,
+                ));
+            }
+            Ok(None) => {} // generation still open — fold it below
+            Err(e) => return err(format!("dlv.reconcile: consumption lookup failed: {e}")),
         }
 
         let op = dsm::types::operations::Operation::DlvOwnerApply {
@@ -1441,6 +1462,7 @@ impl AppRouterImpl {
             input_amount: receipt.trade.input_amount,
             output_policy_commit: receipt.trade.output_policy_commit,
             output_amount: receipt.trade.output_amount,
+            parent_sequence: receipt.trade.parent_sequence,
             new_sequence: receipt.trade.new_sequence,
         };
 
@@ -1453,6 +1475,45 @@ impl AppRouterImpl {
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &actor, &actor,
         );
+        // The consume-once claim is written INSIDE the fold's advance
+        // transaction, so the claim and the reserve move commit together or not at
+        // all. `UNIQUE(vault_id, parent_sequence)` decides a race that slipped past
+        // the pre-check above: a losing racer's claim resolves to `Conflict`, which
+        // this closure turns into an error, rolling back the whole advance so the
+        // loser moves no reserve.
+        let claim_vault = vault_id;
+        let claim_parent = receipt.trade.parent_sequence;
+        let claim_child = receipt.trade.new_sequence;
+        let claim_source = receipt.receipt_id;
+        let record_consumption = move |tx: &rusqlite::Transaction<'_>,
+                                       _outcome: &dsm::types::device_state::AdvanceOutcome|
+              -> Result<(), dsm::types::error::DsmError> {
+            use crate::storage::client_db::{
+                cas_consume_vault_generation_with_conn, VaultGenerationConsumeOutcome,
+            };
+            match cas_consume_vault_generation_with_conn(
+                tx,
+                &claim_vault,
+                claim_parent,
+                claim_child,
+                &claim_source,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("dlv.reconcile: consume-once claim failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })? {
+                VaultGenerationConsumeOutcome::Consumed
+                | VaultGenerationConsumeOutcome::AlreadyConsumedSameSettlement => Ok(()),
+                VaultGenerationConsumeOutcome::Conflict { .. } => {
+                    Err(dsm::types::error::DsmError::invalid_operation(
+                        "dlv.reconcile: this vault generation was consumed by a different \
+                         settlement (race) — rolling back the fold",
+                    ))
+                }
+            }
+        };
         // EMPTY deltas: the owner's spendable balance is not part of a
         // settlement. Only the reserve leaves move, in this same advance.
         if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
@@ -1462,7 +1523,7 @@ impl AppRouterImpl {
             &[],
             Some(init_tip),
             Some(mutation),
-            None,
+            Some(&record_consumption),
         ) {
             return err(format!("dlv.reconcile: advance failed: {e}"));
         }
@@ -3245,6 +3306,384 @@ mod funded_creation_tests {
         assert_eq!(
             dsm::dlv::vault_reserve_inclusion::proven_amount(&proof_after, &pc_b),
             Some(5_000 - expected_out),
+        );
+
+        // (15) THE CONSUME-ONCE CLAIM is durably recorded through the production
+        // reconcile route, naming the settlement that won generation 0 (written
+        // inside the fold's own transaction). This is what lets a DIFFERENT
+        // settlement racing the same parent be refused at reconcile — the winner's
+        // receipt id occupies `(vault, 0)`, so a foreign receipt id resolves to a
+        // typed Conflict rather than a silent double-fold (proven at the claim
+        // level in vault_generation_consumption's unit tests).
+        let consumer =
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load consumer")
+                .expect("generation 0 must be recorded as consumed");
+        assert_eq!(
+            consumer.source_commitment, receipt.receipt_id,
+            "the durable claim must name the settlement that actually consumed the generation"
+        );
+        assert_eq!(consumer.child_sequence, 1);
+    }
+
+    /// Build a GENUINELY FOREIGN, fully valid settlement receipt: a different
+    /// trader device (its own genesis/devid/keypair), funded, settling the SAME
+    /// owner vault at parent generation 0 with a DISTINCT external commitment `x`.
+    /// The receipt is signed against that trader's own post-settle root and
+    /// verifies stand-alone (`verify_trader_settlement_receipt` is stateless), so
+    /// it is exactly what a second device produces in a cross-partition race — the
+    /// case the storage slot-claim cannot prevent and the durable consume-once
+    /// claim must catch at reconcile.
+    fn build_foreign_receipt(
+        vault_id: &[u8; 32],
+        pc_in: &[u8; 32],
+        pc_out: &[u8; 32],
+        x: [u8; 32],
+        seed: u8,
+    ) -> dsm::dlv::settlement_receipt_leaf::SignedTraderSettlementReceipt {
+        use dsm::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+        use dsm::types::operations::{Operation, TransactionMode};
+        use dsm::types::token_types::Balance;
+
+        let kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[seed; 32])
+            .expect("foreign trader keypair");
+        let dev = [seed; 32];
+        let rel = compute_smt_key(&dev, &dev);
+        let init = initial_chain_tip_from_device_ids(&dev, &dev);
+        let sign = |op: Operation| -> Operation {
+            let sig = dsm::crypto::sphincs::sphincs_sign(
+                &kp.secret_key,
+                &op.with_cleared_signature().to_bytes(),
+            )
+            .expect("sign foreign op");
+            op.with_signature(sig)
+        };
+
+        // Fund the foreign trader with the input asset so its settle can pay it.
+        let head = DeviceState::new(dev, dev, kp.public_key.clone(), 64);
+        let head = head
+            .advance(
+                rel,
+                dev,
+                Operation::Mint {
+                    amount: Balance::from_state(10_000, [0u8; 32]),
+                    token_id: b"IN".to_vec(),
+                    policy_commit: *pc_in,
+                    authorized_by: b"self".to_vec(),
+                    proof_of_authorization: Vec::new(),
+                    message: "seed".into(),
+                },
+                vec![0x11; 32],
+                None,
+                &[BalanceDelta {
+                    policy_commit: *pc_in,
+                    direction: BalanceDirection::Credit,
+                    amount: 10_000,
+                }],
+                Some(init),
+                None,
+                None,
+                None,
+            )
+            .expect("foreign mint")
+            .new_device_state;
+
+        let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, &x);
+        let (input_amount, output_amount) = (1_000u64, 500u64);
+        let settle = sign(Operation::DlvSettle {
+            vault_id: vault_id.to_vec(),
+            owner_public_key: Vec::new(),
+            owner_devid: [0u8; 32],
+            owner_genesis: [0u8; 32],
+            input_policy_commit: *pc_in,
+            output_policy_commit: *pc_out,
+            parent_sequence: 0,
+            parent_reserves_digest: [0u8; 32],
+            reserve_proof_root: [0u8; 32],
+            predicate_digest: [0u8; 32],
+            route_commit_bytes: Vec::new(),
+            external_commitment_x: x,
+            input_amount,
+            output_amount,
+            fee_bps: 30,
+            sigma: [0u8; 32],
+            settler_public_key: kp.public_key.clone(),
+            settler_devid: dev,
+            settlement_receipt_id: receipt_id,
+            signature: Vec::new(),
+            mode: TransactionMode::Unilateral,
+        });
+        let head = head
+            .advance(
+                rel,
+                dev,
+                settle,
+                vec![0x22; 32],
+                None,
+                &[
+                    BalanceDelta {
+                        policy_commit: *pc_in,
+                        direction: BalanceDirection::Debit,
+                        amount: input_amount,
+                    },
+                    BalanceDelta {
+                        policy_commit: *pc_out,
+                        direction: BalanceDirection::Credit,
+                        amount: output_amount,
+                    },
+                ],
+                Some(init),
+                None,
+                None,
+                None,
+            )
+            .expect("foreign settle")
+            .new_device_state;
+
+        let key = dsm::dlv::settlement_receipt_leaf::settlement_receipt_key(
+            &head.genesis(),
+            &head.devid(),
+            vault_id,
+            &receipt_id,
+        );
+        let siblings = head.inclusion_siblings(&key).expect("receipt leaf siblings");
+        let trade = dsm::dlv::settlement_receipt_leaf::SettledTrade {
+            x,
+            parent_sequence: 0,
+            new_sequence: 1,
+            input_policy_commit: *pc_in,
+            input_amount,
+            output_policy_commit: *pc_out,
+            output_amount,
+        };
+        dsm::dlv::settlement_receipt_leaf::sign_trader_settlement_receipt(
+            vault_id,
+            &receipt_id,
+            trade,
+            &head.genesis(),
+            &head.devid(),
+            &head.root(),
+            siblings,
+            &kp.public_key,
+            &kp.secret_key,
+        )
+        .expect("sign foreign receipt")
+    }
+
+    /// INVARIANT 3 at the PRODUCTION reconcile route: two genuinely foreign, fully
+    /// valid receipts settle the same vault parent generation; exactly one is
+    /// accepted, and the SECOND — driven through `dlv.reconcile` — physically hits
+    /// the typed consume-once conflict branch. It leaves NO durable success state
+    /// of any kind: no canonical mutation (root unchanged), no reserve mutation, no
+    /// change to the consumption row, no success envelope.
+    ///
+    /// This is exactly the boundary where the old sequence-only idempotence gate
+    /// returned a misleading successful no-op (`leaf.sequence >= new_sequence`
+    /// was true for the loser too).
+    ///
+    /// A single device cannot produce two receipts at one parent through the settle
+    /// route — the storage slot-claim blocks the second locally — so the second
+    /// trader is built directly, which is precisely the cross-partition case the
+    /// slot-claim admits it cannot prevent.
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_refuses_a_second_foreign_receipt_at_an_already_consumed_generation() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+
+        // Fund an owner vault at generation 0.
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        // WINNER: trader A settles generation 0. Publish its receipt and reconcile
+        // it through the production route — it consumes the generation.
+        let x_a = [0xA0u8; 32];
+        let receipt_a = build_foreign_receipt(&vault_id, &pc_a, &pc_b, x_a, 0xC1);
+        crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(
+                &receipt_a,
+            ))
+            .expect("publish winner receipt");
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(
+                    generated::DlvReconcileV1 {
+                        vault_id: vault_id.to_vec(),
+                        x: x_a.to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            })
+            .await
+        });
+        assert!(res.success, "winner reconcile failed: {:?}", res.error_message);
+
+        // Snapshot every durable surface AFTER the winner consumed the generation.
+        let after_winner = r.core_sdk.device_head().expect("head");
+        let root_before = after_winner.root();
+        let (res_a_before, res_b_before) = (
+            after_winner.vault_reserve(&vault_id, &pc_a),
+            after_winner.vault_reserve(&vault_id, &pc_b),
+        );
+        let claim_before =
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load claim")
+                .expect("generation 0 is consumed by the winner");
+        assert_eq!(
+            claim_before.source_commitment, receipt_a.receipt_id,
+            "the winner's receipt id owns generation 0"
+        );
+
+        // LOSER: trader B is a different device that also settled generation 0
+        // (a cross-partition race the slot-claim could not prevent). Its receipt is
+        // fully valid and fetch-verifies — but reconcile must REFUSE it.
+        let x_b = [0xB0u8; 32];
+        let receipt_b = build_foreign_receipt(&vault_id, &pc_a, &pc_b, x_b, 0xC2);
+        assert_ne!(
+            receipt_b.receipt_id, receipt_a.receipt_id,
+            "the two settlements are distinct"
+        );
+        crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(
+                &receipt_b,
+            ))
+            .expect("publish loser receipt");
+
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(
+                    generated::DlvReconcileV1 {
+                        vault_id: vault_id.to_vec(),
+                        x: x_b.to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            })
+            .await
+        });
+
+        // (1) REFUSED with a typed error — never a successful no-op.
+        assert!(
+            !res.success,
+            "the second settlement at an already-consumed generation MUST be refused, \
+             not folded or reported as a successful no-op"
+        );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("already consumed"),
+            "the refusal must name the already-consumed generation: {:?}",
+            res.error_message
+        );
+
+        // (2) NO canonical mutation, NO reserve mutation.
+        let after_loser = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            after_loser.root(),
+            root_before,
+            "the refused fold left the device root unchanged"
+        );
+        assert_eq!(
+            (
+                after_loser.vault_reserve(&vault_id, &pc_a),
+                after_loser.vault_reserve(&vault_id, &pc_b)
+            ),
+            (res_a_before, res_b_before),
+            "the refused fold moved no reserve"
+        );
+
+        // (3) NO consumption-row change: generation 0 still belongs to the winner;
+        // the loser wrote no durable success marker of any kind.
+        let claim_after =
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load claim")
+                .expect("generation 0 is still consumed");
+        assert_eq!(
+            claim_after.source_commitment, receipt_a.receipt_id,
+            "the loser must not overwrite or duplicate the winner's consumption claim"
+        );
+
+        // (4) REPLAY OF THE WINNER remains idempotent; REPLAY OF THE LOSER stays
+        // refused — the two never collapse.
+        let winner_again = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(
+                    generated::DlvReconcileV1 {
+                        vault_id: vault_id.to_vec(),
+                        x: x_a.to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            })
+            .await
+        });
+        assert!(winner_again.success, "winner replay must stay idempotent");
+        assert_eq!(
+            r.core_sdk.device_head().expect("head").root(),
+            root_before,
+            "winner replay moves nothing"
+        );
+        let loser_again = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.reconcile".to_string(),
+                args: pack(
+                    generated::DlvReconcileV1 {
+                        vault_id: vault_id.to_vec(),
+                        x: x_b.to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            })
+            .await
+        });
+        assert!(
+            !loser_again.success,
+            "the loser's replay must remain refused after the winner is committed"
         );
     }
 
