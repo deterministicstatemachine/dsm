@@ -2026,16 +2026,16 @@ impl AppRouterImpl {
                                 // Finality certificates (finality barrier), processed BEFORE
                                 // split-transfer completion in this same poll so a next-
                                 // generation pair held behind them can proceed in one pass.
-                                let mut consumed_certs: Vec<String> = Vec::new();
-                                for cert in b0x_sdk.take_relationship_finalized() {
+                                let mut consumed_checkpoints: Vec<String> = Vec::new();
+                                for checkpoint in b0x_sdk.take_relationship_finalized() {
                                     let outcome =
                                         crate::handlers::relationship_finalized::apply_relationship_finalized(
-                                            &cert.body,
+                                            &checkpoint.body,
                                         )
                                         .await;
                                     log::info!(
-                                        "[storage.sync] finality certificate {} -> {:?}",
-                                        cert.message_id,
+                                        "[storage.sync] finality checkpoint {} -> {:?}",
+                                        checkpoint.message_id,
                                         outcome
                                     );
                                     use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
@@ -2043,21 +2043,21 @@ impl AppRouterImpl {
                                         outcome,
                                         O::Applied | O::AlreadyFinalized | O::NoJournal
                                     ) {
-                                        consumed_certs.push(cert.message_id.clone());
+                                        consumed_checkpoints.push(checkpoint.message_id.clone());
                                     }
                                 }
-                                if !consumed_certs.is_empty() {
-                                    let n = consumed_certs.len();
+                                if !consumed_checkpoints.is_empty() {
+                                    let n = consumed_checkpoints.len();
                                     match b0x_sdk
-                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_certs)
+                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_checkpoints)
                                         .await
                                     {
                                         Ok(_) => log::info!(
-                                            "[storage.sync] ACKed {n} finality certificate(s) on {}..",
+                                            "[storage.sync] ACKed {n} finality checkpoint(s) on {}..",
                                             &tagged_addr.address[..tagged_addr.address.len().min(12)]
                                         ),
                                         Err(e) => log::warn!(
-                                            "[storage.sync] finality certificate ACK failed on {}.. (re-served next poll): {e}",
+                                            "[storage.sync] finality checkpoint ACK failed on {}.. (re-served next poll): {e}",
                                             &tagged_addr.address[..tagged_addr.address.len().min(12)]
                                         ),
                                     }
