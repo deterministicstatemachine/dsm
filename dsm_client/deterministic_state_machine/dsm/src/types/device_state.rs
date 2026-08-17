@@ -2729,8 +2729,16 @@ mod tests {
             .expect("production funding must succeed")
             .new_device_state;
 
-        assert_eq!(funded.balance(&era), 40, "free balance is the remainder, not 100");
-        assert_eq!(funded.vault_reserve(&vault, &era), 60, "the 60 is encumbered");
+        assert_eq!(
+            funded.balance(&era),
+            40,
+            "free balance is the remainder, not 100"
+        );
+        assert_eq!(
+            funded.vault_reserve(&vault, &era),
+            60,
+            "the 60 is encumbered"
+        );
 
         // The transfer ceiling IS the spendable: 41 must underflow.
         let over = funded.advance(
@@ -2739,7 +2747,11 @@ mod tests {
             transfer_op(era, 41),
             entropy(2),
             None,
-            &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 41 }],
+            &[BalanceDelta {
+                policy_commit: era,
+                direction: BalanceDirection::Debit,
+                amount: 41,
+            }],
             Some(tip),
             None,
             None,
@@ -2759,7 +2771,11 @@ mod tests {
                 transfer_op(era, 40),
                 entropy(3),
                 None,
-                &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 40 }],
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 40,
+                }],
                 Some(tip),
                 None,
                 None,
@@ -2792,7 +2808,11 @@ mod tests {
                 transfer_op(era, 50),
                 entropy(1),
                 None,
-                &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 50 }],
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 50,
+                }],
                 Some(tip),
                 None,
                 None,
@@ -2825,7 +2845,11 @@ mod tests {
             err.to_lowercase().contains("insufficient"),
             "must name the shortfall, got: {err}"
         );
-        assert_eq!(*spent.smt.root(), root_before, "a refused funding moves nothing");
+        assert_eq!(
+            *spent.smt.root(),
+            root_before,
+            "a refused funding moves nothing"
+        );
         assert_eq!(spent.balance(&era), 50, "balance intact");
         assert_eq!(spent.vault_reserve(&vault, &era), 0, "no leaf was written");
     }

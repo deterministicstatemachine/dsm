@@ -313,24 +313,43 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
         sign_as_owner(distinct_owner_apply_op([0x99; 32], [0xAA; 32])),
     );
     assert_eq!(
-        winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("out").sequence,
+        winner_first
+            .vault_reserve_entry(&VAULT, &sofi())
+            .expect("out")
+            .sequence,
         1,
         "either settlement, applied first, validly consumes generation 0"
     );
     assert_eq!(
-        loser_first.vault_reserve_entry(&VAULT, &sofi()).expect("out").sequence,
+        loser_first
+            .vault_reserve_entry(&VAULT, &sofi())
+            .expect("out")
+            .sequence,
         1,
         "the loser is a fully valid settlement — it only loses by arriving second"
     );
 
     // THE WINNER consumes generation 0. Exactly one child generation is installed,
     // and each reserve leg reflects exactly ONE settlement.
-    let out = winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("output leg");
-    let inp = winner_first.vault_reserve_entry(&VAULT, &era()).expect("input leg");
-    assert_eq!(out.sequence, 1, "the vault advanced by exactly one generation");
+    let out = winner_first
+        .vault_reserve_entry(&VAULT, &sofi())
+        .expect("output leg");
+    let inp = winner_first
+        .vault_reserve_entry(&VAULT, &era())
+        .expect("input leg");
+    assert_eq!(
+        out.sequence, 1,
+        "the vault advanced by exactly one generation"
+    );
     assert_eq!(inp.sequence, 1);
-    assert_eq!(out.amount, 340, "output reserve reflects exactly one settlement (400 - 60)");
-    assert_eq!(inp.amount, 600, "input reserve reflects exactly one settlement (500 + 100)");
+    assert_eq!(
+        out.amount, 340,
+        "output reserve reflects exactly one settlement (400 - 60)"
+    );
+    assert_eq!(
+        inp.amount, 600,
+        "input reserve reflects exactly one settlement (500 + 100)"
+    );
 
     // THE RACE: the loser, a distinct settlement still naming parent generation 0,
     // is applied AFTER the winner. It MUST be refused — the parent it consumes has
@@ -351,9 +370,17 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
 
     // THE LOSER MOVED NOTHING: no canonical mutation, no reserve mutation. The
     // vault is still at generation 1 with the winner's amounts.
-    let out_after = winner_first.vault_reserve_entry(&VAULT, &sofi()).expect("output leg");
-    assert_eq!(out_after.sequence, 1, "the refused settlement did not advance the generation");
-    assert_eq!(out_after.amount, 340, "the refused settlement moved no reserve");
+    let out_after = winner_first
+        .vault_reserve_entry(&VAULT, &sofi())
+        .expect("output leg");
+    assert_eq!(
+        out_after.sequence, 1,
+        "the refused settlement did not advance the generation"
+    );
+    assert_eq!(
+        out_after.amount, 340,
+        "the refused settlement moved no reserve"
+    );
 
     // REPLAY OF THE LOSER stays rejected after the winner is committed: naming the
     // already-consumed parent 0 is refused however many times it is retried.
