@@ -3384,6 +3384,34 @@ message ReceiptCountersignB {
   bytes ek_cert_b                 = 4 [(dsm_max_len)=65535];
   bytes ek_pk_b                   = 5 [(dsm_max_len)=65535];
   bytes kyber_ct_b                = 6 [(dsm_max_len)=2048];
+  // The recipient's own canonical relationship pair for the applied step: its
+  // local lineage head before this apply (parent) and after it (child) — the
+  // exact parent the recipient will sign under when IT next originates.
+  // Authenticated: `sig_b` is computed over
+  // BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent_tip || b_child_tip),
+  // so a substituted pair fails the sender's countersignature check. The
+  // sender CASes its counterparty-canonical-head record from parent to child.
+  bytes b_parent_tip              = 7 [(dsm_fixed_len)=32];
+  bytes b_child_tip               = 8 [(dsm_fixed_len)=32];
+}
+
+// Bilateral finality certificate (finality barrier). The SENDER issues it after
+// finalizing on the recipient's countersignature: it names the exact
+// transition and both sides' canonical heads for it, signed by the sender's
+// per-step EK for that transition (the same key the recipient chained
+// `ek_pk_a` for). The sender's gate is released only once this artifact
+// reaches storage quorum; the recipient's next origination is released only
+// once it verifies it. Method `relationship.finalized.v1`; deterministic id
+// derived from the artifact digest; frozen route = the recipient's route.
+message RelationshipFinalizedV1 {
+  bytes relationship_key       = 1 [(dsm_fixed_len)=32];
+  bytes transition_commitment  = 2 [(dsm_fixed_len)=32]; // the receipt commitment
+  bytes sender_device_id       = 3 [(dsm_fixed_len)=32];
+  bytes recipient_device_id    = 4 [(dsm_fixed_len)=32];
+  bytes sender_child_tip_a     = 5 [(dsm_fixed_len)=32]; // the sender's signed child (proposal.canonical_child)
+  bytes recipient_parent_tip_b = 6 [(dsm_fixed_len)=32]; // the recipient's pair from the delta
+  bytes recipient_child_tip_b  = 7 [(dsm_fixed_len)=32];
+  bytes signature_a            = 8 [(dsm_max_len)=65535]; // SPHINCS+ by the sender's per-step EK over the v1 target
 }
 
 message OnlineTransferSmartRequest {

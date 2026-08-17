@@ -379,8 +379,8 @@ pub enum StaleGateOutcome {
     /// The gate was stale and its exact row was deleted. The in-memory lock may
     /// be cleared.
     Cleared,
-    /// The chain has not moved past the gate's `parent_tip`: a prior online
-    /// transfer is genuinely still awaiting catch-up.
+    /// A prior online transfer on the relationship is genuinely unresolved
+    /// (an unsettled or checkpoint-pending outbox row exists behind the gate).
     StillPending,
     /// The row changed between the read and the delete inside the transaction.
     /// Unreachable while the read and the delete share one transaction, which is
@@ -400,24 +400,23 @@ impl StaleGateOutcome {
 /// Read the gate, decide whether it is stale, and delete it — atomically.
 ///
 /// The read, the staleness decision and the exact-match delete all run inside
-/// ONE transaction on ONE connection. Previously the caller did the three steps
-/// as separate calls, releasing the global connection mutex between them, so a
-/// concurrent online send could settle the old gate and arm a new one in the
-/// window; the exact-match delete then matched nothing, the newer gate survived
-/// unread, and the caller cleared the in-memory lock anyway.
+/// ONE transaction on ONE connection, so a concurrent online send cannot settle
+/// the old gate and arm a new one between them.
 ///
-/// `sender_reported_tip` is the counterparty's self-reported chain tip from the
-/// prepare request. The gate is stale iff either that tip or our persisted view
-/// of it has moved off the gate's `parent_tip`.
+/// STALENESS UNDER THE FINALITY BARRIER. A gate is `StillPending` while ANY
+/// `sender_outbox` row for the relationship is unsettled or awaiting its
+/// finality checkpoint (`pending_submit`, `submitting`, `submitted`,
+/// `submission_uncertain`, `finalization_checkpoint_pending`): the send behind
+/// it has not yet been made final for the peer, and only the post-quorum
+/// checkpoint sweep may release it. The former "chain tip moved off the gate's
+/// parent ⇒ stale" rule is gone: after local finalization the projection tip
+/// sits at the gate's target by construction, so that rule called every
+/// legitimately-armed gate stale. A gate with NO such outbox row is an orphan
+/// (its send has already been released or never existed) and is deleted.
 ///
-/// Tips are parsed strictly: a stored row whose `parent_tip` or `next_tip` is not
-/// exactly 32 bytes is an error, not a zero-filled default. Substituting
-/// `[0u8; 32]` guaranteed a non-matching DELETE, which left the persisted gate in
-/// place while the caller cleared the in-memory lock — the worst of both.
-pub fn clear_stale_pending_online_gate(
-    counterparty_device_id: &[u8],
-    sender_reported_tip: Option<[u8; 32]>,
-) -> Result<StaleGateOutcome> {
+/// Tips are parsed strictly: a stored row whose `parent_tip` or `next_tip` is
+/// not exactly 32 bytes is an error, not a zero-filled default.
+pub fn clear_stale_pending_online_gate(counterparty_device_id: &[u8]) -> Result<StaleGateOutcome> {
     if counterparty_device_id.len() != 32 {
         return Err(anyhow!("Invalid counterparty_device_id length"));
     }
@@ -463,24 +462,25 @@ pub fn clear_stale_pending_online_gate(
         .try_into()
         .map_err(|_| anyhow!("persisted online gate has a malformed next_tip"))?;
 
-    // Our persisted view of the counterparty's tip, read in the SAME transaction.
-    let persisted_tip: Option<[u8; 32]> = tx
-        .query_row(
-            "SELECT chain_tip FROM contacts WHERE device_id = ?1",
-            params![counterparty_device_id],
-            |row| row.get::<_, Option<Vec<u8>>>(0),
-        )
-        .optional()?
-        .flatten()
-        .and_then(|v| v.as_slice().try_into().ok());
-
-    // The gate's parent_tip was the tip BEFORE the gated send. If the current tip
-    // has moved off it, the chain advanced and the gate is stale.
-    let already_advanced = (sender_reported_tip.is_some()
-        && sender_reported_tip != Some(gate_parent))
-        || (persisted_tip.is_some() && persisted_tip != Some(gate_parent));
-
-    if !already_advanced {
+    // The send behind THIS gate: the outbox row frozen with the gate's own
+    // projection identity (one send in flight per relationship — the gate
+    // guarantees it — so this is "any unsettled row for the relationship").
+    let unsettled: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sender_outbox
+          WHERE projection_parent = ?1 AND projection_target = ?2
+            AND status IN (?3, ?4, ?5, ?6, ?7)",
+        params![
+            gate_parent.as_slice(),
+            gate_next.as_slice(),
+            super::sender_outbox::OUTBOX_PENDING_SUBMIT,
+            super::sender_outbox::OUTBOX_SUBMITTING,
+            super::sender_outbox::OUTBOX_SUBMITTED,
+            super::sender_outbox::OUTBOX_SUBMISSION_UNCERTAIN,
+            super::sender_outbox::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+        ],
+        |row| row.get(0),
+    )?;
+    if unsettled > 0 {
         return Ok(StaleGateOutcome::StillPending);
     }
 

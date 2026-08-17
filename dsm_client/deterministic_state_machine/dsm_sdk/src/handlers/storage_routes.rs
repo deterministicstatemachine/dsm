@@ -525,8 +525,8 @@ async fn finalize_from_countersign_delta(
     };
 
     // Reconstruct the countersigned receipt from OUR A bytes + the delta.
-    let receipt = match bind_countersign_delta(&retained, &wire) {
-        Ok(DeltaBinding::Bound(r)) => *r,
+    let bound = match bind_countersign_delta(&retained, &wire) {
+        Ok(DeltaBinding::Bound(b)) => *b,
         Ok(DeltaBinding::Rejected { reason }) => {
             park_awaiting_valid_reply(&proposal, &short, &reason);
             return CountersignOutcome::DigestMismatch(reason);
@@ -576,14 +576,16 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    let receipt = &bound.receipt;
     match crate::handlers::online_finalize::verify_acceptance_receipt(
         &self_device_id,
         &proposal.counterparty_device_id,
-        &receipt,
+        receipt,
         &proposal,
         &recipient_ak_pk,
         None,
         None,
+        bound.b_pair(),
     ) {
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
         Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
@@ -642,6 +644,38 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    // Pre-tx sanity on the peer's canonical head: the delta's `b_parent_tip`
+    // must be the head this sender pins for the recipient (the genesis seed
+    // when nothing has been learned yet). A mismatch means the recipient
+    // applied this step under a lineage this sender does not know — the
+    // artifact proves nothing for THIS relationship state; park it. The
+    // in-tx CAS below stays authoritative for the race.
+    let genesis_seed = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+        &self_device_id,
+        &proposal.counterparty_device_id,
+    );
+    match crate::storage::client_db::load_counterparty_canonical_head(&proposal.relationship_key) {
+        Ok(pinned) => {
+            let pinned = pinned.unwrap_or(genesis_seed);
+            if pinned != bound.b_parent_tip {
+                let reason = format!(
+                    "peer canonical head mismatch: delta parent {}.. but this sender pins {}..",
+                    crate::util::text_id::encode_base32_crockford(&bound.b_parent_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&pinned[..4]),
+                );
+                park_awaiting_valid_reply(&proposal, &short, &reason);
+                return CountersignOutcome::Rejected(reason);
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "[storage.sync] §16.6 could not read the peer canonical head for {short}.. — \
+                 refusing to finalize (retry from the durable outbox): {e}"
+            );
+            return CountersignOutcome::FinalizeFailed(format!("peer canonical head read: {e}"));
+        }
+    }
+
     let content_digest = evidence_content_digest(ArtifactRole::CountersignB, &delta.body);
     let countersign_artifact = SenderOutboxArtifact {
         relationship_key: proposal.relationship_key,
@@ -651,25 +685,58 @@ async fn finalize_from_countersign_delta(
         submission_id: derive_artifact_submission_id(&content_digest),
         envelope_bytes: delta.envelope_bytes.clone(),
         content_digest,
+        routing_address: None,
+    };
+
+    // ====================================================================
+    // FINALITY CERTIFICATE (finality barrier). Built and signed HERE, before
+    // the finalize transaction, with the PENDING A per-step EK for this
+    // commitment — the key the recipient chained `ek_pk_a` for and will verify
+    // under (its journal's `new_counterparty_a_head`). The transaction below
+    // promotes and deletes that pending row, so the signer must be read first.
+    // The exact envelope bytes are frozen with their own route (the recipient's,
+    // at the projection target it converged to); the checkpoint sweep replays
+    // them until quorum, and only THEN is the sender's gate released.
+    // ====================================================================
+    let finalized_artifact = match build_relationship_finalized_artifact(
+        &proposal,
+        &self_device_id,
+        bound.b_pair(),
+        &receipt.ek_pk_a,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!(
+                "[storage.sync] finality certificate for {short}.. could not be built — \
+                 refusing to finalize (retry from the durable outbox): {e}"
+            );
+            return CountersignOutcome::FinalizeFailed(format!("finality certificate: {e}"));
+        }
     };
 
     match crate::storage::client_db::finalize_on_acceptance_atomically(
-        &proposal.relationship_key,
-        &proposal.canonical_parent,
-        &proposal.nonce_hash,
-        &proposal.commitment,
-        &proposal.counterparty_device_id,
-        &proposal.projection_parent,
-        &proposal.projection_target,
-        expected_counterparty_head.as_deref(),
-        &receipt.ek_pk_b,
-        &countersign_artifact,
+        &crate::storage::client_db::AcceptanceFinalization {
+            relationship_key: &proposal.relationship_key,
+            canonical_parent: &proposal.canonical_parent,
+            proposal_nonce: &proposal.nonce_hash,
+            commitment: &proposal.commitment,
+            counterparty_device_id: &proposal.counterparty_device_id,
+            projection_parent: &proposal.projection_parent,
+            projection_target: &proposal.projection_target,
+            expected_counterparty_head: expected_counterparty_head.as_deref(),
+            new_counterparty_head: &receipt.ek_pk_b,
+            peer_pair: bound.b_pair(),
+            genesis_seed,
+            countersign_b: &countersign_artifact,
+            finalized: &finalized_artifact,
+        },
     ) {
         Ok(()) => {
             log::info!(
                 "[storage.sync] §16.6 FINALIZED atomically on acceptance proof: \
-                 commitment={short}.. tx={} (tip advanced, both cert heads promoted, \
-                 gate released, outbox gc_pending, countersign_b retained)",
+                 commitment={short}.. tx={} (tip advanced, both cert heads promoted, peer \
+                 head pinned, certificate frozen, outbox finalization_checkpoint_pending; \
+                 gate retained until the checkpoint reaches quorum)",
                 proposal.tx_id
             );
             // The retired §5.4 sweep emitted this on tip advance; the tip now
@@ -711,6 +778,221 @@ fn park_awaiting_valid_reply(
              retained, but recording the awaiting-valid-reply state FAILED: {e}"
         ),
     }
+}
+
+/// Build and sign the `RelationshipFinalizedV1` for a verified acceptance,
+/// frozen as an outbox artifact with its own route. PURE apart from DB reads:
+/// the pending A EK (signer), the recipient's genesis (route), the local
+/// genesis (envelope headers). Refuses if the pending EK's public key is not
+/// the `ek_pk_a` the recipient chained — that is the key it will verify under.
+fn build_relationship_finalized_artifact(
+    proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
+    self_device_id: &[u8; 32],
+    b_pair: ([u8; 32], [u8; 32]),
+    receipt_ek_pk_a: &[u8],
+) -> Result<crate::storage::client_db::SenderOutboxArtifact, String> {
+    use crate::storage::client_db::sender_outbox::{
+        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
+    };
+    use prost::Message;
+
+    let wrap_key = crate::init::current_chain_head_at_rest_key()
+        .map_err(|e| format!("chain-head key unavailable (wallet locked?): {e}"))?;
+    let (ek_pk_a, ek_sk_a) = crate::storage::client_db::pending_local_head_signer(
+        &proposal.relationship_key,
+        &proposal.commitment,
+        &wrap_key,
+    )
+    .map_err(|e| format!("pending Local EK head read: {e}"))?
+    .ok_or_else(|| "no pending Local EK head for this commitment".to_string())?;
+    if ek_pk_a != receipt_ek_pk_a {
+        return Err(
+            "pending Local EK head is not the ek_pk_a the recipient chained — refusing to sign \
+             a certificate the recipient could not verify"
+                .to_string(),
+        );
+    }
+    let mut cert = dsm::types::proto::RelationshipFinalizedV1 {
+        relationship_key: proposal.relationship_key.to_vec(),
+        transition_commitment: proposal.commitment.to_vec(),
+        sender_device_id: self_device_id.to_vec(),
+        recipient_device_id: proposal.counterparty_device_id.to_vec(),
+        sender_child_tip_a: proposal.canonical_child.to_vec(),
+        recipient_parent_tip_b: b_pair.0.to_vec(),
+        recipient_child_tip_b: b_pair.1.to_vec(),
+        signature_a: Vec::new(),
+    };
+    let target = dsm::types::receipt_types::relationship_finalized_signing_target(&cert);
+    cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
+        .map_err(|e| format!("certificate signing: {e}"))?;
+    let wire = cert.encode_to_vec();
+    // Self-check through the strict codec the recipient will apply.
+    dsm::types::receipt_types::decode_relationship_finalized_wire(&wire)
+        .map_err(|e| format!("certificate fails its own wire codec: {e}"))?;
+
+    let content_digest = evidence_content_digest(ArtifactRole::RelationshipFinalized, &wire);
+    let submission_id = derive_artifact_submission_id(&content_digest);
+
+    // Frozen route: the recipient polls at the tip it converged to — the
+    // proposal's projection target — under ITS genesis and device.
+    let recipient_genesis: [u8; 32] =
+        match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id)
+        {
+            Ok(Some(c)) => c
+                .genesis_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| "recipient contact genesis is not 32 bytes".to_string())?,
+            Ok(None) => return Err("no contact for the recipient".to_string()),
+            Err(e) => return Err(format!("recipient contact lookup: {e}")),
+        };
+    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+        &recipient_genesis,
+        &proposal.counterparty_device_id,
+        &proposal.projection_target,
+    )
+    .map_err(|e| format!("certificate route: {e}"))?;
+    let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or_else(|| "local genesis unavailable".to_string())?;
+    let built = crate::sdk::b0x_sdk::B0xSDK::build_relationship_finalized_envelope(
+        self_device_id,
+        &local_genesis,
+        &proposal.projection_target,
+        &wire,
+        &content_digest,
+        &submission_id,
+    )
+    .map_err(|e| format!("certificate envelope: {e}"))?;
+
+    Ok(SenderOutboxArtifact {
+        relationship_key: proposal.relationship_key,
+        canonical_parent: proposal.canonical_parent,
+        proposal_nonce: proposal.nonce_hash,
+        role: ArtifactRole::RelationshipFinalized,
+        submission_id,
+        envelope_bytes: built.bytes,
+        content_digest,
+        routing_address: Some(route),
+    })
+}
+
+/// Finality-barrier checkpoint sweep: replay every frozen
+/// `RelationshipFinalizedV1` whose outbox row is `finalization_checkpoint_pending`
+/// under its own frozen route and deterministic id until it reaches storage
+/// quorum, then — the ONE deleter — release the sender's gate and move the row
+/// to `gc_pending` in one transaction. Failure leaves the row for the next
+/// sweep; nothing is rebuilt.
+async fn deliver_pending_finalization_checkpoints(
+    storage_endpoints: &[String],
+    core_sdk: std::sync::Arc<crate::sdk::core_sdk::CoreSDK>,
+) -> Result<u32, String> {
+    use crate::storage::client_db::{
+        finalization_checkpoint_pending_sender_outbox, get_sender_proposal_by_commitment,
+        load_sender_outbox_artifacts, release_gate_on_finalization_checkpoint_atomically,
+        ArtifactRole,
+    };
+
+    let rows = finalization_checkpoint_pending_sender_outbox().map_err(|e| e.to_string())?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let local_device_b32 = match crate::sdk::app_state::AppState::get_device_id() {
+        Some(d) if d.len() == 32 => crate::util::text_id::encode_base32_crockford(&d),
+        _ => return Err("local device_id unavailable for the checkpoint sweep".to_string()),
+    };
+    let mut b0x =
+        crate::sdk::b0x_sdk::B0xSDK::new(local_device_b32, core_sdk, storage_endpoints.to_vec())
+            .map_err(|e| format!("B0xSDK init: {e}"))?;
+    let retry = crate::sdk::b0x_sdk::B0xRetryConfig::default();
+
+    let mut released = 0u32;
+    for row in rows {
+        let artifacts = match load_sender_outbox_artifacts(
+            &row.relationship_key,
+            &row.canonical_parent,
+            &row.proposal_nonce,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] checkpoint sweep: {} artifacts unreadable; retry next sweep: {e}",
+                    row.submission_id
+                );
+                continue;
+            }
+        };
+        let Some(checkpoint) = artifacts
+            .into_iter()
+            .find(|a| a.role == ArtifactRole::RelationshipFinalized)
+        else {
+            log::error!(
+                "[storage.sync] checkpoint sweep: {} is finalization_checkpoint_pending with NO \
+                 frozen certificate — invariant violated; leaving for inspection",
+                row.submission_id
+            );
+            continue;
+        };
+        let Some(route) = checkpoint.routing_address.as_deref() else {
+            log::error!(
+                "[storage.sync] checkpoint sweep: certificate {} has no frozen route — invariant \
+                 violated; leaving for inspection",
+                checkpoint.submission_id
+            );
+            continue;
+        };
+        let proposal = match get_sender_proposal_by_commitment(&row.commitment) {
+            Ok(Some(p)) => p,
+            _ => {
+                log::error!(
+                    "[storage.sync] checkpoint sweep: no proposal for {} — leaving for inspection",
+                    row.submission_id
+                );
+                continue;
+            }
+        };
+        match b0x
+            .submit_stored_envelope_with_retry(
+                &checkpoint.envelope_bytes,
+                route,
+                &checkpoint.submission_id,
+                &retry,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!(
+                    "[storage.sync] checkpoint sweep: certificate {} below quorum (will retry): {e}",
+                    checkpoint.submission_id
+                );
+                continue;
+            }
+        }
+        match release_gate_on_finalization_checkpoint_atomically(
+            &row.relationship_key,
+            &row.canonical_parent,
+            &row.proposal_nonce,
+            &proposal.counterparty_device_id,
+            &row.projection_parent,
+            &row.projection_target,
+        ) {
+            Ok(true) => {
+                released += 1;
+                log::info!(
+                    "[storage.sync] finality checkpoint {} at quorum — gate released, outbox gc_pending",
+                    checkpoint.submission_id
+                );
+                emit_authoritative_wallet_refresh();
+            }
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "[storage.sync] checkpoint sweep: release after quorum FAILED for {}: {e}",
+                checkpoint.submission_id
+            ),
+        }
+    }
+    Ok(released)
 }
 
 /// §16.6 reply-window delivery sweep.
@@ -790,6 +1072,7 @@ async fn deliver_pending_acceptance_replies(
                 &reply.projection_parent_tip,
                 &reply.commitment,
                 &reply.receipt_bytes,
+                (reply.applied_parent_tip_b, reply.applied_child_tip_b),
             )
             .await
         {
@@ -881,12 +1164,20 @@ impl AppRouterImpl {
                 continue;
             };
 
-            let artifacts = match load_sender_outbox_artifacts(
+            // Only the INITIAL-send artifacts are replayed here (the A-side
+            // evidence). The finality certificate has its own frozen route and
+            // sweep; a received delta is never re-sent. An unsettled row cannot
+            // hold either yet, but the resubmit sweep can race a finalize — so
+            // it must never see non-initial roles.
+            let artifacts: Vec<_> = match load_sender_outbox_artifacts(
                 &row.relationship_key,
                 &row.canonical_parent,
                 &row.proposal_nonce,
             ) {
-                Ok(a) => a,
+                Ok(a) => a
+                    .into_iter()
+                    .filter(|a| a.role.is_initial_send_artifact())
+                    .collect(),
                 Err(e) => {
                     log::warn!(
                         "[storage.sync] outbox resubmit: {} artifacts unreadable; leaving \
@@ -1105,6 +1396,34 @@ impl AppRouterImpl {
                     &sender_device,
                     &self_device,
                 );
+
+                // FINALITY BARRIER — reordering hold. A next-generation transfer
+                // may be TRANSPORTED before this device has processed the
+                // sender's certificate for the predecessor it applied, but it
+                // may not be canonically APPLIED until then: while any accepted
+                // journal on this relationship still has `peer_finalized = 0`,
+                // the pair stays `ready_to_verify` (no decide_ack, no apply, no
+                // ACK, no reject; route retained). This pass re-runs every poll
+                // and certificates are drained BEFORE it, so once the
+                // certificate lands the same row proceeds through the normal
+                // pin. Intended behaviour, not a defect to widen the barrier for.
+                match crate::storage::client_db::relationship_awaits_peer_finalization(&rel_key) {
+                    Ok(true) => {
+                        log::info!(
+                            "[storage.sync] ADR 0003 completion: {key} HELD — a prior acceptance on \
+                             this relationship awaits the peer's finality certificate"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "[storage.sync] ADR 0003 completion: {key}: barrier read failed: {e}"
+                        );
+                        continue;
+                    }
+                }
+
                 let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
                     Ok(p) => p,
                     Err(e) => {
@@ -1187,35 +1506,55 @@ impl AppRouterImpl {
                         )
                     };
 
-                    // PREPARE — BEFORE apply, idempotent, never re-signs.
-                    rr::prepare_bside_acceptance_receipt_locked(
-                        rel_key,
-                        signed_parent,
-                        (projection_parent, projection_target),
-                        || {
-                            rr::generate_b_artifacts_from_inbound(
-                                &v.receipt,
-                                &signed_sigma,
-                                &sender_kyber_pk,
-                                &ak_pk,
-                                &ak_sk,
-                                &wrap_key,
-                            )
-                        },
-                    )
-                    .map_err(|e| format!("prepare failed for {key_for_apply}: {e}"))?;
-
-                    // APPLY — the one production canonical apply.
+                    // APPLY — the one production canonical apply, STAGED: the
+                    // B artifacts are generated in the pre-write window from the
+                    // exact AdvanceOutcome (its relationship pair is what sig_b
+                    // authenticates) and the journal is inserted INSIDE the apply
+                    // transaction with the nonce and the canonical record.
                     let tx_id =
                         crate::types::identifiers::TransactionId::new(key_for_apply.clone());
+                    let receipt = &v.receipt;
                     core_sdk
-                        .apply_incoming_transfer_full_state(
+                        .apply_incoming_transfer_staged(
                             v.signed_op.clone(),
                             &tx_id,
                             &sender_b32_for_apply,
                             &v.canonical_operation_bytes,
                             signed_parent,
                             signed_child,
+                            |_outcome, b_pair| {
+                                rr::generate_b_artifacts_from_inbound(
+                                    receipt,
+                                    &signed_sigma,
+                                    &sender_kyber_pk,
+                                    &ak_pk,
+                                    &ak_sk,
+                                    &wrap_key,
+                                    b_pair,
+                                )
+                                .map_err(|e| {
+                                    dsm::types::error::DsmError::invalid_operation(format!(
+                                        "B-side acceptance artifacts: {e}"
+                                    ))
+                                })
+                            },
+                            |tx, _outcome, artifacts| {
+                                crate::storage::client_db::insert_prepared_acceptance_journal_with_conn(
+                                    tx,
+                                    &rr::journal_row(
+                                        artifacts,
+                                        rel_key,
+                                        signed_parent,
+                                        (projection_parent, projection_target),
+                                    ),
+                                )
+                                .map_err(|e| {
+                                    dsm::types::error::DsmError::internal(
+                                        format!("in-tx acceptance journal insert failed: {e}"),
+                                        None::<std::convert::Infallible>,
+                                    )
+                                })
+                            },
                         )
                         .map_err(|e| format!("apply failed for {key_for_apply}: {e}"))
                 });
@@ -1680,6 +2019,45 @@ impl AppRouterImpl {
                                         ),
                                         Err(e) => log::warn!(
                                             "[storage.sync] ADR 0003 countersign delta ACK failed on {}.. (re-served next poll): {e}",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                    }
+                                }
+                                // Finality certificates (finality barrier), processed BEFORE
+                                // split-transfer completion in this same poll so a next-
+                                // generation pair held behind them can proceed in one pass.
+                                let mut consumed_checkpoints: Vec<String> = Vec::new();
+                                for checkpoint in b0x_sdk.take_relationship_finalized() {
+                                    let outcome =
+                                        crate::handlers::relationship_finalized::apply_relationship_finalized(
+                                            &checkpoint.body,
+                                        )
+                                        .await;
+                                    log::info!(
+                                        "[storage.sync] finality checkpoint {} -> {:?}",
+                                        checkpoint.message_id,
+                                        outcome
+                                    );
+                                    use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
+                                    if matches!(
+                                        outcome,
+                                        O::Applied | O::AlreadyFinalized | O::NoJournal
+                                    ) {
+                                        consumed_checkpoints.push(checkpoint.message_id.clone());
+                                    }
+                                }
+                                if !consumed_checkpoints.is_empty() {
+                                    let n = consumed_checkpoints.len();
+                                    match b0x_sdk
+                                        .acknowledge_b0x_v2(&tagged_addr.address, consumed_checkpoints)
+                                        .await
+                                    {
+                                        Ok(_) => log::info!(
+                                            "[storage.sync] ACKed {n} finality checkpoint(s) on {}..",
+                                            &tagged_addr.address[..tagged_addr.address.len().min(12)]
+                                        ),
+                                        Err(e) => log::warn!(
+                                            "[storage.sync] finality checkpoint ACK failed on {}.. (re-served next poll): {e}",
                                             &tagged_addr.address[..tagged_addr.address.len().min(12)]
                                         ),
                                     }
@@ -2153,6 +2531,21 @@ impl AppRouterImpl {
                         Err(e) => {
                             log::warn!("[storage.sync] outbox resubmit sweep errored: {e}");
                             errors.push(format!("outbox resubmit sweep failed: {e}"));
+                        }
+                    }
+                    // Finality barrier: replay frozen certificates until quorum,
+                    // then release the sender's gate — the ONE deleter. Same
+                    // placement rule as the resubmit sweep: outside `if pull_inbox`.
+                    match deliver_pending_finalization_checkpoints(
+                        &storage_endpoints,
+                        self.core_sdk.clone(),
+                    )
+                    .await
+                    {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] checkpoint sweep errored: {e}");
+                            errors.push(format!("checkpoint sweep failed: {e}"));
                         }
                     }
                 }
@@ -2815,6 +3208,20 @@ mod tests {
     /// Ordering matters: everything the commitment covers is set BEFORE the
     /// commitment is computed, and `sig_b` — which signs a target derived from
     /// that commitment — is attached last.
+    /// The recipient's canonical pair every fixture in this module signs
+    /// under (B-canonical target) and carries in its delta: the relationship's
+    /// genesis seed (what the sender pins before any step is learned) → an
+    /// opaque first child.
+    fn test_b_pair() -> ([u8; 32], [u8; 32]) {
+        (
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &[0x0Au8; 32],
+                &[0x0Bu8; 32],
+            ),
+            [0x72u8; 32],
+        )
+    }
+
     fn signed_b_receipt(
         a: [u8; 32],
         b: [u8; 32],
@@ -2822,7 +3229,7 @@ mod tests {
         child: [u8; 32],
         b_ak_sk: &[u8],
     ) -> dsm::types::receipt_types::StitchedReceiptV2 {
-        use crate::sdk::receipts::compute_receipt_challenge_response_target;
+        use crate::sdk::receipts::compute_receipt_b_canonical_target;
         use dsm::crypto::ephemeral_key::sign_ek_cert;
         use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
 
@@ -2847,7 +3254,13 @@ mod tests {
         r.ek_cert_b = sign_ek_cert(b_ak_sk, &ek_pk_b, &parent).expect("ek_cert_b");
 
         let commitment = r.compute_commitment().expect("commitment");
-        let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+        // Online B side: sig_b authenticates the recipient's canonical pair.
+        let target = compute_receipt_b_canonical_target(
+            &commitment,
+            &commitment,
+            &test_b_pair().0,
+            &test_b_pair().1,
+        );
         r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
         r
     }
@@ -2861,6 +3274,7 @@ mod tests {
         proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
         sender_b32: &str,
         recipient_b32: &str,
+        ek_a: (&[u8], &[u8]),
     ) -> [u8; 32] {
         use crate::storage::client_db::{
             commit_send_prerequisites_atomically, evidence_content_digest, ArtifactRole,
@@ -2912,14 +3326,19 @@ mod tests {
             submission_id: evidence_sid,
             envelope_bytes: built.bytes,
             content_digest: digest_a,
+            routing_address: None,
         };
+        // The pending A EK head is stashed under the REAL at-rest key (the
+        // certificate builder decrypts it with the same derivation), holding
+        // the REAL per-step EK the receipt's `ek_pk_a` names.
+        let wrap = crate::init::current_chain_head_at_rest_key().expect("at-rest key");
         commit_send_prerequisites_atomically(
             proposal,
             &outbox,
             "GATE-658",
-            &[0xD1u8; 64],
-            &[0xD2u8; 64],
-            &[0x42u8; 32],
+            ek_a.0,
+            ek_a.1,
+            &wrap,
             true,
             std::slice::from_ref(&evidence),
         )
@@ -2948,6 +3367,8 @@ mod tests {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: test_b_pair().0.to_vec(),
+            b_child_tip: test_b_pair().1.to_vec(),
         }
         .encode_to_vec();
         crate::sdk::b0x_sdk::CountersignDelta {
@@ -2982,6 +3403,20 @@ mod tests {
     /// recipient-side fixture can share it (the AK is the cert-chain genesis
     /// root both ends verify `ek_cert_b` against).
     fn seed_submitted_step_with_recipient_ak(b_ak_pk: Vec<u8>, b_ak_sk: Vec<u8>) -> SeededStep {
+        let (ek_pk_a, ek_sk_a) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
+        seed_submitted_step_with_keys(b_ak_pk, b_ak_sk, ek_pk_a, ek_sk_a)
+    }
+
+    /// As [`seed_submitted_step_with_recipient_ak`], with the sender's per-step
+    /// EK supplied so a recipient-side fixture can hold the same `ek_pk_a`
+    /// (the A bytes both halves digest must be identical).
+    fn seed_submitted_step_with_keys(
+        b_ak_pk: Vec<u8>,
+        b_ak_sk: Vec<u8>,
+        ek_pk_a: Vec<u8>,
+        ek_sk_a: Vec<u8>,
+    ) -> SeededStep {
         use crate::storage::client_db::sender_proposal::{
             mark_sender_proposal_submitted, SenderOnlineProposal, PROPOSAL_PROPOSED,
         };
@@ -3001,10 +3436,16 @@ mod tests {
             vec![0u8; 32],
         );
         crate::sdk::app_state::AppState::set_has_identity(true);
+        // The at-rest key that wraps the pending A EK derives from the wallet
+        // seed + genesis; the finalizer re-derives it to sign the certificate.
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(vec![0x9Cu8; 64]);
 
         // The honest reply defines the commitment this step is bound to; its A
-        // side is what the sender authored and froze.
-        let honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        // side is what the sender authored and froze — including the sender's
+        // REAL per-step EK (`ek_pk_a`), which the recipient chains and the
+        // finality certificate is signed with.
+        let mut honest = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        honest.set_ek_pk_a(ek_pk_a.clone());
         let commitment = honest.compute_commitment().expect("commitment");
         let (a_side, _) = honest.split_countersign_b().expect("split");
 
@@ -3036,6 +3477,7 @@ mod tests {
             &proposal,
             &crate::util::text_id::encode_base32_crockford(&a),
             &crate::util::text_id::encode_base32_crockford(&b),
+            (&ek_pk_a, &ek_sk_a),
         );
         mark_sender_proposal_submitted(&rel_key, &parent, "MSG-658").expect("submit");
 
@@ -3120,6 +3562,7 @@ mod tests {
             &st.b_ak_pk,
             None,
             None,
+            test_b_pair(),
         )
         .expect("verification must not error")
         {
@@ -3143,7 +3586,11 @@ mod tests {
         let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
             .expect("outbox")
             .expect("present");
-        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            "finalized locally; the certificate still has to reach quorum"
+        );
         let retained = crate::storage::client_db::load_sender_outbox_artifacts(
             &st.rel_key,
             &st.parent,
@@ -3155,6 +3602,12 @@ mod tests {
                 == crate::storage::client_db::ArtifactRole::CountersignB
                 && a.envelope_bytes == good.envelope_bytes),
             "the delta the sender finalized on is retained beside its evidence_a"
+        );
+        assert!(
+            retained.iter().any(|a| a.role
+                == crate::storage::client_db::ArtifactRole::RelationshipFinalized
+                && a.routing_address.is_some()),
+            "the finality certificate is frozen with its own route in the same commit"
         );
 
         // A redelivered honest delta is an idempotent no-op.
@@ -3181,13 +3634,19 @@ mod tests {
         let poisoned = signed_b_receipt(a, b, parent, [0xEEu8; 32], &b_ak_sk);
 
         // Its per-step EK countersignature is genuinely valid over the receipt
-        // it was minted for ...
-        crate::sdk::receipts::verify_per_step_ek_signing(
+        // (and pair) it was minted for ...
+        let poisoned_commitment = poisoned.compute_commitment().expect("commitment");
+        crate::sdk::receipts::verify_per_step_ek_signing_target(
             &poisoned,
             crate::sdk::receipts::BilateralSide::B,
             &b_ak_pk,
             &poisoned.parent_tip,
-            &poisoned.compute_commitment().expect("commitment"),
+            &crate::sdk::receipts::compute_receipt_b_canonical_target(
+                &poisoned_commitment,
+                &poisoned_commitment,
+                &test_b_pair().0,
+                &test_b_pair().1,
+            ),
         )
         .expect("the poisoned receipt must carry a genuinely valid sig_b");
 
@@ -3263,9 +3722,73 @@ mod tests {
         assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
     }
 
+    /// R5 — the recipient's canonical pair is covered by `sig_b`. A delta whose
+    /// B material is genuine but whose `b_parent_tip` or `b_child_tip` was
+    /// substituted (a middlebox, or a recipient lying about its lineage) fails
+    /// the countersignature check and finalizes NOTHING; the untouched delta
+    /// then finalizes the same step. Mutation M2 (drop the pair from the
+    /// target) turns this red: the flipped deltas would verify.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn r5_a_substituted_recipient_pair_fails_sig_b_and_finalizes_nothing() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        use prost::Message;
+        let st = seed_submitted_step();
+        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+
+        for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
+            let mut body =
+                dsm::types::proto::ReceiptCountersignB::decode(&*good.body).expect("delta");
+            if flip == 0 {
+                body.b_parent_tip[0] ^= 0x01;
+            } else {
+                body.b_child_tip[0] ^= 0x01;
+            }
+            let flipped = crate::sdk::b0x_sdk::CountersignDelta {
+                body: body.encode_to_vec(),
+                ..good.clone()
+            };
+            match super::finalize_from_countersign_delta(&flipped).await {
+                CountersignOutcome::Rejected(reason) => assert!(
+                    reason.contains("sig_b"),
+                    "{label}: a substituted pair must fail on the countersignature, got: {reason}"
+                ),
+                other => panic!("{label}: expected Rejected on sig_b, got {other:?}"),
+            }
+            assert_eq!(
+                proposal_status(&st.commitment),
+                PROPOSAL_AWAITING_VALID_REPLY,
+                "{label}: parked, not finalized"
+            );
+            assert!(
+                crate::storage::client_db::load_cert_chain_head_pubkey(
+                    &st.rel_key,
+                    crate::storage::client_db::CertChainSide::Counterparty,
+                )
+                .expect("head")
+                .is_none(),
+                "{label}: no head advanced"
+            );
+        }
+
+        // Positive control: the untouched delta finalizes the same step.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
     /// A whole countersigned receipt on the countersign method is refused at
-    /// the wire ("unknown field 7") and changes nothing; the same fixture then
-    /// finalizes on the honest delta, so "nothing changed" is not vacuous.
+    /// the wire and changes nothing; the same fixture then finalizes on the
+    /// honest delta, so "nothing changed" is not vacuous. (Which tag trips
+    /// first depends on the receipt's shape — this thin fixture carries no
+    /// proofs, so its first tag past the delta's 8 is `sig_a`'s 13; the
+    /// production-shaped receipt fails on tag 8's width. Both are refusals
+    /// of the same wire discriminator.)
     #[tokio::test]
     #[serial_test::serial]
     async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
@@ -3280,7 +3803,10 @@ mod tests {
         };
         match super::finalize_from_countersign_delta(&full_receipt).await {
             CountersignOutcome::WireRejected(reason) => {
-                assert!(reason.contains("unknown field 7"), "{reason}")
+                assert!(
+                    reason.contains("countersign wire: unknown field 13"),
+                    "{reason}"
+                )
             }
             other => panic!("expected WireRejected, got {other:?}"),
         }
@@ -3322,6 +3848,7 @@ mod tests {
                 &st.proposal.projection_parent,
                 &st.commitment,
                 &full_bytes,
+                test_b_pair(),
             )
             .expect("real delta");
         assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
@@ -3371,6 +3898,9 @@ mod tests {
         b: [u8; 32],
         b_ak_pk: Vec<u8>,
         b_ak_sk: Vec<u8>,
+        /// The sender's per-step EK the receipt names as `ek_pk_a`.
+        ek_pk_a: Vec<u8>,
+        ek_sk_a: Vec<u8>,
         commitment: [u8; 32],
         projection_parent: [u8; 32],
         full_bytes: Vec<u8>,
@@ -3427,9 +3957,12 @@ mod tests {
         crate::storage::client_db::store_auth_token(endpoint, &b_b32, &genesis_b32, "test-token")
             .expect("seed auth token");
 
-        // The countersigned receipt with REAL per-step EK material, stored in
-        // full — exactly what the fold persists.
-        let full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        // The countersigned receipt with REAL per-step EK material (both
+        // sides), stored in full — exactly what the fold persists.
+        let (ek_pk_a, ek_sk_a) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
+        let mut full = signed_b_receipt(a, b, parent, child, &b_ak_sk);
+        full.set_ek_pk_a(ek_pk_a.clone());
         let full_bytes = full.to_full_protobuf().expect("full receipt");
         let commitment = full.compute_commitment().expect("commitment");
         let rel = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
@@ -3448,10 +3981,13 @@ mod tests {
             new_local_b_head: full.ek_pk_b.clone(),
             new_local_b_sk_enc: None,
             expected_counterparty_a_head: None,
-            new_counterparty_a_head: Vec::new(),
+            new_counterparty_a_head: ek_pk_a.clone(),
             receipt_bytes: full_bytes.clone(),
             projection_parent_tip: projection_parent,
             projection_target_tip: [0xBBu8; 32],
+            applied_parent_tip_b: test_b_pair().0,
+            applied_child_tip_b: test_b_pair().1,
+            peer_finalized: false,
             status: "prepared".to_string(),
             created_at: 0,
         };
@@ -3481,6 +4017,8 @@ mod tests {
             b,
             b_ak_pk,
             b_ak_sk,
+            ek_pk_a,
+            ek_sk_a,
             commitment,
             projection_parent,
             full_bytes,
@@ -3556,7 +4094,12 @@ mod tests {
         );
 
         // ---- sender half: the recorded body finalizes the step ----
-        let st = seed_submitted_step_with_recipient_ak(rh.b_ak_pk.clone(), rh.b_ak_sk.clone());
+        let st = seed_submitted_step_with_keys(
+            rh.b_ak_pk.clone(),
+            rh.b_ak_sk.clone(),
+            rh.ek_pk_a.clone(),
+            rh.ek_sk_a.clone(),
+        );
         assert_eq!(
             st.commitment, rh.commitment,
             "both halves describe the same step"
@@ -3594,7 +4137,9 @@ mod tests {
             ..recorded.clone()
         };
         match super::finalize_from_countersign_delta(&m2).await {
-            CountersignOutcome::WireRejected(r) => assert!(r.contains("unknown field 7"), "{r}"),
+            CountersignOutcome::WireRejected(r) => {
+                assert!(r.contains("countersign wire: unknown field 13"), "{r}")
+            }
             other => panic!("expected WireRejected, got {other:?}"),
         }
 
@@ -3625,7 +4170,10 @@ mod tests {
         let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
             .expect("outbox")
             .expect("present");
-        assert_eq!(outbox.status, crate::storage::client_db::OUTBOX_GC_PENDING);
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING
+        );
         let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
         assert_eq!(
             crate::storage::client_db::load_cert_chain_head_pubkey(
@@ -3856,45 +4404,10 @@ mod tests {
         Ok(endpoint)
     }
 
-    /// Point the runtime's storage-endpoint resolver at the recorders.
-    ///
-    /// Both `wallet.send` and `storage.sync` resolve endpoints through
-    /// `StorageNodeConfig::from_env_config()`, NOT `SdkConfig`. Under
-    /// DSM_SDK_TEST_MODE that loader returns a hardcoded localhost set
-    /// (:8080-8084) unless DSM_ENV_CONFIG_PATH names a real file — so without
-    /// this, the code under test dials ports nothing is listening on and a
-    /// missing submission is indistinguishable from the defect.
-    fn point_env_config_at(endpoints: &[String]) {
-        // ONE fixed path per process, installed through the OnceLock the JNI
-        // layer uses in production. The env var is deliberately NOT relied on:
-        // other test modules in this binary `remove_var` it from NON-serial
-        // setup helpers, so under a full-binary run they can clear it between
-        // this call and the sweep's read — the sweep then dials the
-        // DSM_SDK_TEST_MODE fallback ports and a wiring test goes red for a
-        // fixture reason. The OnceLock is consulted before the env var and
-        // cannot be un-set, so it is immune to that race. Each test rewrites
-        // the FILE with its own recorders; the loader re-reads it every call.
-        let cfg_path = std::env::temp_dir().join(format!(
-            "dsm_storage_routes_test_env_{}.toml",
-            std::process::id()
-        ));
-        let mut cfg_toml = String::from(
-            "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\n\
-             storage_node_mode = \"remote\"\nports = [8080]\n\
-             bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
-        );
-        for (i, ep) in endpoints.iter().enumerate() {
-            cfg_toml.push_str(&format!(
-                "\n[[nodes]]\nname = \"rec-{i}\"\nendpoint = \"{ep}\"\n"
-            ));
-        }
-        std::fs::write(&cfg_path, cfg_toml).expect("write env config");
-        crate::network::set_env_config_path(cfg_path.to_string_lossy().into_owned());
-        // Belt and braces for any reader that still prefers the env var.
-        unsafe {
-            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
-        }
-    }
+    /// Point the runtime's storage-endpoint resolver at the recorders — ONE
+    /// process-wide definition (the OnceLock path cannot be re-set, so every
+    /// test module must write the same file): see `test_support::fake_node`.
+    use crate::test_support::fake_node::point_env_config_at;
 
     /// A frozen uncertain send: the transfer envelope plus its ADR 0003
     /// A-side evidence, both already encoded and committed.
@@ -3973,6 +4486,7 @@ mod tests {
             submission_id: evidence_submission_id.clone(),
             envelope_bytes: evidence_bytes.clone(),
             content_digest: [0x78u8; 32],
+            routing_address: None,
         };
 
         commit_send_prerequisites_atomically(

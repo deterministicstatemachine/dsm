@@ -44,6 +44,11 @@ pub const OUTBOX_SUBMITTING: &str = "submitting";
 pub const OUTBOX_SUBMITTED: &str = "submitted";
 /// Submission may or may not have landed — reconcile forward, never roll back.
 pub const OUTBOX_SUBMISSION_UNCERTAIN: &str = "submission_uncertain";
+/// Finalized on the acceptance proof; the `RelationshipFinalizedV1`
+/// certificate is frozen but has NOT reached storage quorum. The sender's gate
+/// stays armed; the post-quorum sweep is the ONE deleter that moves this row
+/// on (to `gc_pending`) and clears the gate, in one transaction.
+pub const OUTBOX_FINALIZATION_CHECKPOINT_PENDING: &str = "finalization_checkpoint_pending";
 /// Finalized on the acceptance proof; spool copies still need collecting.
 pub const OUTBOX_GC_PENDING: &str = "gc_pending";
 /// Transport GC done. Terminal.
@@ -63,6 +68,11 @@ pub enum ArtifactRole {
     /// exact envelope it verified and finalized on — its record of the
     /// countersignature, since no full receipt ever crosses the wire.
     CountersignB,
+    /// The `RelationshipFinalizedV1` certificate the sender issues on
+    /// finalization (finality barrier), frozen in the finalize transaction and
+    /// replayed by the checkpoint sweep to the recipient's frozen route until
+    /// it reaches quorum. Never part of the initial send.
+    RelationshipFinalized,
 }
 
 impl ArtifactRole {
@@ -70,6 +80,7 @@ impl ArtifactRole {
         match self {
             ArtifactRole::EvidenceA => "evidence_a",
             ArtifactRole::CountersignB => "countersign_b",
+            ArtifactRole::RelationshipFinalized => "relationship_finalized",
         }
     }
 
@@ -77,8 +88,18 @@ impl ArtifactRole {
         match s {
             "evidence_a" => Ok(ArtifactRole::EvidenceA),
             "countersign_b" => Ok(ArtifactRole::CountersignB),
+            "relationship_finalized" => Ok(ArtifactRole::RelationshipFinalized),
             other => Err(anyhow!("unknown sender_outbox_artifacts.role: {other}")),
         }
+    }
+
+    /// Whether this artifact belongs to the INITIAL logical send — what
+    /// `deliver_frozen_logical_send` ships and the resubmit sweep replays under
+    /// the transfer's route. Only the A-side evidence does; the countersign
+    /// delta is received, and the certificate has its own frozen route and its
+    /// own sweep.
+    pub fn is_initial_send_artifact(self) -> bool {
+        matches!(self, ArtifactRole::EvidenceA)
     }
 }
 
@@ -96,6 +117,10 @@ pub fn evidence_content_digest(role: ArtifactRole, full_wire_bytes: &[u8]) -> [u
         ),
         ArtifactRole::CountersignB => dsm::crypto::blake3::domain_hash_bytes(
             dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_B,
+            full_wire_bytes,
+        ),
+        ArtifactRole::RelationshipFinalized => dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
             full_wire_bytes,
         ),
     }
@@ -117,6 +142,11 @@ pub struct SenderOutboxArtifact {
     pub envelope_bytes: Vec<u8>,
     /// Role-domain-separated address of the payload this artifact carries.
     pub content_digest: [u8; 32],
+    /// The frozen route this artifact is submitted under, when it is NOT the
+    /// owning outbox's route: `Some` for `RelationshipFinalized` (the
+    /// recipient's route, frozen at finalize), `None` for the initial-send
+    /// artifacts (which ride the transfer's route).
+    pub routing_address: Option<String>,
 }
 
 /// One online send's durable lifecycle record.
@@ -343,8 +373,8 @@ pub fn insert_sender_outbox_artifact_with_conn(
     tx.execute(
         "INSERT INTO sender_outbox_artifacts(
             relationship_key, canonical_parent, proposal_nonce, role,
-            submission_id, envelope_bytes, content_digest, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            submission_id, envelope_bytes, content_digest, routing_address, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             artifact.relationship_key.as_slice(),
             artifact.canonical_parent.as_slice(),
@@ -353,6 +383,7 @@ pub fn insert_sender_outbox_artifact_with_conn(
             artifact.submission_id,
             artifact.envelope_bytes,
             artifact.content_digest.as_slice(),
+            artifact.routing_address.as_deref(),
             tick() as i64,
         ],
     )?;
@@ -369,7 +400,7 @@ pub fn load_sender_outbox_artifacts(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT relationship_key, canonical_parent, proposal_nonce, role,
-                submission_id, envelope_bytes, content_digest
+                submission_id, envelope_bytes, content_digest, routing_address
          FROM sender_outbox_artifacts
          WHERE relationship_key = ?1 AND canonical_parent = ?2 AND proposal_nonce = ?3
          ORDER BY role",
@@ -395,13 +426,14 @@ pub fn load_sender_outbox_artifacts(
                     row.get::<_, String>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
                     to32(row.get::<_, Vec<u8>>(6)?),
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     rows.into_iter()
-        .map(|(rk, cp, pn, role, sid, bytes, digest)| {
+        .map(|(rk, cp, pn, role, sid, bytes, digest, route)| {
             Ok(SenderOutboxArtifact {
                 relationship_key: rk,
                 canonical_parent: cp,
@@ -410,6 +442,7 @@ pub fn load_sender_outbox_artifacts(
                 submission_id: sid,
                 envelope_bytes: bytes,
                 content_digest: digest,
+                routing_address: route,
             })
         })
         .collect()
@@ -466,6 +499,20 @@ pub fn commit_send_prerequisites_with_conn(
     ek_is_init: bool,
     artifacts: &[SenderOutboxArtifact],
 ) -> Result<()> {
+    // Finality barrier, defense in depth IN the transaction: this device may
+    // not originate on a relationship while an acceptance it journaled still
+    // awaits the peer's certificate. The authority refuses earlier; this makes
+    // the write itself impossible.
+    if super::recipient_receipt_fold::relationship_awaits_peer_finalization_with_conn(
+        tx,
+        &proposal.relationship_key,
+    )? {
+        return Err(anyhow!(
+            "send prerequisites: an inbound acceptance on this relationship still awaits the \
+             peer's finality certificate — originating is refused (finality barrier)"
+        ));
+    }
+
     super::sender_proposal::insert_sender_proposal_with_conn(tx, proposal)?;
 
     super::cert_chain::stash_pending_local_head_cas_with_conn(
@@ -502,47 +549,96 @@ pub fn commit_send_prerequisites_with_conn(
 
 /// §16.6 DEFECT 1 — ATOMIC ACCEPTANCE-PROOF FINALIZATION.
 ///
+/// Everything one verified acceptance authorises the sender to commit — the
+/// inputs of [`finalize_on_acceptance_atomically`], all read from the durable
+/// proposal + the verified delta, never from current state.
+pub struct AcceptanceFinalization<'a> {
+    pub relationship_key: &'a [u8; 32],
+    pub canonical_parent: &'a [u8; 32],
+    pub proposal_nonce: &'a [u8; 32],
+    pub commitment: &'a [u8; 32],
+    pub counterparty_device_id: &'a [u8; 32],
+    pub projection_parent: &'a [u8; 32],
+    pub projection_target: &'a [u8; 32],
+    /// The Counterparty EK head observed before finalization (CAS expectation).
+    pub expected_counterparty_head: Option<&'a [u8]>,
+    /// The recipient's `ek_pk_b` — the new Counterparty EK head.
+    pub new_counterparty_head: &'a [u8],
+    /// The recipient's canonical pair from the delta, authenticated by `sig_b`:
+    /// its head before (`.0`) and after (`.1`) applying this step. CAS'd into
+    /// `counterparty_canonical_heads` (`.0` → `.1`) in the same transaction.
+    pub peer_pair: ([u8; 32], [u8; 32]),
+    /// `initial_chain_tip_from_device_ids(self, peer)` — the pair's `.0` must
+    /// equal it when no head row exists yet (the relationship's first step).
+    pub genesis_seed: [u8; 32],
+    /// The exact delta envelope this finalization was judged on.
+    pub countersign_b: &'a SenderOutboxArtifact,
+    /// The `RelationshipFinalizedV1` certificate, built and signed BEFORE this
+    /// transaction with the pending A EK, frozen here with its own route. The
+    /// checkpoint sweep replays these exact bytes until quorum.
+    pub finalized: &'a SenderOutboxArtifact,
+}
+
 /// The verified countersigned acceptance artifact is the SOLE protocol
 /// authority for finalizing an online send. This performs, as ONE literal
 /// SQLite transaction:
 ///
 ///   1. advance the projection tip (chain_tip = local_bilateral_chain_tip)
 ///   2. promote the pending Local EK head (keyed by commitment)
-///   3. CAS-advance the Counterparty EK head to the recipient's `ek_pk_b`
+///   3. CAS-advance the Counterparty EK head to the recipient's `ek_pk_b`,
+///      and the peer's CANONICAL head `peer_pair.0 → peer_pair.1`
 ///   4. finalize the proposal
-///   5. release the gate
-///   6. mark the outbox `gc_pending`
+///   5. freeze the `RelationshipFinalizedV1` certificate (its own route)
+///   6. move the outbox to `finalization_checkpoint_pending`
 ///
-/// WHY ONE TRANSACTION. The previous design did (4) and (5) in one place and
-/// left (1) and (2) to a separate ACK sweep keyed on the gate that (5) had just
-/// deleted — so the remainder became permanently unreachable and every SECOND
-/// transfer on a relationship failed: the projection tip never advanced, and
-/// the sender re-chained from its root AK (`used_root_ak=true`). Splitting this
-/// sequence is exactly what caused that regression, so it is not split.
+/// The GATE IS NOT RELEASED HERE (finality barrier). Local finalization proves
+/// the recipient applied; it does not prove the recipient can be told so. The
+/// gate is released by `release_gate_on_finalization_checkpoint_atomically`
+/// once the certificate has reached storage quorum — the ONE deleter — so a
+/// second same-direction send cannot leave before the peer can learn that the
+/// first is final.
 ///
-/// The outbox row deliberately SURVIVES as `gc_pending` — it is the durable
-/// record the transport-GC sweep keys on. Only the gate (a concurrency lock) is
-/// deleted here.
+/// WHY ONE TRANSACTION. An earlier design left (1) and (2) to a separate ACK
+/// sweep keyed on a gate that had just been deleted — so the remainder became
+/// permanently unreachable and every SECOND transfer on a relationship failed.
+/// Splitting this sequence is exactly what caused that regression, so it is
+/// not split.
 ///
-/// Idempotent: a redelivered acceptance finds the proposal already finalized
-/// and the heads already at target, and commits the same terminal state.
-#[allow(clippy::too_many_arguments)]
-pub fn finalize_on_acceptance_atomically(
-    relationship_key: &[u8; 32],
-    canonical_parent: &[u8; 32],
-    proposal_nonce: &[u8; 32],
-    commitment: &[u8; 32],
-    counterparty_device_id: &[u8; 32],
-    projection_parent: &[u8; 32],
-    projection_target: &[u8; 32],
-    expected_counterparty_head: Option<&[u8]>,
-    new_counterparty_head: &[u8],
-    countersign_b: &SenderOutboxArtifact,
-) -> Result<()> {
+/// The outbox status write is a CAS from the unsettled statuses only: a
+/// re-entrant finalize after the sweep already released the gate must not
+/// drag `gc_pending` back. Idempotent: a redelivered acceptance finds the
+/// proposal already finalized and the heads already at target.
+pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Result<()> {
+    let AcceptanceFinalization {
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        commitment,
+        counterparty_device_id,
+        projection_parent,
+        projection_target,
+        expected_counterparty_head,
+        new_counterparty_head,
+        peer_pair,
+        genesis_seed,
+        countersign_b,
+        finalized,
+    } = *f;
     if countersign_b.role != ArtifactRole::CountersignB {
         return Err(anyhow!(
             "acceptance finalization: artifact role must be countersign_b, got {}",
             countersign_b.role.as_str()
+        ));
+    }
+    if finalized.role != ArtifactRole::RelationshipFinalized {
+        return Err(anyhow!(
+            "acceptance finalization: certificate role must be relationship_finalized, got {}",
+            finalized.role.as_str()
+        ));
+    }
+    if finalized.routing_address.is_none() {
+        return Err(anyhow!(
+            "acceptance finalization: the certificate must carry its frozen route"
         ));
     }
     let binding = get_connection()?;
@@ -556,8 +652,6 @@ pub fn finalize_on_acceptance_atomically(
         counterparty_device_id: *counterparty_device_id,
         expected_parent_tip: *projection_parent,
         target_tip: *projection_target,
-        observed_gate: None,
-        clear_gate_on_success: false,
     };
     match super::bilateral_tip_sync::sync_tip_projections_in_tx(&tx, &request, None)? {
         super::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
@@ -571,8 +665,17 @@ pub fn finalize_on_acceptance_atomically(
         }
     }
 
-    // (2) Local EK head, keyed by the commitment the artifact names.
-    super::cert_chain::promote_pending_local_head_with_conn(&tx, relationship_key, commitment)?;
+    // (2) Local EK head, keyed by the commitment the artifact names. The
+    // certificate was signed with exactly this pending key moments ago, so a
+    // missing row is an error — never a silent skip.
+    if super::cert_chain::promote_pending_local_head_with_conn(&tx, relationship_key, commitment)?
+        .is_none()
+    {
+        return Err(anyhow!(
+            "acceptance finalization: no pending Local EK head for this commitment — the \
+             certificate's signing key is unaccounted for; aborting"
+        ));
+    }
 
     // (3) Counterparty EK head. AlreadyAtTarget counts as success ONLY because
     // it means the persisted value already equals this proposal's expected
@@ -595,6 +698,35 @@ pub fn finalize_on_acceptance_atomically(
         }
     }
 
+    // (3b) The peer's CANONICAL head: the recipient signed (sig_b) that it
+    // applied this step under peer_pair.0 and now sits at peer_pair.1. That is
+    // the exact parent it will originate under next; pin it. AlreadyAtTarget
+    // (same step re-finalized) is success; a third value aborts — the caller
+    // parks the step and the gate is retained.
+    match super::counterparty_canonical_heads::cas_advance_counterparty_canonical_head_with_conn(
+        &tx,
+        relationship_key,
+        counterparty_device_id,
+        &peer_pair.0,
+        &peer_pair.1,
+        commitment,
+        &genesis_seed,
+    )? {
+        super::counterparty_canonical_heads::CasCanonicalHeadOutcome::Advanced
+        | super::counterparty_canonical_heads::CasCanonicalHeadOutcome::GenesisInit
+        | super::counterparty_canonical_heads::CasCanonicalHeadOutcome::AlreadyAtTarget => {}
+        super::counterparty_canonical_heads::CasCanonicalHeadOutcome::Conflict { current } => {
+            return Err(anyhow!(
+                "acceptance finalization: peer canonical head conflict (delta parent {}.., \
+                 pinned {}) — aborting",
+                crate::util::text_id::encode_base32_crockford(&peer_pair.0[..4]),
+                current
+                    .map(|c| crate::util::text_id::encode_base32_crockford(&c[..4]) + "..")
+                    .unwrap_or_else(|| "none".to_string()),
+            ));
+        }
+    }
+
     // (4) Proposal terminal.
     super::sender_proposal::mark_sender_proposal_finalized_by_canonical_with_conn(
         &tx,
@@ -602,31 +734,104 @@ pub fn finalize_on_acceptance_atomically(
         canonical_parent,
     )?;
 
-    // (5) Release the gate (a concurrency lock, not the durable record).
-    super::online_outbox::clear_pending_online_outbox_if_matches_with_conn(
+    // (5) The certificate, frozen with its own route: the sweep replays these
+    // exact bytes under this deterministic id until quorum. And the recipient's
+    // countersign delta — the exact envelope this finalization was judged on —
+    // beside the frozen A-side evidence: the sender never receives a whole
+    // countersigned receipt (ADR 0003 return leg), so this row plus evidence_a
+    // IS its record of the countersignature.
+    insert_sender_outbox_artifact_with_conn(&tx, finalized)?;
+    insert_sender_outbox_artifact_with_conn(&tx, countersign_b)?;
+
+    // (6) Outbox → checkpoint pending, from an UNSETTLED status only. The
+    // gate stays; the sweep releases it.
+    advance_sender_outbox_status_if_with_conn(
+        &tx,
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        &[
+            OUTBOX_PENDING_SUBMIT,
+            OUTBOX_SUBMITTING,
+            OUTBOX_SUBMITTED,
+            OUTBOX_SUBMISSION_UNCERTAIN,
+        ],
+        OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+    )?;
+
+    // Retained for the sweep's exact-match release; the projection pair is
+    // the gate's identity.
+    let _ = (projection_parent, projection_target);
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// The ONE deleter of the sender's pending online gate (finality barrier):
+/// called by the checkpoint sweep AFTER the `RelationshipFinalizedV1`
+/// certificate reached storage quorum. ONE transaction: the gate row must
+/// match `(counterparty, projection_parent → projection_target)` exactly and
+/// its delete must hit exactly one row (else invariant error, nothing
+/// written), then the outbox moves `finalization_checkpoint_pending →
+/// gc_pending`. Returns `Ok(true)` when the row advanced, `Ok(false)` when it
+/// was already past the checkpoint (a concurrent sweep won).
+pub fn release_gate_on_finalization_checkpoint_atomically(
+    relationship_key: &[u8; 32],
+    canonical_parent: &[u8; 32],
+    proposal_nonce: &[u8; 32],
+    counterparty_device_id: &[u8; 32],
+    projection_parent: &[u8; 32],
+    projection_target: &[u8; 32],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let tx = conn.transaction()?;
+    let advanced = advance_sender_outbox_status_if_with_conn(
+        &tx,
+        relationship_key,
+        canonical_parent,
+        proposal_nonce,
+        &[OUTBOX_FINALIZATION_CHECKPOINT_PENDING],
+        OUTBOX_GC_PENDING,
+    )?;
+    if !advanced {
+        // Already released by another pass; nothing to delete, nothing to write.
+        return Ok(false);
+    }
+    let deleted = super::online_outbox::clear_pending_online_outbox_if_matches_with_conn(
         &tx,
         counterparty_device_id,
         projection_parent,
         projection_target,
     )?;
-
-    // (6) Outbox survives as the GC-driving record.
-    set_sender_outbox_status_with_conn(
-        &tx,
-        relationship_key,
-        canonical_parent,
-        proposal_nonce,
-        OUTBOX_GC_PENDING,
-    )?;
-
-    // (7) The recipient's countersign delta — the exact envelope this
-    // finalization was judged on — persists beside the frozen A-side evidence.
-    // The sender never receives a whole countersigned receipt (ADR 0003 return
-    // leg), so this row plus evidence_a IS its record of the countersignature.
-    insert_sender_outbox_artifact_with_conn(&tx, countersign_b)?;
-
+    if !deleted {
+        return Err(anyhow!(
+            "checkpoint release: the sender gate for this step is not present exactly \
+             (counterparty {}.., {}.. → {}..) — invariant violated; nothing written",
+            crate::util::text_id::encode_base32_crockford(&counterparty_device_id[..4]),
+            crate::util::text_id::encode_base32_crockford(&projection_parent[..4]),
+            crate::util::text_id::encode_base32_crockford(&projection_target[..4]),
+        ));
+    }
     tx.commit()?;
-    Ok(())
+    Ok(true)
+}
+
+/// Rows whose certificate is frozen but not yet at quorum — what the
+/// checkpoint sweep replays.
+pub fn finalization_checkpoint_pending_sender_outbox() -> Result<Vec<SenderOutboxRecord>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM sender_outbox WHERE status = ?1 ORDER BY created_at"
+    ))?;
+    let rows = stmt
+        .query_map(
+            params![OUTBOX_FINALIZATION_CHECKPOINT_PENDING],
+            row_to_record,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 /// Look up by the finalization identity (the receipt commitment).
@@ -936,6 +1141,26 @@ mod tests {
             )),
             envelope_bytes: body.clone(),
             content_digest: evidence_content_digest(ArtifactRole::CountersignB, &body),
+            routing_address: None,
+        }
+    }
+
+    /// The finality certificate as the sender freezes it at finalization:
+    /// role `relationship_finalized`, its own (recipient) route.
+    fn finalized_for(r: &SenderOutboxRecord) -> SenderOutboxArtifact {
+        let body = vec![0xF1u8; 96];
+        SenderOutboxArtifact {
+            relationship_key: r.relationship_key,
+            canonical_parent: r.canonical_parent,
+            proposal_nonce: r.proposal_nonce,
+            role: ArtifactRole::RelationshipFinalized,
+            submission_id: derive_artifact_submission_id(&evidence_content_digest(
+                ArtifactRole::RelationshipFinalized,
+                &body,
+            )),
+            envelope_bytes: body.clone(),
+            content_digest: evidence_content_digest(ArtifactRole::RelationshipFinalized, &body),
+            routing_address: Some("RECIPIENTROUTE".to_string()),
         }
     }
 
@@ -957,6 +1182,8 @@ mod tests {
     const T0: [u8; 32] = [0xAAu8; 32];
     const T1: [u8; 32] = [0xBBu8; 32];
     const EK_B: [u8; 8] = [0xB0u8; 8];
+    /// The relationship's genesis seed — the peer pair's parent on the first step.
+    const SEED: [u8; 32] = [0xA0u8; 32];
 
     /// Seed everything a send leaves behind just before its acceptance lands.
     fn seed_pre_finalization(r: &SenderOutboxRecord) {
@@ -1059,19 +1286,28 @@ mod tests {
         let r = rec(1);
         seed_pre_finalization(&r);
 
-        finalize_on_acceptance_atomically(
-            &r.relationship_key,
-            &r.canonical_parent,
-            &r.proposal_nonce,
-            &r.commitment,
-            &CP,
-            &T0,
-            &T1,
-            None,
-            &EK_B,
-            &countersign_b_for(&r),
-        )
+        finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: None,
+            new_counterparty_head: &EK_B,
+            peer_pair: (SEED, [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+            finalized: &finalized_for(&r),
+        })
         .expect("finalization");
+        assert_eq!(
+            crate::storage::client_db::load_counterparty_canonical_head(&r.relationship_key)
+                .expect("head"),
+            Some([0xB1u8; 32]),
+            "the peer's canonical head is pinned at the delta's child"
+        );
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T1.to_vec(), "projection tip advanced");
@@ -1083,8 +1319,9 @@ mod tests {
         .expect("artifacts");
         assert_eq!(
             retained,
-            vec![countersign_b_for(&r)],
-            "the recipient's countersign delta is persisted in the same commit"
+            vec![countersign_b_for(&r), finalized_for(&r)],
+            "the recipient's countersign delta AND the finality certificate (with its \
+             frozen route) are persisted in the same commit"
         );
         assert_eq!(local_tip, T1.to_vec(), "both spaces converge");
         assert_eq!(
@@ -1113,10 +1350,92 @@ mod tests {
             proposal_status,
             crate::storage::client_db::PROPOSAL_FINALIZED
         );
-        assert_eq!(gate_rows(), 0, "gate released");
         assert_eq!(
-            outbox_status, OUTBOX_GC_PENDING,
-            "the outbox row SURVIVES finalization — it is what transport GC keys on"
+            gate_rows(),
+            1,
+            "the gate is NOT released by local finalization (finality barrier)"
+        );
+        assert_eq!(
+            outbox_status, OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            "the outbox row waits for the certificate to reach quorum"
+        );
+
+        // A re-entrant finalize (redelivered delta) must not move the status.
+        // ...and the ONE deleter: release on checkpoint quorum, one tx.
+        assert!(
+            release_gate_on_finalization_checkpoint_atomically(
+                &r.relationship_key,
+                &r.canonical_parent,
+                &r.proposal_nonce,
+                &CP,
+                &T0,
+                &T1,
+            )
+            .expect("release"),
+            "first release advances"
+        );
+        assert_eq!(gate_rows(), 0, "gate released by the checkpoint sweep");
+        assert_eq!(statuses(&r).1, OUTBOX_GC_PENDING);
+        assert!(
+            !release_gate_on_finalization_checkpoint_atomically(
+                &r.relationship_key,
+                &r.canonical_parent,
+                &r.proposal_nonce,
+                &CP,
+                &T0,
+                &T1,
+            )
+            .expect("second release"),
+            "a second release is a no-op, not an error"
+        );
+    }
+
+    /// The release is all-or-nothing: with the gate row absent the status must
+    /// NOT advance to gc_pending (that would silently forget the release).
+    #[test]
+    #[serial]
+    fn checkpoint_release_refuses_when_the_gate_row_is_missing() {
+        init_test_db();
+        let r = rec(9);
+        seed_pre_finalization(&r);
+        finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: None,
+            new_counterparty_head: &EK_B,
+            peer_pair: (SEED, [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+            finalized: &finalized_for(&r),
+        })
+        .expect("finalization");
+        // Simulate a foreign deletion of the gate row.
+        with_conn(|c| {
+            c.execute(
+                "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1",
+                rusqlite::params![&CP[..]],
+            )
+            .expect("delete gate");
+        });
+        let err = release_gate_on_finalization_checkpoint_atomically(
+            &r.relationship_key,
+            &r.canonical_parent,
+            &r.proposal_nonce,
+            &CP,
+            &T0,
+            &T1,
+        )
+        .expect_err("missing gate row is an invariant violation");
+        assert!(err.to_string().contains("invariant"), "{err}");
+        assert_eq!(
+            statuses(&r).1,
+            OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            "status write rolled back with the failed release"
         );
     }
 
@@ -1140,19 +1459,28 @@ mod tests {
         )
         .expect("seed counterparty head");
 
-        let err = finalize_on_acceptance_atomically(
-            &r.relationship_key,
-            &r.canonical_parent,
-            &r.proposal_nonce,
-            &r.commitment,
-            &CP,
-            &T0,
-            &T1,
-            Some(&[0xDEu8; 8]), // stale expectation — conflicts with 0xC0
-            &EK_B,
-            &countersign_b_for(&r),
-        );
+        let err = finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: Some(&[0xDEu8; 8]), // stale — conflicts with 0xC0
+            new_counterparty_head: &EK_B,
+            peer_pair: (SEED, [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+            finalized: &finalized_for(&r),
+        });
         assert!(err.is_err(), "a conflicting head must abort finalization");
+        assert_eq!(
+            crate::storage::client_db::load_counterparty_canonical_head(&r.relationship_key)
+                .expect("head"),
+            None,
+            "peer canonical head CAS ROLLED BACK"
+        );
 
         let (chain_tip, local_tip) = tips();
         assert_eq!(chain_tip, T0.to_vec(), "tip advance ROLLED BACK");
@@ -1199,26 +1527,33 @@ mod tests {
         );
     }
 
-    /// A redelivered acceptance artifact must be a no-op, not a second advance.
+    /// A redelivered acceptance artifact must never cause a second advance.
+    /// The handler short-circuits on `PROPOSAL_FINALIZED` before reaching this
+    /// function; at THIS layer a re-entry after the commit is refused (the
+    /// pending Local EK head — the certificate's signing key — is gone) and
+    /// changes nothing.
     #[test]
     #[serial]
-    fn redelivered_acceptance_is_idempotent() {
+    fn redelivered_acceptance_is_refused_and_advances_nothing() {
         init_test_db();
         let r = rec(3);
         seed_pre_finalization(&r);
         let call = || {
-            finalize_on_acceptance_atomically(
-                &r.relationship_key,
-                &r.canonical_parent,
-                &r.proposal_nonce,
-                &r.commitment,
-                &CP,
-                &T0,
-                &T1,
-                None,
-                &EK_B,
-                &countersign_b_for(&r),
-            )
+            finalize_on_acceptance_atomically(&AcceptanceFinalization {
+                relationship_key: &r.relationship_key,
+                canonical_parent: &r.canonical_parent,
+                proposal_nonce: &r.proposal_nonce,
+                commitment: &r.commitment,
+                counterparty_device_id: &CP,
+                projection_parent: &T0,
+                projection_target: &T1,
+                expected_counterparty_head: None,
+                new_counterparty_head: &EK_B,
+                peer_pair: (SEED, [0xB1u8; 32]),
+                genesis_seed: SEED,
+                countersign_b: &countersign_b_for(&r),
+                finalized: &finalized_for(&r),
+            })
         };
         call().expect("first finalization");
         let head_after_first = crate::storage::client_db::load_cert_chain_head(
@@ -1228,7 +1563,11 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        call().expect("redelivery must not error");
+        let err = call().expect_err("a re-entrant finalize after the commit is refused");
+        assert!(
+            err.to_string().contains("no pending Local EK head"),
+            "{err}"
+        );
 
         let head_after_second = crate::storage::client_db::load_cert_chain_head(
             &r.relationship_key,
@@ -1242,7 +1581,7 @@ mod tests {
         );
         assert_eq!(tips().0, T1.to_vec(), "tip stays at target");
         let (_, outbox_status) = statuses(&r);
-        assert_eq!(outbox_status, OUTBOX_GC_PENDING);
+        assert_eq!(outbox_status, OUTBOX_FINALIZATION_CHECKPOINT_PENDING);
     }
 
     /// The submission id must be a pure function of the commitment: known
@@ -1464,6 +1803,7 @@ mod tests {
             submission_id: format!("EVID-{}", derive_submission_id(&p.commitment)),
             envelope_bytes: bytes,
             content_digest: digest,
+            routing_address: None,
         }
     }
 

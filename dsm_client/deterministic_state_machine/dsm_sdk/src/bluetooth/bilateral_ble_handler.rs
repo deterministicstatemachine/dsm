@@ -844,8 +844,6 @@ impl BilateralBleHandler {
             counterparty_device_id: session.counterparty_device_id,
             expected_parent_tip,
             target_tip: shared_chain_tip_new,
-            observed_gate: None,
-            clear_gate_on_success: false,
         };
 
         match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(
@@ -876,11 +874,6 @@ impl BilateralBleHandler {
                     bytes_to_base32(&expected_parent_tip[..8]),
                     bytes_to_base32(&current_tip[..8])
                 )));
-            }
-            Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::GateMismatch) => {
-                return Err(DsmError::invalid_operation(
-                    "sender recovery tip sync encountered an unexpected gate mismatch",
-                ));
             }
             Ok(
                 crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::InvariantViolation {
@@ -1487,6 +1480,31 @@ impl BilateralBleHandler {
 
         self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
             .await?;
+
+        // FINALITY BARRIER — same authority as `wallet.send`, BEFORE any value
+        // mutation: a BLE origination is an origination. Refused while our
+        // prior online send on this relationship has not reached its
+        // checkpoint, or an inbound acceptance still awaits the peer's
+        // certificate. (Loopback to self is a test-only path with no
+        // relationship state.)
+        if counterparty_device_id != self.device_id {
+            match crate::handlers::relationship_status::finality_barrier_block(
+                &counterparty_device_id,
+            ) {
+                Ok(None) => {}
+                Ok(Some(blocked)) => {
+                    return Err(DsmError::invalid_operation(format!(
+                        "bilateral.prepare refused (finality barrier): {}",
+                        blocked.send_block_message
+                    )));
+                }
+                Err(e) => {
+                    return Err(DsmError::invalid_operation(format!(
+                        "bilateral.prepare: cannot evaluate the finality barrier: {e}"
+                    )));
+                }
+            }
+        }
 
         // Ensure we have a verified contact and relationship. Allow a special-case
         // loopback path when the counterparty is the local device (test harnesses).
@@ -2293,25 +2311,14 @@ impl BilateralBleHandler {
                         bytes_to_base32(&counterparty_device_id[..8]),
                     );
                 }
-                // The sender's self-reported chain tip from the prepare request. This is the
-                // authoritative catch-up signal: the sender knows its own chain state. Our
-                // persisted view (contacts.chain_tip) is read inside the same transaction below.
-                let sender_reported_tip: Option<[u8; 32]> = prepare_request
-                    .sender_chain_tip
-                    .as_ref()
-                    .and_then(|h| h.v.as_slice().try_into().ok());
-
-                // Read, decide and delete atomically. This used to be three separate calls that
-                // each took and released the global connection mutex, so a concurrent online send
-                // could settle the old gate and arm a new one in the window. The exact-match delete
-                // then matched nothing and returned Ok(false) — which the caller discarded, because
-                // it consumed the result with `if let Err(..)`. The in-memory lock was cleared
-                // regardless and the offline transfer was admitted while a newer online gate sat
-                // unread in SQLite: a fork against an in-flight online step, which is exactly what
-                // §5.4 exists to prevent.
+                // Read, decide and delete atomically (one transaction). Under the
+                // finality barrier a gate is stale ONLY when no unsettled or
+                // checkpoint-pending outbox row stands behind it — the sender's
+                // self-reported tip is not a release signal (after local
+                // finalization the tip has moved by construction while the send
+                // is still not final for the peer).
                 match crate::storage::client_db::clear_stale_pending_online_gate(
                     &counterparty_device_id,
-                    sender_reported_tip,
                 ) {
                     Ok(outcome) => {
                         use crate::storage::client_db::StaleGateOutcome;
@@ -2328,11 +2335,9 @@ impl BilateralBleHandler {
                             }
                             StaleGateOutcome::StillPending => {
                                 log::error!(
-                                    "[BilateralBleHandler] ❌ persisted online gate: chain tip unchanged from parent for ({}, {}). sender_tip={}. Rejecting offline.",
+                                    "[BilateralBleHandler] ❌ persisted online gate: a prior online transfer for ({}, {}) is not yet final for the peer. Rejecting offline.",
                                     bytes_to_base32(&self.device_id[..8]),
                                     bytes_to_base32(&counterparty_device_id[..8]),
-                                    sender_reported_tip
-                                        .map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
                                 );
                                 return Err(DsmError::invalid_operation(
                                     "§5.4: Cannot initiate offline transfer while a prior online transfer for this relationship is still awaiting recipient catch-up",
@@ -5132,36 +5137,20 @@ impl BilateralBleHandler {
         self.prune_terminal_sessions_for_counterparty(&session.counterparty_device_id)
             .await;
 
-        // §5.4: BLE transfer succeeded (receiver side) — clear any stale pending
-        // online gate. Uses exact-match delete to prevent TOCTOU race.
-        if let Ok(Some(stale_gate)) =
-            crate::storage::client_db::get_pending_online_outbox(&session.counterparty_device_id)
-        {
-            let gate_parent: [u8; 32] = stale_gate
-                .parent_tip
-                .as_slice()
-                .try_into()
-                .unwrap_or([0u8; 32]);
-            let gate_next: [u8; 32] = stale_gate
-                .next_tip
-                .as_slice()
-                .try_into()
-                .unwrap_or([0u8; 32]);
-            info!(
-                "[BILATERAL] Clearing stale pending_online_outbox for {} after successful BLE commit (receiver)",
+        // A BLE commit is NOT a release authority for the online gate (finality
+        // barrier): only an orphaned gate — one with no unsettled or
+        // checkpoint-pending online send behind it — is cleared here.
+        match crate::storage::client_db::clear_stale_pending_online_gate(
+            &session.counterparty_device_id,
+        ) {
+            Ok(outcome) => info!(
+                "[BILATERAL] online gate check after BLE commit (receiver) for {}: {outcome:?}",
                 bytes_to_base32(&session.counterparty_device_id[..8]),
-            );
-            if let Err(e) = crate::storage::client_db::clear_pending_online_outbox_if_matches(
-                &session.counterparty_device_id,
-                &gate_parent,
-                &gate_next,
-            ) {
-                warn!(
-                    "[BILATERAL] Failed to clear stale pending_online_outbox for {} (receiver): {}",
-                    bytes_to_base32(&session.counterparty_device_id[..8]),
-                    e,
-                );
-            }
+            ),
+            Err(e) => warn!(
+                "[BILATERAL] online gate check after BLE commit (receiver) for {} failed: {e}",
+                bytes_to_base32(&session.counterparty_device_id[..8]),
+            ),
         }
 
         // Emit transfer_complete event to frontend (receiver side).
@@ -5928,35 +5917,18 @@ impl BilateralBleHandler {
         self.prune_terminal_sessions_for_counterparty(&counterparty_device_id)
             .await;
 
-        // §5.4: clear stale pending_online_outbox gate on successful commit.
-        if let Ok(Some(stale_gate)) =
-            crate::storage::client_db::get_pending_online_outbox(&counterparty_device_id)
-        {
-            let gate_parent: [u8; 32] = stale_gate
-                .parent_tip
-                .as_slice()
-                .try_into()
-                .unwrap_or([0u8; 32]);
-            let gate_next: [u8; 32] = stale_gate
-                .next_tip
-                .as_slice()
-                .try_into()
-                .unwrap_or([0u8; 32]);
-            info!(
-                "[BILATERAL] Clearing stale pending_online_outbox for {} after successful BLE commit",
+        // A BLE commit is NOT a release authority for the online gate (finality
+        // barrier): only an orphaned gate — one with no unsettled or
+        // checkpoint-pending online send behind it — is cleared here.
+        match crate::storage::client_db::clear_stale_pending_online_gate(&counterparty_device_id) {
+            Ok(outcome) => info!(
+                "[BILATERAL] online gate check after BLE commit (sender) for {}: {outcome:?}",
                 bytes_to_base32(&counterparty_device_id[..8]),
-            );
-            if let Err(e) = crate::storage::client_db::clear_pending_online_outbox_if_matches(
-                &counterparty_device_id,
-                &gate_parent,
-                &gate_next,
-            ) {
-                warn!(
-                    "[BILATERAL] Failed to clear stale pending_online_outbox for {} (sender): {}",
-                    bytes_to_base32(&counterparty_device_id[..8]),
-                    e,
-                );
-            }
+            ),
+            Err(e) => warn!(
+                "[BILATERAL] online gate check after BLE commit (sender) for {} failed: {e}",
+                bytes_to_base32(&counterparty_device_id[..8]),
+            ),
         }
 
         // Emit transfer_complete event to frontend (sender side).

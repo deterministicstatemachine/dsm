@@ -1296,32 +1296,24 @@ impl AppRouterImpl {
             }
         };
 
-        // Durable pending-gate guard — DELIVERY SAFETY. The modal lock above is
-        // in-memory only: it does not survive a process restart, and it is cleared
-        // once a send's flow completes even while the durable outbox gate remains
-        // unresolved (recipient accepted but its ACK has not yet been confirmed at
-        // quorum). Without this check, a second send passes the modal lock, is
-        // DELIVERED to the recipient's inbox, and only then hits the different-gate
-        // rejection at `record_pending_online_transition` — forcing a rollback of a
-        // transfer the recipient may have already accepted, diverging the two
-        // ledgers. Fail closed BEFORE delivery instead. The gate self-clears once
-        // the recipient's ACK lands (storage.sync §5.4 sweep), so this blocks only
-        // while a prior transfer to this contact is genuinely still pending.
-        match crate::storage::client_db::get_pending_online_outbox(&to_device_id) {
-            Ok(Some(_pending)) => {
-                let _ =
-                    crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
-                return err(
-                    "wallet.send: a prior online transfer to this contact is still pending the recipient's acknowledgement; sync before sending again"
-                        .to_string(),
-                );
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return err(format!(
-                    "wallet.send: failed to check pending online gate before send: {e}"
-                ));
-            }
+        // FINALITY BARRIER — the send-ready AUTHORITY, consulted BEFORE any
+        // mutation. The modal lock above is in-memory only. The durable
+        // conditions are: our prior send on this relationship has not reached
+        // its finality checkpoint (gate armed), or an inbound acceptance we
+        // journaled still awaits the peer's certificate. Either way this device
+        // may not originate — refusing here is what keeps a second-generation
+        // transfer from being DELIVERED before its predecessor is final. This is
+        // an ordinary PendingCatchup, not divergence: nothing is marked for
+        // reconcile.
+        let send_status =
+            crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                &to_device_id,
+            );
+        if !send_status.send_ready {
+            return err(format!(
+                "wallet.send: relationship is not send-ready: {}",
+                crate::handlers::relationship_status::status_message(&send_status)
+            ));
         }
 
         // Tripwire preflight: the parent tip may be consumed only once.
@@ -1963,6 +1955,7 @@ impl AppRouterImpl {
                 submission_id: evidence_submission_id,
                 envelope_bytes: evidence_envelope.bytes,
                 content_digest: evidence_digest,
+                routing_address: None,
             };
 
             Ok(OnlineSendArtifacts {

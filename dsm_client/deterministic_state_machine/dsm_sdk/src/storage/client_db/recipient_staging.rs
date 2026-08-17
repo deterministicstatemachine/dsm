@@ -399,6 +399,56 @@ pub fn staging_rows_needing_completion() -> Result<Vec<StagingRecord>> {
     Ok(rows)
 }
 
+/// Whether any INBOUND transfer from `counterparty_device_id` is staged but
+/// not yet converged (`staged_transfer` / `staged_evidence` /
+/// `ready_to_verify`). The finality barrier treats this as PendingCatchup for
+/// originating toward that peer: an inbound step is in flight on the
+/// relationship and originating under it would cross it. The counterparty is
+/// read from the frozen halves themselves — the transfer's `from_device_id`
+/// or the evidence receipt's `devid_a` — never from a mutable column.
+pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool> {
+    use prost::Message;
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(
+        "SELECT transfer_bytes, evidence_bytes FROM recipient_staging \
+         WHERE state IN (?1, ?2, ?3)",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                StagingState::StagedTransfer.as_str(),
+                StagingState::StagedEvidence.as_str(),
+                StagingState::ReadyToVerify.as_str()
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, Option<Vec<u8>>>(0)?,
+                    r.get::<_, Option<Vec<u8>>>(1)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (transfer, evidence) in rows {
+        if let Some(t) = transfer {
+            if let Ok(req) = dsm::types::proto::OnlineTransferRequest::decode(t.as_slice()) {
+                if req.from_device_id.as_slice() == counterparty_device_id {
+                    return Ok(true);
+                }
+            }
+        }
+        if let Some(e) = evidence {
+            if let Ok(r) = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&e)
+            {
+                if r.devid_a.as_slice() == counterparty_device_id {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Every retained route that must stay in the recipient's poll set: rows with a
 /// route and NOT terminally rejected. `accepted` rows are included until their
 /// ACK releases the route — the ACK, not the state, is what proves the sender

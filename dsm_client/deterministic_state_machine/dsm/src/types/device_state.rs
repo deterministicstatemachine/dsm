@@ -808,6 +808,21 @@ pub struct AdvanceOutcome {
     pub anchor_proofs: Option<AnchorLeafProofs>,
 }
 
+impl AdvanceOutcome {
+    /// This device's canonical relationship pair for the advanced step: the
+    /// lineage head it consumed (`embedded_parent` — the prior SMT leaf, or the
+    /// shared initial tip on a first-ever advance) and the head it produced
+    /// (`compute_chain_tip()`, the new SMT leaf). Per-device values: the same
+    /// pair the device will sign under as its parent when it next originates on
+    /// this relationship, and the pair a recipient authenticates to its peer.
+    pub fn relationship_pair(&self) -> ([u8; 32], [u8; 32]) {
+        (
+            self.new_chain_state.embedded_parent,
+            self.new_chain_state.compute_chain_tip(),
+        )
+    }
+}
+
 impl DeviceState {
     /// Construct a fresh, empty device state at genesis.
     ///

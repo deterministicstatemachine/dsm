@@ -142,6 +142,11 @@ pub mod ble;
 // comprehensive_validation + crypto_performance_tests modules deleted:
 // orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub mod fake_node;
+    pub mod two_device;
+}
+#[cfg(test)]
 mod device_id_tests;
 #[cfg(test)]
 mod envelope_tests;
