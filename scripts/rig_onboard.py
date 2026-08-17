@@ -27,11 +27,17 @@ def wait_any(texts, timeout):
 
 # ── phase 1: launch, INITIALIZE ────────────────────────────────────────────
 launch()
-got = wait_any(['WALLET SETUP REQUIRED', 'INITIALIZE', 'GENESIS: INITIALIZED', 'PUBLISHING IDENTITY'], 90)
+# 'GENESIS: INITIALIZED' before 'INITIALIZE': the substring match would otherwise
+# read an already-onboarded home screen as the setup menu.
+got = wait_any(['WALLET SETUP REQUIRED', 'GENESIS: INITIALIZED', 'PUBLISHING IDENTITY', 'INITIALIZE'], 90)
 log(f"first screen: {got}")
 if got in ('WALLET SETUP REQUIRED', 'INITIALIZE'):
-    d.tap('INITIALIZE', exact=True)
-    log("tapped INITIALIZE")
+    # A tap on the home brick FOCUSES it; activation needs the full mouse
+    # sequence on the focused brick (observed 2026-08-17: tap alone left the
+    # phone at WALLET SETUP REQUIRED). Tap to focus, then dispatch the click.
+    d.tap('INITIALIZE', exact=True); time.sleep(1)
+    r = d.eval_js("(() => { const el=[...document.querySelectorAll('.dsm-menu-item')].find(e=>e.textContent.trim()==='INITIALIZE'); if(!el) return 'NOEL'; ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))); return 'CLICKED'; })()")
+    log(f"INITIALIZE: {r}")
     # genesis v2: securing_device -> publication_pending
     got = wait_any(['PUBLISHING IDENTITY', 'GENESIS: COMMITTED', 'GENESIS: INITIALIZED', 'DO NOT LEAVE'], 120)
     log(f"after INITIALIZE: {got}")
