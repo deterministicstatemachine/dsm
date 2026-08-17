@@ -30,6 +30,7 @@ mod cert_resync;
 mod contacts;
 pub mod counterparty_canonical_heads;
 mod dlv_receipts;
+pub mod vault_generation_consumption;
 mod export;
 mod genesis;
 mod manifold_seeds;
@@ -73,6 +74,7 @@ pub use sender_proposal::*;
 pub use contacts::*;
 pub use counterparty_canonical_heads::*;
 pub use dlv_receipts::*;
+pub use vault_generation_consumption::*;
 pub use export::*;
 pub use genesis::*;
 pub use manifold_seeds::*;
@@ -363,7 +365,15 @@ fn get_database_path() -> Result<PathBuf> {
 /// `canonical_apply_identity` / `acceptance_fold_journal` /
 /// `accepted_transition_marker` (NOT NULL), plus the tables and columns the
 /// barrier's later commits add on the same generation.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 3;
+///
+/// 4: DLV consume-once claim — `vault_generation_consumption`
+/// (`UNIQUE(vault_id, parent_sequence)` + `source_commitment`). This is durable
+/// protocol state that decides settlement replay-vs-conflict identity, so v3 and
+/// v4 do NOT mean the same durable contract even though the DDL is additive — the
+/// version, not the happenstance that `CREATE TABLE IF NOT EXISTS` can run on a v3
+/// file, is the authority on what the schema means. Reset-and-reprovision, no
+/// migration, per the beta policy.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 4;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -1229,6 +1239,26 @@ fn create_schema(conn: &Connection) -> Result<()> {
             prev_tip               BLOB NOT NULL,
             source_commitment      BLOB NOT NULL,
             updated_at             INTEGER NOT NULL
+        );
+
+        -- The durable "consume-once" claim for a vault generation. The core
+        -- `advance` already refuses a settlement that does not consume the
+        -- CURRENT generation (device_state.rs ApplySettlement), which closes the
+        -- value double-spend; this table adds the dimension the device root does
+        -- not carry — WHICH settlement consumed each generation — so the reconcile
+        -- route distinguishes an idempotent replay of the winner from a DIFFERENT
+        -- settlement racing the same parent, and the loser can never be reported
+        -- as a successful fold. UNIQUE(vault_id, parent_sequence) is the authority
+        -- (checked AT insert, never INSERT OR IGNORE); source_commitment is the
+        -- settlement receipt id that names the consuming step. Written inside the
+        -- fold's advance transaction, so it and the reserve move are atomic.
+        CREATE TABLE IF NOT EXISTS vault_generation_consumption(
+            vault_id           BLOB NOT NULL,
+            parent_sequence    INTEGER NOT NULL,
+            child_sequence     INTEGER NOT NULL,
+            source_commitment  BLOB NOT NULL,
+            created_at         INTEGER NOT NULL,
+            UNIQUE (vault_id, parent_sequence)
         );
 
         -- §11.1 sender-side DEFERRED Local chain-head advance. The new

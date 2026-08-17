@@ -764,8 +764,15 @@ pub enum VaultReserveMutation {
         input_amount: u64,
         output_policy_commit: [u8; 32],
         output_amount: u64,
-        /// `parent + 1`. Every reserve write stamps it, so a stale proof cannot
-        /// be replayed against the new state.
+        /// The vault generation this settlement consumes. The output reserve leg
+        /// MUST currently sit at exactly this sequence or the advance is refused:
+        /// two settlements racing one parent both name `parent_sequence = N`, the
+        /// first moves the vault to `N + 1`, and the second now finds a generation
+        /// it cannot consume. This is the hard parent-consumption claim — exactly
+        /// one settlement succeeds a given generation, whatever a receipt claims.
+        parent_sequence: u64,
+        /// `parent_sequence + 1`. Every reserve write stamps it, so a stale proof
+        /// cannot be replayed against the new state.
         new_sequence: u64,
     },
 }
@@ -1374,6 +1381,7 @@ impl DeviceState {
             input_amount,
             output_policy_commit,
             output_amount,
+            parent_sequence,
             new_sequence,
         }) = &reserve_mutation
         {
@@ -1392,6 +1400,27 @@ impl DeviceState {
                     "advance: settlement amounts must both be non-zero",
                 ));
             }
+            // THE HARD PARENT-CONSUMPTION CLAIM. `new_sequence` is a strict unit
+            // step, and the vault must currently sit at exactly the generation
+            // this settlement names. Two individually-valid settlements racing one
+            // parent both carry `parent_sequence = N`; whichever advances first
+            // moves every touched leg to `N + 1`, and the second now finds the
+            // vault a generation ahead and is refused HERE, in the canonical state
+            // transition. Exactly one settlement consumes a generation — a stale or
+            // already-consumed parent cannot be folded again, whatever a receipt
+            // says. This is the reserve analog of the relationship layer's
+            // `UNIQUE(relationship_key, parent_tip)` consume-once tripwire, enforced
+            // where the vault's generation actually lives: the device root.
+            if *new_sequence
+                != parent_sequence.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: settlement sequence overflow")
+                })?
+            {
+                return Err(DsmError::invalid_operation(
+                    "advance: a settlement must advance the vault by exactly one generation \
+                     (new_sequence must be parent_sequence + 1)",
+                ));
+            }
 
             let key_in = crate::dlv::vault_reserve_leaf::vault_reserve_key(
                 &self.genesis,
@@ -1405,6 +1434,36 @@ impl DeviceState {
                 apply_vault,
                 output_policy_commit,
             );
+            // The output leg is the vault's liquidity being paid out: it must exist
+            // AND sit at exactly the parent generation. This is the consume-once
+            // check — a leg already at `parent + 1` (or beyond) means the generation
+            // was consumed by an earlier settlement.
+            match self.vault_reserves.get(&key_out) {
+                Some(e) if e.sequence == *parent_sequence => {}
+                Some(_) => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: this settlement targets a vault generation that is not \
+                         current — the parent has already been consumed (a second settlement \
+                         racing the same parent) or the proof is stale",
+                    ))
+                }
+                None => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: the vault holds no output reserve for that settlement",
+                    ))
+                }
+            }
+            // The input leg may be a first-time asset (created at `new_sequence`);
+            // but if it already exists it shares the vault's generation — two legs of
+            // one vault are never at different generations.
+            if let Some(e) = self.vault_reserves.get(&key_in) {
+                if e.sequence != *parent_sequence {
+                    return Err(DsmError::invalid_operation(
+                        "advance: the settlement input reserve is at a different vault \
+                         generation than the parent it names",
+                    ));
+                }
+            }
             let cur_in = self
                 .vault_reserves
                 .get(&key_in)
@@ -2573,6 +2632,271 @@ mod tests {
             err.contains("underflow") || err.to_lowercase().contains("insufficient"),
             "must fail as a balance shortfall, got: {err}"
         );
+    }
+
+    // ── reserve authority: the PRODUCTION funding path ─────────────────────
+    //
+    // The tests above fund through `fund_vault_reserves`, a test-only shim that
+    // writes the reserve leaves directly. Production funding never takes that
+    // door: it rides a signed `DlvCreate` transition through `advance`, and the
+    // value is debited from `balances` inside that same advance, under one root,
+    // with the operation's signature committed to the tip. These pin the model
+    // — "value cannot be both free wallet balance and delegated vault liquidity"
+    // — on that real path.
+
+    /// The self-loop relationship key and genesis tip for a device's own vault
+    /// transitions (funding is a `Unilateral` self-loop: the owner encumbers its
+    /// own holdings).
+    fn self_loop(dev: &DeviceState) -> ([u8; 32], [u8; 32]) {
+        (
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid),
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev.devid, &dev.devid,
+            ),
+        )
+    }
+
+    /// A signed `DlvCreate` for `vault`. Funding legs are NOT carried here — they
+    /// ride the `Fund` reserve mutation — because a `BalanceDelta` can only reach
+    /// `balances`, and routing funding through deltas would hand the value back.
+    fn dlv_create(vault: [u8; 32]) -> Operation {
+        sign_op(Operation::DlvCreate {
+            vault_id: vault.to_vec(),
+            creator_public_key: pubkey(),
+            parameters_hash: vec![0u8; 32],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
+            token_id: None,
+            locked_amount: None,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        })
+    }
+
+    /// A `Unilateral` transfer of `amount` of `asset`, with the matching debit
+    /// delta the conservation guard requires.
+    fn transfer_op(asset: [u8; 32], amount: u64) -> Operation {
+        Operation::Transfer {
+            to_device_id: devid(0xBB).to_vec(),
+            amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
+            token_id: b"ERA".to_vec(),
+            policy_commit: asset,
+            mode: crate::types::operations::TransactionMode::Unilateral,
+            nonce: vec![],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![],
+            to: vec![],
+            message: String::new(),
+            signature: vec![],
+            authority_policy: None,
+        }
+    }
+
+    /// USER MODEL, TEST 1 — `100 ERA -> lock 60 into a DLV -> spendable is 40,
+    /// not 100`, driven through the production `advance(DlvCreate, Fund)` path.
+    ///
+    /// "Spendable" is proven two ways so the number is not just a reader's
+    /// opinion: `balance()` reports 40, AND the ordinary transfer ceiling is
+    /// exactly 40 — a 41-unit transfer underflows while a 40-unit transfer
+    /// clears and leaves the 60 still encumbered.
+    #[test]
+    fn funding_via_production_dlvcreate_advance_reduces_spendable_to_the_remainder() {
+        let mut dev = fresh_device(0xC1);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 100);
+        let vault = [0x71u8; 32];
+        let (rk, tip) = self_loop(&dev);
+
+        // Lock 60 through the real funding transition (empty deltas; legs in Fund).
+        let funded = dev
+            .advance(
+                rk,
+                dev.devid,
+                dlv_create(vault),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs: vec![(era, 60)],
+                    vault_sequence: 0,
+                }),
+            )
+            .expect("production funding must succeed")
+            .new_device_state;
+
+        assert_eq!(funded.balance(&era), 40, "free balance is the remainder, not 100");
+        assert_eq!(funded.vault_reserve(&vault, &era), 60, "the 60 is encumbered");
+
+        // The transfer ceiling IS the spendable: 41 must underflow.
+        let over = funded.advance(
+            rk,
+            funded.devid,
+            transfer_op(era, 41),
+            entropy(2),
+            None,
+            &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 41 }],
+            Some(tip),
+            None,
+            None,
+            None,
+        );
+        let err = format!("{}", over.expect_err("41 exceeds the 40 free units"));
+        assert!(
+            err.contains("underflow") || err.to_lowercase().contains("insufficient"),
+            "must fail as a shortfall, got: {err}"
+        );
+
+        // 40 clears, and the reserve is untouched by draining every free unit.
+        let after = funded
+            .advance(
+                rk,
+                funded.devid,
+                transfer_op(era, 40),
+                entropy(3),
+                None,
+                &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 40 }],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("spending exactly the free remainder must clear")
+            .new_device_state;
+        assert_eq!(after.balance(&era), 0, "every free unit is spent");
+        assert_eq!(
+            after.vault_reserve(&vault, &era),
+            60,
+            "draining free balance does not reach the reserve"
+        );
+    }
+
+    /// USER MODEL, TEST 2 (the inverse) — `spend 50 first -> attempt to fund 60
+    /// -> reject`. With 50 already gone the vault cannot be over-funded, and the
+    /// refusal leaves the head byte-identical: no half-encumbrance.
+    #[test]
+    fn spending_first_then_funding_beyond_the_remainder_is_refused() {
+        let mut dev = fresh_device(0xC2);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 100);
+        let (rk, tip) = self_loop(&dev);
+
+        let spent = dev
+            .advance(
+                rk,
+                dev.devid,
+                transfer_op(era, 50),
+                entropy(1),
+                None,
+                &[BalanceDelta { policy_commit: era, direction: BalanceDirection::Debit, amount: 50 }],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("spend 50 first")
+            .new_device_state;
+        assert_eq!(spent.balance(&era), 50);
+
+        let vault = [0x72u8; 32];
+        let root_before = *spent.smt.root();
+        let err = spent.advance(
+            rk,
+            spent.devid,
+            dlv_create(vault),
+            entropy(2),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                legs: vec![(era, 60)],
+                vault_sequence: 0,
+            }),
+        );
+        let err = format!("{}", err.expect_err("cannot encumber 60 out of 50"));
+        assert!(
+            err.to_lowercase().contains("insufficient"),
+            "must name the shortfall, got: {err}"
+        );
+        assert_eq!(*spent.smt.root(), root_before, "a refused funding moves nothing");
+        assert_eq!(spent.balance(&era), 50, "balance intact");
+        assert_eq!(spent.vault_reserve(&vault, &era), 0, "no leaf was written");
+    }
+
+    /// STALE-STATE GUARD, funding side — an already-encumbered vault asset cannot
+    /// be re-encumbered through the production path. This is the device-level
+    /// analog of "reject a move made against stale vault state": completing a
+    /// second encumbrance for a vault that already holds one would be a silent
+    /// repair inside a value-moving constructor. Refused (device_state.rs
+    /// "already holds a reserve"), head untouched.
+    ///
+    /// NOTE — this is NOT the user's test 3 ("owner withdraws from stale v40
+    /// while the market advanced to v42"). That scenario has no production
+    /// operation to drive: there is no withdraw / unencumber / close (only
+    /// `Fund` and `ApplySettlement`), so encumbered liquidity has no path back
+    /// to free `balances` at all — stale or fresh. The succession stale-guard
+    /// (parent-consumption / reconcile-first) lives at the SDK layer, not here.
+    #[test]
+    fn refunding_an_already_encumbered_vault_asset_is_refused() {
+        let mut dev = fresh_device(0xC3);
+        let era = pc(0xE0);
+        dev.balances.insert(era, 100);
+        let vault = [0x73u8; 32];
+        let (rk, tip) = self_loop(&dev);
+
+        let funded = dev
+            .advance(
+                rk,
+                dev.devid,
+                dlv_create(vault),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs: vec![(era, 60)],
+                    vault_sequence: 0,
+                }),
+            )
+            .expect("first funding")
+            .new_device_state;
+        let root_before = *funded.smt.root();
+
+        // A second funding of the same asset for the same vault — refused.
+        let err = funded.advance(
+            rk,
+            funded.devid,
+            dlv_create(vault),
+            entropy(2),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                legs: vec![(era, 10)],
+                vault_sequence: 1,
+            }),
+        );
+        let err = format!("{}", err.expect_err("must refuse a second encumbrance"));
+        assert!(
+            err.contains("already holds a reserve"),
+            "must refuse re-encumbrance, got: {err}"
+        );
+        assert_eq!(*funded.smt.root(), root_before, "the refusal moved nothing");
+        assert_eq!(funded.balance(&era), 40, "balance unchanged by the refusal");
+        assert_eq!(funded.vault_reserve(&vault, &era), 60, "reserve unchanged");
     }
 
     /// END TO END: a really-funded vault produces a proof a stranger can check,
