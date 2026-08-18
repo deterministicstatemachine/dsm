@@ -44,6 +44,7 @@ const HELD = [
 ] as unknown as Awaited<ReturnType<typeof wallet.getAllBalances>>;
 
 const mockedList = jest.mocked(amm.listOwnedAmmVaults);
+const mockedReconcile = jest.mocked(amm.reconcileVaultSettlement);
 const mockedCreate = jest.mocked(amm.createAmmVault);
 const mockedPublishAd = jest.mocked(route_commit.publishRoutingAdvertisement);
 
@@ -61,6 +62,78 @@ describe('LiquidityScreen', () => {
     render(<LiquidityScreen />);
     await waitFor(() => expect(screen.getByText(/No AMM vaults owned by this wallet/)).toBeInTheDocument());
     expect(screen.getByText(/My vaults \(0\)/)).toBeInTheDocument();
+  });
+
+  /// A settled trade the owner has not folded is SHOWN, and foldable.
+  ///
+  /// A trader settles under the owner's pre-commitment, on its own device,
+  /// with the owner offline — so the owner's reserves legitimately lag until
+  /// it writes the trade down. `pending_unapplied` used to be hardcoded 0 in
+  /// the Rust summary under a comment saying reconciliation was not wired, and
+  /// nothing in the UI called `dlv.reconcile`. A real settled trade on hardware
+  /// left the owner's screen looking perfectly caught up.
+  it('surfaces settled trades awaiting reconciliation and folds them', async () => {
+    const X1 = new Uint8Array(32).fill(0xA1);
+    const X2 = new Uint8Array(32).fill(0xB2);
+    mockedList.mockResolvedValue({
+      success: true,
+      vaults: [
+        {
+          vaultIdBase32: ZERO_VAULT_ID_B32,
+          tokenA: new Uint8Array(32).fill(0x11),
+          tokenB: new Uint8Array(32).fill(0x22),
+          reserveA: 250000n,
+          reserveB: 100n,
+          feeBps: 30,
+          advertisedStateNumber: 1n,
+          routingAdvertised: true,
+          anchorSequence: 1n,
+          anchorEnforcement: 'required',
+          pendingUnapplied: 2n,
+          pendingX: [X1, X2],
+        } as any,
+      ],
+    });
+    mockedReconcile.mockResolvedValue({ success: true });
+
+    render(<LiquidityScreen />);
+    await waitFor(() => expect(screen.getByText(/2 settled trades to reconcile/)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /Reconcile/ }));
+    await waitFor(() => expect(mockedReconcile).toHaveBeenCalledTimes(2));
+
+    // Each pending settlement is folded by its OWN external commitment. Folding
+    // one twice, or inventing an x, would move reserves for a trade that never
+    // happened.
+    expect(Array.from(mockedReconcile.mock.calls[0][0].x)).toEqual(Array.from(X1));
+    expect(Array.from(mockedReconcile.mock.calls[1][0].x)).toEqual(Array.from(X2));
+  });
+
+  /// A vault that is caught up shows no reconcile affordance at all.
+  it('shows no reconcile control when nothing is outstanding', async () => {
+    mockedList.mockResolvedValue({
+      success: true,
+      vaults: [
+        {
+          vaultIdBase32: ZERO_VAULT_ID_B32,
+          tokenA: new Uint8Array(32).fill(0x11),
+          tokenB: new Uint8Array(32).fill(0x22),
+          reserveA: 250000n,
+          reserveB: 100n,
+          feeBps: 30,
+          advertisedStateNumber: 1n,
+          routingAdvertised: true,
+          anchorSequence: 1n,
+          anchorEnforcement: 'required',
+          pendingUnapplied: 0n,
+          pendingX: [],
+        } as any,
+      ],
+    });
+    render(<LiquidityScreen />);
+    await waitFor(() => expect(screen.getByText(/My vaults \(1\)/)).toBeInTheDocument());
+    expect(screen.queryByText(/to reconcile/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Reconcile/ })).not.toBeInTheDocument();
   });
 
   it('renders owned vaults with reserves and routing-ad status', async () => {

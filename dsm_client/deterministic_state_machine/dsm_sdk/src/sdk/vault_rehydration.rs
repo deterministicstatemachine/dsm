@@ -200,6 +200,78 @@ pub(crate) fn rehydrate_all_amm_vaults(head: &DeviceState) -> Vec<RehydratedVaul
     out
 }
 
+/// The external commitments of settlements published against `vault_id` that
+/// this owner has not folded yet.
+///
+/// "Unapplied" is read from the LEAVES, the same way `dlv.reconcile` decides
+/// idempotence: a settlement counts while the reserve leaf still sits below the
+/// sequence its receipt would advance to. There is no bookkeeping table to
+/// drift out of step with the state.
+///
+/// A pointer with no valid receipt is skipped, not counted. Publishing a
+/// pointer must never, by itself, make an owner believe value is owed — that is
+/// the whole reason pointers are inert until a receipt witnesses them.
+///
+/// A storage failure yields an empty list and a warning: the owner is told
+/// nothing is outstanding only when nothing could be READ, which understates
+/// rather than invents. Reconciliation is not time-critical, and inventing a
+/// settlement is worse than showing one late.
+pub(crate) async fn unapplied_settlements_for_vault(
+    vault_id: &[u8; 32],
+    head: &DeviceState,
+) -> Vec<[u8; 32]> {
+    use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
+    let prefix = crate::sdk::route_commit_sdk::vault_pending_prefix(vault_id);
+    let mut cursor: Option<String> = None;
+    // (new_sequence, x): ORDERED by generation before returning. A fold consumes
+    // exactly the current parent (the reserve leaf's `parent_sequence` claim),
+    // so the owner must fold generation N before N+1; the storage key layout
+    // happens to sort that way, but the order is a protocol requirement, not a
+    // property of a path string, so it is made explicit here.
+    let mut out: Vec<(u64, [u8; 32])> = Vec::new();
+    loop {
+        let resp = match BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), 256).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("[vault-pending] listing {prefix} failed, reporting none: {e}");
+                return Vec::new();
+            }
+        };
+        for item in &resp.items {
+            // The trade is the last path segment.
+            let Some(seg) = item.key.rsplit('/').next() else {
+                continue;
+            };
+            let Some(x_bytes) = crate::util::text_id::decode_base32_crockford(seg) else {
+                continue;
+            };
+            let Ok(x) = <[u8; 32]>::try_from(x_bytes.as_slice()) else {
+                continue;
+            };
+            // Inert without a verified receipt.
+            let Some(receipt) =
+                crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, &x).await
+            else {
+                continue;
+            };
+            let applied = head
+                .vault_reserve_entry(vault_id, &receipt.trade.input_policy_commit)
+                .map(|e| e.sequence >= receipt.trade.new_sequence)
+                .unwrap_or(false);
+            if !applied && !out.iter().any(|(_, seen)| *seen == x) {
+                out.push((receipt.trade.new_sequence, x));
+            }
+        }
+        match resp.next_cursor {
+            Some(c) if !c.is_empty() => cursor = Some(c),
+            _ => break,
+        }
+    }
+    out.sort_by_key(|(seq, _)| *seq);
+    out.into_iter().map(|(_, x)| x).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -155,6 +155,18 @@ impl AppRouterImpl {
                 let policy_digest_opt = vault.policy_digest;
                 drop(vault);
 
+                // Settlements this owner has not folded yet. Traders settle without
+                // the owner online, so the owner learns what is outstanding by
+                // reading storage against its own leaves — ordered by generation,
+                // because a fold consumes exactly the current parent.
+                let pending_x: Vec<[u8; 32]> = match self.core_sdk.device_head() {
+                    Some(head) => {
+                        crate::sdk::vault_rehydration::unapplied_settlements_for_vault(&vid, &head)
+                            .await
+                    }
+                    None => Vec::new(),
+                };
+
                 // Best-effort storage fetch for advertised state_number.
                 let (state_number, advertised) =
                     match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
@@ -193,9 +205,12 @@ impl AppRouterImpl {
                     token_b_ticker,
                     reserve_a,
                     reserve_b,
-                    // Reconciliation is not wired yet; the owner sees a real
-                    // zero rather than an invented number.
-                    pending_unapplied: 0,
+                    // Real, read from storage against this head's leaves. It used
+                    // to be hardcoded 0 under a comment saying reconciliation was
+                    // not wired — so an owner with a settled trade waiting saw a
+                    // vault that looked caught up.
+                    pending_unapplied: pending_x.len() as u64,
+                    pending_x: pending_x.iter().map(|x| x.to_vec()).collect(),
                     fee_bps,
                     advertised_state_number: state_number,
                     routing_advertised: advertised,
