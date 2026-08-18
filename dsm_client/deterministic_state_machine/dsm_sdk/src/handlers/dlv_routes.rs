@@ -61,12 +61,28 @@ impl AppRouterImpl {
         }
     }
 
-    /// `dlv.listOwnedAmmVaults` (query) — enumerate the local
-    /// `DLVManager` and return the AMM constant-product vaults whose
-    /// `creator_public_key` matches the wallet's current SPHINCS+ pk.
-    /// Each entry carries the live reserves + fee + advertised
-    /// state_number from storage (best-effort: storage failure
-    /// renders the vault as `routing_advertised = false`).
+    /// `dlv.listOwnedAmmVaults` (query) — the owner's AMM vaults, read from
+    /// PERSISTED state: the `amm_vault_records` row for identity and policy,
+    /// the device head's encumbered reserve leaves for reserves and sequence.
+    ///
+    /// It does NOT read the in-memory `DLVManager`. The manager holds only what
+    /// this process happened to create, so a wallet that had merely been
+    /// restarted showed an owner "My vaults (0)" over a funded, published vault
+    /// — observed on a handset, and the same reason restart persistence was
+    /// never actually exercised in production.
+    ///
+    /// Rebuilding a `LimboVault` to repopulate the manager was the alternative
+    /// and is rejected deliberately: the record stores identity and policy, not
+    /// `parameters_hash`, `creator_signature` or `encrypted_content`. Filling
+    /// those in would put an object in the manager that looks complete to every
+    /// consumer while carrying values nobody computed. The value-moving paths
+    /// need the owner key and the vault's policy, both of which the verified
+    /// record supplies; nothing here needs the sealed content.
+    ///
+    /// Every vault is rehydrated through `rehydrate_amm_vault`, so a record
+    /// that is non-canonical, names another owner, carries an unknown
+    /// enforcement mode, or whose reserve legs are absent or disagree makes
+    /// that vault UNAVAILABLE. Absence is never rendered as zero.
     async fn dlv_list_owned_amm_vaults(&self, _q: crate::bridge::AppQuery) -> AppResult {
         let wallet_pk = match crate::sdk::signing_authority::current_public_key() {
             Ok(pk) if !pk.is_empty() => pk,
@@ -79,154 +95,114 @@ impl AppRouterImpl {
                 ));
             }
         };
+        // Reserves and sequence are authenticated by this root. Without a head
+        // there is no reserve evidence at all, so there is nothing to show and
+        // nothing to guess.
+        let Some(head) = self.core_sdk.device_head() else {
+            return err("dlv.listOwnedAmmVaults: no device head; reserves unprovable".into());
+        };
+        let records = match crate::storage::client_db::amm_vault_records::list_amm_vault_records() {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "dlv.listOwnedAmmVaults: reading vault records failed: {e}"
+                ));
+            }
+        };
 
-        let dlv_manager = self.bitcoin_tap.dlv_manager();
-        let summaries: Vec<generated::AmmVaultSummaryV1> = {
-            let vault_ids = match dlv_manager.list_vaults().await {
+        let mut summaries: Vec<generated::AmmVaultSummaryV1> = Vec::with_capacity(records.len());
+        for rec in &records {
+            // Fails closed on a non-canonical pair, an owner mismatch, an
+            // unknown enforcement mode, an unfunded leg, or legs whose
+            // sequences disagree. `owner_devid`/`owner_genesis` are checked
+            // against this head, so a vault that survives belongs to THIS
+            // device — which is what makes the wallet's own signing key the
+            // right creator key for it.
+            let v = match crate::sdk::vault_rehydration::rehydrate_amm_vault(rec, &head) {
                 Ok(v) => v,
                 Err(e) => {
-                    return err(format!("dlv.listOwnedAmmVaults: list_vaults failed: {e}"));
-                }
-            };
-            let mut out: Vec<generated::AmmVaultSummaryV1> = Vec::new();
-            for vid in vault_ids {
-                let vault_lock = match dlv_manager.get_vault(&vid).await {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                let vault = vault_lock.lock().await;
-                if vault.creator_public_key.as_slice() != wallet_pk.as_slice() {
+                    log::warn!(
+                        "[dlv.listOwnedAmmVaults] vault {} unavailable: {e}",
+                        crate::util::text_id::encode_base32_crockford(&rec.vault_id),
+                    );
                     continue;
                 }
-                let (token_a, token_b, fee_bps) = match &vault.fulfillment_condition {
-                    dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                        token_a,
-                        token_b,
-                        fee_bps,
-                    } => (token_a.clone(), token_b.clone(), *fee_bps),
-                    _ => continue,
-                };
-                // Reserves come from THIS DEVICE'S encumbered leaves, not from
-                // the condition and not from an advertisement. The owner's
-                // screen must show what the owner actually holds.
-                // `AmmConstantProduct.token_a/token_b` ARE the 32-byte policy commits
-                // (see `amm_fulfillment_bytes`, and the `(dsm_fixed_len)=32` on the wire
-                // fields). They were being parsed as UTF-8 ticker text first:
-                // `std::str::from_utf8` on 32 bytes of BLAKE3 output all but always
-                // fails, the `?` returned None, and the match fell to `_ => (0, 0)` — so
-                // this route reported ZERO reserves for every funded AMM vault. Use the
-                // commit directly; there is nothing to resolve.
-                let as_commit = |t: &[u8]| -> Option<[u8; 32]> { <[u8; 32]>::try_from(t).ok() };
-                let (pc_a, pc_b) = (as_commit(&token_a), as_commit(&token_b));
-                let (reserve_a, reserve_b) = match (self.core_sdk.device_head(), pc_a, pc_b) {
-                    (Some(head), Some(pc_a), Some(pc_b)) => (
-                        head.vault_reserve(&vid, &pc_a),
-                        head.vault_reserve(&vid, &pc_b),
-                    ),
-                    _ => (0, 0),
-                };
+            };
 
-                // Display labels, resolved HERE because a policy commit is a digest the
-                // frontend cannot invert. NEVER EMPTY: an unresolved commit falls back to
-                // its own canonical Base32 Crockford encoding, which is explicit,
-                // deterministic and lossless. Returning "" would just move the guess into
-                // React, which is the shape of the bug being fixed.
-                let ticker = |pc: Option<[u8; 32]>| -> String {
-                    match pc {
-                        Some(pc) => dsm::core::token::resolve_ticker_for_policy_commit(&pc)
-                            .unwrap_or_else(|| crate::util::text_id::encode_base32_crockford(&pc)),
-                        // Unreachable for a well-formed vault (the commits are fixed 32
-                        // bytes); a malformed one still gets a stable, non-empty label
-                        // rather than an empty cell that looks like a rendering failure.
-                        None => "<malformed policy commit>".to_string(),
-                    }
-                };
-                let (token_a_ticker, token_b_ticker) = (ticker(pc_a), ticker(pc_b));
-                let anchor_sequence = vault.current_sequence;
-                let anchor_enforcement = vault.anchor_enforcement;
-                // Phase 13 follow-up: pull the persisted `policy_digest`
-                // so the owner-side LiquidityScreen republish path can
-                // pass the real digest (instead of 32 zero bytes) to
-                // `route.publishRoutingAdvertisement` on retry.  Vaults
-                // created before this field was added (legacy on-disk
-                // state) carry `None`; the summary leaves both fields
-                // empty and the frontend suppresses the Publish-retry
-                // button for those vaults.
-                let policy_digest_opt = vault.policy_digest;
-                drop(vault);
+            // The pair IS the two 32-byte policy commits. Identity is never
+            // decoded as UTF-8 nor resolved through the ticker registry: a ticker
+            // can name more than one token, and this repo has had two distinct
+            // tokens sharing one.
+            let (pc_a, pc_b) = (v.pair.a(), v.pair.b());
+            let token_a = pc_a.to_vec();
+            let token_b = pc_b.to_vec();
 
-                // Settlements this owner has not folded yet. Traders settle without
-                // the owner online, so the owner learns what is outstanding by
-                // reading storage against its own leaves — ordered by generation,
-                // because a fold consumes exactly the current parent.
-                let pending_x: Vec<[u8; 32]> = match self.core_sdk.device_head() {
-                    Some(head) => {
-                        crate::sdk::vault_rehydration::unapplied_settlements_for_vault(&vid, &head)
-                            .await
-                    }
-                    None => Vec::new(),
-                };
+            // Display labels, resolved HERE because a policy commit is a digest the
+            // frontend cannot invert. NEVER EMPTY: an unresolved commit falls back to
+            // its own canonical Base32 Crockford encoding — explicit, deterministic
+            // and lossless. Labels only; the identity above is the commit.
+            let ticker = |pc: &[u8; 32]| -> String {
+                dsm::core::token::resolve_ticker_for_policy_commit(pc)
+                    .unwrap_or_else(|| crate::util::text_id::encode_base32_crockford(pc))
+            };
+            let (token_a_ticker, token_b_ticker) = (ticker(&pc_a), ticker(&pc_b));
 
-                // Best-effort storage fetch for advertised state_number.
-                let (state_number, advertised) =
-                    match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
-                        &token_a, &token_b,
-                    )
-                    .await
+            // Settlements this owner has not folded yet. Traders settle without
+            // the owner online, so the owner learns what is outstanding by
+            // reading storage against its own leaves — ordered by generation,
+            // because a fold consumes exactly the current parent.
+            let pending_x =
+                crate::sdk::vault_rehydration::unapplied_settlements_for_vault(&v.vault_id, &head)
+                    .await;
+
+            let (state_number, advertised) =
+                match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+                    &token_a, &token_b,
+                )
+                .await
+                {
+                    Ok(ads) => match ads
+                        .into_iter()
+                        .find(|p| p.advertisement.vault_id == v.vault_id.to_vec())
                     {
-                        Ok(ads) => match ads
-                            .into_iter()
-                            .find(|p| p.advertisement.vault_id == vid.to_vec())
-                        {
-                            Some(p) => (p.advertisement.updated_state_number, true),
-                            None => (0, false),
-                        },
-                        Err(_) => (0, false),
-                    };
+                        Some(p) => (p.advertisement.updated_state_number, true),
+                        None => (0, false),
+                    },
+                    // Storage being unreachable says nothing about the vault;
+                    // it is shown as un-advertised, never hidden.
+                    Err(_) => (0, false),
+                };
 
-                // Phase 13 follow-up: derive the canonical routing
-                // advertisement key string entirely in Rust (Layer
-                // Communication Law: protocol decisions belong in Rust,
-                // frontend is a renderer).  Matches the original
-                // create-flow construction
-                // `defi/spec/amm/<first-16-chars-of-vault-id-b32>` so
-                // the republish path stays bit-identical to the
-                // original publish path.
-                let unlock_spec_key_opt: Option<String> = policy_digest_opt.map(|_| {
-                    let vid_b32 = crate::util::text_id::encode_base32_crockford(&vid);
-                    let prefix: String = vid_b32.chars().take(16).collect();
-                    format!("defi/spec/amm/{prefix}")
-                });
-                out.push(generated::AmmVaultSummaryV1 {
-                    vault_id: vid.to_vec(),
-                    token_a,
-                    token_b,
-                    token_a_ticker,
-                    token_b_ticker,
-                    reserve_a,
-                    reserve_b,
-                    // Real, read from storage against this head's leaves. It used
-                    // to be hardcoded 0 under a comment saying reconciliation was
-                    // not wired — so an owner with a settled trade waiting saw a
-                    // vault that looked caught up.
-                    pending_unapplied: pending_x.len() as u64,
-                    pending_x: pending_x.iter().map(|x| x.to_vec()).collect(),
-                    fee_bps,
-                    advertised_state_number: state_number,
-                    routing_advertised: advertised,
-                    anchor_sequence,
-                    anchor_enforcement,
-                    // Phase 13 follow-up: populate only when the vault
-                    // has a persisted digest (post-fix vaults).  Legacy
-                    // vaults carry `None` → frontend hides the
-                    // Publish-retry button rather than corrupting the
-                    // advertisement with 32 zero bytes.
-                    unlock_spec_digest: policy_digest_opt.map(|d| d.to_vec()),
-                    unlock_spec_key: unlock_spec_key_opt,
-                });
-            }
-            out
-        };
+            let vid_b32 = crate::util::text_id::encode_base32_crockford(&v.vault_id);
+            let prefix: String = vid_b32.chars().take(16).collect();
+
+            summaries.push(generated::AmmVaultSummaryV1 {
+                vault_id: v.vault_id.to_vec(),
+                token_a,
+                token_b,
+                token_a_ticker,
+                token_b_ticker,
+                // From the owner's own encumbered leaves.
+                reserve_a: v.reserve_a,
+                reserve_b: v.reserve_b,
+                // Real, read from storage against this head's leaves. It used
+                // to be hardcoded 0 under a comment saying reconciliation was
+                // not wired — so an owner with a settled trade waiting saw a
+                // vault that looked caught up.
+                pending_unapplied: pending_x.len() as u64,
+                pending_x: pending_x.iter().map(|x| x.to_vec()).collect(),
+                fee_bps: v.fee_bps,
+                advertised_state_number: state_number,
+                routing_advertised: advertised,
+                anchor_sequence: v.current_sequence,
+                anchor_enforcement: v.anchor_enforcement,
+                unlock_spec_digest: Some(v.policy_digest.to_vec()),
+                unlock_spec_key: Some(format!("defi/spec/amm/{prefix}")),
+            });
+            // `wallet_pk` gates which device may see these at all; the
+            // owner-match is enforced inside rehydration.
+            let _ = &wallet_pk;
+        }
 
         let lines: Vec<String> = summaries
             .iter()
@@ -2728,6 +2704,215 @@ mod funded_creation_tests {
             call(build(Vec::new())).success,
             "an absent digest must be computed, not required from the caller"
         );
+    }
+
+    /// PRODUCTION STARTUP: a funded vault survives losing the router entirely.
+    ///
+    /// The router and its `DLVManager` are DROPPED, and a fresh one is built
+    /// from the same database and persisted head — the closest a host test gets
+    /// to a cold app start. Then the real `dlv.listOwnedAmmVaults` route runs.
+    ///
+    /// This is the test that was missing. `rehydrate_all_amm_vaults` was
+    /// correct and had coverage, but every one of those tests called it
+    /// DIRECTLY, so none could observe that nothing in production did. A
+    /// handset showed it first: restart the wallet and the owner's funded,
+    /// published vault was gone from the screen.
+    #[test]
+    #[serial]
+    fn a_funded_vault_is_listed_by_a_router_that_never_created_it() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let vault_id;
+        let root_before;
+        let head_before;
+        {
+            let r = router();
+            r.core_sdk.set_device_head_for_testing(
+                crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000),
+            );
+            let create = generated::DlvInstantiateV1 {
+                spec: Some(generated::DlvSpecV1 {
+                    policy_digest: vec![0x5A; 32],
+                    fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                    anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                    ..Default::default()
+                }),
+                creator_public_key: Vec::new(),
+                signature: Vec::new(),
+                funding_legs: vec![
+                    generated::DlvFundingLegV1 {
+                        policy_commit: pc_a.to_vec(),
+                        amount: 10_000,
+                    },
+                    generated::DlvFundingLegV1 {
+                        policy_commit: pc_b.to_vec(),
+                        amount: 5_000,
+                    },
+                ],
+            };
+            let res = crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+            });
+            assert!(res.success, "create failed: {:?}", res.error_message);
+            let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+                .expect("records")
+                .pop()
+                .expect("one vault");
+            vault_id = rec.vault_id;
+            let head = r.core_sdk.device_head().expect("head");
+            root_before = head.root();
+            head_before = head;
+        }
+
+        // A FRESH router. Its DLVManager has never seen this vault.
+        let r2 = router();
+        r2.core_sdk.set_device_head_for_testing(head_before.clone());
+
+        assert!(
+            crate::runtime::get_runtime()
+                .block_on(r2.bitcoin_tap.dlv_manager().list_vaults())
+                .expect("list_vaults")
+                .is_empty(),
+            "the fresh router's DLVManager must be EMPTY - if it ever holds this \
+             vault, the route is served by a cache and this test proves nothing",
+        );
+
+        let q = crate::runtime::get_runtime().block_on(async {
+            r2.query(crate::bridge::AppQuery {
+                path: "dlv.listOwnedAmmVaults".to_string(),
+                params: Vec::new(),
+            })
+            .await
+        });
+        assert!(q.success, "list failed: {:?}", q.error_message);
+        let listed = decode_summaries(&q.data);
+        assert_eq!(
+            listed.len(),
+            1,
+            "the funded vault must be listed after a cold start"
+        );
+        let got = &listed[0];
+
+        assert_eq!(got.vault_id, vault_id.to_vec(), "same vault id");
+        assert_eq!(
+            got.token_a,
+            pc_a.to_vec(),
+            "policy commit A verbatim, never a ticker"
+        );
+        assert_eq!(
+            got.token_b,
+            pc_b.to_vec(),
+            "policy commit B verbatim, never a ticker"
+        );
+        assert_eq!(got.reserve_a, 10_000, "reserve A from the encumbered leaf");
+        assert_eq!(got.reserve_b, 5_000, "reserve B from the encumbered leaf");
+        assert_eq!(got.anchor_sequence, 0, "sequence from the leaves");
+        assert_eq!(got.fee_bps, 30);
+        assert_eq!(
+            got.anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
+            "enforcement must survive; defaulting it trades under rules nobody chose",
+        );
+
+        // Reading is not writing.
+        let head_after = r2.core_sdk.device_head().expect("head after");
+        assert_eq!(
+            head_after.root(),
+            root_before,
+            "listing must not move the root"
+        );
+        assert_eq!(
+            crate::storage::client_db::bcr::encode_device_state(&head_after),
+            crate::storage::client_db::bcr::encode_device_state(&head_before),
+            "listing must not change a single byte of the head",
+        );
+    }
+
+    /// A leg that is not funded makes the vault UNAVAILABLE, never zero.
+    ///
+    /// Zero and absent are the same number and completely different facts. A
+    /// vault rendered with 0 reserves is quotable, priceable and settleable
+    /// against liquidity that was never encumbered.
+    #[test]
+    #[serial]
+    fn a_vault_missing_a_reserve_leg_is_withheld_rather_than_shown_as_zero() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let r = router();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5A; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+
+        // The RECORD stays; the LEAVES are gone. Exactly the shape a
+        // half-written or tampered state takes.
+        let r2 = router();
+        r2.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let q = crate::runtime::get_runtime().block_on(async {
+            r2.query(crate::bridge::AppQuery {
+                path: "dlv.listOwnedAmmVaults".to_string(),
+                params: Vec::new(),
+            })
+            .await
+        });
+        assert!(q.success, "the route still answers: {:?}", q.error_message);
+        assert!(
+            decode_summaries(&q.data).is_empty(),
+            "a vault whose reserve legs are absent must be WITHHELD, never listed with 0",
+        );
+    }
+
+    /// Decode the route's newline-separated Base32 summaries.
+    fn decode_summaries(data: &[u8]) -> Vec<generated::AmmVaultSummaryV1> {
+        // v3 framing: a 0x03 prefix byte, then the Envelope proto.
+        let env = generated::Envelope::decode(&data[1..]).expect("envelope");
+        let value = match env.payload {
+            Some(generated::envelope::Payload::AppStateResponse(r)) => r.value.unwrap_or_default(),
+            other => panic!("unexpected payload: {other:?}"),
+        };
+        value
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let bytes = crate::util::text_id::decode_base32_crockford(l).expect("b32");
+                generated::AmmVaultSummaryV1::decode(bytes.as_slice()).expect("summary")
+            })
+            .collect()
     }
 
     /// A vault created FOR a recipient is advertised to that recipient.
