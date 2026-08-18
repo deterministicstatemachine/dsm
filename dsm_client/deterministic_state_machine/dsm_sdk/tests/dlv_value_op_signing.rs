@@ -181,6 +181,7 @@ fn advance_with(
             input_amount: 100,
             output_policy_commit: dbtc(),
             output_amount: 60,
+            parent_sequence: 0,
             new_sequence: 1,
         }),
     )
