@@ -310,7 +310,9 @@ install-only: ## Install existing APK without rebuilding (fast iteration)
 .PHONY: test
 test: ## Run Rust workspace tests + frontend jest tests
 	@echo "==> Running Rust tests..."
-	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	# --test-threads=1: dsm_sdk/storage suites share process-global singletons; a
+	# non-serial test racing a #[serial] one flakes nondeterministically. Match CI.
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
 	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 	@echo "==> Running frontend tests..."
 	cd $(FRONTEND_DIR) && \
