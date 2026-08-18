@@ -1628,12 +1628,8 @@ impl AppRouterImpl {
 
             // Tier 2 Foundation: anchor enforcement gate.  Verify the
             // RouteCommit hop's vault state binding fields match the
-            // vault's LOCAL internal state (`current_sequence` +
-            // `current_reserves_digest`) per the vault's
-            // `anchor_enforcement` policy.  Storage anchors are
-            // advertisement-only — the gate trusts the local
-            // `DLVManager`, never re-reading from storage to "confirm"
-            // the anchor (that would re-introduce storage trust).
+            // vault's COMPOSED current state (generation + reserves digest)
+            // per the vault's `anchor_enforcement` policy.
             //
             //   Required    => fields MUST be present and match → reject otherwise
             //   Optional    => if fields present, must match; if absent,
@@ -1642,18 +1638,19 @@ impl AppRouterImpl {
             //   Unspecified => grandfathered; same behaviour as Optional
             //                  with no enforcement
             //
-            // The (seq + reserves_digest) match is sufficient because
-            // owner_signature on the storage anchor couples them.
-            // RESERVES COME FROM THE OWNER'S PROOF, never from this device.
+            // RESERVES ARE COMPOSED FROM THE OWNER'S PROOF, never taken from
+            // this device and never from a caller-supplied number.
             //
             // A settling trader does not hold the owner's reserves — they are
             // encumbered leaves in the OWNER's device SMT. The authoritative
-            // source is `VaultReserveInclusionProofV1`, published by the owner
-            // and verified here against its own signature and SMT paths. Passing
+            // baseline is `VaultReserveInclusionProofV1`, published by the owner
+            // and verified against its own signature and SMT paths; every later
+            // generation is a verified trader receipt folded onto it. Passing
             // zeros, as this once did, would let a hop bind to reserves nobody
-            // holds.
-            // Filled by the proof block below; the settle terms are only built
-            // on the path where that block succeeded.
+            // holds; demanding an owner proof at every generation, as it did
+            // next, let nothing settle past the first trade.
+            // Filled by the composition block below; the settle terms are only
+            // built on the path where that block succeeded.
             let amm_fee_bps;
             let pair_a_for_digest;
             let pair_b_for_digest;
@@ -1661,23 +1658,10 @@ impl AppRouterImpl {
             let reserve_owner_devid;
             let reserve_owner_genesis;
             let reserve_root;
+            let composed_sequence;
             let (proven_a, proven_b) = {
-                let Some(proof) =
-                    crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(
-                        &vault_id,
-                        hop.vault_state_anchor_seq,
-                    )
-                    .await
-                else {
-                    return err(format!(
-                        "dlv.unlockRouted: no verified reserve proof for vault {} at sequence {} \
-                         — its liquidity is unproven and cannot be settled against",
-                        crate::util::text_id::encode_base32_crockford(&vault_id),
-                        hop.vault_state_anchor_seq,
-                    ));
-                };
                 // The pair comes from the vault's OWN condition, so the legs the
-                // proof is read for are the ones the curve governs.
+                // reserves are read for are the ones the curve governs.
                 let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
                     token_a: ref vt_a,
                     token_b: ref vt_b,
@@ -1686,32 +1670,106 @@ impl AppRouterImpl {
                 else {
                     return err("dlv.unlockRouted: routed settlement requires an AMM vault".into());
                 };
-                let (Some(pc_a), Some(pc_b)) = (
-                    <[u8; 32]>::try_from(vt_a.as_slice()).ok(),
-                    <[u8; 32]>::try_from(vt_b.as_slice()).ok(),
-                ) else {
-                    return err("dlv.unlockRouted: vault pair is not 32-byte policy commits".into());
+
+                // DELEGATED LIQUIDITY. The vault's state at the hop's generation is
+                // COMPOSED: the owner's baseline — signed anchor, state-inclusion
+                // proof and reserve-inclusion proof, all owner-signed and SMT-rooted
+                // in the owner's device root, published once at creation — plus
+                // every verified trader generation folded on top of it (a
+                // trader-signed pending pointer, a trader-signed settlement receipt
+                // SMT-verified against that trader's own root and matching the
+                // pointer's committed hash, the RouteCommit bound to X and eligible,
+                // the hop's digest matching the fold cursor, and the AMM
+                // re-simulation reproducing the trader's expected output).
+                //
+                // This is exactly the authority the QUOTE side already trusts when it
+                // binds a hop to a generation, and it is what lets the market keep
+                // moving while the LP is offline: no owner signature is needed on any
+                // transition after the baseline. Demanding an owner-published proof
+                // AT the hop's generation instead — as this path once did — made
+                // every vault a one-settlement vault, because the owner publishes
+                // proofs only at creation.
+                let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
+                    &vault_id,
+                )
+                .await
+                {
+                    Ok(Some(a)) => a,
+                    Ok(None) => {
+                        return err(format!(
+                            "dlv.unlockRouted: no verified reserve proof for vault {} — the owner has \
+                             published no vault-state baseline; its liquidity is unproven and \
+                             cannot be settled against",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        ));
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "dlv.unlockRouted: vault-state baseline fetch failed for vault {}: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        ));
+                    }
                 };
-                let (Some(a), Some(b)) = (
-                    dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
-                    dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_b),
-                ) else {
-                    // An absent leg is UNPROVEN, never zero: a half-proved vault
-                    // must not be settled against as if it were empty on one side.
-                    return err(
-                        "dlv.unlockRouted: the reserve proof does not cover both sides of the \
-                         vault's pair"
-                            .into(),
-                    );
+                let composed = match crate::sdk::vault_state_composition::compose_vault_state(
+                    &vault_id,
+                    &anchor,
+                    vt_a,
+                    vt_b,
+                    vault_fee_bps,
+                )
+                .await
+                {
+                    Ok(c) => c,
+                    // Every composition failure is "the liquidity is unproven": a
+                    // missing or invalid baseline proof, an unparseable pair. Fail
+                    // closed — nothing here may be guessed at.
+                    Err(e) => {
+                        return err(format!(
+                            "dlv.unlockRouted: no verified reserve proof for vault {} — its state \
+                             cannot be composed from the owner's baseline ({e}); its liquidity is \
+                             unproven and cannot be settled against",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        ));
+                    }
                 };
+
+                // THE DELEGATION GUARD — policy-independent, before anything moves.
+                // The hop must bind EXACTLY the generation the composition reached.
+                // Behind it, the parent was already consumed by an earlier trader
+                // (the trader-side twin of the owner's consume-once claim). Ahead
+                // of it, the trader is pre-settling a generation that does not
+                // exist — and because the AMM re-simulation below runs against the
+                // composed reserves, a probe that computes its amounts from the
+                // CURRENT reserves while naming a future parent would otherwise
+                // pass every other check and emit a receipt for a parent it never
+                // consumed: a self-credit no owner fold could ever honour.
+                if composed.sequence != hop.vault_state_anchor_seq {
+                    return err(format!(
+                        "dlv.unlockRouted: vault {} is at generation {} but the route binds \
+                         generation {} — that parent is {} and cannot be settled against",
+                        crate::util::text_id::encode_base32_crockford(&vault_id),
+                        composed.sequence,
+                        hop.vault_state_anchor_seq,
+                        if hop.vault_state_anchor_seq < composed.sequence {
+                            "already consumed"
+                        } else {
+                            "not yet reached (unproven)"
+                        },
+                    ));
+                }
+
                 amm_fee_bps = vault_fee_bps;
                 pair_a_for_digest = vt_a.clone();
                 pair_b_for_digest = vt_b.clone();
                 fee_bps_for_digest = vault_fee_bps;
-                reserve_owner_devid = proof.owner_devid;
-                reserve_owner_genesis = proof.owner_genesis;
-                reserve_root = proof.smt_root;
-                (a, b)
+                // The settlement records the BASELINE root and owner: the composed
+                // reserves at generation N are derived from that root plus N verified
+                // receipts and have no owner root of their own.
+                reserve_owner_devid = composed.owner_devid;
+                reserve_owner_genesis = composed.owner_genesis;
+                reserve_root = composed.baseline_reserve_root;
+                composed_sequence = composed.sequence;
+                (composed.reserves_a, composed.reserves_b)
             };
             {
                 use crate::sdk::route_commit_sdk::{AnchorGateReject, AnchorPosture};
@@ -1720,14 +1778,14 @@ impl AppRouterImpl {
                     .unwrap_or(AnchorEnforcement::Unspecified);
                 // Fail-closed anchor gate: the hop's bound (seq,
                 // reserves_digest, anchor_digest) must match the vault's
-                // LOCAL current state per policy.  A mismatch means the
+                // COMPOSED current state per policy.  A mismatch means the
                 // vault advanced since the RouteCommit was bound (stale
-                // state).  Pure + storage-free — never re-reads storage.
+                // state).  Pure — no storage read happens here.
                 // The digest the gate compares against is derived from the
-                // PROVEN reserves, not from local state and not from `None`.
-                // Passing `None` made `ReservesDigestUnavailable` the outcome for
-                // every Required vault — the gate could never pass, because the
-                // one thing it needs was never supplied.
+                // COMPOSED reserves (the same values the AMM re-simulation runs
+                // against), and the sequence is the composed generation — not
+                // the local mirror's `current_sequence`, which never advances and
+                // would pin every Required vault to generation 0 forever.
                 let proven_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
                     &pair_a_for_digest,
                     &pair_b_for_digest,
@@ -1739,7 +1797,7 @@ impl AppRouterImpl {
                     policy,
                     &hop,
                     &vault_id,
-                    vault.current_sequence,
+                    composed_sequence,
                     Some(proven_digest),
                 ) {
                     Ok(AnchorPosture::Enforced) => {}
@@ -2272,6 +2330,13 @@ mod funded_creation_tests {
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         crate::storage::client_db::reset_database_for_tests();
+        // The "storage node" every device in these tests shares is a
+        // process-global in-memory object store, and vault ids are
+        // deterministic in (owner, spec, funding). Without this reset, one
+        // test's published pointers and receipts leak into the next test's
+        // composition of the SAME vault id — and the settle side, correctly,
+        // sees a vault already at a later generation. Each test starts empty.
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
         let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
             "./.dsm_testdata_funded_creation",
         ));
@@ -3684,6 +3749,466 @@ mod funded_creation_tests {
             !loser_again.success,
             "the loser's replay must remain refused after the winner is committed"
         );
+    }
+
+    /// One trader's full production settle against `vault_id` at generation
+    /// `seq`, whose reserves the trader believes to be `(ra, rb)`: mirror the
+    /// vault, bind a hop to `(seq, reserves_digest, anchor_digest)`, sign the
+    /// RouteCommit, publish X + pointer, and `dlv.unlockRouted`. `expected_out`
+    /// is what the trader claims the curve pays; a well-behaved trader passes
+    /// `constant_product_output(input, ra, rb, 30)`, and a probe may lie.
+    /// Returns the route result and the external commitment `x`.
+    ///
+    /// The caller must have switched process identity to this trader
+    /// (`become_device`) and installed the trader's head on `router`.
+    #[allow(clippy::too_many_arguments)]
+    fn trader_settles(
+        router: &AppRouterImpl,
+        trader_pk: &[u8],
+        trader_did: &[u8; 32],
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        seq: u64,
+        (ra, rb): (u64, u64),
+        input: u64,
+        expected_out: u64,
+        nonce: u8,
+    ) -> (AppResult, [u8; 32]) {
+        use prost::Message as _;
+
+        let pair = generated::RoutingPairRequest {
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            router
+                .invoke(AppInvoke {
+                    method: "route.syncVaultsForPair".to_string(),
+                    args: pack(pair.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "sync failed: {:?}", res.error_message);
+
+        let reserves_digest =
+            dsm::dlv::vault_state_anchor::compute_reserves_digest(pc_a, pc_b, ra, rb, 30);
+        let anchor_digest =
+            dsm::dlv::vault_state_anchor::compute_anchor_digest(vault_id, seq, &reserves_digest);
+        let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![nonce; 32],
+            total_fee_bps: 30,
+            initiator_public_key: trader_pk.to_vec(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                vault_state_anchor_seq: seq,
+                vault_state_reserves_digest: reserves_digest.to_vec(),
+                vault_state_anchor_digest: anchor_digest.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&trader_sk, &canonical).expect("trader signs");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    trader_pk,
+                    &trader_sk,
+                    "lp-offline",
+                ),
+            )
+            .expect("publish anchor + pointers");
+
+        let settle = generated::DlvUnlockRoutedV1 {
+            vault_id: vault_id.to_vec(),
+            device_id: trader_did.to_vec(),
+            route_commit_bytes: rc.encode_to_vec(),
+            unlocker_public_key: trader_pk.to_vec(),
+            signature: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            router
+                .invoke(AppInvoke {
+                    method: "dlv.unlockRouted".to_string(),
+                    args: pack(settle.encode_to_vec()),
+                })
+                .await
+        });
+        (res, x)
+    }
+
+    /// The vault's composed state as the production QUOTE side sees it: the
+    /// owner's seq-0 baseline plus every verified trader generation folded on.
+    fn composed(vault_id: &[u8; 32], pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64, u64) {
+        let anchor = crate::runtime::get_runtime()
+            .block_on(crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(vault_id))
+            .expect("anchor fetch")
+            .expect("owner published a baseline anchor");
+        let c = crate::runtime::get_runtime()
+            .block_on(crate::sdk::vault_state_composition::compose_vault_state(
+                vault_id, &anchor, pc_a, pc_b, 30,
+            ))
+            .expect("compose");
+        (c.sequence, c.reserves_a, c.reserves_b)
+    }
+
+    fn reconcile(owner: &AppRouterImpl, vault_id: &[u8; 32], x: &[u8; 32]) -> AppResult {
+        use prost::Message as _;
+        crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.reconcile".to_string(),
+                    args: pack(
+                        generated::DlvReconcileV1 {
+                            vault_id: vault_id.to_vec(),
+                            x: x.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        })
+    }
+
+    /// INVARIANT 2 — DELEGATED LIQUIDITY. The LP funds a vault and disappears.
+    /// The market advances it through THREE generations (0→1→2→3), three
+    /// independent traders settling through the production route, with NO owner
+    /// signature or participation on any transition — each generation consumes
+    /// exactly one parent and the reserves stay conserved. When the LP returns,
+    /// its local state reconciles to the already-final generation, in order,
+    /// without being debited a second time; a fold against a non-current
+    /// generation is refused; replay is idempotent.
+    ///
+    /// The settle side achieves this by settling against the COMPOSED vault
+    /// state — the owner's seq-0 baseline proof plus every verified trader
+    /// receipt folded on (the same authority the quote side already trusts) —
+    /// rather than demanding an owner-published proof at every generation.
+    /// Its load-bearing guard is `composed.sequence == hop.vault_state_anchor_seq`:
+    /// a hop bound to a generation the vault has moved past (already consumed)
+    /// or has not reached (unproven) is refused, so a trader can neither
+    /// re-settle a consumed parent nor pre-settle a future one.
+    #[test]
+    #[serial]
+    fn lp_offline_market_advances_three_generations_and_lp_reconciles_each_once() {
+        use prost::Message as _;
+
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let cp = |input: u64, ra: u64, rb: u64| -> u64 {
+            crate::sdk::routing_path_sdk::constant_product_output(input, ra, rb, 30)
+                .expect("curve output")
+        };
+
+        // ── OWNER funds a Required-policy vault at generation 0, advertises it,
+        //    and then goes OFFLINE (no further owner action until the end). ─────
+        let (_owner_pk, _owner_did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "owner create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/lp-offline".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+        let owner_spendable_before = {
+            let h = owner.core_sdk.device_head().expect("owner head");
+            (h.balance(&pc_a), h.balance(&pc_b))
+        };
+        assert_eq!(owner_spendable_before, (40_000, 15_000));
+
+        // ── THE MARKET, WITH THE LP GONE: three traders, three generations. ────
+        // Each trader settles against the reserves the COMPOSED state says the
+        // vault holds at that generation — nothing the owner published past 0.
+        let mut reserves = (10_000u64, 5_000u64);
+        let inputs = [1_000u64, 700, 400];
+        let mut xs: Vec<[u8; 32]> = Vec::new();
+        for (i, &input) in inputs.iter().enumerate() {
+            let gen = i as u64;
+            let seed = 0x51 + i as u8;
+            let (tpk, tdid) = become_device(seed);
+            let trader = named_router(&format!("trader{i}"));
+            trader.core_sdk.set_device_head_for_testing(
+                crate::sdk::funded_vault_fixture::device_holding(0xD2 + i as u8, 5_000, 0),
+            );
+            let before = trader.core_sdk.device_head().expect("trader head");
+            let (ba, bb) = (before.balance(&pc_a), before.balance(&pc_b));
+
+            // The composed state must have reached this generation with the
+            // reserves the previous settlements imply — the fold IS the vault.
+            assert_eq!(
+                composed(&vault_id, &pc_a, &pc_b),
+                (gen, reserves.0, reserves.1),
+                "composition must reach generation {gen} before trader {i} settles"
+            );
+
+            let out = cp(input, reserves.0, reserves.1);
+            let (res, x) = trader_settles(
+                &trader,
+                &tpk,
+                &tdid,
+                &vault_id,
+                &pc_a,
+                &pc_b,
+                gen,
+                reserves,
+                input,
+                out,
+                0x20 + i as u8,
+            );
+            assert!(
+                res.success,
+                "trader {i} must settle generation {gen} -> {} with the LP offline: {:?}",
+                gen + 1,
+                res.error_message
+            );
+            let after = trader.core_sdk.device_head().expect("trader head");
+            assert_eq!(
+                after.balance(&pc_a),
+                ba - input,
+                "trader {i} paid its input"
+            );
+            assert_eq!(
+                after.balance(&pc_b),
+                bb + out,
+                "trader {i} took the curve's output"
+            );
+            let receipt = crate::runtime::get_runtime()
+                .block_on(
+                    crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x),
+                )
+                .expect("receipt published");
+            assert_eq!(
+                (receipt.trade.parent_sequence, receipt.trade.new_sequence),
+                (gen, gen + 1),
+                "each generation consumes exactly one parent"
+            );
+            reserves = (reserves.0 + input, reserves.1 - out);
+            xs.push(x);
+        }
+        let final_reserves = reserves;
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (3, final_reserves.0, final_reserves.1),
+            "the market moved the vault to generation 3 without the LP"
+        );
+
+        // ── STALE AND FUTURE HOPS ARE REFUSED (the delegation guard). ─────────
+        // A hop bound BEHIND the composed generation (parent already consumed)…
+        {
+            let (tpk, tdid) = become_device(0x61);
+            let probe = named_router("probe-behind");
+            probe.core_sdk.set_device_head_for_testing(
+                crate::sdk::funded_vault_fixture::device_holding(0xE1, 5_000, 0),
+            );
+            let (res, _) = trader_settles(
+                &probe,
+                &tpk,
+                &tdid,
+                &vault_id,
+                &pc_a,
+                &pc_b,
+                1,
+                (11_000, 5_000 - cp(1_000, 10_000, 5_000)),
+                300,
+                cp(300, 11_000, 5_000 - cp(1_000, 10_000, 5_000)),
+                0x31,
+            );
+            // Refused by the delegation guard — and, as defense in depth, by the
+            // AMM re-simulation against the composed reserves and by the
+            // first-writer slot claim even if the guard were absent. Only the
+            // outcome is pinned here; the guard's own necessity is proven by the
+            // AHEAD probe below, which nothing else catches.
+            assert!(
+                !res.success,
+                "a hop at an already-consumed generation must be refused"
+            );
+        }
+        // …and a hop bound AHEAD of it (pre-settling a generation that does not
+        // exist), even one whose amounts are computed against the CURRENT
+        // reserves so the AMM re-simulation would pass. Without the sequence
+        // guard this settles and emits a receipt naming a parent it never
+        // consumed — a self-credit no owner fold can ever honour.
+        {
+            let (tpk, tdid) = become_device(0x62);
+            let probe = named_router("probe-ahead");
+            probe.core_sdk.set_device_head_for_testing(
+                crate::sdk::funded_vault_fixture::device_holding(0xE2, 5_000, 0),
+            );
+            let out_now = cp(300, final_reserves.0, final_reserves.1);
+            let (res, _) = trader_settles(
+                &probe,
+                &tpk,
+                &tdid,
+                &vault_id,
+                &pc_a,
+                &pc_b,
+                5,
+                final_reserves,
+                300,
+                out_now,
+                0x32,
+            );
+            assert!(
+                !res.success,
+                "a hop bound to a future generation must be refused"
+            );
+            assert!(
+                res.error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("generation"),
+                "refusal names the generation mismatch: {:?}",
+                res.error_message
+            );
+            let h = probe.core_sdk.device_head().expect("probe head");
+            assert_eq!(h.balance(&pc_a), 5_000, "the refused probe moved no value");
+        }
+
+        // ── THE LP RETURNS. Nothing was folded while it was away. ─────────────
+        let _ = become_device(0x41);
+        let back = owner.core_sdk.device_head().expect("owner head");
+        assert_eq!(
+            (
+                back.vault_reserve(&vault_id, &pc_a),
+                back.vault_reserve(&vault_id, &pc_b)
+            ),
+            (10_000, 5_000),
+            "the owner's own reserve leaves are untouched until it folds"
+        );
+        assert_eq!(
+            back.vault_reserve_entry(&vault_id, &pc_a)
+                .expect("leg")
+                .sequence,
+            0
+        );
+
+        // Folding out of order is REFUSED: generation 1 is not current.
+        let res = reconcile(&owner, &vault_id, &xs[1]);
+        assert!(
+            !res.success,
+            "folding generation 1->2 before 0->1 must be refused (parent not current)"
+        );
+        let h = owner.core_sdk.device_head().expect("owner head");
+        assert_eq!(
+            h.vault_reserve(&vault_id, &pc_a),
+            10_000,
+            "a refused fold moved nothing"
+        );
+
+        // In order, each fold consumes exactly the next parent, once.
+        let mut expect = (10_000u64, 5_000u64);
+        for (i, &input) in inputs.iter().enumerate() {
+            let out = cp(input, expect.0, expect.1);
+            let res = reconcile(&owner, &vault_id, &xs[i]);
+            assert!(res.success, "fold {i} failed: {:?}", res.error_message);
+            expect = (expect.0 + input, expect.1 - out);
+            let h = owner.core_sdk.device_head().expect("owner head");
+            assert_eq!(
+                (
+                    h.vault_reserve(&vault_id, &pc_a),
+                    h.vault_reserve(&vault_id, &pc_b)
+                ),
+                expect,
+                "after fold {i} the reserves reflect exactly generations 0..={i}"
+            );
+            assert_eq!(
+                h.vault_reserve_entry(&vault_id, &pc_a)
+                    .expect("leg")
+                    .sequence,
+                i as u64 + 1,
+                "each fold advances the generation by exactly one"
+            );
+            let consumer =
+                crate::storage::client_db::load_vault_generation_consumer(&vault_id, i as u64)
+                    .expect("load")
+                    .expect("generation consumed");
+            assert_eq!(
+                consumer.source_commitment,
+                dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, &xs[i]),
+                "generation {i} is recorded as consumed by trader {i}'s settlement"
+            );
+        }
+        assert_eq!(
+            expect, final_reserves,
+            "the LP's reconciled reserves equal the market's composed state"
+        );
+
+        // NO SECOND DEBIT: the LP's spendable balance never moved — the fee
+        // accrued inside the reserves, the settlements moved reserves only.
+        let h = owner.core_sdk.device_head().expect("owner head");
+        assert_eq!(
+            (h.balance(&pc_a), h.balance(&pc_b)),
+            owner_spendable_before,
+            "reconciling already-final generations must not charge the LP"
+        );
+
+        // REPLAY is idempotent: same receipt again, nothing moves.
+        let root = h.root();
+        let res = reconcile(&owner, &vault_id, &xs[2]);
+        assert!(res.success, "replaying the last fold must not error");
+        assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
     }
 
     /// THE ROUTE THAT HAD NO TEST — which is why both wounds shipped.

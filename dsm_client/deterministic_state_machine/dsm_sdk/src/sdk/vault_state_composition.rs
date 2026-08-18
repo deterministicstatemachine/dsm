@@ -119,6 +119,17 @@ pub(crate) struct ComposedVaultState {
     /// depth-exceeded pointer does NOT set this: none of them witness a trade in
     /// flight, and treating them as if they did is precisely the griefing vector.
     pub blocked_by_unreceipted_pointer_at_parent: bool,
+    /// The owner's device root the BASELINE reserves were proven against — the
+    /// only root any generation of this composition is ultimately rooted in. A
+    /// settling trader records it as the settlement's `reserve_proof_root`: the
+    /// composed reserves at generation N are derived from this root plus N
+    /// verified receipts, and have no owner root of their own.
+    pub baseline_reserve_root: [u8; 32],
+    /// The vault owner, as the baseline reserve proof names it — the device whose
+    /// SMT the reserve leaves live in. Constant across generations.
+    pub owner_devid: [u8; 32],
+    pub owner_genesis: [u8; 32],
+    pub owner_public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -646,6 +657,10 @@ pub(crate) async fn compose_vault_state(
         // Only a block at the sequence actually reached. A pointer that blocked
         // an earlier parent is irrelevant once the cursor has moved past it.
         blocked_by_unreceipted_pointer_at_parent: unreceipted_parents.contains(&cursor_seq),
+        baseline_reserve_root: reserve_proof.smt_root,
+        owner_devid: reserve_proof.owner_devid,
+        owner_genesis: reserve_proof.owner_genesis,
+        owner_public_key: reserve_proof.owner_public_key.clone(),
     })
 }
 
