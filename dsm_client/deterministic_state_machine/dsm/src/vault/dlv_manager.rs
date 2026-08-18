@@ -352,27 +352,6 @@ impl LimboVault {
         }
     }
 
-    /// Advance this vault's sequence by one, returning its `token_a` so the
-    /// caller can match the advertisement's canonical pair order against the
-    /// vault's storage order.
-    ///
-    /// This replaces `update_amm_reserves`, which mutated reserves inside the
-    /// fulfillment condition. There are no reserves there to mutate: a
-    /// settlement moves real value between the trader's balances and the
-    /// owner's reserve leaves, and the sequence is the only thing about the
-    /// vault struct that still advances.
-    pub fn bump_sequence(&mut self) -> Option<Vec<u8>> {
-        if let crate::vault::FulfillmentMechanism::AmmConstantProduct { token_a, .. } =
-            &self.fulfillment_condition
-        {
-            let t = token_a.clone();
-            self.current_sequence = self.current_sequence.saturating_add(1);
-            Some(t)
-        } else {
-            None
-        }
-    }
-
     /// Read-only accessor for the vault's AMM token_a (the
     /// caller's-side order of the canonical pair).  Returns `None`
     /// if not AMM.  Used by `route.syncVaultsForPair` to map the
