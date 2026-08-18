@@ -1103,6 +1103,10 @@ message AmmVaultSummaryV1 {
   // Settlements published against this vault that the owner has not yet
   // reconciled. Non-zero means the displayed reserves are behind the chain.
   uint64 pending_unapplied         = 16;
+  // The external commitment of each unreconciled settlement, so the owner can
+  // fold them without rediscovering what is outstanding. One entry per
+  // `pending_unapplied`. Empty when the vault is caught up.
+  repeated bytes pending_x         = 19 [(dsm_fixed_len)=32];
   // Mirror of the published advertisement's state_number; 0 if not advertised.
   uint64 advertised_state_number   = 7;
   // True if a routing-vault advertisement was found at the canonical

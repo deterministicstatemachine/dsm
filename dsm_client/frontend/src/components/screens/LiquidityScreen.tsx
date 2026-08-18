@@ -13,6 +13,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   createAmmVault,
   listOwnedAmmVaults,
+  reconcileVaultSettlement,
   type AmmVaultSummary,
 } from '../../dsm/amm';
 import { publishRoutingAdvertisement } from '../../dsm/route_commit';
@@ -128,6 +129,45 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'publish failed';
       setError(msg);
+      setPhase('error');
+    } finally {
+      setPendingPublishId(null);
+    }
+  }, [refresh]);
+
+  /// Fold every settlement a trader has already completed against this vault.
+  ///
+  /// The trades are FINAL before this runs — a trader settles on its own device
+  /// under the owner's pre-commitment, with the owner offline. Nothing here
+  /// authorises anything; the owner is writing down what already happened, so
+  /// the reserves it shows stop lagging the chain. Rust checks each receipt and
+  /// is idempotent against the reserve leaf's sequence, so a repeat moves
+  /// nothing.
+  const handleReconcile = useCallback(async (v: AmmVaultSummary) => {
+    setError('');
+    setToast('');
+    setPendingPublishId(v.vaultIdBase32);
+    setPhase('republishing');
+    try {
+      const vaultIdBytes = decodeBase32Crockford(v.vaultIdBase32);
+      if (vaultIdBytes.length !== 32) {
+        throw new Error(`vault_id Base32 must decode to 32 bytes (got ${vaultIdBytes.length})`);
+      }
+      let folded = 0;
+      for (const x of v.pendingX) {
+        const r = await reconcileVaultSettlement({ vaultId: vaultIdBytes, x });
+        // Stop at the first refusal rather than pressing on: the rest are
+        // folded in sequence order, and continuing past a gap would apply a
+        // later settlement over a state that never received the earlier one.
+        if (!r.success) {
+          throw new Error(r.error || 'dlv.reconcile failed');
+        }
+        folded += 1;
+      }
+      setToast(`Reconciled ${folded} settlement${folded === 1 ? '' : 's'}.`);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'reconcile failed');
       setPhase('error');
     } finally {
       setPendingPublishId(null);
@@ -308,6 +348,28 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                 <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
                   reserves: {v.reserveA.toString()} / {v.reserveB.toString()}
                 </div>
+                {v.pendingUnapplied > 0n && (
+                  <div
+                    style={{ fontSize: 10, marginTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}
+                  >
+                    {/* Settled and final already — the reserves above are
+                        simply behind until the owner writes them down. */}
+                    <span>
+                      {v.pendingUnapplied.toString()} settled trade
+                      {v.pendingUnapplied === 1n ? '' : 's'} to reconcile
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleReconcile(v)}
+                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
+                      className="cancel-button"
+                      style={{ fontSize: 10, padding: '2px 8px' }}
+                      title="Fold settlements traders have already completed into this vault's reserves"
+                    >
+                      {pendingPublishId === v.vaultIdBase32 ? 'Reconciling…' : 'Reconcile'}
+                    </button>
+                  </div>
+                )}
                 <div style={{ fontSize: 10, opacity: 0.7, marginTop: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                   <span>
                     vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
