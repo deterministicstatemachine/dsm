@@ -675,6 +675,20 @@ fn validate_conservation(
             Ok(())
         }
 
+        // Closing a vault is a RESERVE move back to `balances`: the release and
+        // the credit are computed together from the same leg amounts inside the
+        // `Withdraw` arm of `advance`, so a delta riding along would be a second,
+        // unconserved movement.
+        Operation::DlvClose { .. } => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvClose releases reserves through the Withdraw mutation, not \
+                     balance deltas",
+                ));
+            }
+            Ok(())
+        }
+
         // Funding a vault is a RESERVE move, not a balance delta. The value leaves
         // `balances` and lands in a vault-reserve leaf, and both halves are computed from
         // one amount inside `fund_vault_reserves` — so a delta accompanying this operation
@@ -865,6 +879,25 @@ pub enum VaultReserveMutation {
         /// vault-state leaf at `new_sequence` is derived from it.
         pair: VaultStatePair,
     },
+    /// `DlvClose`: the COMPLETE remaining reserve set — both legs of the pair,
+    /// exactly, at exactly `parent_sequence` — returns to `balances` atomically,
+    /// exactly once; the leaves become `0 @ new_sequence` (terminal, never
+    /// deleted, so the vault id can never be re-funded or re-withdrawn). Must
+    /// equal the signed `DlvClose` operation field-for-field: the signature
+    /// binds the whole transition, unsigned mutation metadata decides nothing.
+    Withdraw {
+        vault_id: [u8; 32],
+        /// `(policy_commit, amount)` — exactly `[pair.a, pair.b]`, in canonical
+        /// order, each amount equal to the leaf it drains.
+        legs: Vec<([u8; 32], u64)>,
+        /// The generation consumed (both leaves must sit at exactly this) and
+        /// the terminal generation produced (`parent + 1`).
+        parent_sequence: u64,
+        new_sequence: u64,
+        /// The vault's pair + fee; the terminal vault-state leaf derives
+        /// `digest(a, b, 0, 0, fee)` at `new_sequence`.
+        pair: VaultStatePair,
+    },
 }
 
 impl VaultReserveMutation {
@@ -872,7 +905,8 @@ impl VaultReserveMutation {
     pub fn vault_id(&self) -> [u8; 32] {
         match self {
             VaultReserveMutation::Fund { vault_id, .. }
-            | VaultReserveMutation::ApplySettlement { vault_id, .. } => *vault_id,
+            | VaultReserveMutation::ApplySettlement { vault_id, .. }
+            | VaultReserveMutation::Withdraw { vault_id, .. } => *vault_id,
         }
     }
 
@@ -880,7 +914,8 @@ impl VaultReserveMutation {
     pub fn pair(&self) -> VaultStatePair {
         match self {
             VaultReserveMutation::Fund { pair, .. }
-            | VaultReserveMutation::ApplySettlement { pair, .. } => *pair,
+            | VaultReserveMutation::ApplySettlement { pair, .. }
+            | VaultReserveMutation::Withdraw { pair, .. } => *pair,
         }
     }
 
@@ -888,7 +923,8 @@ impl VaultReserveMutation {
     pub fn resulting_sequence(&self) -> u64 {
         match self {
             VaultReserveMutation::Fund { vault_sequence, .. } => *vault_sequence,
-            VaultReserveMutation::ApplySettlement { new_sequence, .. } => *new_sequence,
+            VaultReserveMutation::ApplySettlement { new_sequence, .. }
+            | VaultReserveMutation::Withdraw { new_sequence, .. } => *new_sequence,
         }
     }
 }
@@ -1335,7 +1371,9 @@ impl DeviceState {
         // without rewriting this tip and every descendant.
         if matches!(
             operation,
-            Operation::DlvSettle { .. } | Operation::DlvOwnerApply { .. }
+            Operation::DlvSettle { .. }
+                | Operation::DlvOwnerApply { .. }
+                | Operation::DlvClose { .. }
         ) {
             let op_name = operation.get_operation_type();
             crate::core::state_machine::transition::verify_operation_signature(
@@ -1658,6 +1696,139 @@ impl DeviceState {
                     VaultReserve {
                         amount,
                         sequence: *new_sequence,
+                    },
+                );
+            }
+        }
+
+        // THE OWNER CLOSES THE VAULT: the complete remaining reserve set moves
+        // back to `balances` atomically, exactly once, and the leaves become
+        // `0 @ parent + 1` — a terminal generation that can neither be funded
+        // (the leaves exist) nor withdrawn (both are already zero) again.
+        //
+        // The signed `DlvClose` operation binds the WHOLE transition; the
+        // mutation is checked against it FIELD FOR FIELD before anything moves.
+        // (`ApplySettlement` never cross-checked op vs mutation — this arm does
+        // not repeat that.)
+        if let Some(VaultReserveMutation::Withdraw {
+            vault_id: close_vault,
+            legs: close_legs,
+            parent_sequence: close_parent,
+            new_sequence: close_new,
+            pair: close_pair,
+        }) = &reserve_mutation
+        {
+            let Operation::DlvClose {
+                vault_id: op_vault,
+                leg_a_policy_commit,
+                leg_a_amount,
+                leg_b_policy_commit,
+                leg_b_amount,
+                parent_sequence: op_parent,
+                new_sequence: op_new,
+                fee_bps: op_fee,
+                ..
+            } = &operation
+            else {
+                return Err(DsmError::invalid_operation(
+                    "advance: only DlvClose may withdraw reserves",
+                ));
+            };
+            // WITHDRAW == OP, field for field.
+            if op_vault.as_slice() != close_vault.as_slice()
+                || *op_parent != *close_parent
+                || *op_new != *close_new
+                || *op_fee != close_pair.fee_bps()
+                || close_legs.as_slice()
+                    != [
+                        (*leg_a_policy_commit, *leg_a_amount),
+                        (*leg_b_policy_commit, *leg_b_amount),
+                    ]
+            {
+                return Err(DsmError::invalid_operation(
+                    "advance: the Withdraw mutation does not equal the signed DlvClose \
+                     (vault, legs, generation or pair) — refusing",
+                ));
+            }
+            // PAIR COMPLETENESS: the legs are exactly the vault's pair, canonical
+            // order, no duplicates, nothing else. A one-leg or foreign-leg close
+            // would leave the other asset encumbered forever while the vault
+            // reads as closed.
+            let close_expected = [close_pair.a(), close_pair.b()];
+            let close_actual: Vec<[u8; 32]> = close_legs.iter().map(|(pc, _)| *pc).collect();
+            if close_actual.as_slice() != close_expected {
+                return Err(DsmError::invalid_operation(
+                    "advance: a close must drain exactly the vault's pair, in canonical order",
+                ));
+            }
+            if *close_new
+                != close_parent.checked_add(1).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: close sequence overflow")
+                })?
+            {
+                return Err(DsmError::invalid_operation(
+                    "advance: a close must advance the vault by exactly one generation",
+                ));
+            }
+            // Every named leaf must EXIST at exactly the parent generation, and
+            // its amount must EQUAL the leg — a partial or over-withdraw is
+            // refused; a leaf at another generation is a stale or already-
+            // consumed parent.
+            let mut all_zero = true;
+            let mut keys = Vec::with_capacity(2);
+            for (pc, amount) in close_legs.iter() {
+                let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                    &self.genesis,
+                    &self.devid,
+                    close_vault,
+                    pc,
+                );
+                let entry = self.vault_reserves.get(&key).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: the vault holds no reserve leaf for a leg named by the close",
+                    )
+                })?;
+                if entry.sequence != *close_parent {
+                    return Err(DsmError::invalid_operation(
+                        "advance: this close targets a vault generation that is not current — \
+                         the parent was consumed by a settlement, or the close is stale",
+                    ));
+                }
+                if entry.amount != *amount {
+                    return Err(DsmError::invalid_operation(
+                        "advance: a close must withdraw exactly the leaf's amount (no partial \
+                         or over-withdraw)",
+                    ));
+                }
+                if entry.amount != 0 {
+                    all_zero = false;
+                }
+                keys.push((key, *pc, *amount));
+            }
+            // A vault whose complete reserve set is already zero is already
+            // closed: refuse rather than mint a second terminal generation.
+            if all_zero {
+                return Err(DsmError::invalid_operation(
+                    "advance: this vault is already closed (both reserves are zero)",
+                ));
+            }
+            // THE RELEASE: credit `balances` by exactly the leg amounts (checked),
+            // and leave the leaves at `0 @ new_sequence` — never deleted, so a
+            // future `Fund` for this vault id refuses ("already holds a reserve")
+            // and a future close refuses ("already closed").
+            for (key, pc, amount) in keys {
+                let cur = new_balances.get(&pc).copied().unwrap_or(0);
+                let next = cur.checked_add(amount).ok_or_else(|| {
+                    DsmError::invalid_operation("advance: close credit overflows the balance")
+                })?;
+                new_balances.insert(pc, next);
+                let leaf_value = crate::dlv::vault_reserve_leaf::vault_reserve_value(0, *close_new);
+                batch_leaves.push((key, leaf_value));
+                new_vault_reserves.insert(
+                    key,
+                    VaultReserve {
+                        amount: 0,
+                        sequence: *close_new,
                     },
                 );
             }
@@ -5495,6 +5666,501 @@ mod tests {
             &proof.siblings,
         )
         .expect_err("stale generation must not verify against the new root");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Closing a vault: the complete reserve set returns, exactly once
+    // ─────────────────────────────────────────────────────────────
+
+    /// A funded vault at generation 0, with `era`/`rigb` reserves.
+    fn funded_for_close(
+        b: u8,
+        era: [u8; 32],
+        rigb: [u8; 32],
+        ra: u64,
+        rb: u64,
+    ) -> (DeviceState, [u8; 32], [u8; 32], [u8; 32]) {
+        let mut dev = fresh_device(b);
+        dev.balances.insert(era, ra + 1_000);
+        dev.balances.insert(rigb, rb + 500);
+        let vault = [b ^ 0x5A; 32];
+        let (rk, tip) = self_loop(&dev);
+        let funded = dev
+            .advance(
+                rk,
+                dev.devid,
+                dlv_create(vault),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs: vec![(era, ra), (rigb, rb)],
+                    vault_sequence: 0,
+                    pair: vault_pair(era, rigb),
+                }),
+            )
+            .expect("fund")
+            .new_device_state;
+        (funded, vault, rk, tip)
+    }
+
+    /// A signed `DlvClose` for the full reserve set at `parent`.
+    fn dlv_close_op(
+        vault: [u8; 32],
+        a: [u8; 32],
+        amt_a: u64,
+        b: [u8; 32],
+        amt_b: u64,
+        parent: u64,
+        new: u64,
+    ) -> Operation {
+        sign_op(Operation::DlvClose {
+            vault_id: vault.to_vec(),
+            leg_a_policy_commit: a,
+            leg_a_amount: amt_a,
+            leg_b_policy_commit: b,
+            leg_b_amount: amt_b,
+            parent_sequence: parent,
+            new_sequence: new,
+            fee_bps: 30,
+            signature: Vec::new(),
+            mode: TransactionMode::Unilateral,
+        })
+    }
+
+    fn withdraw_mutation(
+        vault: [u8; 32],
+        a: [u8; 32],
+        amt_a: u64,
+        b: [u8; 32],
+        amt_b: u64,
+        parent: u64,
+        new: u64,
+    ) -> VaultReserveMutation {
+        VaultReserveMutation::Withdraw {
+            vault_id: vault,
+            legs: vec![(a, amt_a), (b, amt_b)],
+            parent_sequence: parent,
+            new_sequence: new,
+            pair: vault_pair(a, b),
+        }
+    }
+
+    /// THE CLOSE: the complete remaining reserve set returns to spendable
+    /// balance, exactly once; both leaves sit at `0 @ parent+1`; the vault-state
+    /// leaf follows with `digest(a, b, 0, 0, fee)`; and the vault id is
+    /// single-use afterwards — neither re-fundable nor re-closable.
+    #[test]
+    fn a_close_returns_the_whole_reserve_set_exactly_once_and_the_vault_id_is_single_use() {
+        use crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion;
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD1, era, rigb, 10_000, 5_000);
+        let pair = vault_pair(era, rigb);
+        let (free_a_before, free_b_before) = (funded.balance(&era), funded.balance(&rigb));
+
+        let out = funded
+            .advance(
+                rk,
+                funded.devid,
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
+            )
+            .expect("close");
+        let after = &out.new_device_state;
+
+        // POST-TRADE ORACLE: the wallet grows by exactly the reserves at K.
+        assert_eq!(after.balance(&era), free_a_before + 10_000);
+        assert_eq!(after.balance(&rigb), free_b_before + 5_000);
+        // Leaves are zero at the terminal generation — present, not deleted.
+        assert_eq!(after.vault_reserve(&vault, &era), 0);
+        assert_eq!(after.vault_reserve(&vault, &rigb), 0);
+        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 1);
+        assert_eq!(
+            after.vault_reserve_entry(&vault, &rigb).unwrap().sequence,
+            1
+        );
+        // The vault-state leaf is the terminal one, under the SAME root.
+        let w = out.vault_state_proof.as_ref().expect("witness");
+        assert_eq!(w.sequence, 1);
+        assert_eq!(w.reserves_digest, pair.reserves_digest(0, 0));
+        verify_vault_smt_inclusion(&vault, 1, &w.reserves_digest, &out.child_r_a, &w.siblings)
+            .expect("terminal leaf binds the close's root");
+
+        // SINGLE USE. A second close is refused (already zero), and re-funding
+        // is refused because the leaves EXIST — not because an amount is
+        // non-zero.
+        let second = after.advance(
+            rk,
+            after.devid,
+            dlv_close_op(vault, era, 0, rigb, 0, 1, 2),
+            entropy(3),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(withdraw_mutation(vault, era, 0, rigb, 0, 1, 2)),
+        );
+        let e = format!("{}", second.expect_err("a closed vault cannot close again"));
+        assert!(e.contains("already closed"), "got: {e}");
+
+        let refund = after.advance(
+            rk,
+            after.devid,
+            dlv_create(vault),
+            entropy(4),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                legs: vec![(era, 10), (rigb, 5)],
+                vault_sequence: 2,
+                pair,
+            }),
+        );
+        let e = format!("{}", refund.expect_err("a closed vault id is single use"));
+        assert!(
+            e.contains("already holds a reserve"),
+            "the refusal must be existence-based, got: {e}"
+        );
+    }
+
+    /// A close after a settlement withdraws the POST-TRADE reserves at the
+    /// current generation — never the funding-time amounts.
+    #[test]
+    fn a_close_after_a_settlement_withdraws_the_post_trade_reserves() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD2, era, rigb, 10_000, 5_000);
+        let pair = vault_pair(era, rigb);
+        let apply = sign_op(Operation::DlvOwnerApply {
+            vault_id: vault.to_vec(),
+            settlement_receipt_id: [0x77; 32],
+            pending_pointer_x: [0x55; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_reserves_digest: pair.reserves_digest(10_000, 5_000),
+            new_reserves_digest: pair.reserves_digest(11_000, 4_030),
+            input_policy_commit: era,
+            output_policy_commit: rigb,
+            input_amount: 1_000,
+            output_amount: 970,
+            signature: Vec::new(),
+            mode: TransactionMode::Bilateral,
+        });
+        let traded = funded
+            .advance(
+                rk,
+                funded.devid,
+                apply,
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::ApplySettlement {
+                    vault_id: vault,
+                    input_policy_commit: era,
+                    input_amount: 1_000,
+                    output_policy_commit: rigb,
+                    output_amount: 970,
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+            )
+            .expect("settle")
+            .new_device_state;
+        let (free_a, free_b) = (traded.balance(&era), traded.balance(&rigb));
+
+        // Closing at the FUNDING amounts is refused: they are not the leaves.
+        let stale = traded.advance(
+            rk,
+            traded.devid,
+            dlv_close_op(vault, era, 10_000, rigb, 5_000, 1, 2),
+            entropy(3),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 1, 2)),
+        );
+        let e = format!("{}", stale.expect_err("funding-time amounts are stale"));
+        assert!(e.contains("exactly the leaf's amount"), "got: {e}");
+
+        let after = traded
+            .advance(
+                rk,
+                traded.devid,
+                dlv_close_op(vault, era, 11_000, rigb, 4_030, 1, 2),
+                entropy(4),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 11_000, rigb, 4_030, 1, 2)),
+            )
+            .expect("close at the post-trade generation")
+            .new_device_state;
+        assert_eq!(after.balance(&era), free_a + 11_000);
+        assert_eq!(after.balance(&rigb), free_b + 4_030);
+        assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 2);
+    }
+
+    /// Structural refusals, every one with ZERO mutation: a stale generation, a
+    /// one-leg or foreign-leg drain, unordered legs, a non-unit step, an
+    /// unsigned operation, balance deltas, and a mutation that disagrees with
+    /// the signed operation.
+    #[test]
+    fn every_malformed_close_is_refused_with_zero_mutation() {
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD3, era, rigb, 10_000, 5_000);
+        let root_before = funded.root();
+        let bal_before = funded.balances.clone();
+        let pair = vault_pair(era, rigb);
+
+        /// One refusal case: what it is, the phrase the refusal must name, and
+        /// the shape that must be refused.
+        struct BadClose {
+            name: &'static str,
+            needle: &'static str,
+            op: Operation,
+            mutation: Option<VaultReserveMutation>,
+            deltas: Vec<BalanceDelta>,
+        }
+        let bad = |name, needle, op, mutation, deltas| BadClose {
+            name,
+            needle,
+            op,
+            mutation,
+            deltas,
+        };
+        let attempts: Vec<BadClose> = vec![
+            bad(
+                "stale generation",
+                "not current",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 1, 2),
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 1, 2)),
+                vec![],
+            ),
+            bad(
+                // A one-leg mutation cannot equal a signed op that names both,
+                // so the op-equality gate — the tighter one — refuses first.
+                "one leg only",
+                "does not equal the signed DlvClose",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                Some(VaultReserveMutation::Withdraw {
+                    vault_id: vault,
+                    legs: vec![(era, 10_000)],
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+                vec![],
+            ),
+            bad(
+                // Op and mutation AGREE, and both name an asset the vault's
+                // pair does not contain: pair completeness is what catches it.
+                // Without that check the drain would leave the real second leg
+                // encumbered forever while the vault read as closed.
+                "op and mutation agree on legs that are not the pair",
+                "exactly the vault's pair",
+                dlv_close_op(vault, era, 10_000, dbtc, 5_000, 0, 1),
+                Some(VaultReserveMutation::Withdraw {
+                    vault_id: vault,
+                    legs: vec![(era, 10_000), (dbtc, 5_000)],
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+                vec![],
+            ),
+            bad(
+                "a leg outside the pair",
+                "does not equal the signed DlvClose",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                Some(VaultReserveMutation::Withdraw {
+                    vault_id: vault,
+                    legs: vec![(dbtc, 1), (era, 10_000)],
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+                vec![],
+            ),
+            bad(
+                "legs out of canonical order",
+                "does not equal the signed DlvClose",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                Some(VaultReserveMutation::Withdraw {
+                    vault_id: vault,
+                    legs: vec![(rigb, 5_000), (era, 10_000)],
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+                vec![],
+            ),
+            bad(
+                "a non-unit generation step",
+                "exactly one generation",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 2),
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 2)),
+                vec![],
+            ),
+            bad(
+                "partial withdraw",
+                "exactly the leaf's amount",
+                dlv_close_op(vault, era, 9_000, rigb, 5_000, 0, 1),
+                Some(withdraw_mutation(vault, era, 9_000, rigb, 5_000, 0, 1)),
+                vec![],
+            ),
+            bad(
+                "over withdraw",
+                "exactly the leaf's amount",
+                dlv_close_op(vault, era, 10_001, rigb, 5_000, 0, 1),
+                Some(withdraw_mutation(vault, era, 10_001, rigb, 5_000, 0, 1)),
+                vec![],
+            ),
+            bad(
+                "mutation disagrees with the signed op",
+                "does not equal the signed DlvClose",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 4_999, 0, 1)),
+                vec![],
+            ),
+            bad(
+                "balance deltas riding along",
+                "not balance deltas",
+                dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
+                vec![BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Credit,
+                    amount: 10_000,
+                }],
+            ),
+            bad(
+                "a withdraw under another operation",
+                "only DlvClose may withdraw",
+                dlv_create(vault),
+                Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
+                vec![],
+            ),
+        ];
+
+        for case in attempts {
+            let res = funded.advance(
+                rk,
+                funded.devid,
+                case.op,
+                entropy(9),
+                None,
+                &case.deltas,
+                Some(tip),
+                None,
+                None,
+                case.mutation,
+            );
+            let e = format!("{}", res.expect_err(case.name));
+            assert!(
+                e.contains(case.needle),
+                "{}: expected {:?}, got: {e}",
+                case.name,
+                case.needle
+            );
+        }
+
+        // An UNSIGNED close is refused by the signature gate.
+        let unsigned = funded.advance(
+            rk,
+            funded.devid,
+            Operation::DlvClose {
+                vault_id: vault.to_vec(),
+                leg_a_policy_commit: era,
+                leg_a_amount: 10_000,
+                leg_b_policy_commit: rigb,
+                leg_b_amount: 5_000,
+                parent_sequence: 0,
+                new_sequence: 1,
+                fee_bps: 30,
+                signature: Vec::new(),
+                mode: TransactionMode::Unilateral,
+            },
+            entropy(10),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(withdraw_mutation(vault, era, 10_000, rigb, 5_000, 0, 1)),
+        );
+        assert!(unsigned.is_err(), "an unsigned close must be refused");
+
+        assert_eq!(funded.root(), root_before, "every refusal moved nothing");
+        assert_eq!(funded.balances, bal_before);
+        assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
+        assert_eq!(funded.vault_reserve(&vault, &rigb), 5_000);
+    }
+
+    /// The close's terminal state SURVIVES a reload: `restore` replays the zero
+    /// leaves and the terminal vault-state leaf and recomputes the same root.
+    #[test]
+    fn a_closed_vaults_terminal_state_survives_restore() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD4, era, rigb, 7_000, 3_000);
+        let closed = funded
+            .advance(
+                rk,
+                funded.devid,
+                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
+            )
+            .expect("close")
+            .new_device_state;
+        let restored = DeviceState::restore(
+            closed.genesis,
+            closed.devid,
+            closed.public_key.clone(),
+            closed.legacy_anchor,
+            closed.balances.clone(),
+            closed.tips.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            closed.extra_leaves.clone(),
+            closed.offline_allocations.clone(),
+            closed.vault_reserves.clone(),
+            1024,
+        )
+        .expect("restore");
+        assert_eq!(restored.root(), closed.root(), "terminal state reloads");
+        assert_eq!(restored.vault_reserve(&vault, &era), 0);
+        assert_eq!(
+            restored
+                .vault_reserve_entry(&vault, &rigb)
+                .unwrap()
+                .sequence,
+            1
+        );
     }
 
     /// `VaultStatePair` refuses a non-canonical or degenerate pair.

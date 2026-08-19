@@ -14,6 +14,7 @@ import {
   createAmmVault,
   listOwnedAmmVaults,
   reconcileVaultSettlement,
+  closeAmmVault,
   type AmmVaultSummary,
 } from '../../dsm/amm';
 import { publishRoutingAdvertisement } from '../../dsm/route_commit';
@@ -23,7 +24,7 @@ import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import '../../styles/EnhancedWallet.css';
 
-type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'created' | 'error';
+type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'closing' | 'created' | 'error';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -42,6 +43,9 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const [toast, setToast] = useState<string>('');
   const [showCreate, setShowCreate] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  /// The vault a Withdraw-all click is awaiting confirmation for. Closing is
+  /// irreversible (the vault id is single-use), so it is never one click.
+  const [confirmClose, setConfirmClose] = useState<AmmVaultSummary | null>(null);
 
   // The pair is chosen from assets this device actually HOLDS, and each choice
   // carries the token's 32-byte CPTA anchor. Free text used to be sent as the
@@ -168,6 +172,33 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'reconcile failed');
+      setPhase('error');
+    } finally {
+      setPendingPublishId(null);
+    }
+  }, [refresh]);
+
+  /// Owner: close a vault and take ALL of its remaining liquidity back.
+  ///
+  /// Irreversible, and Rust refuses unless this device has folded every
+  /// settlement the market made — so the button is confirmed, and a refusal is
+  /// shown verbatim rather than retried.
+  const handleClose = useCallback(async (v: AmmVaultSummary) => {
+    setError('');
+    setToast('');
+    setPendingPublishId(v.vaultIdBase32);
+    setPhase('closing');
+    try {
+      const vaultIdBytes = decodeBase32Crockford(v.vaultIdBase32);
+      if (vaultIdBytes.length !== 32) {
+        throw new Error(`vault_id Base32 must decode to 32 bytes (got ${vaultIdBytes.length})`);
+      }
+      const r = await closeAmmVault({ vaultId: vaultIdBytes });
+      if (!r.success) throw new Error(r.error || 'dlv.close failed');
+      setToast('Vault closed. All liquidity returned to your balance.');
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'close failed');
       setPhase('error');
     } finally {
       setPendingPublishId(null);
@@ -390,7 +421,29 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                       </span>
                     )}
                   </span>
-                  {!v.routingAdvertised && v.publicationState === 'published' && v.unlockSpecDigest && v.unlockSpecKey && (
+                  {v.closed ? (
+                    // Terminal. The vault holds nothing and its id is single-use;
+                    // nothing here is actionable any more.
+                    <span title="This vault was closed: all liquidity was returned and its id cannot be reused">
+                      closed
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClose(v)}
+                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing' || phase === 'closing'}
+                      className="cancel-button"
+                      style={{ fontSize: 10, padding: '2px 8px' }}
+                      title={
+                        v.pendingUnapplied > 0n
+                          ? 'Reconcile the settled trades first — a close must consume the vault\'s current state'
+                          : 'Withdraw ALL liquidity and retire this vault (irreversible)'
+                      }
+                    >
+                      {phase === 'closing' && pendingPublishId === v.vaultIdBase32 ? 'Closing…' : 'Withdraw all'}
+                    </button>
+                  )}
+                  {!v.closed && !v.routingAdvertised && v.publicationState === 'published' && v.unlockSpecDigest && v.unlockSpecKey && (
                     // Phase 13 follow-up: hide the button for legacy
                     // vaults whose persisted policy_digest is absent.
                     // Republishing them would require stamping a zero
@@ -495,6 +548,25 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         message={`Create vault ${tickerFor(tokenA)} / ${tickerFor(tokenB)} with reserves ${reserveA} / ${reserveB} at ${feeBps} bps fee?`}
         onConfirm={() => { setShowConfirm(false); void handleCreate(); }}
         onCancel={() => setShowConfirm(false)}
+      />
+
+      <ConfirmModal
+        visible={confirmClose !== null}
+        title="Withdraw all and close vault"
+        message={
+          confirmClose
+            ? `Return ${confirmClose.reserveA.toString()} ${confirmClose.tokenATicker} and ` +
+              `${confirmClose.reserveB.toString()} ${confirmClose.tokenBTicker} to your balance and ` +
+              'retire this vault? This cannot be undone — the vault id is single-use, and providing ' +
+              'liquidity again means creating a new vault.'
+            : ''
+        }
+        onConfirm={() => {
+          const v = confirmClose;
+          setConfirmClose(null);
+          if (v) void handleClose(v);
+        }}
+        onCancel={() => setConfirmClose(null)}
       />
     </div>
   );

@@ -8486,6 +8486,15 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
   tokenBTicker = "";
 
   /**
+   * TRUE once `dlv.close` has drained the vault: both reserve leaves are 0 at
+   * the terminal generation. A closed vault is unquotable (composition sees
+   * zero reserves), un-fundable and un-closable — its id is single-use.
+   *
+   * @generated from field: bool closed = 20;
+   */
+  closed = false;
+
+  /**
    * FUNDED IS NOT PUBLISHED. A vault's five birth objects (anchor seq-pinned +
    * latest, vault-state inclusion proof seq-pinned + latest, reserve proof)
    * are frozen in the funding transaction and replayed to the vault's birth
@@ -8522,6 +8531,7 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 12, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 17, name: "token_a_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 18, name: "token_b_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 20, name: "closed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 21, name: "publication_state", kind: "enum", T: proto3.getEnumType(VaultPublicationState) },
   ]);
 
@@ -9651,7 +9661,51 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
  * owner learning what happened, not authorizing it. So the request names only
  * which settlement to look at: everything the owner acts on is re-derived from
  * the receipt it fetches and verifies, never taken from the caller.
+ * dlv.close — the owner withdraws ALL remaining liquidity and retires the vault.
  *
+ * The request names only the vault: every field of the canonical
+ * `Operation::DlvClose` (both legs with their amounts, the parent and terminal
+ * generation, the pair/fee) is DERIVED by Rust from the owner's verified
+ * frontier — composition at exactly this generation, with exactly these
+ * reserves — and signed. A caller cannot state what it withdraws.
+ *
+ * @generated from message dsm.DlvCloseV1
+ */
+export class DlvCloseV1 extends Message<DlvCloseV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvCloseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvCloseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvCloseV1 {
+    return new DlvCloseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvCloseV1 {
+    return new DlvCloseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvCloseV1 {
+    return new DlvCloseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvCloseV1 | PlainMessage<DlvCloseV1> | undefined, b: DlvCloseV1 | PlainMessage<DlvCloseV1> | undefined): boolean {
+    return proto3.util.equals(DlvCloseV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.DlvReconcileV1
  */
 export class DlvReconcileV1 extends Message<DlvReconcileV1> {

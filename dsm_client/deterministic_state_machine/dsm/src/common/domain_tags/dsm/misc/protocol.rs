@@ -32,6 +32,15 @@ pub const TAG_DSM_PROTOCOL_TRANSITION: TaggedHashDomain<'static> =
 pub const TAG_DSM_RECEIPT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/receipt");
 pub const TAG_DSM_RECEIPT_BIND_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-bind-session");
+/// The deterministic `x` a vault close claims its parent slot with:
+/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_be ‖ owner_devid)` — so a retry produces
+/// the same slot occupant rather than a second one.
+pub const TAG_DSM_DLV_CLOSE_X: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/dlv-close-x");
+/// The close commitment a terminal pointer names as its expected receipt:
+/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_be)`.
+pub const TAG_DSM_DLV_CLOSE_COMMIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/dlv-close-commit");
 /// Settlement-slot claim: the signed preimage `H(tag ‖ 0x00 ‖ canonical
 /// SettlementSlotClaimBodyV1 bytes)`, and (with `-envelope`) the digest of the
 /// frozen envelope bytes a register member stores and compares.
