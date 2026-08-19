@@ -227,6 +227,21 @@ export interface AmmVaultSummary {
   /** The external commitment of each one, so the owner can fold them without
    *  rediscovering what is outstanding. */
   pendingX: Uint8Array[];
+  /**
+   * FUNDED IS NOT PUBLISHED. `'pending'` until every one of the vault's birth
+   * objects (anchor, state inclusion proof, reserve proof) has reached quorum
+   * on the vault's storage set — the wallet keeps replaying the frozen bytes
+   * on every sync. Until `'published'` the vault is not market-active and the
+   * routing advertisement cannot be published. Derived in Rust from the
+   * frozen-artifact table; the screen only renders it.
+   */
+  publicationState: 'pending' | 'published';
+}
+
+function publicationStateToString(
+  s: pb.VaultPublicationState,
+): 'pending' | 'published' {
+  return s === pb.VaultPublicationState.PUBLISHED ? 'published' : 'pending';
 }
 
 function anchorEnforcementToString(
@@ -316,6 +331,7 @@ export async function listOwnedAmmVaults(): Promise<{
         pendingX: summary.pendingX,
         unlockSpecDigest,
         unlockSpecKey,
+        publicationState: publicationStateToString(summary.publicationState),
       };
     });
     return { success: true, vaults };

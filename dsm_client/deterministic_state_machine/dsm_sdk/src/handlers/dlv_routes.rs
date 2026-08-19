@@ -198,6 +198,13 @@ impl AppRouterImpl {
                 anchor_enforcement: v.anchor_enforcement,
                 unlock_spec_digest: Some(v.policy_digest.to_vec()),
                 unlock_spec_key: Some(format!("defi/spec/amm/{prefix}")),
+                // Derived from the frozen-artifact table: PUBLISHED iff every
+                // birth object has reached quorum on the vault's birth set.
+                publication_state: if birth_is_published(&v.vault_id) {
+                    generated::VaultPublicationState::Published as i32
+                } else {
+                    generated::VaultPublicationState::Pending as i32
+                },
             });
             // `wallet_pk` gates which device may see these at all; the
             // owner-match is enforced inside rehydration.
@@ -709,8 +716,8 @@ impl AppRouterImpl {
         } else {
             None
         };
-        let record_to_persist = match amm_pair.as_ref() {
-            Some((token_a, token_b)) => {
+        let record_to_persist = match (amm_pair.as_ref(), birth_storage_set_id) {
+            (Some((token_a, token_b)), Some(birth_set_id)) => {
                 match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
                     Ok(pair) => {
                         let owner = self.core_sdk.device_head();
@@ -729,8 +736,7 @@ impl AppRouterImpl {
                                 fee_bps: amm_fee_bps,
                                 anchor_enforcement: spec.anchor_enforcement,
                                 policy_digest: pd,
-                                storage_set_id: birth_storage_set_id
-                                    .expect("AMM vault has a birth storage set"),
+                                storage_set_id: birth_set_id,
                             },
                         )
                     }
@@ -739,17 +745,25 @@ impl AppRouterImpl {
                     }
                 }
             }
-            None => None,
+            // No AMM pair ⇒ no vault record and no birth set. The mixed shapes
+            // cannot occur (both derive from `amm_pair`) and are refused rather
+            // than papered over with a default.
+            (None, None) => None,
+            _ => {
+                return err(
+                    "dlv.create: internal: an AMM pair and its birth storage set must both be \
+                     present"
+                        .into(),
+                )
+            }
         };
 
-        let in_tx = |tx: &rusqlite::Transaction<'_>,
-                     _o: &dsm::types::device_state::AdvanceOutcome|
+        // The record write, shared by both shapes below: re-check inside the
+        // transaction (two concurrent creators could both pass the readable
+        // check above; only one can hold this transaction), then insert.
+        let write_record = |tx: &rusqlite::Transaction<'_>,
+                            rec: &crate::storage::client_db::amm_vault_records::AmmVaultRecord|
          -> Result<(), dsm::types::error::DsmError> {
-            let Some(rec) = record_to_persist.as_ref() else {
-                return Ok(());
-            };
-            // Re-check inside the transaction. Two concurrent creators could both
-            // pass the readable check above; only one can hold this transaction.
             let already: i64 = tx
                 .query_row(
                     "SELECT COUNT(1) FROM amm_vault_records WHERE vault_id = ?1",
@@ -794,16 +808,99 @@ impl AppRouterImpl {
             Ok(())
         };
 
-        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
-            rel_key,
-            actor,
-            op,
-            &[],
-            Some(init_tip),
-            reserve_funding,
-            Some(&in_tx),
-        ) {
-            return err(format!("dlv.create: funded creation failed: {e}"));
+        match (reserve_funding, record_to_persist.as_ref()) {
+            // AN AMM VAULT'S BIRTH: one staged advance. `build` runs after the
+            // pure prepare and BEFORE anything is persisted, reading ONLY the
+            // outcome (never `device_head()` — the state-machine lock is held):
+            // it signs the vault's five birth objects off the exact root the
+            // funding advance produced. `write` then persists the record AND
+            // freezes those exact bytes inside the same SQLite transaction as
+            // the head write. If any signature or freeze fails, nothing commits
+            // — no encumbered reserves without their published-in-waiting proofs,
+            // no proofs without the reserves. Publication (best-effort now, the
+            // generic sweep thereafter) replays the frozen bytes byte-identically
+            // until a quorum of the vault's birth storage set holds them.
+            (Some(funding_mutation), Some(rec)) => {
+                let birth_set_id = rec.storage_set_id;
+                let pair = funding_mutation.pair();
+                let (owner_pk, owner_sk) = match (
+                    crate::sdk::signing_authority::current_public_key(),
+                    crate::sdk::signing_authority::current_secret_key(),
+                ) {
+                    (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
+                    _ => {
+                        return err(
+                            "dlv.create: signing authority unavailable (wallet locked) — a \
+                             vault cannot be born without its signed birth proofs"
+                                .into(),
+                        )
+                    }
+                };
+                let build = |outcome: &dsm::types::device_state::AdvanceOutcome|
+                 -> Result<BirthArtifacts, dsm::types::error::DsmError> {
+                    build_birth_artifacts(outcome, &vault_id, &pair, &birth_set_id, &owner_pk, &owner_sk)
+                };
+                let write = |tx: &rusqlite::Transaction<'_>,
+                             _o: &dsm::types::device_state::AdvanceOutcome,
+                             artifacts: &BirthArtifacts|
+                 -> Result<(), dsm::types::error::DsmError> {
+                    write_record(tx, rec)?;
+                    for (key, bytes) in &artifacts.objects {
+                        crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                            tx,
+                            &birth_set_id,
+                            key,
+                            bytes,
+                            &artifacts.root,
+                            BIRTH_ARTIFACT_PURPOSE,
+                        )
+                        .map_err(|e| {
+                            dsm::types::error::DsmError::storage(
+                                format!("dlv.create: freeze birth artifact {key}: {e}"),
+                                None::<std::io::Error>,
+                            )
+                        })?;
+                    }
+                    Ok(())
+                };
+                if let Err(e) = self
+                    .core_sdk
+                    .execute_on_relationship_staged_with_reserve_mutation(
+                        rel_key,
+                        actor,
+                        op,
+                        &[],
+                        Some(init_tip),
+                        Some(funding_mutation),
+                        build,
+                        write,
+                    )
+                {
+                    return err(format!("dlv.create: funded creation failed: {e}"));
+                }
+            }
+            // A non-AMM vault: the plain advance, nothing to freeze.
+            (None, None) => {
+                if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
+                    rel_key,
+                    actor,
+                    op,
+                    &[],
+                    Some(init_tip),
+                    None,
+                    None,
+                ) {
+                    return err(format!("dlv.create: creation failed: {e}"));
+                }
+            }
+            // A funding mutation without a record (or vice versa) is an internal
+            // contradiction: refuse before anything moves.
+            _ => {
+                return err(
+                    "dlv.create: internal: AMM funding and vault record must both be present"
+                        .into(),
+                )
+            }
         }
 
         // Persist vault state in the DLV manager.
@@ -904,143 +1001,21 @@ impl AppRouterImpl {
         // so it cannot outlive a rolled-back creation or be lost to a crash that
         // leaves the reserves encumbered.
 
-        // Tier 2 Foundation: publish genesis vault state anchor
-        // (sequence=0) for AMM vaults whose spec declares
-        // anchor_enforcement = REQUIRED or OPTIONAL.  Vault internal
-        // state is authoritative; the anchor is a best-effort
-        // off-device-trader-readable advertisement.  Failure is
-        // logged but does NOT roll back vault creation.
-        {
-            use dsm::types::proto::AnchorEnforcement;
-            let enforcement = AnchorEnforcement::try_from(spec.anchor_enforcement)
-                .unwrap_or(AnchorEnforcement::Unspecified);
-            let should_publish = match enforcement {
-                AnchorEnforcement::Required | AnchorEnforcement::Optional => true,
-                AnchorEnforcement::Unspecified => false,
-            };
-            if should_publish {
-                match dlv_manager.get_vault(&vault_id).await {
-                    Ok(vault_lock) => {
-                        let vault = vault_lock.lock().await;
-                        // Digest over the reserves this device just encumbered,
-                        // read from its own leaves — the condition no longer
-                        // carries quantities to hash.
-                        let reserves_digest_opt = match self.core_sdk.device_head() {
-                            Some(head) => {
-                                let (ra, rb) = funding
-                                    .first()
-                                    .zip(funding.get(1))
-                                    .map(|((pc_a, _), (pc_b, _))| {
-                                        (
-                                            head.vault_reserve(&vault_id, pc_a),
-                                            head.vault_reserve(&vault_id, pc_b),
-                                        )
-                                    })
-                                    .unwrap_or((0, 0));
-                                vault.reserves_digest_for(ra, rb)
-                            }
-                            None => None,
-                        };
-                        drop(vault);
-                        if let Some(reserves_digest) = reserves_digest_opt {
-                            let pk_res = crate::sdk::signing_authority::current_public_key();
-                            let sk_res = crate::sdk::signing_authority::current_secret_key();
-                            match (pk_res, sk_res) {
-                                (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => {
-                                    match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
-                                        &vault_id,
-                                        0,
-                                        &reserves_digest,
-                                        &pk,
-                                        &sk,
-                                    ) {
-                                        Ok(signed) => {
-                                            let proto_bytes =
-                                                crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
-                                                    &signed,
-                                                );
-                                            if let Err(e) =
-                                                publish_vault_state_anchor(&vault_id, &proto_bytes)
-                                                    .await
-                                            {
-                                                log::warn!(
-                                                    "[dlv.create] genesis anchor publish failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
-                                                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "[dlv.create] genesis anchor sign failed for {}: {e:?}",
-                                                crate::util::text_id::encode_base32_crockford(&vault_id),
-                                            );
-                                        }
-                                    }
-
-                                    // Phase 7 — SoFi spec §4.1.2: also
-                                    // commit the genesis vault state into
-                                    // the PD-SMT and publish a
-                                    // VaultStateInclusionProofV1.  The
-                                    // anchor above is the legacy fast
-                                    // path (works for composition without
-                                    // SMT verification); the inclusion
-                                    // proof is the spec-strict
-                                    // strengthening that closes the
-                                    // signing-key-forgery hole.
-                                    publish_vault_state_inclusion_proof(
-                                        self.core_sdk.as_ref(),
-                                        &vault_id,
-                                        0,
-                                        &reserves_digest,
-                                        &pk,
-                                        &sk,
-                                    )
-                                    .await;
-
-                                    // And the RESERVE inclusion proof, which is
-                                    // what turns "the owner says this vault holds
-                                    // 10,000 ERA" into "the owner's own device
-                                    // root commits it". Without it a trader has
-                                    // no authenticated liquidity to quote
-                                    // against and `compose_vault_state` refuses
-                                    // the vault outright.
-                                    //
-                                    // Both proofs read the SAME head: the funding
-                                    // advance wrote the reserve leaves AND the
-                                    // vault-state leaf in one SMT batch, so the
-                                    // composer's `smt_root` equality holds by
-                                    // construction — no ordering dependency, no
-                                    // second root.
-                                    let funded_commits: Vec<[u8; 32]> =
-                                        funding.iter().map(|(pc, _)| *pc).collect();
-                                    publish_reserve_inclusion_proof(
-                                        self.core_sdk.as_ref(),
-                                        &vault_id,
-                                        0,
-                                        &funded_commits,
-                                        &pk,
-                                        &sk,
-                                    )
-                                    .await;
-                                }
-                                _ => {
-                                    log::warn!(
-                                        "[dlv.create] genesis anchor: signing authority unavailable for {}",
-                                        crate::util::text_id::encode_base32_crockford(&vault_id),
-                                    );
-                                }
-                            }
-                        }
-                        // No reserves digest: non-AMM vault.  Tier 2 Foundation
-                        // is AMM-only — silently skip.
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[dlv.create] genesis anchor: get_vault for {} failed: {e}",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                        );
-                    }
-                }
+        // PUBLISH THE BIRTH — best-effort now; the generic sweep (cold boot and
+        // every `storage.sync`) replays the exact frozen bytes until a quorum of
+        // the birth set holds them. Until then the vault is FUNDED but NOT
+        // market-active: `publication_state` reports it, and the routing
+        // advertisement refuses to publish.
+        if record_to_persist.is_some() {
+            match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
+                Ok(n) => log::info!(
+                    "[dlv.create] birth publication pass: {n} artifact(s) reached quorum for {}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id)
+                ),
+                Err(e) => log::warn!(
+                    "[dlv.create] birth publication pass errored for {} — the sweep will retry: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id)
+                ),
             }
         }
 
@@ -2183,47 +2158,169 @@ impl AppRouterImpl {
     }
 }
 
-/// Publish a `VaultStateAnchorV1` proto blob to storage at the
-/// canonical Tier 2 Foundation key
-/// `sofi/vault-state/{vault_id_b32}/latest`.  Best-effort —
-/// vault internal state is authoritative; this storage write is
-/// advertisement-and-discovery only.
-async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> Result<(), String> {
-    let key = format!(
-        "sofi/vault-state/{}/latest",
-        crate::util::text_id::encode_base32_crockford(vault_id),
-    );
-    crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(&key, proto_bytes)
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("storage put failed: {e:?}"))
+/// Purpose label frozen on a vault's five birth objects (opaque to the
+/// publication layer; for operators and proofs).
+const BIRTH_ARTIFACT_PURPOSE: &str = "dlv-birth";
+
+/// A vault's birth publication set, built and signed off ONE `AdvanceOutcome`
+/// — the exact root the funding advance produced — before anything is
+/// persisted, then frozen byte-for-byte inside the advance transaction.
+///
+/// Three logical proofs are FIVE durable objects, because the publication
+/// primitive is keyed by object key and each key is its own quorum:
+/// (1) the owner-signed vault-state anchor at its seq-pinned key (the
+/// birth-pinned lineage reference), (2) the same anchor bytes at `latest`,
+/// (3) the vault-state inclusion proof at its seq-pinned key, (4) the same
+/// bytes at `latest`, (5) the reserve inclusion proof at its seq key.
+struct BirthArtifacts {
+    /// `(object_key, exact bytes)` — what gets frozen and replayed.
+    objects: Vec<(String, Vec<u8>)>,
+    /// The device root every object binds (`outcome.child_r_a`).
+    root: [u8; 32],
 }
 
-/// Phase 7 — SoFi spec §4.1.2 / §8.4 step 2.
+/// Build + sign the five birth objects from the funding advance's outcome.
 ///
-/// 1. Commit a vault-state leaf into the device's PD-SMT at the
-///    (sequence, reserves_digest) tuple — produces the canonical
-///    smt_root + 256-sibling inclusion path.
-/// 2. Sign the inclusion proof with the owner's SPHINCS+ secret key.
-/// 3. Publish to BOTH the seq-pinned key (historical traceability)
-///    AND the `latest` mirror (trader fast-path).
-///
-/// Caller has already confirmed `local_is_owner` (we are the vault
-/// owner).  Failure logs a warning and returns — the on-chain operation
-/// has already succeeded; the inclusion proof is an advertisement and
-/// can be republished later.
-/// Publish the reserve inclusion proof for a vault's legs.
-///
-/// This is the artifact that converts an owner's claim about its liquidity into
-/// something a stranger can check: each leg carries a 256-sibling path from the
-/// owner's own vault-reserve leaf up to the published device root. Without it
-/// `compose_vault_state` returns `MissingReserveProof` and the vault cannot be
-/// quoted at all — a signed reserves digest is not a substitute, because a
-/// one-way digest can only confirm that numbers the caller already held hash to
-/// what the owner signed.
-///
-/// Best-effort like its vault-state sibling: a publication failure leaves the
-/// vault unquotable rather than mis-quoted, which is the safe direction.
+/// Reads ONLY `outcome` (this runs under the state-machine lock in
+/// `pre_write`; `device_head()` would deadlock). The reserves digest and the
+/// vault-state siblings come from `outcome.vault_state_proof` — what `advance`
+/// DERIVED and landed — so the anchor signs the state the root actually
+/// commits; the reserve legs are proven off `outcome.new_device_state`, the
+/// same tree. All five bind `outcome.child_r_a`, so
+/// `compose_vault_state`'s root-equality holds by construction.
+fn build_birth_artifacts(
+    outcome: &dsm::types::device_state::AdvanceOutcome,
+    vault_id: &[u8; 32],
+    pair: &dsm::types::device_state::VaultStatePair,
+    birth_storage_set_id: &[u8; 32],
+    owner_pk: &[u8],
+    owner_sk: &[u8],
+) -> Result<BirthArtifacts, dsm::types::error::DsmError> {
+    use dsm::types::error::DsmError;
+    use prost::Message;
+
+    let head = &outcome.new_device_state;
+    let root = outcome.child_r_a;
+    let witness = outcome.vault_state_proof.as_ref().ok_or_else(|| {
+        DsmError::invalid_operation(
+            "dlv.create: the funding advance produced no vault-state witness — refusing to \
+             sign a birth without it",
+        )
+    })?;
+    if witness.vault_id != *vault_id || witness.sequence != 0 {
+        return Err(DsmError::invalid_operation(
+            "dlv.create: vault-state witness does not describe this vault's genesis",
+        ));
+    }
+
+    // (1)+(2) The anchor: (vault, seq 0, DERIVED digest, birth set), owner-signed.
+    let anchor = dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+        vault_id,
+        0,
+        &witness.reserves_digest,
+        birth_storage_set_id,
+        owner_pk,
+        owner_sk,
+    )
+    .map_err(|e| {
+        DsmError::crypto(
+            format!("dlv.create: sign birth anchor: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let anchor_bytes = crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(&anchor);
+
+    // (3)+(4) The vault-state inclusion proof under `root`.
+    let inclusion = dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
+        vault_id,
+        0,
+        &witness.reserves_digest,
+        &root,
+        witness.siblings.clone(),
+        owner_pk,
+        owner_sk,
+    )
+    .map_err(|e| {
+        DsmError::crypto(
+            format!("dlv.create: sign birth inclusion proof: {e:?}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let inclusion_bytes =
+        crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&inclusion);
+
+    // (5) The reserve inclusion proof: both legs proven off the SAME tree.
+    let legs = head.vault_reserve_leg_proofs(vault_id, &[pair.a(), pair.b()])?;
+    let reserve_proof = dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
+        vault_id,
+        0,
+        &root,
+        &head.genesis(),
+        &head.devid(),
+        legs,
+        owner_pk,
+        owner_sk,
+    )
+    .map_err(|e| {
+        DsmError::crypto(
+            format!("dlv.create: sign birth reserve proof: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let reserve_bytes =
+        crate::sdk::vault_reserve_proof_codec::reserve_proof_to_proto(&reserve_proof)
+            .encode_to_vec();
+
+    Ok(BirthArtifacts {
+        objects: vec![
+            (
+                crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
+                anchor_bytes.clone(),
+            ),
+            (
+                crate::sdk::vault_state_anchor_codec::anchor_latest_key(vault_id),
+                anchor_bytes,
+            ),
+            (
+                crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, 0),
+                inclusion_bytes.clone(),
+            ),
+            (
+                crate::sdk::vault_smt_inclusion_codec::inclusion_proof_latest_key(vault_id),
+                inclusion_bytes,
+            ),
+            (
+                crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, 0),
+                reserve_bytes,
+            ),
+        ],
+        root,
+    })
+}
+
+/// The five object keys a vault's birth publishes, in the same order
+/// `build_birth_artifacts` freezes them. `publication_state` is derived from
+/// whether the LATEST artifact under each is published.
+pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> [String; 5] {
+    [
+        crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
+        crate::sdk::vault_state_anchor_codec::anchor_latest_key(vault_id),
+        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, 0),
+        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_latest_key(vault_id),
+        crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, 0),
+    ]
+}
+
+/// `true` iff every one of a vault's birth objects has reached quorum on the
+/// vault's birth storage set — the activation boundary: FUNDED locally is not
+/// MARKET-ACTIVE until this holds.
+pub(crate) fn birth_is_published(vault_id: &[u8; 32]) -> bool {
+    birth_object_keys(vault_id).iter().all(|k| {
+        crate::storage::client_db::frozen_publication_artifact::is_artifact_published(k)
+            .unwrap_or(false)
+    })
+}
+
 /// Everything `Operation::DlvSettle` must carry, captured from the hop that was
 /// verified against the owner's PROVEN reserves.
 ///
@@ -2244,137 +2341,6 @@ struct SettleTerms {
     fee_bps: u32,
     sigma: [u8; 32],
     settler_devid: [u8; 32],
-}
-
-async fn publish_reserve_inclusion_proof(
-    core_sdk: &crate::sdk::core_sdk::CoreSDK,
-    vault_id: &[u8; 32],
-    sequence: u64,
-    policy_commits: &[[u8; 32]],
-    owner_pk: &[u8],
-    owner_sk: &[u8],
-) {
-    // Read the legs from the CURRENT head — after the vault-state leaf install,
-    // so the path binds the same root the state proof was signed over.
-    let Some(head) = core_sdk.device_head() else {
-        log::warn!("[dlv] reserve proof: no device head");
-        return;
-    };
-    let legs = match head.vault_reserve_leg_proofs(vault_id, policy_commits) {
-        Ok(l) => l,
-        Err(e) => {
-            log::warn!(
-                "[dlv] reserve proof: cannot prove legs for {}: {e}",
-                crate::util::text_id::encode_base32_crockford(vault_id),
-            );
-            return;
-        }
-    };
-    let signed = match dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
-        vault_id,
-        sequence,
-        &head.root(),
-        &head.genesis(),
-        &head.devid(),
-        legs,
-        owner_pk,
-        owner_sk,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!(
-                "[dlv] reserve proof: sign failed for {}: {e}",
-                crate::util::text_id::encode_base32_crockford(vault_id),
-            );
-            return;
-        }
-    };
-    if let Err(e) = crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&signed).await {
-        log::warn!(
-            "[dlv] reserve proof: publish failed for {} — the vault will not be quotable: {e}",
-            crate::util::text_id::encode_base32_crockford(vault_id),
-        );
-    }
-}
-
-async fn publish_vault_state_inclusion_proof(
-    core_sdk: &crate::sdk::core_sdk::CoreSDK,
-    vault_id: &[u8; 32],
-    sequence: u64,
-    reserves_digest: &[u8; 32],
-    owner_pk: &[u8],
-    owner_sk: &[u8],
-) {
-    // (1) The vault-state leaf was written by the funding advance itself (it
-    // rides the same SMT batch as the reserve leaves), so the head ALREADY
-    // commits it: read the witness off the head — no second advance, no second
-    // root. The reserve proof published next reads the same head, so both
-    // proofs bind one root by construction.
-    let Some(head) = core_sdk.device_head() else {
-        log::warn!(
-            "[dlv] vault-state inclusion proof (seq={}) for {}: no device head",
-            sequence,
-            crate::util::text_id::encode_base32_crockford(vault_id),
-        );
-        return;
-    };
-    let smt_root = head.root();
-    let siblings =
-        match head.inclusion_siblings(&dsm::dlv::vault_smt_leaf::compute_vault_smt_key(vault_id)) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "[dlv] vault-state inclusion siblings (seq={}) for {}: {e}",
-                    sequence,
-                    crate::util::text_id::encode_base32_crockford(vault_id),
-                );
-                return;
-            }
-        };
-
-    // (2) Sign over (vault_id, sequence, reserves_digest, smt_root).
-    let signed = match dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
-        vault_id,
-        sequence,
-        reserves_digest,
-        &smt_root,
-        siblings,
-        owner_pk,
-        owner_sk,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!(
-                "[dlv] sign_vault_state_inclusion_proof (seq={}) failed for {}: {e}",
-                sequence,
-                crate::util::text_id::encode_base32_crockford(vault_id),
-            );
-            return;
-        }
-    };
-
-    // (3) Encode + publish to storage.
-    let proto_bytes =
-        crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
-    if let Err(e) = crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(
-        vault_id,
-        sequence,
-        &proto_bytes,
-    )
-    .await
-    {
-        log::warn!(
-            "[dlv] inclusion proof publish (seq={}) failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
-            sequence,
-            crate::util::text_id::encode_base32_crockford(vault_id),
-        );
-    } else {
-        log::info!(
-            "[dlv] inclusion proof published seq={} vault={}",
-            sequence,
-            crate::util::text_id::encode_base32_crockford(vault_id),
-        );
-    }
 }
 
 #[cfg(test)]

@@ -483,6 +483,21 @@ impl AppRouterImpl {
                  assets actually encumbered"
             ));
         }
+        // FUNDED IS NOT PUBLISHED. An advertisement makes a vault discoverable
+        // and quotable; a trader who finds it must be able to fetch its birth
+        // proofs (anchor, state inclusion, reserves) from the vault's storage
+        // set — otherwise the vault is "discoverable, quotable, un-settleable".
+        // So the ad may not go out until every birth object has reached quorum.
+        // Same fail-closed posture as the encumbrance check above; the sweep
+        // keeps replaying the frozen bytes, so this clears on its own.
+        if !crate::handlers::dlv_routes::birth_is_published(&vault_id) {
+            return err(
+                "route.publishRoutingAdvertisement: this vault's birth proofs have not yet reached \
+                 quorum on its storage set (publication pending) — the advertisement would point \
+                 traders at proofs they cannot fetch; retry after the sync completes publication"
+                    .into(),
+            );
+        }
         // Derive vault_proto_bytes from the local DLVManager when the
         // caller passes empty.  This is the path the SoFi test +
         // production wallet UIs use: the wallet has the canonical
@@ -811,17 +826,30 @@ impl AppRouterImpl {
             let advertised_reserve_a = ad.reserve_a;
             let advertised_reserve_b = ad.reserve_b;
 
-            // Fetch the latest vault state anchor.  If absent, the ad
-            // pre-dates the anchor flow — fall through and use the ad
-            // as-is (no composition possible without a signed baseline).
+            // Fetch the latest vault state anchor. Without one there is no
+            // signed baseline to compose against, so the vault is DROPPED —
+            // never quoted from the advertisement's own numbers. (Every
+            // advertised vault has published its birth proofs: the ad publish
+            // is gated on it. A storage error is a drop too: an unproven
+            // reserve is not a quote.)
             let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
                 &vid,
             )
             .await
             {
                 Ok(Some(a)) => a,
-                _ => {
-                    ads_after_composition.push(ad);
+                Ok(None) => {
+                    log::debug!(
+                        "[route.findAndBindBestPath] dropping {}: no signed anchor published",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[route.findAndBindBestPath] dropping {}: anchor fetch failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
                     continue;
                 }
             };
