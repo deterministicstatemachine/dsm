@@ -208,6 +208,11 @@ pub(crate) mod fake_fleet {
             .insert(member_id.to_string(), echoes.map(|s| s.to_string()));
     }
 
+    /// The bytes ANY member holds under `key` (a reader fetches from any node).
+    pub(crate) fn any_member_holding(key: &str) -> Option<Vec<u8>> {
+        state().stores.values().find_map(|m| m.get(key).cloned())
+    }
+
     pub(crate) fn stored(member_id: &str, key: &str) -> Option<Vec<u8>> {
         state()
             .stores

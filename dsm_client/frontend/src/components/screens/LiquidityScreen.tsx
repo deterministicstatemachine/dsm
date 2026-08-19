@@ -262,11 +262,17 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         // Rust stamps the wallet pk.
       });
       if (!publishR.success) {
-        // Vault was created locally; only the advertisement publish
-        // failed.  Surface the error but don't roll back the vault —
-        // the owner can refresh + retry from the list view in a
-        // future polish step.
-        throw new Error(`Vault created, but advertisement publish failed: ${publishR.error}`);
+        // The vault was created and funded, and its birth proofs are frozen
+        // durably. What did NOT happen is the routing advertisement — most
+        // often because those proofs have not yet reached quorum on the
+        // storage set (Rust refuses to advertise a vault traders could not
+        // verify). Nothing to roll back: the wallet replays the proofs on
+        // every sync, and Publish appears on the card once they land.
+        throw new Error(
+          `Vault created and funded, but not yet advertised: ${publishR.error}. ` +
+            'It will show "publication pending" until its proofs reach the storage set; ' +
+            'then press Publish.',
+        );
       }
 
       setPhase('created');
@@ -373,8 +379,18 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                 <div style={{ fontSize: 10, opacity: 0.7, marginTop: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                   <span>
                     vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
+                    {v.publicationState !== 'published' && (
+                      // FUNDED IS NOT PUBLISHED. The wallet keeps replaying the
+                      // vault's frozen birth proofs on every sync until a quorum
+                      // of its storage set holds them; until then the vault is
+                      // not market-active and Publish is suppressed (Rust refuses
+                      // it too — the screen only reflects that).
+                      <span title="Birth proofs not yet at quorum on the vault's storage set — replayed on every sync">
+                        {' '}· publication pending
+                      </span>
+                    )}
                   </span>
-                  {!v.routingAdvertised && v.unlockSpecDigest && v.unlockSpecKey && (
+                  {!v.routingAdvertised && v.publicationState === 'published' && v.unlockSpecDigest && v.unlockSpecKey && (
                     // Phase 13 follow-up: hide the button for legacy
                     // vaults whose persisted policy_digest is absent.
                     // Republishing them would require stamping a zero

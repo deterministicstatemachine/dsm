@@ -22,13 +22,15 @@ pub fn encode_anchor_to_proto(anchor: &SignedVaultStateAnchor) -> Vec<u8> {
         reserves_digest: anchor.reserves_digest.to_vec(),
         owner_public_key: anchor.owner_public_key.clone(),
         owner_signature: anchor.owner_signature.clone(),
+        storage_set_id: anchor.storage_set_id.to_vec(),
     };
     proto.encode_to_vec()
 }
 
 /// Deserialise canonical `VaultStateAnchorV1` proto bytes back into a
 /// `SignedVaultStateAnchor`.  Length-validates the fixed-size byte
-/// fields (`vault_id`, `reserves_digest` are both 32 bytes).
+/// fields (`vault_id`, `reserves_digest`, `storage_set_id` are all 32
+/// bytes — an anchor without its birth set is not an anchor).
 pub fn decode_anchor_from_proto(bytes: &[u8]) -> Result<SignedVaultStateAnchor, AnchorError> {
     let proto = generated::VaultStateAnchorV1::decode(bytes)
         .map_err(|e| AnchorError::SignFailed(format!("decode: {e}")))?;
@@ -38,17 +40,44 @@ pub fn decode_anchor_from_proto(bytes: &[u8]) -> Result<SignedVaultStateAnchor, 
     if proto.reserves_digest.len() != 32 {
         return Err(AnchorError::SignatureInvalid);
     }
+    if proto.storage_set_id.len() != 32 {
+        return Err(AnchorError::SignatureInvalid);
+    }
     let mut vault_id = [0u8; 32];
     vault_id.copy_from_slice(&proto.vault_id);
     let mut reserves_digest = [0u8; 32];
     reserves_digest.copy_from_slice(&proto.reserves_digest);
+    let mut storage_set_id = [0u8; 32];
+    storage_set_id.copy_from_slice(&proto.storage_set_id);
     Ok(SignedVaultStateAnchor {
         vault_id,
         sequence: proto.sequence,
         reserves_digest,
+        storage_set_id,
         owner_public_key: proto.owner_public_key,
         owner_signature: proto.owner_signature,
     })
+}
+
+/// Storage prefix for vault-state anchors.
+pub const VAULT_STATE_ANCHOR_PREFIX: &str = "sofi/vault-state/";
+
+/// The sequence-pinned anchor key: `sofi/vault-state/{vault_b32}/seq-{b32(seq)}`
+/// (16-byte big-endian sequence, Base32 Crockford; lex order = numeric order).
+/// The seq-0 key is the vault's BIRTH-PINNED reference: composition reads it to
+/// enforce that `storage_set_id` never changes across the lineage.
+pub fn anchor_seq_key(vault_id: &[u8; 32], sequence: u64) -> String {
+    let vault_b32 = crate::util::text_id::encode_base32_crockford(vault_id);
+    let mut seq_bytes = [0u8; 16];
+    seq_bytes[8..].copy_from_slice(&sequence.to_be_bytes());
+    let seq_b32 = crate::util::text_id::encode_base32_crockford(&seq_bytes);
+    format!("{VAULT_STATE_ANCHOR_PREFIX}{vault_b32}/seq-{seq_b32}")
+}
+
+/// The `latest` mirror key: `sofi/vault-state/{vault_b32}/latest`.
+pub fn anchor_latest_key(vault_id: &[u8; 32]) -> String {
+    let vault_b32 = crate::util::text_id::encode_base32_crockford(vault_id);
+    format!("{VAULT_STATE_ANCHOR_PREFIX}{vault_b32}/latest")
 }
 
 /// BLAKE3 digest of the canonical proto encoding.  Stamped into
@@ -73,11 +102,20 @@ pub fn compute_anchor_digest(anchor: &SignedVaultStateAnchor) -> [u8; 32] {
 pub async fn fetch_latest_signed_anchor(
     vault_id: &[u8; 32],
 ) -> Result<Option<SignedVaultStateAnchor>, String> {
-    let key = format!(
-        "sofi/vault-state/{}/latest",
-        crate::util::text_id::encode_base32_crockford(vault_id),
-    );
-    let bytes = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await {
+    fetch_signed_anchor_at_key(&anchor_latest_key(vault_id)).await
+}
+
+/// Fetch the anchor pinned at `sequence` (`Ok(None)` if absent). The seq-0
+/// anchor is the birth-pinned lineage reference.
+pub async fn fetch_signed_anchor_at_sequence(
+    vault_id: &[u8; 32],
+    sequence: u64,
+) -> Result<Option<SignedVaultStateAnchor>, String> {
+    fetch_signed_anchor_at_key(&anchor_seq_key(vault_id, sequence)).await
+}
+
+async fn fetch_signed_anchor_at_key(key: &str) -> Result<Option<SignedVaultStateAnchor>, String> {
+    let bytes = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(key).await {
         Ok(b) => b,
         Err(e) => {
             let msg = format!("{e}");
@@ -105,7 +143,7 @@ mod tests {
         let vault_id = [0x44u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
-        let signed = sign_vault_state_anchor(&vault_id, 7, &reserves_digest, &pk, &sk)
+        let signed = sign_vault_state_anchor(&vault_id, 7, &reserves_digest, &[0x6B; 32], &pk, &sk)
             .expect("sign succeeds");
 
         let proto_bytes = encode_anchor_to_proto(&signed);
@@ -116,8 +154,34 @@ mod tests {
         assert_eq!(decoded.reserves_digest, signed.reserves_digest);
         assert_eq!(decoded.owner_public_key, signed.owner_public_key);
         assert_eq!(decoded.owner_signature, signed.owner_signature);
+        assert_eq!(decoded.storage_set_id, [0x6B; 32]);
 
         verify_vault_state_anchor(&decoded).expect("verify decoded succeeds");
+    }
+
+    /// An anchor missing its birth set is refused at decode: there is no
+    /// "unset" storage set for a vault.
+    #[test]
+    fn anchor_without_storage_set_id_is_refused() {
+        let proto = generated::VaultStateAnchorV1 {
+            vault_id: vec![0x44; 32],
+            sequence: 0,
+            reserves_digest: vec![0x11; 32],
+            owner_public_key: vec![1, 2, 3],
+            owner_signature: vec![4, 5, 6],
+            storage_set_id: Vec::new(),
+        };
+        assert!(decode_anchor_from_proto(&proto.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn anchor_keys_are_base32_and_seq_ordered() {
+        let v = [0x77u8; 32];
+        let k0 = anchor_seq_key(&v, 0);
+        let k1 = anchor_seq_key(&v, 1);
+        assert!(k0 < k1, "lex order == numeric order");
+        assert!(k0.starts_with("sofi/vault-state/"));
+        assert!(anchor_latest_key(&v).ends_with("/latest"));
     }
 
     #[test]
@@ -126,7 +190,7 @@ mod tests {
         let vault_id = [0x55u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
-        let signed = sign_vault_state_anchor(&vault_id, 1, &reserves_digest, &pk, &sk)
+        let signed = sign_vault_state_anchor(&vault_id, 1, &reserves_digest, &[0x6B; 32], &pk, &sk)
             .expect("sign succeeds");
 
         let proto_bytes = encode_anchor_to_proto(&signed);
