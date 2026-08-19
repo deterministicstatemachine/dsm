@@ -5,9 +5,32 @@
 #   __LISTEN_ADDR__     — e.g. "0.0.0.0"
 #   __PORT__            — e.g. 8080
 #   __DATABASE_URL__    — injected at deploy time from operator-provided settings
+#   __STORAGE_SET_MEMBERS__ — the canonical storage set's member ids, e.g.
+#                             "us-west-1a-1", "us-west-1a-2", "us-west-1a-3"
+#                             (must match the client env config's [[nodes]] names)
 
 [node]
 id = "__NODE_ID__"
+
+# THE CANONICAL STORAGE SET this node belongs to — required before the
+# settlement-slot claim register will accept anything (absent ⇒ the register is
+# INACTIVE on this node and every claim is refused, fail-closed).
+#
+# Rules, all load-bearing:
+#   * list EVERY member of the set, including this node; this node's own
+#     `node.id` MUST appear or startup refuses;
+#   * each member id must equal the `name` of that node's entry in the CLIENT
+#     env config (`[[nodes]] name = "..."`), because the canonical set id is
+#     BLAKE3 over the sorted, length-prefixed member ids and both sides derive
+#     it independently — a mismatch makes every claim look like a foreign set;
+#   * the set is IMMUTABLE for the lifetime of every vault born under it. A vault's
+#     signed birth anchor binds this id; changing membership needs an explicit
+#     handover protocol that preserves outstanding write-once claims, not a config edit;
+#   * the register's non-equivocation must survive restart AND storage lifecycle —
+#     restoring this node's database from a snapshot that predates a held claim,
+#     or replacing the node without its register, is a SAFETY violation.
+[storage_set]
+members = ["__STORAGE_SET_MEMBERS__"]
 
 [network]
 listen_addr = "__LISTEN_ADDR__"

@@ -8,6 +8,7 @@
 pub mod controller_rotation;
 pub mod pair_identity;
 pub mod settlement_receipt_leaf;
+pub mod settlement_slot_claim; // write-once claim envelope for the settlement-slot quorum register
 pub mod vault_pending_pointer;
 pub mod vault_reserve_inclusion;
 pub mod vault_reserve_leaf;

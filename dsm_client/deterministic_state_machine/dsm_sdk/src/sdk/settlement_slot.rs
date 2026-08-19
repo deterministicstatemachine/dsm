@@ -1,83 +1,84 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! First-writer protection over a vault's settlement slot.
+//! First-writer protection over a vault's settlement slot — the SDK side of a
+//! distributed, crash-fault-tolerant, ONE-SHOT quorum register.
 //!
-//! WHAT MUST BE IMPOSSIBLE. Two settlements receipted against the same parent
-//! sequence. Each would be individually valid — correct conservation, correct
-//! authorization, a genuine receipt — and together they spend the same reserves
-//! twice. Nothing downstream can undo that: a receipted settlement is final by
-//! construction, which is the property that makes owner-offline finality work.
+//! WHAT MUST BE IMPOSSIBLE. Two settlements — or a settlement and the owner's
+//! close — receipted against the same parent sequence. Each would be
+//! individually valid, and together they spend the same reserves twice. Nothing
+//! downstream can undo that: a receipted settlement is final by construction,
+//! which is the property that makes owner-offline finality work.
 //!
-//! So it is prevented, not resolved. A trader claims the slot BEFORE it
+//! So it is prevented, not resolved. A contestant CLAIMS the slot before it
 //! advances, and an unclaimable slot fails closed while the trade is still just
-//! bytes. Detecting the collision afterwards and picking a winner would mean one
-//! of the two已 moved value.
+//! bytes. The old shape of this module was a storage LISTING: "is my pointer
+//! the only one under this prefix?" — a read against a system that is not
+//! consensus. Under partition a trader and the close could each observe an
+//! exclusive slot at K, and a trader's settlement final on its own chain plus an
+//! owner release of the same reserves is value duplication — the exact boundary
+//! this work exists to prevent. That implementation is deleted, not kept beside.
 //!
-//! THE SLOT IS THE CANONICAL TUPLE `(vault_id, parent_sequence, X)`. Vault and
-//! parent sequence name exactly the state being consumed; `X` names the trade
-//! consuming it. The pending-pointer key already encodes all three
-//! (`sofi/vault-pending/{vault}/{new_sequence}/{x}`), so the claim is a listing
-//! of one slot prefix rather than a new record — the pointer a trader must
-//! publish anyway IS the claim.
+//! THE REGISTER. Every member of the vault's canonical storage set (its
+//! BIRTH set, read from the vault's signed anchor and resolved through the local
+//! catalog — never from local config) performs write-once conditional acceptance
+//! for `(vault_id, parent_sequence)`: the first claim bytes win, identical bytes
+//! re-ack, different bytes are refused. A claimant WINS only when a quorum of
+//! the set (`StorageSet::quorum()`, the one definition) accepted the SAME
+//! envelope bytes. Quorums over one canonical set intersect and a member holds
+//! one value per slot, so two conflicting claimants cannot both win. Failure to
+//! reach quorum is NOT claimed, for everyone — liveness cost, safety kept:
+//! contention fails everyone, deliberately, and there is no "lowest X wins"
+//! (any such rule is grindable).
 //!
-//! CONTENTION FAILS EVERYONE, DELIBERATELY. When the slot holds any X but this
-//! trader's, this trader stops. There is no "lowest X wins" rule, because any
-//! such rule is grindable: a trader that can choose its X can choose to win.
-//! Refusing on contention costs liveness — a contested slot means both traders
-//! re-quote at the next sequence — and buys the safety property outright. That
-//! is the correct direction for this trade to fail in.
+//! WHAT IT IS NOT. Storage provides concurrency serialization for
+//! mutually-unknown actors — never validity. Members verify claimant
+//! attribution (the body key is the authenticated caller's) and nothing about
+//! the settlement. Under the beta client model (protocol-conforming clients)
+//! this yields exclusivity; a modified client that skips the claim is a
+//! Byzantine-client case the beta model excludes (see the storage node docs).
+//! Griefing — claim and vanish — wedges the parent: accepted for the controlled
+//! beta, a launch blocker for a public market.
 //!
-//! A STORAGE ERROR IS A REFUSAL, NOT AN ABSENCE. If the slot cannot be listed,
-//! the trader does not know whether it is contested. Treating "I could not ask"
-//! as "nobody else is there" is exactly how a partition becomes a double-spend,
-//! and it is the more dangerous failure because it looks like the happy path.
+//! BYTE DISCIPLINE. The claim envelope is signed once over the canonical body,
+//! canonically encoded once, and RETAINED durably (`settlement_slot_claim_local`);
+//! every retry and recovery replays those exact bytes. A member echoes its own
+//! node id on every response; an acceptance counts only when that id is the
+//! catalog member being contacted — "distinct members" is executable.
+//!
+//! A STORAGE ERROR IS A REFUSAL, NOT AN ABSENCE. If quorum cannot be reached,
+//! the contestant does not know whether it holds the parent. Treating "I could
+//! not ask" as "I hold it" is exactly how a partition becomes a double-spend.
 
-use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
-use crate::util::text_id::encode_base32_crockford;
+use dsm::dlv::settlement_slot_claim::{
+    claim_envelope_digest, decode_and_verify_settlement_slot_claim, sign_settlement_slot_claim,
+    SettlementSlotClaimBody,
+};
 
-/// Storage prefix for one settlement slot: every pointer published against the
-/// same `(vault, parent_sequence)`.
-///
-/// `new_sequence` is `parent_sequence + 1` — the sequence a pointer names — so
-/// the prefix is derived from the parent the trader is actually consuming
-/// rather than from a number it supplies separately.
-pub(crate) fn settlement_slot_prefix(vault_id: &[u8; 32], parent_sequence: u64) -> Option<String> {
-    let new_sequence = parent_sequence.checked_add(1)?;
-    Some(format!(
-        "{}{}/{:016}/",
-        crate::sdk::route_commit_sdk::VAULT_PENDING_ROOT,
-        encode_base32_crockford(vault_id),
-        new_sequence,
-    ))
-}
+use crate::sdk::storage_set::StorageSet;
 
-/// Evidence that this trader holds a settlement slot exclusively.
+/// Evidence that this contestant holds a settlement slot: a quorum of the
+/// vault's canonical set accepted exactly its claim bytes.
 ///
 /// Returned only by [`claim_settlement_slot`] and constructible nowhere else,
-/// so a settle path that takes one cannot be reached without having claimed.
-/// "Receipt production only for the winner" becomes an obligation the compiler
-/// carries rather than a comment asking the next caller to remember: the
-/// receipt leaf is written solely by the `DlvSettle` advance, so if the advance
-/// requires this, no unclaimed settlement can produce a receipt.
-///
-/// Deliberately carries the tuple it attests to, so a claim for one slot cannot
-/// be presented for another.
+/// so a settle/close path that takes one cannot be reached without having won
+/// the register. Carries the tuple it attests to, so a claim for one slot
+/// cannot be presented for another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SettlementSlotClaim {
     vault_id: [u8; 32],
     parent_sequence: u64,
     x: [u8; 32],
+    /// Members that accepted these exact bytes, out of the set's size.
+    accepted: u32,
+    total: u32,
 }
 
 impl SettlementSlotClaim {
-    pub(crate) fn vault_id(&self) -> [u8; 32] {
-        self.vault_id
+    pub(crate) fn accepted(&self) -> u32 {
+        self.accepted
     }
-    pub(crate) fn parent_sequence(&self) -> u64 {
-        self.parent_sequence
-    }
-    pub(crate) fn x(&self) -> [u8; 32] {
-        self.x
+    pub(crate) fn total(&self) -> u32 {
+        self.total
     }
     /// `true` when this claim is for exactly the settlement described.
     pub(crate) fn matches(&self, vault_id: &[u8; 32], parent_sequence: u64, x: &[u8; 32]) -> bool {
@@ -87,372 +88,350 @@ impl SettlementSlotClaim {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SlotClaimError {
-    /// The slot could not be listed. The trader does not know whether it is
-    /// contested, so it must not proceed — "I could not ask" is not "nobody is
-    /// there".
-    StorageUnavailable(String),
-    /// This trader's own pointer is not visible in the slot yet. Publishing the
-    /// pointer is what claims the slot, so advancing before it is readable
-    /// would be advancing on an unclaimed slot.
-    NotClaimed,
-    /// Another trade already occupies this slot. This trader loses and stops,
-    /// with nothing moved and nothing to undo.
-    Contested { others: usize },
-    /// `parent_sequence` cannot be advanced.
-    SequenceOverflow,
+    /// Quorum could not be reached and no member reported a different holder:
+    /// transport, auth, or too few members reachable. The contestant does not
+    /// know whether it holds the parent, so it must not proceed.
+    StorageUnavailable {
+        accepted: u32,
+        total: u32,
+        detail: String,
+    },
+    /// At least one member holds DIFFERENT bytes for this slot and we did not
+    /// reach quorum: another contestant is (or may be) ahead. This contestant
+    /// loses and stops, with nothing moved and nothing to undo.
+    Contested {
+        refused_by: u32,
+        accepted: u32,
+        total: u32,
+    },
+    /// The frozen envelope does not describe the requested slot (internal
+    /// contradiction — refuse before contacting anyone).
+    EnvelopeMismatch,
 }
 
 impl std::fmt::Display for SlotClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SlotClaimError::StorageUnavailable(msg) => write!(
+            SlotClaimError::StorageUnavailable {
+                accepted,
+                total,
+                detail,
+            } => write!(
                 f,
-                "settlement slot could not be read, so contention is unknown and settlement must not proceed: {msg}"
+                "settlement-slot register did not reach quorum ({accepted}/{total} accepted) and \
+                 no other holder was reported — contention is unknown, settlement must not \
+                 proceed: {detail}"
             ),
-            SlotClaimError::NotClaimed => write!(
+            SlotClaimError::Contested {
+                refused_by,
+                accepted,
+                total,
+            } => write!(
                 f,
-                "this trader's pending pointer is not visible in the slot; publish it before settling"
+                "settlement slot is held by another claim on {refused_by} member(s) \
+                 ({accepted}/{total} accepted ours); re-quote at the next sequence"
             ),
-            SlotClaimError::Contested { others } => write!(
+            SlotClaimError::EnvelopeMismatch => write!(
                 f,
-                "settlement slot is already held by {others} other trade(s); re-quote at the next sequence"
+                "frozen claim envelope does not describe the requested slot"
             ),
-            SlotClaimError::SequenceOverflow => {
-                write!(f, "parent sequence cannot be advanced")
-            }
         }
     }
 }
 
 impl std::error::Error for SlotClaimError {}
 
-/// Confirm this trader holds the settlement slot for `(vault_id,
-/// parent_sequence, x)`, exclusively.
+/// The claim envelope for `(vault_id, parent_sequence, x)` under `storage_set_id`,
+/// signed by this device's canonical signing authority — RETAINED durably the
+/// first time it is built, and returned byte-identically thereafter. Retries
+/// and recovery must never re-sign: members compare exact bytes.
+pub(crate) fn frozen_claim_envelope(
+    vault_id: &[u8; 32],
+    parent_sequence: u64,
+    x: &[u8; 32],
+    storage_set_id: &[u8; 32],
+) -> Result<Vec<u8>, dsm::types::error::DsmError> {
+    use crate::storage::client_db::settlement_slot_claim_local as local;
+    if let Some(bytes) = local::get_frozen_claim(vault_id, parent_sequence, x).map_err(|e| {
+        dsm::types::error::DsmError::storage(
+            format!("frozen slot claim lookup: {e}"),
+            None::<std::io::Error>,
+        )
+    })? {
+        // The retained bytes must still describe this exact slot and set.
+        let v = decode_and_verify_settlement_slot_claim(&bytes).map_err(|e| {
+            dsm::types::error::DsmError::invalid_operation(format!(
+                "retained slot claim is not a valid envelope: {e}"
+            ))
+        })?;
+        if v.body.vault_id != *vault_id
+            || v.body.parent_sequence != parent_sequence
+            || v.body.x != *x
+            || v.body.storage_set_id != *storage_set_id
+        {
+            return Err(dsm::types::error::DsmError::invalid_operation(
+                "retained slot claim describes a different slot or set — refusing",
+            ));
+        }
+        return Ok(bytes);
+    }
+    let pk = crate::sdk::signing_authority::current_public_key()?;
+    let sk = crate::sdk::signing_authority::current_secret_key()?;
+    if pk.is_empty() || sk.is_empty() {
+        return Err(dsm::types::error::DsmError::invalid_operation(
+            "signing authority unavailable (wallet locked) — cannot sign a slot claim",
+        ));
+    }
+    let body = SettlementSlotClaimBody {
+        vault_id: *vault_id,
+        parent_sequence,
+        x: *x,
+        claimant_public_key: pk,
+        storage_set_id: *storage_set_id,
+    };
+    let bytes = sign_settlement_slot_claim(&body, &sk).map_err(|e| {
+        dsm::types::error::DsmError::crypto(format!("sign slot claim: {e}"), None::<std::io::Error>)
+    })?;
+    local::put_frozen_claim(vault_id, parent_sequence, x, &bytes).map_err(|e| {
+        dsm::types::error::DsmError::storage(
+            format!("retain frozen slot claim: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    Ok(bytes)
+}
+
+/// Submit the exact `frozen_envelope` to every member of `set` and decide:
+/// `Ok` iff a quorum of the set accepted (or already held) exactly these bytes;
+/// `Contested` if any member holds different bytes and quorum was not reached;
+/// `StorageUnavailable` otherwise. Idempotent: replaying the same bytes re-acks
+/// at members that hold them, so a crash-and-retry converges.
 ///
-/// Call IMMEDIATELY BEFORE the settling advance. Everything after it moves
-/// value; everything before it is reversible by simply stopping.
-///
-/// Succeeds only when the slot listing contains exactly this trader's `X` and
-/// nothing else. Every other outcome — unreadable, empty, or holding another
-/// trade — is a refusal.
-///
-/// What this does NOT claim: that the slot cannot become contested a moment
-/// later. It cannot, because storage is not a consensus system and this is a
-/// read. What it gives is that two traders cannot BOTH observe an exclusive
-/// slot and proceed — the second to publish sees the first, and the first sees
-/// the second unless it had already advanced. The window where both see a clean
-/// slot requires both listings to precede both publishes, which the
-/// publish-then-claim ordering excludes.
+/// Call IMMEDIATELY BEFORE the value-moving advance. Everything after moves
+/// value; everything before is reversible by stopping.
 pub(crate) async fn claim_settlement_slot(
+    set: &StorageSet,
+    frozen_envelope: &[u8],
     vault_id: &[u8; 32],
     parent_sequence: u64,
     x: &[u8; 32],
 ) -> Result<SettlementSlotClaim, SlotClaimError> {
-    let prefix = settlement_slot_prefix(vault_id, parent_sequence)
-        .ok_or(SlotClaimError::SequenceOverflow)?;
-    let mine = encode_base32_crockford(x);
+    // The envelope must describe the slot we are claiming and this set.
+    let v = decode_and_verify_settlement_slot_claim(frozen_envelope)
+        .map_err(|_| SlotClaimError::EnvelopeMismatch)?;
+    if v.body.vault_id != *vault_id
+        || v.body.parent_sequence != parent_sequence
+        || v.body.x != *x
+        || v.body.storage_set_id != set.id()
+    {
+        return Err(SlotClaimError::EnvelopeMismatch);
+    }
+    let our_digest = claim_envelope_digest(frozen_envelope);
 
-    // Page the whole slot. Stopping at the first page would let a contender
-    // sitting past the page boundary go unseen, which is the same as not
-    // checking at all for a slot that is busy enough to matter.
-    let mut cursor: Option<String> = None;
-    let mut mine_seen = false;
-    let mut others = 0usize;
-    loop {
-        let resp = BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), 256)
-            .await
-            .map_err(|e| SlotClaimError::StorageUnavailable(format!("{e}")))?;
-        for item in &resp.items {
-            // The key's last segment is the trade's X. Compare against the whole
-            // segment, never a prefix: a truncated compare would let a crafted
-            // key impersonate a claim.
-            match item.key.rsplit('/').next() {
-                Some(seg) if seg == mine => mine_seen = true,
-                Some(seg) if !seg.is_empty() => others += 1,
-                _ => {}
+    let fanout = crate::sdk::storage_io::submit_settlement_slot_claim(set, frozen_envelope)
+        .await
+        .map_err(|e| SlotClaimError::StorageUnavailable {
+            accepted: 0,
+            total: set.len() as u32,
+            detail: format!("fan-out failed: {e}"),
+        })?;
+
+    let mut accepted = 0u32;
+    let mut refused_by = 0u32;
+    let mut details: Vec<String> = Vec::new();
+    for o in &fanout.outcomes {
+        match &o.result {
+            crate::sdk::storage_node_sdk::MemberClaimResult::Accepted
+            | crate::sdk::storage_node_sdk::MemberClaimResult::HeldIdentical => {
+                if o.echoed_node_id.as_deref() == Some(o.member_id.as_str()) {
+                    accepted += 1;
+                } else {
+                    details.push(format!(
+                        "{}: accepted but echoed {:?} — not counted",
+                        o.member_id, o.echoed_node_id
+                    ));
+                }
+            }
+            crate::sdk::storage_node_sdk::MemberClaimResult::Refused { held_digest } => {
+                if held_digest.as_deref() == Some(&our_digest[..]) {
+                    // A member that reports OUR digest as "held" is holding our
+                    // bytes (a re-ack expressed oddly); count it.
+                    accepted += 1;
+                } else {
+                    refused_by += 1;
+                }
+            }
+            crate::sdk::storage_node_sdk::MemberClaimResult::Unavailable(e) => {
+                details.push(format!("{}: {e}", o.member_id));
             }
         }
-        if (resp.items.len() as u32) < 256 {
-            break;
-        }
-        match resp.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
-        }
     }
-
-    if others > 0 {
-        // Reported even when our own pointer is also present: another trade
-        // holding the slot is decisive regardless of what else is there.
-        return Err(SlotClaimError::Contested { others });
+    let total = set.len() as u32;
+    if accepted >= set.quorum() {
+        return Ok(SettlementSlotClaim {
+            vault_id: *vault_id,
+            parent_sequence,
+            x: *x,
+            accepted,
+            total,
+        });
     }
-    if !mine_seen {
-        return Err(SlotClaimError::NotClaimed);
+    if refused_by > 0 {
+        return Err(SlotClaimError::Contested {
+            refused_by,
+            accepted,
+            total,
+        });
     }
-    Ok(SettlementSlotClaim {
-        vault_id: *vault_id,
-        parent_sequence,
-        x: *x,
+    Err(SlotClaimError::StorageUnavailable {
+        accepted,
+        total,
+        detail: details.join("; "),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdk::route_commit_sdk::vault_pending_pointer_key;
+    use crate::sdk::storage_io::fake_fleet;
+    use crate::sdk::storage_set::StorageSetCatalog;
+    use dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim;
+    use serial_test::serial;
 
-    fn vid(b: u8) -> [u8; 32] {
-        [b; 32]
-    }
-    fn x_of(b: u8) -> [u8; 32] {
-        [b; 32]
+    fn init() -> StorageSet {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        fake_fleet::reset();
+        StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .sole_set()
+            .expect("one set")
+            .clone()
     }
 
-    async fn put_pointer(vault_id: &[u8; 32], parent_sequence: u64, x: &[u8; 32]) {
-        let key = vault_pending_pointer_key(vault_id, parent_sequence + 1, x);
-        BitcoinTapSdk::storage_put_bytes(&key, b"pointer-bytes")
+    fn envelope(sk: &[u8], pk: &[u8], set: &StorageSet, seq: u64, x: u8) -> Vec<u8> {
+        sign_settlement_slot_claim(
+            &SettlementSlotClaimBody {
+                vault_id: [0x11; 32],
+                parent_sequence: seq,
+                x: [x; 32],
+                claimant_public_key: pk.to_vec(),
+                storage_set_id: set.id(),
+            },
+            sk,
+        )
+        .expect("sign")
+    }
+
+    /// Two contestants, three members: at most one reaches quorum, and the
+    /// loser is told the slot is contested — nothing "unknown" about it.
+    #[tokio::test]
+    #[serial]
+    async fn two_contestants_at_most_one_wins() {
+        let set = init();
+        let (pk_a, sk_a) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let (pk_b, sk_b) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let a = envelope(&sk_a, &pk_a, &set, 5, 0xA1);
+        let b = envelope(&sk_b, &pk_b, &set, 5, 0xB2);
+        let won = claim_settlement_slot(&set, &a, &[0x11; 32], 5, &[0xA1; 32])
             .await
-            .expect("publish pointer");
-    }
-
-    /// The slot prefix is derived from the PARENT the trader consumes, so it
-    /// cannot be aimed at a different state by supplying a separate number.
-    #[test]
-    fn the_slot_is_the_canonical_tuple() {
-        let v = vid(0x11);
-        assert_eq!(
-            settlement_slot_prefix(&v, 7),
-            settlement_slot_prefix(&v, 7),
-            "deterministic"
-        );
-        assert_ne!(settlement_slot_prefix(&v, 7), settlement_slot_prefix(&v, 8));
-        assert_ne!(
-            settlement_slot_prefix(&v, 7),
-            settlement_slot_prefix(&vid(0x22), 7)
-        );
-        assert_eq!(
-            settlement_slot_prefix(&v, u64::MAX),
-            None,
-            "a parent that cannot advance has no slot"
-        );
-        // A pointer published for parent 7 lands under parent 7's slot.
-        let prefix = settlement_slot_prefix(&v, 7).expect("prefix");
-        assert!(vault_pending_pointer_key(&v, 8, &x_of(0xAA)).starts_with(&prefix));
-        assert!(!vault_pending_pointer_key(&v, 9, &x_of(0xAA)).starts_with(&prefix));
-    }
-
-    #[tokio::test]
-    async fn an_exclusive_slot_is_claimable() {
-        let (v, x) = (vid(0x30), x_of(0xA1));
-        put_pointer(&v, 5, &x).await;
-        claim_settlement_slot(&v, 5, &x)
+            .expect("A claims first");
+        assert_eq!((won.accepted(), won.total()), (3, 3));
+        let lost = claim_settlement_slot(&set, &b, &[0x11; 32], 5, &[0xB2; 32])
             .await
-            .expect("a trader alone in its slot may settle");
-    }
-
-    /// THE DOUBLE-SETTLE CASE. Two traders, one parent. The second must be
-    /// refused before it advances — not reconciled afterwards, because a
-    /// receipted settlement is final and there is nothing to reconcile.
-    #[tokio::test]
-    async fn a_contested_slot_refuses_both_rather_than_picking_a_winner() {
-        let v = vid(0x31);
-        let (alice, bob) = (x_of(0xA1), x_of(0xB2));
-        put_pointer(&v, 5, &alice).await;
-        put_pointer(&v, 5, &bob).await;
-
-        // Neither may proceed. A "lowest X wins" rule would be grindable: a
-        // trader that chooses its X can choose to win.
-        for (who, x) in [("alice", alice), ("bob", bob)] {
-            let err = claim_settlement_slot(&v, 5, &x)
-                .await
-                .expect_err("{who} must not settle a contested slot");
-            assert!(
-                matches!(err, SlotClaimError::Contested { others: 1 }),
-                "{who} must see the contention explicitly, got {err:?}"
-            );
-        }
-    }
-
-    /// A trader that has not published its pointer has not claimed anything.
-    /// Advancing here would be advancing on an unclaimed slot.
-    #[tokio::test]
-    async fn an_unpublished_pointer_claims_nothing() {
-        let v = vid(0x32);
-        let err = claim_settlement_slot(&v, 5, &x_of(0xA1))
-            .await
-            .expect_err("an empty slot is not a claim");
-        assert_eq!(err, SlotClaimError::NotClaimed);
-    }
-
-    /// The claim names the slot it attests to, so one cannot be presented for
-    /// another settlement.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_claim_attests_to_its_own_slot_only() {
-        let (v, x) = (vid(0x37), x_of(0xA1));
-        put_pointer(&v, 5, &x).await;
-        let claim = claim_settlement_slot(&v, 5, &x).await.expect("claim");
-        assert!(claim.matches(&v, 5, &x));
-        assert!(!claim.matches(&v, 6, &x), "not a claim on another sequence");
+            .expect_err("B is contested");
         assert!(
-            !claim.matches(&vid(0x38), 5, &x),
-            "not a claim on another vault"
+            matches!(lost, SlotClaimError::Contested { refused_by: 3, .. }),
+            "{lost}"
         );
-        assert!(
-            !claim.matches(&v, 5, &x_of(0xB2)),
-            "not a claim on another trade"
-        );
-        assert_eq!(
-            (claim.vault_id(), claim.parent_sequence(), claim.x()),
-            (v, 5, x)
-        );
+        // A's retry with the SAME bytes re-acks (idempotent).
+        let again = claim_settlement_slot(&set, &a, &[0x11; 32], 5, &[0xA1; 32])
+            .await
+            .expect("A re-acks");
+        assert_eq!(again.accepted(), 3);
     }
 
-    /// DRIVEN CONCURRENTLY, not asserted in prose.
-    ///
-    /// Two traders publish and claim against one parent with their operations
-    /// interleaved by the runtime. Whatever the interleaving, the run must never
-    /// end with both holding the slot — that is the state from which two
-    /// receipted settlements would follow, and a receipted settlement cannot be
-    /// undone.
-    ///
-    /// At most one winner, possibly none: if both publish before either claims,
-    /// both correctly refuse and re-quote. Zero winners is a liveness cost;
-    /// two winners is a double-spend.
+    /// Partition split: m1 accepts A, m2 accepts B, m3 accepts A ⇒ A wins 2/3,
+    /// B is refused (2 members hold A) — never both.
     #[tokio::test]
-    #[serial_test::serial]
-    async fn two_traders_racing_one_parent_never_both_win() {
-        for round in 0u8..24 {
-            let v = vid(0x40u8.wrapping_add(round));
-            let (alice, bob) = (x_of(0xA1), x_of(0xB2));
-
-            // Interleave differently each round so the race is actually varied
-            // rather than the same ordering repeated.
-            let (first, second) = if round % 2 == 0 {
-                (alice, bob)
-            } else {
-                (bob, alice)
-            };
-
-            let a = async {
-                put_pointer(&v, 5, &first).await;
-                claim_settlement_slot(&v, 5, &first).await
-            };
-            let b = async {
-                put_pointer(&v, 5, &second).await;
-                claim_settlement_slot(&v, 5, &second).await
-            };
-            let (ra, rb) = tokio::join!(a, b);
-
-            let winners = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
-            assert!(
-                winners <= 1,
-                "round {round}: {winners} traders claimed one slot — that is the double-settle state"
-            );
-            for r in [&ra, &rb] {
-                if let Err(e) = r {
-                    assert!(
-                        matches!(
-                            e,
-                            SlotClaimError::Contested { .. } | SlotClaimError::NotClaimed
-                        ),
-                        "round {round}: a loser must fail on the slot itself, got {e:?}"
-                    );
+    #[serial]
+    async fn partition_split_yields_one_winner() {
+        let set = init();
+        let (pk_a, sk_a) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let (pk_b, sk_b) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let a = envelope(&sk_a, &pk_a, &set, 9, 0xA1);
+        let b = envelope(&sk_b, &pk_b, &set, 9, 0xB2);
+        // B reaches only test-2 first (test-1/test-3 down for B's attempt).
+        fake_fleet::fail_member("test-1");
+        fake_fleet::fail_member("test-3");
+        let b_first = claim_settlement_slot(&set, &b, &[0x11; 32], 9, &[0xB2; 32])
+            .await
+            .expect_err("1/3 is not quorum");
+        assert!(
+            matches!(
+                b_first,
+                SlotClaimError::StorageUnavailable { accepted: 1, .. }
+            ),
+            "{b_first}"
+        );
+        // Now everyone is up; A claims: test-1 + test-3 accept, test-2 holds B.
+        fake_fleet::heal_member("test-1");
+        fake_fleet::heal_member("test-3");
+        let a_res = claim_settlement_slot(&set, &a, &[0x11; 32], 9, &[0xA1; 32])
+            .await
+            .expect("A wins 2/3");
+        assert_eq!(a_res.accepted(), 2);
+        // B retries with everyone up: only test-2 holds B ⇒ contested, never a win.
+        let b_retry = claim_settlement_slot(&set, &b, &[0x11; 32], 9, &[0xB2; 32])
+            .await
+            .expect_err("B cannot win");
+        assert!(
+            matches!(
+                b_retry,
+                SlotClaimError::Contested {
+                    refused_by: 2,
+                    accepted: 1,
+                    ..
                 }
-            }
-        }
-    }
-
-    /// The loser stops while the trade is still bytes. Nothing it published is
-    /// consuming: an unreceipted pointer is inert, so a refused claim leaves the
-    /// vault exactly as it was and the loser has nothing to undo.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_refused_claim_leaves_nothing_to_undo() {
-        let v = vid(0x60);
-        let (winner, loser) = (x_of(0xA1), x_of(0xB2));
-        put_pointer(&v, 5, &winner).await;
-        put_pointer(&v, 5, &loser).await;
-
-        // Both refuse, so neither reaches the settling advance — and the
-        // advance is the only thing that writes a receipt leaf. No claim, no
-        // advance, no receipt: the winner-only property holds structurally
-        // rather than by a separate check.
-        assert!(claim_settlement_slot(&v, 5, &winner).await.is_err());
-        assert!(claim_settlement_slot(&v, 5, &loser).await.is_err());
-
-        // The slot is still exactly what was published; refusing wrote nothing.
-        let prefix = settlement_slot_prefix(&v, 5).expect("prefix");
-        let listed = BitcoinTapSdk::storage_list_objects(&prefix, None, 256)
-            .await
-            .expect("list");
-        assert_eq!(
-            listed.items.len(),
-            2,
-            "a refusal must not add, remove or rewrite anything in the slot"
+            ),
+            "{b_retry}"
         );
+        // The minority conflicting row on test-2 is legal and permanent: it
+        // still holds B's bytes.
+        assert!(fake_fleet::slot_held_digest("test-2", &[0x11; 32], 9).is_some());
     }
 
-    /// A STORAGE ERROR IS A REFUSAL. The trader could not ask whether the slot
-    /// is contested, so it does not know — and "I could not ask" read as
-    /// "nobody is there" is how a partition becomes a double-spend. This is the
-    /// more dangerous failure precisely because it otherwise looks like the
-    /// happy path.
+    /// A node echoing another member's id does not count toward quorum.
     #[tokio::test]
-    #[serial_test::serial]
-    async fn an_unreadable_slot_refuses_rather_than_assuming_it_is_free() {
-        let (v, x) = (vid(0x36), x_of(0xA1));
-        // The pointer IS published — so if the listing failure were treated as
-        // an empty result, this call would wrongly succeed on a real claim.
-        put_pointer(&v, 5, &x).await;
-        claim_settlement_slot(&v, 5, &x)
+    #[serial]
+    async fn echo_mismatch_is_not_counted() {
+        let set = init();
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let a = envelope(&sk, &pk, &set, 2, 0xA1);
+        fake_fleet::set_echo("test-1", Some("test-2"));
+        fake_fleet::fail_member("test-3");
+        let r = claim_settlement_slot(&set, &a, &[0x11; 32], 2, &[0xA1; 32])
             .await
-            .expect("readable slot is claimable");
-
-        BitcoinTapSdk::set_dbtc_storage_list_results([Err("node unreachable".to_string())]);
-        let err = claim_settlement_slot(&v, 5, &x)
-            .await
-            .expect_err("an unreadable slot must refuse");
+            .expect_err("only test-2's own acceptance counts");
         assert!(
-            matches!(err, SlotClaimError::StorageUnavailable(_)),
-            "must refuse as unreadable, not as free or as contested: {err:?}"
+            matches!(r, SlotClaimError::StorageUnavailable { accepted: 1, .. }),
+            "{r}"
         );
-        assert!(
-            format!("{err}").contains("must not proceed"),
-            "the message must say settlement is refused, not merely that a read failed"
-        );
-
-        // The queue is drained; the slot reads normally again.
-        claim_settlement_slot(&v, 5, &x)
-            .await
-            .expect("recovered storage claims normally");
     }
 
-    /// Slots do not bleed across sequences: a claim at parent 5 says nothing
-    /// about parent 6, and vice versa.
+    /// An envelope for another slot or another set is refused before any
+    /// member is contacted.
     #[tokio::test]
-    async fn a_claim_is_scoped_to_its_parent_sequence() {
-        let (v, x) = (vid(0x33), x_of(0xA1));
-        put_pointer(&v, 5, &x).await;
-        claim_settlement_slot(&v, 5, &x)
-            .await
-            .expect("parent 5 held");
+    #[serial]
+    async fn envelope_must_describe_the_requested_slot_and_set() {
+        let set = init();
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let a = envelope(&sk, &pk, &set, 4, 0xA1);
         assert_eq!(
-            claim_settlement_slot(&v, 6, &x).await,
-            Err(SlotClaimError::NotClaimed),
-            "holding parent 5 must not imply holding parent 6"
+            claim_settlement_slot(&set, &a, &[0x11; 32], 5, &[0xA1; 32]).await,
+            Err(SlotClaimError::EnvelopeMismatch)
         );
-    }
-
-    /// Another vault's traffic is not this vault's contention.
-    #[tokio::test]
-    async fn another_vaults_slot_does_not_contend() {
-        let (mine, theirs) = (vid(0x34), vid(0x35));
-        let x = x_of(0xA1);
-        put_pointer(&mine, 5, &x).await;
-        put_pointer(&theirs, 5, &x_of(0xB2)).await;
-        claim_settlement_slot(&mine, 5, &x)
-            .await
-            .expect("a different vault's pointer is not contention");
+        assert!(fake_fleet::put_log().is_empty(), "no member was contacted");
     }
 }

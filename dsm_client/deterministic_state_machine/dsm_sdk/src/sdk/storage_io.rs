@@ -158,6 +158,26 @@ pub(crate) async fn put_bytes_to_all_members(
     }
 }
 
+/// Submit one frozen settlement-slot claim envelope to every member of `set`,
+/// each authenticated with its OWN per-node token (lazily back-filled like
+/// [`put_bytes`]). Never decides quorum; never retries — the caller replays the
+/// same bytes if it must.
+pub(crate) async fn submit_settlement_slot_claim(
+    set: &crate::sdk::storage_set::StorageSet,
+    envelope: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
+    // Exactly one of these blocks survives cfg expansion, and it is the
+    // function's tail expression.
+    #[cfg(test)]
+    {
+        Ok(fake_fleet::claim(set, envelope))
+    }
+    #[cfg(not(test))]
+    {
+        submit_settlement_slot_claim_live(set, envelope).await
+    }
+}
+
 /// TEST-ONLY in-process member fleet: one object store per MEMBER ID (not per
 /// URL), an injectable per-member failure, and an injectable echoed node id —
 /// so a test can drive the real per-member replay/quorum logic through
@@ -174,6 +194,9 @@ pub(crate) mod fake_fleet {
     struct FleetState {
         /// member_id -> (key -> bytes)
         stores: HashMap<String, HashMap<String, Vec<u8>>>,
+        /// member_id -> ((vault_id, parent_sequence) -> (envelope, digest)):
+        /// the write-once settlement-slot register, per member.
+        registers: HashMap<String, HashMap<([u8; 32], u64), (Vec<u8>, [u8; 32])>>,
         /// members whose next PUTs fail (persistent until cleared)
         failing: HashSet<String>,
         /// member_id -> the node id it echoes (default: its own member id)
@@ -224,6 +247,97 @@ pub(crate) mod fake_fleet {
     /// Every attempted PUT as (member_id, key, blake3(bytes)).
     pub(crate) fn put_log() -> Vec<(String, String, [u8; 32])> {
         state().put_log.clone()
+    }
+
+    /// The digest a member holds for a slot, if any (minority losing rows are
+    /// legal and permanent — this is how a test proves they stay).
+    pub(crate) fn slot_held_digest(
+        member_id: &str,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Option<[u8; 32]> {
+        state()
+            .registers
+            .get(member_id)
+            .and_then(|r| r.get(&(*vault_id, parent_sequence)))
+            .map(|(_, d)| *d)
+    }
+
+    /// Write-once conditional acceptance per member, exactly as the storage
+    /// node does it: first bytes win, identical re-ack, different refused with
+    /// the held digest. Attribution/set checks are the node's; the fake fleet
+    /// models the register only.
+    pub(crate) fn claim(
+        set: &StorageSet,
+        envelope: &[u8],
+    ) -> crate::sdk::storage_node_sdk::ClaimFanout {
+        use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimOutcome, MemberClaimResult};
+        let verified =
+            dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(envelope);
+        let mut st = state();
+        let mut outcomes = Vec::with_capacity(set.len());
+        for m in set.members() {
+            let key = format!(
+                "slot:{}/{}",
+                verified
+                    .as_ref()
+                    .map(|v| crate::util::text_id::encode_base32_crockford(&v.body.vault_id))
+                    .unwrap_or_else(|_| "?".into()),
+                verified
+                    .as_ref()
+                    .map(|v| v.body.parent_sequence)
+                    .unwrap_or(0)
+            );
+            st.put_log
+                .push((m.member_id.clone(), key, *blake3::hash(envelope).as_bytes()));
+            if st.failing.contains(&m.member_id) {
+                outcomes.push(MemberClaimOutcome {
+                    member_id: m.member_id.clone(),
+                    endpoint: m.endpoint.clone(),
+                    result: MemberClaimResult::Unavailable("injected failure".into()),
+                    echoed_node_id: None,
+                });
+                continue;
+            }
+            let echoed = match st.echo_override.get(&m.member_id) {
+                Some(o) => o.clone(),
+                None => Some(m.member_id.clone()),
+            };
+            let Ok(v) = verified.as_ref() else {
+                outcomes.push(MemberClaimOutcome {
+                    member_id: m.member_id.clone(),
+                    endpoint: m.endpoint.clone(),
+                    result: MemberClaimResult::Unavailable("malformed".into()),
+                    echoed_node_id: echoed,
+                });
+                continue;
+            };
+            let slot = (v.body.vault_id, v.body.parent_sequence);
+            let reg = st.registers.entry(m.member_id.clone()).or_default();
+            // Read the held digest OUT before deciding, so the write-once insert
+            // does not overlap the read borrow.
+            let held: Option<[u8; 32]> = reg.get(&slot).map(|(_, d)| *d);
+            let result = match held {
+                None => {
+                    reg.insert(slot, (envelope.to_vec(), v.envelope_digest));
+                    MemberClaimResult::Accepted
+                }
+                Some(d) if d == v.envelope_digest => MemberClaimResult::HeldIdentical,
+                Some(d) => MemberClaimResult::Refused {
+                    held_digest: Some(d.to_vec()),
+                },
+            };
+            outcomes.push(MemberClaimOutcome {
+                member_id: m.member_id.clone(),
+                endpoint: m.endpoint.clone(),
+                result,
+                echoed_node_id: echoed,
+            });
+        }
+        ClaimFanout {
+            outcomes,
+            total: set.len() as u32,
+        }
     }
 
     pub(crate) fn put(set: &StorageSet, key: &str, payload: &[u8]) -> KeyedPutFanout {
@@ -279,19 +393,27 @@ pub(crate) mod fake_fleet {
 }
 
 #[cfg(not(test))]
-async fn put_bytes_to_all_members_live(
+async fn submit_settlement_slot_claim_live(
     set: &crate::sdk::storage_set::StorageSet,
-    key: &str,
-    payload: &[u8],
-) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
+    envelope: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
+    let sdk = member_sdk_with_auth(set).await?;
+    Ok(sdk.submit_settlement_slot_claim(set, envelope).await)
+}
+
+/// A `StorageNodeSDK` whose clients are exactly `set`'s member endpoints, each
+/// carrying its own per-node auth token (lazily back-filled by an idempotent
+/// registration pass).
+#[cfg(not(test))]
+async fn member_sdk_with_auth(
+    set: &crate::sdk::storage_set::StorageSet,
+) -> Result<StorageNodeSDK, DsmError> {
     let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
         DsmError::storage(
             format!("load storage node config: {e}"),
             None::<std::io::Error>,
         )
     })?;
-    // Reach the SET's endpoints, not whatever `node_urls` happens to list:
-    // the set is the authority on WHO, the config only on HOW to reach them.
     let mut member_config = config.clone();
     member_config.node_urls = set.members().iter().map(|m| m.endpoint.clone()).collect();
     let sdk = StorageNodeSDK::new(member_config.clone())
@@ -321,8 +443,8 @@ async fn put_bytes_to_all_members_live(
                 .await
             {
                 log::warn!(
-                    "storage_io::put_bytes_to_all_members: back-fill register_device_for_auth \
-                     failed: {e} (continuing — some members may PUT-401)"
+                    "storage_io: back-fill register_device_for_auth failed: {e} (continuing — \
+                     some members may refuse auth)"
                 );
             }
             auths.clear();
@@ -333,7 +455,16 @@ async fn put_bytes_to_all_members_live(
             }
         }
     }
-    let sdk = sdk.with_per_node_auth(&auths);
+    Ok(sdk.with_per_node_auth(&auths))
+}
+
+#[cfg(not(test))]
+async fn put_bytes_to_all_members_live(
+    set: &crate::sdk::storage_set::StorageSet,
+    key: &str,
+    payload: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
+    let sdk = member_sdk_with_auth(set).await?;
     Ok(sdk.put_bytes_to_all_members(set, key, payload).await)
 }
 
