@@ -2375,6 +2375,11 @@ mod funded_creation_tests {
         // composition of the SAME vault id — and the settle side, correctly,
         // sees a vault already at a later generation. Each test starts empty.
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
+        // Same reasoning for the member fleet: publication state and the
+        // settlement-slot register are per-member and process-global, so a
+        // previous test's quorum on the SAME deterministic vault id would make
+        // a later vault look born, published, or already claimed.
+        crate::sdk::storage_io::fake_fleet::reset();
         let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
             "./.dsm_testdata_funded_creation",
         ));
@@ -4457,7 +4462,6 @@ mod funded_creation_tests {
         assert!(res.success, "replaying the last fold must not error");
         assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
     }
-
     /// THE ROUTE THAT HAD NO TEST — which is why both wounds shipped.
     ///
     /// `dlv_list_owned_amm_vaults` parsed `AmmConstantProduct.token_a/token_b` as UTF-8
