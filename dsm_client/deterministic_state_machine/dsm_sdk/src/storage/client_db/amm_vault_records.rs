@@ -48,6 +48,11 @@ pub struct AmmVaultRecord {
     pub anchor_enforcement: i32,
     /// The CPTA policy anchor governing this vault.
     pub policy_digest: [u8; 32],
+    /// The canonical storage set the vault was born under — a LOCAL COPY of the
+    /// value bound inside the vault's signed birth anchor. Consumers resolve
+    /// the anchor's set; a caller that has both must require equality and fail
+    /// closed on mismatch (the anchor chooses the set; this only caches it).
+    pub storage_set_id: [u8; 32],
 }
 
 pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
@@ -60,8 +65,8 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO amm_vault_records(
             vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
-            fee_bps, anchor_enforcement, policy_digest, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            fee_bps, anchor_enforcement, policy_digest, storage_set_id, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             rec.vault_id.as_slice(),
             rec.owner_genesis.as_slice(),
@@ -71,6 +76,7 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
             rec.fee_bps,
             rec.anchor_enforcement,
             rec.policy_digest.as_slice(),
+            rec.storage_set_id.as_slice(),
             now as i64,
         ],
     )?;
@@ -93,7 +99,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
     let row = conn
         .query_row(
             "SELECT vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
-                    fee_bps, anchor_enforcement, policy_digest
+                    fee_bps, anchor_enforcement, policy_digest, storage_set_id
              FROM amm_vault_records WHERE vault_id = ?1",
             params![vault_id.as_slice()],
             |r| {
@@ -106,11 +112,12 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
                     r.get::<_, u32>(5)?,
                     r.get::<_, i32>(6)?,
                     r.get::<_, Vec<u8>>(7)?,
+                    r.get::<_, Vec<u8>>(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((vid, g, d, a, b, fee_bps, anchor_enforcement, pd)) = row else {
+    let Some((vid, g, d, a, b, fee_bps, anchor_enforcement, pd, ss)) = row else {
         return Ok(None);
     };
     let (Some(vault_id), Some(owner_genesis), Some(owner_devid)) =
@@ -118,8 +125,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
     else {
         return Ok(None);
     };
-    let (Some(policy_commit_a), Some(policy_commit_b), Some(policy_digest)) =
-        (fixed32(a), fixed32(b), fixed32(pd))
+    let (Some(policy_commit_a), Some(policy_commit_b), Some(policy_digest), Some(storage_set_id)) =
+        (fixed32(a), fixed32(b), fixed32(pd), fixed32(ss))
     else {
         return Ok(None);
     };
@@ -132,6 +139,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         fee_bps,
         anchor_enforcement,
         policy_digest,
+        storage_set_id,
     }))
 }
 
@@ -182,6 +190,7 @@ mod tests {
             fee_bps: 30,
             anchor_enforcement: 2,
             policy_digest: [0x5A; 32],
+            storage_set_id: [0x6B; 32],
         }
     }
 
