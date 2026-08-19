@@ -218,6 +218,7 @@ pub(crate) fn install_full_app_router_self_config() -> Result<bool, String> {
     log::info!("[SDK] Full AppRouter hot-swapped in (canonical identity ready)");
     spawn_token_registry_rehydrate(app_router_for_rehydrate, "warm-swap");
     spawn_acceptance_recovery_sweep("warm-swap");
+    crate::handlers::artifact_republish::spawn_frozen_artifact_republish("warm-swap");
     Ok(true)
 }
 
@@ -606,6 +607,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         log::info!("[SDK Init] Full AppRouter installed (device identity ready)");
         spawn_token_registry_rehydrate(app_router_for_rehydrate, "cold-boot");
         spawn_acceptance_recovery_sweep("cold-boot");
+        // Frozen publication artifacts owed to their quorum survive a restart as
+        // exact bytes; replay them now (not seed-gated: payloads are plain
+        // bytes, only storage auth is needed).
+        crate::handlers::artifact_republish::spawn_frozen_artifact_republish("cold-boot");
     } else {
         // Install minimal bootstrap router for pre-genesis queries
         use crate::bridge::{AppQuery, AppInvoke, AppResult};

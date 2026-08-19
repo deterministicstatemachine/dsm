@@ -2548,6 +2548,19 @@ impl AppRouterImpl {
                             errors.push(format!("checkpoint sweep failed: {e}"));
                         }
                     }
+                    // Frozen publication artifacts (vault birth/terminal proof
+                    // sets, and whatever else a canonical advance froze): replay
+                    // the exact bytes to the set they were frozen for until
+                    // quorum. Same placement rule; purpose-agnostic; never signs.
+                    match crate::handlers::artifact_republish::republish_unpublished_artifacts()
+                        .await
+                    {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] artifact republish sweep errored: {e}");
+                            errors.push(format!("artifact republish sweep failed: {e}"));
+                        }
+                    }
                 }
 
                 // Record network success for connectivity monitoring
