@@ -294,20 +294,37 @@ pub(crate) async fn claim_settlement_slot(
 mod tests {
     use super::*;
     use crate::sdk::storage_io::fake_fleet;
-    use crate::sdk::storage_set::StorageSetCatalog;
+    use crate::sdk::storage_set::StorageMember;
     use dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim;
     use serial_test::serial;
 
+    /// The THREE-member set these tests reason about, built explicitly.
+    ///
+    /// Deliberately not `StorageSetCatalog::from_env_config()`: quorum
+    /// arithmetic over "however many members happen to be configured" is not a
+    /// test of quorum arithmetic. Ambient config is also not stable inside one
+    /// test binary — a fleet installed by any earlier test persists — so a set
+    /// taken from it silently became a one-member set here, and every
+    /// assertion about 2-of-3 splits passed or failed for reasons having
+    /// nothing to do with the code under test. The functions under test take
+    /// the set as a parameter, so naming it here is both hermetic and exact.
     fn init() -> StorageSet {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        };
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         fake_fleet::reset();
-        StorageSetCatalog::from_env_config()
-            .expect("catalog")
-            .sole_set()
-            .expect("one set")
-            .clone()
+        StorageSet::new(
+            (1..=3)
+                .map(|i| StorageMember {
+                    member_id: format!("test-{i}"),
+                    endpoint: format!("http://127.0.0.1:808{i}"),
+                })
+                .collect(),
+        )
+        .expect("a three-member set")
     }
 
     fn envelope(sk: &[u8], pk: &[u8], set: &StorageSet, seq: u64, x: u8) -> Vec<u8> {
