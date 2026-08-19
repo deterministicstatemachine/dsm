@@ -686,6 +686,29 @@ impl AppRouterImpl {
             }
             None => None,
         };
+        // THE CANONICAL STORAGE SET THIS VAULT IS BORN UNDER. Chosen ONCE, here,
+        // from the configured catalog (beta: exactly one fleet), and immutable
+        // for the vault's lifetime: the birth anchor binds it, publication
+        // artifacts are frozen for it, and every later consumer resolves THAT id
+        // through its own catalog — never its local node list.
+        let birth_storage_set_id: Option<[u8; 32]> = if amm_pair.is_some() {
+            let catalog = match crate::sdk::storage_set::StorageSetCatalog::from_env_config() {
+                Ok(c) => c,
+                Err(e) => return err(format!("dlv.create: storage-set catalog unavailable: {e}")),
+            };
+            match catalog.sole_set() {
+                Some(set) => Some(set.id()),
+                None => {
+                    return err(
+                        "dlv.create: the storage-set catalog must hold exactly one set to \
+                         choose a vault's birth set"
+                            .into(),
+                    )
+                }
+            }
+        } else {
+            None
+        };
         let record_to_persist = match amm_pair.as_ref() {
             Some((token_a, token_b)) => {
                 match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
@@ -706,6 +729,8 @@ impl AppRouterImpl {
                                 fee_bps: amm_fee_bps,
                                 anchor_enforcement: spec.anchor_enforcement,
                                 policy_digest: pd,
+                                storage_set_id: birth_storage_set_id
+                                    .expect("AMM vault has a birth storage set"),
                             },
                         )
                     }
@@ -745,8 +770,8 @@ impl AppRouterImpl {
             tx.execute(
                 "INSERT INTO amm_vault_records(
                     vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
-                    fee_bps, anchor_enforcement, policy_digest, created_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    fee_bps, anchor_enforcement, policy_digest, storage_set_id, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     rec.vault_id.as_slice(),
                     rec.owner_genesis.as_slice(),
@@ -756,6 +781,7 @@ impl AppRouterImpl {
                     rec.fee_bps,
                     rec.anchor_enforcement,
                     rec.policy_digest.as_slice(),
+                    rec.storage_set_id.as_slice(),
                     crate::util::deterministic_time::tick() as i64,
                 ],
             )

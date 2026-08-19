@@ -63,6 +63,49 @@ impl ConnectionPool {
     }
 }
 
+/// A successful keyed PUT on one node: the object address it reported and the
+/// node identity it echoed (`x-dsm-node-id`), if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutAcceptance {
+    pub address: String,
+    pub echoed_node_id: Option<String>,
+}
+
+/// One member's outcome in a keyed fan-out over a canonical storage set.
+/// `accepted` is `true` ONLY when the PUT succeeded AND the node echoed the
+/// member id the catalog says lives at `endpoint` — so two catalog members
+/// pointing at one physical node yield one countable acceptance, not two, and
+/// a node that does not identify itself does not count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberPutOutcome {
+    pub member_id: String,
+    pub endpoint: String,
+    pub accepted: bool,
+    pub echoed_node_id: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Result of a keyed fan-out over a canonical storage set. Never short-circuits;
+/// `total` is the SET size (the quorum denominator), not the number of nodes
+/// that happened to be reachable or constructible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedPutFanout {
+    pub outcomes: Vec<MemberPutOutcome>,
+    pub accepted: u32,
+    pub total: u32,
+}
+
+impl KeyedPutFanout {
+    /// Member ids whose acceptance counted.
+    pub fn accepting_member_ids(&self) -> Vec<&str> {
+        self.outcomes
+            .iter()
+            .filter(|o| o.accepted)
+            .map(|o| o.member_id.as_str())
+            .collect()
+    }
+}
+
 /// API-facing health status for nodes
 #[derive(Debug, Clone)]
 pub struct ApiNodeHealthStatus {
@@ -571,6 +614,67 @@ impl StorageNodeClient {
         }
     }
 
+    /// Keyed PUT that also returns the node's ECHOED identity
+    /// (`x-dsm-node-id` response header), so a fan-out can count an
+    /// acceptance only when the node that answered is the member the catalog
+    /// says lives at this endpoint. Same request shape as [`Self::put`].
+    pub async fn put_echoing_node_id(
+        &self,
+        key: &str,
+        data: &[u8],
+    ) -> Result<PutAcceptance, StorageNodeError> {
+        let mut hasher = dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_DLV_PARTITION);
+        hasher.update(key.as_bytes());
+        let dlv_id = hasher.finalize();
+        let dlv_id_text = crate::util::text_id::encode_base32_crockford(dlv_id.as_bytes());
+        let stake_hash_text = crate::util::text_id::encode_base32_crockford(&[0u8; 32]);
+        let url = format!("{base}/api/v2/object/put", base = self.node_info.url);
+        let mut req_builder = self
+            .client
+            .post(&url)
+            .header("x-dlv-id", dlv_id_text)
+            .header("x-path", key)
+            .header("x-capacity-bytes", "10485760")
+            .header("x-stake-hash", stake_hash_text)
+            .header("Content-Type", "application/octet-stream");
+        if let Some(auth) = &self.auth {
+            let msg_id = Self::generate_message_id(key);
+            req_builder = req_builder
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
+                .header("x-dsm-message-id", msg_id);
+        }
+        let response = req_builder
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(|e| StorageNodeError::network(format!("HTTP request failed: {e}")))?;
+        let status = response.status();
+        let echoed_node_id = response
+            .headers()
+            .get("x-dsm-node-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if status.is_success() {
+            let address = response
+                .headers()
+                .get("x-object-address")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            Ok(PutAcceptance {
+                address,
+                echoed_node_id,
+            })
+        } else {
+            Err(StorageNodeError::server_error(format!(
+                "PUT failed with status: {status}"
+            )))
+        }
+    }
+
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, StorageNodeError> {
         // Use direct GET by key/addr
         let encoded_key = urlencoding::encode(key);
@@ -981,6 +1085,89 @@ impl StorageNodeSDK {
         result.map_err(|e| {
             DsmError::storage(format!("StorageNodeSDK.put: {e}"), None::<std::io::Error>)
         })
+    }
+
+    /// Keyed PUT of `payload` under `key` to EVERY member of the canonical set
+    /// `set`, returning a per-member outcome. Never short-circuits; returns `Ok`
+    /// even at zero acceptances — whether that reaches quorum is the caller's
+    /// decision (`set.quorum()`), and the denominator is `set.len()`, never the
+    /// number of clients this SDK managed to construct.
+    ///
+    /// A member is contacted through the client whose URL equals its catalog
+    /// endpoint (per-node auth already attached). An acceptance counts only if
+    /// the node ECHOES that member's id: "distinct members" is executable, not
+    /// administrative.
+    pub async fn put_bytes_to_all_members(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        key: &str,
+        payload: &[u8],
+    ) -> KeyedPutFanout {
+        let mut outcomes = Vec::with_capacity(set.len());
+        let mut accepted = 0u32;
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let outcome = match client {
+                None => MemberPutOutcome {
+                    member_id: member.member_id.clone(),
+                    endpoint: member.endpoint.clone(),
+                    accepted: false,
+                    echoed_node_id: None,
+                    error: Some("no client for this member's endpoint".to_string()),
+                },
+                Some(c) => match c.put_echoing_node_id(key, payload).await {
+                    Ok(ack) => {
+                        let identity_matches =
+                            ack.echoed_node_id.as_deref() == Some(member.member_id.as_str());
+                        if identity_matches {
+                            let _ = crate::network::report_storage_success(&member.endpoint);
+                        }
+                        MemberPutOutcome {
+                            member_id: member.member_id.clone(),
+                            endpoint: member.endpoint.clone(),
+                            accepted: identity_matches,
+                            echoed_node_id: ack.echoed_node_id.clone(),
+                            error: if identity_matches {
+                                None
+                            } else {
+                                Some(format!(
+                                    "node did not echo member id {:?} (echoed {:?}) — not counted",
+                                    member.member_id, ack.echoed_node_id
+                                ))
+                            },
+                        }
+                    }
+                    Err(e) => {
+                        let _ = crate::network::report_storage_failure(&member.endpoint);
+                        MemberPutOutcome {
+                            member_id: member.member_id.clone(),
+                            endpoint: member.endpoint.clone(),
+                            accepted: false,
+                            echoed_node_id: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                },
+            };
+            if outcome.accepted {
+                accepted += 1;
+            }
+            outcomes.push(outcome);
+        }
+        log::info!(
+            "put_bytes_to_all_members: key={} accepted={}/{} members",
+            &key[..key.len().min(24)],
+            accepted,
+            set.len()
+        );
+        KeyedPutFanout {
+            outcomes,
+            accepted,
+            total: set.len() as u32,
+        }
     }
 
     /// Write to ALL configured storage nodes (spec §6: redundant mirrors).

@@ -23,7 +23,9 @@ use log::info;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{
+    limit::RequestBodyLimitLayer, set_header::SetResponseHeaderLayer, trace::TraceLayer,
+};
 
 use dsm_sdk::util::text_id;
 
@@ -279,6 +281,18 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
+        // Echo this node's configured protocol identity on EVERY response. A
+        // client fanning a keyed write out over a canonical storage set counts
+        // an acceptance only when the answering node IS the member its catalog
+        // says lives at that endpoint — "distinct members" is executable, not
+        // administrative. This is identity, not authentication (crash-fault node
+        // model): it prevents two catalog entries on one physical node from
+        // yielding two acceptances; it does not prove the node is honest.
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::header::HeaderName::from_static("x-dsm-node-id"),
+            axum::http::HeaderValue::from_str(&config.node_id)
+                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid-node-id")),
+        ))
         .layer(Extension(state))
 }
 

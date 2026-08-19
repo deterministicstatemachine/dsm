@@ -329,6 +329,7 @@ mod tests {
             fee_bps: 30,
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
+            storage_set_id: [0x6B; 32],
         };
         (record, head)
     }
@@ -562,6 +563,7 @@ mod tests {
             fee_bps: 30,
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
+            storage_set_id: [0x6B; 32],
         };
         assert_eq!(
             rehydrate_amm_vault(&record, &head),
