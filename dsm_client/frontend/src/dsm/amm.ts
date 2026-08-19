@@ -220,6 +220,13 @@ export interface AmmVaultSummary {
    * used.  `undefined` for legacy vaults (see `unlockSpecDigest`).
    */
   unlockSpecKey?: string;
+  /** Settlements published against this vault that the owner has not folded.
+   *  Traders settle without the owner online, so a non-zero count means the
+   *  displayed reserves are behind the chain — not that anything is wrong. */
+  pendingUnapplied: bigint;
+  /** The external commitment of each one, so the owner can fold them without
+   *  rediscovering what is outstanding. */
+  pendingX: Uint8Array[];
 }
 
 function anchorEnforcementToString(
@@ -305,6 +312,8 @@ export async function listOwnedAmmVaults(): Promise<{
         routingAdvertised: summary.routingAdvertised,
         anchorSequence: summary.anchorSequence,
         anchorEnforcement: anchorEnforcementToString(summary.anchorEnforcement),
+        pendingUnapplied: summary.pendingUnapplied,
+        pendingX: summary.pendingX,
         unlockSpecDigest,
         unlockSpecKey,
       };
@@ -312,5 +321,43 @@ export async function listOwnedAmmVaults(): Promise<{
     return { success: true, vaults };
   } catch (e: any) {
     return { success: false, error: e?.message || 'listOwnedAmmVaults failed' };
+  }
+}
+
+/**
+ * Owner: fold ONE settled trade into this vault's reserves.
+ *
+ * The trader's settlement is already final — it was authorised by
+ * pre-commitment, not by the owner being reachable. This is the owner writing
+ * down what already happened, and it is idempotent: Rust checks the reserve
+ * leaf's sequence, so folding the same receipt twice moves nothing.
+ */
+export async function reconcileVaultSettlement(input: {
+  vaultId: Uint8Array;
+  x: Uint8Array;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (input.vaultId?.length !== 32) return { success: false, error: 'vaultId must be 32 bytes' };
+    if (input.x?.length !== 32) return { success: false, error: 'x must be 32 bytes' };
+    const req = new pb.DlvReconcileV1({
+      vaultId: input.vaultId as any,
+      x: input.x as any,
+    });
+    const argPack = new pb.ArgPack({
+      schemaHash: new pb.Hash32({ v: new Uint8Array(32) }),
+      codec: pb.Codec.PROTO as any,
+      body: req.toBinary(),
+    });
+    const resBytes = await routerInvokeBin(
+      'dlv.reconcile',
+      new Uint8Array(argPack.toBinary()),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    if (env.payload.case === 'error') {
+      return { success: false, error: env.payload.value.message || 'dlv.reconcile failed' };
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'reconcileVaultSettlement failed' };
   }
 }

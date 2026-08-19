@@ -227,6 +227,17 @@ impl AppRouterImpl {
         rc.initiator_signature = sig;
 
         let signed_bytes = rc.encode_to_vec();
+
+        // Retain it against its own X. `route.publishExternalCommitment` needs
+        // the hops to write one pending pointer per settlement-relevant hop,
+        // and those hops are protocol state — they do not belong in a round
+        // trip through the render layer.
+        let x_of_rc = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        {
+            let mut cache = self.signed_route_commits.lock().await;
+            cache.insert(x_of_rc, signed_bytes.clone());
+        }
+
         let resp = generated::AppStateResponse {
             key: "route.signRouteCommit".to_string(),
             value: Some(crate::util::text_id::encode_base32_crockford(&signed_bytes)),
@@ -254,47 +265,22 @@ impl AppRouterImpl {
             );
         }
 
-        // Phase 6: the request may be either a bare `ExternalCommitmentV1`
-        // (legacy callers) or a `PublishExternalCommitmentRequest` wrapper
-        // (Phase 6+ trader UI that wants vault-keyed pending pointers
-        // published alongside the anchor).  Try the wrapper first; on
-        // decode failure or missing inner anchor, fall back to bare.
-        let (mut req, signed_rc_bytes_opt): (generated::ExternalCommitmentV1, Option<Vec<u8>>) =
-            match generated::PublishExternalCommitmentRequest::decode(&*bytes) {
-                Ok(wrapper) => {
-                    if let Some(inner) = wrapper.anchor {
-                        let rc_opt = if wrapper.signed_route_commit_bytes.is_empty() {
-                            None
-                        } else {
-                            Some(wrapper.signed_route_commit_bytes)
-                        };
-                        (inner, rc_opt)
-                    } else {
-                        // Fall back to bare ExternalCommitmentV1.
-                        let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                return err(format!(
-                                "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
-                            ));
-                            }
-                        };
-                        (bare, None)
-                    }
-                }
-                Err(_) => {
-                    // Fall back to bare ExternalCommitmentV1.
-                    let bare = match generated::ExternalCommitmentV1::decode(&*bytes) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return err(format!(
-                            "route.publishExternalCommitment: decode failed (tried PublishExternalCommitmentRequest then ExternalCommitmentV1): {e}"
-                        ));
-                        }
-                    };
-                    (bare, None)
-                }
-            };
+        // ONE shape: a bare `ExternalCommitmentV1`. The signed RouteCommit is
+        // NOT carried by the caller — it is protocol state, it was produced by
+        // `route.signRouteCommit` on this device, and Rust kept it. The route
+        // used to accept either this or a wrapper carrying the signed RC, and
+        // fell back to publishing X alone when the RC was absent. The frontend
+        // sent the bare shape, so that fallback was the live path: no pending
+        // pointer was ever written, the route reported success, and settlement
+        // then failed at the slot claim with nothing to point at.
+        let mut req = match generated::ExternalCommitmentV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "route.publishExternalCommitment: decode ExternalCommitmentV1 failed: {e}"
+                ));
+            }
+        };
 
         if req.x.len() != 32 {
             return err(format!(
@@ -324,76 +310,90 @@ impl AppRouterImpl {
         let mut x = [0u8; 32];
         x.copy_from_slice(&req.x);
 
-        // If the caller supplied the signed RouteCommit bytes, use the
-        // Phase-6 helper to publish X + vault-keyed pending pointers
-        // atomically.  Otherwise publish X only (legacy behaviour).
-        match signed_rc_bytes_opt {
-            None => {
-                if let Err(e) = crate::sdk::route_commit_sdk::publish_external_commitment(
-                    &x,
-                    &req.publisher_public_key,
-                    &req.label,
-                )
-                .await
-                {
-                    return err(format!(
-                        "route.publishExternalCommitment: storage put failed: {e}"
-                    ));
-                }
-            }
-            Some(rc_bytes) => {
-                let rc = match generated::RouteCommitV1::decode(&*rc_bytes) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return err(format!(
-                            "route.publishExternalCommitment: decode signed_route_commit_bytes failed: {e}"
-                        ));
-                    }
-                };
-                // Verify X derived from this RC matches the caller's X.
-                let derived_x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
-                if derived_x != x {
+        // The signed RouteCommit for this X, as Rust produced it.
+        //
+        // Absent means no `route.signRouteCommit` on this device ever derived
+        // this X, so there are no hops to write pointers for. Publishing the
+        // anchor alone would look like success and leave the settlement slot
+        // empty, which is exactly the failure this replaced.
+        let rc_bytes = {
+            let cache = self.signed_route_commits.lock().await;
+            match cache.get(&x) {
+                Some(b) => b.clone(),
+                None => {
                     return err(
-                        "route.publishExternalCommitment: signed_route_commit_bytes does not derive the supplied x"
+                        "route.publishExternalCommitment: no signed RouteCommit is held for                          this x; sign the route on this device first (a commitment with no                          route cannot claim a settlement slot)"
                             .into(),
                     );
                 }
-                let sk = match crate::sdk::signing_authority::current_secret_key() {
-                    Ok(s) if !s.is_empty() => s,
-                    Ok(_) => {
-                        return err(
-                            "route.publishExternalCommitment: wallet signing secret key is empty"
-                                .into(),
-                        );
-                    }
-                    Err(e) => {
-                        return err(format!(
-                            "route.publishExternalCommitment: get_current_secret_key failed: {e}"
-                        ));
-                    }
-                };
-                match crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
-                    &x,
-                    &rc,
-                    &req.publisher_public_key,
-                    &sk,
-                    &req.label,
-                )
-                .await
-                {
-                    Ok(pointer_errors) => {
-                        for pe in &pointer_errors {
-                            log::warn!(
-                                "[route.publishExternalCommitment] pointer publish (best-effort) failed: {pe}"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        return err(format!(
-                            "route.publishExternalCommitment: anchor publish failed: {e}"
-                        ));
-                    }
-                }
+            }
+        };
+        let rc = match generated::RouteCommitV1::decode(&*rc_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "route.publishExternalCommitment: decode retained RouteCommit failed: {e}"
+                ));
+            }
+        };
+        // The retained RC must still derive this X. A mismatch means the cache
+        // and the request disagree about which trade is being anchored.
+        if crate::sdk::route_commit_sdk::compute_external_commitment(&rc) != x {
+            return err(
+                "route.publishExternalCommitment: retained RouteCommit does not derive x".into(),
+            );
+        }
+        // A route with no hops settles nothing, so it must not anchor anything.
+        if rc.hops.is_empty() {
+            return err(
+                "route.publishExternalCommitment: RouteCommit carries no hops; there is no                  settlement to anchor"
+                    .into(),
+            );
+        }
+        let sk = match crate::sdk::signing_authority::current_secret_key() {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => {
+                return err(
+                    "route.publishExternalCommitment: wallet signing secret key is empty".into(),
+                );
+            }
+            Err(e) => {
+                return err(format!(
+                    "route.publishExternalCommitment: get_current_secret_key failed: {e}"
+                ));
+            }
+        };
+        // MANDATORY, not best-effort. Every hop's pending pointer is a
+        // precondition of settling that hop: `claim_settlement_slot` refuses
+        // when the slot does not hold this trader's X. Reporting success with
+        // a pointer missing hands the caller a commitment that can never
+        // settle, and the only way to find out was to be refused at the gate.
+        match crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+            &x,
+            &rc,
+            &req.publisher_public_key,
+            &sk,
+            &req.label,
+        )
+        .await
+        {
+            Ok(pointer_errors) if pointer_errors.is_empty() => {}
+            Ok(pointer_errors) => {
+                let detail = pointer_errors
+                    .iter()
+                    .map(|e| format!("{e}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return err(format!(
+                    "route.publishExternalCommitment: {} of {} settlement pointer(s) were not                      published, so this commitment cannot settle: {detail}",
+                    pointer_errors.len(),
+                    rc.hops.len(),
+                ));
+            }
+            Err(e) => {
+                return err(format!(
+                    "route.publishExternalCommitment: anchor publish failed: {e}"
+                ));
             }
         }
 
@@ -1112,6 +1112,132 @@ mod stamping_tests {
     /// message's own canonical bytes. Then the stamped key is altered and
     /// verification must break — which is what distinguishes "signed over the
     /// stamped identity" from "stamped after signing".
+    /// PRODUCER AND CONSUMER, against one route and one slot.
+    ///
+    /// `route.publishExternalCommitment` writes the pending pointer;
+    /// `claim_settlement_slot` refuses to settle without it. Nothing exercised
+    /// the two together, so they were free to disagree — and they did. The
+    /// route took a no-RouteCommit branch, published the X anchor alone,
+    /// reported SUCCESS, and wrote no pointer. On hardware the trader anchored
+    /// a commitment that could never settle and only learned at the gate:
+    /// "settlement slot not held". Storage confirmed it — `sofi/vault-pending/`
+    /// was empty at every sequence while the advertisement sat next to it.
+    #[test]
+    #[serial]
+    fn publishing_a_commitment_writes_the_pointer_its_own_slot_claim_requires() {
+        install_identity();
+        let r = router();
+        let rc = rc_fixture();
+        let signed = sign_through_router(&r, &rc);
+
+        // X is derived from the signed RC, exactly as the settle path derives it.
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&signed);
+
+        // The caller sends ONLY the anchor. The signed RouteCommit is protocol
+        // state Rust already holds; it does not travel through the caller.
+        let anchor = generated::ExternalCommitmentV1 {
+            version: 1,
+            x: x.to_vec(),
+            publisher_public_key: Vec::new(),
+            label: "test".to_string(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishExternalCommitment".to_string(),
+                args: pack(anchor.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // The pointer must be READABLE at the key the slot claim lists.
+        let hop = &signed.hops[0];
+        let vault_id: [u8; 32] = hop.vault_id.as_slice().try_into().expect("vault id");
+        let parent_sequence = hop.vault_state_anchor_seq;
+        let new_sequence = parent_sequence + 1;
+        let key =
+            crate::sdk::route_commit_sdk::vault_pending_pointer_key(&vault_id, new_sequence, &x);
+        let bytes = crate::runtime::get_runtime()
+            .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+            .expect("the pointer publication claims to have written this key");
+        assert!(!bytes.is_empty(), "pointer key exists but is empty");
+
+        // The key names this vault, this sequence and this trade.
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
+        let x_b32 = crate::util::text_id::encode_base32_crockford(&x);
+        assert!(key.contains(&vid_b32), "key must name the vault: {key}");
+        assert!(
+            key.contains(&format!("/{new_sequence:016}/")),
+            "key must name the sequence: {key}"
+        );
+        assert!(key.ends_with(&x_b32), "key must name the trade: {key}");
+
+        // And the decoded pointer agrees with the key.
+        let ptr = generated::VaultPendingPointerV1::decode(bytes.as_slice()).expect("pointer");
+        assert_eq!(ptr.vault_id, vault_id.to_vec());
+        assert_eq!(ptr.parent_sequence, parent_sequence);
+        assert_eq!(ptr.new_sequence, new_sequence);
+        assert_eq!(ptr.x, x.to_vec());
+
+        // THE CONSUMER. The same slot the settle path claims must now see it.
+        let claim = crate::runtime::get_runtime().block_on(
+            crate::sdk::settlement_slot::claim_settlement_slot(&vault_id, parent_sequence, &x),
+        );
+        let claim = claim.expect("the slot claim must see the pointer the publish just wrote");
+        assert!(
+            claim.matches(&vault_id, parent_sequence, &x),
+            "the claim must be for exactly this trade",
+        );
+    }
+
+    /// No route, no anchor. A commitment that cannot settle must not publish.
+    ///
+    /// This is the branch that used to exist and silently succeed: with no
+    /// signed RouteCommit the route published X alone and returned OK. The
+    /// caller had no way to learn its trade could never claim a slot.
+    #[test]
+    #[serial]
+    fn publishing_a_commitment_with_no_route_behind_it_is_refused() {
+        install_identity();
+        let r = router();
+        // An X that no `route.signRouteCommit` on this device ever produced.
+        let x = [0x5Eu8; 32];
+        let anchor = generated::ExternalCommitmentV1 {
+            version: 1,
+            x: x.to_vec(),
+            publisher_public_key: Vec::new(),
+            label: "orphan".to_string(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishExternalCommitment".to_string(),
+                args: pack(anchor.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            !res.success,
+            "an anchor with no route behind it must be refused, not published",
+        );
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("no signed RouteCommit"),
+            "the refusal must say why: {msg}",
+        );
+        // And nothing was written.
+        assert!(
+            crate::runtime::get_runtime()
+                .block_on(
+                    crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(
+                        &crate::sdk::route_commit_sdk::external_commitment_key(&x)
+                    )
+                )
+                .map(|b| b.is_empty())
+                .unwrap_or(true),
+            "a refused publish must leave no anchor behind",
+        );
+    }
+
     #[test]
     #[serial]
     fn signing_stamps_the_wallet_identity_and_signs_over_it() {
