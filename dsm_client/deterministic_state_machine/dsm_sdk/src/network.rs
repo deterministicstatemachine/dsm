@@ -102,21 +102,37 @@ pub struct NetworkConfigLoader;
 impl NetworkConfigLoader {
     /// Load environment config strictly from TOML or TEST_MODE.
     pub fn load_env_config() -> Result<EnvConfig, DsmError> {
-        // Try global static first (set by JNI), then fall back to env var
-        let explicit_path = if let Some(p) = ENV_CONFIG_PATH.get() {
+        let test_mode = std::env::var("DSM_SDK_TEST_MODE").is_ok();
+        let env_var_path = std::env::var("DSM_ENV_CONFIG_PATH").ok();
+
+        // PRODUCTION: the global static (set once by JNI at init) is the
+        // authority, with the env var as a fallback.
+        //
+        // TEST MODE: the env var alone decides, because `set_env_config_path`
+        // writes a OnceLock that NOTHING can subsequently clear. One test
+        // pointing the loader at its own fleet would otherwise hand that fleet
+        // to every test that ran after it, for the life of the process — which
+        // is how quorum tests came to reason about whichever fleet happened to
+        // be installed first. A test that wants a specific fleet sets the env
+        // var (`point_env_config_at` sets both), so the env var's presence is
+        // exactly the signal "this test chose a fleet"; its absence means "give
+        // me the hermetic default", and that must stay reachable.
+        let explicit_path = if test_mode {
+            if let Some(p) = &env_var_path {
+                log::info!("NetworkConfigLoader: using DSM_ENV_CONFIG_PATH={p} (test mode)");
+            }
+            env_var_path
+        } else if let Some(p) = ENV_CONFIG_PATH.get() {
             log::info!("NetworkConfigLoader: using global ENV_CONFIG_PATH={}", p);
             Some(p.clone())
-        } else if let Ok(env_path) = std::env::var("DSM_ENV_CONFIG_PATH") {
-            log::info!(
-                "NetworkConfigLoader: using DSM_ENV_CONFIG_PATH={}",
-                env_path
-            );
-            Some(env_path)
         } else {
-            None
+            if let Some(p) = &env_var_path {
+                log::info!("NetworkConfigLoader: using DSM_ENV_CONFIG_PATH={p}");
+            }
+            env_var_path
         };
 
-        if explicit_path.is_none() && std::env::var("DSM_SDK_TEST_MODE").is_ok() {
+        if explicit_path.is_none() && test_mode {
             return Ok(Self::test_env_config());
         }
 
