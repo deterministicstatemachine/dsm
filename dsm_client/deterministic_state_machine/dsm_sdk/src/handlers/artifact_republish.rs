@@ -145,7 +145,16 @@ mod tests {
     use serial_test::serial;
 
     fn init() -> StorageSetCatalog {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        // The sweep resolves a row's FROZEN set through the catalog, so these
+        // tests must use the catalog's own set — and therefore must pin which
+        // catalog that is. Clearing the path any earlier test pointed the
+        // loader at is what makes the hermetic three-node default reachable;
+        // without it this module inherits whichever fleet ran first and the
+        // partition assertions below stop meaning anything.
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+            std::env::remove_var("DSM_ENV_CONFIG_PATH");
+        };
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         fake_fleet::reset();

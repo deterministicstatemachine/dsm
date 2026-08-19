@@ -352,10 +352,16 @@ impl FakeB0xNode {
 /// Both `wallet.send` and `storage.sync` resolve endpoints through
 /// `StorageNodeConfig::from_env_config()`, NOT `SdkConfig`. Under
 /// `DSM_SDK_TEST_MODE` that loader returns a hardcoded localhost set unless
-/// `DSM_ENV_CONFIG_PATH` names a real file. One fixed path per process,
-/// installed through the OnceLock the JNI layer uses in production (immune to
-/// other test modules clearing the env var); the file is rewritten per call
-/// and re-read by the loader on every use.
+/// `DSM_ENV_CONFIG_PATH` names a real file. One fixed path per process; the
+/// file is rewritten per call and re-read by the loader on every use.
+///
+/// The OnceLock the JNI layer uses in production is set too, so a test that
+/// goes through the ingress startup path sees a consistent value — but in TEST
+/// MODE the loader decides on the ENV VAR alone, so this call must precede
+/// every use rather than being relied on to persist. It deliberately no longer
+/// survives another module clearing the variable: a OnceLock nothing can reset
+/// meant the first fleet installed in a process became every later test's
+/// fleet, which silently turned three-member quorum tests into one-member ones.
 pub fn point_env_config_at(endpoints: &[String]) {
     let cfg_path =
         std::env::temp_dir().join(format!("dsm_sdk_test_env_{}.toml", std::process::id()));
