@@ -49,6 +49,22 @@ openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
 # Generate a random PostgreSQL password (shared across all nodes for simplicity)
 PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
 
+# ----- The canonical storage set -----
+# Every node must be handed the SAME member list: the set id is derived by
+# hashing the sorted ids, so a node configured with a different list computes a
+# different id and refuses claims for the set its peers belong to. Built once,
+# here, and substituted into every bundle unchanged.
+#
+# These ids are also the client's contract: the member ids must equal the
+# `[[nodes]] name` entries in the client env config, because that is what the
+# client hashes to name the set a vault is born under.
+STORAGE_SET_MEMBERS=""
+for i in $(seq 1 "${N}"); do
+    [ -n "${STORAGE_SET_MEMBERS}" ] && STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}, "
+    STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}\"dsm-node-${i}\""
+done
+echo "Canonical storage set (${N} members): ${STORAGE_SET_MEMBERS}"
+
 # ----- Per-Node Bundles -----
 for i in $(seq 1 "${N}"); do
     IDX=$((i - 1))
@@ -95,7 +111,8 @@ EXTEOF
     DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
-    sed -e "s|__NODE_ID__|${NODE_ID}|g" \
+    sed -e "s|members = \[\"__STORAGE_SET_MEMBERS__\"\]|members = [${STORAGE_SET_MEMBERS}]|g" \
+        -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \

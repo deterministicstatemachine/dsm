@@ -18,14 +18,25 @@ mempool_api_url = "https://mempool.space"
 # Path is relative to this config file's directory (resolved by SDK).
 custom_ca_certs = ["ca.crt"]
 
+# `name` IS THE MEMBER ID OF THE CANONICAL STORAGE SET, not a label. It is
+# hashed (sorted, length-prefixed) into the storage_set_id a vault is born
+# under, and it is what an acceptance is counted against: a member only counts
+# toward quorum when the node echoes this exact string back as x-dsm-node-id.
+#
+# So each name MUST equal that node's own `[node] id`, which is also the CN of
+# the TLS certificate it serves — verify with:
+#   openssl s_client -connect <ip>:8080 </dev/null | openssl x509 -noout -subject
+# A name that merely describes the node ("us-west-1a-1") makes the client
+# compute a set id no node belongs to: every settlement-slot claim is refused as
+# a foreign set and no publication ever reaches quorum.
 [[nodes]]
-name = "us-west-1a-1"
+name = "dsm-node-1"
 endpoint = "https://47.251.246.93:8080"
 
 [[nodes]]
-name = "us-west-1a-2"
+name = "dsm-node-2"
 endpoint = "https://47.251.250.159:8080"
 
 [[nodes]]
-name = "us-west-1a-3"
+name = "dsm-node-3"
 endpoint = "https://47.251.88.58:8080"
