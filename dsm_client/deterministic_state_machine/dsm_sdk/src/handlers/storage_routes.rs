@@ -2561,6 +2561,18 @@ impl AppRouterImpl {
                             errors.push(format!("artifact republish sweep failed: {e}"));
                         }
                     }
+                    // A vault close that was interrupted between its claim and
+                    // its canonical commit: re-establish the storage-set
+                    // invariant, re-run the claim with the SAME frozen bytes,
+                    // and finish (or abandon). Never infers closure — the
+                    // canonical state decides.
+                    match self.resume_close_intents().await {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] close-intent resume errored: {e}");
+                            errors.push(format!("close-intent resume failed: {e}"));
+                        }
+                    }
                 }
 
                 // Record network success for connectivity monitoring
