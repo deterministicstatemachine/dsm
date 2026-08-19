@@ -5235,6 +5235,23 @@ mod funded_creation_tests {
         (a.amount, b.amount, a.sequence)
     }
 
+    /// The member ids of the set a vault was BORN under, resolved the way
+    /// production resolves it: by re-hashing the catalog's entries against the
+    /// id in the vault's own record, never by assuming the configured fleet.
+    fn vault_storage_members(vault_id: &[u8; 32]) -> Vec<String> {
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .expect("record read")
+            .expect("the owner has a record for this vault");
+        crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .resolve(&record.storage_set_id)
+            .expect("the vault's birth set resolves through this device's catalog")
+            .members()
+            .iter()
+            .map(|m| m.member_id.clone())
+            .collect()
+    }
+
     fn spendable(owner: &AppRouterImpl, pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64) {
         let h = owner.core_sdk.device_head().expect("owner head");
         (h.balance(pc_a), h.balance(pc_b))
@@ -5516,8 +5533,8 @@ mod funded_creation_tests {
         // Another contestant takes generation 0 first, at quorum.
         let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .expect("catalog")
-            .sole_set()
-            .expect("one configured set")
+            .resolve(&record.storage_set_id)
+            .expect("the vault's birth set resolves through this device's catalog")
             .clone();
         let (rival_pk, _rival_did) = become_device(0x71);
         let rival_sk = crate::sdk::signing_authority::current_secret_key().expect("rival sk");
@@ -5618,8 +5635,16 @@ mod funded_creation_tests {
             "the vault must be born and published before this test unplugs the fleet"
         );
 
-        // The fleet goes away mid-close.
-        for m in ["test-1", "test-2", "test-3"] {
+        // The fleet goes away mid-close. The members are the vault's OWN —
+        // read from the set it was born under — because a hardcoded member name
+        // that matches nothing fails nothing, and the test would then assert a
+        // refusal against a fleet that was never down.
+        let members = vault_storage_members(&vault_id);
+        assert!(
+            members.len() >= 2,
+            "this test needs a set whose quorum can actually be lost, got {members:?}"
+        );
+        for m in &members {
             crate::sdk::storage_io::fake_fleet::fail_member(m);
         }
         let res = close(&owner, &vault_id);
@@ -5652,7 +5677,7 @@ mod funded_creation_tests {
         let frozen_claim = intent.claim_bytes.clone();
 
         // The fleet returns; the sweep finishes what the owner started.
-        for m in ["test-1", "test-2", "test-3"] {
+        for m in &members {
             crate::sdk::storage_io::fake_fleet::heal_member(m);
         }
         let resumed = crate::runtime::get_runtime()
