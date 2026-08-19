@@ -55,6 +55,16 @@ fn sofi() -> [u8; 32] {
     dsm::core::token::builtin_policy_commit_for_token("dBTC").expect("dBTC policy commit")
 }
 
+/// The vault's canonical pair + fee, as the owner's own vault record carries it.
+fn vault_pair() -> dsm::types::device_state::VaultStatePair {
+    let (lo, hi) = if era() < sofi() {
+        (era(), sofi())
+    } else {
+        (sofi(), era())
+    };
+    dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
+}
+
 fn mint(head: &DeviceState, policy: [u8; 32], token: &[u8], amount: u64) -> DeviceState {
     let rel = compute_smt_key(&OWNER, &OWNER);
     let init = initial_chain_tip_from_device_ids(&OWNER, &OWNER);
@@ -112,11 +122,13 @@ fn rich_owner_head() -> DeviceState {
         .expect("peer advance")
         .new_device_state;
 
-    // A vault-state extra leaf (commits into r_A, must be replayed by restore).
+    // An unrelated extra leaf (an anchor-state leaf; commits into r_A, must be
+    // replayed by restore and must survive a settlement untouched). The vault's
+    // OWN state leaf is not planted here: `advance` derives and writes it as
+    // part of the settlement's SMT batch.
     let head = head
-        .with_vault_state_leaf(&VAULT, 0, &[0x33; 32])
-        .expect("vault state leaf")
-        .new_device_state;
+        .with_anchor_state_leaf(&[0x33; 32], &[0x34; 32])
+        .expect("anchor state leaf");
 
     // Encumber both legs so ApplySettlement has reserves to move.
     head.fund_vault_reserves(&VAULT, &[(era(), 500), (sofi(), 400)], 0)
@@ -176,6 +188,7 @@ fn try_apply_settlement(
             output_amount: 60,
             parent_sequence: 0,
             new_sequence: 1,
+            pair: vault_pair(),
         }),
     )
 }

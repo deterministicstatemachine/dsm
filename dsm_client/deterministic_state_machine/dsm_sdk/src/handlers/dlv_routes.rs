@@ -667,14 +667,25 @@ impl AppRouterImpl {
         // The encumbrance rides THIS advance, and the vault's record is written
         // inside the same SQLite transaction as the head. Either the transition,
         // both reserve leaves and the record all land, or none of them do.
-        let reserve_funding =
-            amm_pair
-                .as_ref()
-                .map(|_| dsm::types::device_state::VaultReserveMutation::Fund {
+        // The vault's pair + fee ride the mutation so `advance` DERIVES the
+        // vault-state leaf (sequence 0, digest of the funded amounts) in the same
+        // batch as the reserve leaves — one root for the transition, the reserves
+        // and the vault state.
+        let reserve_funding = match amm_pair.as_ref() {
+            Some((token_a, token_b)) => {
+                let pair = match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
+                    Ok(p) => p,
+                    Err(e) => return err(format!("dlv.create: vault pair is not canonical: {e}")),
+                };
+                Some(dsm::types::device_state::VaultReserveMutation::Fund {
                     vault_id,
                     legs: funding.clone(),
                     vault_sequence: 0,
-                });
+                    pair: dsm::types::device_state::VaultStatePair::from_pair(&pair, amm_fee_bps),
+                })
+            }
+            None => None,
+        };
         let record_to_persist = match amm_pair.as_ref() {
             Some((token_a, token_b)) => {
                 match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
@@ -968,15 +979,12 @@ impl AppRouterImpl {
                                     // against and `compose_vault_state` refuses
                                     // the vault outright.
                                     //
-                                    // Published AFTER the vault-state leaf, and
-                                    // that ordering is load-bearing:
-                                    // `install_vault_state_leaf` performs its own
-                                    // head mutation, so the root moves. Both
-                                    // proofs must be built from the SAME final
-                                    // head, because the composer requires them to
-                                    // agree on `smt_root` — building the reserve
-                                    // proof first would bind the pre-install root
-                                    // and every quote would fail closed.
+                                    // Both proofs read the SAME head: the funding
+                                    // advance wrote the reserve leaves AND the
+                                    // vault-state leaf in one SMT batch, so the
+                                    // composer's `smt_root` equality holds by
+                                    // construction — no ordering dependency, no
+                                    // second root.
                                     let funded_commits: Vec<[u8; 32]> =
                                         funding.iter().map(|(pc, _)| *pc).collect();
                                     publish_reserve_inclusion_proof(
@@ -1447,6 +1455,39 @@ impl AppRouterImpl {
             Ok(signed) => signed,
             Err(e) => return err(format!("dlv.reconcile: failed to sign DlvOwnerApply: {e}")),
         };
+        // The vault's pair + fee come from the owner's OWN record of the vault it
+        // created — never from the receipt — so `advance` can derive the
+        // vault-state leaf at `new_sequence` and refuse a settlement naming an
+        // asset outside the pair. No record ⇒ this device did not create the
+        // vault ⇒ it cannot fold anything for it.
+        let record =
+            match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return err(
+                        "dlv.reconcile: no AMM vault record for this vault on this device — \
+                     only the creating owner can fold settlements"
+                            .into(),
+                    )
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.reconcile: reading the vault record failed: {e}"
+                    ))
+                }
+            };
+        let pair = match dsm::types::device_state::VaultStatePair::new(
+            record.policy_commit_a,
+            record.policy_commit_b,
+            record.fee_bps,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: vault record pair is not canonical: {e}"
+                ))
+            }
+        };
         let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
             vault_id,
             input_policy_commit: receipt.trade.input_policy_commit,
@@ -1455,6 +1496,7 @@ impl AppRouterImpl {
             output_amount: receipt.trade.output_amount,
             parent_sequence: receipt.trade.parent_sequence,
             new_sequence: receipt.trade.new_sequence,
+            pair,
         };
 
         let reference_state = match self.core_sdk.get_current_state() {
@@ -2237,13 +2279,26 @@ async fn publish_vault_state_inclusion_proof(
     owner_pk: &[u8],
     owner_sk: &[u8],
 ) {
-    // (1) Mutate the device's PD-SMT to commit the new vault state.
-    let (smt_root, siblings) =
-        match core_sdk.install_vault_state_leaf(vault_id, sequence, reserves_digest) {
-            Ok(pair) => pair,
+    // (1) The vault-state leaf was written by the funding advance itself (it
+    // rides the same SMT batch as the reserve leaves), so the head ALREADY
+    // commits it: read the witness off the head — no second advance, no second
+    // root. The reserve proof published next reads the same head, so both
+    // proofs bind one root by construction.
+    let Some(head) = core_sdk.device_head() else {
+        log::warn!(
+            "[dlv] vault-state inclusion proof (seq={}) for {}: no device head",
+            sequence,
+            crate::util::text_id::encode_base32_crockford(vault_id),
+        );
+        return;
+    };
+    let smt_root = head.root();
+    let siblings =
+        match head.inclusion_siblings(&dsm::dlv::vault_smt_leaf::compute_vault_smt_key(vault_id)) {
+            Ok(s) => s,
             Err(e) => {
                 log::warn!(
-                    "[dlv] install_vault_state_leaf (seq={}) failed for {}: {e}",
+                    "[dlv] vault-state inclusion siblings (seq={}) for {}: {e}",
                     sequence,
                     crate::util::text_id::encode_base32_crockford(vault_id),
                 );
@@ -4690,11 +4745,11 @@ mod funded_creation_tests {
         assert_eq!(proven_amount(&proof, &pc_a), Some(10_000));
         assert_eq!(proven_amount(&proof, &pc_b), Some(5_000));
 
-        // (4) THE ROOT A QUOTE WOULD USE. `install_vault_state_leaf` performs
-        // its own head mutation, so the root moves after funding. Both proofs
-        // must bind the SAME final root or `compose_vault_state` refuses the
-        // vault — this is the ordering dependency that would otherwise only
-        // surface as every quote failing closed.
+        // (4) THE ROOT A QUOTE WOULD USE. The funding advance wrote the reserve
+        // leaves and the vault-state leaf in ONE SMT batch, so there is exactly
+        // one root and both proofs bind it — `compose_vault_state` requires them
+        // to agree on `smt_root`, and that now holds by construction rather than
+        // by call ordering.
         let state_leaf_key = dsm::dlv::vault_smt_leaf::compute_vault_smt_key(&rec.vault_id);
         assert!(
             head.extra_leaves_snapshot().contains_key(&state_leaf_key),
