@@ -5241,13 +5241,14 @@ mod funded_creation_tests {
     }
 
     /// Fund a vault, let ONE trader move it a generation, and (optionally) fold
-    /// that settlement back. Returns `(vault_id, reserves_now)`.
+    /// that settlement back. Returns `(vault_id, reserves_now, x)` — `x` names
+    /// the settlement, so a caller that skipped the fold can perform it later.
     fn vault_after_one_trade(
         owner: &AppRouterImpl,
         pc_a: &[u8; 32],
         pc_b: &[u8; 32],
         fold: bool,
-    ) -> ([u8; 32], (u64, u64)) {
+    ) -> ([u8; 32], (u64, u64), [u8; 32]) {
         use prost::Message as _;
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             owner, pc_a, pc_b, 10_000, 5_000,
@@ -5299,7 +5300,7 @@ mod funded_creation_tests {
             let res = reconcile(owner, &vault_id, &x);
             assert!(res.success, "owner fold failed: {:?}", res.error_message);
         }
-        (vault_id, (11_000, 5_000 - out))
+        (vault_id, (11_000, 5_000 - out), x)
     }
 
     /// INVARIANT 4 — WITHDRAWAL, THE WHOLE ROUND TRIP.
@@ -5326,7 +5327,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
         );
 
-        let (vault_id, reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
         assert_eq!(
             leaves(&owner, &vault_id, &pc_a, &pc_b),
             (reserves.0, reserves.1, 1),
@@ -5432,7 +5433,7 @@ mod funded_creation_tests {
 
         // Traded, NOT folded: the owner's leaves say generation 0, the market
         // says generation 1.
-        let (vault_id, _reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, false);
+        let (vault_id, reserves, x) = vault_after_one_trade(&owner, &pc_a, &pc_b, false);
         assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
         assert_eq!(composed(&vault_id, &pc_a, &pc_b).0, 1);
 
@@ -5465,6 +5466,24 @@ mod funded_creation_tests {
             pending.is_none(),
             "a close refused at the gate never records an intent"
         );
+
+        // SEQUENCING, NOT LOCKING. Fold the outstanding settlement and the SAME
+        // vault closes, returning the reserves of the generation the market
+        // actually reached — the ones the refused close would have missed.
+        let res = reconcile(&owner, &vault_id, &x);
+        assert!(res.success, "fold failed: {:?}", res.error_message);
+        let res = close(&owner, &vault_id);
+        assert!(
+            res.success,
+            "once folded, the same vault must close: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000 + reserves.0, 15_000 + reserves.1),
+            "the close returns the TRADED reserves, not the funded ones"
+        );
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
     }
 
     /// A CONTESTED PARENT. Exclusivity over a generation belongs to the quorum
@@ -5734,7 +5753,7 @@ mod funded_creation_tests {
         owner.core_sdk.set_device_head_for_testing(
             crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
         );
-        let (vault_id, reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
 
         // The probe learns the vault while it is still live and funded.
         let (tpk, tdid) = become_device(0x52);
