@@ -5193,6 +5193,546 @@ mod funded_creation_tests {
         assert!(res.success, "replaying the last fold must not error");
         assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
     }
+    // ── CLOSE / WITHDRAWAL ───────────────────────────────────────────────────
+    // Invariant 4 at the ROUTE. The core arm proves the mutation is unforgeable;
+    // these prove the route that drives it: what the owner gets back, when the
+    // close is allowed to run at all, and what happens when it is interrupted.
+
+    fn close(owner: &AppRouterImpl, vault_id: &[u8; 32]) -> AppResult {
+        use prost::Message as _;
+        crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.close".to_string(),
+                    args: pack(
+                        generated::DlvCloseV1 {
+                            vault_id: vault_id.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        })
+    }
+
+    /// The vault's reserve LEAVES as the owner's head holds them, as
+    /// `(amount_a, amount_b, generation)`. Absence is an assertion failure, not
+    /// a zero: a deleted leaf and an emptied one are different vaults.
+    fn leaves(
+        owner: &AppRouterImpl,
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+    ) -> (u64, u64, u64) {
+        let h = owner.core_sdk.device_head().expect("owner head");
+        let a = h
+            .vault_reserve_entry(vault_id, pc_a)
+            .expect("leg A leaf present");
+        let b = h
+            .vault_reserve_entry(vault_id, pc_b)
+            .expect("leg B leaf present");
+        assert_eq!(a.sequence, b.sequence, "the legs must share a generation");
+        (a.amount, b.amount, a.sequence)
+    }
+
+    fn spendable(owner: &AppRouterImpl, pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64) {
+        let h = owner.core_sdk.device_head().expect("owner head");
+        (h.balance(pc_a), h.balance(pc_b))
+    }
+
+    /// Fund a vault, let ONE trader move it a generation, and (optionally) fold
+    /// that settlement back. Returns `(vault_id, reserves_now)`.
+    fn vault_after_one_trade(
+        owner: &AppRouterImpl,
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        fold: bool,
+    ) -> ([u8; 32], (u64, u64)) {
+        use prost::Message as _;
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner, pc_a, pc_b, 10_000, 5_000,
+        );
+        // Advertise it: a trader discovers vaults through the routing index, so
+        // an unadvertised vault is one no trader can settle against.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/close".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "advertise failed: {:?}", res.error_message);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        let (tpk, tdid) = become_device(0x51);
+        let trader = named_router("trader");
+        trader.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD2, 5_000, 0),
+        );
+        let (res, x) = trader_settles(
+            &trader,
+            &tpk,
+            &tdid,
+            &vault_id,
+            pc_a,
+            pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0x20,
+        );
+        assert!(res.success, "trader settle failed: {:?}", res.error_message);
+        let _ = become_device(0x41);
+        if fold {
+            let res = reconcile(owner, &vault_id, &x);
+            assert!(res.success, "owner fold failed: {:?}", res.error_message);
+        }
+        (vault_id, (11_000, 5_000 - out))
+    }
+
+    /// INVARIANT 4 — WITHDRAWAL, THE WHOLE ROUND TRIP.
+    ///
+    /// Value delegated to a vault comes back to the owner's SPENDABLE balance
+    /// exactly, at the leaf amounts of the generation the market actually
+    /// reached — not the amounts it was funded with, and not amounts the caller
+    /// states (the request names only the vault). The vault then dies: its
+    /// leaves stay PRESENT at zero one generation on, so the id can never be
+    /// refunded or reused; its five terminal objects are frozen and at quorum;
+    /// and a second close is refused.
+    ///
+    /// The pairing is the point. "Value returned" alone would pass for a close
+    /// that left a live vault behind, and "vault dead" alone would pass for one
+    /// that burned the liquidity.
+    #[test]
+    #[serial]
+    fn closing_a_traded_vault_returns_exactly_the_leaf_reserves_and_kills_the_vault() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+
+        let (vault_id, reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (reserves.0, reserves.1, 1),
+            "the fold left the vault at generation 1 with the traded reserves"
+        );
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (1, reserves.0, reserves.1),
+            "and the market sees the same generation"
+        );
+        let before = spendable(&owner, &pc_a, &pc_b);
+        assert_eq!(before, (40_000, 15_000), "funding is still delegated");
+
+        let res = close(&owner, &vault_id);
+        assert!(res.success, "close failed: {:?}", res.error_message);
+
+        // THE RETURN IS EXACT — the leaf amounts, both legs, nothing rounded.
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (before.0 + reserves.0, before.1 + reserves.1),
+            "the close credits exactly what the leaves held"
+        );
+        // Stated as the round trip: everything funded came back, plus what the
+        // market added and minus what it took.
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (51_000, 20_000 - (5_000 - reserves.1)),
+            "delegation is a loop: funded out, traded, withdrawn back"
+        );
+
+        // THE VAULT IS DEAD — but its leaves are still there, at zero.
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (0, 0, 2),
+            "closing ends the leaves at 0 @ K+1: present, never deleted"
+        );
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (2, 0, 0),
+            "the market composes the vault's death from its published terminal set"
+        );
+
+        // The five terminal objects of the CLOSING generation, at quorum.
+        for key in vault_object_keys(&vault_id, 2) {
+            assert!(
+                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(&key)
+                    .expect("artifact state"),
+                "terminal object {key} must have reached quorum"
+            );
+            assert!(
+                crate::sdk::storage_io::fake_fleet::any_member_holding(&key).is_some(),
+                "…and the fleet must actually hold {key}"
+            );
+        }
+
+        // A SECOND CLOSE IS REFUSED, and moves nothing.
+        let after = spendable(&owner, &pc_a, &pc_b);
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "a closed vault cannot be closed again");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("already closed"),
+            "the refusal says the vault is already closed: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            after,
+            "the refused second close credited nothing"
+        );
+
+        // Nothing is left for recovery to finish.
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(resumed, 0, "a committed close leaves no unfinished intent");
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            after,
+            "and the resume pass credited nothing"
+        );
+    }
+
+    /// THE FRONTIER GATE. A close consumes the CURRENT composed generation, so
+    /// an owner holding a stale view cannot close: it would drain amounts the
+    /// market has already moved past, at a parent a trader may still be
+    /// settling against.
+    ///
+    /// The gate is a SEQUENCING rule, not a lock — the second half proves the
+    /// same vault closes cleanly once the outstanding settlement is folded.
+    #[test]
+    #[serial]
+    fn a_close_is_refused_while_a_settlement_is_unreconciled() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+
+        // Traded, NOT folded: the owner's leaves say generation 0, the market
+        // says generation 1.
+        let (vault_id, _reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, false);
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
+        assert_eq!(composed(&vault_id, &pc_a, &pc_b).0, 1);
+
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "a stale close must be refused");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("moved past"),
+            "the refusal names the frontier: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "the refused close moved no reserves"
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000, 15_000),
+            "and credited nothing"
+        );
+
+        // A close refused at the gate is refused BEFORE anything durable: no
+        // intent, so nothing for a later sweep to pick up and finish.
+        let pending = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read");
+        assert!(
+            pending.is_none(),
+            "a close refused at the gate never records an intent"
+        );
+    }
+
+    /// A CONTESTED PARENT. Exclusivity over a generation belongs to the quorum
+    /// register, not to the owner: if a trader's claim is already at quorum on
+    /// this parent, the close loses and must move nothing. The intent is
+    /// ABANDONED so no later sweep can resurrect a close whose parent someone
+    /// else consumed.
+    ///
+    /// The contesting claim is signed by a different device and submitted
+    /// straight to the fleet — the register's own validity rules are the
+    /// storage node's tests; what is proven here is the close's reaction to
+    /// losing.
+    #[test]
+    #[serial]
+    fn a_contested_parent_refuses_the_close_and_moves_nothing() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("record read")
+            .expect("the owner has a record");
+
+        // Another contestant takes generation 0 first, at quorum.
+        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .sole_set()
+            .expect("one configured set")
+            .clone();
+        let (rival_pk, _rival_did) = become_device(0x71);
+        let rival_sk = crate::sdk::signing_authority::current_secret_key().expect("rival sk");
+        let envelope = dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
+            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
+                vault_id,
+                parent_sequence: 0,
+                x: [0x99u8; 32],
+                claimant_public_key: rival_pk,
+                storage_set_id: record.storage_set_id,
+            },
+            &rival_sk,
+        )
+        .expect("rival signs its claim");
+        let fanout = crate::sdk::storage_io::fake_fleet::claim(&set, &envelope);
+        let accepted = fanout
+            .outcomes
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o.result,
+                    crate::sdk::storage_node_sdk::MemberClaimResult::Accepted
+                )
+            })
+            .count();
+        assert!(
+            accepted as u32 >= set.quorum(),
+            "the rival claim must reach quorum before the owner tries to close"
+        );
+
+        let _ = become_device(0x41);
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "the close must lose a contested parent");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("another trade holds this vault generation"),
+            "the refusal names the contest: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "a lost contest moves no reserves"
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000, 15_000),
+            "and credits nothing"
+        );
+        let intent = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read")
+            .expect("the close recorded an intent before claiming");
+        assert_eq!(
+            intent.state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::Abandoned,
+            "a lost contest abandons the intent so no sweep can resurrect it"
+        );
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(resumed, 0, "and the resume pass leaves it abandoned");
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "the vault stays open and funded — the safe direction"
+        );
+    }
+
+    /// AN INTERRUPTED CLOSE IS FINISHED BY THE RESUME PASS, WITH THE SAME BYTES.
+    ///
+    /// The fleet is unreachable when the owner closes, so the parent claim
+    /// cannot reach quorum. That is the reversible half of the close: no value
+    /// moves, and the intent stays PREPARED rather than being abandoned —
+    /// abandoning a transient failure would strand the vault forever.
+    ///
+    /// When the fleet comes back the resume pass replays the SAME frozen claim
+    /// envelope (a re-signed one would read as a different claimant and could
+    /// lose its own slot), commits the canonical close, and publishes the
+    /// terminal set. The digest assertions are what prove "replayed", not
+    /// "rebuilt".
+    #[test]
+    #[serial]
+    fn an_interrupted_close_is_completed_by_the_resume_pass_with_identical_bytes() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        assert!(
+            birth_is_published(&vault_id),
+            "the vault must be born and published before this test unplugs the fleet"
+        );
+
+        // The fleet goes away mid-close.
+        for m in ["test-1", "test-2", "test-3"] {
+            crate::sdk::storage_io::fake_fleet::fail_member(m);
+        }
+        let res = close(&owner, &vault_id);
+        assert!(
+            !res.success,
+            "a close that cannot claim its parent must stop"
+        );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exclusive use"),
+            "the refusal names the claim: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "nothing moved before the claim"
+        );
+        assert_eq!(spendable(&owner, &pc_a, &pc_b), (40_000, 15_000));
+        let intent = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read")
+            .expect("intent recorded");
+        assert_eq!(
+            intent.state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::PreparedClose,
+            "an unreachable fleet is transient: the close stays PREPARED, never abandoned"
+        );
+        let frozen_claim = intent.claim_bytes.clone();
+
+        // The fleet returns; the sweep finishes what the owner started.
+        for m in ["test-1", "test-2", "test-3"] {
+            crate::sdk::storage_io::fake_fleet::heal_member(m);
+        }
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(
+            resumed, 1,
+            "the interrupted close is completed exactly once"
+        );
+
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (50_000, 20_000),
+            "the recovered close returns the full delegation"
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (0, 0, 1),
+            "and ends the leaves at 0 @ K+1"
+        );
+        assert_eq!(
+            crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+                .expect("intent read")
+                .expect("intent")
+                .state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::CanonicalCloseCommitted,
+        );
+
+        // THE CLAIM WAS REPLAYED, NOT REBUILT: the bytes the resume submitted
+        // are the bytes frozen before the interruption.
+        let claim_digests: std::collections::BTreeSet<[u8; 32]> =
+            crate::sdk::storage_io::fake_fleet::put_log()
+                .into_iter()
+                .filter(|(_, key, _)| key.starts_with("slot:"))
+                .map(|(_, _, digest)| digest)
+                .collect();
+        assert_eq!(
+            claim_digests.len(),
+            1,
+            "every claim attempt, before and after the outage, carried one envelope"
+        );
+        assert_eq!(
+            claim_digests.into_iter().next(),
+            Some(*blake3::hash(&frozen_claim).as_bytes()),
+            "…and that envelope is the one frozen with the intent"
+        );
+
+        // The terminal set published, and each seq-pinned object was PUT with
+        // exactly one content digest across every attempt.
+        let terminal = vault_object_keys(&vault_id, 1);
+        for key in [&terminal[0], &terminal[2], &terminal[4]] {
+            assert!(
+                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(key)
+                    .expect("artifact state"),
+                "terminal object {key} must have reached quorum after recovery"
+            );
+            let digests: std::collections::BTreeSet<[u8; 32]> =
+                crate::sdk::storage_io::fake_fleet::put_log()
+                    .into_iter()
+                    .filter(|(_, k, _)| k == key)
+                    .map(|(_, _, d)| d)
+                    .collect();
+            assert_eq!(
+                digests.len(),
+                1,
+                "{key} was republished from frozen bytes, never re-signed"
+            );
+        }
+
+        // A second pass has nothing left to do.
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("second resume pass");
+        assert_eq!(resumed, 0);
+        assert_eq!(spendable(&owner, &pc_a, &pc_b), (50_000, 20_000));
+    }
+
+    /// Only the creating owner can close. A device with no record of the vault
+    /// has no pair, no fee and no birth-bound storage set for it — everything
+    /// the close derives — so it is refused before any of it is guessed.
+    #[test]
+    #[serial]
+    fn a_vault_this_device_never_created_cannot_be_closed() {
+        install_identity();
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let res = close(&owner, &[0x7Eu8; 32]);
+        assert!(!res.success, "an unknown vault cannot be closed");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("only the creating owner can close"),
+            "the refusal says why: {:?}",
+            res.error_message
+        );
+    }
     /// THE ROUTE THAT HAD NO TEST — which is why both wounds shipped.
     ///
     /// `dlv_list_owned_amm_vaults` parsed `AmmConstantProduct.token_a/token_b` as UTF-8
