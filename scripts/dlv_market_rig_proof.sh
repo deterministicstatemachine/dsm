@@ -14,6 +14,12 @@
 #   - traders: Σ trader ERA debits == ERA reserve gain; Σ trader SOFI credits == SOFI reserve drain
 #   - storage: exactly N receipted pointers on the fleet (union over nodes), one per generation 1..N;
 #     any extra pointer (the refused stale/future attempt) has NO receipt
+#   - register: for every consumed parent, exactly ONE claim digest holds a quorum of the storage set,
+#     and no conflicting digest holds one. Minority conflicting rows are LEGAL and permanent (a
+#     partition split leaves the loser's bytes on one node forever) — asserting "identical on every
+#     node" would reject a perfectly safe specimen, so it is deliberately NOT asserted
+#   - if the vault was CLOSED: both legs are 0 at the terminal generation and the five terminal
+#     objects (anchor seq+latest, inclusion seq+latest, reserve proof) are readable on a quorum
 set -uo pipefail
 LP="${1:?LP serial}"; T1="${2:?T1 serial}"; T2="${3:?T2 serial}"; N="${4:-4}"
 OUT="$(mktemp -d)"; PASS=0; FAIL=0
@@ -27,7 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 NODES="47.251.246.93 47.251.250.159 47.251.88.58"
 
 echo "== pulling =="; pull "$LP" "$OUT/lp.db" || exit 1; pull "$T1" "$OUT/t1.db" || exit 1; pull "$T2" "$OUT/t2.db" || exit 1
-for s in lp t1 t2; do check "$s schema v4" "$(q "$OUT/$s.db" 'PRAGMA user_version;')" "4"; done
+for s in lp t1 t2; do check "$s schema v5" "$(q "$OUT/$s.db" 'PRAGMA user_version;')" "5"; done
 
 echo; echo "== LP: vault, reserves, generation =="
 LPD="$(python3 "$HERE/dsm_head_decode.py" "$OUT/lp.db")"
@@ -126,4 +132,46 @@ EOF
 echo; echo "== storage fleet: witness chain =="
 check "receipted pointers cover generations 1..N exactly" "$RGENS" "$(python3 -c "print(\",\".join(map(str,range(1,$N+1))))")"
 [ "$UNRCT" -ge 1 ] && ok "refused attempt left an UNRECEIPTED pointer only ($UNRCT), no receipt, no value" || bad "expected at least one unreceipted (refused) pointer, got $UNRCT"
+
+echo; echo "== settlement-slot register: one claim with quorum per consumed parent =="
+QUORUM=2   # 2 of the 3-node canonical set
+for p in $(seq 0 $((N-1))); do
+  DIGESTS=""
+  for ip in $NODES; do
+    d="$(curl -sk --max-time 10 -o /dev/null -D - "https://$ip:8080/api/v2/settlement-slot/$VID_B32/$p" \
+         | awk 'BEGIN{IGNORECASE=1} /^x-dsm-slot-digest:/{print $2}' | tr -d "\r")"
+    [ -n "$d" ] && DIGESTS="$DIGESTS$d\n"
+  done
+  # How many nodes hold the most-common digest, and does any OTHER digest also reach quorum?
+  TALLY="$(printf "%b" "$DIGESTS" | grep -c . || true)"
+  TOP="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')"
+  SECOND="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | sed -n 2p | awk '{print $1}')"
+  TOP="${TOP:-0}"; SECOND="${SECOND:-0}"
+  [ "$TOP" -ge "$QUORUM" ] && ok "parent $p: one claim holds quorum ($TOP/$TALLY nodes)" \
+                           || bad "parent $p: no claim reached quorum ($TOP/$TALLY)"
+  [ "$SECOND" -lt "$QUORUM" ] && ok "parent $p: no conflicting claim reached quorum (runner-up $SECOND)" \
+                              || bad "parent $p: TWO claims reached quorum — exclusivity broken"
+done
+
+if [ "$LEG_A_AMT" = "0" ] && [ "$LEG_B_AMT" = "0" ]; then
+  echo; echo "== closed vault: terminal state and its published proof set =="
+  ok "both reserve legs are zero at the terminal generation $LEG_A_SEQ"
+  TERM_SEQ_B32="$(python3 -c "
+import sys; sys.path.insert(0,'scripts'); from dsm_head_decode import b32
+print(b32((0).to_bytes(8,'big') + int($LEG_A_SEQ).to_bytes(8,'big')))")"
+  for key in "sofi/vault-state/$VID_B32/seq-$TERM_SEQ_B32" \
+             "sofi/vault-state/$VID_B32/latest" \
+             "sofi/vault-state-inclusion/$VID_B32/seq-$TERM_SEQ_B32" \
+             "sofi/vault-state-inclusion/$VID_B32/latest" \
+             "sofi/vault-reserve/$VID_B32/seq-$TERM_SEQ_B32"; do
+    HOLDERS=0
+    for ip in $NODES; do
+      code="$(curl -sk --max-time 10 -o /dev/null -w "%{http_code}" "https://$ip:8080/api/v2/object/get?key=$key")"
+      [ "$code" = "200" ] && HOLDERS=$((HOLDERS+1))
+    done
+    [ "$HOLDERS" -ge "$QUORUM" ] && ok "terminal object at quorum ($HOLDERS/3): ${key##*/}" \
+                                 || bad "terminal object below quorum ($HOLDERS/3): $key"
+  done
+fi
+
 echo; echo "PASS=$PASS FAIL=$FAIL  ($OUT)"; [ "$FAIL" = 0 ]
