@@ -482,6 +482,28 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     first_written_tick BIGINT NOT NULL
                 );
 
+                -- SETTLEMENT-SLOT CLAIM REGISTER: a distributed, crash-fault-
+                -- tolerant, ONE-SHOT quorum register keyed (vault_id,
+                -- parent_sequence). This node holds AT MOST ONE value per slot,
+                -- forever: the first claim bytes win, identical bytes re-ack,
+                -- different bytes are refused. There is no update and no delete.
+                -- Its non-equivocation (a member never acknowledges two values
+                -- for one slot, and that survives restart) is part of DLV's
+                -- no-double-consumption safety argument — restoring this table
+                -- from a stale snapshot is a SAFETY violation, not an
+                -- availability event. This is not DSM consensus: the node never
+                -- judges whether the settlement/close is valid, only who wrote
+                -- first.
+                CREATE TABLE IF NOT EXISTS settlement_slot_claims (
+                    vault_id            BYTEA NOT NULL,
+                    parent_sequence     BIGINT NOT NULL,
+                    claim_bytes         BYTEA NOT NULL,
+                    claim_digest        BYTEA NOT NULL,
+                    claimant_public_key BYTEA NOT NULL,
+                    storage_set_id      BYTEA NOT NULL,
+                    PRIMARY KEY (vault_id, parent_sequence)
+                );
+
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
                 -- layer 1). One row per (device, head_number); a head is accepted
                 -- only if it links the current tip. No overwrite, no fork. Full
@@ -756,6 +778,100 @@ pub async fn get_device_tree_state_version(pool: &Pool, genesis_b32: &str) -> Re
 // ============================================================
 // Recovery-authority anchor — single-assignment (spec §0.5 bind-once)
 // ============================================================
+
+/// Outcome of one write-once attempt on the settlement-slot register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotClaimOutcome {
+    /// No prior claim for this slot; these bytes now hold it, durably.
+    Accepted,
+    /// The slot already holds exactly these bytes — idempotent re-ack.
+    AlreadyHeldIdentical,
+    /// The slot holds DIFFERENT bytes; refused. `held_digest` names them.
+    Refused { held_digest: Vec<u8> },
+}
+
+/// Write-once conditional acceptance for `(vault_id, parent_sequence)` in ONE
+/// atomic write transaction over the unique key: `INSERT … ON CONFLICT DO
+/// NOTHING`, then read the held row inside the same transaction. First bytes
+/// win; identical bytes re-ack; different bytes refuse. Never check-then-insert
+/// outside the transaction. Committed with the pool's default synchronous
+/// commit (fsync before ack) — a claim this node acknowledged survives its
+/// restart.
+pub async fn claim_settlement_slot(
+    pool: &Pool,
+    vault_id: &[u8],
+    parent_sequence: u64,
+    claim_bytes: &[u8],
+    claim_digest: &[u8],
+    claimant_public_key: &[u8],
+    storage_set_id: &[u8],
+) -> Result<SlotClaimOutcome> {
+    let seq_i64 = i64::try_from(parent_sequence)
+        .map_err(|_| anyhow::anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
+    let mut client = pool.get().await?;
+    let tx = client.build_transaction().start().await?;
+    let stmt = tx
+        .prepare_cached(
+            "INSERT INTO settlement_slot_claims
+               (vault_id, parent_sequence, claim_bytes, claim_digest, claimant_public_key,
+                storage_set_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (vault_id, parent_sequence) DO NOTHING",
+        )
+        .await?;
+    let inserted = tx
+        .execute(
+            &stmt,
+            &[
+                &vault_id,
+                &seq_i64,
+                &claim_bytes,
+                &claim_digest,
+                &claimant_public_key,
+                &storage_set_id,
+            ],
+        )
+        .await?;
+    let outcome = if inserted == 1 {
+        SlotClaimOutcome::Accepted
+    } else {
+        let row = tx
+            .query_one(
+                "SELECT claim_digest FROM settlement_slot_claims
+                  WHERE vault_id = $1 AND parent_sequence = $2",
+                &[&vault_id, &seq_i64],
+            )
+            .await?;
+        let held: Vec<u8> = row.get(0);
+        if held == claim_digest {
+            SlotClaimOutcome::AlreadyHeldIdentical
+        } else {
+            SlotClaimOutcome::Refused { held_digest: held }
+        }
+    };
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// The claim this node holds for `(vault_id, parent_sequence)`, as
+/// `(claim_bytes, claim_digest)`, or `None`.
+pub async fn get_settlement_slot_claim(
+    pool: &Pool,
+    vault_id: &[u8],
+    parent_sequence: u64,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let seq_i64 = i64::try_from(parent_sequence)
+        .map_err(|_| anyhow::anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT claim_bytes, claim_digest FROM settlement_slot_claims
+              WHERE vault_id = $1 AND parent_sequence = $2",
+            &[&vault_id, &seq_i64],
+        )
+        .await?;
+    Ok(row.map(|r| (r.get(0), r.get(1))))
+}
 
 /// Outcome of [`insert_recovery_authority_anchor_if_absent`].
 #[derive(Debug, Clone, PartialEq, Eq)]

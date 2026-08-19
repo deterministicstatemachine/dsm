@@ -44,6 +44,7 @@ pub mod recipient_staging;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
+pub mod settlement_slot_claim_local; // this device's frozen slot-claim envelopes (namespaced)
 mod system_peers;
 pub mod token_registry;
 mod tokens;
@@ -380,9 +381,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// bound to the `storage_set_id` they were frozen for) and
 /// `frozen_publication_artifact_members` (one current acceptance observation per
 /// member); `amm_vault_records.storage_set_id BLOB NOT NULL` (the set a vault was
-/// born under — a local copy of the value the vault's signed anchor binds). Also
-/// durable protocol state that decides what "published" and "which set" mean;
-/// same rule as v4 — the version is the authority, no shim.
+/// born under — a local copy of the value the vault's signed anchor binds);
+/// `settlement_slot_claim_local` (this device's frozen settlement-slot claim
+/// envelopes, replayed byte-identically — the register compares exact bytes).
+/// Also durable protocol state that decides what "published", "which set" and
+/// "which claim" mean; same rule as v4 — the version is the authority, no shim.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 5;
 
 /// Honest incompatibility detection — NOT legacy support.
@@ -514,6 +517,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             member_id       TEXT NOT NULL,
             accepted_digest BLOB NOT NULL,
             PRIMARY KEY (object_key, member_id)
+        );
+
+        -- THIS DEVICE'S frozen settlement-slot claim envelopes, keyed by the slot
+        -- they claim. Signed + canonically encoded ONCE and replayed byte-for-
+        -- byte on every retry/recovery (register members compare exact bytes).
+        -- Never updated.
+        CREATE TABLE IF NOT EXISTS settlement_slot_claim_local(
+            vault_id        BLOB NOT NULL,
+            parent_sequence INTEGER NOT NULL,
+            x               BLOB NOT NULL,
+            envelope        BLOB NOT NULL,
+            PRIMARY KEY (vault_id, parent_sequence, x)
         );
 
         CREATE TABLE IF NOT EXISTS contacts(

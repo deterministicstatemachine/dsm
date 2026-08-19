@@ -13,6 +13,16 @@
 [node]
 id = "local-dev-0"
 
+# The canonical storage set this node is a member of. Member ids are the
+# `node.id` strings of every member (this node's own id MUST be listed); the
+# canonical set id is BLAKE3 over the sorted, length-prefixed ids — exactly what
+# clients derive from their env config's `[[nodes]] name` entries. Absent ⇒ the
+# settlement-slot claim register is INACTIVE on this node (every claim refused).
+# On the fleet, list all three members on every node; the set is immutable for
+# the lifetime of every vault born under it.
+[storage_set]
+members = ["local-dev-0"]
+
 [network]
 listen_addr = "127.0.0.1"
 port = 8080
