@@ -1103,6 +1103,10 @@ message AmmVaultSummaryV1 {
   // Settlements published against this vault that the owner has not yet
   // reconciled. Non-zero means the displayed reserves are behind the chain.
   uint64 pending_unapplied         = 16;
+  // The external commitment of each unreconciled settlement, so the owner can
+  // fold them without rediscovering what is outstanding. One entry per
+  // `pending_unapplied`. Empty when the vault is caught up.
+  repeated bytes pending_x         = 19 [(dsm_fixed_len)=32];
   // Mirror of the published advertisement's state_number; 0 if not advertised.
   uint64 advertised_state_number   = 7;
   // True if a routing-vault advertisement was found at the canonical
@@ -1274,14 +1278,20 @@ message ExternalCommitmentV1 {
 // or `anchor` is unset, fall back to decoding the body as bare
 // ExternalCommitmentV1. This keeps the old wire shape working for any
 // non-SoFi external-commitment users.
-message PublishExternalCommitmentRequest {
-  ExternalCommitmentV1 anchor                  = 1;
-  // Optional. Pass the signed RouteCommitV1 bytes returned by
-  // `route.signRouteCommit` so the handler can derive + publish vault-
-  // keyed pending pointers. Empty bytes → handler publishes the anchor
-  // only, identical to the legacy path.
-  bytes                signed_route_commit_bytes = 2 [(dsm_max_len)=131072];
-}
+// REMOVED: PublishExternalCommitmentRequest.
+//
+// It existed so a caller could hand `route.publishExternalCommitment` the
+// signed RouteCommit and have pending pointers published alongside the anchor.
+// That put protocol state in the caller's hands, and it made pointers
+// conditional: with the bytes absent the route published the anchor alone and
+// still reported success, so a trader could anchor a commitment that could
+// never settle. On hardware that is exactly what happened — the frontend sent
+// the bare anchor, no pointer was ever written, and settlement failed at the
+// slot claim.
+//
+// `route.signRouteCommit` retains the signed RouteCommit in Rust against its
+// own X, and `route.publishExternalCommitment` resolves it there. The request
+// is a bare ExternalCommitmentV1 and pointer publication is mandatory.
 
 // Vault-keyed pointer to a pending state advance, published alongside
 // each ExternalCommitmentV1 (one pointer per hop's vault). Lets the

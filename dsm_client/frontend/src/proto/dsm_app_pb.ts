@@ -8367,6 +8367,15 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
   pendingUnapplied = protoInt64.zero;
 
   /**
+   * The external commitment of each unreconciled settlement, so the owner can
+   * fold them without rediscovering what is outstanding. One entry per
+   * `pending_unapplied`. Empty when the vault is caught up.
+   *
+   * @generated from field: repeated bytes pending_x = 19;
+   */
+  pendingX: Uint8Array[] = [];
+
+  /**
    * Mirror of the published advertisement's state_number; 0 if not advertised.
    *
    * @generated from field: uint64 advertised_state_number = 7;
@@ -8457,6 +8466,7 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 14, name: "reserve_a", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 15, name: "reserve_b", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 16, name: "pending_unapplied", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 19, name: "pending_x", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 7, name: "advertised_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 9, name: "anchor_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
@@ -8876,65 +8886,6 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 
   static equals(a: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined, b: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined): boolean {
     return proto3.util.equals(ExternalCommitmentV1, a, b);
-  }
-}
-
-/**
- * Request wrapper for `route.publishExternalCommitment`. The handler
- * accepts either this wrapper OR a bare ExternalCommitmentV1 (legacy
- * callers). When `signed_route_commit_bytes` is non-empty, the handler
- * additionally derives and publishes one VaultPendingPointerV1 per hop
- * (composition discovery aid; see VaultPendingPointerV1 docs).
- *
- * Decode discriminator: try this wrapper first; if it fails to decode
- * or `anchor` is unset, fall back to decoding the body as bare
- * ExternalCommitmentV1. This keeps the old wire shape working for any
- * non-SoFi external-commitment users.
- *
- * @generated from message dsm.PublishExternalCommitmentRequest
- */
-export class PublishExternalCommitmentRequest extends Message<PublishExternalCommitmentRequest> {
-  /**
-   * @generated from field: dsm.ExternalCommitmentV1 anchor = 1;
-   */
-  anchor?: ExternalCommitmentV1;
-
-  /**
-   * Optional. Pass the signed RouteCommitV1 bytes returned by
-   * `route.signRouteCommit` so the handler can derive + publish vault-
-   * keyed pending pointers. Empty bytes → handler publishes the anchor
-   * only, identical to the legacy path.
-   *
-   * @generated from field: bytes signed_route_commit_bytes = 2;
-   */
-  signedRouteCommitBytes = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<PublishExternalCommitmentRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.PublishExternalCommitmentRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "anchor", kind: "message", T: ExternalCommitmentV1 },
-    { no: 2, name: "signed_route_commit_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishExternalCommitmentRequest {
-    return new PublishExternalCommitmentRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined, b: PublishExternalCommitmentRequest | PlainMessage<PublishExternalCommitmentRequest> | undefined): boolean {
-    return proto3.util.equals(PublishExternalCommitmentRequest, a, b);
   }
 }
 
@@ -10490,8 +10441,10 @@ export class SmartProof extends Message<SmartProof> {
 }
 
 /**
- * body carries §16.6 acceptance artifacts (a countersigned StitchedReceiptV2 runs
- * ~218 KB: two SPHINCS+ signatures, two ek_certs, and both SMT proof sets).
+ * No artifact body may exceed the storage node's 128 KiB envelope cap; the largest
+ * b0x carriers are the ADR 0003 A-side evidence (~118 KB) and the B-side
+ * countersign delta (~101 KB). A full countersigned StitchedReceiptV2 (~218 KB)
+ * never rides in a body — that is exactly the shape ADR 0003 split.
  *
  * @generated from message dsm.ArgPack
  */
@@ -19717,134 +19670,6 @@ export class Envelope extends Message<Envelope> {
 }
 
 /**
- * ===================== §16.6 REPLY WINDOW =====================
- * Online finalization is driven by the recipient's countersigned acceptance receipt,
- * NOT by storage-node message deletion (which is best-effort GC). The artifact rides
- * back to the sender through the same b0x spool the forward transfer used, addressed
- * to the tip the SENDER polls (its projection parent), carried as the ArgPack body of a
- * `wallet.acceptanceReceipt` invoke. Discrimination is by that explicit method name --
- * never a trial-decode of the forward transfer.
- *
- * @generated from message dsm.ReplyWindowArtifact
- */
-export class ReplyWindowArtifact extends Message<ReplyWindowArtifact> {
-  /**
-   * @generated from oneof dsm.ReplyWindowArtifact.artifact
-   */
-  artifact: {
-    /**
-     * @generated from field: dsm.AcceptanceReceiptArtifact acceptance_receipt = 1;
-     */
-    value: AcceptanceReceiptArtifact;
-    case: "acceptanceReceipt";
-  } | { case: undefined; value?: undefined } = { case: undefined };
-
-  constructor(data?: PartialMessage<ReplyWindowArtifact>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ReplyWindowArtifact";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "acceptance_receipt", kind: "message", T: AcceptanceReceiptArtifact, oneof: "artifact" },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReplyWindowArtifact {
-    return new ReplyWindowArtifact().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReplyWindowArtifact {
-    return new ReplyWindowArtifact().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReplyWindowArtifact {
-    return new ReplyWindowArtifact().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ReplyWindowArtifact | PlainMessage<ReplyWindowArtifact> | undefined, b: ReplyWindowArtifact | PlainMessage<ReplyWindowArtifact> | undefined): boolean {
-    return proto3.util.equals(ReplyWindowArtifact, a, b);
-  }
-}
-
-/**
- * The recipient's B-side countersigned receipt for one canonical transition.
- * `receipt_bytes` is the canonical StitchedReceiptV2 the recipient persisted at PREPARE
- * (byte-identical across redeliveries — never re-signed). The sender matches it to its
- * ONE persisted proposal by `commitment`, verifies it against that proposal's CANONICAL
- * pair (never the gate's projection values), then finalizes the gate terminally.
- *
- * @generated from message dsm.AcceptanceReceiptArtifact
- */
-export class AcceptanceReceiptArtifact extends Message<AcceptanceReceiptArtifact> {
-  /**
-   * canonical StitchedReceiptV2
-   *
-   * @generated from field: bytes receipt_bytes = 1;
-   */
-  receiptBytes = new Uint8Array(0);
-
-  /**
-   * proposal/receipt commitment
-   *
-   * @generated from field: bytes commitment = 2;
-   */
-  commitment = new Uint8Array(0);
-
-  /**
-   * k_{A<->B} (§2.2)
-   *
-   * @generated from field: bytes relationship_key = 3;
-   */
-  relationshipKey = new Uint8Array(0);
-
-  /**
-   * the countersigner (B side)
-   *
-   * @generated from field: bytes recipient_device_id = 4;
-   */
-  recipientDeviceId = new Uint8Array(0);
-
-  /**
-   * signed child (A-space), diagnostic
-   *
-   * @generated from field: bytes canonical_child_tip = 5;
-   */
-  canonicalChildTip = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<AcceptanceReceiptArtifact>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.AcceptanceReceiptArtifact";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "receipt_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "relationship_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "canonical_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AcceptanceReceiptArtifact {
-    return new AcceptanceReceiptArtifact().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AcceptanceReceiptArtifact {
-    return new AcceptanceReceiptArtifact().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AcceptanceReceiptArtifact {
-    return new AcceptanceReceiptArtifact().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: AcceptanceReceiptArtifact | PlainMessage<AcceptanceReceiptArtifact> | undefined, b: AcceptanceReceiptArtifact | PlainMessage<AcceptanceReceiptArtifact> | undefined): boolean {
-    return proto3.util.equals(AcceptanceReceiptArtifact, a, b);
-  }
-}
-
-/**
  * ===================== SDK INIT / STATUS =====================
  * Returned when the app attempts to mark the SDK/wallet "initialized" but a
  * mandatory prerequisite is missing.
@@ -22172,13 +21997,6 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
   seq = protoInt64.zero;
 
   /**
-   * §4.2 ReceiptCommit canonical protobuf bytes — SMT proofs for this transition
-   *
-   * @generated from field: bytes receipt_commit = 10;
-   */
-  receiptCommit = new Uint8Array(0);
-
-  /**
    * §4.2.1 Canonical unsigned Operation bytes (signing preimage).
    * Sender populates with signing_op.to_bytes() (signature field empty).
    * Receiver MUST use these bytes directly for SPHINCS+ verification and
@@ -22187,6 +22005,22 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
    * @generated from field: bytes canonical_operation_bytes = 11;
    */
   canonicalOperationBytes = new Uint8Array(0);
+
+  /**
+   * ADR 0003: content address of the A-side receipt-evidence artifact this
+   * transfer refers to. Role-domain-separated
+   * (BLAKE3("DSM/receipt-evidence/A/v1" ‖ full_wire_bytes)) and computed over
+   * the FULL wire bytes, never ReceiptCommit::compute_commitment(), which
+   * hard-zeroes fields 12-20 — a commitment-addressed object could be served
+   * with substituted signatures.
+   *
+   * A dedicated field rather than reusing 10: the two carry different semantic
+   * types (a 32-byte address vs a full object), and encoding both in one field
+   * would make "which form is this?" a runtime guess.
+   *
+   * @generated from field: bytes receipt_evidence_digest = 12;
+   */
+  receiptEvidenceDigest = new Uint8Array(0);
 
   constructor(data?: PartialMessage<OnlineTransferRequest>) {
     super();
@@ -22205,8 +22039,8 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
     { no: 7, name: "from_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 10, name: "receipt_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferRequest {
@@ -22223,6 +22057,280 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
 
   static equals(a: OnlineTransferRequest | PlainMessage<OnlineTransferRequest> | undefined, b: OnlineTransferRequest | PlainMessage<OnlineTransferRequest> | undefined): boolean {
     return proto3.util.equals(OnlineTransferRequest, a, b);
+  }
+}
+
+/**
+ * ADR 0003: the A-side receipt evidence, carried as its OWN b0x artifact
+ * rather than inline in the transfer. Its own message and its own invoke
+ * method -- it is not an Operation and must not be threaded through one.
+ *
+ * INVARIANT:
+ *   receipt_evidence_digest == BLAKE3("DSM/receipt-evidence/A/v1\0" || full_receipt_bytes)
+ *
+ * The digest here is cryptographically redundant (the recipient can recompute
+ * it) but structurally useful: the artifact can identify itself before the
+ * recipient has paired it with a transfer. The AUTHORITATIVE binding remains
+ * the digest in field 12 of the transfer.
+ *
+ * @generated from message dsm.ReceiptEvidenceA
+ */
+export class ReceiptEvidenceA extends Message<ReceiptEvidenceA> {
+  /**
+   * The transfer artifact this evidence belongs to, for correlation while
+   * staging. Not authority -- the digest is.
+   *
+   * @generated from field: string transfer_submission_id = 1;
+   */
+  transferSubmissionId = "";
+
+  /**
+   * @generated from field: bytes receipt_evidence_digest = 2;
+   */
+  receiptEvidenceDigest = new Uint8Array(0);
+
+  /**
+   * The FULL ReceiptCommit wire object: canonical fields plus sig_a,
+   * ek_cert_a, ek_pk_a and Kyber material. ~118 KB with production-sized
+   * SPHINCS+ material, against the node's 128 KiB envelope cap.
+   *
+   * @generated from field: bytes full_receipt_bytes = 3;
+   */
+  fullReceiptBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ReceiptEvidenceA>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReceiptEvidenceA";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "transfer_submission_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "full_receipt_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptEvidenceA {
+    return new ReceiptEvidenceA().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReceiptEvidenceA {
+    return new ReceiptEvidenceA().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReceiptEvidenceA {
+    return new ReceiptEvidenceA().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReceiptEvidenceA | PlainMessage<ReceiptEvidenceA> | undefined, b: ReceiptEvidenceA | PlainMessage<ReceiptEvidenceA> | undefined): boolean {
+    return proto3.util.equals(ReceiptEvidenceA, a, b);
+  }
+}
+
+/**
+ * ADR 0003 return leg: the B-side countersign DELTA. The sender retains the
+ * full A-side receipt it authored (sender_outbox_artifacts, role evidence_a);
+ * the recipient returns ONLY what the sender lacks. Carried as the ArgPack body
+ * of a `receipt.countersign.b` invoke on the sender's projection-parent b0x
+ * address. The sender reconstructs the countersigned receipt = ITS OWN retained
+ * A bytes + these four fields, then runs the unchanged acceptance verifier.
+ * That reconstruction is the load-bearing binding: B material can only ever be
+ * judged against the A side the sender itself authored. `receipt_evidence_digest_a`
+ * is advisory consistency evidence naming which A bytes the recipient
+ * countersigned (nothing B signs covers it); a mismatch parks the step, it
+ * does not authenticate anything.
+ *
+ * NORMATIVE (ADR 0003 wire budget): exactly TWO SPHINCS+ signature-sized
+ * objects, sig_b and ek_cert_b. ~101 KB with production material against
+ * the node's 128 KiB envelope cap; a third signature-sized field breaks it.
+ *
+ * receipt_evidence_digest_a == BLAKE3("DSM/receipt-evidence/A/v1\0" || A-side full_receipt_bytes)
+ * A full ReceiptCommit body on this method is refused at the wire (unknown field 7+).
+ *
+ * @generated from message dsm.ReceiptCountersignB
+ */
+export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
+  /**
+   * receipt/proposal commitment: the sender's lookup key
+   *
+   * @generated from field: bytes commitment = 1;
+   */
+  commitment = new Uint8Array(0);
+
+  /**
+   * which A bytes B countersigned (advisory; see above)
+   *
+   * @generated from field: bytes receipt_evidence_digest_a = 2;
+   */
+  receiptEvidenceDigestA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes sig_b = 3;
+   */
+  sigB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ek_cert_b = 4;
+   */
+  ekCertB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ek_pk_b = 5;
+   */
+  ekPkB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes kyber_ct_b = 6;
+   */
+  kyberCtB = new Uint8Array(0);
+
+  /**
+   * The recipient's own canonical relationship pair for the applied step: its
+   * local lineage head before this apply (parent) and after it (child) — the
+   * exact parent the recipient will sign under when IT next originates.
+   * Authenticated: `sig_b` is computed over
+   * BLAKE3("DSM/receipt-b-canonical/v1" || standard_target || b_parent_tip || b_child_tip),
+   * so a substituted pair fails the sender's countersignature check. The
+   * sender CASes its counterparty-canonical-head record from parent to child.
+   *
+   * @generated from field: bytes b_parent_tip = 7;
+   */
+  bParentTip = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes b_child_tip = 8;
+   */
+  bChildTip = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ReceiptCountersignB>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReceiptCountersignB";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "receipt_evidence_digest_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "b_parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "b_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptCountersignB {
+    return new ReceiptCountersignB().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReceiptCountersignB {
+    return new ReceiptCountersignB().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReceiptCountersignB {
+    return new ReceiptCountersignB().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReceiptCountersignB | PlainMessage<ReceiptCountersignB> | undefined, b: ReceiptCountersignB | PlainMessage<ReceiptCountersignB> | undefined): boolean {
+    return proto3.util.equals(ReceiptCountersignB, a, b);
+  }
+}
+
+/**
+ * Bilateral finality certificate (finality barrier). The SENDER issues it after
+ * finalizing on the recipient's countersignature: it names the exact
+ * transition and both sides' canonical heads for it, signed by the sender's
+ * per-step EK for that transition (the same key the recipient chained
+ * `ek_pk_a` for). The sender's gate is released only once this artifact
+ * reaches storage quorum; the recipient's next origination is released only
+ * once it verifies it. Method `relationship.finalized.v1`; deterministic id
+ * derived from the artifact digest; frozen route = the recipient's route.
+ *
+ * @generated from message dsm.RelationshipFinalizedV1
+ */
+export class RelationshipFinalizedV1 extends Message<RelationshipFinalizedV1> {
+  /**
+   * @generated from field: bytes relationship_key = 1;
+   */
+  relationshipKey = new Uint8Array(0);
+
+  /**
+   * the receipt commitment
+   *
+   * @generated from field: bytes transition_commitment = 2;
+   */
+  transitionCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes sender_device_id = 3;
+   */
+  senderDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_device_id = 4;
+   */
+  recipientDeviceId = new Uint8Array(0);
+
+  /**
+   * the sender's signed child (proposal.canonical_child)
+   *
+   * @generated from field: bytes sender_child_tip_a = 5;
+   */
+  senderChildTipA = new Uint8Array(0);
+
+  /**
+   * the recipient's pair from the delta
+   *
+   * @generated from field: bytes recipient_parent_tip_b = 6;
+   */
+  recipientParentTipB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_child_tip_b = 7;
+   */
+  recipientChildTipB = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ by the sender's per-step EK over the v1 target
+   *
+   * @generated from field: bytes signature_a = 8;
+   */
+  signatureA = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RelationshipFinalizedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipFinalizedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "relationship_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "transition_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "sender_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "sender_child_tip_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "recipient_parent_tip_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "recipient_child_tip_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "signature_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipFinalizedV1 {
+    return new RelationshipFinalizedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipFinalizedV1 {
+    return new RelationshipFinalizedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipFinalizedV1 {
+    return new RelationshipFinalizedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipFinalizedV1 | PlainMessage<RelationshipFinalizedV1> | undefined, b: RelationshipFinalizedV1 | PlainMessage<RelationshipFinalizedV1> | undefined): boolean {
+    return proto3.util.equals(RelationshipFinalizedV1, a, b);
   }
 }
 
