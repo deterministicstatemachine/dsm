@@ -145,6 +145,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             hsts_max_age,
             database_url,
             seed_peers,
+            storage_set_members,
         });
     }
 
