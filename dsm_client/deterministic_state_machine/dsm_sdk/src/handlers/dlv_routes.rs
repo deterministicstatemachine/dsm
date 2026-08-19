@@ -5711,6 +5711,101 @@ mod funded_creation_tests {
         assert_eq!(spendable(&owner, &pc_a, &pc_b), (50_000, 20_000));
     }
 
+    /// A CLOSED VAULT IS NOT A MARKET.
+    ///
+    /// After withdrawal the vault's proven reserves are zero at generation K+1.
+    /// A trader presenting a hop that names the reserves the vault held BEFORE
+    /// the close is settling against liquidity nobody backs — and would credit
+    /// itself an output from a vault that holds nothing.
+    ///
+    /// The probe syncs while the vault is still alive, so it holds the vault in
+    /// its own DLVManager and is refused on the STATE, not on ignorance of the
+    /// vault's existence. Refusal is asserted together with the probe's balance:
+    /// a refusal that still moved value would pass the first assertion alone.
+    #[test]
+    #[serial]
+    fn a_closed_vault_cannot_be_traded() {
+        use prost::Message as _;
+
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let (vault_id, reserves) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+
+        // The probe learns the vault while it is still live and funded.
+        let (tpk, tdid) = become_device(0x52);
+        let probe = named_router("probe-dead-market");
+        probe.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xE3, 5_000, 0),
+        );
+        let res = crate::runtime::get_runtime().block_on(async {
+            probe
+                .invoke(AppInvoke {
+                    method: "route.syncVaultsForPair".to_string(),
+                    args: pack(
+                        generated::RoutingPairRequest {
+                            token_a: pc_a.to_vec(),
+                            token_b: pc_b.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        });
+        assert!(res.success, "probe sync failed: {:?}", res.error_message);
+        let probe_before = {
+            let h = probe.core_sdk.device_head().expect("probe head");
+            (h.balance(&pc_a), h.balance(&pc_b))
+        };
+
+        // The owner withdraws everything.
+        let _ = become_device(0x41);
+        let res = close(&owner, &vault_id);
+        assert!(res.success, "close failed: {:?}", res.error_message);
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (2, 0, 0),
+            "the market composes the vault as dead"
+        );
+
+        // The probe settles against the reserves the vault held before the
+        // close, at the generation the close produced.
+        let _ = become_device(0x52);
+        let out =
+            crate::sdk::routing_path_sdk::constant_product_output(300, reserves.0, reserves.1, 30)
+                .expect("curve output on the pre-close reserves");
+        let (res, _x) = trader_settles(
+            &probe, &tpk, &tdid, &vault_id, &pc_a, &pc_b, 2, reserves, 300, out, 0x40,
+        );
+        assert!(!res.success, "a closed vault must not settle a trade");
+        // The refusal must come from the vault's STATE. "The trader has never
+        // heard of this vault" would also be a refusal, and would leave the
+        // dangerous case — a trader that DID hold the vault — untested.
+        let msg = res.error_message.as_deref().unwrap_or_default().to_string();
+        assert!(
+            !msg.contains("not in local DLVManager"),
+            "the probe must know the vault and be refused on its state: {msg}"
+        );
+        assert!(
+            msg.contains("re-simulation rejected"),
+            "the settle side re-simulates the curve against the composed (zero) reserves: {msg}"
+        );
+        let h = probe.core_sdk.device_head().expect("probe head");
+        assert_eq!(
+            (h.balance(&pc_a), h.balance(&pc_b)),
+            probe_before,
+            "the refused trade moved none of the probe's value"
+        );
+
+        // …and the vault is still dead: a refused settle cannot revive it.
+        let _ = become_device(0x41);
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+    }
+
     /// Only the creating owner can close. A device with no record of the vault
     /// has no pair, no fee and no birth-bound storage set for it — everything
     /// the close derives — so it is refused before any of it is guessed.
