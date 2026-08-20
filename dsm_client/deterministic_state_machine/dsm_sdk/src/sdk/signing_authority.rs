@@ -54,6 +54,20 @@ pub(crate) fn current_secret_key() -> Result<Vec<u8>, DsmError> {
     Ok(derive_current_signing_keypair()?.secret_key().to_vec())
 }
 
+/// Whether signing is possible right now, WITHOUT handing back a key.
+///
+/// For callers that need to decide "is there any point starting this work?"
+/// but must not hold signing material while doing the part that precedes
+/// signing. Binding a key just to test for its presence puts the capability in
+/// scope for everything that follows, which is exactly what some boundaries
+/// exist to prevent.
+pub(crate) fn can_sign() -> bool {
+    match derive_current_signing_keypair() {
+        Ok(kp) => !kp.public_key().is_empty() && !kp.secret_key().is_empty(),
+        Err(_) => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers.
 //
