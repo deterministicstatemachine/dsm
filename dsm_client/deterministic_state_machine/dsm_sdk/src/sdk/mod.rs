@@ -78,6 +78,7 @@ pub mod preview;
 pub mod storage_io;
 pub mod storage_node_health;
 pub mod storage_node_sdk;
+pub mod storage_set; // canonical storage-set identity + catalog (the anchor chooses the set; config resolves it)
 
 // Chain tip synchronization and blockchain integration
 // Blockchain transport is feature-gated: JSON (Web3) support is opt-in only.

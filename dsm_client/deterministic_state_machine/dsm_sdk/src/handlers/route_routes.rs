@@ -483,6 +483,21 @@ impl AppRouterImpl {
                  assets actually encumbered"
             ));
         }
+        // FUNDED IS NOT PUBLISHED. An advertisement makes a vault discoverable
+        // and quotable; a trader who finds it must be able to fetch its birth
+        // proofs (anchor, state inclusion, reserves) from the vault's storage
+        // set — otherwise the vault is "discoverable, quotable, un-settleable".
+        // So the ad may not go out until every birth object has reached quorum.
+        // Same fail-closed posture as the encumbrance check above; the sweep
+        // keeps replaying the frozen bytes, so this clears on its own.
+        if !crate::handlers::dlv_routes::birth_is_published(&vault_id) {
+            return err(
+                "route.publishRoutingAdvertisement: this vault's birth proofs have not yet reached \
+                 quorum on its storage set (publication pending) — the advertisement would point \
+                 traders at proofs they cannot fetch; retry after the sync completes publication"
+                    .into(),
+            );
+        }
         // Derive vault_proto_bytes from the local DLVManager when the
         // caller passes empty.  This is the path the SoFi test +
         // production wallet UIs use: the wallet has the canonical
@@ -811,17 +826,30 @@ impl AppRouterImpl {
             let advertised_reserve_a = ad.reserve_a;
             let advertised_reserve_b = ad.reserve_b;
 
-            // Fetch the latest vault state anchor.  If absent, the ad
-            // pre-dates the anchor flow — fall through and use the ad
-            // as-is (no composition possible without a signed baseline).
+            // Fetch the latest vault state anchor. Without one there is no
+            // signed baseline to compose against, so the vault is DROPPED —
+            // never quoted from the advertisement's own numbers. (Every
+            // advertised vault has published its birth proofs: the ad publish
+            // is gated on it. A storage error is a drop too: an unproven
+            // reserve is not a quote.)
             let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
                 &vid,
             )
             .await
             {
                 Ok(Some(a)) => a,
-                _ => {
-                    ads_after_composition.push(ad);
+                Ok(None) => {
+                    log::debug!(
+                        "[route.findAndBindBestPath] dropping {}: no signed anchor published",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[route.findAndBindBestPath] dropping {}: anchor fetch failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
                     continue;
                 }
             };
@@ -1017,6 +1045,11 @@ mod stamping_tests {
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         crate::storage::client_db::reset_database_for_tests();
+        // Vault ids are deterministic in (owner, spec, funding), so without
+        // these resets one test's published birth proofs and advertisements
+        // answer for the NEXT test's vault of the same id.
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
+        crate::sdk::storage_io::fake_fleet::reset();
         let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
             "./.dsm_testdata_route_stamping",
         ));
@@ -1294,6 +1327,77 @@ mod stamping_tests {
         );
     }
 
+    /// THE ACTIVATION BOUNDARY: funded is not market-active.
+    ///
+    /// A vault whose birth proofs have not reached quorum cannot be advertised.
+    /// The advertisement is a discovery record pointing traders at anchor,
+    /// inclusion and reserve proofs; published ahead of those objects it names
+    /// bytes no trader can fetch, and every quote against it fails closed at
+    /// composition — a market that looks live and settles nothing.
+    ///
+    /// This is the gate's own proof. The three tests above satisfy it by going
+    /// through the real create route, so none of them would notice if it stopped
+    /// refusing; this one holds a vault in exactly the state `funded_vault`
+    /// builds — reserves encumbered on the head, nothing published — and
+    /// requires the refusal.
+    #[test]
+    #[serial]
+    fn an_unpublished_vault_cannot_be_advertised() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        // Funded on the device, never born through the route: no frozen birth
+        // artifacts, so nothing at quorum.
+        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
+        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        assert!(
+            !crate::handlers::dlv_routes::birth_is_published(&v.vault_id),
+            "precondition: this vault's birth proofs are not published"
+        );
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: v.vault_id.to_vec(),
+            token_a: v.pc_a.to_vec(),
+            token_b: v.pc_b.to_vec(),
+            fee_bps: v.fee_bps,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: b"vault-proto".to_vec(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            !res.success,
+            "an unpublished vault must not be advertisable"
+        );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("publication pending"),
+            "the refusal names the activation boundary: {:?}",
+            res.error_message
+        );
+
+        // And nothing was written: a refused publish leaves no discoverable
+        // record behind for a trader to find later.
+        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        assert!(
+            crate::runtime::get_runtime()
+                .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
+                .map(|b| b.is_empty())
+                .unwrap_or(true),
+            "a refused publish must leave no advertisement behind"
+        );
+    }
+
     /// CROSS-LAYER AGREEMENT: the advertisement that was stored and the address
     /// it was stored under must describe the same market.
     ///
@@ -1315,14 +1419,22 @@ mod stamping_tests {
 
         // A genuinely funded vault: publication reads the reserve leaves, so an
         // unfunded head is refused before any stamping happens.
-        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
-        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        // The vault is born through the REAL create route, so its birth proofs
+        // are frozen and at quorum — the precondition the publish gate checks.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
 
         let req = generated::PublishRoutingAdvertisementRequest {
-            vault_id: v.vault_id.to_vec(),
-            token_a: v.pc_a.to_vec(),
-            token_b: v.pc_b.to_vec(),
-            fee_bps: v.fee_bps,
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
             unlock_spec_digest: vec![0x5A; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(), // empty → stamp me
@@ -1339,18 +1451,18 @@ mod stamping_tests {
 
         // Fetch what was actually STORED, at the address the pair and vault
         // derive, and require the record to name that same pair and vault.
-        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let key = crate::sdk::routing_sdk::advertisement_key(&pc_a, &pc_b, &vault_id);
         let stored = crate::runtime::get_runtime()
             .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
             .expect("the advertisement must be readable at its derived address");
         let ad = generated::RoutingVaultAdvertisementV1::decode(stored.as_slice())
             .expect("stored bytes must decode as the advertisement");
 
-        assert_eq!(ad.vault_id, v.vault_id.to_vec());
-        assert_eq!(ad.token_a, v.pc_a.to_vec());
-        assert_eq!(ad.token_b, v.pc_b.to_vec());
+        assert_eq!(ad.vault_id, vault_id.to_vec());
+        assert_eq!(ad.token_a, pc_a.to_vec());
+        assert_eq!(ad.token_b, pc_b.to_vec());
         assert_eq!(
-            crate::sdk::routing_sdk::advertisement_key(&ad.token_a, &ad.token_b, &v.vault_id),
+            crate::sdk::routing_sdk::advertisement_key(&ad.token_a, &ad.token_b, &vault_id),
             key,
             "the address must be re-derivable from the record it stores"
         );
@@ -1363,14 +1475,14 @@ mod stamping_tests {
 
         // Changing the market changes the address, so a record cannot be
         // discovered under a pair it does not name.
-        let mut impostor = v.pc_b;
+        let mut impostor = pc_b;
         impostor[0] ^= 0xff;
         assert_ne!(
-            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &impostor, &v.vault_id),
+            crate::sdk::routing_sdk::advertisement_key(&pc_a, &impostor, &vault_id),
             key,
         );
         assert_ne!(
-            crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &[0x99u8; 32]),
+            crate::sdk::routing_sdk::advertisement_key(&pc_a, &pc_b, &[0x99u8; 32]),
             key,
         );
     }
@@ -1394,14 +1506,22 @@ mod stamping_tests {
 
         install_identity();
         let r = router();
-        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
-        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        // The vault is born through the REAL create route, so its birth proofs
+        // are frozen and at quorum — the precondition the publish gate checks.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
 
         let publish = generated::PublishRoutingAdvertisementRequest {
-            vault_id: v.vault_id.to_vec(),
-            token_a: v.pc_a.to_vec(),
-            token_b: v.pc_b.to_vec(),
-            fee_bps: v.fee_bps,
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
             unlock_spec_digest: vec![0x5A; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
@@ -1418,9 +1538,7 @@ mod stamping_tests {
 
         // Read via the SDK the handler is supposed to delegate to.
         let via_sdk = crate::runtime::get_runtime()
-            .block_on(
-                crate::sdk::routing_sdk::load_active_advertisements_for_pair(&v.pc_a, &v.pc_b),
-            )
+            .block_on(crate::sdk::routing_sdk::load_active_advertisements_for_pair(&pc_a, &pc_b))
             .expect("sdk load");
         // Select THIS vault's advertisement rather than position 0. The fixture
         // pair is a constant, so the pair prefix is shared with every other test
@@ -1428,7 +1546,7 @@ mod stamping_tests {
         // another test's record and compare it against this one's facts.
         let mine: Vec<_> = via_sdk
             .iter()
-            .filter(|a| a.advertisement.vault_id == v.vault_id.to_vec())
+            .filter(|a| a.advertisement.vault_id == vault_id.to_vec())
             .collect();
         assert_eq!(
             mine.len(),
@@ -1439,8 +1557,8 @@ mod stamping_tests {
 
         // Read via the production query route.
         let pair = generated::RoutingPairRequest {
-            token_a: v.pc_a.to_vec(),
-            token_b: v.pc_b.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
         };
         let q = crate::runtime::get_runtime().block_on(async {
             r.query(crate::bridge::AppQuery {
@@ -1467,16 +1585,16 @@ mod stamping_tests {
 
         // And the shared facts are the funded ones, so agreement is not two
         // copies of the same mistake.
-        assert_eq!(sdk_ad.vault_id, v.vault_id.to_vec());
-        assert_eq!(sdk_ad.token_a, v.pc_a.to_vec());
-        assert_eq!(sdk_ad.token_b, v.pc_b.to_vec());
-        assert_eq!(
-            (sdk_ad.reserve_a, sdk_ad.reserve_b),
+        assert_eq!(sdk_ad.vault_id, vault_id.to_vec());
+        assert_eq!(sdk_ad.token_a, pc_a.to_vec());
+        assert_eq!(sdk_ad.token_b, pc_b.to_vec());
+        assert_eq!((sdk_ad.reserve_a, sdk_ad.reserve_b), {
+            let head = r.core_sdk.device_head().expect("owner head");
             (
-                v.head.vault_reserve(&v.vault_id, &v.pc_a),
-                v.head.vault_reserve(&v.vault_id, &v.pc_b)
-            ),
-        );
+                head.vault_reserve(&vault_id, &pc_a),
+                head.vault_reserve(&vault_id, &pc_b),
+            )
+        },);
     }
 
     /// ACCEPT-OR-STAMP, the non-empty half: a supplied publisher key is
@@ -1494,17 +1612,25 @@ mod stamping_tests {
 
         let wallet_pk = install_identity();
         let r = router();
-        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
-        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        // The vault is born through the REAL create route, so its birth proofs
+        // are frozen and at quorum — the precondition the publish gate checks.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
 
         let integration_pk = vec![0xC3u8; 64];
         assert_ne!(integration_pk, wallet_pk);
 
         let req = generated::PublishRoutingAdvertisementRequest {
-            vault_id: v.vault_id.to_vec(),
-            token_a: v.pc_a.to_vec(),
-            token_b: v.pc_b.to_vec(),
-            fee_bps: v.fee_bps,
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
             unlock_spec_digest: vec![0x5A; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: integration_pk.clone(),
@@ -1519,7 +1645,7 @@ mod stamping_tests {
         });
         assert!(res.success, "publish failed: {:?}", res.error_message);
 
-        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let key = crate::sdk::routing_sdk::advertisement_key(&pc_a, &pc_b, &vault_id);
         let stored = crate::runtime::get_runtime()
             .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
             .expect("stored");

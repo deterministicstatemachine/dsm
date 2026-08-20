@@ -1221,6 +1221,44 @@ impl CoreSDK {
             &A,
         ) -> Result<(), DsmError>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        self.execute_on_relationship_staged_with_reserve_mutation(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            None,
+            build_artifacts,
+            write_extra,
+        )
+    }
+
+    /// [`Self::execute_on_relationship_staged`] with a [`VaultReserveMutation`]
+    /// riding the SAME advance — the vault chokepoints' shape: the reserve
+    /// leaves and the derived vault-state leaf land in one device root with the
+    /// transition, `build_artifacts` signs proofs off `outcome.new_device_state`
+    /// (that exact root, before anything is persisted), and `write_extra` freezes
+    /// them inside the advance transaction. Construction failure ⇒ no commit.
+    ///
+    /// Constraints inside `build_artifacts` (it runs under the state-machine
+    /// lock): read ONLY the outcome — never `device_head()` / `get_current_state()`
+    /// (re-lock ⇒ deadlock); signing is synchronous and lock-free; no `.await`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged_with_reserve_mutation<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        reserve_mutation: Option<dsm::types::device_state::VaultReserveMutation>,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         // Artifacts are built once in `pre_write` (outside the transaction, so
         // signing may read the DB) and shared with the in-tx writer through a
         // cell. The in-tx closure NEVER rebuilds them — retries and the durable
@@ -1262,7 +1300,7 @@ impl CoreSDK {
             None,
             Some(&write),
             Some(&pre),
-            None,
+            reserve_mutation,
         )?;
 
         let artifacts = built.borrow_mut().take().ok_or_else(|| {
@@ -1599,41 +1637,6 @@ impl CoreSDK {
     /// Read the device's SMT root (canonical head identity per §2.2).
     pub fn device_smt_root(&self) -> Option<[u8; 32]> {
         self.state_machine.lock().device_head().map(|ds| ds.root())
-    }
-
-    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec
-    /// §4.1.2 / §8.4 step 2).
-    ///
-    /// Mirrors `execute_on_relationship`'s prepare/write/commit
-    /// pattern:
-    ///   1. PREPARE — clone the head, write the leaf, capture root +
-    ///      siblings (pure; no head mutation).
-    ///   2. WRITE   — persist the new head into `bcr_device_heads`.
-    ///      If this fails, the in-memory head is unchanged.
-    ///   3. COMMIT  — install the new head on the StateMachine.
-    ///
-    /// Returns `(new_root, siblings)` ready for the caller to embed in
-    /// a `VaultStateInclusionProofV1`.  The lock is held across all
-    /// three steps so the prepare/write/commit sequence is atomic
-    /// with respect to other writers.
-    pub fn install_vault_state_leaf(
-        &self,
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserves_digest: &[u8; 32],
-    ) -> Result<([u8; 32], Vec<[u8; 32]>), DsmError> {
-        use crate::storage::client_db::update_bcr_device_head;
-
-        let mut sm = self.state_machine.lock();
-        let outcome = sm.prepare_vault_state_leaf(vault_id, sequence, reserves_digest)?;
-        update_bcr_device_head(&outcome.new_device_state).map_err(|e| {
-            DsmError::storage(
-                format!("install_vault_state_leaf: device-head write failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        sm.commit_vault_state_leaf(&outcome);
-        Ok((outcome.new_root, outcome.siblings))
     }
 
     pub fn register_token_manager(

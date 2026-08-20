@@ -77,8 +77,9 @@ pub struct DeviceState {
 
     /// Non-relationship SMT leaves that also commit into the device root `r_A`:
     /// offline-bearer anchor-state leaves ([`Self::with_anchor_state_leaf`], and the
-    /// `anchor_leaf` replaced inside [`Self::advance`]) and SoFi vault-state leaves
-    /// ([`Self::with_vault_state_leaf`]). The [`SparseMerkleTree`] is the canonical source
+    /// `anchor_leaf` replaced inside [`Self::advance`]), SoFi vault reserve leaves and the
+    /// derived vault-state leaf (both written by [`Self::advance`] when a
+    /// [`VaultReserveMutation`] rides it). The [`SparseMerkleTree`] is the canonical source
     /// of truth for their VALUE, but — exactly like [`Self::tips`] — this map is the
     /// enumerable record needed to REPLAY them in [`Self::restore`]. Without it a state that
     /// has any such leaf recomputes a different root on reload (the leaf is in the stored root
@@ -733,6 +734,15 @@ pub struct AnchorLeafUpdate {
 /// `(amount, vault_sequence)`. Accepting a precomputed leaf would be the same
 /// "magnitudes supplied rather than proven" shape that was removed from reserve
 /// composition.
+/// The vault-state leaf `advance` derived for this batch: what it will prove
+/// after `post_root` is taken.
+struct DerivedVaultStateLeaf {
+    vault_id: [u8; 32],
+    sequence: u64,
+    reserves_digest: [u8; 32],
+    key: [u8; 32],
+}
+
 /// Borrowed view of the `Fund` variant, so the encumbrance body reads the same
 /// as it did before the mutation type grew a second case.
 struct FundingView<'a> {
@@ -741,18 +751,95 @@ struct FundingView<'a> {
     vault_sequence: u64,
 }
 
+/// The AMM vault's asset pair and fee, carried on every reserve mutation so
+/// [`DeviceState::advance`] can DERIVE the vault-state leaf
+/// (`compute_vault_smt_value(sequence, reserves_digest)`) from the reserves it
+/// has just moved, in the SAME SMT batch. A vault-state leaf therefore never
+/// exists without the reserve move it describes, and its digest is computed
+/// from the post-mutation leaves — never accepted from a caller.
+///
+/// The two sides are 32-byte POLICY COMMITMENTS — the keys the reserve legs are
+/// stored under — in canonical (lex-ascending) order, exactly what
+/// [`crate::dlv::pair_identity::CanonicalPair`] produces. They are not token
+/// labels. The reserves digest is always computed over this canonical order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VaultStatePair {
+    policy_commit_a: [u8; 32],
+    policy_commit_b: [u8; 32],
+    fee_bps: u32,
+}
+
+impl VaultStatePair {
+    /// Build from an already-canonical pair (the only production source).
+    pub fn from_pair(pair: &crate::dlv::pair_identity::CanonicalPair, fee_bps: u32) -> Self {
+        Self {
+            policy_commit_a: pair.a(),
+            policy_commit_b: pair.b(),
+            fee_bps,
+        }
+    }
+
+    /// Build from two raw policy commits. Refuses a non-canonical or degenerate
+    /// pair so a caller cannot smuggle an unordered or single-asset "pair" into
+    /// the digest.
+    pub fn new(
+        policy_commit_a: [u8; 32],
+        policy_commit_b: [u8; 32],
+        fee_bps: u32,
+    ) -> Result<Self, DsmError> {
+        if policy_commit_a >= policy_commit_b {
+            return Err(DsmError::invalid_operation(
+                "vault-state pair: policy commits must be distinct and lex-ascending (a < b)",
+            ));
+        }
+        Ok(Self {
+            policy_commit_a,
+            policy_commit_b,
+            fee_bps,
+        })
+    }
+
+    /// The lex-lower asset's policy commit.
+    pub fn a(&self) -> [u8; 32] {
+        self.policy_commit_a
+    }
+
+    /// The lex-higher asset's policy commit.
+    pub fn b(&self) -> [u8; 32] {
+        self.policy_commit_b
+    }
+
+    pub fn fee_bps(&self) -> u32 {
+        self.fee_bps
+    }
+
+    /// The reserves digest for `(reserve_a, reserve_b)` over this pair — the one
+    /// definition every anchor, inclusion proof and quote agree on.
+    pub fn reserves_digest(&self, reserve_a: u64, reserve_b: u64) -> [u8; 32] {
+        crate::dlv::vault_state_anchor::compute_reserves_digest(
+            &self.policy_commit_a,
+            &self.policy_commit_b,
+            reserve_a,
+            reserve_b,
+            self.fee_bps,
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultReserveMutation {
     /// `DlvCreate`: value leaves `balances` and enters the vault's reserve
     /// leaves.
     Fund {
         vault_id: [u8; 32],
-        /// `(policy_commit, amount)` in canonical pair order, distinct assets,
-        /// every amount non-zero. Checked here rather than trusted.
+        /// `(policy_commit, amount)` — exactly the vault's pair, in canonical
+        /// order, every amount non-zero. Checked here rather than trusted.
         legs: Vec<([u8; 32], u64)>,
         /// The vault's sequence at creation. `0` is a real genesis sequence, not
         /// an absence.
         vault_sequence: u64,
+        /// The vault's pair + fee; the vault-state leaf is derived from it.
+        pair: VaultStatePair,
     },
     /// `DlvOwnerApply`: the owner records a settlement it has verified. The
     /// input the trader paid arrives, the output it took leaves, and `balances`
@@ -774,7 +861,50 @@ pub enum VaultReserveMutation {
         /// `parent_sequence + 1`. Every reserve write stamps it, so a stale proof
         /// cannot be replayed against the new state.
         new_sequence: u64,
+        /// The vault's pair + fee; `{input, output}` must BE this pair, and the
+        /// vault-state leaf at `new_sequence` is derived from it.
+        pair: VaultStatePair,
     },
+}
+
+impl VaultReserveMutation {
+    /// The vault this mutation moves reserves for.
+    pub fn vault_id(&self) -> [u8; 32] {
+        match self {
+            VaultReserveMutation::Fund { vault_id, .. }
+            | VaultReserveMutation::ApplySettlement { vault_id, .. } => *vault_id,
+        }
+    }
+
+    /// The vault's pair + fee.
+    pub fn pair(&self) -> VaultStatePair {
+        match self {
+            VaultReserveMutation::Fund { pair, .. }
+            | VaultReserveMutation::ApplySettlement { pair, .. } => *pair,
+        }
+    }
+
+    /// The vault generation the reserves sit at AFTER this mutation.
+    pub fn resulting_sequence(&self) -> u64 {
+        match self {
+            VaultReserveMutation::Fund { vault_sequence, .. } => *vault_sequence,
+            VaultReserveMutation::ApplySettlement { new_sequence, .. } => *new_sequence,
+        }
+    }
+}
+
+/// The vault-state leaf witness an advance produced, `Some` iff a
+/// [`VaultReserveMutation`] rode it. `siblings` (exactly 256) bind the leaf
+/// under `AdvanceOutcome::child_r_a`; `sequence` and `reserves_digest` are the
+/// values that actually LANDED (derived inside `advance`), so a caller signs
+/// what the root commits rather than what it hoped for. Feed straight into
+/// [`crate::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof`].
+#[derive(Clone, Debug)]
+pub struct VaultStateLeafProof {
+    pub vault_id: [u8; 32],
+    pub sequence: u64,
+    pub reserves_digest: [u8; 32],
+    pub siblings: Vec<[u8; 32]>,
 }
 
 /// Inclusion proofs for the anchor-state leaf across a bearer advance (`Π_i`/`Π_{i+1}`): `parent`
@@ -813,6 +943,13 @@ pub struct AdvanceOutcome {
     /// (a bearer advance). `parent` binds the old commit under `parent_r_a`/`smt_proofs.pre_root`;
     /// `child` binds the successor commit under `child_r_a`. `None` for ordinary transitions.
     pub anchor_proofs: Option<AnchorLeafProofs>,
+
+    /// Vault-state leaf witness, `Some` iff a [`VaultReserveMutation`] rode this
+    /// advance. Its siblings bind the (derived) leaf under `child_r_a` — the same
+    /// root the reserve leaves and the relationship leaf landed under — so an
+    /// owner-published inclusion proof and reserve proof share one root by
+    /// construction.
+    pub vault_state_proof: Option<VaultStateLeafProof>,
 }
 
 impl AdvanceOutcome {
@@ -1280,11 +1417,15 @@ impl DeviceState {
         // any transfer, mint or burn — only the vault chokepoints can move it.
         // Routing funding through deltas would give it back.
         let mut new_vault_reserves = self.vault_reserves.clone();
-        let mut funding_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        // Every non-relationship leaf this advance writes: reserve leaves and the
+        // vault-state leaf. ONE vector, consumed by every batch arm and by the
+        // `extra_leaves` replay, so no arm can forget a leaf.
+        let mut batch_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
         if let Some(VaultReserveMutation::Fund {
             vault_id: funding_vault,
             legs: funding_legs_in,
             vault_sequence,
+            pair,
         }) = &reserve_mutation
         {
             let funding = FundingView {
@@ -1297,9 +1438,16 @@ impl DeviceState {
                     "advance: only DlvCreate may encumber reserves",
                 ));
             }
-            if funding.legs.is_empty() {
+            // PAIR COMPLETENESS. An AMM vault's legs ARE its pair — exactly the
+            // two assets the vault-state digest is derived over. A third asset,
+            // a single leg, or an asset outside the pair would be silently
+            // omitted from `digest(a, b, ra, rb, fee)`, giving a signed vault
+            // state that describes different reserves than the leaves hold.
+            let expected_legs = [pair.a(), pair.b()];
+            let actual_legs: Vec<[u8; 32]> = funding.legs.iter().map(|(pc, _)| *pc).collect();
+            if actual_legs.as_slice() != expected_legs {
                 return Err(DsmError::invalid_operation(
-                    "advance: reserve funding carries no legs",
+                    "advance: funding legs must be exactly the vault's pair, in canonical order",
                 ));
             }
             for (i, (policy_commit, amount)) in funding.legs.iter().enumerate() {
@@ -1356,7 +1504,7 @@ impl DeviceState {
                     *amount,
                     funding.vault_sequence,
                 );
-                funding_leaves.push((key, leaf_value));
+                batch_leaves.push((key, leaf_value));
                 new_vault_reserves.insert(
                     key,
                     VaultReserve {
@@ -1383,6 +1531,7 @@ impl DeviceState {
             output_amount,
             parent_sequence,
             new_sequence,
+            pair,
         }) = &reserve_mutation
         {
             if !matches!(operation, Operation::DlvOwnerApply { .. }) {
@@ -1394,6 +1543,22 @@ impl DeviceState {
                 return Err(DsmError::invalid_operation(
                     "advance: a settlement cannot name one asset on both legs",
                 ));
+            }
+            // PAIR COMPLETENESS. `{input, output}` must BE the vault's pair: a
+            // settlement introducing a third asset would move a leg the vault-
+            // state digest never sees, so the signed state and the leaves would
+            // silently disagree.
+            {
+                let (lo, hi) = if input_policy_commit < output_policy_commit {
+                    (*input_policy_commit, *output_policy_commit)
+                } else {
+                    (*output_policy_commit, *input_policy_commit)
+                };
+                if [lo, hi] != [pair.a(), pair.b()] {
+                    return Err(DsmError::invalid_operation(
+                        "advance: a settlement's input and output must be exactly the vault's pair",
+                    ));
+                }
             }
             if *input_amount == 0 || *output_amount == 0 {
                 return Err(DsmError::invalid_operation(
@@ -1487,7 +1652,7 @@ impl DeviceState {
             for (key, amount) in [(key_in, next_in), (key_out, next_out)] {
                 let leaf_value =
                     crate::dlv::vault_reserve_leaf::vault_reserve_value(amount, *new_sequence);
-                funding_leaves.push((key, leaf_value));
+                batch_leaves.push((key, leaf_value));
                 new_vault_reserves.insert(
                     key,
                     VaultReserve {
@@ -1497,6 +1662,57 @@ impl DeviceState {
                 );
             }
         }
+
+        // THE VAULT-STATE LEAF, DERIVED — never accepted. Every reserve mutation
+        // updates the vault's state leaf in the SAME batch as the reserve leaves,
+        // and its value is computed HERE from the post-mutation reserves: the
+        // sequence the mutation produced and the digest of the amounts the leaves
+        // now hold. So the vault-state proof an owner publishes and the reserve
+        // proof it publishes bind ONE root by construction, and no caller can
+        // commit a vault-state leaf that disagrees with the leaves (which is
+        // worse than two roots: it would be signed and self-consistent).
+        //
+        // Domain-disjoint from relationship and reserve leaves
+        // (`DSM/vault-smt-key\0`), so it shares the tree without colliding.
+        let vault_state_leaf: Option<DerivedVaultStateLeaf> = match &reserve_mutation {
+            None => None,
+            Some(m) => {
+                let vault_id = m.vault_id();
+                let pair = m.pair();
+                let sequence = m.resulting_sequence();
+                let reserve_at = |pc: &[u8; 32]| -> Result<u64, DsmError> {
+                    let key = crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                        &self.genesis,
+                        &self.devid,
+                        &vault_id,
+                        pc,
+                    );
+                    match new_vault_reserves.get(&key) {
+                        Some(e) if e.sequence == sequence => Ok(e.amount),
+                        // Both pair legs are written by the arms above at exactly
+                        // `sequence`; anything else is an internal contradiction,
+                        // refused rather than papered over with a zero.
+                        _ => Err(DsmError::invalid_operation(
+                            "advance: vault-state leaf cannot be derived — a pair leg is missing \
+                             or at a different generation than the mutation produced",
+                        )),
+                    }
+                };
+                let ra = reserve_at(&pair.a())?;
+                let rb = reserve_at(&pair.b())?;
+                let reserves_digest = pair.reserves_digest(ra, rb);
+                let key = crate::dlv::vault_smt_leaf::compute_vault_smt_key(&vault_id);
+                let value =
+                    crate::dlv::vault_smt_leaf::compute_vault_smt_value(sequence, &reserves_digest);
+                batch_leaves.push((key, value));
+                Some(DerivedVaultStateLeaf {
+                    vault_id,
+                    sequence,
+                    reserves_digest,
+                    key,
+                })
+            }
+        };
 
         // A settling advance WRITES ITS OWN RECEIPT, derived from the operation's
         // fields rather than from anything the caller passes alongside.
@@ -1591,19 +1807,22 @@ impl DeviceState {
         // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
         let (smt_proofs, anchor_proofs) = match (&anchor_leaf, &settlement_leaf) {
             // The ordinary path, and the only one that keeps `smt_replace`: no
-            // anchor leaf, no receipt leaf, no funding. Every transfer.
-            (None, None) if funding_leaves.is_empty() => {
+            // anchor leaf, no receipt leaf, no reserve/vault-state leaves. Every
+            // transfer.
+            (None, None) if batch_leaves.is_empty() => {
                 let p = new_smt
                     .smt_replace(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
                 (p, None)
             }
-            // A FUNDING advance: the reserve leaves ride the SAME batch as the
-            // relationship leaf, so the encumbrance and the DlvCreate transition
-            // share one device root. `smt_replace` cannot express this — its
-            // child proof binds a root taken before the reserve leaves land — and
-            // two roots would put the reserve proof and the vault-state proof
-            // permanently out of agreement, which `compose_vault_state` requires.
+            // A reserve-moving advance (funding or owner-apply): the reserve
+            // leaves AND the derived vault-state leaf ride the SAME batch as the
+            // relationship leaf, so the encumbrance/settlement, the vault state
+            // and the transition share one device root. `smt_replace` cannot
+            // express this — its child proof binds a root taken before the extra
+            // leaves land — and two roots would put the reserve proof and the
+            // vault-state proof out of agreement, which `compose_vault_state`
+            // requires to be equal.
             (None, None) => {
                 let pre_root = *new_smt.root();
                 let rel_parent = new_smt
@@ -1612,9 +1831,9 @@ impl DeviceState {
                 new_smt
                     .update_leaf(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
-                for (k, v) in &funding_leaves {
+                for (k, v) in &batch_leaves {
                     new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
+                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
                     })?;
                 }
                 let post_root = *new_smt.root();
@@ -1648,9 +1867,9 @@ impl DeviceState {
                 new_smt.update_leaf(rk, rv).map_err(|e| {
                     DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
                 })?;
-                for (k, v) in &funding_leaves {
+                for (k, v) in &batch_leaves {
                     new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
+                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
                     })?;
                 }
                 let post_root = *new_smt.root();
@@ -1696,9 +1915,9 @@ impl DeviceState {
                         DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
                     })?;
                 }
-                for (k, v) in &funding_leaves {
+                for (k, v) in &batch_leaves {
                     new_smt.update_leaf(k, v).map_err(|e| {
-                        DsmError::invalid_operation(format!("vault reserve funding leaf: {e}"))
+                        DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
                     })?;
                 }
                 let post_root = *new_smt.root();
@@ -1724,6 +1943,28 @@ impl DeviceState {
         };
 
         let child_r_a = smt_proofs.post_root;
+
+        // The vault-state witness is taken off the FINAL tree, after every arm
+        // has landed all its leaves, so its siblings bind exactly `child_r_a`.
+        let vault_state_proof = match vault_state_leaf {
+            None => None,
+            Some(DerivedVaultStateLeaf {
+                vault_id,
+                sequence,
+                reserves_digest,
+                key,
+            }) => {
+                let proof = new_smt.get_inclusion_proof(&key, 256).map_err(|e| {
+                    DsmError::invalid_operation(format!("vault-state leaf proof: {e}"))
+                })?;
+                Some(VaultStateLeafProof {
+                    vault_id,
+                    sequence,
+                    reserves_digest,
+                    siblings: proof.siblings,
+                })
+            }
+        };
 
         // Update the tip cache with the new state. value_capability is sticky-monotone:
         // a missing prior means we are witnessing this relationship's birth, so we start
@@ -1761,9 +2002,9 @@ impl DeviceState {
         if let Some((rk, rv)) = settlement_leaf {
             new_extra_leaves.insert(rk, rv);
         }
-        // Funding leaves replay through `extra_leaves` too, or a reloaded device
-        // recomputes a root missing them and refuses to start.
-        for (k, v) in &funding_leaves {
+        // Reserve and vault-state leaves replay through `extra_leaves` too, or a
+        // reloaded device recomputes a root missing them and refuses to start.
+        for (k, v) in &batch_leaves {
             new_extra_leaves.insert(*k, *v);
         }
         let mut new_offline_allocations = self.offline_allocations.clone();
@@ -1791,6 +2032,7 @@ impl DeviceState {
             parent_r_a,
             child_r_a,
             anchor_proofs,
+            vault_state_proof,
         })
     }
 
@@ -1821,73 +2063,6 @@ impl DeviceState {
             extra_leaves: new_extra_leaves,
             offline_allocations: self.offline_allocations.clone(),
             vault_reserves: self.vault_reserves.clone(),
-        })
-    }
-
-    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec §4.1.2).
-    ///
-    /// Vault-state leaves live in the same SMT as bilateral relationship
-    /// chain tips, but in a disjoint key namespace via
-    /// [`dsm::dlv::vault_smt_leaf::compute_vault_smt_key`] (domain tag
-    /// `DSM/vault-smt-key\0`).  This keeps both leaf types committed
-    /// under a single device root — what the spec calls "vault state
-    /// committed in Per-Device SMT" — without colliding with bilateral
-    /// leaves (which use `DSM/smt-key\0 || min(A,B) || max(A,B)`).
-    ///
-    /// This is a *pure* method (mirroring [`Self::advance`]): it returns a
-    /// new `DeviceState` + the inclusion proof siblings + the post-write
-    /// root.  Caller installs the new head via `StateMachine::set_device_head`
-    /// once persistence succeeds, mirroring the prepare/write/commit
-    /// pattern in `CoreSdk::execute_on_relationship`.
-    ///
-    /// # Parameters
-    /// - `vault_id` — 32-byte deterministic vault identifier.
-    /// - `sequence` — monotonic vault state sequence (0 at create,
-    ///   +1 per accepted unlock).
-    /// - `reserves_digest` — BLAKE3 digest of (token_a, token_b,
-    ///   reserve_a, reserve_b, fee_bps) per
-    ///   [`dsm::dlv::vault_state_anchor::compute_reserves_digest`].
-    pub fn with_vault_state_leaf(
-        &self,
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserves_digest: &[u8; 32],
-    ) -> Result<VaultLeafOutcome, DsmError> {
-        use crate::dlv::vault_smt_leaf::{compute_vault_smt_key, compute_vault_smt_value};
-
-        let leaf_key = compute_vault_smt_key(vault_id);
-        let leaf_value = compute_vault_smt_value(sequence, reserves_digest);
-
-        let mut new_smt = self.smt.clone();
-        new_smt.update_leaf(&leaf_key, &leaf_value).map_err(|e| {
-            DsmError::invalid_operation(format!("with_vault_state_leaf: update_leaf failed: {e}"))
-        })?;
-        let new_root = *new_smt.root();
-        let proof = new_smt.get_inclusion_proof(&leaf_key, 256).map_err(|e| {
-            DsmError::merkle(format!(
-                "with_vault_state_leaf: get_inclusion_proof failed: {e}"
-            ))
-        })?;
-
-        let mut new_extra_leaves = self.extra_leaves.clone();
-        new_extra_leaves.insert(leaf_key, leaf_value);
-        let new_device_state = Self {
-            genesis: self.genesis,
-            devid: self.devid,
-            public_key: self.public_key.clone(),
-            smt: new_smt,
-            balances: self.balances.clone(),
-            tips: self.tips.clone(),
-            legacy_anchor: self.legacy_anchor,
-            extra_leaves: new_extra_leaves,
-            offline_allocations: self.offline_allocations.clone(),
-            vault_reserves: self.vault_reserves.clone(),
-        };
-
-        Ok(VaultLeafOutcome {
-            new_device_state,
-            new_root,
-            siblings: proof.siblings,
         })
     }
 
@@ -2235,8 +2410,11 @@ impl DeviceState {
         self.move_vault_reserves(vault_id, legs, vault_sequence, true)
     }
 
-    /// Release `legs` from `vault_id` back to the online balance. Required so encumbrance
-    /// is reversible — without it, funding a vault is a one-way door.
+    /// Release `legs` from `vault_id` back to the online balance. TEST-ONLY: the
+    /// one production door for un-encumbering is the signed `DlvClose` transition
+    /// (a `Withdraw` reserve mutation riding `advance`); an unsigned withdrawal
+    /// path must not exist in a production build.
+    #[cfg(test)]
     pub fn withdraw_vault_reserves(
         &self,
         vault_id: &[u8; 32],
@@ -2403,23 +2581,6 @@ pub struct OfflineAllocationOutcome {
     pub amount: u64,
     /// New allocation transition sequence.
     pub sequence: u64,
-}
-
-/// Outcome of [`DeviceState::with_vault_state_leaf`].  Caller installs
-/// `new_device_state` as the device head once persistence succeeds, and
-/// uses `(new_root, siblings)` to build a
-/// `VaultStateInclusionProofV1` record for the off-device trader path.
-#[derive(Debug, Clone)]
-pub struct VaultLeafOutcome {
-    /// The new device state (post-leaf-write).  Has the same balances,
-    /// tips, genesis, etc. as `self`; only the SMT differs.
-    pub new_device_state: DeviceState,
-    /// Post-write SMT root.  This is the value to embed in the signed
-    /// inclusion proof.
-    pub new_root: [u8; 32],
-    /// 256 sibling hashes in leaf-to-root order, ready to ship inside
-    /// `VaultStateInclusionProofV1.smt_siblings`.
-    pub siblings: Vec<[u8; 32]>,
 }
 
 #[cfg(test)]
@@ -2673,6 +2834,12 @@ mod tests {
         })
     }
 
+    /// The vault's canonical pair + a 30 bps fee, the way production builds it
+    /// from `CanonicalPair`. `a` must be lex-lower than `b`.
+    fn vault_pair(a: [u8; 32], b: [u8; 32]) -> VaultStatePair {
+        VaultStatePair::new(a, b, 30).expect("canonical test pair")
+    }
+
     /// A `Unilateral` transfer of `amount` of `asset`, with the matching debit
     /// delta the conservation guard requires.
     fn transfer_op(asset: [u8; 32], amount: u64) -> Operation {
@@ -2703,12 +2870,15 @@ mod tests {
     #[test]
     fn funding_via_production_dlvcreate_advance_reduces_spendable_to_the_remainder() {
         let mut dev = fresh_device(0xC1);
-        let era = pc(0xE0);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
         dev.balances.insert(era, 100);
+        dev.balances.insert(rigb, 10);
         let vault = [0x71u8; 32];
         let (rk, tip) = self_loop(&dev);
 
         // Lock 60 through the real funding transition (empty deltas; legs in Fund).
+        // An AMM vault is funded with exactly its pair, so the other side rides
+        // along; the claim under test is about the ERA remainder.
         let funded = dev
             .advance(
                 rk,
@@ -2722,8 +2892,9 @@ mod tests {
                 None,
                 Some(VaultReserveMutation::Fund {
                     vault_id: vault,
-                    legs: vec![(era, 60)],
+                    legs: vec![(era, 60), (rigb, 10)],
                     vault_sequence: 0,
+                    pair: vault_pair(era, rigb),
                 }),
             )
             .expect("production funding must succeed")
@@ -2823,6 +2994,7 @@ mod tests {
         assert_eq!(spent.balance(&era), 50);
 
         let vault = [0x72u8; 32];
+        let rigb = pc(0xF0);
         let root_before = *spent.smt.root();
         let err = spent.advance(
             rk,
@@ -2836,8 +3008,9 @@ mod tests {
             None,
             Some(VaultReserveMutation::Fund {
                 vault_id: vault,
-                legs: vec![(era, 60)],
+                legs: vec![(era, 60), (rigb, 10)],
                 vault_sequence: 0,
+                pair: vault_pair(era, rigb),
             }),
         );
         let err = format!("{}", err.expect_err("cannot encumber 60 out of 50"));
@@ -2870,8 +3043,9 @@ mod tests {
     #[test]
     fn refunding_an_already_encumbered_vault_asset_is_refused() {
         let mut dev = fresh_device(0xC3);
-        let era = pc(0xE0);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
         dev.balances.insert(era, 100);
+        dev.balances.insert(rigb, 100);
         let vault = [0x73u8; 32];
         let (rk, tip) = self_loop(&dev);
 
@@ -2888,15 +3062,16 @@ mod tests {
                 None,
                 Some(VaultReserveMutation::Fund {
                     vault_id: vault,
-                    legs: vec![(era, 60)],
+                    legs: vec![(era, 60), (rigb, 10)],
                     vault_sequence: 0,
+                    pair: vault_pair(era, rigb),
                 }),
             )
             .expect("first funding")
             .new_device_state;
         let root_before = *funded.smt.root();
 
-        // A second funding of the same asset for the same vault — refused.
+        // A second funding of the same assets for the same vault — refused.
         let err = funded.advance(
             rk,
             funded.devid,
@@ -2909,8 +3084,9 @@ mod tests {
             None,
             Some(VaultReserveMutation::Fund {
                 vault_id: vault,
-                legs: vec![(era, 10)],
+                legs: vec![(era, 10), (rigb, 5)],
                 vault_sequence: 1,
+                pair: vault_pair(era, rigb),
             }),
         );
         let err = format!("{}", err.expect_err("must refuse a second encumbrance"));
@@ -5012,158 +5188,321 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Phase 7 — vault state SMT leaf integration (§4.1.2 / §8.4 step 2)
+    // The vault-state leaf rides the staged advance (one canonical root)
     // ─────────────────────────────────────────────────────────────
 
+    /// A funding advance writes the vault-state leaf in the SAME SMT batch as
+    /// the reserve leaves and the relationship leaf, so `outcome.vault_state_proof`
+    /// verifies against `child_r_a` == `new_device_state.root()`, and its digest
+    /// is DERIVED from the leaves that landed (canonical pair order), not
+    /// supplied.
     #[test]
-    fn with_vault_state_leaf_returns_verifiable_inclusion_proof() {
-        use crate::dlv::vault_smt_leaf::{
-            compute_vault_smt_key, compute_vault_smt_value, verify_vault_smt_inclusion,
-        };
-        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+    fn a_funding_advance_writes_the_vault_state_leaf_under_the_same_root() {
+        use crate::dlv::vault_smt_leaf::{compute_vault_smt_key, verify_vault_smt_inclusion};
 
-        let bob = fresh_device(0xC1);
-        let vault_id = [0x12u8; 32];
-        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let mut dev = fresh_device(0xC5);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 50_000);
+        dev.balances.insert(rigb, 20_000);
+        let vault = [0x75u8; 32];
+        let (rk, tip) = self_loop(&dev);
 
-        let outcome = bob
-            .with_vault_state_leaf(&vault_id, 0, &reserves_digest)
-            .expect("vault leaf write succeeds");
-
-        // Pure-function contract: self untouched.
-        assert_eq!(bob.root(), bob.root(), "self.root must be stable");
-        assert_ne!(
-            bob.root(),
-            outcome.new_root,
-            "writing a vault leaf must change the SMT root"
-        );
-
-        // Spec-strict verification path: trader rebuilds key+value
-        // from public inputs, walks the siblings up to the proven
-        // root, and accepts.
-        verify_vault_smt_inclusion(
-            &vault_id,
-            0,
-            &reserves_digest,
-            &outcome.new_root,
-            &outcome.siblings,
-        )
-        .expect("verifier accepts the on-device-produced proof");
-
-        // Sanity: the new device state actually carries the leaf.
-        let leaf_key = compute_vault_smt_key(&vault_id);
-        let leaf_value = compute_vault_smt_value(0, &reserves_digest);
-        assert!(outcome.new_device_state.smt.contains_key(&leaf_key));
-        // The proof's value field equals the recomputed leaf value.
-        let live_proof = outcome
-            .new_device_state
-            .smt
-            .get_inclusion_proof(&leaf_key, 256)
-            .expect("live proof");
-        assert_eq!(live_proof.value, Some(leaf_value));
-    }
-
-    #[test]
-    fn vault_state_leaf_does_not_disturb_bilateral_tips() {
-        use crate::dlv::vault_state_anchor::compute_reserves_digest;
-
-        // First seed a bilateral chain (self-loop) so there's a real
-        // relationship leaf in the SMT.
-        let alice = fresh_device(0xA2);
-        let rk_self =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&alice.devid, &alice.devid);
-        let init_tip =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &alice.devid,
-                &alice.devid,
-            );
-        let after_bilateral = alice
+        let out = dev
             .advance(
-                rk_self,
-                alice.devid,
-                op(),
-                entropy(7),
+                rk,
+                dev.devid,
+                dlv_create(vault),
+                entropy(1),
                 None,
                 &[],
-                Some(init_tip),
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs: vec![(era, 10_000), (rigb, 5_000)],
+                    vault_sequence: 0,
+                    pair: vault_pair(era, rigb),
+                }),
+            )
+            .expect("funding advance");
+
+        let proof = out
+            .vault_state_proof
+            .as_ref()
+            .expect("a reserve mutation must yield a vault-state witness");
+        assert_eq!(proof.vault_id, vault);
+        assert_eq!(proof.sequence, 0);
+        assert_eq!(
+            proof.reserves_digest,
+            vault_pair(era, rigb).reserves_digest(10_000, 5_000),
+            "the digest is derived from the amounts the leaves hold"
+        );
+        assert_eq!(proof.siblings.len(), 256);
+
+        // ONE root: the outcome's child root IS the new head's root, and the
+        // vault-state proof verifies against it — the same root the reserve
+        // leaves and the relationship leaf landed under.
+        assert_eq!(out.child_r_a, out.new_device_state.root());
+        verify_vault_smt_inclusion(
+            &vault,
+            0,
+            &proof.reserves_digest,
+            &out.child_r_a,
+            &proof.siblings,
+        )
+        .expect("vault-state proof binds child_r_a");
+        // ...and so does a reserve-leg proof taken off the SAME head.
+        let legs = out
+            .new_device_state
+            .vault_reserve_leg_proofs(&vault, &[era, rigb])
+            .expect("reserve legs provable");
+        assert_eq!(legs.len(), 2);
+        assert!(out
+            .new_device_state
+            .smt
+            .contains_key(&compute_vault_smt_key(&vault)));
+
+        // The leaf is in the replay record: a restored device recomputes the
+        // SAME root (the reload-brick guard).
+        let live = &out.new_device_state;
+        let restored = DeviceState::restore(
+            live.genesis,
+            live.devid,
+            live.public_key.clone(),
+            live.legacy_anchor,
+            live.balances.clone(),
+            live.tips.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            live.extra_leaves.clone(),
+            live.offline_allocations.clone(),
+            live.vault_reserves.clone(),
+            1024,
+        )
+        .expect("restore");
+        assert_eq!(
+            restored.root(),
+            live.root(),
+            "restore replays the vault-state leaf"
+        );
+
+        // No mutation, no witness.
+        let plain = out
+            .new_device_state
+            .advance(
+                rk,
+                out.new_device_state.devid,
+                transfer_op(era, 1),
+                entropy(2),
+                None,
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 1,
+                }],
+                Some(tip),
                 None,
                 None,
                 None,
             )
-            .expect("bilateral advance succeeds")
-            .new_device_state;
-
-        let bilateral_tip_before = after_bilateral
-            .chain_tip(&rk_self)
-            .expect("relationship tip present");
-        let smt_root_before = after_bilateral.root();
-
-        // Now write a vault leaf on top.
-        let vault_id = [0x34u8; 32];
-        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
-        let outcome = after_bilateral
-            .with_vault_state_leaf(&vault_id, 0, &reserves_digest)
-            .expect("vault leaf write succeeds");
-
-        // Bilateral tip cache is unchanged.
-        assert_eq!(
-            outcome
-                .new_device_state
-                .chain_tip(&rk_self)
-                .expect("relationship tip survives"),
-            bilateral_tip_before,
-            "vault leaf write must not perturb relationship tip cache"
-        );
-        // Balances unchanged.
-        assert_eq!(outcome.new_device_state.balances, after_bilateral.balances);
-        // But the SMT root advanced because a new leaf landed in the
-        // (disjoint, domain-separated) vault namespace.
-        assert_ne!(outcome.new_root, smt_root_before);
+            .expect("ordinary transfer");
+        assert!(plain.vault_state_proof.is_none());
     }
 
+    /// PAIR COMPLETENESS on funding: legs must be exactly the vault's pair, in
+    /// canonical order. One leg, three legs, or an asset outside the pair is
+    /// refused — a leg the digest never sees would let a signed vault state
+    /// describe different reserves than the leaves hold.
     #[test]
-    fn vault_state_leaf_sequence_advance_changes_root_monotonically() {
-        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+    fn funding_legs_that_are_not_exactly_the_pair_are_refused() {
+        let mut dev = fresh_device(0xC6);
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        dev.balances.insert(era, 50_000);
+        dev.balances.insert(rigb, 20_000);
+        dev.balances.insert(dbtc, 9_000);
+        let vault = [0x76u8; 32];
+        let (rk, tip) = self_loop(&dev);
+        let root_before = dev.root();
 
-        let bob = fresh_device(0xC2);
-        let vault_id = [0x56u8; 32];
-        let r0 = compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30);
-        let after_seq0 = bob
-            .with_vault_state_leaf(&vault_id, 0, &r0)
-            .expect("seq=0 write");
+        for (name, legs) in [
+            ("one leg", vec![(era, 10_000)]),
+            ("three legs", vec![(dbtc, 1), (era, 10_000), (rigb, 5_000)]),
+            (
+                "an asset outside the pair",
+                vec![(dbtc, 1_000), (era, 10_000)],
+            ),
+            ("the pair out of order", vec![(rigb, 5_000), (era, 10_000)]),
+        ] {
+            let err = dev.advance(
+                rk,
+                dev.devid,
+                dlv_create(vault),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs,
+                    vault_sequence: 0,
+                    pair: vault_pair(era, rigb),
+                }),
+            );
+            let err = format!("{}", err.expect_err(name));
+            assert!(
+                err.contains("exactly the vault's pair"),
+                "{name}: must refuse on pair completeness, got: {err}"
+            );
+        }
+        assert_eq!(dev.root(), root_before, "refusals move nothing");
+        assert_eq!(dev.balance(&era), 50_000);
+    }
 
-        // Simulate a trade: reserves shift, sequence bumps.
-        let r1 = compute_reserves_digest(b"AAA", b"BBB", 1_500, 1_700, 30);
-        let after_seq1 = after_seq0
-            .new_device_state
-            .with_vault_state_leaf(&vault_id, 1, &r1)
-            .expect("seq=1 write");
+    /// The owner-apply advance keeps the vault-state leaf in LOCKSTEP with the
+    /// reserve legs: after folding a settlement the leaf sits at `new_sequence`
+    /// carrying the digest of the folded amounts, under the same root as the
+    /// moved legs. And a settlement naming a third asset is refused.
+    #[test]
+    fn owner_apply_advance_keeps_the_vault_state_leaf_in_lockstep_and_refuses_a_third_asset() {
+        use crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion;
 
-        assert_ne!(
-            after_seq0.new_root, after_seq1.new_root,
-            "sequence advance must visibly change the SMT root"
+        let mut owner = fresh_device(0xC7);
+        let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
+        owner.balances.insert(era, 50_000);
+        owner.balances.insert(rigb, 20_000);
+        let vault = [0x77u8; 32];
+        let (rk, tip) = self_loop(&owner);
+        let pair = vault_pair(era, rigb);
+
+        let funded = owner
+            .advance(
+                rk,
+                owner.devid,
+                dlv_create(vault),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::Fund {
+                    vault_id: vault,
+                    legs: vec![(era, 10_000), (rigb, 5_000)],
+                    vault_sequence: 0,
+                    pair,
+                }),
+            )
+            .expect("fund")
+            .new_device_state;
+
+        let apply_op = |input: [u8; 32], output: [u8; 32], out_amt: u64| {
+            sign_op(Operation::DlvOwnerApply {
+                vault_id: vault.to_vec(),
+                settlement_receipt_id: [0x77; 32],
+                pending_pointer_x: [0x55; 32],
+                parent_sequence: 0,
+                new_sequence: 1,
+                parent_reserves_digest: pair.reserves_digest(10_000, 5_000),
+                new_reserves_digest: pair.reserves_digest(11_000, 5_000 - out_amt),
+                input_policy_commit: input,
+                output_policy_commit: output,
+                input_amount: 1_000,
+                output_amount: out_amt,
+                signature: vec![],
+                mode: TransactionMode::Bilateral,
+            })
+        };
+
+        // A third asset on the input side: refused, nothing moves.
+        let root_before = funded.root();
+        let err = funded.advance(
+            rk,
+            funded.devid,
+            apply_op(dbtc, rigb, 970),
+            entropy(2),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::ApplySettlement {
+                vault_id: vault,
+                input_policy_commit: dbtc,
+                input_amount: 1_000,
+                output_policy_commit: rigb,
+                output_amount: 970,
+                parent_sequence: 0,
+                new_sequence: 1,
+                pair,
+            }),
         );
+        let err = format!("{}", err.expect_err("third asset"));
+        assert!(
+            err.contains("exactly the vault's pair"),
+            "must refuse a settlement outside the pair, got: {err}"
+        );
+        assert_eq!(funded.root(), root_before);
 
-        // The seq=1 proof verifies against the seq=1 root.
-        crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion(
-            &vault_id,
+        // The real settlement: legs move AND the vault-state leaf follows.
+        let out = funded
+            .advance(
+                rk,
+                funded.devid,
+                apply_op(era, rigb, 970),
+                entropy(3),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::ApplySettlement {
+                    vault_id: vault,
+                    input_policy_commit: era,
+                    input_amount: 1_000,
+                    output_policy_commit: rigb,
+                    output_amount: 970,
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+            )
+            .expect("owner apply");
+        let after = &out.new_device_state;
+        assert_eq!(after.vault_reserve(&vault, &era), 11_000);
+        assert_eq!(after.vault_reserve(&vault, &rigb), 4_030);
+        let proof = out.vault_state_proof.as_ref().expect("witness");
+        assert_eq!(proof.sequence, 1, "the leaf advanced with the legs");
+        assert_eq!(
+            proof.reserves_digest,
+            pair.reserves_digest(11_000, 4_030),
+            "the leaf's digest is the folded amounts, in canonical pair order"
+        );
+        verify_vault_smt_inclusion(
+            &vault,
             1,
-            &r1,
-            &after_seq1.new_root,
-            &after_seq1.siblings,
+            &proof.reserves_digest,
+            &out.child_r_a,
+            &proof.siblings,
         )
-        .expect("seq=1 proof verifies");
-
-        // The seq=0 proof now NO LONGER verifies against the seq=1
-        // root — i.e. an attacker cannot replay the old proof against
-        // the device's current state.
-        crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion(
-            &vault_id,
+        .expect("lockstep leaf binds the post-settlement root");
+        // The stale seq-0 witness no longer verifies against the new root.
+        verify_vault_smt_inclusion(
+            &vault,
             0,
-            &r0,
-            &after_seq1.new_root,
-            &after_seq0.siblings,
+            &pair.reserves_digest(10_000, 5_000),
+            &out.child_r_a,
+            &proof.siblings,
         )
-        .expect_err("stale seq=0 proof must not verify against the seq=1 root");
+        .expect_err("stale generation must not verify against the new root");
+    }
+
+    /// `VaultStatePair` refuses a non-canonical or degenerate pair.
+    #[test]
+    fn vault_state_pair_must_be_canonical_and_distinct() {
+        let (lo, hi) = (pc(0x10), pc(0x20));
+        assert!(VaultStatePair::new(lo, hi, 30).is_ok());
+        assert!(VaultStatePair::new(hi, lo, 30).is_err(), "unordered");
+        assert!(VaultStatePair::new(lo, lo, 30).is_err(), "single asset");
     }
 }

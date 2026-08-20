@@ -20,18 +20,20 @@ use crate::util::text_id::encode_base32_crockford;
 
 /// Storage prefix for reserve inclusion proofs, keyed by vault then sequence.
 ///
-/// Sequence is zero-padded big-endian so the lexical listing order a storage
-/// node returns is the numeric order — the same convention the pending-pointer
-/// prefix uses, and the reason "latest" can be taken from the last entry
-/// without parsing every key.
+/// The sequence is a 16-byte big-endian buffer in Base32 Crockford — the SAME
+/// encoding the vault-state inclusion proof and the vault-state anchor use for
+/// their seq-pinned keys — so the lexical listing order a storage node returns
+/// is the numeric order (no hex anywhere: repo hard invariant).
 pub(crate) const VAULT_RESERVE_PROOF_ROOT: &str = "sofi/vault-reserve/";
 
 pub(crate) fn vault_reserve_proof_key(vault_id: &[u8; 32], sequence: u64) -> String {
+    let mut seq_bytes = [0u8; 16];
+    seq_bytes[8..].copy_from_slice(&sequence.to_be_bytes());
     format!(
-        "{}{}/{:016x}",
+        "{}{}/seq-{}",
         VAULT_RESERVE_PROOF_ROOT,
         encode_base32_crockford(vault_id),
-        sequence
+        encode_base32_crockford(&seq_bytes)
     )
 }
 

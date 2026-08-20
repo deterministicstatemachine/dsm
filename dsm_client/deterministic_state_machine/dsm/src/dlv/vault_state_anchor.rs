@@ -44,6 +44,10 @@ pub struct SignedVaultStateAnchor {
     pub vault_id: [u8; 32],
     pub sequence: u64,
     pub reserves_digest: [u8; 32],
+    /// The canonical storage set the vault was born under — inside the signed
+    /// preimage, birth-fixed across the lineage (every generation of the
+    /// anchor carries the same value; composition rejects a change).
+    pub storage_set_id: [u8; 32],
     pub owner_public_key: Vec<u8>,
     pub owner_signature: Vec<u8>,
 }
@@ -72,7 +76,9 @@ impl core::fmt::Display for AnchorError {
 
 impl std::error::Error for AnchorError {}
 
-fn anchor_sign_payload(vault_id: &[u8; 32], sequence: u64, reserves_digest: &[u8; 32]) -> [u8; 32] {
+/// The anchor-binding digest over the vault's attested state:
+/// `BLAKE3(DOMAIN_ANCHOR || vault_id || sequence_be || reserves_digest)`.
+fn anchor_state_digest(vault_id: &[u8; 32], sequence: u64, reserves_digest: &[u8; 32]) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(DOMAIN_ANCHOR);
     h.update(vault_id);
@@ -81,40 +87,64 @@ fn anchor_sign_payload(vault_id: &[u8; 32], sequence: u64, reserves_digest: &[u8
     *h.finalize().as_bytes()
 }
 
+/// The owner's SIGNED preimage: the anchor-binding digest extended with the
+/// canonical storage set the vault was born under —
+/// `BLAKE3(DOMAIN_ANCHOR || vault_id || sequence_be || reserves_digest ||
+/// storage_set_id)`. The set is inside the signature so a consumer resolving
+/// "which storage set serves this vault" reads it from the vault's own
+/// authenticated identity, never from local configuration.
+fn anchor_sign_payload(
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+    storage_set_id: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = Hasher::new();
+    h.update(DOMAIN_ANCHOR);
+    h.update(vault_id);
+    h.update(&sequence.to_be_bytes());
+    h.update(reserves_digest);
+    h.update(storage_set_id);
+    *h.finalize().as_bytes()
+}
+
 /// Canonical vault-state-anchor digest binding a vault to one attested
 /// `(sequence, reserves_digest)` state — `BLAKE3(DOMAIN_ANCHOR || vault_id
-/// || sequence_be || reserves_digest)`.  This is exactly the payload an
-/// owner-signed `VaultStateAnchorV1` signs over, so the RouteCommit hop's
+/// || sequence_be || reserves_digest)`.  The RouteCommit hop's
 /// `vault_state_anchor_digest` (stamped by the routing binder from the
-/// composed vault state) and the vault-side unlock gate can independently
-/// recompute the same value and compare — the third anchor-binding field,
+/// composed vault state) and the vault-side unlock gate independently
+/// recompute this value and compare — the third anchor-binding field,
 /// alongside `vault_state_anchor_seq` and `vault_state_reserves_digest`.
+/// (The owner-signed anchor covers these same fields plus the vault's
+/// birth-fixed `storage_set_id`; see `sign_vault_state_anchor`.)
 pub fn compute_anchor_digest(
     vault_id: &[u8; 32],
     sequence: u64,
     reserves_digest: &[u8; 32],
 ) -> [u8; 32] {
-    anchor_sign_payload(vault_id, sequence, reserves_digest)
+    anchor_state_digest(vault_id, sequence, reserves_digest)
 }
 
 /// Sign a vault state anchor with the owner's SPHINCS+ secret key.
 ///
 /// The signed payload is the BLAKE3 digest of
-/// `DOMAIN_ANCHOR || vault_id || sequence_be || reserves_digest`.
+/// `DOMAIN_ANCHOR || vault_id || sequence_be || reserves_digest || storage_set_id`.
 pub fn sign_vault_state_anchor(
     vault_id: &[u8; 32],
     sequence: u64,
     reserves_digest: &[u8; 32],
+    storage_set_id: &[u8; 32],
     owner_public_key: &[u8],
     owner_secret_key: &[u8],
 ) -> Result<SignedVaultStateAnchor, AnchorError> {
-    let payload = anchor_sign_payload(vault_id, sequence, reserves_digest);
+    let payload = anchor_sign_payload(vault_id, sequence, reserves_digest, storage_set_id);
     let signature = crate::crypto::sphincs::sphincs_sign(owner_secret_key, &payload)
         .map_err(|e| AnchorError::SignFailed(format!("{e:?}")))?;
     Ok(SignedVaultStateAnchor {
         vault_id: *vault_id,
         sequence,
         reserves_digest: *reserves_digest,
+        storage_set_id: *storage_set_id,
         owner_public_key: owner_public_key.to_vec(),
         owner_signature: signature,
     })
@@ -125,7 +155,12 @@ pub fn sign_vault_state_anchor(
 /// derived from the anchor's public fields, `Err(SignatureInvalid)`
 /// otherwise.
 pub fn verify_vault_state_anchor(anchor: &SignedVaultStateAnchor) -> Result<(), AnchorError> {
-    let payload = anchor_sign_payload(&anchor.vault_id, anchor.sequence, &anchor.reserves_digest);
+    let payload = anchor_sign_payload(
+        &anchor.vault_id,
+        anchor.sequence,
+        &anchor.reserves_digest,
+        &anchor.storage_set_id,
+    );
     let ok = crate::crypto::sphincs::sphincs_verify(
         &anchor.owner_public_key,
         &payload,
@@ -157,8 +192,11 @@ mod tests {
         let base = compute_anchor_digest(&vault_id, 5, &rd);
         // Deterministic.
         assert_eq!(base, compute_anchor_digest(&vault_id, 5, &rd));
-        // It IS the payload an owner-signed anchor signs over.
-        assert_eq!(base, anchor_sign_payload(&vault_id, 5, &rd));
+        // It is the STATE half of what an owner-signed anchor signs over: the
+        // signed payload extends it with the vault's birth-fixed storage set, so
+        // the two are distinct and neither is a prefix collision of the other.
+        assert_eq!(base, anchor_state_digest(&vault_id, 5, &rd));
+        assert_ne!(base, anchor_sign_payload(&vault_id, 5, &rd, &[0x6B; 32]));
         // Sensitive to vault_id, sequence, and reserves digest.
         assert_ne!(base, compute_anchor_digest(&[0x22u8; 32], 5, &rd));
         assert_ne!(base, compute_anchor_digest(&vault_id, 6, &rd));
@@ -197,7 +235,7 @@ mod tests {
         let vault_id = [0x11u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
-        let signed = sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &pk, &sk)
+        let signed = sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &[0x6B; 32], &pk, &sk)
             .expect("sign succeeds");
 
         verify_vault_state_anchor(&signed).expect("verify succeeds");
@@ -209,8 +247,9 @@ mod tests {
         let vault_id = [0x22u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
-        let mut signed = sign_vault_state_anchor(&vault_id, 5, &reserves_digest, &pk, &sk)
-            .expect("sign succeeds");
+        let mut signed =
+            sign_vault_state_anchor(&vault_id, 5, &reserves_digest, &[0x6B; 32], &pk, &sk)
+                .expect("sign succeeds");
         signed.sequence = 6;
 
         assert!(verify_vault_state_anchor(&signed).is_err());
@@ -222,9 +261,27 @@ mod tests {
         let vault_id = [0x33u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
-        let mut signed = sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &pk, &sk)
-            .expect("sign succeeds");
+        let mut signed =
+            sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &[0x6B; 32], &pk, &sk)
+                .expect("sign succeeds");
         signed.reserves_digest[0] ^= 0xff;
+
+        assert!(verify_vault_state_anchor(&signed).is_err());
+    }
+
+    /// The storage set is INSIDE the signed preimage: an anchor whose set id
+    /// was altered after signing does not verify — a consumer cannot be
+    /// steered to another set by a mutated field.
+    #[test]
+    fn anchor_verification_rejects_tampered_storage_set_id() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let vault_id = [0x44u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
+
+        let mut signed =
+            sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &[0x6B; 32], &pk, &sk)
+                .expect("sign succeeds");
+        signed.storage_set_id[0] ^= 0xff;
 
         assert!(verify_vault_state_anchor(&signed).is_err());
     }

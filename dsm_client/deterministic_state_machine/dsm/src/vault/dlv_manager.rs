@@ -337,21 +337,6 @@ impl LimboVault {
     /// `VaultReserveInclusionProofV1`) and passes them here.
     ///
     /// Returns `None` for non-AMM fulfillments — Tier 2 Foundation is AMM-only.
-    pub fn reserves_digest_for(&self, reserve_a: u64, reserve_b: u64) -> Option<[u8; 32]> {
-        if let crate::vault::FulfillmentMechanism::AmmConstantProduct {
-            token_a,
-            token_b,
-            fee_bps,
-        } = &self.fulfillment_condition
-        {
-            Some(crate::dlv::vault_state_anchor::compute_reserves_digest(
-                token_a, token_b, reserve_a, reserve_b, *fee_bps,
-            ))
-        } else {
-            None
-        }
-    }
-
     /// Read-only accessor for the vault's AMM token_a (the
     /// caller's-side order of the canonical pair).  Returns `None`
     /// if not AMM.  Used by `route.syncVaultsForPair` to map the
@@ -603,29 +588,5 @@ mod tests {
         let lock = mgr.get_vault(&id).await.unwrap();
         let v = lock.lock().await;
         assert_eq!(v.current_sequence, 0);
-    }
-
-    #[tokio::test]
-    async fn vault_reserves_digest_is_over_the_reserves_it_is_given() {
-        use crate::dlv::vault_state_anchor::compute_reserves_digest;
-        let v = amm_vault(b"AAA", b"BBB", 30);
-        // The digest is a function of SUPPLIED reserves — the vault no longer
-        // stores any, so it cannot digest a quantity nobody holds.
-        assert_eq!(
-            v.reserves_digest_for(1_000, 2_000),
-            Some(compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30)),
-        );
-        assert_ne!(
-            v.reserves_digest_for(1_000, 2_000),
-            v.reserves_digest_for(1_000, 2_001),
-            "a different reserve must yield a different digest"
-        );
-    }
-
-    #[tokio::test]
-    async fn vault_reserves_digest_returns_none_for_non_amm() {
-        // Non-AMM fulfilment (CryptoCondition) — Tier 2 Foundation is AMM-only.
-        let v = dummy_vault(vid(1), VS::Limbo);
-        assert_eq!(v.reserves_digest_for(1, 2), None);
     }
 }

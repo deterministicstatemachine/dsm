@@ -131,6 +131,212 @@ pub(crate) async fn put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmEr
     sdk.put_to_all_replicas(key, payload, None).await
 }
 
+/// Keyed PUT of `payload` under `key` to every member of the canonical set
+/// `set`, each authenticated with its OWN per-node token (lazily back-filled
+/// like [`put_bytes`]). Returns the per-member fan-out; never short-circuits and
+/// never decides quorum — `set.quorum()` is the caller's threshold and
+/// `set.len()` its denominator.
+///
+/// This is the delivery primitive under frozen publication artifacts: the
+/// caller passes the exact frozen bytes and the set they were frozen FOR
+/// (resolved through the catalog), never "the configured fleet".
+pub(crate) async fn put_bytes_to_all_members(
+    set: &crate::sdk::storage_set::StorageSet,
+    key: &str,
+    payload: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
+    // Exactly one of these blocks survives cfg expansion, and it is the
+    // function's tail expression (the shape `BitcoinTapSdk::storage_put_bytes`
+    // uses for the same test seam).
+    #[cfg(test)]
+    {
+        Ok(fake_fleet::put(set, key, payload))
+    }
+    #[cfg(not(test))]
+    {
+        put_bytes_to_all_members_live(set, key, payload).await
+    }
+}
+
+/// TEST-ONLY in-process member fleet: one object store per MEMBER ID (not per
+/// URL), an injectable per-member failure, and an injectable echoed node id —
+/// so a test can drive the real per-member replay/quorum logic through
+/// partition splits, echo mismatches and foreign sets without HTTP.
+#[cfg(test)]
+pub(crate) mod fake_fleet {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use crate::sdk::storage_node_sdk::{KeyedPutFanout, MemberPutOutcome};
+    use crate::sdk::storage_set::StorageSet;
+
+    #[derive(Default)]
+    struct FleetState {
+        /// member_id -> (key -> bytes)
+        stores: HashMap<String, HashMap<String, Vec<u8>>>,
+        /// members whose next PUTs fail (persistent until cleared)
+        failing: HashSet<String>,
+        /// member_id -> the node id it echoes (default: its own member id)
+        echo_override: HashMap<String, Option<String>>,
+        /// every (member_id, key, digest-of-bytes) PUT that was attempted, in order
+        put_log: Vec<(String, String, [u8; 32])>,
+    }
+
+    static STATE: once_cell::sync::Lazy<Mutex<FleetState>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(FleetState::default()));
+
+    fn state() -> std::sync::MutexGuard<'static, FleetState> {
+        STATE.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn reset() {
+        *state() = FleetState::default();
+    }
+
+    pub(crate) fn fail_member(member_id: &str) {
+        state().failing.insert(member_id.to_string());
+    }
+
+    pub(crate) fn heal_member(member_id: &str) {
+        state().failing.remove(member_id);
+    }
+
+    /// Make `member_id` echo `echoes` (e.g. another member's id, or `None`).
+    pub(crate) fn set_echo(member_id: &str, echoes: Option<&str>) {
+        state()
+            .echo_override
+            .insert(member_id.to_string(), echoes.map(|s| s.to_string()));
+    }
+
+    /// The bytes ANY member holds under `key` (a reader fetches from any node).
+    pub(crate) fn any_member_holding(key: &str) -> Option<Vec<u8>> {
+        state().stores.values().find_map(|m| m.get(key).cloned())
+    }
+
+    pub(crate) fn stored(member_id: &str, key: &str) -> Option<Vec<u8>> {
+        state()
+            .stores
+            .get(member_id)
+            .and_then(|m| m.get(key))
+            .cloned()
+    }
+
+    /// Every attempted PUT as (member_id, key, blake3(bytes)).
+    pub(crate) fn put_log() -> Vec<(String, String, [u8; 32])> {
+        state().put_log.clone()
+    }
+
+    pub(crate) fn put(set: &StorageSet, key: &str, payload: &[u8]) -> KeyedPutFanout {
+        let mut st = state();
+        let mut outcomes = Vec::with_capacity(set.len());
+        let mut accepted = 0u32;
+        for m in set.members() {
+            st.put_log.push((
+                m.member_id.clone(),
+                key.to_string(),
+                *blake3::hash(payload).as_bytes(),
+            ));
+            if st.failing.contains(&m.member_id) {
+                outcomes.push(MemberPutOutcome {
+                    member_id: m.member_id.clone(),
+                    endpoint: m.endpoint.clone(),
+                    accepted: false,
+                    echoed_node_id: None,
+                    error: Some("injected failure".into()),
+                });
+                continue;
+            }
+            st.stores
+                .entry(m.member_id.clone())
+                .or_default()
+                .insert(key.to_string(), payload.to_vec());
+            let echoed = match st.echo_override.get(&m.member_id) {
+                Some(o) => o.clone(),
+                None => Some(m.member_id.clone()),
+            };
+            let counted = echoed.as_deref() == Some(m.member_id.as_str());
+            if counted {
+                accepted += 1;
+            }
+            outcomes.push(MemberPutOutcome {
+                member_id: m.member_id.clone(),
+                endpoint: m.endpoint.clone(),
+                accepted: counted,
+                echoed_node_id: echoed,
+                error: if counted {
+                    None
+                } else {
+                    Some("echoed node id does not match member".into())
+                },
+            });
+        }
+        KeyedPutFanout {
+            outcomes,
+            accepted,
+            total: set.len() as u32,
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn put_bytes_to_all_members_live(
+    set: &crate::sdk::storage_set::StorageSet,
+    key: &str,
+    payload: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
+    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+        DsmError::storage(
+            format!("load storage node config: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    // Reach the SET's endpoints, not whatever `node_urls` happens to list:
+    // the set is the authority on WHO, the config only on HOW to reach them.
+    let mut member_config = config.clone();
+    member_config.node_urls = set.members().iter().map(|m| m.endpoint.clone()).collect();
+    let sdk = StorageNodeSDK::new(member_config.clone())
+        .await
+        .map_err(|e| {
+            DsmError::storage(
+                format!("construct storage node sdk: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+    let mut auths = std::collections::HashMap::new();
+    for url in &member_config.node_urls {
+        if let Some(auth) = resolve_storage_auth(url) {
+            auths.insert(url.clone(), auth);
+        }
+    }
+    if auths.len() < member_config.node_urls.len() {
+        let device_id = crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
+        let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+        if !device_id.is_empty() && !public_key.is_empty() && !genesis_hash.is_empty() {
+            let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+            let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
+            let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
+            if let Err(e) = sdk
+                .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
+                .await
+            {
+                log::warn!(
+                    "storage_io::put_bytes_to_all_members: back-fill register_device_for_auth \
+                     failed: {e} (continuing — some members may PUT-401)"
+                );
+            }
+            auths.clear();
+            for url in &member_config.node_urls {
+                if let Some(auth) = resolve_storage_auth(url) {
+                    auths.insert(url.clone(), auth);
+                }
+            }
+        }
+    }
+    let sdk = sdk.with_per_node_auth(&auths);
+    Ok(sdk.put_bytes_to_all_members(set, key, payload).await)
+}
+
 /// Fetch an object's bytes by key, with failover across the configured nodes.
 pub(crate) async fn get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
     let config = StorageNodeConfig::from_env_config().await.map_err(|e| {

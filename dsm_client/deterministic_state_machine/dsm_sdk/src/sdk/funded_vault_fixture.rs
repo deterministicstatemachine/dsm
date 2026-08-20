@@ -192,6 +192,90 @@ pub(crate) fn funded_vault_with_surplus(
     }
 }
 
+/// Create a funded AMM vault through the REAL `dlv.create` route and return its
+/// id.
+///
+/// [`funded_vault`] builds device STATE directly, which is the right shape for
+/// testing verification but leaves the vault unborn as far as the market is
+/// concerned: no frozen publication artifacts, so nothing at quorum. Routes that
+/// require a vault to be market-active — advertising it, closing it — must not
+/// be handed that state, or the test proves the route works on a vault the
+/// production path can never produce.
+///
+/// So this is the mandatory producer: the same handler the app calls, including
+/// the five birth objects it freezes and publishes.
+pub(crate) fn create_funded_amm_vault(
+    router: &crate::handlers::app_router_impl::AppRouterImpl,
+    pc_a: &[u8; 32],
+    pc_b: &[u8; 32],
+    reserve_a: u64,
+    reserve_b: u64,
+) -> [u8; 32] {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use dsm::types::proto as generated;
+    use prost::Message as _;
+
+    let (lo, hi) = if pc_a <= pc_b {
+        (pc_a, pc_b)
+    } else {
+        (pc_b, pc_a)
+    };
+    let fulfillment = generated::FulfillmentMechanism {
+        kind: Some(generated::fulfillment_mechanism::Kind::AmmConstantProduct(
+            generated::AmmConstantProduct {
+                token_a: lo.to_vec(),
+                token_b: hi.to_vec(),
+                fee_bps: 30,
+            },
+        )),
+    }
+    .encode_to_vec();
+    let req = generated::DlvInstantiateV1 {
+        spec: Some(generated::DlvSpecV1 {
+            policy_digest: vec![0x5Au8; 32],
+            fulfillment_bytes: fulfillment,
+            anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+            ..Default::default()
+        }),
+        creator_public_key: Vec::new(),
+        signature: Vec::new(),
+        funding_legs: vec![
+            generated::DlvFundingLegV1 {
+                policy_commit: pc_a.to_vec(),
+                amount: reserve_a,
+            },
+            generated::DlvFundingLegV1 {
+                policy_commit: pc_b.to_vec(),
+                amount: reserve_b,
+            },
+        ],
+    };
+    let args = generated::ArgPack {
+        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+        codec: generated::Codec::Proto as i32,
+        body: req.encode_to_vec(),
+    }
+    .encode_to_vec();
+    let res = crate::runtime::get_runtime().block_on(async {
+        router
+            .invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args,
+            })
+            .await
+    });
+    assert!(
+        res.success,
+        "fixture: dlv.create failed: {:?}",
+        res.error_message
+    );
+    crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+        .expect("fixture: list vault records")
+        .pop()
+        .expect("fixture: dlv.create recorded exactly one vault")
+        .vault_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
