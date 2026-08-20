@@ -24,6 +24,38 @@ pub struct AppState {
     pub db_pool: Arc<db::DBPool>,
     pub replication_manager: Arc<replication::ReplicationManager>,
     pub current_tick: Arc<AtomicI64>,
+    /// The canonical storage set this node is a member of (`[storage_set]
+    /// members = [...]` in config, canonical id derived exactly as clients derive
+    /// it). `None` = not configured: the settlement-slot register refuses every
+    /// claim (fail closed) rather than accepting claims for an unknown set.
+    pub storage_set: Option<Arc<NodeStorageSet>>,
+}
+
+/// This node's view of the canonical storage set it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeStorageSet {
+    /// `dsm_sdk::sdk::storage_set::compute_storage_set_id` over `member_ids`.
+    pub id: [u8; 32],
+    /// The configured protocol identities of every member (this node's own
+    /// `node.id` string must be among them).
+    pub member_ids: Vec<String>,
+}
+
+impl NodeStorageSet {
+    /// Build from configured member ids; refuses an empty set, duplicate ids,
+    /// or a set that does not contain `own_node_id` — a node that would
+    /// acknowledge claims for a set it is not a member of is misconfigured.
+    pub fn new(member_ids: Vec<String>, own_node_id: &str) -> anyhow::Result<Self> {
+        if !member_ids.iter().any(|m| m == own_node_id) {
+            anyhow::bail!(
+                "storage_set.members does not contain this node's own id {own_node_id:?}"
+            );
+        }
+        let refs: Vec<&str> = member_ids.iter().map(|s| s.as_str()).collect();
+        let id = dsm_sdk::sdk::storage_set::compute_storage_set_id(&refs)
+            .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
+        Ok(Self { id, member_ids })
+    }
 }
 
 impl AppState {
@@ -48,7 +80,14 @@ impl AppState {
             db_pool,
             replication_manager,
             current_tick: Arc::new(AtomicI64::new(0)),
+            storage_set: None,
         }
+    }
+
+    /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
+    pub fn with_storage_set(mut self, set: NodeStorageSet) -> Self {
+        self.storage_set = Some(Arc::new(set));
+        self
     }
 }
 

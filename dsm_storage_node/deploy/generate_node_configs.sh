@@ -21,10 +21,45 @@ TEMPLATE="${SCRIPT_DIR}/../config/production.toml"
 COMPOSE_SRC="${SCRIPT_DIR}/docker-compose.node.yml"
 OUT_DIR="${SCRIPT_DIR}/nodes"
 
+FORCE=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --force) FORCE=1 ;;
+        *) ARGS+=("$a") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 IP1 IP2 [IP3 ... IPN]"
+    echo "Usage: $0 [--force] IP1 IP2 [IP3 ... IPN]"
     echo "  Generates per-node deploy bundles for DSM storage nodes."
     echo "  Minimum 2 nodes; recommended 6 for N=6 K=3 replication."
+    echo "  --force: overwrite an existing bundle directory (see the warning below)."
+    exit 1
+fi
+
+# THIS SCRIPT MINTS A NEW CA AND DELETES THE OLD ONE.
+#
+# The CA private key exists in exactly one place — ${OUT_DIR}/ca/ca.key. It is
+# not in git (only the public cert is, as scripts/ca.crt) and it cannot be
+# reconstructed. Deleting it means the deployed fleet's certificates can never
+# be reissued or extended: every node must be redeployed with a new CA, and
+# every client CA bundle re-pushed, before anything can talk to anything.
+#
+# Running this to LOOK at the output would therefore destroy the running
+# fleet's deployment material. So an existing bundle directory is never
+# clobbered silently.
+if [ -e "${OUT_DIR}" ] && [ "${FORCE}" -ne 1 ]; then
+    echo "REFUSING: ${OUT_DIR} already exists."
+    echo
+    echo "  Regenerating replaces the CA (private key NOT recoverable — not in git),"
+    echo "  every per-node key, and any saved image tar in that directory."
+    echo "  The live fleet's certs chain to the CA that is there now."
+    echo
+    echo "  To inspect what would be generated, copy the directory aside first."
+    echo "  To genuinely re-issue the fleet's identity, re-run with --force and be"
+    echo "  ready to redeploy EVERY node and re-push the client CA bundle."
     exit 1
 fi
 
@@ -48,6 +83,22 @@ openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
 
 # Generate a random PostgreSQL password (shared across all nodes for simplicity)
 PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
+
+# ----- The canonical storage set -----
+# Every node must be handed the SAME member list: the set id is derived by
+# hashing the sorted ids, so a node configured with a different list computes a
+# different id and refuses claims for the set its peers belong to. Built once,
+# here, and substituted into every bundle unchanged.
+#
+# These ids are also the client's contract: the member ids must equal the
+# `[[nodes]] name` entries in the client env config, because that is what the
+# client hashes to name the set a vault is born under.
+STORAGE_SET_MEMBERS=""
+for i in $(seq 1 "${N}"); do
+    [ -n "${STORAGE_SET_MEMBERS}" ] && STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}, "
+    STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}\"dsm-node-${i}\""
+done
+echo "Canonical storage set (${N} members): ${STORAGE_SET_MEMBERS}"
 
 # ----- Per-Node Bundles -----
 for i in $(seq 1 "${N}"); do
@@ -95,7 +146,8 @@ EXTEOF
     DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
-    sed -e "s|__NODE_ID__|${NODE_ID}|g" \
+    sed -e "s|members = \[\"__STORAGE_SET_MEMBERS__\"\]|members = [${STORAGE_SET_MEMBERS}]|g" \
+        -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \
