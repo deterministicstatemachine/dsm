@@ -1144,8 +1144,10 @@ message AmmVaultSummaryV1 {
   // unresolved, not broken.  52 chars for an encoded 32-byte commit, hence 64.
   string token_a_ticker = 17 [(dsm_max_len)=64];
   string token_b_ticker = 18 [(dsm_max_len)=64];
-  // Reserved for `closed` (the vault's reserves are 0 @ K+1 after `dlv.close`).
-  reserved 20;
+  // TRUE once `dlv.close` has drained the vault: both reserve leaves are 0 at
+  // the terminal generation. A closed vault is unquotable (composition sees
+  // zero reserves), un-fundable and un-closable — its id is single-use.
+  bool closed = 20;
   // FUNDED IS NOT PUBLISHED. A vault's five birth objects (anchor seq-pinned +
   // latest, vault-state inclusion proof seq-pinned + latest, reserve proof)
   // are frozen in the funding transaction and replayed to the vault's birth
@@ -1565,6 +1567,17 @@ message RoutingVaultAdvertisementV1 {
 // owner learning what happened, not authorizing it. So the request names only
 // which settlement to look at: everything the owner acts on is re-derived from
 // the receipt it fetches and verifies, never taken from the caller.
+// dlv.close — the owner withdraws ALL remaining liquidity and retires the vault.
+//
+// The request names only the vault: every field of the canonical
+// `Operation::DlvClose` (both legs with their amounts, the parent and terminal
+// generation, the pair/fee) is DERIVED by Rust from the owner's verified
+// frontier — composition at exactly this generation, with exactly these
+// reserves — and signed. A caller cannot state what it withdraws.
+message DlvCloseV1 {
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
+}
+
 message DlvReconcileV1 {
   bytes vault_id = 1 [(dsm_fixed_len)=32];
   // The external commitment of the settlement to fold. The receipt is fetched

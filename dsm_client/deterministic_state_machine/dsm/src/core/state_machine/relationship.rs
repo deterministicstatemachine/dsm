@@ -288,6 +288,7 @@ impl RelationshipStatePair {
                         Operation::DlvInvalidate { .. } => b"dlv_inv_",
                         Operation::DlvSettle { .. } => b"dlv_set_",
                         Operation::DlvOwnerApply { .. } => b"dlv_app_",
+                        Operation::DlvClose { .. } => b"dlv_cls_",
                     };
 
                     if value != op_type {

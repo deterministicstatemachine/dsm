@@ -667,6 +667,42 @@ pub enum Operation {
         signature: Vec<u8>,
         mode: TransactionMode,
     },
+    /// The owner CLOSES its AMM vault: the complete remaining reserve set (both
+    /// legs of the pair, exactly, at the current generation) moves back to
+    /// ordinary spendable balance atomically, exactly once, and the vault's
+    /// leaves become `0 @ parent + 1` — the terminal generation. A closed vault
+    /// id is single-use: `Fund` refuses it forever (its leaves exist).
+    ///
+    /// The SIGNED operation binds the WHOLE transition — vault, both legs with
+    /// their amounts, the parent and child generation, and the pair/fee that
+    /// determine the terminal vault-state digest — so no unsigned mutation
+    /// metadata decides what moves. The `Withdraw` reserve mutation that rides
+    /// the same advance must equal these fields field-for-field.
+    ///
+    /// The app request is only `DlvCloseV1 { vault_id }`: every field here is
+    /// DERIVED by the handler from the owner's verified frontier (composition
+    /// at exactly this generation with exactly these reserves), never supplied.
+    DlvClose {
+        /// 32-byte vault being closed.
+        vault_id: Vec<u8>,
+        /// The lex-lower and lex-higher legs of the vault's pair, with the
+        /// amounts being withdrawn — the FULL remaining reserves. Both present,
+        /// canonical order.
+        leg_a_policy_commit: [u8; 32],
+        leg_a_amount: u64,
+        leg_b_policy_commit: [u8; 32],
+        leg_b_amount: u64,
+        /// The generation consumed and the terminal generation produced.
+        /// Exactly one step.
+        parent_sequence: u64,
+        new_sequence: u64,
+        /// The vault's fee (its pair is `leg_a/leg_b`); together they derive
+        /// the terminal reserves digest `digest(a, b, 0, 0, fee)`.
+        fee_bps: u32,
+        /// SPHINCS+ signature by the owner over the canonical operation bytes.
+        signature: Vec<u8>,
+        mode: TransactionMode,
+    },
     /// Attempt to unlock a vault by providing a fulfillment proof.
     DlvUnlock {
         /// 32-byte vault identifier.
@@ -766,6 +802,9 @@ impl Operation {
             // so it is egress too — even though the owner's spendable balance
             // is untouched and the operation authorizes no balance delta.
             | DlvOwnerApply { .. }
+            // A close moves the vault's reserves OUT of the encumbrance and
+            // back to the owner's spendable balance: value-bearing.
+            | DlvClose { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -898,6 +937,18 @@ impl Operation {
             } => EgressAsset::Asset {
                 token_id: output_policy_commit.to_vec(),
                 amount: *output_amount,
+            },
+            // A close releases BOTH legs from the vault's reserves back to the
+            // owner's own spendable balance. Nothing leaves the device's
+            // control, but the encumbrance is what the recovery/bearer gates
+            // watch: name the lex-lower leg so the gate sees a reserve move.
+            DlvClose {
+                leg_a_policy_commit,
+                leg_a_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: leg_a_policy_commit.to_vec(),
+                amount: *leg_a_amount,
             },
 
             // Token creation: the asset that LEAVES is ERA (the burned fee) —
@@ -1533,6 +1584,30 @@ impl Operation {
                 put_bytes(&mut out, output_policy_commit);
                 put_u64(&mut out, *input_amount);
                 put_u64(&mut out, *output_amount);
+                put_bytes(&mut out, signature);
+                put_mode(&mut out, mode);
+            }
+            DlvClose {
+                vault_id,
+                leg_a_policy_commit,
+                leg_a_amount,
+                leg_b_policy_commit,
+                leg_b_amount,
+                parent_sequence,
+                new_sequence,
+                fee_bps,
+                signature,
+                mode,
+            } => {
+                put_u8(&mut out, 28);
+                put_bytes(&mut out, vault_id);
+                put_bytes(&mut out, leg_a_policy_commit);
+                put_u64(&mut out, *leg_a_amount);
+                put_bytes(&mut out, leg_b_policy_commit);
+                put_u64(&mut out, *leg_b_amount);
+                put_u64(&mut out, *parent_sequence);
+                put_u64(&mut out, *new_sequence);
+                put_u32(&mut out, *fee_bps);
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -2301,6 +2376,30 @@ impl Operation {
                     mode,
                 }
             }
+            28 => {
+                let vault_id = get_bytes(&mut input)?;
+                let leg_a_policy_commit = get_arr32(&mut input)?;
+                let leg_a_amount = get_u64(&mut input)?;
+                let leg_b_policy_commit = get_arr32(&mut input)?;
+                let leg_b_amount = get_u64(&mut input)?;
+                let parent_sequence = get_u64(&mut input)?;
+                let new_sequence = get_u64(&mut input)?;
+                let fee_bps = get_u32(&mut input)?;
+                let signature = get_bytes(&mut input)?;
+                let mode = dec_mode(&mut input)?;
+                DlvClose {
+                    vault_id,
+                    leg_a_policy_commit,
+                    leg_a_amount,
+                    leg_b_policy_commit,
+                    leg_b_amount,
+                    parent_sequence,
+                    new_sequence,
+                    fee_bps,
+                    signature,
+                    mode,
+                }
+            }
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must
@@ -2378,6 +2477,7 @@ impl Operation {
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
             | Operation::DlvOwnerApply { signature, .. }
+            | Operation::DlvClose { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2416,6 +2516,7 @@ impl Operation {
             Operation::DlvClaim { .. } => "dlv_claim",
             Operation::DlvSettle { .. } => "dlv_settle",
             Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
+            Operation::DlvClose { .. } => "dlv_close",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }
@@ -2438,7 +2539,8 @@ impl Operation {
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
-            | Operation::DlvOwnerApply { signature, .. } => {
+            | Operation::DlvOwnerApply { signature, .. }
+            | Operation::DlvClose { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -2465,7 +2567,8 @@ impl Operation {
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
-            | Operation::DlvOwnerApply { signature, .. } => {
+            | Operation::DlvOwnerApply { signature, .. }
+            | Operation::DlvClose { signature, .. } => {
                 *signature = sig;
             }
             _ => {}
@@ -2569,6 +2672,7 @@ impl Ops for Operation {
             Operation::DlvClaim { .. } => "dlv_claim",
             Operation::DlvSettle { .. } => "dlv_settle",
             Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
+            Operation::DlvClose { .. } => "dlv_close",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }

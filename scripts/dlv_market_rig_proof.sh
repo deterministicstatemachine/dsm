@@ -14,6 +14,14 @@
 #   - traders: Σ trader ERA debits == ERA reserve gain; Σ trader SOFI credits == SOFI reserve drain
 #   - storage: exactly N receipted pointers on the fleet (union over nodes), one per generation 1..N;
 #     any extra pointer (the refused stale/future attempt) has NO receipt
+#   - register: for every consumed parent, exactly ONE claim digest holds a quorum of the storage set,
+#     and no conflicting digest holds one. Minority conflicting rows are LEGAL and permanent (a
+#     partition split leaves the loser's bytes on one node forever) — asserting "identical on every
+#     node" would reject a perfectly safe specimen, so it is deliberately NOT asserted
+#   - if the vault was CLOSED: the LP's spendable balances grew by EXACTLY the reserves the vault
+#     held at the consumed generation (invariant 4), both legs are 0 at the terminal generation, and
+#     the five terminal objects (anchor seq+latest, inclusion seq+latest, reserve proof) are
+#     readable on a quorum
 set -uo pipefail
 LP="${1:?LP serial}"; T1="${2:?T1 serial}"; T2="${3:?T2 serial}"; N="${4:-4}"
 OUT="$(mktemp -d)"; PASS=0; FAIL=0
@@ -27,7 +35,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 NODES="47.251.246.93 47.251.250.159 47.251.88.58"
 
 echo "== pulling =="; pull "$LP" "$OUT/lp.db" || exit 1; pull "$T1" "$OUT/t1.db" || exit 1; pull "$T2" "$OUT/t2.db" || exit 1
-for s in lp t1 t2; do check "$s schema v4" "$(q "$OUT/$s.db" 'PRAGMA user_version;')" "4"; done
+for s in lp t1 t2; do check "$s schema v5" "$(q "$OUT/$s.db" 'PRAGMA user_version;')" "5"; done
 
 echo; echo "== LP: vault, reserves, generation =="
 LPD="$(python3 "$HERE/dsm_head_decode.py" "$OUT/lp.db")"
@@ -108,22 +116,83 @@ print(f"{tot_in} {tot_out} {','.join(map(str,receipted))} {len(unreceipted)}")
 EOF
 )"
 read -r TOT_IN TOT_OUT RGENS UNRCT <<<"$CONS"
-# ERA (leg B) gained exactly what traders paid; SOFI (leg A) lost exactly what traders received, relative to funding.
-FUND_A=25000000; FUND_B=100   # the LP funded these at gen 0 (asserted at creation from the head; see trace)
-check "ERA reserve == funding + Σ trader inputs" "$LEG_B_AMT" "$((FUND_B + TOT_IN))"
-check "SOFI reserve == funding − Σ trader outputs" "$LEG_A_AMT" "$((FUND_A - TOT_OUT))"
-check "LP spendable ERA untouched by the market (funding-time value)" "$(python3 - "$OUT/lp.db" <<'EOF'
+# What the LP funded at gen 0 (asserted at creation from the head; see trace),
+# and what it kept back as spendable.
+FUND_A=25000000; FUND_B=100
+KEPT_SOFI=75000000; KEPT_ERA=190
+# The reserves the vault holds at the last consumed generation: funding plus
+# what the market moved. ERA (leg B) gained exactly what traders paid; SOFI
+# (leg A) lost exactly what traders received. These are also the amounts a
+# close must return — exactly, which is what makes them worth naming once.
+RESERVE_A_AT_K=$((FUND_A - TOT_OUT))
+RESERVE_B_AT_K=$((FUND_B + TOT_IN))
+read -r LP_SOFI LP_ERA <<<"$(python3 - "$OUT/lp.db" <<'EOF'
 import sqlite3,sys; sys.path.insert(0,'scripts'); from dsm_head_decode import decode
-h=decode(sqlite3.connect(sys.argv[1]).execute("SELECT head_bytes FROM bcr_device_heads").fetchone()[0]); print([v for k,v in h['balances'].items() if k.startswith('NW9MKEFN')][0])
+b=decode(sqlite3.connect(sys.argv[1]).execute("SELECT head_bytes FROM bcr_device_heads").fetchone()[0])['balances']
+print([v for k,v in b.items() if k.startswith('DX7JKWDQ')][0], [v for k,v in b.items() if k.startswith('NW9MKEFN')][0])
 EOF
-)" "190"
-check "LP spendable SOFI untouched by the market (funding-time value)" "$(python3 - "$OUT/lp.db" <<'EOF'
-import sqlite3,sys; sys.path.insert(0,'scripts'); from dsm_head_decode import decode
-h=decode(sqlite3.connect(sys.argv[1]).execute("SELECT head_bytes FROM bcr_device_heads").fetchone()[0]); print([v for k,v in h['balances'].items() if k.startswith('DX7JKWDQ')][0])
-EOF
-)" "75000000"
+)"
+
+if [ "$LEG_A_AMT" = "0" ] && [ "$LEG_B_AMT" = "0" ]; then
+  CLOSED=1
+  # INVARIANT 4 — WITHDRAWAL. The delegation is a loop: everything the LP put
+  # in comes back, plus what the market added and minus what it took. Asserted
+  # against the reserves at the CONSUMED generation, not against the funding
+  # amounts — a close that returned the funding would be off by the market.
+  echo; echo "== invariant 4: the vault was closed and the reserves came back, exactly =="
+  check "LP spendable SOFI == kept + reserve_a at the consumed generation" "$LP_SOFI" "$((KEPT_SOFI + RESERVE_A_AT_K))"
+  check "LP spendable ERA  == kept + reserve_b at the consumed generation" "$LP_ERA"  "$((KEPT_ERA  + RESERVE_B_AT_K))"
+else
+  CLOSED=0
+  check "ERA reserve == funding + Σ trader inputs" "$LEG_B_AMT" "$RESERVE_B_AT_K"
+  check "SOFI reserve == funding − Σ trader outputs" "$LEG_A_AMT" "$RESERVE_A_AT_K"
+  check "LP spendable ERA untouched by the market (funding-time value)" "$LP_ERA" "$KEPT_ERA"
+  check "LP spendable SOFI untouched by the market (funding-time value)" "$LP_SOFI" "$KEPT_SOFI"
+fi
 
 echo; echo "== storage fleet: witness chain =="
 check "receipted pointers cover generations 1..N exactly" "$RGENS" "$(python3 -c "print(\",\".join(map(str,range(1,$N+1))))")"
 [ "$UNRCT" -ge 1 ] && ok "refused attempt left an UNRECEIPTED pointer only ($UNRCT), no receipt, no value" || bad "expected at least one unreceipted (refused) pointer, got $UNRCT"
+
+echo; echo "== settlement-slot register: one claim with quorum per consumed parent =="
+QUORUM=2   # 2 of the 3-node canonical set
+for p in $(seq 0 $((N-1))); do
+  DIGESTS=""
+  for ip in $NODES; do
+    d="$(curl -sk --max-time 10 -o /dev/null -D - "https://$ip:8080/api/v2/settlement-slot/$VID_B32/$p" \
+         | awk 'BEGIN{IGNORECASE=1} /^x-dsm-slot-digest:/{print $2}' | tr -d "\r")"
+    [ -n "$d" ] && DIGESTS="$DIGESTS$d\n"
+  done
+  # How many nodes hold the most-common digest, and does any OTHER digest also reach quorum?
+  TALLY="$(printf "%b" "$DIGESTS" | grep -c . || true)"
+  TOP="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')"
+  SECOND="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | sed -n 2p | awk '{print $1}')"
+  TOP="${TOP:-0}"; SECOND="${SECOND:-0}"
+  [ "$TOP" -ge "$QUORUM" ] && ok "parent $p: one claim holds quorum ($TOP/$TALLY nodes)" \
+                           || bad "parent $p: no claim reached quorum ($TOP/$TALLY)"
+  [ "$SECOND" -lt "$QUORUM" ] && ok "parent $p: no conflicting claim reached quorum (runner-up $SECOND)" \
+                              || bad "parent $p: TWO claims reached quorum — exclusivity broken"
+done
+
+if [ "$CLOSED" = 1 ]; then
+  echo; echo "== closed vault: terminal state and its published proof set =="
+  ok "both reserve legs are zero at the terminal generation $LEG_A_SEQ"
+  TERM_SEQ_B32="$(python3 -c "
+import sys; sys.path.insert(0,'scripts'); from dsm_head_decode import b32
+print(b32((0).to_bytes(8,'big') + int($LEG_A_SEQ).to_bytes(8,'big')))")"
+  for key in "sofi/vault-state/$VID_B32/seq-$TERM_SEQ_B32" \
+             "sofi/vault-state/$VID_B32/latest" \
+             "sofi/vault-state-inclusion/$VID_B32/seq-$TERM_SEQ_B32" \
+             "sofi/vault-state-inclusion/$VID_B32/latest" \
+             "sofi/vault-reserve/$VID_B32/seq-$TERM_SEQ_B32"; do
+    HOLDERS=0
+    for ip in $NODES; do
+      code="$(curl -sk --max-time 10 -o /dev/null -w "%{http_code}" "https://$ip:8080/api/v2/object/get?key=$key")"
+      [ "$code" = "200" ] && HOLDERS=$((HOLDERS+1))
+    done
+    [ "$HOLDERS" -ge "$QUORUM" ] && ok "terminal object at quorum ($HOLDERS/3): ${key##*/}" \
+                                 || bad "terminal object below quorum ($HOLDERS/3): $key"
+  done
+fi
+
 echo; echo "PASS=$PASS FAIL=$FAIL  ($OUT)"; [ "$FAIL" = 0 ]
