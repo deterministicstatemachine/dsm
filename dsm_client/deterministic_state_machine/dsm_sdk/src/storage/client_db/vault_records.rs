@@ -156,6 +156,33 @@ pub fn list_vault_records_db() -> Result<Vec<PersistedVaultRecord>> {
     Ok(out)
 }
 
+/// Every record bound to `vault_id` — as the vault itself, or as its parent.
+///
+/// This is exactly the row set a routing advertisement is built from. The
+/// advertisement publisher reads it at the moment it publishes rather than
+/// from a sweep-wide snapshot, so a record written while the sweep was
+/// walking (an exit that moved to `awaiting_confirmation`, a fractional
+/// successor inserted) cannot be published away.
+pub fn list_vault_records_for_vault_or_parent(vault_id: &str) -> Result<Vec<PersistedVaultRecord>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in list_vault_records_for_vault_or_parent, recovering");
+        poisoned.into_inner()
+    });
+    let sql = format!(
+        "SELECT {VAULT_COLS} FROM vault_records \
+         WHERE vault_id = ?1 OR parent_vault_id = ?1 \
+         ORDER BY created_at_state DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map(params![vault_id], read_persisted_vault_record)?;
+    let mut out = Vec::new();
+    for r in iter {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Set the destination address on an existing vault record.
 pub fn set_vault_record_destination_address(vault_op_id: &str, destination: &str) -> Result<()> {
     let binding = get_connection()?;

@@ -573,6 +573,24 @@ struct DbtcStorageTestState {
     put_failures: HashMap<String, String>,
     get_failures: HashMap<String, String>,
     object_store: HashMap<String, Vec<u8>>,
+    /// Every PUT and DELETE that reached the store, in order.
+    ///
+    /// `object_store` is last-write-wins: a PUT that landed and was then
+    /// corrected leaves no trace in it, so end state cannot distinguish
+    /// "never published the stale bytes" from "published them and fixed it".
+    /// A test that must prove what went over the wire reads this log.
+    op_log: Vec<(String, DbtcStorageOp)>,
+    /// Fires once, just after a PUT on that key lands. The interleaving seam:
+    /// it lets a test perform the database write production would perform
+    /// concurrently, at an exact point inside a sweep, without threads.
+    put_hooks: HashMap<String, fn()>,
+}
+
+#[cfg(any(test, feature = "demos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DbtcStorageOp {
+    Put([u8; 32]),
+    Delete,
 }
 
 #[cfg(any(test, feature = "demos"))]
@@ -2876,6 +2894,18 @@ impl BitcoinTapSdk {
         *state = DbtcStorageTestState::default();
     }
 
+    /// Every PUT and DELETE attempted against the object store, in order.
+    #[cfg(test)]
+    pub(crate) fn dbtc_storage_op_log() -> Vec<(String, DbtcStorageOp)> {
+        dbtc_storage_test_state().op_log.clone()
+    }
+
+    /// Run `hook` once, immediately after the next PUT on `key` lands.
+    #[cfg(test)]
+    pub(crate) fn set_dbtc_storage_put_hook(key: impl Into<String>, hook: fn()) {
+        dbtc_storage_test_state().put_hooks.insert(key.into(), hook);
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_dbtc_storage_object(key: impl Into<String>, payload: Vec<u8>) {
         dbtc_storage_test_state()
@@ -2917,6 +2947,13 @@ impl BitcoinTapSdk {
                 ));
             }
             state.object_store.insert(key.to_string(), payload.to_vec());
+            let digest = *blake3::hash(payload).as_bytes();
+            state.op_log.push((key.to_string(), DbtcStorageOp::Put(digest)));
+            let hook = state.put_hooks.remove(key);
+            drop(state);
+            if let Some(hook) = hook {
+                hook();
+            }
             Ok(key.to_string())
         }
 
@@ -2957,6 +2994,7 @@ impl BitcoinTapSdk {
         {
             let mut state = dbtc_storage_test_state();
             state.object_store.remove(key);
+            state.op_log.push((key.to_string(), DbtcStorageOp::Delete));
             Ok(())
         }
 
@@ -3093,6 +3131,58 @@ impl BitcoinTapSdk {
             records_by_vault,
             records_by_parent,
             storage_node_vault_ids,
+        })
+    }
+
+    /// Re-read exactly the rows one vault's advertisement is built from.
+    ///
+    /// The sweep's opening vault-id list is a work list, not an authority: it
+    /// is taken once and then two network PUTs happen per vault. A record
+    /// written inside that window is invisible to a sweep-wide snapshot — an
+    /// exit moving to `awaiting_confirmation`, a fractional successor being
+    /// inserted — and republishing from the snapshot would put
+    /// `routeable=true` back over the busy advertisement the storage nodes
+    /// already hold, offering a vault whose UTXO is being swept as live
+    /// liquidity. Read the rows at the moment of publish instead.
+    fn load_storage_node_vault_routing_slice(
+        vault_id: &str,
+    ) -> Result<StorageNodeVaultRoutingInventory, DsmError> {
+        let records = crate::storage::client_db::list_vault_records_for_vault_or_parent(vault_id)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("re-read vault records for {vault_id}: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        let mut records_by_vault: HashMap<
+            String,
+            Vec<crate::storage::client_db::PersistedVaultRecord>,
+        > = HashMap::new();
+        let mut records_by_parent: HashMap<
+            String,
+            Vec<crate::storage::client_db::PersistedVaultRecord>,
+        > = HashMap::new();
+        for record in records {
+            if record.vault_id.as_deref() == Some(vault_id) {
+                records_by_vault
+                    .entry(vault_id.to_string())
+                    .or_default()
+                    .push(record.clone());
+            }
+            if record.parent_vault_id.as_deref() == Some(vault_id) {
+                records_by_parent
+                    .entry(vault_id.to_string())
+                    .or_default()
+                    .push(record);
+            }
+        }
+        Ok(StorageNodeVaultRoutingInventory {
+            records_by_vault,
+            records_by_parent,
+            // A slice covers one vault; the id set is that vault alone. Only
+            // the sweep's work list and the planner read this field, and
+            // neither is built from a slice.
+            storage_node_vault_ids: std::iter::once(vault_id.to_string()).collect(),
         })
     }
 
@@ -3328,7 +3418,8 @@ impl BitcoinTapSdk {
             return Ok(());
         };
         // Guard: only the vault creator should publish advertisements.
-        // If this vault has no PersistedVaultRecord in the local inventory,
+        // If this vault has no PersistedVaultRecord in the rows re-read for
+        // this publish,
         // this device received the vault via bilateral transfer and cached
         // the proto locally for execution. The creator already published the
         // complete advertisement (htlc_address, redeem_params, deposit_nonce,
@@ -3382,19 +3473,37 @@ impl BitcoinTapSdk {
         &self,
         controller_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let inventory = Self::load_storage_node_vault_routing_inventory()?;
-        let mut vault_ids: Vec<String> = inventory.storage_node_vault_ids.iter().cloned().collect();
+        let mut vault_ids: Vec<String> = crate::storage::client_db::list_all_vault_ids()
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("list vault store for advertisement refresh: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
         vault_ids.sort();
+        vault_ids.dedup();
         log::info!(
             "[withdraw.plan] refreshing {} storage_node vault advertisements",
             vault_ids.len(),
         );
         let mut refreshed = 0u32;
         for vault_id in &vault_ids {
+            // The list above is the work list. Every row the advertisement is
+            // built from is re-read here, immediately before the publish.
+            let slice = match Self::load_storage_node_vault_routing_slice(vault_id) {
+                Ok(slice) => slice,
+                Err(e) => {
+                    log::warn!(
+                        "[withdraw.plan] failed to re-read rows for vault {}: {e}",
+                        &vault_id[..vault_id.len().min(12)],
+                    );
+                    continue;
+                }
+            };
             match Self::publish_storage_node_vault_advertisement_from_inventory(
                 vault_id,
                 controller_device_id,
-                &inventory,
+                &slice,
             )
             .await
             {
@@ -3421,7 +3530,7 @@ impl BitcoinTapSdk {
         vault_id: &str,
         controller_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let inventory = Self::load_storage_node_vault_routing_inventory()?;
+        let inventory = Self::load_storage_node_vault_routing_slice(vault_id)?;
         Self::publish_storage_node_vault_advertisement_from_inventory(
             vault_id,
             controller_device_id,
@@ -5333,6 +5442,109 @@ mod tests {
         )
         .unwrap_or_else(|| panic!("expected successor reason"));
         assert!(successor_reason.contains("Successor vault still pending confirmation"));
+    }
+
+    // Two vaults whose ids bracket the sweep: the sweep walks `list_all_vault_ids`
+    // in sorted order, so the lower id is published first and the higher id is
+    // still ahead of it. Recomputed rather than stored so the interleaving hook,
+    // which is a bare `fn()` and captures nothing, can name the same vault.
+    const SWEEP_LABEL_ONE: &str = "sweep-interleave-one";
+    const SWEEP_LABEL_TWO: &str = "sweep-interleave-two";
+
+    fn sweep_interleave_ids() -> (String, String) {
+        let mut ids = [
+            crate::util::text_id::encode_base32_crockford(&vid_from_label(SWEEP_LABEL_ONE)),
+            crate::util::text_id::encode_base32_crockford(&vid_from_label(SWEEP_LABEL_TWO)),
+        ];
+        ids.sort();
+        (ids[0].clone(), ids[1].clone())
+    }
+
+    /// The concurrent writer, fired from inside the sweep: an exit starts on the
+    /// not-yet-published vault, inserting the fractional successor row that makes
+    /// it busy. In production this is the withdrawal executor running while the
+    /// planner's refresh is mid-flight.
+    fn start_exit_on_the_trailing_vault() {
+        let (_, trailing) = sweep_interleave_ids();
+        let mut successor = persisted_deposit_record(
+            "btc_to_dbtc",
+            "BurnPending",
+            Some("successor-of-trailing"),
+            Some(&trailing),
+            true,
+        );
+        successor.vault_op_id = "successor-of-trailing".to_string();
+        crate::storage::client_db::upsert_vault_record(&successor)
+            .unwrap_or_else(|e| panic!("insert successor record failed: {e}"));
+    }
+
+    /// The advertisement sweep takes a vault-id work list once and then performs
+    /// two network PUTs per vault. A record written inside that window — here an
+    /// exit starting on a vault the sweep has not reached yet — must reach the
+    /// wire. Publishing the opening snapshot instead would put `routeable=true`
+    /// back over the busy advertisement the storage nodes already hold, offering
+    /// a vault whose UTXO is being swept as live liquidity to every other device.
+    ///
+    /// Asserted on the wire, not on end state: the object store is
+    /// last-write-wins, so this counts the PUTs on the advertisement key and
+    /// requires exactly one before reading its bytes.
+    #[tokio::test]
+    #[serial]
+    async fn a_record_written_during_the_sweep_is_not_published_away() {
+        init_withdrawal_test_db();
+        let (leading, trailing) = sweep_interleave_ids();
+
+        for label in [SWEEP_LABEL_ONE, SWEEP_LABEL_TWO] {
+            let vid = vid_from_label(label);
+            put_active_vault(vid, 400_000);
+            put_active_vault_record(vid, 400_000, "btc_to_dbtc");
+        }
+
+        // Fire once the leading vault's advertisement has landed: the sweep is
+        // now between the two vaults, exactly where a stale snapshot would have
+        // already decided what the trailing vault's advertisement says.
+        BitcoinTapSdk::set_dbtc_storage_put_hook(
+            BitcoinTapSdk::vault_advertisement_key(&leading),
+            start_exit_on_the_trailing_vault,
+        );
+
+        let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+        bridge
+            .refresh_storage_node_vault_advertisements(&[0x07; 32])
+            .await
+            .unwrap_or_else(|e| panic!("advertisement refresh failed: {e}"));
+
+        let trailing_ad_key = BitcoinTapSdk::vault_advertisement_key(&trailing);
+        let ad_puts = BitcoinTapSdk::dbtc_storage_op_log()
+            .into_iter()
+            .filter(|(key, op)| {
+                key == &trailing_ad_key && matches!(op, DbtcStorageOp::Put(_))
+            })
+            .count();
+        assert_eq!(
+            ad_puts, 1,
+            "expected exactly one advertisement PUT for the trailing vault; \
+             more than one would mean the stored bytes are not the published bytes",
+        );
+
+        let published = BitcoinTapSdk::storage_get_bytes(&trailing_ad_key)
+            .await
+            .unwrap_or_else(|e| panic!("no advertisement published for trailing vault: {e}"));
+        let advertisement = generated::DbtcVaultAdvertisementV1::decode(published.as_slice())
+            .unwrap_or_else(|e| panic!("decode published advertisement: {e}"));
+
+        assert!(
+            !advertisement.routeable,
+            "the sweep published routeable=true for a vault whose exit had already \
+             started — the opening snapshot was treated as the authority",
+        );
+        assert!(
+            advertisement
+                .busy_reason
+                .contains("Successor vault still pending confirmation"),
+            "expected the fresh busy reason on the wire, got {:?}",
+            advertisement.busy_reason,
+        );
     }
 
     // dBTC planner tests use BLAKE3-derived 32-byte ids via `vid_from_label`
