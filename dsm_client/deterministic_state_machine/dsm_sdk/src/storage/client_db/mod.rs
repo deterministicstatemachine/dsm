@@ -29,6 +29,7 @@ pub mod cert_chain;
 mod cert_resync;
 mod contacts;
 pub mod counterparty_canonical_heads;
+pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
 mod dlv_receipts;
 mod export;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
@@ -383,7 +384,9 @@ fn get_database_path() -> Result<PathBuf> {
 /// member); `amm_vault_records.storage_set_id BLOB NOT NULL` (the set a vault was
 /// born under — a local copy of the value the vault's signed anchor binds);
 /// `settlement_slot_claim_local` (this device's frozen settlement-slot claim
-/// envelopes, replayed byte-identically — the register compares exact bytes).
+/// envelopes, replayed byte-identically — the register compares exact bytes);
+/// `dlv_close_intent` (the exact bytes a close will publish/claim/advance,
+/// written before any external step so recovery resumes instead of re-signing).
 /// Also durable protocol state that decides what "published", "which set" and
 /// "which claim" mean; same rule as v4 — the version is the authority, no shim.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 5;
@@ -523,6 +526,28 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- they claim. Signed + canonically encoded ONCE and replayed byte-for-
         -- byte on every retry/recovery (register members compare exact bytes).
         -- Never updated.
+        -- DURABLE PRE-CLAIM INTENT for `dlv.close`: the exact bytes this device
+        -- will publish, claim and advance, written BEFORE anything external
+        -- happens so a crash resumes rather than re-signs (the register compares
+        -- exact bytes). Recovery orchestration ONLY — never authority: the
+        -- canonical state decides whether a vault is closed, and terminal
+        -- publication is derived from the frozen artifacts, not stored here.
+        CREATE TABLE IF NOT EXISTS dlv_close_intent(
+            insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+            vault_id          BLOB NOT NULL,
+            parent_sequence   INTEGER NOT NULL,
+            state             TEXT NOT NULL CHECK (state IN
+                                ('prepared_close','claim_published',
+                                 'canonical_close_committed','abandoned')),
+            op_bytes          BLOB NOT NULL,
+            x_close           BLOB NOT NULL,
+            claim_bytes       BLOB NOT NULL,
+            pointer_key       TEXT NOT NULL,
+            pointer_bytes     BLOB NOT NULL,
+            storage_set_id    BLOB NOT NULL,
+            UNIQUE (vault_id, parent_sequence)
+        );
+
         CREATE TABLE IF NOT EXISTS settlement_slot_claim_local(
             vault_id        BLOB NOT NULL,
             parent_sequence INTEGER NOT NULL,

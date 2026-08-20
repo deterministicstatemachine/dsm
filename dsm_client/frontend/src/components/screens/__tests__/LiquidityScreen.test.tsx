@@ -91,6 +91,8 @@ describe('LiquidityScreen', () => {
           anchorEnforcement: 'required',
           pendingUnapplied: 2n,
           pendingX: [X1, X2],
+          publicationState: 'published' as const,
+          closed: false,
         } as any,
       ],
     });
@@ -127,6 +129,8 @@ describe('LiquidityScreen', () => {
           anchorEnforcement: 'required',
           pendingUnapplied: 0n,
           pendingX: [],
+          publicationState: 'published' as const,
+          closed: false,
         } as any,
       ],
     });
@@ -156,6 +160,10 @@ describe('LiquidityScreen', () => {
           routingAdvertised: true,
           anchorSequence: 0n,
           anchorEnforcement: 'required' as const,
+          pendingUnapplied: 0n,
+          pendingX: [],
+          publicationState: 'published' as const,
+          closed: false,
         },
       ],
     });
@@ -282,6 +290,10 @@ describe('LiquidityScreen', () => {
             routingAdvertised: true,
             anchorSequence: 0n,
             anchorEnforcement: 'required' as const,
+            pendingUnapplied: 0n,
+            pendingX: [],
+            publicationState: 'published' as const,
+            closed: false,
           },
         ],
       });

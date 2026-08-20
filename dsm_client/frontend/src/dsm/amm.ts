@@ -236,6 +236,12 @@ export interface AmmVaultSummary {
    * frozen-artifact table; the screen only renders it.
    */
   publicationState: 'pending' | 'published';
+  /**
+   * TRUE once the owner closed the vault: both reserve leaves are zero at the
+   * terminal generation. A closed vault is unquotable, un-fundable and
+   * un-closable — its id is single-use. Derived in Rust from the leaves.
+   */
+  closed: boolean;
 }
 
 function publicationStateToString(
@@ -332,6 +338,7 @@ export async function listOwnedAmmVaults(): Promise<{
         unlockSpecDigest,
         unlockSpecKey,
         publicationState: publicationStateToString(summary.publicationState),
+        closed: summary.closed,
       };
     });
     return { success: true, vaults };
@@ -375,5 +382,40 @@ export async function reconcileVaultSettlement(input: {
     return { success: true };
   } catch (e: any) {
     return { success: false, error: e?.message || 'reconcileVaultSettlement failed' };
+  }
+}
+
+/**
+ * Owner: CLOSE this vault — withdraw ALL remaining liquidity and retire it.
+ *
+ * The request names only the vault. Rust derives and signs everything else
+ * from the vault's verified frontier: it refuses unless this device has folded
+ * every settlement the market has made (composed generation and reserves must
+ * match the local leaves), claims the vault's parent in the storage set's
+ * one-shot register so a trade in flight cannot be double-spent against, and
+ * only then releases the reserves — atomically, exactly once.
+ *
+ * IRREVERSIBLE: a closed vault id is single-use. It cannot be re-funded or
+ * closed again; to provide liquidity later, create a new vault.
+ */
+export async function closeAmmVault(input: {
+  vaultId: Uint8Array;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (input.vaultId?.length !== 32) return { success: false, error: 'vaultId must be 32 bytes' };
+    const req = new pb.DlvCloseV1({ vaultId: input.vaultId as any });
+    const argPack = new pb.ArgPack({
+      schemaHash: new pb.Hash32({ v: new Uint8Array(32) }),
+      codec: pb.Codec.PROTO as any,
+      body: req.toBinary(),
+    });
+    const resBytes = await routerInvokeBin('dlv.close', new Uint8Array(argPack.toBinary()));
+    const env = decodeFramedEnvelopeV3(resBytes);
+    if (env.payload.case === 'error') {
+      return { success: false, error: env.payload.value.message || 'dlv.close failed' };
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'closeAmmVault failed' };
   }
 }

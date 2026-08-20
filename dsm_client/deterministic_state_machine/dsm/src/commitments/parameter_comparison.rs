@@ -607,6 +607,47 @@ pub fn extract_operation_parameters(
             );
             Ok(params)
         }
+        Operation::DlvClose {
+            vault_id,
+            leg_a_policy_commit,
+            leg_a_amount,
+            leg_b_policy_commit,
+            leg_b_amount,
+            parent_sequence,
+            new_sequence,
+            fee_bps,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"dlv_close".to_vec());
+            params.insert("vault_id".to_string(), vault_id.clone());
+            params.insert(
+                "leg_a_policy_commit".to_string(),
+                leg_a_policy_commit.to_vec(),
+            );
+            params.insert(
+                "leg_a_amount".to_string(),
+                leg_a_amount.to_be_bytes().to_vec(),
+            );
+            params.insert(
+                "leg_b_policy_commit".to_string(),
+                leg_b_policy_commit.to_vec(),
+            );
+            params.insert(
+                "leg_b_amount".to_string(),
+                leg_b_amount.to_be_bytes().to_vec(),
+            );
+            params.insert(
+                "parent_sequence".to_string(),
+                parent_sequence.to_be_bytes().to_vec(),
+            );
+            params.insert(
+                "new_sequence".to_string(),
+                new_sequence.to_be_bytes().to_vec(),
+            );
+            params.insert("fee_bps".to_string(), fee_bps.to_be_bytes().to_vec());
+            Ok(params)
+        }
     }
 }
 

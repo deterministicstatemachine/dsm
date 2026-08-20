@@ -57,6 +57,7 @@ impl AppRouterImpl {
             "dlv.unlock" => self.dlv_unlock(i).await,
             "dlv.unlockRouted" => self.dlv_unlock_routed(i).await,
             "dlv.reconcile" => self.dlv_reconcile(i).await,
+            "dlv.close" => self.dlv_close(i).await,
             other => err(format!("unknown dlv invoke method: {other}")),
         }
     }
@@ -198,6 +199,9 @@ impl AppRouterImpl {
                 anchor_enforcement: v.anchor_enforcement,
                 unlock_spec_digest: Some(v.policy_digest.to_vec()),
                 unlock_spec_key: Some(format!("defi/spec/amm/{prefix}")),
+                // Both reserve leaves at zero IS the terminal state: `dlv.close`
+                // drained the vault. Derived from the leaves, never a flag.
+                closed: v.reserve_a == 0 && v.reserve_b == 0,
                 // Derived from the frozen-artifact table: PUBLISHED iff every
                 // birth object has reached quorum on the vault's birth set.
                 publication_state: if birth_is_published(&v.vault_id) {
@@ -837,12 +841,12 @@ impl AppRouterImpl {
                     }
                 };
                 let build = |outcome: &dsm::types::device_state::AdvanceOutcome|
-                 -> Result<BirthArtifacts, dsm::types::error::DsmError> {
-                    build_birth_artifacts(outcome, &vault_id, &pair, &birth_set_id, &owner_pk, &owner_sk)
+                 -> Result<VaultPublicationArtifacts, dsm::types::error::DsmError> {
+                    build_vault_publication_artifacts(outcome, &vault_id, &pair, &birth_set_id, &owner_pk, &owner_sk)
                 };
                 let write = |tx: &rusqlite::Transaction<'_>,
                              _o: &dsm::types::device_state::AdvanceOutcome,
-                             artifacts: &BirthArtifacts|
+                             artifacts: &VaultPublicationArtifacts|
                  -> Result<(), dsm::types::error::DsmError> {
                     write_record(tx, rec)?;
                     for (key, bytes) in &artifacts.objects {
@@ -1570,6 +1574,697 @@ impl AppRouterImpl {
         ))
     }
 
+    /// Commit the canonical close: ONE staged advance in which the release, the
+    /// consume-once claim for this generation, and the FIVE frozen terminal
+    /// objects land together — or none of them do. Value is spendable at this
+    /// commit, and durable, replayable terminal evidence exists locally at the
+    /// same instant.
+    ///
+    /// Shared by `dlv.close` and by recovery, so a resumed close commits through
+    /// exactly the same path (with the same frozen operation bytes) as the
+    /// original attempt.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_canonical_close(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        new_sequence: u64,
+        pair: &dsm::types::device_state::VaultStatePair,
+        storage_set_id: &[u8; 32],
+        close_commitment: &[u8; 32],
+        op: dsm::types::operations::Operation,
+        reserve_a: u64,
+        reserve_b: u64,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) -> Result<(), String> {
+        use crate::storage::client_db::dlv_close_intent as intent_db;
+        // One staged advance: the release, the consume-once claim for this
+        // generation, and the FIVE frozen terminal objects commit together, or
+        // none of them do. Value is spendable at this commit — and durable,
+        // replayable terminal evidence exists locally at the same instant.
+        let reference_state = self
+            .core_sdk
+            .get_current_state()
+            .map_err(|e| format!("dlv.close: get_current_state failed: {e}"))?;
+        let actor = reference_state.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
+        let mutation = dsm::types::device_state::VaultReserveMutation::Withdraw {
+            vault_id: *vault_id,
+            legs: vec![(pair.a(), reserve_a), (pair.b(), reserve_b)],
+            parent_sequence,
+            new_sequence,
+            pair: *pair,
+        };
+        let build = |outcome: &dsm::types::device_state::AdvanceOutcome| {
+            build_vault_publication_artifacts(
+                outcome,
+                vault_id,
+                pair,
+                storage_set_id,
+                owner_pk,
+                owner_sk,
+            )
+        };
+        let write = |tx: &rusqlite::Transaction<'_>,
+                     _o: &dsm::types::device_state::AdvanceOutcome,
+                     artifacts: &VaultPublicationArtifacts|
+         -> Result<(), dsm::types::error::DsmError> {
+            use crate::storage::client_db::{
+                cas_consume_vault_generation_with_conn, VaultGenerationConsumeOutcome,
+            };
+            match cas_consume_vault_generation_with_conn(
+                tx,
+                vault_id,
+                parent_sequence,
+                new_sequence,
+                close_commitment,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("dlv.close: consume-once claim failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })? {
+                VaultGenerationConsumeOutcome::Consumed
+                | VaultGenerationConsumeOutcome::AlreadyConsumedSameSettlement => {}
+                VaultGenerationConsumeOutcome::Conflict { .. } => {
+                    return Err(dsm::types::error::DsmError::invalid_operation(
+                        "dlv.close: this vault generation was consumed by a settlement — rolling \
+                         back the close",
+                    ))
+                }
+            }
+            for (key, bytes) in &artifacts.objects {
+                crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                    tx,
+                    storage_set_id,
+                    key,
+                    bytes,
+                    &artifacts.root,
+                    TERMINAL_ARTIFACT_PURPOSE,
+                )
+                .map_err(|e| {
+                    dsm::types::error::DsmError::storage(
+                        format!("dlv.close: freeze terminal artifact {key}: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            }
+            intent_db::set_state_with_conn(
+                tx,
+                vault_id,
+                parent_sequence,
+                intent_db::CloseIntentState::CanonicalCloseCommitted,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("dlv.close: intent state write failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            Ok(())
+        };
+        if let Err(e) = self
+            .core_sdk
+            .execute_on_relationship_staged_with_reserve_mutation(
+                rel_key,
+                actor,
+                op,
+                &[],
+                Some(init_tip),
+                Some(mutation),
+                build,
+                write,
+            )
+        {
+            // NOT abandoned here. This error can be transient (a busy database,
+            // a lock) or permanent (the owner folded a settlement in between, so
+            // the generation moved and the reserve arm refuses). Abandoning on
+            // the transient case would wedge the parent we hold in the register
+            // forever, so the decision is left to `resume_close_intents`: it
+            // re-reads the leaves each pass and abandons only when the frontier
+            // has genuinely moved past this close.
+            return Err(format!("dlv.close: canonical close failed: {e}"));
+        }
+
+        // Publish the terminal set — best-effort now, the generic sweep
+        // thereafter. The value is already spendable; this makes the vault's
+        // death visible to the market.
+        match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
+            Ok(n) => log::info!(
+                "[dlv.close] {}: {n} terminal artifact(s) at quorum",
+                crate::util::text_id::encode_base32_crockford(vault_id)
+            ),
+            Err(e) => log::warn!(
+                "[dlv.close] {}: publication pass errored: {e}",
+                crate::util::text_id::encode_base32_crockford(vault_id)
+            ),
+        }
+        Ok(())
+    }
+
+    /// Resume every close this device started but did not finish.
+    ///
+    /// Runs on each `storage.sync` push pass. It never re-signs the claim (the
+    /// register compares exact bytes, so a re-encode would read as a different
+    /// claimant) and never infers closure from a pointer or a held claim — the
+    /// canonical state decides.
+    ///
+    /// THE S INVARIANT IS RE-ESTABLISHED FIRST. Between the crash and now the
+    /// vault's lineage could have been re-read; before touching anything the
+    /// resume re-composes and requires
+    /// `claim.storage_set_id == composed.storage_set_id == record.storage_set_id`.
+    /// Anything else is abandoned — the vault stays open and encumbered, which
+    /// is the safe direction.
+    ///
+    /// The claim is then re-run with the SAME frozen bytes (idempotent at any
+    /// member that already holds them). A `Contested` result means another
+    /// contestant took the parent while we were down: abandon.
+    pub(crate) async fn resume_close_intents(&self) -> Result<u32, String> {
+        use crate::storage::client_db::dlv_close_intent as intent_db;
+
+        let intents = intent_db::list_unfinished_intents().map_err(|e| e.to_string())?;
+        if intents.is_empty() {
+            return Ok(0);
+        }
+        let (owner_pk, owner_sk) = match (
+            crate::sdk::signing_authority::current_public_key(),
+            crate::sdk::signing_authority::current_secret_key(),
+        ) {
+            (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
+            // Locked wallet: the terminal proofs cannot be signed. Leave every
+            // intent exactly as it is and retry on a later pass.
+            _ => return Ok(0),
+        };
+        let mut finished = 0u32;
+        for intent in intents {
+            let vault_b32 = crate::util::text_id::encode_base32_crockford(&intent.vault_id);
+            let abandon = |why: &str| {
+                log::warn!("[dlv.close resume] {vault_b32}: abandoning — {why}");
+                let _ = intent_db::set_state(
+                    &intent.vault_id,
+                    intent.parent_sequence,
+                    intent_db::CloseIntentState::Abandoned,
+                );
+            };
+
+            // The vault as this device knows it, and as its lineage says it is.
+            let Ok(Some(record)) =
+                crate::storage::client_db::amm_vault_records::get_amm_vault_record(
+                    &intent.vault_id,
+                )
+            else {
+                abandon("no vault record on this device");
+                continue;
+            };
+            let Some(head) = self.core_sdk.device_head() else {
+                return Ok(finished);
+            };
+            let Ok(live) = crate::sdk::vault_rehydration::rehydrate_amm_vault(&record, &head)
+            else {
+                abandon("the vault could not be rehydrated");
+                continue;
+            };
+            if live.current_sequence != intent.parent_sequence {
+                // Either the close already committed (leaves at parent+1) or a
+                // settlement was folded in between; nothing to resume.
+                abandon("the vault has moved past this close's generation");
+                continue;
+            }
+            let Ok(pair) = dsm::types::device_state::VaultStatePair::new(
+                live.pair.a(),
+                live.pair.b(),
+                live.fee_bps,
+            ) else {
+                abandon("the vault pair is not canonical");
+                continue;
+            };
+            let Ok(Some(baseline)) =
+                crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(&intent.vault_id)
+                    .await
+            else {
+                // Storage says nothing: keep the intent and try again later.
+                continue;
+            };
+            let Ok(composed) = crate::sdk::vault_state_composition::compose_vault_state(
+                &intent.vault_id,
+                &baseline,
+                &pair.a(),
+                &pair.b(),
+                pair.fee_bps(),
+            )
+            .await
+            else {
+                continue;
+            };
+            // THE THREE-WAY S EQUALITY: the frozen claim, the vault's
+            // birth-bound lineage, and the local record must all name one set.
+            let claim_set_id =
+                match dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(
+                    &intent.claim_bytes,
+                ) {
+                    Ok(v) => v.body.storage_set_id,
+                    Err(_) => {
+                        abandon("the frozen claim envelope no longer verifies");
+                        continue;
+                    }
+                };
+            if claim_set_id != composed.storage_set_id
+                || record.storage_set_id != composed.storage_set_id
+            {
+                abandon("the storage set no longer agrees across claim, lineage and record");
+                continue;
+            }
+            if composed.sequence != intent.parent_sequence {
+                abandon("the composed frontier moved past this close's generation");
+                continue;
+            }
+            let Ok(catalog) = crate::sdk::storage_set::StorageSetCatalog::from_env_config() else {
+                continue;
+            };
+            let Some(claim_set) = catalog.resolve(&composed.storage_set_id) else {
+                continue;
+            };
+            let claim_set = claim_set.clone();
+
+            // Re-run the claim with the SAME bytes.
+            match crate::sdk::settlement_slot::claim_settlement_slot(
+                &claim_set,
+                &intent.claim_bytes,
+                &intent.vault_id,
+                intent.parent_sequence,
+                &intent.x_close,
+            )
+            .await
+            {
+                Ok(_) => {
+                    let _ = intent_db::set_state(
+                        &intent.vault_id,
+                        intent.parent_sequence,
+                        intent_db::CloseIntentState::ClaimPublished,
+                    );
+                }
+                Err(crate::sdk::settlement_slot::SlotClaimError::Contested { .. }) => {
+                    abandon("another contestant holds this vault generation");
+                    let _ = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_delete_key(
+                        &intent.pointer_key,
+                    )
+                    .await;
+                    continue;
+                }
+                // Quorum unknown: keep the intent and retry on a later pass.
+                Err(_) => continue,
+            }
+
+            // The operation is REPLAYED from the frozen bytes — never rebuilt.
+            let Ok(op) = dsm::types::operations::Operation::from_bytes(&intent.op_bytes) else {
+                abandon("the frozen close operation no longer decodes");
+                continue;
+            };
+            let Some(new_sequence) = intent.parent_sequence.checked_add(1) else {
+                abandon("sequence overflow");
+                continue;
+            };
+            let close_commitment = {
+                let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                    dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_COMMIT,
+                );
+                h.update(&intent.vault_id);
+                h.update(&intent.parent_sequence.to_be_bytes());
+                *h.finalize().as_bytes()
+            };
+            match self
+                .commit_canonical_close(
+                    &intent.vault_id,
+                    intent.parent_sequence,
+                    new_sequence,
+                    &pair,
+                    &composed.storage_set_id,
+                    &close_commitment,
+                    op,
+                    live.reserve_a,
+                    live.reserve_b,
+                    &owner_pk,
+                    &owner_sk,
+                )
+                .await
+            {
+                Ok(()) => {
+                    finished += 1;
+                    log::info!("[dlv.close resume] {vault_b32}: close completed after restart");
+                }
+                Err(e) => log::warn!("[dlv.close resume] {vault_b32}: {e}"),
+            }
+        }
+        Ok(finished)
+    }
+
+    /// `dlv.close` — the owner withdraws ALL remaining liquidity and retires the
+    /// vault.
+    ///
+    /// The request names only the vault. Every field of the canonical
+    /// `Operation::DlvClose` is DERIVED here from the owner's VERIFIED frontier
+    /// and signed, so the signature binds the whole transition and a caller
+    /// cannot state what it withdraws.
+    ///
+    /// Order, and why: the frontier gate first (a close must consume exactly the
+    /// current composed generation, with exactly the reserves that generation
+    /// holds); then durable intent — the exact bytes this device will publish,
+    /// claim and advance — BEFORE anything external, so a crash resumes instead
+    /// of re-signing; then the parent claim in the vault's quorum register,
+    /// because everything after it moves value and everything before it is
+    /// reversible by stopping; then the canonical close, which makes the value
+    /// spendable AND freezes the terminal proof set in the same transaction.
+    async fn dlv_close(&self, i: AppInvoke) -> AppResult {
+        use crate::storage::client_db::dlv_close_intent as intent_db;
+
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("dlv.close: {e}")),
+        };
+        let req = match generated::DlvCloseV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("dlv.close: decode DlvCloseV1 failed: {e}")),
+        };
+        if req.vault_id.len() != 32 {
+            return err("dlv.close: vault_id must be 32 bytes".into());
+        }
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&req.vault_id);
+        let vault_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
+
+        let Some(head) = self.core_sdk.device_head() else {
+            return err("dlv.close: no device head".into());
+        };
+        // The owner's OWN record of the vault it created: pair, fee, and the
+        // storage set it was born under. No record ⇒ this device did not create
+        // the vault ⇒ it cannot close it.
+        let record =
+            match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return err(
+                        "dlv.close: no AMM vault record on this device — only the creating owner \
+                         can close a vault"
+                            .into(),
+                    )
+                }
+                Err(e) => return err(format!("dlv.close: reading the vault record failed: {e}")),
+            };
+        // Reserves and generation come from the LEAVES, never from a request.
+        let live = match crate::sdk::vault_rehydration::rehydrate_amm_vault(&record, &head) {
+            Ok(v) => v,
+            Err(e) => return err(format!("dlv.close: vault unavailable: {e:?}")),
+        };
+        let pair = match dsm::types::device_state::VaultStatePair::new(
+            live.pair.a(),
+            live.pair.b(),
+            live.fee_bps,
+        ) {
+            Ok(p) => p,
+            Err(e) => return err(format!("dlv.close: vault pair is not canonical: {e}")),
+        };
+        let parent_sequence = live.current_sequence;
+        let Some(new_sequence) = parent_sequence.checked_add(1) else {
+            return err("dlv.close: vault sequence overflow".into());
+        };
+        if live.reserve_a == 0 && live.reserve_b == 0 {
+            return err("dlv.close: this vault is already closed (both reserves are zero)".into());
+        }
+
+        // ── THE FRONTIER GATE ────────────────────────────────────────────────
+        // A close may consume ONLY the current composed generation, and only
+        // when this device has already folded everything that generation
+        // contains. Sequence equality alone is not enough: the reserves must
+        // agree too, or a close could drain amounts the market has already
+        // moved past. Any composition failure is a refusal — never close blind.
+        let baseline =
+            match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(&vault_id).await
+            {
+                Ok(Some(a)) => a,
+                Ok(None) => return err(
+                    "dlv.close: this vault has no published state anchor — its frontier cannot be \
+                     verified; publish (or let the sync republish) before closing"
+                        .into(),
+                ),
+                Err(e) => return err(format!("dlv.close: anchor fetch failed: {e}")),
+            };
+        let composed = match crate::sdk::vault_state_composition::compose_vault_state(
+            &vault_id,
+            &baseline,
+            &pair.a(),
+            &pair.b(),
+            pair.fee_bps(),
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return err(format!(
+                    "dlv.close: the vault's composed state could not be verified ({e:?}) — \
+                     refusing to close blind"
+                ))
+            }
+        };
+        if composed.sequence != parent_sequence {
+            return err(format!(
+                "dlv.close: the market has moved past this device's view (composed generation {} \
+                 vs local {parent_sequence}) — reconcile the outstanding settlements first",
+                composed.sequence
+            ));
+        }
+        if pair.reserves_digest(composed.reserves_a, composed.reserves_b)
+            != pair.reserves_digest(live.reserve_a, live.reserve_b)
+        {
+            return err(
+                "dlv.close: the composed reserves disagree with this device's leaves at the same \
+                 generation — refusing (reconcile, then close)"
+                    .into(),
+            );
+        }
+        // The set is the vault's BIRTH-bound one, from its signed anchor; the
+        // local record is a cache and must agree.
+        if record.storage_set_id != composed.storage_set_id {
+            return err(
+                "dlv.close: the local vault record names a different storage set than the vault's \
+                 signed anchor — refusing"
+                    .into(),
+            );
+        }
+        let storage_set_id = composed.storage_set_id;
+        let claim_set = {
+            let catalog = match crate::sdk::storage_set::StorageSetCatalog::from_env_config() {
+                Ok(c) => c,
+                Err(e) => return err(format!("dlv.close: storage-set catalog: {e}")),
+            };
+            match catalog.resolve(&storage_set_id) {
+                Some(sset) => sset.clone(),
+                None => {
+                    return err(
+                        "dlv.close: the vault's storage set is not resolvable through this \
+                         device's catalog — cannot claim its parent; refusing"
+                            .into(),
+                    )
+                }
+            }
+        };
+
+        // ── THE CLOSE'S IDENTITY ─────────────────────────────────────────────
+        // Deterministic, so a retry occupies the SAME slot rather than a second
+        // one, and a recovery replays the same bytes.
+        let x_close = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_X,
+            );
+            h.update(&vault_id);
+            h.update(&parent_sequence.to_be_bytes());
+            h.update(&head.devid());
+            *h.finalize().as_bytes()
+        };
+        let close_commitment = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_COMMIT,
+            );
+            h.update(&vault_id);
+            h.update(&parent_sequence.to_be_bytes());
+            *h.finalize().as_bytes()
+        };
+
+        // The canonical operation: derived, then signed.
+        let op = dsm::types::operations::Operation::DlvClose {
+            vault_id: vault_id.to_vec(),
+            leg_a_policy_commit: pair.a(),
+            leg_a_amount: live.reserve_a,
+            leg_b_policy_commit: pair.b(),
+            leg_b_amount: live.reserve_b,
+            parent_sequence,
+            new_sequence,
+            fee_bps: pair.fee_bps(),
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+        let op = match self.core_sdk.sign_operation_sphincs(op) {
+            Ok(signed) => signed,
+            Err(e) => return err(format!("dlv.close: failed to sign DlvClose: {e}")),
+        };
+        let (owner_pk, owner_sk) = match (
+            crate::sdk::signing_authority::current_public_key(),
+            crate::sdk::signing_authority::current_secret_key(),
+        ) {
+            (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
+            _ => return err("dlv.close: signing authority unavailable (wallet locked)".into()),
+        };
+
+        // The DISCOVERY pointer: it tells the next quote that this parent is in
+        // flight. It is not the claim — exclusivity is the register's job — and
+        // it can never be activated, because no receipt will ever hash to a
+        // close commitment.
+        let terminal_digest = pair.reserves_digest(0, 0);
+        let pointer = match dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer(
+            &vault_id,
+            parent_sequence,
+            new_sequence,
+            &x_close,
+            &terminal_digest,
+            &close_commitment,
+            &owner_pk,
+            &owner_sk,
+        ) {
+            Ok(p) => p,
+            Err(e) => return err(format!("dlv.close: failed to sign the close pointer: {e}")),
+        };
+        let pointer_bytes = generated::VaultPendingPointerV1 {
+            vault_id: pointer.vault_id.to_vec(),
+            parent_sequence: pointer.parent_sequence,
+            new_sequence: pointer.new_sequence,
+            x: pointer.x.to_vec(),
+            new_reserves_digest: pointer.new_reserves_digest.to_vec(),
+            expected_receipt_hash: pointer.expected_receipt_hash.to_vec(),
+            publisher_public_key: pointer.publisher_public_key.clone(),
+            publisher_signature: pointer.publisher_signature.clone(),
+        }
+        .encode_to_vec();
+        let pointer_key = crate::sdk::route_commit_sdk::vault_pending_pointer_key(
+            &vault_id,
+            new_sequence,
+            &x_close,
+        );
+
+        // The register claim, signed once and RETAINED — retries replay these
+        // exact bytes.
+        let claim_bytes = match crate::sdk::settlement_slot::frozen_claim_envelope(
+            &vault_id,
+            parent_sequence,
+            &x_close,
+            &storage_set_id,
+        ) {
+            Ok(b) => b,
+            Err(e) => return err(format!("dlv.close: build slot claim: {e}")),
+        };
+
+        // ── DURABLE INTENT, BEFORE ANYTHING EXTERNAL ─────────────────────────
+        // Recovery orchestration only; never authority.
+        let intent = intent_db::CloseIntent {
+            vault_id,
+            parent_sequence,
+            state: intent_db::CloseIntentState::PreparedClose,
+            op_bytes: op.to_bytes(),
+            x_close,
+            claim_bytes: claim_bytes.clone(),
+            pointer_key: pointer_key.clone(),
+            pointer_bytes: pointer_bytes.clone(),
+            storage_set_id,
+            insertion_ordinal: 0,
+        };
+        if let Err(e) = intent_db::put_intent(&intent) {
+            return err(format!("dlv.close: could not record the close intent: {e}"));
+        }
+
+        // Discovery first (best-effort: the register decides exclusivity, so a
+        // pointer that does not land costs a quote, not safety).
+        if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(
+            &pointer_key,
+            &pointer_bytes,
+        )
+        .await
+        {
+            log::warn!("[dlv.close] {vault_b32}: discovery pointer publish failed: {e:?}");
+        }
+
+        // ── CLAIM THE PARENT ─────────────────────────────────────────────────
+        match crate::sdk::settlement_slot::claim_settlement_slot(
+            &claim_set,
+            &claim_bytes,
+            &vault_id,
+            parent_sequence,
+            &x_close,
+        )
+        .await
+        {
+            Ok(_) => {
+                let _ = intent_db::set_state(
+                    &vault_id,
+                    parent_sequence,
+                    intent_db::CloseIntentState::ClaimPublished,
+                );
+            }
+            Err(crate::sdk::settlement_slot::SlotClaimError::Contested { .. }) => {
+                // Another contestant holds this parent. Abandon: the vault stays
+                // open and encumbered, and the owner may close again at the next
+                // generation once that trade is folded.
+                let _ = intent_db::set_state(
+                    &vault_id,
+                    parent_sequence,
+                    intent_db::CloseIntentState::Abandoned,
+                );
+                let _ =
+                    crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_delete_key(&pointer_key)
+                        .await;
+                return err(
+                    "dlv.close: another trade holds this vault generation — reconcile it, then \
+                     close at the next generation"
+                        .into(),
+                );
+            }
+            Err(e) => {
+                // Quorum unknown: the close stays PREPARED and is resumed later.
+                return err(format!(
+                    "dlv.close: could not establish exclusive use of this vault generation: {e}"
+                ));
+            }
+        }
+
+        if let Err(e) = self
+            .commit_canonical_close(
+                &vault_id,
+                parent_sequence,
+                new_sequence,
+                &pair,
+                &storage_set_id,
+                &close_commitment,
+                op,
+                live.reserve_a,
+                live.reserve_b,
+                &owner_pk,
+                &owner_sk,
+            )
+            .await
+        {
+            return err(e);
+        }
+
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+            generated::AppStateResponse {
+                key: "dlv.close".to_string(),
+                value: Some(vault_b32),
+            },
+        ))
+    }
+
     async fn dlv_unlock_routed(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -2197,6 +2892,8 @@ impl AppRouterImpl {
 /// Purpose label frozen on a vault's five birth objects (opaque to the
 /// publication layer; for operators and proofs).
 const BIRTH_ARTIFACT_PURPOSE: &str = "dlv-birth";
+/// Purpose label frozen on a vault's five TERMINAL objects.
+const TERMINAL_ARTIFACT_PURPOSE: &str = "dlv-terminal";
 
 /// A vault's birth publication set, built and signed off ONE `AdvanceOutcome`
 /// — the exact root the funding advance produced — before anything is
@@ -2208,7 +2905,7 @@ const BIRTH_ARTIFACT_PURPOSE: &str = "dlv-birth";
 /// birth-pinned lineage reference), (2) the same anchor bytes at `latest`,
 /// (3) the vault-state inclusion proof at its seq-pinned key, (4) the same
 /// bytes at `latest`, (5) the reserve inclusion proof at its seq key.
-struct BirthArtifacts {
+struct VaultPublicationArtifacts {
     /// `(object_key, exact bytes)` — what gets frozen and replayed.
     objects: Vec<(String, Vec<u8>)>,
     /// The device root every object binds (`outcome.child_r_a`).
@@ -2224,14 +2921,14 @@ struct BirthArtifacts {
 /// commits; the reserve legs are proven off `outcome.new_device_state`, the
 /// same tree. All five bind `outcome.child_r_a`, so
 /// `compose_vault_state`'s root-equality holds by construction.
-fn build_birth_artifacts(
+fn build_vault_publication_artifacts(
     outcome: &dsm::types::device_state::AdvanceOutcome,
     vault_id: &[u8; 32],
     pair: &dsm::types::device_state::VaultStatePair,
     birth_storage_set_id: &[u8; 32],
     owner_pk: &[u8],
     owner_sk: &[u8],
-) -> Result<BirthArtifacts, dsm::types::error::DsmError> {
+) -> Result<VaultPublicationArtifacts, dsm::types::error::DsmError> {
     use dsm::types::error::DsmError;
     use prost::Message;
 
@@ -2243,16 +2940,17 @@ fn build_birth_artifacts(
              sign a birth without it",
         )
     })?;
-    if witness.vault_id != *vault_id || witness.sequence != 0 {
+    if witness.vault_id != *vault_id {
         return Err(DsmError::invalid_operation(
-            "dlv.create: vault-state witness does not describe this vault's genesis",
+            "vault publication: the advance's vault-state witness names a different vault",
         ));
     }
+    let sequence = witness.sequence;
 
     // (1)+(2) The anchor: (vault, seq 0, DERIVED digest, birth set), owner-signed.
     let anchor = dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
         vault_id,
-        0,
+        sequence,
         &witness.reserves_digest,
         birth_storage_set_id,
         owner_pk,
@@ -2269,7 +2967,7 @@ fn build_birth_artifacts(
     // (3)+(4) The vault-state inclusion proof under `root`.
     let inclusion = dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
         vault_id,
-        0,
+        sequence,
         &witness.reserves_digest,
         &root,
         witness.siblings.clone(),
@@ -2289,7 +2987,7 @@ fn build_birth_artifacts(
     let legs = head.vault_reserve_leg_proofs(vault_id, &[pair.a(), pair.b()])?;
     let reserve_proof = dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
         vault_id,
-        0,
+        sequence,
         &root,
         &head.genesis(),
         &head.devid(),
@@ -2307,44 +3005,37 @@ fn build_birth_artifacts(
         crate::sdk::vault_reserve_proof_codec::reserve_proof_to_proto(&reserve_proof)
             .encode_to_vec();
 
-    Ok(BirthArtifacts {
+    let keys = vault_object_keys(vault_id, sequence);
+    let [anchor_seq, anchor_latest, incl_seq, incl_latest, reserve_key] = keys;
+    Ok(VaultPublicationArtifacts {
         objects: vec![
-            (
-                crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
-                anchor_bytes.clone(),
-            ),
-            (
-                crate::sdk::vault_state_anchor_codec::anchor_latest_key(vault_id),
-                anchor_bytes,
-            ),
-            (
-                crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, 0),
-                inclusion_bytes.clone(),
-            ),
-            (
-                crate::sdk::vault_smt_inclusion_codec::inclusion_proof_latest_key(vault_id),
-                inclusion_bytes,
-            ),
-            (
-                crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, 0),
-                reserve_bytes,
-            ),
+            (anchor_seq, anchor_bytes.clone()),
+            (anchor_latest, anchor_bytes),
+            (incl_seq, inclusion_bytes.clone()),
+            (incl_latest, inclusion_bytes),
+            (reserve_key, reserve_bytes),
         ],
         root,
     })
 }
 
-/// The five object keys a vault's birth publishes, in the same order
-/// `build_birth_artifacts` freezes them. `publication_state` is derived from
-/// whether the LATEST artifact under each is published.
-pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> [String; 5] {
+/// The five object keys one generation of a vault publishes, in the same order
+/// `build_vault_publication_artifacts` freezes them: anchor (seq-pinned, then
+/// the `latest` mirror), inclusion proof (seq-pinned, then `latest`), reserve
+/// proof.
+pub(crate) fn vault_object_keys(vault_id: &[u8; 32], sequence: u64) -> [String; 5] {
     [
-        crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
+        crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, sequence),
         crate::sdk::vault_state_anchor_codec::anchor_latest_key(vault_id),
-        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, 0),
+        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, sequence),
         crate::sdk::vault_smt_inclusion_codec::inclusion_proof_latest_key(vault_id),
-        crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, 0),
+        crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, sequence),
     ]
+}
+
+/// The five object keys a vault's BIRTH publishes.
+pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> [String; 5] {
+    vault_object_keys(vault_id, 0)
 }
 
 /// `true` iff every one of a vault's birth objects has reached quorum on the
@@ -4501,6 +5192,685 @@ mod funded_creation_tests {
         let res = reconcile(&owner, &vault_id, &xs[2]);
         assert!(res.success, "replaying the last fold must not error");
         assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
+    }
+    // ── CLOSE / WITHDRAWAL ───────────────────────────────────────────────────
+    // Invariant 4 at the ROUTE. The core arm proves the mutation is unforgeable;
+    // these prove the route that drives it: what the owner gets back, when the
+    // close is allowed to run at all, and what happens when it is interrupted.
+
+    fn close(owner: &AppRouterImpl, vault_id: &[u8; 32]) -> AppResult {
+        use prost::Message as _;
+        crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.close".to_string(),
+                    args: pack(
+                        generated::DlvCloseV1 {
+                            vault_id: vault_id.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        })
+    }
+
+    /// The vault's reserve LEAVES as the owner's head holds them, as
+    /// `(amount_a, amount_b, generation)`. Absence is an assertion failure, not
+    /// a zero: a deleted leaf and an emptied one are different vaults.
+    fn leaves(
+        owner: &AppRouterImpl,
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+    ) -> (u64, u64, u64) {
+        let h = owner.core_sdk.device_head().expect("owner head");
+        let a = h
+            .vault_reserve_entry(vault_id, pc_a)
+            .expect("leg A leaf present");
+        let b = h
+            .vault_reserve_entry(vault_id, pc_b)
+            .expect("leg B leaf present");
+        assert_eq!(a.sequence, b.sequence, "the legs must share a generation");
+        (a.amount, b.amount, a.sequence)
+    }
+
+    /// The member ids of the set a vault was BORN under, resolved the way
+    /// production resolves it: by re-hashing the catalog's entries against the
+    /// id in the vault's own record, never by assuming the configured fleet.
+    fn vault_storage_members(vault_id: &[u8; 32]) -> Vec<String> {
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .expect("record read")
+            .expect("the owner has a record for this vault");
+        crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .resolve(&record.storage_set_id)
+            .expect("the vault's birth set resolves through this device's catalog")
+            .members()
+            .iter()
+            .map(|m| m.member_id.clone())
+            .collect()
+    }
+
+    fn spendable(owner: &AppRouterImpl, pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64) {
+        let h = owner.core_sdk.device_head().expect("owner head");
+        (h.balance(pc_a), h.balance(pc_b))
+    }
+
+    /// Fund a vault, let ONE trader move it a generation, and (optionally) fold
+    /// that settlement back. Returns `(vault_id, reserves_now, x)` — `x` names
+    /// the settlement, so a caller that skipped the fold can perform it later.
+    fn vault_after_one_trade(
+        owner: &AppRouterImpl,
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        fold: bool,
+    ) -> ([u8; 32], (u64, u64), [u8; 32]) {
+        use prost::Message as _;
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner, pc_a, pc_b, 10_000, 5_000,
+        );
+        // Advertise it: a trader discovers vaults through the routing index, so
+        // an unadvertised vault is one no trader can settle against.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/close".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "advertise failed: {:?}", res.error_message);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        let (tpk, tdid) = become_device(0x51);
+        let trader = named_router("trader");
+        trader.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD2, 5_000, 0),
+        );
+        let (res, x) = trader_settles(
+            &trader,
+            &tpk,
+            &tdid,
+            &vault_id,
+            pc_a,
+            pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0x20,
+        );
+        assert!(res.success, "trader settle failed: {:?}", res.error_message);
+        let _ = become_device(0x41);
+        if fold {
+            let res = reconcile(owner, &vault_id, &x);
+            assert!(res.success, "owner fold failed: {:?}", res.error_message);
+        }
+        (vault_id, (11_000, 5_000 - out), x)
+    }
+
+    /// INVARIANT 4 — WITHDRAWAL, THE WHOLE ROUND TRIP.
+    ///
+    /// Value delegated to a vault comes back to the owner's SPENDABLE balance
+    /// exactly, at the leaf amounts of the generation the market actually
+    /// reached — not the amounts it was funded with, and not amounts the caller
+    /// states (the request names only the vault). The vault then dies: its
+    /// leaves stay PRESENT at zero one generation on, so the id can never be
+    /// refunded or reused; its five terminal objects are frozen and at quorum;
+    /// and a second close is refused.
+    ///
+    /// The pairing is the point. "Value returned" alone would pass for a close
+    /// that left a live vault behind, and "vault dead" alone would pass for one
+    /// that burned the liquidity.
+    #[test]
+    #[serial]
+    fn closing_a_traded_vault_returns_exactly_the_leaf_reserves_and_kills_the_vault() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (reserves.0, reserves.1, 1),
+            "the fold left the vault at generation 1 with the traded reserves"
+        );
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (1, reserves.0, reserves.1),
+            "and the market sees the same generation"
+        );
+        let before = spendable(&owner, &pc_a, &pc_b);
+        assert_eq!(before, (40_000, 15_000), "funding is still delegated");
+
+        let res = close(&owner, &vault_id);
+        assert!(res.success, "close failed: {:?}", res.error_message);
+
+        // THE RETURN IS EXACT — the leaf amounts, both legs, nothing rounded.
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (before.0 + reserves.0, before.1 + reserves.1),
+            "the close credits exactly what the leaves held"
+        );
+        // Stated as the round trip: everything funded came back, plus what the
+        // market added and minus what it took.
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (51_000, 20_000 - (5_000 - reserves.1)),
+            "delegation is a loop: funded out, traded, withdrawn back"
+        );
+
+        // THE VAULT IS DEAD — but its leaves are still there, at zero.
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (0, 0, 2),
+            "closing ends the leaves at 0 @ K+1: present, never deleted"
+        );
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (2, 0, 0),
+            "the market composes the vault's death from its published terminal set"
+        );
+
+        // The five terminal objects of the CLOSING generation, at quorum.
+        for key in vault_object_keys(&vault_id, 2) {
+            assert!(
+                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(&key)
+                    .expect("artifact state"),
+                "terminal object {key} must have reached quorum"
+            );
+            assert!(
+                crate::sdk::storage_io::fake_fleet::any_member_holding(&key).is_some(),
+                "…and the fleet must actually hold {key}"
+            );
+        }
+
+        // A SECOND CLOSE IS REFUSED, and moves nothing.
+        let after = spendable(&owner, &pc_a, &pc_b);
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "a closed vault cannot be closed again");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("already closed"),
+            "the refusal says the vault is already closed: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            after,
+            "the refused second close credited nothing"
+        );
+
+        // Nothing is left for recovery to finish.
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(resumed, 0, "a committed close leaves no unfinished intent");
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            after,
+            "and the resume pass credited nothing"
+        );
+    }
+
+    /// THE FRONTIER GATE. A close consumes the CURRENT composed generation, so
+    /// an owner holding a stale view cannot close: it would drain amounts the
+    /// market has already moved past, at a parent a trader may still be
+    /// settling against.
+    ///
+    /// The gate is a SEQUENCING rule, not a lock — the second half proves the
+    /// same vault closes cleanly once the outstanding settlement is folded.
+    #[test]
+    #[serial]
+    fn a_close_is_refused_while_a_settlement_is_unreconciled() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+
+        // Traded, NOT folded: the owner's leaves say generation 0, the market
+        // says generation 1.
+        let (vault_id, reserves, x) = vault_after_one_trade(&owner, &pc_a, &pc_b, false);
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
+        assert_eq!(composed(&vault_id, &pc_a, &pc_b).0, 1);
+
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "a stale close must be refused");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("moved past"),
+            "the refusal names the frontier: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "the refused close moved no reserves"
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000, 15_000),
+            "and credited nothing"
+        );
+
+        // A close refused at the gate is refused BEFORE anything durable: no
+        // intent, so nothing for a later sweep to pick up and finish.
+        let pending = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read");
+        assert!(
+            pending.is_none(),
+            "a close refused at the gate never records an intent"
+        );
+
+        // SEQUENCING, NOT LOCKING. Fold the outstanding settlement and the SAME
+        // vault closes, returning the reserves of the generation the market
+        // actually reached — the ones the refused close would have missed.
+        let res = reconcile(&owner, &vault_id, &x);
+        assert!(res.success, "fold failed: {:?}", res.error_message);
+        let res = close(&owner, &vault_id);
+        assert!(
+            res.success,
+            "once folded, the same vault must close: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000 + reserves.0, 15_000 + reserves.1),
+            "the close returns the TRADED reserves, not the funded ones"
+        );
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+    }
+
+    /// A CONTESTED PARENT. Exclusivity over a generation belongs to the quorum
+    /// register, not to the owner: if a trader's claim is already at quorum on
+    /// this parent, the close loses and must move nothing. The intent is
+    /// ABANDONED so no later sweep can resurrect a close whose parent someone
+    /// else consumed.
+    ///
+    /// The contesting claim is signed by a different device and submitted
+    /// straight to the fleet — the register's own validity rules are the
+    /// storage node's tests; what is proven here is the close's reaction to
+    /// losing.
+    #[test]
+    #[serial]
+    fn a_contested_parent_refuses_the_close_and_moves_nothing() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("record read")
+            .expect("the owner has a record");
+
+        // Another contestant takes generation 0 first, at quorum.
+        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .resolve(&record.storage_set_id)
+            .expect("the vault's birth set resolves through this device's catalog")
+            .clone();
+        let (rival_pk, _rival_did) = become_device(0x71);
+        let rival_sk = crate::sdk::signing_authority::current_secret_key().expect("rival sk");
+        let envelope = dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
+            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
+                vault_id,
+                parent_sequence: 0,
+                x: [0x99u8; 32],
+                claimant_public_key: rival_pk,
+                storage_set_id: record.storage_set_id,
+            },
+            &rival_sk,
+        )
+        .expect("rival signs its claim");
+        let fanout = crate::sdk::storage_io::fake_fleet::claim(&set, &envelope);
+        let accepted = fanout
+            .outcomes
+            .iter()
+            .filter(|o| {
+                matches!(
+                    o.result,
+                    crate::sdk::storage_node_sdk::MemberClaimResult::Accepted
+                )
+            })
+            .count();
+        assert!(
+            accepted as u32 >= set.quorum(),
+            "the rival claim must reach quorum before the owner tries to close"
+        );
+
+        let _ = become_device(0x41);
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "the close must lose a contested parent");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("another trade holds this vault generation"),
+            "the refusal names the contest: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "a lost contest moves no reserves"
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (40_000, 15_000),
+            "and credits nothing"
+        );
+        let intent = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read")
+            .expect("the close recorded an intent before claiming");
+        assert_eq!(
+            intent.state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::Abandoned,
+            "a lost contest abandons the intent so no sweep can resurrect it"
+        );
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(resumed, 0, "and the resume pass leaves it abandoned");
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "the vault stays open and funded — the safe direction"
+        );
+    }
+
+    /// AN INTERRUPTED CLOSE IS FINISHED BY THE RESUME PASS, WITH THE SAME BYTES.
+    ///
+    /// The fleet is unreachable when the owner closes, so the parent claim
+    /// cannot reach quorum. That is the reversible half of the close: no value
+    /// moves, and the intent stays PREPARED rather than being abandoned —
+    /// abandoning a transient failure would strand the vault forever.
+    ///
+    /// When the fleet comes back the resume pass replays the SAME frozen claim
+    /// envelope (a re-signed one would read as a different claimant and could
+    /// lose its own slot), commits the canonical close, and publishes the
+    /// terminal set. The digest assertions are what prove "replayed", not
+    /// "rebuilt".
+    #[test]
+    #[serial]
+    fn an_interrupted_close_is_completed_by_the_resume_pass_with_identical_bytes() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        assert!(
+            birth_is_published(&vault_id),
+            "the vault must be born and published before this test unplugs the fleet"
+        );
+
+        // The fleet goes away mid-close. The members are the vault's OWN —
+        // read from the set it was born under — because a hardcoded member name
+        // that matches nothing fails nothing, and the test would then assert a
+        // refusal against a fleet that was never down.
+        let members = vault_storage_members(&vault_id);
+        assert!(
+            members.len() >= 2,
+            "this test needs a set whose quorum can actually be lost, got {members:?}"
+        );
+        for m in &members {
+            crate::sdk::storage_io::fake_fleet::fail_member(m);
+        }
+        let res = close(&owner, &vault_id);
+        assert!(
+            !res.success,
+            "a close that cannot claim its parent must stop"
+        );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("exclusive use"),
+            "the refusal names the claim: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "nothing moved before the claim"
+        );
+        assert_eq!(spendable(&owner, &pc_a, &pc_b), (40_000, 15_000));
+        let intent = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+            .expect("intent read")
+            .expect("intent recorded");
+        assert_eq!(
+            intent.state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::PreparedClose,
+            "an unreachable fleet is transient: the close stays PREPARED, never abandoned"
+        );
+        let frozen_claim = intent.claim_bytes.clone();
+
+        // The fleet returns; the sweep finishes what the owner started.
+        for m in &members {
+            crate::sdk::storage_io::fake_fleet::heal_member(m);
+        }
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("resume pass");
+        assert_eq!(
+            resumed, 1,
+            "the interrupted close is completed exactly once"
+        );
+
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (50_000, 20_000),
+            "the recovered close returns the full delegation"
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (0, 0, 1),
+            "and ends the leaves at 0 @ K+1"
+        );
+        assert_eq!(
+            crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+                .expect("intent read")
+                .expect("intent")
+                .state,
+            crate::storage::client_db::dlv_close_intent::CloseIntentState::CanonicalCloseCommitted,
+        );
+
+        // THE CLAIM WAS REPLAYED, NOT REBUILT: the bytes the resume submitted
+        // are the bytes frozen before the interruption.
+        let claim_digests: std::collections::BTreeSet<[u8; 32]> =
+            crate::sdk::storage_io::fake_fleet::put_log()
+                .into_iter()
+                .filter(|(_, key, _)| key.starts_with("slot:"))
+                .map(|(_, _, digest)| digest)
+                .collect();
+        assert_eq!(
+            claim_digests.len(),
+            1,
+            "every claim attempt, before and after the outage, carried one envelope"
+        );
+        assert_eq!(
+            claim_digests.into_iter().next(),
+            Some(*blake3::hash(&frozen_claim).as_bytes()),
+            "…and that envelope is the one frozen with the intent"
+        );
+
+        // The terminal set published, and each seq-pinned object was PUT with
+        // exactly one content digest across every attempt.
+        let terminal = vault_object_keys(&vault_id, 1);
+        for key in [&terminal[0], &terminal[2], &terminal[4]] {
+            assert!(
+                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(key)
+                    .expect("artifact state"),
+                "terminal object {key} must have reached quorum after recovery"
+            );
+            let digests: std::collections::BTreeSet<[u8; 32]> =
+                crate::sdk::storage_io::fake_fleet::put_log()
+                    .into_iter()
+                    .filter(|(_, k, _)| k == key)
+                    .map(|(_, _, d)| d)
+                    .collect();
+            assert_eq!(
+                digests.len(),
+                1,
+                "{key} was republished from frozen bytes, never re-signed"
+            );
+        }
+
+        // A second pass has nothing left to do.
+        let resumed = crate::runtime::get_runtime()
+            .block_on(owner.resume_close_intents())
+            .expect("second resume pass");
+        assert_eq!(resumed, 0);
+        assert_eq!(spendable(&owner, &pc_a, &pc_b), (50_000, 20_000));
+    }
+
+    /// A CLOSED VAULT IS NOT A MARKET.
+    ///
+    /// After withdrawal the vault's proven reserves are zero at generation K+1.
+    /// A trader presenting a hop that names the reserves the vault held BEFORE
+    /// the close is settling against liquidity nobody backs — and would credit
+    /// itself an output from a vault that holds nothing.
+    ///
+    /// The probe syncs while the vault is still alive, so it holds the vault in
+    /// its own DLVManager and is refused on the STATE, not on ignorance of the
+    /// vault's existence. Refusal is asserted together with the probe's balance:
+    /// a refusal that still moved value would pass the first assertion alone.
+    #[test]
+    #[serial]
+    fn a_closed_vault_cannot_be_traded() {
+        use prost::Message as _;
+
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+
+        // The probe learns the vault while it is still live and funded.
+        let (tpk, tdid) = become_device(0x52);
+        let probe = named_router("probe-dead-market");
+        probe.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xE3, 5_000, 0),
+        );
+        let res = crate::runtime::get_runtime().block_on(async {
+            probe
+                .invoke(AppInvoke {
+                    method: "route.syncVaultsForPair".to_string(),
+                    args: pack(
+                        generated::RoutingPairRequest {
+                            token_a: pc_a.to_vec(),
+                            token_b: pc_b.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        });
+        assert!(res.success, "probe sync failed: {:?}", res.error_message);
+        let probe_before = {
+            let h = probe.core_sdk.device_head().expect("probe head");
+            (h.balance(&pc_a), h.balance(&pc_b))
+        };
+
+        // The owner withdraws everything.
+        let _ = become_device(0x41);
+        let res = close(&owner, &vault_id);
+        assert!(res.success, "close failed: {:?}", res.error_message);
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (2, 0, 0),
+            "the market composes the vault as dead"
+        );
+
+        // The probe settles against the reserves the vault held before the
+        // close, at the generation the close produced.
+        let _ = become_device(0x52);
+        let out =
+            crate::sdk::routing_path_sdk::constant_product_output(300, reserves.0, reserves.1, 30)
+                .expect("curve output on the pre-close reserves");
+        let (res, _x) = trader_settles(
+            &probe, &tpk, &tdid, &vault_id, &pc_a, &pc_b, 2, reserves, 300, out, 0x40,
+        );
+        assert!(!res.success, "a closed vault must not settle a trade");
+        // The refusal must come from the vault's STATE. "The trader has never
+        // heard of this vault" would also be a refusal, and would leave the
+        // dangerous case — a trader that DID hold the vault — untested.
+        let msg = res.error_message.as_deref().unwrap_or_default().to_string();
+        assert!(
+            !msg.contains("not in local DLVManager"),
+            "the probe must know the vault and be refused on its state: {msg}"
+        );
+        assert!(
+            msg.contains("re-simulation rejected"),
+            "the settle side re-simulates the curve against the composed (zero) reserves: {msg}"
+        );
+        let h = probe.core_sdk.device_head().expect("probe head");
+        assert_eq!(
+            (h.balance(&pc_a), h.balance(&pc_b)),
+            probe_before,
+            "the refused trade moved none of the probe's value"
+        );
+
+        // …and the vault is still dead: a refused settle cannot revive it.
+        let _ = become_device(0x41);
+        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+    }
+
+    /// Only the creating owner can close. A device with no record of the vault
+    /// has no pair, no fee and no birth-bound storage set for it — everything
+    /// the close derives — so it is refused before any of it is guessed.
+    #[test]
+    #[serial]
+    fn a_vault_this_device_never_created_cannot_be_closed() {
+        install_identity();
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let res = close(&owner, &[0x7Eu8; 32]);
+        assert!(!res.success, "an unknown vault cannot be closed");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("only the creating owner can close"),
+            "the refusal says why: {:?}",
+            res.error_message
+        );
     }
     /// THE ROUTE THAT HAD NO TEST — which is why both wounds shipped.
     ///
