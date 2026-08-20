@@ -956,6 +956,116 @@ impl AppRouterImpl {
         })
     }
 
+    /// The legs that still say what they said when the policy check passed.
+    ///
+    /// ATOMIC STATE GUARD (legs). The withdrawal row is re-read before the burn
+    /// so a second poller pass cannot double-burn it. The legs were never given
+    /// the same treatment, and the work they drive is just as terminal: the
+    /// prune removes a vault's advertisement from every storage node, and the
+    /// republish puts a successor back on the wire as live liquidity. The rows
+    /// were read before the policy check, the burn, and the projection sync —
+    /// three awaits — and `upsert_withdrawal_leg` can rewrite them in that
+    /// window. A leg re-pointed there must not have its old source pruned, and
+    /// its old successor must not be advertised.
+    fn legs_still_authoritative(
+        log_prefix: &str,
+        withdrawal_id: &str,
+        validated: &[crate::storage::client_db::InFlightWithdrawalLeg],
+    ) -> Vec<crate::storage::client_db::InFlightWithdrawalLeg> {
+        let current = match crate::storage::client_db::list_withdrawal_legs(withdrawal_id) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::warn!(
+                    "[{}] ρ={} could not re-read legs before prune: {} — pruning nothing (race guard)",
+                    log_prefix,
+                    withdrawal_id,
+                    e
+                );
+                return Vec::new();
+            }
+        };
+        validated
+            .iter()
+            .filter(|leg| {
+                let Some(row) = current.iter().find(|row| row.leg_index == leg.leg_index) else {
+                    log::warn!(
+                        "[{}] ρ={} leg {} vanished after validation — skipping its prune (race guard)",
+                        log_prefix,
+                        withdrawal_id,
+                        leg.leg_index
+                    );
+                    return false;
+                };
+                if row.vault_id != leg.vault_id || row.successor_vault_id != leg.successor_vault_id
+                {
+                    log::warn!(
+                        "[{}] ρ={} leg {} was re-pointed after validation (source {} → {}, \
+                         successor {:?} → {:?}) — skipping its prune (race guard)",
+                        log_prefix,
+                        withdrawal_id,
+                        leg.leg_index,
+                        leg.vault_id,
+                        row.vault_id,
+                        leg.successor_vault_id,
+                        row.successor_vault_id
+                    );
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Publish each settled leg's successor as routeable and prune its spent
+    /// source, for the legs the re-read still vouches for.
+    async fn prune_settled_withdrawal_legs(
+        bitcoin_tap: &Arc<crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk>,
+        controller_device_id: &[u8; 32],
+        log_prefix: &str,
+        withdrawal_id: &str,
+        validated_legs: &[crate::storage::client_db::InFlightWithdrawalLeg],
+    ) {
+        for leg in Self::legs_still_authoritative(log_prefix, withdrawal_id, validated_legs) {
+            if let Some(ref succ_vault_id) = leg.successor_vault_id {
+                if let Err(e) = bitcoin_tap
+                    .publish_vault_advertisement(succ_vault_id, controller_device_id)
+                    .await
+                {
+                    log::warn!(
+                        "[{}] successor ad re-publish for {} failed: {}",
+                        log_prefix,
+                        succ_vault_id,
+                        e
+                    );
+                } else {
+                    log::info!(
+                        "[{}] re-advertised successor vault {} as routeable",
+                        log_prefix,
+                        succ_vault_id
+                    );
+                }
+            }
+
+            // Prune spent source vault from storage nodes.
+            // Finalization is terminal — the UTXO is buried, no one
+            // needs the source advertisement anymore.
+            if let Err(e) =
+                crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
+                    &leg.vault_id,
+                )
+                .await
+            {
+                log::warn!(
+                    "[{}] vault prune failed for {}: {}",
+                    log_prefix,
+                    leg.vault_id,
+                    e
+                );
+            }
+        }
+    }
+
     async fn resolve_pending_withdrawals_with_client(
         &self,
         unresolved: &[crate::storage::client_db::InFlightWithdrawal],
@@ -1204,48 +1314,16 @@ impl AppRouterImpl {
                     wd.withdrawal_id
                 );
 
-                // Flip successor vault advertisements to green (routeable).
-                // After settlement, each leg's successor vault has confirmed burial
-                // and should be advertised as available liquidity.
-                for leg in &legs {
-                    if let Some(ref succ_vault_id) = leg.successor_vault_id {
-                        if let Err(e) = self
-                            .bitcoin_tap
-                            .publish_vault_advertisement(succ_vault_id, &self.device_id_bytes)
-                            .await
-                        {
-                            log::warn!(
-                                "[{}] successor ad re-publish for {} failed: {}",
-                                log_prefix,
-                                succ_vault_id,
-                                e
-                            );
-                        } else {
-                            log::info!(
-                                "[{}] re-advertised successor vault {} as routeable",
-                                log_prefix,
-                                succ_vault_id
-                            );
-                        }
-                    }
-
-                    // Prune spent source vault from storage nodes.
-                    // Finalization is terminal — the UTXO is buried, no one
-                    // needs the source advertisement anymore.
-                    if let Err(e) =
-                        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
-                            &leg.vault_id,
-                        )
-                        .await
-                    {
-                        log::warn!(
-                            "[{}] vault prune failed for {}: {}",
-                            log_prefix,
-                            leg.vault_id,
-                            e
-                        );
-                    }
-                }
+                // Flip successor vault advertisements to green (routeable) and
+                // prune each spent source vault, for the legs that still hold.
+                Self::prune_settled_withdrawal_legs(
+                    &self.bitcoin_tap,
+                    &self.device_id_bytes,
+                    log_prefix,
+                    &wd.withdrawal_id,
+                    &legs,
+                )
+                .await;
 
                 summary.finalized += 1;
             } else {
@@ -4939,6 +5017,115 @@ mod tests {
             enable_offline: true,
         })
         .expect("router init")
+    }
+
+    fn withdrawal_leg(
+        withdrawal_id: &str,
+        leg_index: u32,
+        vault_id: &str,
+    ) -> client_db::InFlightWithdrawalLeg {
+        client_db::InFlightWithdrawalLeg {
+            withdrawal_id: withdrawal_id.to_string(),
+            leg_index,
+            vault_id: vault_id.to_string(),
+            leg_kind: "full".to_string(),
+            amount_sats: 100_000,
+            estimated_fee_sats: 0,
+            estimated_net_sats: 100_000,
+            sweep_txid: Some(format!("txid-{leg_index}")),
+            successor_vault_id: None,
+            successor_vault_op_id: None,
+            exit_vault_op_id: None,
+            state: "broadcast".to_string(),
+            proof_digest: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// The prune is terminal: it removes a vault's advertisement from every
+    /// storage node. The leg rows keyed it were read before the policy check,
+    /// the burn and the projection sync — three awaits — while the withdrawal
+    /// row itself was re-read under an explicit race guard. A leg re-pointed
+    /// in that window must not take its old source's advertisement with it.
+    ///
+    /// Asserted on the wire: the object store cannot distinguish "never
+    /// deleted" from "deleted and republished", so this reads the ordered op
+    /// log the storage double keeps.
+    #[tokio::test]
+    #[serial]
+    async fn a_leg_repointed_after_validation_is_not_pruned() {
+        let router = init_withdrawal_invoke_test_router("leg_repointed");
+        let withdrawal_id = "rho-repointed";
+        let settled_vault = "VAULTSETTLED";
+        let stale_source = "VAULTSTALESOURCE";
+        let live_source = "VAULTLIVESOURCE";
+
+        client_db::create_withdrawal(client_db::CreateWithdrawalParams {
+            withdrawal_id,
+            device_id: "device-under-test",
+            amount_sats: 200_000,
+            dest_address: "tb1qdestination",
+            policy_commit: &[0x01; 32],
+            state: "committed",
+            burn_token_id: Some("dBTC"),
+            burn_amount_sats: 0,
+        })
+        .unwrap_or_else(|e| panic!("create withdrawal failed: {e}"));
+
+        for leg in [
+            withdrawal_leg(withdrawal_id, 0, settled_vault),
+            withdrawal_leg(withdrawal_id, 1, stale_source),
+        ] {
+            client_db::upsert_withdrawal_leg(&leg)
+                .unwrap_or_else(|e| panic!("seed leg failed: {e}"));
+        }
+
+        // What the finalization path validated, read exactly as it reads it.
+        let validated = client_db::list_withdrawal_legs(withdrawal_id)
+            .unwrap_or_else(|e| panic!("list legs failed: {e}"));
+        assert_eq!(validated.len(), 2, "expected two seeded legs");
+
+        // The window: leg 1 is re-pointed at a different source before the
+        // prune runs. Leg 0 is untouched and must still be pruned.
+        client_db::upsert_withdrawal_leg(&withdrawal_leg(withdrawal_id, 1, live_source))
+            .unwrap_or_else(|e| panic!("re-point leg failed: {e}"));
+
+        AppRouterImpl::prune_settled_withdrawal_legs(
+            &router.bitcoin_tap,
+            &[0x07; 32],
+            "test.prune",
+            withdrawal_id,
+            &validated,
+        )
+        .await;
+
+        let deleted: Vec<String> =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::dbtc_storage_op_log()
+                .into_iter()
+                .filter(|(_, op)| matches!(op, crate::sdk::bitcoin_tap_sdk::DbtcStorageOp::Delete))
+                .map(|(key, _)| key)
+                .collect();
+
+        let settled_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(settled_vault);
+        let stale_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(stale_source);
+        let live_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(live_source);
+
+        assert!(
+            deleted.contains(&settled_ad),
+            "the untouched leg's source was never pruned; deletes were {deleted:?}",
+        );
+        assert!(
+            !deleted.contains(&stale_ad),
+            "the re-pointed leg pruned the advertisement of a vault it no longer names",
+        );
+        assert!(
+            !deleted.contains(&live_ad),
+            "the prune reached a vault the validated leg never named",
+        );
     }
 
     fn pack_proto<T: Message>(message: &T) -> Vec<u8> {
