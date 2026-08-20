@@ -541,7 +541,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
                                  'canonical_close_committed','abandoned')),
             op_bytes          BLOB NOT NULL,
             x_close           BLOB NOT NULL,
-            claim_bytes       BLOB NOT NULL,
             pointer_key       TEXT NOT NULL,
             pointer_bytes     BLOB NOT NULL,
             storage_set_id    BLOB NOT NULL,
