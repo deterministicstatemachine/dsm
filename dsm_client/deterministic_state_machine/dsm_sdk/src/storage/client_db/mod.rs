@@ -31,6 +31,7 @@ mod contacts;
 pub mod counterparty_canonical_heads;
 mod dlv_receipts;
 mod export;
+pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
 mod manifold_seeds;
 mod nonces;
@@ -373,7 +374,16 @@ fn get_database_path() -> Result<PathBuf> {
 /// version, not the happenstance that `CREATE TABLE IF NOT EXISTS` can run on a v3
 /// file, is the authority on what the schema means. Reset-and-reprovision, no
 /// migration, per the beta policy.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 4;
+///
+/// 5: publication durability + canonical storage set — `frozen_publication_artifact`
+/// (exact bytes a canonical advance froze, keyed `(object_key, content_digest)`,
+/// bound to the `storage_set_id` they were frozen for) and
+/// `frozen_publication_artifact_members` (one current acceptance observation per
+/// member); `amm_vault_records.storage_set_id BLOB NOT NULL` (the set a vault was
+/// born under — a local copy of the value the vault's signed anchor binds). Also
+/// durable protocol state that decides what "published" and "which set" mean;
+/// same rule as v4 — the version is the authority, no shim.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 5;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -469,6 +479,41 @@ fn create_schema(conn: &Connection) -> Result<()> {
             node_url    TEXT NOT NULL,
             verified_at INTEGER NOT NULL,
             PRIMARY KEY (device_id, node_url)
+        );
+
+        -- FROZEN PUBLICATION ARTIFACTS: the exact bytes a canonical advance froze
+        -- (in the SAME transaction as the head write) that must reach a quorum of
+        -- the canonical storage set they were frozen FOR. Keyed by
+        -- (object_key, content_digest): a `.../latest` key re-published across
+        -- generations supersedes the older row instead of colliding. The content
+        -- digest is derived from the bytes (never caller-supplied). No recipient,
+        -- no route, no acceptance, no ACK-GC -- this is not an outbox. Quorum is
+        -- never stored: it is always quorum_for(|resolved set|). No clock columns
+        -- in logic: unpublished work is ordered by the insertion ordinal.
+        CREATE TABLE IF NOT EXISTS frozen_publication_artifact(
+            insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+            object_key        TEXT NOT NULL,
+            content_digest    BLOB NOT NULL,
+            payload           BLOB NOT NULL,
+            bound_root        BLOB NOT NULL,
+            purpose           TEXT NOT NULL,
+            storage_set_id    BLOB NOT NULL,
+            state             TEXT NOT NULL CHECK (state IN
+                                ('frozen','publication_pending','published','superseded')),
+            last_error        TEXT NOT NULL DEFAULT '',
+            UNIQUE (object_key, content_digest)
+        );
+
+        -- ONE CURRENT acceptance observation per (object_key, member_id):
+        -- `accepted_digest` names which artifact generation the member holds.
+        -- Only rows whose accepted_digest equals a row's content_digest count for
+        -- that row; superseding an artifact does not carry old observations
+        -- forward. Members are canonical node identities, never URLs.
+        CREATE TABLE IF NOT EXISTS frozen_publication_artifact_members(
+            object_key      TEXT NOT NULL,
+            member_id       TEXT NOT NULL,
+            accepted_digest BLOB NOT NULL,
+            PRIMARY KEY (object_key, member_id)
         );
 
         CREATE TABLE IF NOT EXISTS contacts(
@@ -1076,6 +1121,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             fee_bps             INTEGER NOT NULL,
             anchor_enforcement  INTEGER NOT NULL,
             policy_digest       BLOB NOT NULL,
+            -- The canonical storage set this vault was born under: a LOCAL COPY of
+            -- the value the vault's signed birth anchor binds. Consumers resolve
+            -- the anchor's set; this cache must equal it (fail closed on mismatch).
+            storage_set_id      BLOB NOT NULL,
             created_at          INTEGER NOT NULL
         );
 

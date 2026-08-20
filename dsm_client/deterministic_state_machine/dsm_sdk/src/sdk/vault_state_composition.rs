@@ -130,10 +130,24 @@ pub(crate) struct ComposedVaultState {
     pub owner_devid: [u8; 32],
     pub owner_genesis: [u8; 32],
     pub owner_public_key: Vec<u8>,
+    /// The canonical storage set the vault was born under, read from the
+    /// vault's OWN signed anchors (the seq-0 birth anchor and the baseline
+    /// agree, or composition refuses). Consumers resolve THIS through their
+    /// local catalog — the anchor chooses the set; configuration only resolves
+    /// it — for the settlement-slot register and any publication scoped to the
+    /// vault. Never derived from local config.
+    pub storage_set_id: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompositionError {
+    /// The vault's seq-0 (birth) anchor is missing, fails verification, is
+    /// signed by a different owner key than the baseline, or names a
+    /// different `storage_set_id` than the baseline. `storage_set_id` is
+    /// birth-fixed across the lineage: a validly signed later anchor with a
+    /// different set is not caught by its own signature — only by this
+    /// lineage check. Fail closed.
+    StorageSetLineageBroken,
     /// Baseline anchor's SPHINCS+ signature failed verification.  Fail
     /// closed — without a valid baseline the entire composition is moot.
     InvalidBaselineAnchor,
@@ -214,6 +228,11 @@ impl std::fmt::Display for CompositionError {
             CompositionError::PairIsNotPolicyCommits => write!(
                 f,
                 "vault pair must be 32-byte policy commits so proven reserve legs can be matched to a side"
+            ),
+            CompositionError::StorageSetLineageBroken => write!(
+                f,
+                "vault storage-set lineage broken: the seq-0 birth anchor is missing, unverifiable, \
+                 signed by another key, or names a different storage_set_id than the baseline"
             ),
         }
     }
@@ -331,10 +350,12 @@ pub(crate) async fn compose_vault_state(
 
     // The owner's signed digest must agree with what its own leaves prove. Both
     // are the owner's, so disagreement means the two records were produced from
-    // different states — the vault is not safe to quote either way.
+    // different states — the vault is not safe to quote either way. The digest
+    // is always over the CANONICAL pair order (lex-lower first) — the order the
+    // owner's own advance derived it in — never the caller's token order.
     let expected_digest = compute_reserves_digest(
-        token_a,
-        token_b,
+        &pc_a,
+        &pc_b,
         baseline_reserves.0,
         baseline_reserves.1,
         fee_bps,
@@ -342,6 +363,28 @@ pub(crate) async fn compose_vault_state(
     if expected_digest != baseline.reserves_digest {
         return Err(CompositionError::InvalidReserveProof);
     }
+
+    // STORAGE-SET LINEAGE. The set a vault is born under is fixed for its
+    // lifetime, and every later generation must derive it from the birth
+    // state — callers never supply it. The seq-0 pinned anchor is the
+    // birth-pinned reference: it must exist, verify, be signed by the SAME
+    // owner key as the baseline, and name the SAME `storage_set_id`. A baseline
+    // that names another set is a lineage break (or an equivocating owner),
+    // and quoting it would let a trader claim against a set the vault was
+    // never bound to.
+    let birth = crate::sdk::vault_state_anchor_codec::fetch_signed_anchor_at_sequence(vault_id, 0)
+        .await
+        .map_err(|e| CompositionError::StorageListFailed(format!("birth anchor fetch: {e}")))?
+        .ok_or(CompositionError::StorageSetLineageBroken)?;
+    verify_vault_state_anchor(&birth).map_err(|_| CompositionError::StorageSetLineageBroken)?;
+    if birth.vault_id != baseline.vault_id
+        || birth.sequence != 0
+        || birth.owner_public_key != baseline.owner_public_key
+        || birth.storage_set_id != baseline.storage_set_id
+    {
+        return Err(CompositionError::StorageSetLineageBroken);
+    }
+    let storage_set_id = birth.storage_set_id;
 
     let prefix = vault_pending_prefix(vault_id);
     let mut cursor: Option<String> = None;
@@ -567,13 +610,8 @@ pub(crate) async fn compose_vault_state(
         // signed against a different parent state and folding it would
         // diverge from the canonical chain — skip.  Note: this is the
         // cryptographic link between pointer and cursor.
-        let cursor_digest = compute_reserves_digest(
-            token_a,
-            token_b,
-            cursor_reserve_a,
-            cursor_reserve_b,
-            fee_bps,
-        );
+        let cursor_digest =
+            compute_reserves_digest(&pc_a, &pc_b, cursor_reserve_a, cursor_reserve_b, fee_bps);
         if !hop.vault_state_reserves_digest.is_empty()
             && hop.vault_state_reserves_digest.as_slice() != cursor_digest.as_slice()
         {
@@ -661,6 +699,7 @@ pub(crate) async fn compose_vault_state(
         owner_devid: reserve_proof.owner_devid,
         owner_genesis: reserve_proof.owner_genesis,
         owner_public_key: reserve_proof.owner_public_key.clone(),
+        storage_set_id,
     })
 }
 
@@ -678,6 +717,9 @@ mod tests {
     /// Owner identity the reserve leaves are keyed under.
     const OWNER_GENESIS: [u8; 32] = [0xA0; 32];
     const OWNER_DEVID: [u8; 32] = [0xB0; 32];
+    /// The storage set every fixture vault is born under (any 32 bytes: the
+    /// lineage check compares birth vs baseline, it does not resolve it).
+    const TEST_STORAGE_SET: [u8; 32] = [0x6B; 32];
     use dsm::dlv::settlement_receipt_leaf::{
         derive_receipt_id, receipt_commitment, settlement_receipt_key, settlement_receipt_value,
         sign_trader_settlement_receipt, SettledTrade,
@@ -701,7 +743,38 @@ mod tests {
         owner_sk: &[u8],
     ) -> SignedVaultStateAnchor {
         let digest = compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
-        sign_vault_state_anchor(vault_id, seq, &digest, owner_pk, owner_sk).expect("sign anchor")
+        sign_vault_state_anchor(
+            vault_id,
+            seq,
+            &digest,
+            &TEST_STORAGE_SET,
+            owner_pk,
+            owner_sk,
+        )
+        .expect("sign anchor")
+    }
+
+    /// Publish the vault's BIRTH-PINNED (seq-0) anchor under the same owner key
+    /// and storage set, so the composer's lineage check finds it. Production
+    /// freezes this at `dlv.create`; fixtures publish it directly.
+    async fn publish_birth_anchor(
+        vault_id: &[u8; 32],
+        token_a: &[u8],
+        token_b: &[u8],
+        fee_bps: u32,
+        owner_pk: &[u8],
+        owner_sk: &[u8],
+    ) {
+        let birth = make_baseline_anchor_only(
+            vault_id, 0, token_a, token_b, 1, 1, fee_bps, owner_pk, owner_sk,
+        );
+        let bytes = crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(&birth);
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(
+            &crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
+            &bytes,
+        )
+        .await
+        .expect("publish birth anchor");
     }
 
     /// Phase-7 strict-mode-compatible baseline: sign the anchor AND
@@ -724,6 +797,7 @@ mod tests {
         let anchor = make_baseline_anchor_only(
             vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
         );
+        publish_birth_anchor(vault_id, token_a, token_b, fee_bps, owner_pk, owner_sk).await;
         publish_baseline_inclusion_proof(
             vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
         )
@@ -1305,6 +1379,136 @@ mod tests {
             publish_receipt(vault_id, &trade, trader_pk, trader_sk).await;
         }
         (new_a, new_b)
+    }
+
+    // ── storage-set lineage ────────────────────────────────────────────────
+    //
+    // The set a vault is born under is fixed for its lifetime; every later
+    // generation derives it from the birth state, and a caller never supplies
+    // it. A validly signed later anchor naming another set is not caught by its
+    // own signature — only by comparing it to the birth-pinned anchor.
+
+    /// Birth under S1, an otherwise-valid signed generation-K anchor under S2:
+    /// composition refuses (`StorageSetLineageBroken`), even though the K
+    /// anchor, its inclusion proof and its reserve proof all verify.
+    #[tokio::test]
+    async fn a_generation_naming_a_different_storage_set_than_birth_is_refused() {
+        let vault_id = vid_seed(0x91);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        // Publishes the birth anchor under TEST_STORAGE_SET and a valid gen-3
+        // inclusion + reserve proof.
+        let _ = make_baseline(
+            &vault_id,
+            3,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        // The gen-3 baseline the trader is handed names ANOTHER set — signed
+        // correctly by the same owner.
+        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
+        let mut other_set = TEST_STORAGE_SET;
+        other_set[0] ^= 0xff;
+        let baseline_s2 = sign_vault_state_anchor(
+            &vault_id,
+            3,
+            &digest,
+            &other_set,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .expect("sign");
+        let err = compose_vault_state(&vault_id, &baseline_s2, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("a lineage break must refuse composition");
+        assert_eq!(err, CompositionError::StorageSetLineageBroken);
+
+        // Positive control: the same generation under the birth set composes and
+        // exposes the birth-bound set for consumers to resolve.
+        let baseline_s1 = sign_vault_state_anchor(
+            &vault_id,
+            3,
+            &digest,
+            &TEST_STORAGE_SET,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .expect("sign");
+        let composed = compose_vault_state(&vault_id, &baseline_s1, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("same set composes");
+        assert_eq!(composed.storage_set_id, TEST_STORAGE_SET);
+    }
+
+    /// No birth anchor at all, or a birth anchor signed by a different key:
+    /// refused. The lineage reference must be the vault's own.
+    #[tokio::test]
+    async fn a_missing_or_foreign_key_birth_anchor_is_refused() {
+        let vault_id = vid_seed(0x92);
+        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
+        let baseline = make_baseline_anchor_only(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        );
+        // Inclusion + reserve proofs exist, but no seq-0 anchor was published.
+        publish_baseline_inclusion_proof(
+            &vault_id,
+            0,
+            &TOKEN_A,
+            &TOKEN_B,
+            1_000_000,
+            500_000,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("no birth anchor");
+        assert_eq!(err, CompositionError::StorageSetLineageBroken);
+
+        // A birth anchor signed by SOMEONE ELSE under the same set: refused.
+        let stranger = generate_keypair(SphincsVariant::SPX256f).expect("stranger kp");
+        publish_birth_anchor(
+            &vault_id,
+            &TOKEN_A,
+            &TOKEN_B,
+            30,
+            &stranger.public_key,
+            &stranger.secret_key,
+        )
+        .await;
+        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect_err("foreign-key birth anchor");
+        assert_eq!(err, CompositionError::StorageSetLineageBroken);
+
+        // The owner's own birth anchor: composes.
+        publish_birth_anchor(
+            &vault_id,
+            &TOKEN_A,
+            &TOKEN_B,
+            30,
+            &owner.public_key,
+            &owner.secret_key,
+        )
+        .await;
+        compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+            .await
+            .expect("owner's birth anchor restores composition");
     }
 
     #[tokio::test]

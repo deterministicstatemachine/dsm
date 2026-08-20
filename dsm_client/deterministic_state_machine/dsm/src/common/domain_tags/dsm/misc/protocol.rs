@@ -19,6 +19,10 @@ pub const TAG_DSM_DETERMINISTIC_TIME: TaggedHashDomain<'static> =
 pub const TAG_DSM_DEV_ENT_V2: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/DEV_ENT/v2");
 pub const TAG_DSM_DJTE_SHARD_MERKLE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/djte-shard-merkle");
+/// Content digest of a frozen publication artifact (exact bytes replayed to a
+/// storage quorum): `H(tag ‖ 0x00 ‖ object_key ‖ 0x00 ‖ payload)`.
+pub const TAG_DSM_FROZEN_ARTIFACT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/frozen-artifact/v1");
 pub const TAG_DSM_OP_VERIFY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/op-verify");
 pub const TAG_DSM_PRE_FINALIZATION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/pre-finalization");
@@ -28,6 +32,10 @@ pub const TAG_DSM_PROTOCOL_TRANSITION: TaggedHashDomain<'static> =
 pub const TAG_DSM_RECEIPT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/receipt");
 pub const TAG_DSM_RECEIPT_BIND_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-bind-session");
+/// Canonical storage-set identity: `H(tag ‖ 0x00 ‖ u32_be(count) ‖ for each
+/// member id in lexicographic byte order: u32_be(len) ‖ id)`.
+pub const TAG_DSM_STORAGE_SET_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage-set/v1");
 /// Content address of an A-side receipt-evidence artifact (ADR 0003).
 ///
 /// Separated BY ROLE from the B-side tag below. Every evidence artifact is a

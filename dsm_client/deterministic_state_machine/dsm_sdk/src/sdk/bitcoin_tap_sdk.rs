@@ -2874,6 +2874,10 @@ impl BitcoinTapSdk {
     pub(crate) fn reset_dbtc_storage_test_state() {
         let mut state = dbtc_storage_test_state();
         *state = DbtcStorageTestState::default();
+        // The per-member fake fleet is the other half of "storage" in tests
+        // (frozen-artifact fan-out lands there; reads fall back to it). Reset
+        // both together so deterministic vault ids cannot leak across tests.
+        crate::sdk::storage_io::fake_fleet::reset();
     }
 
     #[cfg(test)]
@@ -2938,12 +2942,22 @@ impl BitcoinTapSdk {
                     None::<std::io::Error>,
                 ));
             }
-            state.object_store.get(key).cloned().ok_or_else(|| {
-                DsmError::storage(
-                    format!("load {key}: object not found"),
-                    None::<std::io::Error>,
-                )
-            })
+            if let Some(bytes) = state.object_store.get(key).cloned() {
+                return Ok(bytes);
+            }
+            drop(state);
+            // A reader on the real fleet fetches from ANY node; in tests, the
+            // frozen-artifact fan-out lands on the per-member fake fleet rather
+            // than this flat store, so a get falls back to any member holding
+            // the key (test-only seam; production reads go through storage_io).
+            #[cfg(test)]
+            if let Some(bytes) = crate::sdk::storage_io::fake_fleet::any_member_holding(key) {
+                return Ok(bytes);
+            }
+            Err(DsmError::storage(
+                format!("load {key}: object not found"),
+                None::<std::io::Error>,
+            ))
         }
 
         #[cfg(not(any(test, feature = "demos")))]

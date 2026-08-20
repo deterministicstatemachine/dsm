@@ -183,6 +183,14 @@ fn advance_with(
             output_amount: 60,
             parent_sequence: 0,
             new_sequence: 1,
+            pair: {
+                let (lo, hi) = if era() < dbtc() {
+                    (era(), dbtc())
+                } else {
+                    (dbtc(), era())
+                };
+                dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
+            },
         }),
     )
     .map(|o| o.new_device_state)

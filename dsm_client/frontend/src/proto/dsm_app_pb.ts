@@ -181,6 +181,40 @@ proto3.util.setEnumType(AnchorEnforcement, "dsm.AnchorEnforcement", [
 ]);
 
 /**
+ * Whether a vault's birth publication set has reached quorum on its birth
+ * storage set (see `AmmVaultSummaryV1.publication_state`).
+ *
+ * @generated from enum dsm.VaultPublicationState
+ */
+export enum VaultPublicationState {
+  /**
+   * @generated from enum value: VAULT_PUBLICATION_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Frozen in the funding transaction; not every birth object has reached
+   * quorum yet. Not market-active.
+   *
+   * @generated from enum value: VAULT_PUBLICATION_STATE_PENDING = 1;
+   */
+  PENDING = 1,
+
+  /**
+   * Every birth object accepted by a quorum of the vault's birth storage set.
+   *
+   * @generated from enum value: VAULT_PUBLICATION_STATE_PUBLISHED = 2;
+   */
+  PUBLISHED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(VaultPublicationState)
+proto3.util.setEnumType(VaultPublicationState, "dsm.VaultPublicationState", [
+  { no: 0, name: "VAULT_PUBLICATION_STATE_UNSPECIFIED" },
+  { no: 1, name: "VAULT_PUBLICATION_STATE_PENDING" },
+  { no: 2, name: "VAULT_PUBLICATION_STATE_PUBLISHED" },
+]);
+
+/**
  * @generated from enum dsm.StorageNodeStatus
  */
 export enum StorageNodeStatus {
@@ -8451,6 +8485,19 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
    */
   tokenBTicker = "";
 
+  /**
+   * FUNDED IS NOT PUBLISHED. A vault's five birth objects (anchor seq-pinned +
+   * latest, vault-state inclusion proof seq-pinned + latest, reserve proof)
+   * are frozen in the funding transaction and replayed to the vault's birth
+   * storage set until a quorum holds them. Until every one is published the
+   * vault is funded locally but NOT market-active: the routing advertisement
+   * refuses to publish, and this reports PENDING. Derived from the artifact
+   * table — never a stored flag.
+   *
+   * @generated from field: dsm.VaultPublicationState publication_state = 21;
+   */
+  publicationState = VaultPublicationState.UNSPECIFIED;
+
   constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8475,6 +8522,7 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 12, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
     { no: 17, name: "token_a_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 18, name: "token_b_ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 21, name: "publication_state", kind: "enum", T: proto3.getEnumType(VaultPublicationState) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {
@@ -8537,6 +8585,18 @@ export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
    */
   ownerSignature = new Uint8Array(0);
 
+  /**
+   * The canonical storage set the vault was born under (BLAKE3 over its
+   * sorted, length-prefixed member ids), INSIDE the owner-signed preimage
+   * and birth-fixed across the vault's lineage. Consumers resolve it through
+   * their local storage-set catalog by re-hashing; the anchor chooses the
+   * set, configuration only resolves it. Publication artifacts and the
+   * settlement-slot register for this vault are scoped to this set.
+   *
+   * @generated from field: bytes storage_set_id = 6;
+   */
+  storageSetId = new Uint8Array(0);
+
   constructor(data?: PartialMessage<VaultStateAnchorV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8550,6 +8610,7 @@ export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
     { no: 3, name: "reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultStateAnchorV1 {

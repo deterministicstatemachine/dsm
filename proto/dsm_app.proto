@@ -1144,6 +1144,27 @@ message AmmVaultSummaryV1 {
   // unresolved, not broken.  52 chars for an encoded 32-byte commit, hence 64.
   string token_a_ticker = 17 [(dsm_max_len)=64];
   string token_b_ticker = 18 [(dsm_max_len)=64];
+  // Reserved for `closed` (the vault's reserves are 0 @ K+1 after `dlv.close`).
+  reserved 20;
+  // FUNDED IS NOT PUBLISHED. A vault's five birth objects (anchor seq-pinned +
+  // latest, vault-state inclusion proof seq-pinned + latest, reserve proof)
+  // are frozen in the funding transaction and replayed to the vault's birth
+  // storage set until a quorum holds them. Until every one is published the
+  // vault is funded locally but NOT market-active: the routing advertisement
+  // refuses to publish, and this reports PENDING. Derived from the artifact
+  // table — never a stored flag.
+  VaultPublicationState publication_state = 21;
+}
+
+// Whether a vault's birth publication set has reached quorum on its birth
+// storage set (see `AmmVaultSummaryV1.publication_state`).
+enum VaultPublicationState {
+  VAULT_PUBLICATION_STATE_UNSPECIFIED = 0;
+  // Frozen in the funding transaction; not every birth object has reached
+  // quorum yet. Not market-active.
+  VAULT_PUBLICATION_STATE_PENDING     = 1;
+  // Every birth object accepted by a quorum of the vault's birth storage set.
+  VAULT_PUBLICATION_STATE_PUBLISHED   = 2;
 }
 
 // Per-vault signed state anchor.  Owner publishes one at vault
@@ -1165,6 +1186,13 @@ message VaultStateAnchorV1 {
   bytes  reserves_digest    = 3 [(dsm_fixed_len)=32];
   bytes  owner_public_key   = 4 [(dsm_max_len)=65535];
   bytes  owner_signature    = 5 [(dsm_max_len)=65535];
+  // The canonical storage set the vault was born under (BLAKE3 over its
+  // sorted, length-prefixed member ids), INSIDE the owner-signed preimage
+  // and birth-fixed across the vault's lineage. Consumers resolve it through
+  // their local storage-set catalog by re-hashing; the anchor chooses the
+  // set, configuration only resolves it. Publication artifacts and the
+  // settlement-slot register for this vault are scoped to this set.
+  bytes  storage_set_id     = 6 [(dsm_fixed_len)=32];
 }
 
 // One hop in a `RouteCommitV1`.  Bound at routing time to the vault
