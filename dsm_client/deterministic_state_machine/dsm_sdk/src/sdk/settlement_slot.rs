@@ -51,7 +51,7 @@
 
 use dsm::dlv::settlement_slot_claim::{
     claim_envelope_digest, decode_and_verify_settlement_slot_claim, sign_settlement_slot_claim,
-    SettlementSlotClaimBody,
+    SettlementSlotClaimBody, VerifiedSettlementSlotClaim,
 };
 
 use crate::sdk::storage_set::StorageSet;
@@ -141,6 +141,73 @@ impl std::fmt::Display for SlotClaimError {
 
 impl std::error::Error for SlotClaimError {}
 
+/// A settlement-slot claim envelope that came OUT OF DURABLE STORAGE.
+///
+/// This type is the recovery boundary, and it exists because no observation
+/// downstream can enforce the rule it enforces. SPHINCS+ signing here is
+/// deterministic (`R = H(sk_prf || m)`), so a rebuilt claim is byte-identical
+/// to a replayed one: nothing on the wire, in a digest, or in a test can tell
+/// which happened. The guarantee therefore has to be that the machinery is
+/// ABSENT rather than merely unused.
+///
+/// So there is exactly one constructor — [`FrozenClaimEnvelope::load`], which
+/// reads bytes that are already retained — and [`claim_settlement_slot`]
+/// accepts nothing else. A caller holding one of these cannot have built it,
+/// and a caller with a signing key but no retained bytes cannot obtain one at
+/// all. Making recovery re-sign a claim would mean changing this type, not
+/// quietly editing a call site while every test stays green.
+pub(crate) struct FrozenClaimEnvelope {
+    bytes: Vec<u8>,
+    verified: VerifiedSettlementSlotClaim,
+}
+
+impl FrozenClaimEnvelope {
+    /// The ONLY constructor: the envelope retained for this slot, if any.
+    ///
+    /// Verified on the way out, so a caller cannot act on retained bytes that
+    /// no longer decode or no longer describe the slot they were asked for.
+    pub(crate) fn load(
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        x: &[u8; 32],
+    ) -> Result<Option<Self>, dsm::types::error::DsmError> {
+        use crate::storage::client_db::settlement_slot_claim_local as local;
+        let Some(bytes) = local::get_frozen_claim(vault_id, parent_sequence, x).map_err(|e| {
+            dsm::types::error::DsmError::storage(
+                format!("frozen slot claim lookup: {e}"),
+                None::<std::io::Error>,
+            )
+        })?
+        else {
+            return Ok(None);
+        };
+        let verified = decode_and_verify_settlement_slot_claim(&bytes).map_err(|e| {
+            dsm::types::error::DsmError::invalid_operation(format!(
+                "retained slot claim is not a valid envelope: {e}"
+            ))
+        })?;
+        if verified.body.vault_id != *vault_id
+            || verified.body.parent_sequence != parent_sequence
+            || verified.body.x != *x
+        {
+            return Err(dsm::types::error::DsmError::invalid_operation(
+                "retained slot claim describes a different slot — refusing",
+            ));
+        }
+        Ok(Some(Self { bytes, verified }))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The set this claim was frozen against — the client half of the
+    /// three-way storage-set equality a resumed close re-establishes.
+    pub(crate) fn storage_set_id(&self) -> [u8; 32] {
+        self.verified.body.storage_set_id
+    }
+}
+
 /// The claim envelope for `(vault_id, parent_sequence, x)` under `storage_set_id`,
 /// signed by this device's canonical signing authority — RETAINED durably the
 /// first time it is built, and returned byte-identically thereafter. Retries
@@ -150,30 +217,15 @@ pub(crate) fn frozen_claim_envelope(
     parent_sequence: u64,
     x: &[u8; 32],
     storage_set_id: &[u8; 32],
-) -> Result<Vec<u8>, dsm::types::error::DsmError> {
+) -> Result<FrozenClaimEnvelope, dsm::types::error::DsmError> {
     use crate::storage::client_db::settlement_slot_claim_local as local;
-    if let Some(bytes) = local::get_frozen_claim(vault_id, parent_sequence, x).map_err(|e| {
-        dsm::types::error::DsmError::storage(
-            format!("frozen slot claim lookup: {e}"),
-            None::<std::io::Error>,
-        )
-    })? {
-        // The retained bytes must still describe this exact slot and set.
-        let v = decode_and_verify_settlement_slot_claim(&bytes).map_err(|e| {
-            dsm::types::error::DsmError::invalid_operation(format!(
-                "retained slot claim is not a valid envelope: {e}"
-            ))
-        })?;
-        if v.body.vault_id != *vault_id
-            || v.body.parent_sequence != parent_sequence
-            || v.body.x != *x
-            || v.body.storage_set_id != *storage_set_id
-        {
+    if let Some(retained) = FrozenClaimEnvelope::load(vault_id, parent_sequence, x)? {
+        if retained.storage_set_id() != *storage_set_id {
             return Err(dsm::types::error::DsmError::invalid_operation(
-                "retained slot claim describes a different slot or set — refusing",
+                "retained slot claim describes a different set — refusing",
             ));
         }
-        return Ok(bytes);
+        return Ok(retained);
     }
     let pk = crate::sdk::signing_authority::current_public_key()?;
     let sk = crate::sdk::signing_authority::current_secret_key()?;
@@ -198,7 +250,16 @@ pub(crate) fn frozen_claim_envelope(
             None::<std::io::Error>,
         )
     })?;
-    Ok(bytes)
+    // Read it back rather than wrapping the bytes we just signed, so that what
+    // is submitted is ALWAYS what storage holds — on the first attempt exactly
+    // as on every later one. A retention that silently failed to persist
+    // surfaces here, before the claim goes out, instead of at recovery.
+    FrozenClaimEnvelope::load(vault_id, parent_sequence, x)?.ok_or_else(|| {
+        dsm::types::error::DsmError::storage(
+            "frozen slot claim did not persist — refusing to claim from memory",
+            None::<std::io::Error>,
+        )
+    })
 }
 
 /// Submit the exact `frozen_envelope` to every member of `set` and decide:
@@ -211,11 +272,15 @@ pub(crate) fn frozen_claim_envelope(
 /// value; everything before is reversible by stopping.
 pub(crate) async fn claim_settlement_slot(
     set: &StorageSet,
-    frozen_envelope: &[u8],
+    frozen_envelope: &FrozenClaimEnvelope,
     vault_id: &[u8; 32],
     parent_sequence: u64,
     x: &[u8; 32],
 ) -> Result<SettlementSlotClaim, SlotClaimError> {
+    // Only a [`FrozenClaimEnvelope`] can be submitted, and the only way to hold
+    // one is to have loaded it from storage — so no caller, on any path, can
+    // hand this function a claim it just built.
+    let frozen_envelope = frozen_envelope.as_bytes();
     // The envelope must describe the slot we are claiming and this set.
     let v = decode_and_verify_settlement_slot_claim(frozen_envelope)
         .map_err(|_| SlotClaimError::EnvelopeMismatch)?;
@@ -240,10 +305,16 @@ pub(crate) async fn claim_settlement_slot(
     let mut refused_by = 0u32;
     let mut details: Vec<String> = Vec::new();
     for o in &fanout.outcomes {
+        // ATTRIBUTION IS A PRECONDITION OF COUNTING, on every path that counts.
+        // Quorum means a majority of DISTINCT members hold these exact bytes,
+        // and an outcome only says anything about a member if that member
+        // named ITSELF in the reply. One node answering under another's id
+        // would otherwise contribute twice to a majority that does not exist.
+        let attributed = o.echoed_node_id.as_deref() == Some(o.member_id.as_str());
         match &o.result {
             crate::sdk::storage_node_sdk::MemberClaimResult::Accepted
             | crate::sdk::storage_node_sdk::MemberClaimResult::HeldIdentical => {
-                if o.echoed_node_id.as_deref() == Some(o.member_id.as_str()) {
+                if attributed {
                     accepted += 1;
                 } else {
                     details.push(format!(
@@ -254,10 +325,24 @@ pub(crate) async fn claim_settlement_slot(
             }
             crate::sdk::storage_node_sdk::MemberClaimResult::Refused { held_digest } => {
                 if held_digest.as_deref() == Some(&our_digest[..]) {
-                    // A member that reports OUR digest as "held" is holding our
-                    // bytes (a re-ack expressed oddly); count it.
-                    accepted += 1;
+                    // A member reporting OUR digest as "held" is holding our
+                    // bytes — a re-ack expressed oddly. It is an ACCEPTANCE, so
+                    // it carries the same attribution requirement as one; the
+                    // current node never phrases a re-ack this way, and this
+                    // arm exists so that a node which did could not slip an
+                    // unattributed count past the check its siblings apply.
+                    if attributed {
+                        accepted += 1;
+                    } else {
+                        details.push(format!(
+                            "{}: holds our claim but echoed {:?} — not counted",
+                            o.member_id, o.echoed_node_id
+                        ));
+                    }
                 } else {
+                    // A refusal is NOT attributed on purpose: counting it makes
+                    // this claim fail closed as Contested, so an unattributed
+                    // one can only make us more conservative, never less.
                     refused_by += 1;
                 }
             }
@@ -327,8 +412,16 @@ mod tests {
         .expect("a three-member set")
     }
 
-    fn envelope(sk: &[u8], pk: &[u8], set: &StorageSet, seq: u64, x: u8) -> Vec<u8> {
-        sign_settlement_slot_claim(
+    /// Sign a claim, RETAIN it, and hand back the loaded envelope.
+    ///
+    /// The tests go through storage exactly as production does, because
+    /// `claim_settlement_slot` accepts only a [`FrozenClaimEnvelope`] and the
+    /// only way to hold one is to load it. A test-only constructor taking raw
+    /// bytes would hand these tests the very capability the type exists to
+    /// withhold, and the boundary would then be enforced everywhere except
+    /// where it is exercised.
+    fn envelope(sk: &[u8], pk: &[u8], set: &StorageSet, seq: u64, x: u8) -> FrozenClaimEnvelope {
+        let bytes = sign_settlement_slot_claim(
             &SettlementSlotClaimBody {
                 vault_id: [0x11; 32],
                 parent_sequence: seq,
@@ -338,7 +431,17 @@ mod tests {
             },
             sk,
         )
-        .expect("sign")
+        .expect("sign");
+        crate::storage::client_db::settlement_slot_claim_local::put_frozen_claim(
+            &[0x11; 32],
+            seq,
+            &[x; 32],
+            &bytes,
+        )
+        .expect("retain");
+        FrozenClaimEnvelope::load(&[0x11; 32], seq, &[x; 32])
+            .expect("load")
+            .expect("retained")
     }
 
     /// Two contestants, three members: at most one reaches quorum, and the
@@ -431,6 +534,46 @@ mod tests {
         let r = claim_settlement_slot(&set, &a, &[0x11; 32], 2, &[0xA1; 32])
             .await
             .expect_err("only test-2's own acceptance counts");
+        assert!(
+            matches!(r, SlotClaimError::StorageUnavailable { accepted: 1, .. }),
+            "{r}"
+        );
+    }
+
+    /// A RE-ACK PHRASED AS A REFUSAL IS STILL AN ACCEPTANCE, so it carries the
+    /// same attribution requirement as one.
+    ///
+    /// A member answering `Refused` while naming OUR digest as the value it
+    /// holds is holding our bytes. Counting it is correct — and counting it
+    /// without checking who answered is not. Quorum means a majority of
+    /// DISTINCT members hold these exact bytes; one node replying under
+    /// another's id would otherwise contribute twice to a majority that does
+    /// not exist, on the one acceptance path that never checked.
+    ///
+    /// The current node never phrases a re-ack this way. That is the reason to
+    /// test it: the arm exists for a node that would, and such a node is
+    /// precisely the one whose attribution cannot be taken on trust.
+    #[tokio::test]
+    #[serial]
+    async fn a_refusal_holding_our_own_digest_still_needs_attribution() {
+        let set = init();
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let a = envelope(&sk, &pk, &set, 7, 0xA1);
+
+        // First pass: every member takes our bytes, so every later answer is a
+        // re-ack over the identical envelope.
+        claim_settlement_slot(&set, &a, &[0x11; 32], 7, &[0xA1; 32])
+            .await
+            .expect("the first claim reaches quorum");
+
+        // The retry: test-1 re-acks in the refusal phrasing AND names test-2 as
+        // itself; test-3 is unreachable. Only test-2's own re-ack may count.
+        fake_fleet::set_refuse_phrasing("test-1");
+        fake_fleet::set_echo("test-1", Some("test-2"));
+        fake_fleet::fail_member("test-3");
+        let r = claim_settlement_slot(&set, &a, &[0x11; 32], 7, &[0xA1; 32])
+            .await
+            .expect_err("an unattributed re-ack must not complete a quorum");
         assert!(
             matches!(r, SlotClaimError::StorageUnavailable { accepted: 1, .. }),
             "{r}"
