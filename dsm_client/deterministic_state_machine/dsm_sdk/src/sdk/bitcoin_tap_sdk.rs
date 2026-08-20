@@ -2462,7 +2462,7 @@ impl BitcoinTapSdk {
         format!("dbtc/manifold/{}/vault/", Self::dbtc_policy_commit_b32())
     }
 
-    fn vault_advertisement_key(vault_id: &str) -> String {
+    pub(crate) fn vault_advertisement_key(vault_id: &str) -> String {
         format!("{}{}", Self::vault_advertisement_prefix(), vault_id)
     }
 
@@ -2948,7 +2948,9 @@ impl BitcoinTapSdk {
             }
             state.object_store.insert(key.to_string(), payload.to_vec());
             let digest = *blake3::hash(payload).as_bytes();
-            state.op_log.push((key.to_string(), DbtcStorageOp::Put(digest)));
+            state
+                .op_log
+                .push((key.to_string(), DbtcStorageOp::Put(digest)));
             let hook = state.put_hooks.remove(key);
             drop(state);
             if let Some(hook) = hook {
@@ -3149,11 +3151,11 @@ impl BitcoinTapSdk {
     ) -> Result<StorageNodeVaultRoutingInventory, DsmError> {
         let records = crate::storage::client_db::list_vault_records_for_vault_or_parent(vault_id)
             .map_err(|e| {
-                DsmError::storage(
-                    format!("re-read vault records for {vault_id}: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
+            DsmError::storage(
+                format!("re-read vault records for {vault_id}: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         let mut records_by_vault: HashMap<
             String,
             Vec<crate::storage::client_db::PersistedVaultRecord>,
@@ -3473,8 +3475,8 @@ impl BitcoinTapSdk {
         &self,
         controller_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let mut vault_ids: Vec<String> = crate::storage::client_db::list_all_vault_ids()
-            .map_err(|e| {
+        let mut vault_ids: Vec<String> =
+            crate::storage::client_db::list_all_vault_ids().map_err(|e| {
                 DsmError::storage(
                     format!("list vault store for advertisement refresh: {e}"),
                     None::<std::io::Error>,
@@ -5517,9 +5519,7 @@ mod tests {
         let trailing_ad_key = BitcoinTapSdk::vault_advertisement_key(&trailing);
         let ad_puts = BitcoinTapSdk::dbtc_storage_op_log()
             .into_iter()
-            .filter(|(key, op)| {
-                key == &trailing_ad_key && matches!(op, DbtcStorageOp::Put(_))
-            })
+            .filter(|(key, op)| key == &trailing_ad_key && matches!(op, DbtcStorageOp::Put(_)))
             .count();
         assert_eq!(
             ad_puts, 1,
