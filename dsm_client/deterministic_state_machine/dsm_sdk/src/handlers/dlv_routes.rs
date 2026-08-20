@@ -1693,6 +1693,7 @@ impl AppRouterImpl {
             let reserve_owner_genesis;
             let reserve_root;
             let composed_sequence;
+            let vault_storage_set_id;
             let (proven_a, proven_b) = {
                 // The pair comes from the vault's OWN condition, so the legs the
                 // reserves are read for are the ones the curve governs.
@@ -1803,6 +1804,7 @@ impl AppRouterImpl {
                 reserve_owner_genesis = composed.owner_genesis;
                 reserve_root = composed.baseline_reserve_root;
                 composed_sequence = composed.sequence;
+                vault_storage_set_id = composed.storage_set_id;
                 (composed.reserves_a, composed.reserves_b)
             };
             {
@@ -1927,6 +1929,7 @@ impl AppRouterImpl {
                         predicate_digest: anchor_digest,
                         fee_bps: amm_fee_bps,
                         sigma: [0u8; 32],
+                        storage_set_id: vault_storage_set_id,
                         settler_devid: {
                             let mut d = [0u8; 32];
                             if req.device_id.len() == 32 {
@@ -1968,7 +1971,40 @@ impl AppRouterImpl {
             return err("dlv.unlockRouted: route_commit_bytes did not decode".into());
         };
         let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc_for_x);
+        // The register is the vault's BIRTH set, resolved from its signed anchor
+        // through this device's catalog — never this device's own node list. A
+        // set this device cannot resolve is a refusal: it cannot know who holds
+        // the parent.
+        let claim_set =
+            {
+                let catalog = match crate::sdk::storage_set::StorageSetCatalog::from_env_config() {
+                    Ok(c) => c,
+                    Err(e) => return err(format!("dlv.unlockRouted: storage-set catalog: {e}")),
+                };
+                match catalog.resolve(&settle.storage_set_id) {
+                    Some(s) => s.clone(),
+                    None => return err(
+                        "dlv.unlockRouted: the vault's storage set is not resolvable through this \
+                         device's catalog — cannot claim its parent; refusing"
+                            .into(),
+                    ),
+                }
+            };
+        // The claim envelope is signed ONCE and retained durably; a retry of this
+        // request replays the exact same bytes (a byte-different re-encode would
+        // read as a different claimant at every member that already holds ours).
+        let frozen_claim = match crate::sdk::settlement_slot::frozen_claim_envelope(
+            &vault_id,
+            hop.vault_state_anchor_seq,
+            &x,
+            &settle.storage_set_id,
+        ) {
+            Ok(b) => b,
+            Err(e) => return err(format!("dlv.unlockRouted: build slot claim: {e}")),
+        };
         if let Err(e) = crate::sdk::settlement_slot::claim_settlement_slot(
+            &claim_set,
+            &frozen_claim,
             &vault_id,
             hop.vault_state_anchor_seq,
             &x,
@@ -2341,6 +2377,10 @@ struct SettleTerms {
     fee_bps: u32,
     sigma: [u8; 32],
     settler_devid: [u8; 32],
+    /// The vault's birth-bound canonical storage set, from its verified
+    /// composition — the set whose register the settlement-slot claim goes to.
+    /// Never from local config.
+    storage_set_id: [u8; 32],
 }
 
 #[cfg(test)]

@@ -1212,14 +1212,42 @@ mod stamping_tests {
         assert_eq!(ptr.new_sequence, new_sequence);
         assert_eq!(ptr.x, x.to_vec());
 
-        // THE CONSUMER. The same slot the settle path claims must now see it.
+        // THE CONSUMER. The pointer above is DISCOVERY (composition folds it);
+        // exclusivity is decided by the settlement-slot REGISTER, over the same
+        // canonical tuple. Both must work for a trade to settle: the pointer so
+        // the next quote sees the trade in flight, the register so exactly one
+        // contestant may consume this parent.
+        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .sole_set()
+            .expect("one configured set")
+            .clone();
+        let envelope = crate::sdk::settlement_slot::frozen_claim_envelope(
+            &vault_id,
+            parent_sequence,
+            &x,
+            &set.id(),
+        )
+        .expect("sign the slot claim");
         let claim = crate::runtime::get_runtime().block_on(
-            crate::sdk::settlement_slot::claim_settlement_slot(&vault_id, parent_sequence, &x),
+            crate::sdk::settlement_slot::claim_settlement_slot(
+                &set,
+                &envelope,
+                &vault_id,
+                parent_sequence,
+                &x,
+            ),
         );
-        let claim = claim.expect("the slot claim must see the pointer the publish just wrote");
+        let claim = claim.expect("a quorum of the set must accept this trade's claim");
         assert!(
             claim.matches(&vault_id, parent_sequence, &x),
             "the claim must be for exactly this trade",
+        );
+        assert!(
+            claim.accepted() >= set.quorum(),
+            "a held slot means quorum accepted OUR bytes: {}/{}",
+            claim.accepted(),
+            claim.total()
         );
     }
 

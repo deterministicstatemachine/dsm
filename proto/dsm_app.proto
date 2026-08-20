@@ -1367,6 +1367,44 @@ message VaultPendingPointerV1 {
   bytes  expected_receipt_hash = 8 [(dsm_fixed_len)=32];
 }
 
+// SETTLEMENT-SLOT CLAIM — the write-once claim a contestant (trader or the
+// closing owner) submits to every member of a vault's canonical storage set
+// to acquire the right to consume vault parent `parent_sequence`. The register
+// is a distributed, crash-fault-tolerant, ONE-SHOT quorum register: each
+// member holds at most one value per (vault_id, parent_sequence), forever; a
+// claimant wins only when a quorum of the vault's set accepted the SAME
+// envelope bytes. This is concurrency serialization for mutually-unknown
+// actors consuming one public parent — NOT validity: the canonical DSM
+// transition still decides whether the settlement/close is valid; nodes never
+// judge that. Under the beta client model (protocol-conforming clients) it
+// makes trader-vs-close and trader-vs-trader exclusivity exact.
+//
+// The signature covers the BODY only (you cannot sign bytes that contain the
+// signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v1" || 0x00 ||
+// canonical_body_bytes))`. Nodes verify claimant ATTRIBUTION — the body's
+// `claimant_public_key` must be the authenticated caller's device key and the
+// signature must verify — so an authenticated caller cannot claim as someone
+// else. Both fields are strict: fixed 32-byte fields, no unknown or duplicate
+// fields, decode→re-encode equality; the client encodes ONCE and retains the
+// exact envelope bytes for every retry (a byte-different re-encode reads as a
+// different claimant at the node).
+message SettlementSlotClaimBodyV1 {
+  bytes  vault_id            = 1 [(dsm_fixed_len)=32];
+  uint64 parent_sequence     = 2;
+  // The trade's external commitment (trader) or the deterministic close
+  // commitment (owner) — the `x` the slot's discovery pointer names.
+  bytes  x                   = 3 [(dsm_fixed_len)=32];
+  bytes  claimant_public_key = 4 [(dsm_max_len)=65535];
+  // The vault's birth-bound canonical storage set (from its signed anchor).
+  // A member refuses a claim whose set is not its own.
+  bytes  storage_set_id      = 5 [(dsm_fixed_len)=32];
+}
+
+message SettlementSlotClaimV1 {
+  SettlementSlotClaimBodyV1 body = 1;
+  bytes  signature               = 2 [(dsm_max_len)=65535];
+}
+
 // Proof that a trader's own DlvSettle advance COMMITTED — the witness a
 // pending pointer needs before it may consume anyone's liquidity.
 //

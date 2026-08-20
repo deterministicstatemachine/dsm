@@ -23,6 +23,11 @@ use crate::db;
 #[derive(Clone, Debug)]
 pub struct DeviceContext {
     pub device_id: String, // transport id from Authorization header
+    /// The authenticated device's registered public key, as the token lookup
+    /// returned it. Handlers that must bind a signed payload to THE CALLER
+    /// (e.g. the settlement-slot register's claimant attribution) compare
+    /// against this rather than re-querying the device table.
+    pub public_key: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -183,7 +188,7 @@ pub async fn device_auth(
     }
 
     // Device lookup + token verify
-    let (_pubkey, token_hash, revoked) = lookup_device(&state.db_pool, &device_id).await?;
+    let (pubkey, token_hash, revoked) = lookup_device(&state.db_pool, &device_id).await?;
     if revoked {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -223,8 +228,12 @@ pub async fn device_auth(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let mut req = Request::from_parts(parts, Body::from(body_bytes));
 
-    // Inject DeviceContext for downstream handlers
-    let ctx = DeviceContext { device_id };
+    // Inject DeviceContext for downstream handlers (identity AND the key the
+    // token was issued to — already looked up above; no second query).
+    let ctx = DeviceContext {
+        device_id,
+        public_key: pubkey,
+    };
     req.extensions_mut().insert(ctx);
 
     Ok(next.run(req).await)

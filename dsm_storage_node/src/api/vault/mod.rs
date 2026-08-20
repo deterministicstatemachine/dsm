@@ -6,4 +6,5 @@
 pub mod paidk;
 pub mod policy;
 pub mod recovery;
+pub mod settlement_slot; // one-shot quorum register for vault parents
 pub mod slot;

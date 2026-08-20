@@ -327,6 +327,18 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     first_written_tick INTEGER NOT NULL
                 );
 
+                -- SETTLEMENT-SLOT CLAIM REGISTER: one-shot, write-once per
+                -- (vault_id, parent_sequence); no update, no delete. See pg.rs.
+                CREATE TABLE IF NOT EXISTS settlement_slot_claims (
+                    vault_id            BLOB NOT NULL,
+                    parent_sequence     INTEGER NOT NULL,
+                    claim_bytes         BLOB NOT NULL,
+                    claim_digest        BLOB NOT NULL,
+                    claimant_public_key BLOB NOT NULL,
+                    storage_set_id      BLOB NOT NULL,
+                    PRIMARY KEY (vault_id, parent_sequence)
+                );
+
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
                 -- layer 1). One row per (device, head_number); a new head is
                 -- accepted only if it links the current tip (parent_head_hash ==
@@ -686,6 +698,97 @@ pub async fn get_device_tree_state_version(
             )
             .optional()?;
         Ok(version_i64.map(|v| u64::try_from(v).unwrap_or(0)))
+    })
+    .await
+}
+
+/// Outcome of one write-once attempt on the settlement-slot register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotClaimOutcome {
+    Accepted,
+    AlreadyHeldIdentical,
+    Refused { held_digest: Vec<u8> },
+}
+
+/// Write-once conditional acceptance for `(vault_id, parent_sequence)` in ONE
+/// atomic write transaction over the unique key (INSERT OR IGNORE, then read
+/// the held row in the same transaction). Committed with `synchronous=FULL` so
+/// a claim this node acknowledged survives its restart.
+pub async fn claim_settlement_slot(
+    pool: &DBPool,
+    vault_id: &[u8],
+    parent_sequence: u64,
+    claim_bytes: &[u8],
+    claim_digest: &[u8],
+    claimant_public_key: &[u8],
+    storage_set_id: &[u8],
+) -> Result<SlotClaimOutcome> {
+    let vault_id = vault_id.to_vec();
+    let claim_bytes = claim_bytes.to_vec();
+    let claim_digest = claim_digest.to_vec();
+    let claimant_public_key = claimant_public_key.to_vec();
+    let storage_set_id = storage_set_id.to_vec();
+    let seq_i64 = i64::try_from(parent_sequence)
+        .map_err(|_| anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        // Durable before ack: the register's non-equivocation must survive a
+        // crash between our OK and the OS flushing the page cache.
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO settlement_slot_claims
+               (vault_id, parent_sequence, claim_bytes, claim_digest, claimant_public_key,
+                storage_set_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                vault_id,
+                seq_i64,
+                claim_bytes,
+                claim_digest,
+                claimant_public_key,
+                storage_set_id
+            ],
+        )?;
+        let outcome = if inserted == 1 {
+            SlotClaimOutcome::Accepted
+        } else {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT claim_digest FROM settlement_slot_claims
+                  WHERE vault_id = ?1 AND parent_sequence = ?2",
+                params![vault_id, seq_i64],
+                |row| row.get(0),
+            )?;
+            if held == claim_digest {
+                SlotClaimOutcome::AlreadyHeldIdentical
+            } else {
+                SlotClaimOutcome::Refused { held_digest: held }
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// The claim this node holds for `(vault_id, parent_sequence)`.
+pub async fn get_settlement_slot_claim(
+    pool: &DBPool,
+    vault_id: &[u8],
+    parent_sequence: u64,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let vault_id = vault_id.to_vec();
+    let seq_i64 = i64::try_from(parent_sequence)
+        .map_err(|_| anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT claim_bytes, claim_digest FROM settlement_slot_claims
+                  WHERE vault_id = ?1 AND parent_sequence = ?2",
+                params![vault_id, seq_i64],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
     })
     .await
 }

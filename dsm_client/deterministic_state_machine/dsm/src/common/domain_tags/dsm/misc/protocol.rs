@@ -32,6 +32,13 @@ pub const TAG_DSM_PROTOCOL_TRANSITION: TaggedHashDomain<'static> =
 pub const TAG_DSM_RECEIPT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/receipt");
 pub const TAG_DSM_RECEIPT_BIND_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/receipt-bind-session");
+/// Settlement-slot claim: the signed preimage `H(tag ‖ 0x00 ‖ canonical
+/// SettlementSlotClaimBodyV1 bytes)`, and (with `-envelope`) the digest of the
+/// frozen envelope bytes a register member stores and compares.
+pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/settlement-slot-claim/v1");
+pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v1");
 /// Canonical storage-set identity: `H(tag ‖ 0x00 ‖ u32_be(count) ‖ for each
 /// member id in lexicographic byte order: u32_be(len) ‖ id)`.
 pub const TAG_DSM_STORAGE_SET_V1: TaggedHashDomain<'static> =

@@ -106,6 +106,40 @@ impl KeyedPutFanout {
     }
 }
 
+/// One member's answer to a settlement-slot claim submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberClaimResult {
+    /// The member accepted our bytes as the FIRST value for the slot.
+    Accepted,
+    /// The member already held exactly our bytes (idempotent re-ack).
+    HeldIdentical,
+    /// The member holds DIFFERENT bytes; `held_digest` names them (as the
+    /// member reported it), if it did.
+    Refused { held_digest: Option<Vec<u8>> },
+    /// No usable answer: transport error, auth failure, no set configured on
+    /// the member, foreign set, malformed — the member did NOT accept.
+    Unavailable(String),
+}
+
+/// One member's outcome in a settlement-slot claim fan-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberClaimOutcome {
+    pub member_id: String,
+    pub endpoint: String,
+    pub result: MemberClaimResult,
+    /// The node id the member echoed (`x-dsm-node-id`); an acceptance counts
+    /// only when it equals `member_id`.
+    pub echoed_node_id: Option<String>,
+}
+
+/// Result of submitting one frozen claim envelope to every member of a set.
+/// Never short-circuits; the caller decides quorum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimFanout {
+    pub outcomes: Vec<MemberClaimOutcome>,
+    pub total: u32,
+}
+
 /// API-facing health status for nodes
 #[derive(Debug, Clone)]
 pub struct ApiNodeHealthStatus {
@@ -675,6 +709,71 @@ impl StorageNodeClient {
         }
     }
 
+    /// Submit the exact frozen claim envelope to THIS member's settlement-slot
+    /// register (`POST /api/v2/settlement-slot/claim`, device-authenticated).
+    /// Returns the member's outcome and its echoed node id. Never retries: the
+    /// caller owns idempotent replay of the same bytes.
+    pub async fn post_settlement_slot_claim(
+        &self,
+        envelope: &[u8],
+    ) -> (MemberClaimResult, Option<String>) {
+        let url = format!(
+            "{base}/api/v2/settlement-slot/claim",
+            base = self.node_info.url
+        );
+        let mut req_builder = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/octet-stream");
+        if let Some(auth) = &self.auth {
+            // Transport replay guard only: each submission is its own message.
+            // Register idempotency is by BYTES (identical envelope re-acks), not
+            // by message id.
+            let msg_id = Self::generate_message_id("settlement-slot-claim");
+            req_builder = req_builder
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
+                .header("x-dsm-message-id", msg_id);
+        }
+        let response = match req_builder.body(envelope.to_vec()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
+                    None,
+                )
+            }
+        };
+        let echoed = response
+            .headers()
+            .get("x-dsm-node-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let outcome_hdr = response
+            .headers()
+            .get("x-dsm-slot-outcome")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let held_digest = response
+            .headers()
+            .get("x-dsm-slot-held-digest")
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::util::text_id::decode_base32_crockford);
+        let status = response.status();
+        let result = match (status.as_u16(), outcome_hdr.as_str()) {
+            (200, "accepted") => MemberClaimResult::Accepted,
+            (200, "held-identical") => MemberClaimResult::HeldIdentical,
+            (409, "refused") => MemberClaimResult::Refused { held_digest },
+            (code, other) => {
+                MemberClaimResult::Unavailable(format!("status {code} outcome {other:?}"))
+            }
+        };
+        (result, echoed)
+    }
+
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, StorageNodeError> {
         // Use direct GET by key/addr
         let encoded_key = urlencoding::encode(key);
@@ -1085,6 +1184,40 @@ impl StorageNodeSDK {
         result.map_err(|e| {
             DsmError::storage(format!("StorageNodeSDK.put: {e}"), None::<std::io::Error>)
         })
+    }
+
+    /// Submit one frozen settlement-slot claim envelope to EVERY member of the
+    /// canonical set. Never short-circuits; the caller counts acceptances whose
+    /// echoed node id equals the member id and decides quorum.
+    pub async fn submit_settlement_slot_claim(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        envelope: &[u8],
+    ) -> ClaimFanout {
+        let mut outcomes = Vec::with_capacity(set.len());
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let (result, echoed_node_id) = match client {
+                None => (
+                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
+                    None,
+                ),
+                Some(c) => c.post_settlement_slot_claim(envelope).await,
+            };
+            outcomes.push(MemberClaimOutcome {
+                member_id: member.member_id.clone(),
+                endpoint: member.endpoint.clone(),
+                result,
+                echoed_node_id,
+            });
+        }
+        ClaimFanout {
+            outcomes,
+            total: set.len() as u32,
+        }
     }
 
     /// Keyed PUT of `payload` under `key` to EVERY member of the canonical set

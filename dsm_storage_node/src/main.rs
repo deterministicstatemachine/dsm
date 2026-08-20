@@ -59,6 +59,8 @@ struct ServerConfig {
     hsts_max_age: Option<u64>,
     database_url: String,
     seed_peers: Vec<String>,
+    /// `[storage_set] members` — configured member ids of this node's set.
+    storage_set_members: Vec<String>,
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -116,6 +118,17 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .filter_map(|v| v.into_string().ok())
         .collect();
 
+    // The canonical storage set this node is a member of ([storage_set]
+    // members = ["id-1", "id-2", "id-3"]). Absent = the settlement-slot
+    // register is inactive (fail closed); present but not containing this
+    // node's own id = misconfiguration, refused at startup.
+    let storage_set_members: Vec<String> = settings
+        .get_array("storage_set.members")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.into_string().ok())
+        .collect();
+
     if opts.auto_detect {
         let node_index = opts.node_index.unwrap_or(0);
         let detected = NetworkDetector::detect_network_config_with_tls(node_index, tls_enabled)?;
@@ -132,6 +145,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             hsts_max_age,
             database_url,
             seed_peers,
+            storage_set_members,
         });
     }
 
@@ -173,6 +187,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         hsts_max_age,
         database_url,
         seed_peers,
+        storage_set_members,
     })
 }
 
@@ -228,6 +243,19 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // DLV slot + Recovery Capsule
     let dlv_slot_router =
         api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
+    // Settlement-slot claim register: writes behind device auth (attribution is
+    // checked against the authenticated key), reads public.
+    let slot_claim_auth_state = Arc::new(auth::AuthState {
+        db_pool: state.db_pool.clone(),
+    });
+    let slot_claim_write_router = api::vault::settlement_slot::create_write_router()
+        .layer(axum::middleware::from_fn_with_state(
+            slot_claim_auth_state,
+            auth::device_auth,
+        ))
+        .layer(Extension(state.clone()));
+    let slot_claim_read_router = api::vault::settlement_slot::create_read_router(state.clone())
+        .layer(public_rate_layer.clone());
     let recovery_capsule_router =
         api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
     // Device registration
@@ -269,6 +297,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(tips_router)
         .merge(genesis_router)
         .merge(dlv_slot_router)
+        .merge(slot_claim_write_router)
+        .merge(slot_claim_read_router)
         .merge(recovery_capsule_router)
         .merge(device_router) // exposes /api/v2/device/register
         .merge(paidk_router) // PaidK spend-gate endpoints
@@ -410,13 +440,30 @@ async fn async_main() -> Result<()> {
         server_config.bind_addr.ip(),
         server_config.bind_addr.port()
     );
-    let state = AppState::new(
+    let mut state = AppState::new(
         server_config.node_id.clone(),
         &bind_addr_str,
         server_config.hsts_max_age,
         db_pool.clone(),
         replication_manager,
     );
+    if !server_config.storage_set_members.is_empty() {
+        let set = dsm_storage_node::NodeStorageSet::new(
+            server_config.storage_set_members.clone(),
+            &server_config.node_id,
+        )?;
+        log::info!(
+            "storage set configured: {} members, id={}",
+            set.member_ids.len(),
+            text_id::encode_base32_crockford(&set.id)
+        );
+        state = state.with_storage_set(set);
+    } else {
+        log::warn!(
+            "no [storage_set] configured — the settlement-slot register is INACTIVE on this node \
+             (every claim is refused)"
+        );
+    }
 
     let app_state = Arc::new(state.clone());
 

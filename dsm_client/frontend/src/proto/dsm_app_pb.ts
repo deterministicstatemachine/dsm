@@ -9067,6 +9067,138 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
 }
 
 /**
+ * SETTLEMENT-SLOT CLAIM — the write-once claim a contestant (trader or the
+ * closing owner) submits to every member of a vault's canonical storage set
+ * to acquire the right to consume vault parent `parent_sequence`. The register
+ * is a distributed, crash-fault-tolerant, ONE-SHOT quorum register: each
+ * member holds at most one value per (vault_id, parent_sequence), forever; a
+ * claimant wins only when a quorum of the vault's set accepted the SAME
+ * envelope bytes. This is concurrency serialization for mutually-unknown
+ * actors consuming one public parent — NOT validity: the canonical DSM
+ * transition still decides whether the settlement/close is valid; nodes never
+ * judge that. Under the beta client model (protocol-conforming clients) it
+ * makes trader-vs-close and trader-vs-trader exclusivity exact.
+ *
+ * The signature covers the BODY only (you cannot sign bytes that contain the
+ * signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v1" || 0x00 ||
+ * canonical_body_bytes))`. Nodes verify claimant ATTRIBUTION — the body's
+ * `claimant_public_key` must be the authenticated caller's device key and the
+ * signature must verify — so an authenticated caller cannot claim as someone
+ * else. Both fields are strict: fixed 32-byte fields, no unknown or duplicate
+ * fields, decode→re-encode equality; the client encodes ONCE and retains the
+ * exact envelope bytes for every retry (a byte-different re-encode reads as a
+ * different claimant at the node).
+ *
+ * @generated from message dsm.SettlementSlotClaimBodyV1
+ */
+export class SettlementSlotClaimBodyV1 extends Message<SettlementSlotClaimBodyV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_sequence = 2;
+   */
+  parentSequence = protoInt64.zero;
+
+  /**
+   * The trade's external commitment (trader) or the deterministic close
+   * commitment (owner) — the `x` the slot's discovery pointer names.
+   *
+   * @generated from field: bytes x = 3;
+   */
+  x = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes claimant_public_key = 4;
+   */
+  claimantPublicKey = new Uint8Array(0);
+
+  /**
+   * The vault's birth-bound canonical storage set (from its signed anchor).
+   * A member refuses a claim whose set is not its own.
+   *
+   * @generated from field: bytes storage_set_id = 5;
+   */
+  storageSetId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SettlementSlotClaimBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SettlementSlotClaimBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "parent_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimBodyV1 {
+    return new SettlementSlotClaimBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV1 {
+    return new SettlementSlotClaimBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV1 {
+    return new SettlementSlotClaimBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SettlementSlotClaimBodyV1 | PlainMessage<SettlementSlotClaimBodyV1> | undefined, b: SettlementSlotClaimBodyV1 | PlainMessage<SettlementSlotClaimBodyV1> | undefined): boolean {
+    return proto3.util.equals(SettlementSlotClaimBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SettlementSlotClaimV1
+ */
+export class SettlementSlotClaimV1 extends Message<SettlementSlotClaimV1> {
+  /**
+   * @generated from field: dsm.SettlementSlotClaimBodyV1 body = 1;
+   */
+  body?: SettlementSlotClaimBodyV1;
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SettlementSlotClaimV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SettlementSlotClaimV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "message", T: SettlementSlotClaimBodyV1 },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimV1 {
+    return new SettlementSlotClaimV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimV1 {
+    return new SettlementSlotClaimV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimV1 {
+    return new SettlementSlotClaimV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SettlementSlotClaimV1 | PlainMessage<SettlementSlotClaimV1> | undefined, b: SettlementSlotClaimV1 | PlainMessage<SettlementSlotClaimV1> | undefined): boolean {
+    return proto3.util.equals(SettlementSlotClaimV1, a, b);
+  }
+}
+
+/**
  * Proof that a trader's own DlvSettle advance COMMITTED — the witness a
  * pending pointer needs before it may consume anyone's liquidity.
  *
