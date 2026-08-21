@@ -182,10 +182,10 @@ storage address, a resource key or an authority check appears here.
 | `0x0004` | `EncumbranceClaim` (`e_j`) | 1 | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | 1 | `E = H(DSM/enc ‖ vault_id ‖ CCB)` | §5.3 defined |
 | `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
-| `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | **shape fixed, family unassigned — §6** |
-| `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | **blocked, see §6** |
+| `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | §5.7 defined |
+| `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | §5.6 defined |
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | **blocked, see §6** |
-| `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | **blocked, see §6** |
+| `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
 | `0x000C` | `RouteSet` (`R`) | 1 | `X = H(DSM/route-set ‖ I ‖ CCB ‖ …)` | **blocked, see §6** |
 | `0x000D` | `Route` (`r_i`) | 1 | set element of `0x000C` | **blocked, see §6** |
@@ -209,10 +209,11 @@ inventing the missing ones.**
 
 Of the nineteen live object classes above:
 
-- **5 are fully specified** in §5 — `0x0002`, `0x0004`, `0x0005`, `0x000B`, `0x0013`.
+- **8 are fully specified** in §5 — `0x0002`, `0x0004`, `0x0005`, `0x0007`, `0x0008`,
+  `0x000A`, `0x000B`, `0x0013`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **10 are blocked** with only a class assignment.
+- **7 are blocked** with only a class assignment.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -220,7 +221,7 @@ field table for those would settle protocol in this document exactly as writing 
 first would settle it in Rust. §6 states precisely what each one needs.
 
 The framework in §2 and the namespace in §3 are complete and are **not** blocked on §6. They
-can be reviewed, merged, and implemented against for the five specified objects immediately.
+can be reviewed, merged, and implemented against for the eight specified objects immediately.
 
 ## 5. Field tables
 
@@ -301,6 +302,37 @@ and states that no expiry, timestamp or duration is permitted.
 No field 10. Adding expiry or any time-like field to this class is forbidden; §9.1 of the
 specification excludes them, and §2.7 forbids extending a shipped schema version.
 
+### 5.6 `MarketBounds` — class `0x0008`, schema 1
+
+Narrowed by the Def 5.2 amendments to the bounds with no home in `V_n` and none in the predicate
+family. The invariant is **not** a field here: `P_M.family_id` names it, and a second
+representation would be an alias.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `per_transition_size_ceiling` | `u64` | base units of the input leg; the market size bound of §5.1 together with the remaining reserves in `V_n` |
+| 2 | `authorized_encumbrance_purposes` | set of `u16` | purpose enumeration; §2.4 ordering over the 2-byte encodings; empty set permitted and means no purpose is authorized |
+
+### 5.7 `MarketPolicy` — class `0x0007`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `family_id` | `u16` | `0x0001` = `CONSTANT_PRODUCT_EXACT_INPUT`. Beta declares no other member |
+| 2 | `family_version` | `u16` | `1` for beta. Fixes the pricing rule, the admissibility conditions and the evaluation budget together |
+| 3 | `token_a_policy_commit` | `digest32` | strictly less than field 4 under unsigned lexicographic byte comparison |
+| 4 | `token_b_policy_commit` | `digest32` | |
+
+`evaluation_budget` is **not** a field. It is a constant of `family_version`, so an owner cannot
+configure it and two implementations cannot agree on the bytes while disagreeing on whether
+evaluation exhausted its allowance.
+
+The fee is not a field either. `Φ` is the single authoritative fee policy and is a member of
+`V_n`; carrying it here as well would be the alias the Def 5.2 amendment removed.
+
+Ordering of fields 3 and 4 is a validity condition, not a normalization: an encoder must reject
+an unordered or equal pair rather than swap it, because swapping would make two distinct logical
+inputs produce one encoding.
+
 ### 5.8 `ReferenceWindow` — class `0x0013`, schema 1
 
 `W = H(DSM/ref-window ‖ pair_id ‖ Canon({d_i}))`. The canonical object is the digest set;
@@ -313,6 +345,16 @@ specification excludes them, and §2.7 forbids extending a shipped schema versio
 A set of `digest32` sorts by the 32 raw bytes; there is no element envelope, because
 `digest32` is a primitive rather than an object class.
 
+### 5.9 `FeePolicy` — class `0x000A`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `fee_bps` | `u32` | `0 ≤ fee_bps < 10_000`; the exact rational `fee_bps / 10_000` under the §3.4 allowance |
+
+`10_000` and above is invalid rather than meaningful — it would leave the pricing rule with a
+zero or negative effective numerator. The width is 32 bits because that is the representation
+already in use; re-scaling to Q32.32 would change every committed fee without changing any fee.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -322,10 +364,7 @@ writing an encoder.**
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
 | `0x0001` | `VaultStateV2` | the fifteen-member tuple of Def 4.1 | widths and types for every scalar; how `P_M`, `P_R`, `Φ`, `E` enter; `β`'s optional encoding. Blocked transitively on `0x0007`–`0x000A` |
-| `0x0007` | `MarketPolicy` `P_M` | **shape now fixed** by the Def 5.2 amendment: `(family_id, family_version, evaluation_budget, family_parameters)`, a birth-time descriptor and explicitly not a Def 7.1 instance | the beta family itself. `family_id` has no admissible value until an amendment states the family, its invariant and its exact §3.4 arithmetic. Types for `family_parameters` follow from that choice |
-| `0x0008` | `MarketBounds` `B_M` | **narrowed** by the same amendment to the invariant, the per-transition size ceiling, and the authorized encumbrance purposes — `Φ`, `S`, `q` and `P_M` are no longer restated here | types for the three remaining components; the invariant's representation depends on `0x0007`'s family |
 | `0x0009` | `ReleasePolicy` `P_R` | "the bounded release/withdraw/close policy", owner-local per Req 4.6 | the entire contents |
-| `0x000A` | `FeePolicy` `Φ` | "the fee policy" | the entire contents; and its relationship to `B_M`'s fee policy |
 | `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" | the route CCB it is ordered by — i.e. class `0x000D` |
 | `0x000D` | `Route` `r_i` | referenced only as a set member | the entire contents |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
