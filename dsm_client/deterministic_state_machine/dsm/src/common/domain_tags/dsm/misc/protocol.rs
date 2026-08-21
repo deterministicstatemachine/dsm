@@ -48,6 +48,15 @@ pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/settlement-slot-claim/v1");
 pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v1");
+/// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
+/// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
+pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/vault-state");
+/// The genesis lineage edge: `h_0 = H(tag ‖ 0x00 ‖ vault_id)`. Commits the
+/// vault identity and nothing else — birth reserves, `S` and `q` are already
+/// members of `V_0`.
+pub const TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/vault-state-parent/genesis/v2");
 /// Canonical storage-set identity: `H(tag ‖ 0x00 ‖ u32_be(count) ‖ for each
 /// member id in lexicographic byte order: u32_be(len) ‖ id)`.
 pub const TAG_DSM_STORAGE_SET_V1: TaggedHashDomain<'static> =
