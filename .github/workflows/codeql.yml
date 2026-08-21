@@ -221,6 +221,21 @@ jobs:
       # Gradle daemon starts outside the CodeQL tracer, and compilations it
       # performs would go unobserved.
       #
+      # --no-build-cache and the per-task --rerun are required for the same
+      # reason, and the failure they prevent is worse because it looks like
+      # success. The cache step above restores ~/.gradle/caches, which holds
+      # the Gradle build cache, so :app:compileDebugKotlin can be served
+      # FROM-CACHE. Gradle then reports BUILD SUCCESSFUL having run no compiler
+      # at all, the tracer observes nothing, and Analyze fails with "CodeQL
+      # could not process any code written in Java/Kotlin". Which PR that hits
+      # is a matter of whose cache happens to be warm, so the check is
+      # nondeterministic across PRs that touch no Kotlin at all. A cache hit is
+      # not evidence the Kotlin was analyzed; only an executed compilation is.
+      # Ordinary CI and build jobs keep normal caching — this treatment is for
+      # the traced compile alone. Note --rerun is a TASK option in Gradle 8.9,
+      # not a global one, so it follows each task name; as a leading flag it is
+      # rejected outright.
+      #
       # androidTest is deliberately EXCLUDED. Those 7 instrumented-test files
       # do not compile today — :app:compileDebugAndroidTestKotlin fails with 14
       # "Unresolved reference" errors against protobuf accessors that no longer
@@ -236,9 +251,9 @@ jobs:
         if: matrix.language == 'java-kotlin'
         working-directory: dsm_client/android
         run: |
-          ./gradlew --no-daemon --stacktrace \
-            :app:compileDebugKotlin \
-            :app:compileDebugUnitTestKotlin
+          ./gradlew --no-daemon --stacktrace --no-build-cache \
+            :app:compileDebugKotlin --rerun \
+            :app:compileDebugUnitTestKotlin --rerun
 
       - name: Analyze
         uses: github/codeql-action/analyze@v4
