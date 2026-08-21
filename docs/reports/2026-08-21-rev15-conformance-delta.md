@@ -77,9 +77,14 @@ and `SoFi-V2.pdf` are drafting artifacts.
 | 4 | Immutable object vs mutable index | Divergent — two distinct violations |
 | 5 | Trader acceptance realization | Partial, security-relevant — gate correctly placed, witness format non-conformant |
 | 6 | One-phase owner-local close | Non-conformant in candidate completeness and realization boundary |
+| 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6** |
 
 Two areas reverse decisions that are currently documented as deliberate in landed code. They
 are called out in **Reversals of landed decisions** below so that neither is made silently.
+
+Area 7 was found while preparing the Anchor V2 work and is a **prerequisite**, not a peer:
+it determines whether two independent implementations can agree on the inputs to the rest of
+Rev 15 at all. It blocks Anchor V2.
 
 ---
 
@@ -376,6 +381,90 @@ commit to materialization.
 
 ---
 
+## 7. Canonical commit bytes are underspecified protocol-wide
+
+Found while preparing Anchor V2. This is a defect in the specification's serialization layer,
+not a divergence between spec and code: it determines whether two independent implementations
+can agree on the **inputs** to everything in areas 1–6.
+
+Note on terminology: this is **canonical cross-implementation commitment encoding**, not
+consensus encoding. DSM has no global consensus layer, and calling it that would import a
+model the protocol does not have.
+
+**Rev 15.** Req 3.1 (spec:438) defines generic CCB rules — fixed-width big-endian integers,
+4-byte length-prefixed byte strings, "fields emitted in ascending declared field-number
+order", explicit absence markers for optional fields, sets sorted lexicographically by element
+CCB, sorted maps, no floating point, and "every CCB blob begins with an object-class
+discriminant and CCB schema version". Req 3.2 adds that no two logical objects may share a
+CCB encoding and no logical object may have two.
+
+**The defect.** The rules require metadata the document never supplies.
+
+- **No field number is declared for any object, anywhere.** The phrase `declared field`
+  occurs exactly once in the specification — inside rule 3 itself.
+- **No object-class discriminant ever takes a value**, and neither does any CCB schema
+  version. Both appear only in rule 8's statement of the requirement.
+- **The document contains two width mentions in total**: `4-byte`, for the CCB length prefix,
+  and one `32-byte`. No state field has a declared width or type.
+- `Canon(...)` is invoked **fifteen distinct ways and defined zero times** — `Canon(V_n)`,
+  `Canon(S)`, `Canon(P_M)`, `Canon(B_M)`, `Canon(A_B)`, `Canon(R)`, `Canon(B)`,
+  `Canon(TradeIntent)`, `Canon(TradeDigest)`, `Canon(x)`, `Canon(X)`, and the set forms.
+  `CCB(...)` appears twice, both as references — `CCB(M)` and `CCB(V_{n+1})` — never as a
+  definition.
+
+Consequently `c_n`, the fulfillment mechanism `M`, `storage_set_id`, the acceptance digest
+`a_B`, and the Def 6.17 settlement resource key are **all non-derivable from the
+specification**. Req 3.2's uniqueness guarantee cannot be checked against anything, because
+there is no encoding to check.
+
+For the Def 4.1 state tuple specifically, **none of the fifteen members of
+`V_n = (g_o, d_o, vault_id, n, R_A, R_B, P_M, P_R, Φ, E, β, h_n, r_o, S, q)` has a unique
+normative representation.** `P_M`, `P_R`, `Φ`, `E` and `β` appear only as prose names in that
+tuple; the scalars have no declared widths; `β`'s absence marker has no encoding; and the
+nested objects have no CCB of their own to be nested by value or referenced by digest.
+
+**The precedent is already live.** `storage_set_id = H(DSM/storage-set ‖ Canon(S))` ships
+today, and `Canon(S)` was chosen **only in Rust**:
+
+```
+H(TAG ‖ 0x00 ‖ u32_be(count) ‖ for each id in lexicographic byte order: u32_be(len(id)) ‖ id)
+```
+
+(`sdk/storage_set.rs:51-86`). It is load-bearing across the trust boundary —
+`dsm_storage_node/src/lib.rs:55` calls the client's `compute_storage_set_id` directly, so node
+and client agree because they share one helper. That is implementation monoculture, not
+protocol specification, and the agreement it produces would not survive a second
+implementation. It is the concrete demonstration of what happens when a `Canon` is settled in
+code, and the reason area 7 gates the rest.
+
+**Verdict: underspecified protocol-wide; prerequisite to areas 1–6.**
+
+**Direction.** A normative CCB object registry, landed before any Anchor V2 code, defining
+once: object-class discriminants, CCB schema versions, primitive encodings, field numbering,
+option encoding, set and map ordering, and nested-object treatment — then a concrete field
+table per object covering every Rev 15 object whose `Canon(...)` result feeds a hash,
+signature, storage address, resource key or authority check. At minimum `V_n`, `S`, `P_M`,
+`P_R`, `B_M`, `E`, `TradeIntent`, the route and allocation structures, the SettlementBundle
+`B`, and `A_B`.
+
+Two constraints on that work.
+
+*Sub-objects by digest is not a solution.* Inserting `P_M`, `P_R`, `Φ` or `E` as committed
+digests looks bounded but relocates the ambiguity one layer down: "digest of which canonical
+bytes?" is the same question again unless those preimages are themselves fully defined.
+
+*Order is normative schema first, encoder second, vectors third.* The reference encoder must
+not define the protocol by accident. Golden vectors are outputs of an already-defined schema,
+not the source of truth — and they should be verified by an independent conformance
+encoder/parser that does not call the production canonicalization helpers, so that a bug in
+one implementation cannot bless itself.
+
+The registry should **absorb the existing `storage_set_id` byte layout** as written rather
+than silently changing it, unless the storage-set commitment is deliberately versioned in the
+same change.
+
+---
+
 ## Reversals of landed decisions
 
 Recorded explicitly so neither is made silently.
@@ -400,10 +489,17 @@ different meaning for the same state, which the intent-table documentation must 
 
 Ordered by dependency, not by size.
 
+0. **Area 7, the CCB object registry.** Gates everything below that produces or verifies a
+   commitment. Until it lands, `c_n`, `M`, `a_B` and the Def 6.17 resource key have no
+   derivable bytes, so an implementation of steps 2, 4, 5 or 6 would be settling protocol in
+   Rust. Normative schema, then reference encoder, then golden vectors — in that order.
 1. **Area 3, `q` rule only.** Smallest change, largest immediate risk reduction, and a hard
    precondition of the fleet redeploy: at `n=5` the current rule silently yields `q=3`.
+   Independent of step 0: it is an integer threshold, not an encoding. **Landed in #683.**
 2. **Area 3, anchor V2.** `parent_state_commitment` and `q` in a `/v2` domain. Gates the
-   schema-v5 reprovision under Req 6.6's clean-cut rule.
+   schema-v5 reprovision under Req 6.6's clean-cut rule. Blocked on step 0: `h_n = c_{n-1}`
+   is not computable until `CCB(V_n)` exists. The lineage recurrence itself is settled
+   separately as a spec amendment.
 3. **Area 4.** Immutable namespace, shared address derivation, consumer re-hash, `/latest`
    demoted from identity to index. Independent of 1–2 and can run in parallel.
 4. **Area 1 + area 2 together.** The generic `CanonicalStorage` interface and
