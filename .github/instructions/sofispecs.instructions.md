@@ -485,6 +485,25 @@ settlement threshold for that set.
 The canonical state commitment is
 cn = H(DSM/vault-state ∥Canon(Vn)).
 The vault identity is fixed at creation and never changes.
+The local parent commitment hn is the lineage edge into Vn, and is defined by the recurrence
+h0 = H(DSM/vault-state-parent/genesis/v2 ∥vault
+_
+id),
+hn = cn−1 for n > 0.
+The genesis value commits the vault identity and nothing else. Birth reserves, the committed
+storage set S, and the fixed threshold q are already fields of V0 and of the generation-0
+VaultStateAnchorV2, and duplicating them into h0 would blur a field whose only role is the
+predecessor edge. An untyped all-zero sentinel is not used: a domain-separated genesis value is
+a value no other construction produces, and it makes "this is generation zero" a derivation
+rather than a magic-constant comparison.
+Because hn commits cn−1, and cn−1 commits the whole canonical prior state rather than its
+reserve amounts alone, two histories that arrive at identical reserves still differ in every
+later parent binding whenever any preceding canonical DLV state differed. This is the property
+Requirement 6.5 requires of the parent anchor, and Definition 6.4 carries hn as
+parent_
+state
+_
+commitment.
 4.2 Reserve ownership and custody
 Requirement 4.2 (Reserve location and no duplicate custody). DLV reserves must not
 simultaneously remain available as ordinary spendable owner balance. Funding a DLV must debit
@@ -661,6 +680,11 @@ Requirement 6.5. A parent anchor must bind the history commitment that produced 
 advertised reserves, not only the vault identifier, local generation, and reserves digest. Two distinct
 histories that happen to produce identical reserve amounts must therefore produce different parent
 bindings whenever their parent state commitments differ.
+The parent state commitment carried here is exactly the local parent commitment hn of
+Definition 4.1: hn = cn−1 for n > 0, and the domain-separated genesis value at n = 0. It is
+the canonical prior DLV state, not a chain over anchor serializations and not the trader's
+ordinary DSM relationship root — the trader's parent and successor are bound separately by
+the SettlementBundle and by the initiating-trader fence of Requirement 6.23.
 Requirement 6.6 (Clean anchor cut). The history-bound VaultStateAnchorV2 defined
 here uses a new domain/schema and must not be silently accepted as the legacy anchor format or
 vice versa. Beta deployment uses a schema bump and clean reprovision rather than a dual-read or
