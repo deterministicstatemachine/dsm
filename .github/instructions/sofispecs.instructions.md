@@ -460,6 +460,15 @@ object may map to two CCB encodings.
 All prices, fees, ratios, and invariant calculations use checked integer arithmetic at scale 232 unless a
 token’s base-unit arithmetic is exact without fixed-point conversion. Division uses floor semantics
 with documented payer-adverse rounding. Overflow is predicate failure.
+Exact rational representations. A protocol object may instead define an exact versioned rational
+representation with a fixed denominator, where this specification states that denominator
+explicitly. Such a representation is not converted to scale 232 . Its products are evaluated in
+checked integer arithmetic wide enough not to overflow before any division, and the division floors
+exactly once, adverse to the party who would otherwise gain from the truncation. Beta FeePolicyV1
+of §5.1 uses this allowance with denominator 10 000.
+The allowance exists because converting an exact rational such as f/10 000 to scale 232 introduces
+a rounding stage with no protocol meaning. Two implementations that rounded at different points
+would disagree on outputs while both claiming conformance.
 4 Deterministic Limbo Vaults
 4.1 Definition
 Definition 4.1 (DLV). A Deterministic Limbo Vault is an encumbered state object inside its
@@ -572,8 +581,8 @@ M= H(DSM/fulfillment ∥vault
 _
 id ∥c0 ∥CCB(BM )),
 where BM commits the additional owner-committed bounds on market exercise that do not already
-have a home in the vault state: the invariant, the per-transition size ceiling, and the authorized
-encumbrance purposes.
+have a home in the vault state or in the predicate family: the per-transition size ceiling and the
+authorized encumbrance purposes.
 Single value source. PM , the fee policy Φ, the committed storage set S, and the fixed threshold
 q are members of V0 under Definition 4.1, and c0 commits the complete canonical V0. The
 owner-signed mechanism therefore already commits their birth values transitively, and BM does not
@@ -600,13 +609,57 @@ Requirement 4.3 demands. It is not a predicate instance: ∆in, ∆out, the exte
 encumbrances and the intent bounds of Definition 7.1 are transaction-time values that do not exist
 when PM is committed, which Requirement 4.4 already implies by having the owner commit PM
 before any particular trader exists.
-The beta market family is not assigned here. Naming one — including any constant-product
-automated-market-maker family — is a normative economic decision that must state the family
-identifier, its invariant, and its exact arithmetic under the fixed-point rules of §3.4 before
-family
-_
-id may take a value. Until that amendment lands, PM has a shape and no admissible
-member, and no conformant vault may be born.
+Beta market family. Beta declares exactly one admissible family: family_id =
+CONSTANT_PRODUCT_EXACT_INPUT, family_version = 1, and family_parameters =
+(token_a_policy_commit, token_b_policy_commit), where both commitments are exactly 32 bytes and
+token_a_policy_commit is strictly less than token_b_policy_commit under unsigned lexicographic
+byte comparison. The canonical pair belongs to PM because the predicate must know which two
+reserve legs it governs. The fee does not belong here: Φ is the single authoritative fee policy,
+and it is a member of Vn .
+Pricing rule. Let a be the exact input amount, x the input-leg reserve and y the output-leg
+reserve of the parent Vn , let D = 10 000 be the fixed denominator of §3.4, and let f = fee_bps
+from Φ with 0 ≤ f < D. Then
+effective_num = a · (D − f),
+output = floor( (y · effective_num) / (x · D + effective_num) ).
+Every product is evaluated in checked integer arithmetic wide enough not to overflow, and the
+single floor division above is the only rounding in the rule. An implementation must not compute a
+rounded fee-adjusted input first: flooring a · (D − f)/D before applying the curve is a second
+rounding stage, and two implementations that disagree about whether it happens produce different
+outputs from identical inputs. The divergence is not a corner case that needs contrived values:
+at a = 1, x = 1, y = 3 and any fee_bps in the legal range, the fused rule yields 1 while the
+doubly-rounded variant yields 0, because flooring the fee-adjusted input first collapses a
+sub-unit input to zero and takes the whole output with it. Small reserves and small inputs are
+where the two rules part company most often, which is exactly the region a low-liquidity vault
+operates in.
+Reserve successor. The valid successor is R'_in = R_in + a and R'_out = R_out − output,
+crediting the FULL input to the reserve. The fee is not withheld, not routed elsewhere, and not
+represented anywhere in the successor: it remains inside the DLV reserves as liquidity-provider
+yield. That is precisely why R'_in is R_in + a and not R_in + floor(a · (D − f)/D).
+Admissibility. The transition is inadmissible, and no successor exists, if a = 0, if x = 0, if
+y = 0, if f ≥ D, if output = 0, if output > R_out, or if any checked product overflows.
+Acceptance predicate. A verifier recomputes output from the exact parent, direction, input, fee
+and bounds, and requires the proposed reserve successor to equal the values above exactly. The
+acceptance condition is equality with the recomputed successor. It is not an inequality over the
+product.
+Consequence, not predicate. Under a valid beta transition R'_in · R'_out ≥ R_in · R_out, with
+strict increase possible from the retained fee and from integer truncation. This is a theorem about
+the family and a useful sanity property, and it must never serve as the acceptance condition on its
+own: many successors far worse for the trader also satisfy it.
+Evaluation budget. evaluation_budget is a constant of the family version, not an
+owner-configurable field. A per-owner budget would let two implementations agree on every byte
+while disagreeing about whether evaluation exhausted its allowance, which is the same class of
+divergence canonical bytes exist to prevent. The beta family performs a fixed, bounded sequence of
+checked multiplications, one comparison chain and one division, with no iteration, so its budget is
+a constant declared by family_version = 1.
+Because family_id now names the invariant, BM carries no invariant field. The invariant is the
+semantics of the predicate family itself, and a second representation of it would be another alias.
+BM retains only the per-transition size ceiling and the authorized encumbrance purposes.
+Beta fee policy. Φ is FeePolicyV1, a single unsigned 32-bit field fee_bps with
+0 ≤ fee_bps < 10 000, interpreted as the exact rational fee_bps/10 000 under the allowance of
+§3.4. A value of 10 000 or above is invalid rather than meaningful: it would make the fee at
+least the whole input and leave the pricing rule with a zero or negative effective numerator.
+The width is 32 bits because that is the representation already in use throughout, and widening
+or re-scaling it would change every committed fee without changing any fee.
 The owner signs CCB(M) at vault creation. M commits a mechanism, not a preferred trader.
 Market size bound. The beta DLV state has no separate economic “quota” variable. The phrase
 market size bound means the per-transition size ceiling committed in BM together with the actual
