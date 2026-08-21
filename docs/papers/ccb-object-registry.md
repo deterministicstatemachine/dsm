@@ -132,8 +132,8 @@ discriminant and schema version**. It is not replaced by a digest.
 
 Emitting a sub-object as a digest is permitted only where the enclosing object's field table
 declares a `digest32` field whose domain is named in that table — for example `c_0` inside the
-fulfillment mechanism of §5.4, which the specification itself defines as a commitment rather
-than as an inlined state. Substituting a digest for a declared nested object, or inlining an
+fulfillment mechanism `M` of class `0x0006`, which the specification itself defines as a
+commitment rather than as an inlined state. Substituting a digest for a declared nested object, or inlining an
 object where a digest is declared, is invalid.
 
 This rule exists because "sub-object by digest" relocates ambiguity rather than removing it.
@@ -181,8 +181,8 @@ storage address, a resource key or an authority check appears here.
 | `0x0002` | `StorageSet` (`S`) | 1 | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined |
 | `0x0004` | `EncumbranceClaim` (`e_j`) | 1 | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | 1 | `E = H(DSM/enc ‖ vault_id ‖ CCB)` | §5.3 defined |
-| `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ …)`, signed as `CCB(M)` | §5.4 partial |
-| `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0006` | **blocked, see §6** |
+| `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
+| `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | **shape fixed, family unassigned — §6** |
 | `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | **blocked, see §6** |
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | **blocked, see §6** |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | **blocked, see §6** |
@@ -322,8 +322,8 @@ writing an encoder.**
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
 | `0x0001` | `VaultStateV2` | the fifteen-member tuple of Def 4.1 | widths and types for every scalar; how `P_M`, `P_R`, `Φ`, `E` enter; `β`'s optional encoding. Blocked transitively on `0x0007`–`0x000A` |
-| `0x0007` | `MarketPolicy` `P_M` | "the bounded market-fulfillment policy" | the entire contents. Req 4.3 requires a declared static evaluation budget, which implies at least a predicate family and a budget, but neither is enumerated |
-| `0x0008` | `MarketBounds` `B_M` | commits "the invariant, fee policy, per-transition size ceiling, authorized encumbrance purposes, and storage-set settlement parameters" | five named components with no types; whether the fee policy here is the same object as `Φ` in `V_n` or a separate commitment |
+| `0x0007` | `MarketPolicy` `P_M` | **shape now fixed** by the Def 5.2 amendment: `(family_id, family_version, evaluation_budget, family_parameters)`, a birth-time descriptor and explicitly not a Def 7.1 instance | the beta family itself. `family_id` has no admissible value until an amendment states the family, its invariant and its exact §3.4 arithmetic. Types for `family_parameters` follow from that choice |
+| `0x0008` | `MarketBounds` `B_M` | **narrowed** by the same amendment to the invariant, the per-transition size ceiling, and the authorized encumbrance purposes — `Φ`, `S`, `q` and `P_M` are no longer restated here | types for the three remaining components; the invariant's representation depends on `0x0007`'s family |
 | `0x0009` | `ReleasePolicy` `P_R` | "the bounded release/withdraw/close policy", owner-local per Req 4.6 | the entire contents |
 | `0x000A` | `FeePolicy` `Φ` | "the fee policy" | the entire contents; and its relationship to `B_M`'s fee policy |
 | `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" | the route CCB it is ordered by — i.e. class `0x000D` |
@@ -335,8 +335,10 @@ writing an encoder.**
 Two of these have partial tables in §5 rather than none:
 
 - `0x0006` `FulfillmentMechanism` is fixed as a preimage —
-  `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ Canon(P_M) ‖ Canon(B_M))` — so its field order is
-  known and only its two nested policies block it.
+  `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))` — so its field order is known and only
+  `0x0008` blocks it. `Canon(P_M)` was removed from this preimage by the Def 5.2 amendment:
+  `P_M` is a member of `V_0` and `c_0` commits the complete canonical `V_0`, so the mechanism
+  already committed it transitively and the second copy was an alias, not a binding.
 - `0x000E` `SettlementBundle` and `0x000F` `ConsumedDlvTransition` have their members named by
   Def 6.14 and the prose that follows it, and block on the types of those members plus
   `0x0010`.
