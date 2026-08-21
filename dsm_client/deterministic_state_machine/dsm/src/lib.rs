@@ -69,6 +69,7 @@
 //! - Feature-gated optional modules (perf, telemetry, bluetooth)
 
 pub mod bilateral;
+pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
 // pub mod config; // Network detection moved to SDK - no HTTP in core
