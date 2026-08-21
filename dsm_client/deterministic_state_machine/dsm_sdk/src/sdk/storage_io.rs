@@ -201,6 +201,10 @@ pub(crate) mod fake_fleet {
         failing: HashSet<String>,
         /// member_id -> the node id it echoes (default: its own member id)
         echo_override: HashMap<String, Option<String>>,
+        /// members that phrase a re-ack as `Refused { held_digest: <ours> }`
+        /// instead of `HeldIdentical` — a shape the current node never emits,
+        /// which is exactly why the claim path must not take it on trust.
+        refuse_phrasing: HashSet<String>,
         /// every (member_id, key, digest-of-bytes) PUT that was attempted, in order
         put_log: Vec<(String, String, [u8; 32])>,
     }
@@ -222,6 +226,11 @@ pub(crate) mod fake_fleet {
 
     pub(crate) fn heal_member(member_id: &str) {
         state().failing.remove(member_id);
+    }
+
+    /// Make `member_id` answer a re-ack as `Refused` carrying our own digest.
+    pub(crate) fn set_refuse_phrasing(member_id: &str) {
+        state().refuse_phrasing.insert(member_id.to_string());
     }
 
     /// Make `member_id` echo `echoes` (e.g. another member's id, or `None`).
@@ -313,6 +322,7 @@ pub(crate) mod fake_fleet {
                 continue;
             };
             let slot = (v.body.vault_id, v.body.parent_sequence);
+            let st_refuse_phrasing = st.refuse_phrasing.contains(&m.member_id);
             let reg = st.registers.entry(m.member_id.clone()).or_default();
             // Read the held digest OUT before deciding, so the write-once insert
             // does not overlap the read borrow.
@@ -322,7 +332,15 @@ pub(crate) mod fake_fleet {
                     reg.insert(slot, (envelope.to_vec(), v.envelope_digest));
                     MemberClaimResult::Accepted
                 }
-                Some(d) if d == v.envelope_digest => MemberClaimResult::HeldIdentical,
+                Some(d) if d == v.envelope_digest => {
+                    if st_refuse_phrasing {
+                        MemberClaimResult::Refused {
+                            held_digest: Some(d.to_vec()),
+                        }
+                    } else {
+                        MemberClaimResult::HeldIdentical
+                    }
+                }
                 Some(d) => MemberClaimResult::Refused {
                     held_digest: Some(d.to_vec()),
                 },

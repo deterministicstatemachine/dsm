@@ -207,18 +207,6 @@ pub fn record_accepting_member(
     Ok(())
 }
 
-/// Drop a member's observation for `object_key` (a read-back that used to match
-/// no longer does).
-pub fn clear_accepting_member(object_key: &str, member_id: &str) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "DELETE FROM frozen_publication_artifact_members WHERE object_key = ?1 AND member_id = ?2",
-        params![object_key, member_id],
-    )?;
-    Ok(())
-}
-
 /// Members whose current observation for `object_key` is EXACTLY
 /// `content_digest`. A member holding different bytes under the key never
 /// counts.
@@ -411,8 +399,6 @@ mod tests {
             2,
             "the stale-digest member does not count"
         );
-        clear_accepting_member("k/q", "m3").unwrap();
-        assert_eq!(count_accepting_members("k/q", &d).unwrap(), 1);
     }
 
     #[test]

@@ -1751,15 +1751,14 @@ impl AppRouterImpl {
         if intents.is_empty() {
             return Ok(0);
         }
-        let (owner_pk, owner_sk) = match (
-            crate::sdk::signing_authority::current_public_key(),
-            crate::sdk::signing_authority::current_secret_key(),
-        ) {
-            (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
-            // Locked wallet: the terminal proofs cannot be signed. Leave every
-            // intent exactly as it is and retry on a later pass.
-            _ => return Ok(0),
-        };
+        // A locked wallet cannot sign the terminal proofs, so there is nothing
+        // to finish; leave every intent exactly as it is and retry later. Note
+        // this ASKS whether signing is possible without binding the keys —
+        // nothing below this line holds a signing key, and that is the point of
+        // the split with `finish_prepared_close`.
+        if !crate::sdk::signing_authority::can_sign() {
+            return Ok(0);
+        }
         let mut finished = 0u32;
         for intent in intents {
             let vault_b32 = crate::util::text_id::encode_base32_crockford(&intent.vault_id);
@@ -1821,18 +1820,27 @@ impl AppRouterImpl {
             else {
                 continue;
             };
+            // THE FROZEN ENVELOPE, FROM STORAGE. This is the only claim this
+            // pass can submit: `FrozenClaimEnvelope` has no constructor that
+            // takes bytes or keys, so nothing below can build one.
+            let claim = match crate::sdk::settlement_slot::FrozenClaimEnvelope::load(
+                &intent.vault_id,
+                intent.parent_sequence,
+                &intent.x_close,
+            ) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    abandon("no frozen claim envelope is retained for this close");
+                    continue;
+                }
+                Err(_) => {
+                    abandon("the frozen claim envelope no longer verifies");
+                    continue;
+                }
+            };
             // THE THREE-WAY S EQUALITY: the frozen claim, the vault's
             // birth-bound lineage, and the local record must all name one set.
-            let claim_set_id =
-                match dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(
-                    &intent.claim_bytes,
-                ) {
-                    Ok(v) => v.body.storage_set_id,
-                    Err(_) => {
-                        abandon("the frozen claim envelope no longer verifies");
-                        continue;
-                    }
-                };
+            let claim_set_id = claim.storage_set_id();
             if claim_set_id != composed.storage_set_id
                 || record.storage_set_id != composed.storage_set_id
             {
@@ -1851,10 +1859,10 @@ impl AppRouterImpl {
             };
             let claim_set = claim_set.clone();
 
-            // Re-run the claim with the SAME bytes.
+            // Re-run the claim with the retained envelope.
             match crate::sdk::settlement_slot::claim_settlement_slot(
                 &claim_set,
-                &intent.claim_bytes,
+                &claim,
                 &intent.vault_id,
                 intent.parent_sequence,
                 &intent.x_close,
@@ -1898,7 +1906,7 @@ impl AppRouterImpl {
                 *h.finalize().as_bytes()
             };
             match self
-                .commit_canonical_close(
+                .finish_prepared_close(
                     &intent.vault_id,
                     intent.parent_sequence,
                     new_sequence,
@@ -1908,8 +1916,6 @@ impl AppRouterImpl {
                     op,
                     live.reserve_a,
                     live.reserve_b,
-                    &owner_pk,
-                    &owner_sk,
                 )
                 .await
             {
@@ -1921,6 +1927,51 @@ impl AppRouterImpl {
             }
         }
         Ok(finished)
+    }
+
+    /// The COMMIT half of a resumed close: replay the frozen operation and sign
+    /// the terminal publication set.
+    ///
+    /// Split from [`Self::resume_close_intents`] so that the claim half holds
+    /// no signing key at all. Terminal proofs genuinely have to be signed here
+    /// — they did not exist when the close was interrupted — but the parent
+    /// claim must never be, and keeping the key out of that scope is what makes
+    /// "never" a property of the code rather than of the current author's
+    /// discipline.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_prepared_close(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        new_sequence: u64,
+        pair: &dsm::types::device_state::VaultStatePair,
+        storage_set_id: &[u8; 32],
+        close_commitment: &[u8; 32],
+        op: dsm::types::operations::Operation,
+        reserve_a: u64,
+        reserve_b: u64,
+    ) -> Result<(), String> {
+        let (owner_pk, owner_sk) = match (
+            crate::sdk::signing_authority::current_public_key(),
+            crate::sdk::signing_authority::current_secret_key(),
+        ) {
+            (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
+            _ => return Err("signing authority unavailable (wallet locked)".to_string()),
+        };
+        self.commit_canonical_close(
+            vault_id,
+            parent_sequence,
+            new_sequence,
+            pair,
+            storage_set_id,
+            close_commitment,
+            op,
+            reserve_a,
+            reserve_b,
+            &owner_pk,
+            &owner_sk,
+        )
+        .await
     }
 
     /// `dlv.close` — the owner withdraws ALL remaining liquidity and retires the
@@ -2156,7 +2207,7 @@ impl AppRouterImpl {
 
         // The register claim, signed once and RETAINED — retries replay these
         // exact bytes.
-        let claim_bytes = match crate::sdk::settlement_slot::frozen_claim_envelope(
+        let claim = match crate::sdk::settlement_slot::frozen_claim_envelope(
             &vault_id,
             parent_sequence,
             &x_close,
@@ -2174,7 +2225,6 @@ impl AppRouterImpl {
             state: intent_db::CloseIntentState::PreparedClose,
             op_bytes: op.to_bytes(),
             x_close,
-            claim_bytes: claim_bytes.clone(),
             pointer_key: pointer_key.clone(),
             pointer_bytes: pointer_bytes.clone(),
             storage_set_id,
@@ -2198,7 +2248,7 @@ impl AppRouterImpl {
         // ── CLAIM THE PARENT ─────────────────────────────────────────────────
         match crate::sdk::settlement_slot::claim_settlement_slot(
             &claim_set,
-            &claim_bytes,
+            &claim,
             &vault_id,
             parent_sequence,
             &x_close,
@@ -5612,11 +5662,25 @@ mod funded_creation_tests {
     /// moves, and the intent stays PREPARED rather than being abandoned —
     /// abandoning a transient failure would strand the vault forever.
     ///
-    /// When the fleet comes back the resume pass replays the SAME frozen claim
-    /// envelope (a re-signed one would read as a different claimant and could
-    /// lose its own slot), commits the canonical close, and publishes the
-    /// terminal set. The digest assertions are what prove "replayed", not
-    /// "rebuilt".
+    /// When the fleet comes back the resume pass submits the SAME claim
+    /// envelope, commits the canonical close, and publishes the terminal set.
+    ///
+    /// What the digest assertions prove, precisely: every claim attempt before
+    /// and after the outage carried ONE envelope, and it is the one frozen with
+    /// the intent. That is the property the register compares — a claimant is
+    /// its exact bytes, so an envelope differing in `x`, in the storage set, in
+    /// the claimant key, or merely in field order would lose the slot it
+    /// already held.
+    ///
+    /// What they deliberately do NOT prove: that the bytes were read from disk
+    /// rather than reconstructed. SPHINCS+ signing here is deterministic
+    /// (`R = H(sk_prf || m)`, dsm-sphincs `sig_randomizer`), so rebuilding the
+    /// same body with the same key yields byte-identical bytes and no
+    /// wire-level assertion can separate the two. That rule is enforced
+    /// STRUCTURALLY instead: `claim_settlement_slot` accepts only a
+    /// `FrozenClaimEnvelope`, whose single constructor loads already-retained
+    /// bytes, so the resume path has no way to build or sign one. Claiming this
+    /// test proves provenance would be claiming more than it observes.
     #[test]
     #[serial]
     fn an_interrupted_close_is_completed_by_the_resume_pass_with_identical_bytes() {
@@ -5674,7 +5738,15 @@ mod funded_creation_tests {
             crate::storage::client_db::dlv_close_intent::CloseIntentState::PreparedClose,
             "an unreachable fleet is transient: the close stays PREPARED, never abandoned"
         );
-        let frozen_claim = intent.claim_bytes.clone();
+        // The retained envelope, from the one place that holds it.
+        let frozen_claim =
+            crate::storage::client_db::settlement_slot_claim_local::get_frozen_claim(
+                &vault_id,
+                0,
+                &intent.x_close,
+            )
+            .expect("retention read")
+            .expect("the close retained its claim envelope before going out");
 
         // The fleet returns; the sweep finishes what the owner started.
         for m in &members {
@@ -5706,8 +5778,10 @@ mod funded_creation_tests {
             crate::storage::client_db::dlv_close_intent::CloseIntentState::CanonicalCloseCommitted,
         );
 
-        // THE CLAIM WAS REPLAYED, NOT REBUILT: the bytes the resume submitted
-        // are the bytes frozen before the interruption.
+        // ONE ENVELOPE ACROSS THE OUTAGE, and it is the frozen one. The
+        // register identifies a claimant BY these bytes, so this is the
+        // property that decides whether the resumed close keeps the slot it
+        // already holds.
         let claim_digests: std::collections::BTreeSet<[u8; 32]> =
             crate::sdk::storage_io::fake_fleet::put_log()
                 .into_iter()

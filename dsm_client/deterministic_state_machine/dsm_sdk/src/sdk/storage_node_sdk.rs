@@ -95,17 +95,6 @@ pub struct KeyedPutFanout {
     pub total: u32,
 }
 
-impl KeyedPutFanout {
-    /// Member ids whose acceptance counted.
-    pub fn accepting_member_ids(&self) -> Vec<&str> {
-        self.outcomes
-            .iter()
-            .filter(|o| o.accepted)
-            .map(|o| o.member_id.as_str())
-            .collect()
-    }
-}
-
 /// One member's answer to a settlement-slot claim submission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberClaimResult {

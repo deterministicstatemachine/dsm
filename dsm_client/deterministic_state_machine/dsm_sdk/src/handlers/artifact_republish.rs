@@ -27,6 +27,15 @@ pub(crate) const ARTIFACT_REPUBLISH_ROWS_PER_POLL: u32 = 8;
 pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
     let rows = fpa::list_unpublished_artifacts(ARTIFACT_REPUBLISH_ROWS_PER_POLL)
         .map_err(|e| format!("list unpublished artifacts: {e}"))?;
+    republish_rows(rows).await
+}
+
+/// The pass proper, over an already-selected batch.
+///
+/// Split out so a test can hand it a DELIBERATELY STALE batch — the selection
+/// happens once, before any network I/O, and everything below is what has to
+/// stay correct when the world moves underneath that snapshot.
+async fn republish_rows(rows: Vec<fpa::FrozenArtifact>) -> Result<u32, String> {
     if rows.is_empty() {
         return Ok(0);
     }
@@ -35,6 +44,45 @@ pub(crate) async fn republish_unpublished_artifacts() -> Result<u32, String> {
 
     let mut published = 0u32;
     for row in rows {
+        // THE ROW MAY HAVE DIED WHILE AN EARLIER ROW WAS IN FLIGHT.
+        //
+        // `rows` was selected before this pass made a single network call, and
+        // every iteration below awaits. A `dlv.close` (or any later generation)
+        // committing in that window supersedes this row and publishes its own
+        // bytes under the same `.../latest` mirror key. Replaying the stale row
+        // afterwards would put an OLDER generation's bytes back on every member
+        // — a closed vault would serve its birth anchor again — and the damage
+        // would be permanent and invisible: `upsert_artifact_publication_state`
+        // declines to write to a superseded row, so nothing records that the
+        // fleet now disagrees with us, and `list_unpublished_artifacts` skips
+        // published rows, so the newer bytes are never re-sent.
+        //
+        // The module's own contract is that a superseded row is never replayed.
+        // Honour it against the CURRENT state, not the state at selection time.
+        match fpa::get_artifact(&row.object_key, &row.content_digest) {
+            Ok(Some(current)) => {
+                if !matches!(
+                    current.state,
+                    fpa::ArtifactState::Frozen | fpa::ArtifactState::PublicationPending
+                ) {
+                    log::info!(
+                        "[artifact republish] {} ({}): {} since selection — not replayed",
+                        row.object_key,
+                        row.purpose,
+                        current.state.as_str()
+                    );
+                    continue;
+                }
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                log::warn!(
+                    "[artifact republish] {}: state re-read failed ({e}) — holding",
+                    row.object_key
+                );
+                continue;
+            }
+        }
         // THE SET IS THE ROW'S, NOT OURS. An id the catalog cannot re-derive
         // means this device does not know how to reach that set; the bytes stay
         // owed, and are sent nowhere else.
@@ -327,5 +375,75 @@ mod tests {
             Some(&b"gen1"[..]),
             "members hold the current generation"
         );
+    }
+    /// A ROW SUPERSEDED *AFTER* SELECTION IS NOT REPLAYED.
+    ///
+    /// `a_superseded_generation_is_never_swept` above cannot catch this: the
+    /// SELECT already filters superseded rows, so it passes whether or not the
+    /// pass re-checks anything. The dangerous case is the row that was
+    /// legitimately selected and then died while an EARLIER row of the same
+    /// batch was in flight — every iteration awaits, and a `dlv.close`
+    /// committing in that window supersedes this row and publishes its own
+    /// bytes under the same `.../latest` mirror.
+    ///
+    /// Replaying it then puts an older generation back on every member. That
+    /// damage is permanent AND silent: `upsert_artifact_publication_state`
+    /// declines to write to a superseded row, so nothing records the
+    /// divergence, and `list_unpublished_artifacts` skips published rows, so
+    /// the newer bytes are never re-sent. A closed vault would serve its birth
+    /// anchor to every trader, forever.
+    ///
+    /// The stale batch is handed to `republish_rows` directly, which is exactly
+    /// what the real pass holds after its own SELECT.
+    #[tokio::test]
+    #[serial]
+    async fn a_row_superseded_after_selection_is_not_replayed_over_the_newer_one() {
+        let cat = init();
+        let sid = cat.sole_set().unwrap().id();
+
+        // gen0 is frozen and legitimately selected while it is still current.
+        let d0 = freeze(&sid, "sofi/latest", b"gen0");
+        let selected = fpa::list_unpublished_artifacts(8).expect("select");
+        assert_eq!(selected.len(), 1, "gen0 was selected while current");
+        assert_eq!(selected[0].content_digest, d0);
+
+        // The world moves: a close freezes gen1 under the same mirror key and
+        // publishes it to quorum. gen0 is now superseded.
+        let d1 = freeze(&sid, "sofi/latest", b"gen1");
+        assert_eq!(republish_unpublished_artifacts().await.unwrap(), 1);
+        assert_eq!(state_of("sofi/latest", &d1), fpa::ArtifactState::Published);
+        assert_eq!(state_of("sofi/latest", &d0), fpa::ArtifactState::Superseded);
+        assert_eq!(
+            fake_fleet::stored("test-1", "sofi/latest").as_deref(),
+            Some(&b"gen1"[..])
+        );
+
+        // Now the in-flight pass reaches its stale row.
+        let published = republish_rows(selected).await.expect("stale pass");
+        assert_eq!(published, 0, "a dead row publishes nothing");
+
+        // THE FLEET STILL HOLDS THE NEWER GENERATION, on every member.
+        for m in ["test-1", "test-2", "test-3"] {
+            assert_eq!(
+                fake_fleet::stored(m, "sofi/latest").as_deref(),
+                Some(&b"gen1"[..]),
+                "{m} must not have been rolled back to gen0"
+            );
+        }
+        // And gen0's bytes were never sent at all after it died — asserted on
+        // the wire, not only on the resulting state, because a PUT that landed
+        // and was then overwritten would leave the same final state.
+        let gen0 = *blake3::hash(b"gen0").as_bytes();
+        assert_eq!(
+            fake_fleet::put_log()
+                .into_iter()
+                .filter(|(_, k, dg)| k == "sofi/latest" && *dg == gen0)
+                .count(),
+            0,
+            "the superseded bytes were never put on the wire"
+        );
+        // The newer row is untouched — still published, still the latest.
+        assert_eq!(state_of("sofi/latest", &d1), fpa::ArtifactState::Published);
+        assert!(fpa::is_artifact_published("sofi/latest").unwrap());
     }
 }
