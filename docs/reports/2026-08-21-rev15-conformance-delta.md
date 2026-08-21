@@ -31,6 +31,30 @@ citations in this report therefore resolve at `5efc1d3a`; code citations resolve
 Recording the blob hash means a later revision landing on that path is detected rather than
 silently absorbed.
 
+### Amendments since the freeze
+
+The mechanism above has fired once, as designed. The spec blob is now
+`4b4d243bc3563c76756131cce9ac7f0f86d1a755`.
+
+**`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
+`parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
+and the trader fence of Req 6.23 — but never gave its construction; Req 6.5 constrained only
+its property. Def 4.1 already supplied the missing pieces, defining `h_n` as "the local parent
+commitment" and `c_n = H(DSM/vault-state ‖ Canon(V_n))`, without ever relating them. The
+amendment states the recurrence:
+
+```
+h_0 = H(DSM/vault-state-parent/genesis/v2 ‖ vault_id)
+h_n = c_{n-1}                                        for n > 0
+```
+
+and records that `parent_state_commitment` is exactly that `h_n`.
+
+This resolves an underspecification in the normative authority rather than in Rust, which is
+the point: a construction chosen only in the implementation would have been indistinguishable
+from one the specification required. **None of the six findings below changes** — the
+amendment fixes what Anchor V2 must build, not whether the current anchor diverges.
+
 Rev 15 identity was verified by content markers, not by the title: the "Revision 15" running
 head; the domains `DSM/vault-state-anchor/v2`, `DSM/trader-settlement-acceptance/v2`,
 `DSM/binding-tx`, `DSM/binding-keyset`; Req 6.6's clean `VaultStateAnchorV2` cut; Req 6.13's
@@ -124,7 +148,8 @@ p_v = H(DSM/vault-state-anchor/v2 ‖ vault_id ‖ generation ‖ parent_state_c
 ```
 
 so **`q` is owner-committed inside the signed anchor**, alongside the parent state
-commitment. Req 6.5 (spec:660) requires the anchor to "bind the history commitment that
+commitment — which, per the amendment recorded above, is the local parent commitment `h_n`
+of Def 4.1, chaining the canonical prior DLV state `c_{n-1}`. Req 6.5 (spec:660) requires the anchor to "bind the history commitment that
 produced the advertised reserves, not only the vault identifier, local generation, and
 reserves digest". Req 6.6 (spec:664) requires the history-bound `VaultStateAnchorV2` to use
 "a new domain/schema" that "must not be silently accepted as the legacy anchor format or
