@@ -74,8 +74,6 @@ pub struct CloseIntent {
     pub op_bytes: Vec<u8>,
     /// The deterministic close commitment naming this close in the slot.
     pub x_close: [u8; 32],
-    /// The frozen `SettlementSlotClaimV1` envelope (register bytes).
-    pub claim_bytes: Vec<u8>,
     /// The discovery pointer this close publishes, and where.
     pub pointer_key: String,
     pub pointer_bytes: Vec<u8>,
@@ -85,22 +83,25 @@ pub struct CloseIntent {
 }
 
 /// Write the intent before anything external happens. Idempotent per
-/// `(vault_id, parent_sequence)`: a retry of the same close reuses the FIRST
-/// bytes — re-signing would produce a claim the register reads as a different
-/// claimant.
+/// `(vault_id, parent_sequence)`: a retry of the same close reuses the first
+/// row.
+///
+/// The claim envelope is deliberately NOT stored here. It lives in exactly one
+/// place — `settlement_slot_claim_local` — reachable only through
+/// `FrozenClaimEnvelope::load`, so there is never a second copy that could
+/// disagree with it or be submitted in its place.
 pub fn put_intent_with_conn(conn: &Connection, intent: &CloseIntent) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO dlv_close_intent
-            (vault_id, parent_sequence, state, op_bytes, x_close, claim_bytes,
+            (vault_id, parent_sequence, state, op_bytes, x_close,
              pointer_key, pointer_bytes, storage_set_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             intent.vault_id.as_slice(),
             intent.parent_sequence as i64,
             intent.state.as_str(),
             intent.op_bytes,
             intent.x_close.as_slice(),
-            intent.claim_bytes,
             intent.pointer_key,
             intent.pointer_bytes,
             intent.storage_set_id.as_slice(),
@@ -157,15 +158,14 @@ fn row_to_intent(r: &rusqlite::Row<'_>) -> rusqlite::Result<CloseIntent> {
         state: CloseIntentState::from_str(&r.get::<_, String>(2)?),
         op_bytes: r.get(3)?,
         x_close: fixed(r.get::<_, Vec<u8>>(4)?),
-        claim_bytes: r.get(5)?,
-        pointer_key: r.get(6)?,
-        pointer_bytes: r.get(7)?,
-        storage_set_id: fixed(r.get::<_, Vec<u8>>(8)?),
-        insertion_ordinal: r.get(9)?,
+        pointer_key: r.get(5)?,
+        pointer_bytes: r.get(6)?,
+        storage_set_id: fixed(r.get::<_, Vec<u8>>(7)?),
+        insertion_ordinal: r.get(8)?,
     })
 }
 
-const COLS: &str = "vault_id, parent_sequence, state, op_bytes, x_close, claim_bytes, \
+const COLS: &str = "vault_id, parent_sequence, state, op_bytes, x_close, \
                     pointer_key, pointer_bytes, storage_set_id, insertion_ordinal";
 
 pub fn get_intent(vault_id: &[u8; 32], parent_sequence: u64) -> Result<Option<CloseIntent>> {
@@ -213,7 +213,6 @@ mod tests {
             state: CloseIntentState::PreparedClose,
             op_bytes: b"signed-op".to_vec(),
             x_close: [0xC1; 32],
-            claim_bytes: b"claim-envelope".to_vec(),
             pointer_key: "sofi/vault-pending/V/1/X".to_string(),
             pointer_bytes: b"pointer".to_vec(),
             storage_set_id: [0x6B; 32],
@@ -234,11 +233,9 @@ mod tests {
         put_intent(&a).unwrap();
         let mut b = a.clone();
         b.op_bytes = b"DIFFERENT".to_vec();
-        b.claim_bytes = b"different-claim".to_vec();
         put_intent(&b).unwrap();
         let got = get_intent(&[0x11; 32], 3).unwrap().expect("row");
         assert_eq!(got.op_bytes, b"signed-op".to_vec());
-        assert_eq!(got.claim_bytes, b"claim-envelope".to_vec());
         assert_eq!(got.state, CloseIntentState::PreparedClose);
     }
 
