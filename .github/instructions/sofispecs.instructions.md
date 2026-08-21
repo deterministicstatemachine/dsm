@@ -570,10 +570,43 @@ plus a proof that Vn+1 satisfies every bound of that mechanism.
 Definition 5.2 (Market fulfillment mechanism).
 M= H(DSM/fulfillment ∥vault
 _
-id ∥c0 ∥Canon(PM ) ∥Canon(BM )),
-where PM is the bounded market predicate family and BM commits, at minimum, the invariant,
-fee policy, per-transition size ceiling, authorized encumbrance purposes, and storage-set settlement
-parameters.
+id ∥c0 ∥CCB(BM )),
+where BM commits the additional owner-committed bounds on market exercise that do not already
+have a home in the vault state: the invariant, the per-transition size ceiling, and the authorized
+encumbrance purposes.
+Single value source. PM , the fee policy Φ, the committed storage set S, and the fixed threshold
+q are members of V0 under Definition 4.1, and c0 commits the complete canonical V0. The
+owner-signed mechanism therefore already commits their birth values transitively, and BM does not
+repeat them. This is a deliberate structural choice rather than an omission: two authoritative
+copies of one fact create states that encode validly while disagreeing internally, and no equality
+rule can be enforced by a verifier that holds only one of the two objects. Any future BM field
+concerning fees or storage must express a semantically distinct bound or profile constraint, never
+another copy of a V0 value.
+The layering is therefore: PM is which bounded predicate family may execute, BM is the additional
+owner-committed bounds on its exercise, the Smart Commitment C of Definition 7.1 is the concrete
+transaction-time instance over ∆in, ∆out, external commitments, encumbrances and intent bounds,
+and Vn is the actual reserve state being consumed. PM is committed at vault birth, before any
+trader exists, so it is not structurally equal to C.
+Shape of PM . PM is a birth-time, versioned predicate-family descriptor:
+PM = (family
+_
+id,family
+_version,evaluation
+_budget,family
+_parameters),
+naming which bounded deterministic predicate family may execute and carrying only the static
+parameters needed to instantiate and evaluate it, together with the static evaluation budget
+Requirement 4.3 demands. It is not a predicate instance: ∆in, ∆out, the external commitments, the
+encumbrances and the intent bounds of Definition 7.1 are transaction-time values that do not exist
+when PM is committed, which Requirement 4.4 already implies by having the owner commit PM
+before any particular trader exists.
+The beta market family is not assigned here. Naming one — including any constant-product
+automated-market-maker family — is a normative economic decision that must state the family
+identifier, its invariant, and its exact arithmetic under the fixed-point rules of §3.4 before
+family
+_
+id may take a value. Until that amendment lands, PM has a shape and no admissible
+member, and no conformant vault may be born.
 The owner signs CCB(M) at vault creation. M commits a mechanism, not a preferred trader.
 Market size bound. The beta DLV state has no separate economic “quota” variable. The phrase
 market size bound means the per-transition size ceiling committed in BM together with the actual
