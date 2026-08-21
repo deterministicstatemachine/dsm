@@ -33,8 +33,8 @@ silently absorbed.
 
 ### Amendments since the freeze
 
-The mechanism above has fired three times, as designed. The spec blob is now
-`fc93e9007b6a619a1f2cf03f104b66a6dbfc3f3e`.
+The mechanism above has fired four times, as designed. The spec blob is now
+`12c69d4cc95c23a80e7aaa74b7b893773c42004c`.
 
 **`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
 `parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
@@ -129,7 +129,7 @@ and `SoFi-V2.pdf` are drafting artifacts.
 | 4 | Immutable object vs mutable index | Divergent — two distinct violations |
 | 5 | Trader acceptance realization | Partial, security-relevant — gate correctly placed, witness format non-conformant |
 | 6 | One-phase owner-local close | Non-conformant in candidate completeness and realization boundary |
-| 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6** |
+| 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6; 10 of 19 classes now specified** |
 
 Two areas reverse decisions that are currently documented as deliberate in landed code. They
 are called out in **Reversals of landed decisions** below so that neither is made silently.
@@ -548,10 +548,11 @@ Ordered by dependency, not by size.
 1. **Area 3, `q` rule only.** Smallest change, largest immediate risk reduction, and a hard
    precondition of the fleet redeploy: at `n=5` the current rule silently yields `q=3`.
    Independent of step 0: it is an integer threshold, not an encoding. **Landed in #683.**
-2. **Area 3, anchor V2.** `parent_state_commitment` and `q` in a `/v2` domain. Gates the
-   schema-v5 reprovision under Req 6.6's clean-cut rule. Blocked on step 0: `h_n = c_{n-1}`
-   is not computable until `CCB(V_n)` exists. The lineage recurrence itself is settled
-   separately as a spec amendment.
+2. **Area 3, anchor V2. UNBLOCKED.** `parent_state_commitment` and `q` in a `/v2` domain.
+   Gates the schema-v5 reprovision under Req 6.6's clean-cut rule. The normative prerequisites
+   are complete: the lineage recurrence `h_n = c_{n-1}`, the beta market and release families,
+   `Φ`, and `CCB(VaultStateV2)` are all specified. What stands between here and implementation
+   is an encoder for `0x0001`, checked against an independent one — not another amendment.
 3. **Area 4.** Immutable namespace, shared address derivation, consumer re-hash, `/latest`
    demoted from identity to index. Independent of 1–2 and can run in parallel.
 4. **Area 1 + area 2 together.** The generic `CanonicalStorage` interface and
