@@ -660,6 +660,26 @@ Beta fee policy. Φ is FeePolicyV1, a single unsigned 32-bit field fee_bps with
 least the whole input and leave the pricing rule with a zero or negative effective numerator.
 The width is 32 bits because that is the representation already in use throughout, and widening
 or re-scaling it would change every committed fee without changing any fee.
+Beta release family. PR has the same descriptor shape as PM , and beta declares exactly one
+admissible family: family_id = OWNER_LOCAL_FULL_CLOSE, family_version = 1, with no family
+parameters. Its evaluation_budget is likewise a constant of the family version.
+The family admits exactly one successor shape. A valid release consumes the current DLV parent
+and drains BOTH reserve legs to zero in one transition, crediting each leg's exact remaining
+amount to ordinary owner balance and retiring the vault, so that no later successor may compose
+from the retired parent. There is no partial release in beta: a family that released part of a
+leg would need a released amount per leg, and that amount is exactly the parameter this family
+does not have.
+The family carries no parameters because there is nothing left to parameterise. The amounts are
+the parent's reserves, the destination is ordinary owner balance, the authority is the owner
+signature over the exact successor required by Definition 5.1(a), and the timing is governed by
+Requirement 6.30 rather than by the policy. A parameter here would be a value some verifier
+could read differently from the parent state, which is precisely what Requirement 4.6's
+decidability condition forbids.
+PR is therefore decidable exactly as Requirement 4.6 demands: from the authenticated current
+DLV parent, the exact owner-signed release successor, the applicable token policy, and canonical
+bytes complete before the first mutating binding step. It requires no post-binding owner action,
+no external counterparty or co-signature, no reference-window outcome, and no liquidation or
+oracle branch.
 The owner signs CCB(M) at vault creation. M commits a mechanism, not a preferred trader.
 Market size bound. The beta DLV state has no separate economic “quota” variable. The phrase
 market size bound means the per-transition size ceiling committed in BM together with the actual

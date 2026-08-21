@@ -5,7 +5,7 @@ Establishes the CCB framework and object registry for finding 7 of
 `docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.**
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
-make Rev 15's commitments independently derivable, because ten of nineteen object classes
+make Rev 15's commitments independently derivable, because five of nineteen object classes
 still have no contents in the specification — see §4 and §6. Finding 7 closes when those are
 resolved by the normative amendments listed in §7, not when this document merges.
 
@@ -177,14 +177,14 @@ storage address, a resource key or an authority check appears here.
 
 | Class | Object | Schema | Commitment it feeds | Status |
 |---|---|---|---|---|
-| `0x0001` | `VaultStateV2` (`V_n`) | 1 | `c_n = H(DSM/vault-state ‖ CCB)` | **§5.1 — blocked, see §6** |
+| `0x0001` | `VaultStateV2` (`V_n`) | 1 | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined |
 | `0x0002` | `StorageSet` (`S`) | 1 | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined |
 | `0x0004` | `EncumbranceClaim` (`e_j`) | 1 | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | 1 | `E = H(DSM/enc ‖ vault_id ‖ CCB)` | §5.3 defined |
 | `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
 | `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | §5.7 defined |
 | `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | §5.6 defined |
-| `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | **blocked, see §6** |
+| `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | §5.4 defined |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
 | `0x000C` | `RouteSet` (`R`) | 1 | `X = H(DSM/route-set ‖ I ‖ CCB ‖ …)` | **blocked, see §6** |
@@ -209,11 +209,11 @@ inventing the missing ones.**
 
 Of the nineteen live object classes above:
 
-- **8 are fully specified** in §5 — `0x0002`, `0x0004`, `0x0005`, `0x0007`, `0x0008`,
-  `0x000A`, `0x000B`, `0x0013`.
+- **10 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **7 are blocked** with only a class assignment.
+- **5 are blocked** with only a class assignment.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -221,12 +221,44 @@ field table for those would settle protocol in this document exactly as writing 
 first would settle it in Rust. §6 states precisely what each one needs.
 
 The framework in §2 and the namespace in §3 are complete and are **not** blocked on §6. They
-can be reviewed, merged, and implemented against for the eight specified objects immediately.
+can be reviewed, merged, and implemented against for the ten specified objects immediately.
 
 ## 5. Field tables
 
 *(Sections 5.1–5.8 follow the framework above. Objects marked blocked in §3 carry only their
 class assignment until §6 is resolved.)*
+
+### 5.1 `VaultStateV2` — class `0x0001`, schema 1
+
+The fifteen members of the Def 4.1 tuple, numbered in the order that definition states them.
+`c_n = H(DSM/vault-state ‖ CCB(V_n))`, and `h_n` — field 12 — is `c_{n-1}` for `n > 0` and the
+domain-separated genesis value at `n = 0`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `owner_genesis_id` (`g_o`) | `digest32` | |
+| 2 | `owner_device_id` (`d_o`) | `digest32` | |
+| 3 | `vault_id` | `digest32` | fixed at creation, never changes |
+| 4 | `generation` (`n`) | `u64` | |
+| 5 | `reserve_a` (`R_A`) | `u64` | base units of `P_M.token_a_policy_commit` |
+| 6 | `reserve_b` (`R_B`) | `u64` | base units of `P_M.token_b_policy_commit` |
+| 7 | `market_policy` (`P_M`) | nested `0x0007` | inline by value per §2.6 |
+| 8 | `release_policy` (`P_R`) | nested `0x0009` | inline by value |
+| 9 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value; the single authoritative fee |
+| 10 | `encumbrances` (`E`) | nested `0x0005` | the encumbrance set, inline by value |
+| 11 | `iteration_budget` (`β`) | optional `u64` | §2.3 presence marker; absent is the common case |
+| 12 | `parent_state_commitment` (`h_n`) | `digest32` | `c_{n-1}`, or the genesis value at `n = 0` |
+| 13 | `owner_root` (`r_o`) | `digest32` | the authenticated owner root |
+| 14 | `storage_set` (`S`) | nested `0x0002` | inline by value; note `0x0002` carries the frozen legacy layout of §5.2 |
+| 15 | `quorum` (`q`) | `u32` | the fixed threshold; validity is `q` conformant for `|S|` per the beta profile |
+
+Reserve ordering follows the token pair in `P_M`: field 5 is the leg whose policy commitment is
+`token_a_policy_commit`, which `0x0007` requires to be the lexicographically smaller of the two.
+The pair is therefore not restated here — restating it would be the alias class the Def 5.2
+amendment removed.
+
+`q` is a field of the state rather than of `B_M`, and `S` likewise, because Def 4.1 makes both
+members of `V_n`. `M` commits their birth values transitively through `c_0`.
 
 ### 5.2 `StorageSet` — class `0x0002`, schema 1
 
@@ -280,6 +312,26 @@ The specification fixes the preimage directly:
 | 6 | `purpose` | `u16` | enumeration; values are declared where the purpose set is defined |
 
 `EncumbranceSet` — class `0x0005`, schema 1 — is a set of `EncumbranceClaim` under §2.4.
+
+### 5.4 `ReleasePolicy` — class `0x0009`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `family_id` | `u16` | `0x0001` = `OWNER_LOCAL_FULL_CLOSE`. Beta declares no other member |
+| 2 | `family_version` | `u16` | `1` for beta; fixes the admissible successor shape and the evaluation budget |
+
+**No parameters, deliberately.** The beta family admits exactly one successor shape — both
+reserve legs drained to zero in one transition, each leg's exact remaining amount credited to
+ordinary owner balance, the vault retired. The amounts are the parent's reserves, the
+destination is ordinary owner balance, the authority is the owner signature over the exact
+successor, and the timing is Req 6.30's. A parameter here would be a value some verifier could
+read differently from the parent state, which is what Req 4.6's decidability condition forbids.
+
+A partial-release family would need a released amount per leg — precisely the parameter this
+family does not have — and so takes a new `family_id` under a new schema version rather than an
+optional field bolted onto this one.
+
+`evaluation_budget` is a constant of `family_version`, as in `0x0007`.
 
 ### 5.5 `TradeIntent` — class `0x000B`, schema 1
 
@@ -363,8 +415,6 @@ writing an encoder.**
 
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
-| `0x0001` | `VaultStateV2` | the fifteen-member tuple of Def 4.1 | widths and types for every scalar; how `P_M`, `P_R`, `Φ`, `E` enter; `β`'s optional encoding. Blocked transitively on `0x0007`–`0x000A` |
-| `0x0009` | `ReleasePolicy` `P_R` | "the bounded release/withdraw/close policy", owner-local per Req 4.6 | the entire contents |
 | `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" | the route CCB it is ordered by — i.e. class `0x000D` |
 | `0x000D` | `Route` `r_i` | referenced only as a set member | the entire contents |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
@@ -451,5 +501,10 @@ Most of §6 falls in the third tier.
    independent one, and published as outputs of an already-defined schema rather than as its
    source of truth.
 
-Anchor V2 remains blocked until `0x0001` is unblocked, because `h_n = c_{n-1}` is not
-computable without `CCB(VaultStateV2)`.
+**Anchor V2 is unblocked.** `0x0001` is specified in §5.1, so `c_n = H(DSM/vault-state ‖
+CCB(V_n))` is computable and therefore so is `h_n = c_{n-1}`. What remains before Anchor V2 can
+be *implemented* is step 3 of this list, not another normative amendment: an encoder that emits
+`CCB(VaultStateV2)` and is checked against an independent one.
+
+The five still-blocked classes — `0x000C`, `0x000D`, `0x0010`, `0x0012`, `0x0014` — belong to
+the routing and settlement amendments and do not gate Anchor V2.
