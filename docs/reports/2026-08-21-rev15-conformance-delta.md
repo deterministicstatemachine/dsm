@@ -33,8 +33,8 @@ silently absorbed.
 
 ### Amendments since the freeze
 
-The mechanism above has fired twice, as designed. The spec blob is now
-`f4e33a6f38e273306aa78a6336dc0f82e5f56de2`.
+The mechanism above has fired three times, as designed. The spec blob is now
+`fc93e9007b6a619a1f2cf03f104b66a6dbfc3f3e`.
 
 **`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
 `parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
@@ -78,6 +78,34 @@ do not exist when `P_M` is committed. It deliberately does **not** name the beta
 family: Rev 15 never uses the phrase "constant product", and naming a family is a normative
 economic decision requiring its invariant and exact §3.4 arithmetic. Until that lands, `P_M`
 has a shape and no admissible member.
+
+**The beta market family, `Φ`, and an exact-rational allowance in §3.4.** The family is now
+named: `CONSTANT_PRODUCT_EXACT_INPUT` version 1, parameterised by the canonical token pair, with
+`Φ = FeePolicyV1{fee_bps: u32}` under `0 ≤ fee_bps < 10_000`. §3.4 gained an allowance for exact
+versioned rationals with a fixed denominator, because `fee_bps/10_000` converted to scale 2³²
+would introduce a rounding stage with no protocol meaning.
+
+The pricing rule is stated as the fused expression
+`output = floor(y·a·(D−f) / (x·D + a·(D−f)))` with **one** floor division, and the text forbids
+computing a rounded fee-adjusted input first — two implementations disagreeing about that second
+rounding produce different outputs from identical inputs. That is not a contrived corner: at
+`a=1, x=1, y=3` the fused rule yields 1 and the doubly-rounded variant yields 0, and a brute-force
+sweep of small reserves finds tens of thousands of divergent cases — precisely the region a
+low-liquidity vault operates in. The successor credits the **full**
+input, `R'_in = R_in + a`, with the fee remaining in reserves as LP yield.
+
+Acceptance is equality with the recomputed successor. The nondecreasing product
+`R'_in·R'_out ≥ R_in·R_out` is recorded as a consequence and explicitly barred from serving as
+the acceptance condition, since many successors far worse for the trader also satisfy it.
+
+Two aliases were removed in the same pass: `B_M` no longer carries the invariant, which
+`family_id` now names, and `evaluation_budget` is a family-version constant rather than an
+owner-configurable field — otherwise two implementations could agree on every byte while
+disagreeing on whether evaluation exhausted its allowance.
+
+This formalizes implementation behaviour verified at `routing_path_sdk.rs:125-155`, **not** the
+stale prose at `proto/dsm_app.proto:202`, which says `reserve_in += input_after_fee` while the
+reserve semantics and their test credit the full input.
 
 Rev 15 identity was verified by content markers, not by the title: the "Revision 15" running
 head; the domains `DSM/vault-state-anchor/v2`, `DSM/trader-settlement-acceptance/v2`,
