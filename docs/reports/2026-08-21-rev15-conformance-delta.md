@@ -33,8 +33,8 @@ silently absorbed.
 
 ### Amendments since the freeze
 
-The mechanism above has fired once, as designed. The spec blob is now
-`4b4d243bc3563c76756131cce9ac7f0f86d1a755`.
+The mechanism above has fired twice, as designed. The spec blob is now
+`f4e33a6f38e273306aa78a6336dc0f82e5f56de2`.
 
 **`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
 `parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
@@ -54,6 +54,30 @@ This resolves an underspecification in the normative authority rather than in Ru
 the point: a construction chosen only in the implementation would have been indistinguishable
 from one the specification required. **None of the six findings below changes** — the
 amendment fixes what Anchor V2 must build, not whether the current anchor diverges.
+
+**Fulfillment mechanism de-duplication, and the shape of `P_M`.** Def 5.2 committed
+`Canon(P_M)` and had `B_M` commit the fee policy and "storage-set settlement parameters" —
+but `P_M`, `Φ`, `S` and `q` are all members of `V_0` under Def 4.1, and `c_0` commits the
+complete canonical `V_0`. The mechanism therefore already committed every one of them
+transitively, and the second copies were aliases rather than bindings. Def 5.2 now reads
+
+```
+M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))
+```
+
+with `B_M` narrowed to the invariant, the per-transition size ceiling, and the authorized
+encumbrance purposes. `V_n` is the single value source for `P_M`, `Φ`, `S` and `q`. The
+reason is structural rather than aesthetic: two authoritative copies of one fact create states
+that encode validly while disagreeing internally, and no equality rule can be enforced by a
+verifier holding only one of the two objects.
+
+The same amendment fixes the *shape* of `P_M` — a birth-time versioned descriptor
+`(family_id, family_version, evaluation_budget, family_parameters)`, explicitly not a Def 7.1
+Smart Commitment, since `Δ_in`, `Δ_out` and the intent bounds are transaction-time values that
+do not exist when `P_M` is committed. It deliberately does **not** name the beta market
+family: Rev 15 never uses the phrase "constant product", and naming a family is a normative
+economic decision requiring its invariant and exact §3.4 arithmetic. Until that lands, `P_M`
+has a shape and no admissible member.
 
 Rev 15 identity was verified by content markers, not by the title: the "Revision 15" running
 head; the domains `DSM/vault-state-anchor/v2`, `DSM/trader-settlement-acceptance/v2`,
