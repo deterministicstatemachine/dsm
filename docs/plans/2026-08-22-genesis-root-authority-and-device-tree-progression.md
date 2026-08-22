@@ -29,7 +29,8 @@ by a delegated key whose authority descends from `g_o`, never from the tree bein
 delegation carries a **causal activation edge** so that supersession is enforced by the acceptance
 predicate rather than merely asserted — and that enforcement is relative to a chain the verifier
 holds, which is why revocation against a stranger additionally requires the frontier work Part 3
-identifies as blocking.
+identifies as blocking **for that capability**. It does not block the SoFi path, which is
+position-bound.
 
 ### The derivation-order constraint that forces this shape
 
@@ -201,12 +202,16 @@ include `T_j`. Everything below depends on that being fixed mechanically rather 
 word "after".
 
 > **Applicable delegation.** For a transition `T_j`, the applicable delegation is the
-> **highest-numbered** delegation whose activation position lies in `T_j`'s **proper** ancestry.
-> `T_j` must bind exactly that delegation.
+> **highest-numbered activation-eligible** delegation whose activation position lies in `T_j`'s
+> **proper** ancestry. `T_j` must bind exactly that delegation.
+
+Activation-eligibility is defined below and is not optional shorthand: without it, a delegation
+whose predecessor never activated could still take effect.
 
 Exactly one delegation qualifies for any `T_j`, and it is determined by the chain rather than
-chosen by the signer. Once `act(D_{n+1})` is in a transition's proper ancestry, `D_n` is no longer
-applicable for it, so supersession is enforced rather than declared. This rule **replaces** the
+chosen by the signer. Once `D_{n+1}` is activation-eligible and `act(D_{n+1})` lies in a
+transition's proper ancestry, `D_n` is no longer applicable for it, so supersession is enforced
+rather than declared. This rule **replaces** the
 earlier non-decreasing-number rule, which it strictly implies.
 
 **A delegation does not authorize its own activation transition.** Because ancestry is proper,
@@ -215,7 +220,7 @@ and `D_{n+1}` begins with the **child** of `act(D_{n+1})`. Handing `D_{n+1}` the
 names it would let a delegation bootstrap its own authority at the position it selected, which is
 the self-activation ambiguity the proper-ancestry rule removes.
 
-Two supporting constraints:
+Three supporting constraints:
 
 - **The digest, not the root value.** Activation names a transition digest because root *values*
   demonstrably recur. The existing suite asserts exactly that: after an add and a remove, the root
@@ -229,10 +234,28 @@ Two supporting constraints:
   refused rather than silently honoured. **Where this is discharged matters**: descendancy is a
   fact about the transition chain, so it cannot be checked while only delegations are authenticated.
   It is validated during the root-chain fold, as positions resolve — see P2.
-- **An unresolvable activation never activates.** A delegation whose `activation_transition_digest`
-  names no authenticated transition on the chain is simply not effective there. It is not a
-  refusal — a delegation may legitimately be published ahead of the transition that activates it —
-  but it must not become applicable to anything, and it must not retire its predecessor.
+- **An unresolvable activation never activates, and its inactivity cascades.** A delegation whose
+  `activation_transition_digest` names no authenticated transition on the chain is not effective
+  there. That is not a refusal — a delegation may legitimately be published ahead of the transition
+  that activates it — but it must not become applicable, and it must not retire its predecessor.
+
+  The cascade is the part that is easy to miss. Activation eligibility is a property of the
+  **contiguous resolved prefix**, not of a delegation in isolation:
+
+  > `D_i`, for `i > 0`, is **activation-eligible** only if every predecessor activation through
+  > `act(D_{i−1})` resolves on the authenticated transition chain, *and* `act(D_i)` strictly
+  > descends `act(D_{i−1})`. `D_0` is eligible by the sentinel.
+
+  Without the cascade, a chain `D_0 → D_1 → D_2` in which `act(D_1)` never resolves but `act(D_2)`
+  does would let `D_2` activate — and the verifier would have no way to establish that `act(D_2)`
+  descends from `act(D_1)`, which is precisely what the forward-only rule requires. The lineage
+  would have skipped an edge it never proved. An unresolved predecessor therefore blocks activation
+  of **all** its descendants, while leaving the delegation objects themselves perfectly valid.
+
+  This is a liveness failure of supersession, not a safety failure of the predicate: the effect is
+  that an older delegation stays applicable, never that a newer one is honoured without proof. It is
+  also indistinguishable from withholding the activating transition — one more reason revocation
+  against strangers needs the frontier work rather than this rule.
 
 **Roots signed under a superseded delegation remain valid history.** Supersession changes who may
 sign *next*; it does not invalidate what was already authorized.
@@ -310,16 +333,23 @@ of the following hold against that prefix:
 
 - `old_root` equals the running root and `version_number` is strictly monotone;
 - the bound delegation digest identifies some `D_i` on P1's authenticated chain;
+- `D_i` is **activation-eligible** against the current prefix — every activation through
+  `act(D_{i−1})` resolves in it and each strictly descends its predecessor, `D_0` by the sentinel;
 - `act(D_i)` resolves to a transition in `T_j`'s **proper** ancestry, or is the genesis sentinel;
-- no higher-numbered `D_m` (`m > i`) has an activation resolving into that same proper ancestry —
-  this is what retires `D_i`;
+- no higher-numbered **activation-eligible** `D_m` (`m > i`) has an activation resolving into that
+  same proper ancestry — this is what retires `D_i`. A delegation outside the eligible prefix is
+  inert: it neither activates nor retires;
 - the signature verifies under `D_i`'s `delegated_pk`.
 
 Then `T_j` joins the authenticated prefix. Activation ordering is validated here as positions
-resolve: for any two delegations whose activations resolve into the authenticated chain, chain
-position must strictly increase with delegation number. A delegation whose activation resolves at or
-before its predecessor's is refused as history retraction; one whose activation never resolves is
-simply never applicable.
+resolve: a delegation whose activation resolves at or before its predecessor's is refused as
+history retraction; one whose activation never resolves is inert, and so is every delegation after
+it until the lineage becomes constructible.
+
+The eligible prefix is computed against the prefix authenticated so far, and it only ever grows as
+the chain extends — a later activation resolves at a position at or beyond the current end, so it
+can never enter an earlier transition's proper ancestry. The fold is therefore deterministic and
+never revises a decision it already made.
 
 Every fact P2 consumes is either authenticated by P0/P1 or by P2's own already-authenticated prefix.
 The induction is over the chain, not over the document's section order.
@@ -479,18 +509,22 @@ The implementation must carry these as tests, not as comments:
 10. **Unresolvable activation never applies.** A `D_{n+1}` whose `activation_transition_digest`
     names a nonexistent or unauthenticated transition must not become applicable to any transition,
     and must not retire `D_n`.
-11. **No self-activation.** The transition named by `act(D_{n+1})` must verify under `D_n`, and a
+11. **Inactivity cascades.** If `act(D_{n+1})` is unresolved, `D_{n+2}` must not become applicable
+    **even when `act(D_{n+2})` resolves to an authenticated transition** — the skipped edge was
+    never proven, so the lineage is not constructible. The delegation objects stay valid; only
+    their activation is blocked.
+12. **No self-activation.** The transition named by `act(D_{n+1})` must verify under `D_n`, and a
     version of it signed by `D_{n+1}` must be refused — proper ancestry asserted mechanically, not
     inferred from the word "after".
-12. **Stage isolation.** P1 must be unable to consult transition material at all — enforce
+13. **Stage isolation.** P1 must be unable to consult transition material at all — enforce
     structurally (P1 takes no transition input) so activation ordering cannot drift back into it.
     This is the obligation that keeps the ordering property from silently regressing.
-13. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
+14. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
     context; a delegated-key signature over a non-transition preimage likewise.
-14. **No implied frontier.** A verifier handed a truthful *prefix* of the chain must return a
+15. **No implied frontier.** A verifier handed a truthful *prefix* of the chain must return a
     position-scoped result, never a "current" one — asserted against the API surface, since this is
     the failure that hides in naming rather than in logic.
-15. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
+16. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
     rule that an untested gate is an assumed one.
 
 ---
@@ -509,13 +543,15 @@ Gated on this document being accepted as normative:
   verifies against, and its encoding — see Part 3. `VaultStateAnchorV2` does not carry it today;
 - resumption of the five `compose_vault_state` call sites.
 
-Three questions this design does not answer. The first is a **blocking dependency**, not an
-optional extension:
+Three questions this design does not answer:
 
-- **Authenticated frontier and freshness semantics.** Required before supersession means anything
-  to a stranger, per Part 3. Must state what the frontier asserts, what refreshes it, and what an
-  absent or stale one obliges a verifier to do. Until it exists, verification is bound to a named
-  position and no API may imply currency.
+- **Authenticated frontier and freshness semantics.** A **blocking dependency for
+  revocation-against-strangers specifically** — not a general blocker, and in particular **not on
+  the SoFi path**, which proceeds on position-bound verification once the owner-authenticated
+  position commitment exists. What it gates is any feature that relies on supersession having
+  effect for a verifier who has not been shown the superseding material. Must state what the
+  frontier asserts, what refreshes it, and what an absent or stale one obliges a verifier to do.
+  Until it exists, verification is bound to a named position and no API may imply currency.
 - **Rollback of roots signed by a compromised delegate.** Supersession changes who signs next; it
   does not retract history. Retracting an append-only monotone chain is a substantive decision with
   its own failure modes. Note this is now cleanly separable: activation handles *forward* authority,
