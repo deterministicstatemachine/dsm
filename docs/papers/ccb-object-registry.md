@@ -1,8 +1,20 @@
 # CCB Object Registry — canonical cross-implementation commitment encoding
 
-Normative companion to SoFi Revision 15 (`.github/instructions/sofispecs.instructions.md`).
-Establishes the CCB framework and object registry for finding 7 of
-`docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.**
+Establishes the CCB framework and the single object-class namespace for canonical
+cross-implementation commitment encoding across DSM.
+
+It began as, and remains, the normative companion to SoFi Revision 15
+(`.github/instructions/sofispecs.instructions.md`) for finding 7 of
+`docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.** It now also
+carries **DSM substrate** object classes that are not Rev 15 objects — the Genesis v3 authority
+parameters and the Device Tree root-progression objects of area 8, whose semantics were fixed by
+[`docs/plans/2026-08-22-genesis-root-authority-and-device-tree-progression.md`](../plans/2026-08-22-genesis-root-authority-and-device-tree-progression.md).
+
+They live here rather than in a second document for one reason: **there is one `u16` object-class
+namespace, and two registries allocating from it independently would let two logical objects share
+an encoding — Req 3.2's failure, arrived at by administrative accident rather than by encoding
+ambiguity.** Substrate classes are marked as such in §3 and are excluded from §4's Rev 15 closure
+accounting; they neither gate nor are gated by finding 7.
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
 make Rev 15's commitments independently derivable, because two of its twenty-one live
@@ -186,7 +198,24 @@ recycled number makes two logical objects share an encoding across releases, whi
 valid CCB blob. `0xFF00`–`0xFFFF` are reserved for experimental and test object classes and
 must never appear in a production commitment.
 
-### 2.9 Relationship to transport
+### 2.9 Signatures are not fields
+
+A signature over an object is **never** a field of that object's CCB. The CCB *is* the signed
+preimage; the signature travels beside it in transport and is verified against it.
+
+The reason is ordering rather than taste: a signature is computed over the encoded object, so an
+object that contained its own signature could not be encoded before it was signed, nor signed
+before it was encoded. Any scheme that appears to do so is really encoding two different objects
+and calling them one.
+
+Where an object is both hashed and signed, the two are distinguished by domain tag over the same
+bytes — `H(<digest-domain> ‖ CCB(o))` for its identity, `Sign(sk, <signing-domain> ‖ CCB(o))` for
+its authorization. Using one domain for both would make a digest and a signature preimage
+interchangeable, which is the confusion domain separation exists to prevent.
+
+A signature carried in a protobuf message alongside CCB bytes is transport, per §2.10.
+
+### 2.10 Relationship to transport
 
 CCB is not protobuf. Req 3.1 states this directly, and Req 3.3 keeps protobuf as the transport
 encoding. A protobuf message may carry an object whose commitment is computed over its CCB,
@@ -223,6 +252,9 @@ storage address, a resource key or an authority check appears here.
 | `0x0017` | `RouteCommitmentBody` (`Q`) | 1 | `X = H(DSM/route-set ‖ CCB(Q))` | §5.12 defined |
 | `0x0015` | `Allocation` (`a`) | 1 | leg element; nested in `0x000D` | §5.10 defined |
 | `0x0016` | `AllocationBundle` (`AB_{A→B}`) | 1 | leg element; nested in `0x000D` | §5.11 defined |
+| `0x0018` | **substrate** `GenesisParamsV3` | 1 | `G = H(DSM/genesis/v3 ‖ CCB)` | §5.15 defined |
+| `0x0019` | **substrate** `RootProgressionDelegation` (`D_i`) | 1 | `del_i = H(DSM/devtree-delegation ‖ CCB)`, and the GRK-signed bytes | §5.16 defined |
+| `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
 
 `0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
 and §6a finding 3 established there is no such object. Re-using that number for
@@ -232,6 +264,36 @@ identity does not become vacant just because it never received a field table. `0
 object class before §5.2 established that member ids are bare length-prefixed bytes inside a
 frozen layout, with no envelope and therefore no class. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
+
+`0x0018`–`0x001A` are **DSM substrate**, not Rev 15 objects. They are allocated from this table
+because the namespace is single and indivisible (§2.8), and they carry the same immutability rules
+as every other assignment. They are excluded from §4's count and closure criteria.
+
+### 3.1 Declared enumerations
+
+Enumerations are `u16_be` per §2.2 over values declared here, never over values invented in a field
+table. A field table names the enumeration; this section fixes its members.
+
+**`signature_alg`** — identifies a signature algorithm together with the exact encoding of its
+public keys and signatures.
+
+| Value | Member | Public key | Signature |
+|---|---|---|---|
+| `0x0001` | `SPHINCS_PLUS_SPX256F` | 64 bytes (`2n`, `n = 32`) | 49,856 bytes |
+
+Beta declares no other member. The value is committed wherever a public key is, so a future
+variant can never be substituted for the committed one: the algorithm and the key bytes stand or
+fall together.
+
+**`authority_role`** — the scope a root-authority delegation confers.
+
+| Value | Member | Meaning |
+|---|---|---|
+| `0x0001` | `DEVICE_TREE_ROOT_PROGRESSION` | may sign `0x001A` transitions for the named genesis, and nothing else |
+
+Beta declares no other member. A role is deliberately narrow: the GRK exists to delegate one
+capability, and a role that meant "may act for the owner" would make the delegation a universal
+authority, which the area 8 semantics forbid.
 
 ## 4. Status of this registry
 
@@ -255,6 +317,12 @@ first would settle it in Rust. §6 states precisely what each one needs.
 
 The framework in §2 and the namespace in §3 are complete and are **not** blocked on §6. They
 can be reviewed, merged, and implemented against for the ten specified objects immediately.
+
+**Substrate classes are outside this count.** `0x0018`–`0x001A` are DSM substrate, fully specified
+in §5.15–§5.17, and they do not enter the twenty-one live Rev 15 classes above. Finding 7 closes on
+the Rev 15 amendments in §7 alone; nothing about the substrate classes advances or delays it. The
+direction of independence runs both ways — the substrate objects are derivable now, whether or not
+`0x0010` and `0x0012` ever are.
 
 ## 5. Field tables
 
@@ -537,6 +605,132 @@ producer bug and is refused rather than collapsed. Note this is genuinely a **se
 elements are **sequences** — the alternatives `R` retains are unordered, the hops inside each
 are not.
 
+---
+
+*Sections 5.15–5.17 are **DSM substrate**, not Rev 15 objects. Their semantics are fixed by
+[the area 8 root-authority design](../plans/2026-08-22-genesis-root-authority-and-device-tree-progression.md);
+this registry supplies only their bytes.*
+
+### 5.15 `GenesisParamsV3` — class `0x0018`, schema 1
+
+`G = H(DSM/genesis/v3 ‖ CCB(GenesisParamsV3))`. The genesis identifier is a commitment to its own
+parameters, and the Genesis Root Key is one of them — which is what lets a verifier holding `g_o`
+authenticate `GRK_pk` by recomputation, with no fetch and no signature.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `genesis_nonce` | `digest32` | public; `KDF(wallet_seed, DSM/genesis-public-nonce/v2 ‖ network_id ‖ wallet_index)` |
+| 2 | `network_id` | `bytes` | length-prefixed; the v2 preimage concatenated it bare |
+| 3 | `genesis_version` | `u32` | `3` for this class; big-endian, where the v2 preimage was little-endian |
+| 4 | `grk_alg_id` | enum `signature_alg` | fixes the key encoding of field 5 |
+| 5 | `grk_pk` | `bytes` | the exact Genesis Root Key public key, not a commitment to it |
+
+Field 5 is the key itself. A `digest32` commitment to it would need its own preimage rules — the
+same canonicalization question one layer down, which §2.7 refuses for nested objects and which is
+refused here for the same reason. `G` is already a hash; folding the key directly *is* the
+commitment.
+
+`network_id` is length-prefixed and `genesis_version` is big-endian, both departures from the
+shipping v2 preimage (`genesis_v2.rs:92-103`), which concatenates `network_id` bare and emits the
+version little-endian. The length prefix is forced: this preimage now holds **two** variable-length
+fields, `network_id` and `grk_pk`, and unprefixed concatenation does not determine where the first
+ends and the second begins. One bare variable-length field can survive by being recoverable from
+the remaining fixed widths; two cannot. Big-endian is §2.2's rule and needs no separate
+justification beyond consistency.
+
+No compatibility claim is made or needed. This class is a clean cut against a new
+`genesis_version`, and a v2 identity cannot be re-encoded into it in any case, because its `G`
+committed a preimage that contained no key at all.
+
+**Not in this object.** `device_slot`, `authority_policy_hash`, `AttA` and any device key.
+`GenesisParamsV3` fixes the identity and its root authority; every device-scoped value derives from
+`G` and therefore cannot appear inside it without circularity.
+
+### 5.16 `RootProgressionDelegation` — class `0x0019`, schema 1
+
+`del_i = H(DSM/devtree-delegation ‖ CCB(D_i))`, and the same CCB is the byte string the GRK signs
+under `DSM/devtree-delegation-sign` — two domains over one preimage, per §2.9. The signature is not
+a field.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `genesis_id` (`g_o`) | `digest32` | binds the delegation to one identity; not replayable under another |
+| 2 | `role` | enum `authority_role` | `0x0001` in beta |
+| 3 | `role_version` | `u16` | a changed role semantic requires a new value, never silent acceptance |
+| 4 | `delegated_alg_id` | enum `signature_alg` | fixes the key encoding of field 5 |
+| 5 | `delegated_pk` | `bytes` | the authorized key, **named by key**, never by DevID or tree position |
+| 6 | `delegation_number` | `u64` | monotone from 0 |
+| 7 | `parent_delegation_digest` | `digest32` | `del_{i−1}`; the §5.18 delegation sentinel at `i = 0` |
+| 8 | `activation_transition_digest` | `digest32` | the transition **after** which this delegation takes effect; the §5.18 transition sentinel at `i = 0` |
+
+Field 5 carries a key and not an identifier because the delegation's validity must not depend on
+the Device Tree it authorizes changes to. Naming a DevID here would route the delegation's
+authority through the tree, which is the circularity the whole construction avoids.
+
+Field 8 names a **transition digest, not a root value**, because root values recur: the shipping
+suite asserts that the root at `version_number = 2` equals the version-0 root after an add and a
+remove (`dsm_sdk/src/sdk/storage_node_sdk.rs:4695-4713`). A root value is not a unique chain
+position and would activate a delegation at two places at once.
+
+### 5.17 `DeviceTreeRootTransition` — class `0x001A`, schema 1
+
+`t_j = H(DSM/devtree-transition ‖ CCB(T_j))`, and the same CCB is the byte string the delegated key
+signs under `DSM/devtree-transition-sign`, per §2.9.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `genesis_id` (`g_o`) | `digest32` | without it a transition is replayable across identities |
+| 2 | `old_root` | `digest32` | the predecessor's `new_root`; the §5.18 transition sentinel at `j = 0` |
+| 3 | `new_root` (`R_G,j`) | `digest32` | the Device Tree Merkle root this transition establishes |
+| 4 | `version_number` | `u64` | strictly monotone along the chain |
+| 5 | `delegation_digest` | `digest32` | `del_i` of the delegation this transition acts under |
+
+Fields 1 and 5 are both absent from today's `DeviceTreeRootUpdateV1`
+(`proto/dsm_app.proto:3732-3737`), whose only content fields are `old_root`, `new_root` and
+`version_number` beside a signature.
+That message is replaceable rather than adoptable: without field 1 a transition is replayable
+across identities, and without field 5 a verifier cannot tell which authority to check it against.
+
+**Why the predecessor is a root value and not a transition digest.** Given that root values recur,
+`old_root` alone does not identify a unique predecessor — `version_number` does, since the chain is
+strictly monotone and two transitions at one version are a fork the verifier refuses outright. The
+pair is therefore sufficient. A `predecessor_transition_digest` field would make the chain
+self-linking, but adding it **beside** `old_root` would put two authoritative copies of one fact in
+one object, which is precisely the alias class the Def 5.2 amendment removed, and replacing
+`old_root` with it would change merged normative semantics rather than encode them. Noted here as
+an alternative, deliberately not taken by this registry.
+
+### 5.18 Genesis sentinels
+
+Two chain-origin values, fixed here because the area 8 semantics deliberately deferred their bytes
+to the encoding layer.
+
+| Sentinel | Value | Used by |
+|---|---|---|
+| delegation origin | `H(DSM/devtree-delegation/genesis-sentinel/v1)` | `0x0019` field 7 at `i = 0` |
+| transition origin | `H(DSM/devtree-transition/genesis-sentinel/v1)` | `0x0019` field 8 at `i = 0`; `0x001A` field 2 at `j = 0` |
+
+Each is the BLAKE3 domain hash of its tag over **empty input** — a constant, not a function of the
+genesis. Three properties fix the shape, and a fourth fixes its scope.
+
+**Domain-separated rather than all-zero.** An all-zero digest is a value a buggy producer reaches
+by accident, so it cannot distinguish "origin of chain" from "field never populated". These cannot
+be produced accidentally and cannot collide with a real digest, whose domain tag differs.
+
+**Two sentinels, not one.** A delegation origin and a transition origin are different kinds of
+position. Sharing one value would let a delegation-parent field validate against a transition
+origin, which no rule would then catch.
+
+**Constant, not per-genesis.** Every object that carries a sentinel already binds `genesis_id` in
+field 1, so parameterizing the sentinel by genesis would restate a fact the object already commits —
+the same aliasing §5.17 declines above. This is the one respect in which these differ from Rev 15's
+`h_0 = H(DSM/vault-state-parent/genesis/v2 ‖ vault_id)`, which is parameterized because `c_0` must
+differ per vault and `V_n` has no other field forcing it to.
+
+**One sentinel serves both the delegation activation at `i = 0` and the transition predecessor at
+`j = 0`,** because both denote the same thing: the position before `T_0`. `act(D_0)` means
+"effective from the start of the chain", which is exactly `T_0`'s predecessor.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -767,6 +961,23 @@ this registry is to stop implementation accidents becoming protocol.
 | **Design normatively** | the specification only names a concept | **evidence, not authority** |
 
 Most of §6 falls in the third tier.
+
+### The substrate classes are not in this queue
+
+`0x0018`–`0x001A` are fully specified in §5.15–§5.17 and are not waiting on any amendment above.
+They are ready for steps 3 and 4 immediately, and are gated instead by their own dependencies,
+which live outside this registry: **area 4's immutable publication** — without it, transitions
+still land in a mutable version-ordered slot that one anonymous write can hold indefinitely — and
+the **owner-authenticated SoFi authority-position commitment**, which no shipping object carries
+today.
+
+They also answer, by precedent, the *Core canonical-successor encoding prerequisite* raised inside
+2c above. That prerequisite asked where non-SoFi canonical bytes should be specified when SoFi
+depends on them. The answer these three classes establish is: **here, in this namespace, marked
+substrate and excluded from Rev 15's closure accounting** — never restated ad hoc inside a SoFi
+amendment, and never in a second registry with its own numbering. The successor encoding itself
+remains unwritten; only its home is settled.
+
 3. **A production encoder**, written from this text.
 4. **An independent conformance encoder and parser**, written from this text by a path that
    does not call the production canonicalization helpers, so that a bug in one implementation
