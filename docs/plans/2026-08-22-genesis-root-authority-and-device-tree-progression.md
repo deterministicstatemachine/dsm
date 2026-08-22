@@ -25,7 +25,11 @@ deterministic SPHINCS+ derivation costs one KDF call.
 
 **Q2, root progression — GRK establishes authority; a GRK-signed delegation exercises it.** The
 mnemonic-derived root secret does not enter ordinary device operations. Root transitions are signed
-by a delegated key whose authority descends from `g_o`, never from the tree being updated.
+by a delegated key whose authority descends from `g_o`, never from the tree being updated. Each
+delegation carries a **causal activation edge** so that supersession is enforced by the acceptance
+predicate rather than merely asserted — and that enforcement is relative to a chain the verifier
+holds, which is why revocation against a stranger additionally requires the frontier work Part 3
+identifies as blocking.
 
 ### The derivation-order constraint that forces this shape
 
@@ -57,13 +61,23 @@ design's reasoning depends on the true ordering.
 ### Derivation
 
 ```
-GRK_seed = KDF(wallet_seed, "DSM/genesis-root-authority/v1" ‖ network_id ‖ wallet_index)
+GRK_seed = KDF(wallet_seed, "DSM/genesis-root-authority/v1"
+                            ‖ network_id ‖ wallet_index ‖ genesis_version)
 GRK      = SPHINCS+.KeyGen(GRK_seed)                        # SPX256f; pk = 64 B, sig = 49_856 B
 ```
 
-`KDF` is the existing HKDF-BLAKE3 helper (`genesis_v2.rs:59-79`), used exactly as `genesis_nonce`
-uses it. The inputs are `wallet_seed`, `network_id` and `wallet_index` — the same inputs
-`derive_genesis_nonce` takes, and **`G` is not among them**.
+`KDF` is the existing HKDF-BLAKE3 helper (`genesis_v2.rs:59-79`). The inputs are `wallet_seed`,
+`network_id`, `wallet_index` and `genesis_version` — and **`G` is not among them**.
+`genesis_version` is a plain caller parameter, not a derivative of `G`, so including it keeps the
+graph acyclic.
+
+**GRK is identity-specific, not wallet-context-wide.** `derive_genesis_nonce` omits
+`genesis_version` and is right to: it is a public nonce, and `G` folds the version itself, so the
+identities still differ. A *key* is different. Without the version, one mnemonic would reuse the
+same root authority across a v3 identity and any future v4 — so a GRK compromised under v3 would
+carry into the v4 identity, and re-provisioning would not re-root the thing re-provisioning exists
+to re-root. Binding the version makes the root authority per-identity, which is what "clean cut"
+has to mean for a key.
 
 ### Genesis v3
 
@@ -124,7 +138,12 @@ wallet seed, exactly as `s0` and `Smaster` are. `GRK` is fully re-derivable from
 (`wallet_seed`, `network_id`, `wallet_index` are all available at recovery), so it survives device
 loss with no additional backup artifact.
 
-Compromise of the mnemonic already compromises the identity completely; GRK adds no new exposure.
+Compromise of the mnemonic already compromises every mnemonic-rooted authority — authorship,
+recovery, and now root delegation — so GRK adds no new exposure to that domain. It does **not**
+compromise the identity completely: the fused anti-clone anchor is deliberately a separate
+authority domain and is not mnemonic-derived, which is precisely why a seed copy can sign and still
+cannot clone. Keeping those domains distinct in the wording matters, because a design that treats
+"mnemonic compromise" as total loss has no reason to preserve the separation that limits it.
 
 ### No migration path exists
 
@@ -157,6 +176,7 @@ A delegation binds at minimum:
 | `delegated_alg_id`, `delegated_pk` | the exact key authorized, named directly — never a DevID, never a tree position |
 | `delegation_number` | monotone from 0 |
 | `parent_delegation_digest` | digest of delegation `n−1`; the genesis sentinel at `n = 0` |
+| `activation_transition_digest` | the chain position after which this delegation takes effect; the genesis sentinel at `n = 0` |
 
 Signed by `GRK` over a domain-separated digest of those fields.
 
@@ -164,9 +184,48 @@ Signed by `GRK` over a domain-separated digest of those fields.
 condition: nothing about the delegation's validity depends on the Device Tree it authorizes changes
 to.
 
-**Supersession is revocation.** Delegation `n+1`, chaining `n`, replaces it. There is no separate
-revocation object. Roots signed under a superseded delegation remain valid history — supersession
-changes who may sign *next*, not what was already authorized.
+#### Activation, and why supersession needs it
+
+Chaining `D_{n+1}` to `D_n` orders the delegations but does not retire `D_n`. Without an activation
+edge, a verifier can only require that a transition's delegation number not decrease — and a
+compromised `D_n` key satisfies that forever, because nothing forces any transition to bind
+`D_{n+1}` at all. Supersession would be an assertion the acceptance predicate never checks. This is
+forward authority, not the deferred question of retracting history.
+
+So each delegation binds `activation_transition_digest`: the transition after which it becomes
+effective. Write `act(D_i)` for that position, with the genesis sentinel meaning "effective from the
+start of the chain". Then:
+
+> **Applicable delegation.** For a transition `T_j`, the applicable delegation is the
+> **highest-numbered** delegation on the authenticated chain whose activation position lies in
+> `T_j`'s ancestry. `T_j` must bind exactly that delegation.
+
+Exactly one delegation qualifies for any `T_j`, and it is determined by the chain rather than
+chosen by the signer. Once `act(D_{n+1})` is in a transition's ancestry, `D_n` is no longer
+applicable for it, so supersession is now enforced rather than declared. This rule **replaces** the
+earlier non-decreasing-number rule, which it strictly implies.
+
+Two supporting constraints:
+
+- **The digest, not the root value.** Activation names a transition digest because root *values*
+  demonstrably recur. The existing suite asserts exactly that: after an add and a remove, the root
+  at `version_number = 2` equals the single-device root at version 0
+  (`dsm_sdk/src/sdk/storage_node_sdk.rs:4695-4713`). A root value is therefore not a unique chain
+  position — naming one would activate a delegation at two places at once — while a transition
+  digest is unique by construction.
+- **Activation is forward-only.** `act(D_{n+1})` must be a strict descendant of `act(D_n)`. A
+  delegation activating at or before its predecessor's activation would retroactively unseat
+  transitions already authorized — that is history retraction, which is out of scope and must be
+  refused rather than silently honoured.
+
+**Roots signed under a superseded delegation remain valid history.** Supersession changes who may
+sign *next*; it does not invalidate what was already authorized.
+
+**What activation does not deliver.** Enforcement is relative to one authenticated chain. A
+compromised `D_n` holder can still sign transitions on a branch that never contains
+`act(D_{n+1})` — but that branch is a fork, and forks are refused (below). And a verifier that has
+not discovered `D_{n+1}` cannot apply it at all, which is the frontier problem treated in Part 3.
+**Supersession as revocation-against-strangers is not delivered by activation alone.**
 
 **Lineage gives fork evidence, not fork prevention.** Chaining each delegation to its predecessor's
 digest means two delegations at the same number are detectable as a fork by any verifier holding
@@ -185,11 +244,15 @@ Without `genesis_id` a transition is replayable across identities, and without t
 a verifier cannot tell which authority to check it against. **The existing message is insufficient
 even once a signer exists**, which is worth stating plainly so it is replaced rather than adopted.
 
-Two ordering rules, both wall-clock-free:
+Two rules, both wall-clock-free:
 
 - `version_number` is strictly monotone and `old_root` equals the predecessor's `new_root`;
-- the bound delegation's `delegation_number` is **greater than or equal to** the one bound by the
-  predecessor transition. Authority never moves backwards along the chain.
+- the bound delegation is **the applicable delegation** for this transition, per the activation
+  rule above. Authority never moves backwards, and never lingers past its successor's activation.
+
+**A transition has at most one valid child.** Two transitions consuming the same authenticated
+predecessor are a fork, even when both signatures verify under a properly applicable delegation.
+The delegate is authorized to advance the chain, not to branch it.
 
 ### What the prior root does and does not do
 
@@ -214,20 +277,29 @@ The steps are ordered and the order is normative.
 `GRK_pk` is now authoritative. *(No signature is checked here. That is the point: the step that
 bootstraps authority consumes nothing but the identifier the verifier already holds.)*
 
-**P1 — Delegation chain.** Walk `D_0 … D_k`: `D_0` at number 0 with the sentinel parent; each
-`D_{i+1}` at number `i+1` with `parent_delegation_digest = digest(D_i)`; every `D_i` signed by
-`GRK_pk`, binding `genesis_id = g_o`, carrying the root-progression role at a supported
-`role_version`. Refuse on any fork. The tip `D_k` is the currently applicable delegation.
+**P1 — Delegation chain.** Walk `D_0 … D_k`: `D_0` at number 0 with the sentinel parent and
+sentinel activation; each `D_{i+1}` at number `i+1` with `parent_delegation_digest = digest(D_i)`
+and `act(D_{i+1})` a strict descendant of `act(D_i)`; every `D_i` signed by `GRK_pk`, binding
+`genesis_id = g_o`, carrying the root-progression role at a supported `role_version`. Refuse on any
+fork — two delegations at one number are evidence, never a choice.
 
-**P2 — Root chain.** Fold transitions `T_0 … T_n` forward from the genesis sentinel. For each: the
-bound delegation must be on the chain authenticated in P1; its `delegation_number` must not
-decrease; `old_root` must equal the running root; `version_number` must be strictly monotone; and
-the signature must verify under that delegation's `delegated_pk`.
+**P2 — Root chain.** Fold transitions `T_0 … T_n` forward from the genesis sentinel. For each:
+`old_root` equals the running root; `version_number` is strictly monotone; the bound delegation is
+**the applicable delegation** for this position — the highest-numbered delegation on P1's chain
+whose activation lies in this transition's ancestry — and the signature verifies under that
+delegation's `delegated_pk`.
 
-**P3 — Applicable root.** The applicable root is the highest-`version_number` root reachable by P2.
-A root is never applicable because a node returned it as "latest" — an unauthenticatable root is a
-refusal, not a fallback. If a node serves a root the verifier cannot reach by an authenticated
-chain, the verifier refuses and reports *which* failure it hit (below).
+**P3 — Chain tip, and fork refusal.** Two transitions consuming the same authenticated predecessor
+are a **fork**, and a verifier holding both refuses. It does not take the higher `version_number`:
+selecting a branch by ordering would convert equivocation into a rule, and hand any compromised
+delegate a way to overwrite the chain by simply numbering higher. The tip is the end of the unique
+authenticated chain, or a refusal.
+
+A root is never accepted because a node returned it as "latest". An unauthenticatable root is a
+refusal, not a fallback, and the verifier reports *which* failure it hit (below).
+
+As with delegation forks, this is **evidence, not prevention**. A sibling that has not surfaced
+cannot be detected, so a verifier's fork-freedom is only ever over the material it holds.
 
 **P4 — Membership.** Verify the inclusion proof for the presented `d_o` against **exactly** the
 root authenticated in P3. `DeviceInclusionProofV1` carries its own `root_hash`
@@ -237,9 +309,46 @@ must never be used *as* the root.
 **P5 — Identifier recomputation.** Compute `d_o′ = H("DSM/devid" ‖ AK_pk ‖ AttA)` from the
 independently presented `AK_pk` and `AttA`, and require `d_o′ = d_o` as proven included in P4.
 
-**P6 — Promotion.** Only now is `AK_pk` owner authority for facts attributed to `d_o` under `g_o`.
-The promotion is scoped: it authorizes device-attributed statements. It is not a spending
-authorization and asserts nothing about anti-clone.
+**P6 — Promotion.** `AK_pk` is owner authority for facts attributed to `d_o` under `g_o`
+**as of the chain position established in P3**. The promotion is scoped twice over: it authorizes
+device-attributed statements — not spending, and nothing about anti-clone — and it is relative to a
+position, not to the present. See the next section, which is a limitation of the predicate rather
+than a caveat on it.
+
+### What P0–P6 prove, and what they cannot
+
+The predicate proves **descent**: this root is authentically descended from `g_o`, this `d_o` is in
+it, and this `AK_pk` recomputes it. It does **not** prove **frontier**: that no newer authentic
+delegation or root exists.
+
+Immutable publication does not close that gap. Area 4 defeats *poisoning* — garbage becomes an
+unreferenced object instead of owning `/latest` — but it says nothing about *withholding*. A
+verifier shown a truthful prefix of the chain cannot distinguish it from the whole chain, so
+"currently applicable" is not a property a presented chain can carry. The word is avoided
+throughout this document for that reason.
+
+The consequence for Part 2 is direct and must not be glossed: **activation makes supersession
+enforceable relative to a chain the verifier holds, and therefore does not by itself revoke a
+compromised delegate against a stranger.** A stranger who never learns of `D_{n+1}` keeps accepting
+`D_n`'s transitions, and nothing in the presented material tells them to look further. Revocation
+against strangers requires frontier semantics, full stop.
+
+Two ways to make the question well-posed, and this document adopts the first:
+
+- **Bound verification (adopted now).** The consumer names the exact authority and chain position it
+  wants verified, and the predicate answers a closed question: *was `AK_pk` authorized for `d_o`
+  under `g_o` at this position?* That has a definite answer from the presented material alone, with
+  no freshness assumption anywhere. It also fits SoFi: a vault anchor can commit the identity
+  position it was authored under, so the trader verifies the position the owner actually claimed
+  rather than chasing a moving tip.
+- **Authenticated frontier (deferred, and required before revocation means anything to a
+  stranger).** An explicit freshness construct with stated semantics — what it asserts, what
+  refreshes it, and what an absent or stale frontier obliges a verifier to do. It is deferred
+  because it is a design in its own right, not because it is optional: any use of supersession as
+  revocation is blocked on it.
+
+Until a frontier exists, an implementation must not present bound verification as currency, and
+must not name any API in a way that implies it ("latest", "current", "resolve").
 
 ### Why the order is normative
 
@@ -270,10 +379,12 @@ A single error type covering all three would hide the only one that matters.
 Adding signatures does not by itself make publication safe, because the current slot is mutable and
 version-ordered. `upsert_device_tree_state_if_monotonic` accepts strictly-increasing
 `version_number` and rejects everything else as stale (`dsm_storage_node/src/db/sqlite.rs:613-619`),
-and the route is unauthenticated. **One anonymous PUT at `i64::MAX` permanently locks a genesis's
-device-tree slot**: every genuine update afterwards is refused with 409. That is a live denial of
-service today, independent of the authority question, and signing the payload does not fix it — the
-node would still be ordering by a field it cannot verify.
+and the route is unauthenticated. **One anonymous PUT at `i64::MAX` locks a genesis's device-tree
+slot indefinitely under the current API**: every genuine update afterwards is refused with 409, and
+the API exposes no reset — recovery would require operator intervention or reprovision, neither of
+which is a protocol path. That is a live denial of service today, independent of the authority
+question, and signing the payload does not fix it: the node would still be ordering by a field it
+cannot verify.
 
 The fix is area 4's shape, not a node-side signature check (which would break the index-only
 invariant): transitions are published as immutable content-addressed objects, and the **client**
@@ -293,16 +404,28 @@ The implementation must carry these as tests, not as comments:
 2. **Recoverability.** GRK re-derived from the mnemonic alone is byte-identical to the one genesis
    committed.
 3. **Genesis binding is sensitive to the key.** Flipping one byte of `GRK_pk` changes `G`.
-4. **Ordering enforcement.** P4-before-P2 and P5-before-P2 orderings must be unreachable — a test
+4. **Version binding.** The same mnemonic, network and wallet index under `genesis_version` 3 and 4
+   must produce different GRK keypairs.
+5. **Ordering enforcement.** P4-before-P2 and P5-before-P2 orderings must be unreachable — a test
    that presents a valid inclusion proof under an *unauthenticated* root must be refused.
-5. **Fork refusal.** Two delegations at the same number, both validly GRK-signed, must produce a
-   refusal and never a selection.
-6. **Backwards authority refusal.** A transition binding a lower `delegation_number` than its
-   predecessor must be refused.
-7. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
-   context; a delegated-key signature over a non-transition preimage likewise.
-8. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
-   rule that an untested gate is an assumed one.
+6. **Delegation fork refusal.** Two delegations at the same number, both validly GRK-signed, must
+   produce a refusal and never a selection.
+7. **Transition fork refusal.** Two transitions consuming the same authenticated predecessor, both
+   validly signed under a properly applicable delegation, must produce a refusal — specifically,
+   the higher `version_number` must **not** win.
+8. **Supersession is enforced, not declared.** After `act(D_{n+1})` enters a transition's ancestry,
+   a further transition bound to `D_n` must be refused *even though `D_n` is validly GRK-signed and
+   on the authenticated chain*. This is the test that would have caught the defect this rule fixes,
+   so it is the one that must not be skipped.
+9. **Retroactive activation refusal.** A delegation whose activation is at or before its
+   predecessor's must be refused rather than honoured as history retraction.
+10. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
+    context; a delegated-key signature over a non-transition preimage likewise.
+11. **No implied frontier.** A verifier handed a truthful *prefix* of the chain must return a
+    position-scoped result, never a "current" one — asserted against the API surface, since this is
+    the failure that hides in naming rather than in logic.
+12. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
+    rule that an untested gate is an assumed one.
 
 ---
 
@@ -318,11 +441,17 @@ Gated on this document being accepted as normative:
 - storage-node behaviour and endpoint shape;
 - resumption of the five `compose_vault_state` call sites.
 
-Two questions this design does not answer and should not:
+Three questions this design does not answer. The first is a **blocking dependency**, not an
+optional extension:
 
+- **Authenticated frontier and freshness semantics.** Required before supersession means anything
+  to a stranger, per Part 3. Must state what the frontier asserts, what refreshes it, and what an
+  absent or stale one obliges a verifier to do. Until it exists, verification is bound to a named
+  position and no API may imply currency.
 - **Rollback of roots signed by a compromised delegate.** Supersession changes who signs next; it
   does not retract history. Retracting an append-only monotone chain is a substantive decision with
-  its own failure modes.
+  its own failure modes. Note this is now cleanly separable: activation handles *forward* authority,
+  so rollback is genuinely only about the past.
 - **Checkpointing.** A foreign verifier currently replays every transition, and each carries a
   49,856-byte SPX256f signature — roughly 0.5 MB for ten updates. Tolerable at expected device
   counts, and the honest bound on how long a chain a stranger can be asked to walk. Any checkpoint
@@ -340,6 +469,11 @@ Area 8 semantics (merged) ──┘                                             
                                         atomic h_n lineage advancement
                                         finish V1 deletion
 ```
+
+The authenticated frontier is **not** on this path, and deliberately so: SoFi needs bound
+verification against a position the owner committed, which P0–P6 delivers without any freshness
+assumption. The frontier gates a different capability — revoking a delegate against strangers — and
+must land before any feature depends on supersession having that effect.
 
 The five composition call sites stay paused throughout. There is still no legitimate
 `expected_owner_public_key` to feed them, and there will not be one until P6 can be discharged.
