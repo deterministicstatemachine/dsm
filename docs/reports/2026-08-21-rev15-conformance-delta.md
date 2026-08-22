@@ -555,6 +555,52 @@ different meaning for the same state, which the intent-table documentation must 
 
 ---
 
+## The schema-6 / V2 lifecycle cut
+
+Decided 2026-08-22. Recorded here because it spans the anchor, the local schema, the unlock
+gate and the fleet, and because Req 6.6 makes it **one change**: "a schema bump and clean
+reprovision rather than a dual-read or fallback path". Splitting it would produce exactly the
+dual-read state that requirement forbids.
+
+**Schema 5 → 6.** `main` already declares `CLIENT_DB_SCHEMA_VERSION = 5` with
+reset-and-reprovision semantics. Req 6.6 requires *a* bump, not the number 5, so the V2 cut
+takes 6.
+
+**The vault record persists primitive facts only**: `storage_set_id`, `quorum`, and
+`parent_state_commitment`. It does **not** persist `parent_binding` — that is derived, and a
+persisted copy would be a second authoritative source of a fact the primitives already fix.
+`reserves_digest` likewise stays derived from authenticated reserve state.
+
+```
+p_v = H(vault_id ‖ generation ‖ h_n ‖ reserves_digest ‖ storage_set_id ‖ q)
+```
+
+**The unlock gate stays local-state-derived.** It is deliberately storage-free today, and that
+is the trust boundary being preserved: a valid signed V2 anchor fetched from storage proves
+owner authorship but can still be **stale**. Letting storage supply `h_n` would let storage
+choose which owner-signed history edge the gate sees — precisely what Req 6.5 makes
+distinguishable, since two histories reaching identical reserves must not share a binding. A
+fetched anchor is never authoritative at unlock.
+
+**`h_n` is not birth-only metadata.** Unlike the mostly-static fields of the vault record, it
+advances with the DLV lineage. It must be written atomically with the local fold or catch-up
+that changes generation and reserves, or through a durable journal that makes torn state fail
+closed and recoverable. A `h_n` that lags its generation is a silently wrong binding.
+
+**`AnchorEnforcement::Optional` and `Unspecified` are deleted.** They are grandfathering for
+vaults predating the anchor flow. With V2 mandatory under a clean reprovision there is nothing
+to grandfather, and a bypass knob that can disable a binding check is legacy compatibility
+carried forward. The V2 parent binding becomes required, not enforced-if-configured.
+
+**Production birth requires exactly five members and `q = 4`.** `sofi_beta_quorum_for` admits
+no other cardinality, so **V2 birth refuses on the live three-node fleet** — the correct
+failure mode, not a regression. Any 1- or 3-member setup for local testing lives behind an
+explicit non-production dev profile and never on the production birth path.
+
+**Deployment order follows from that**: stand up the five-member fleet and catalog first, then
+ship the schema-6 build and reprovision. If the new build reaches the old fleet first, birth
+refusing is correct.
+
 ## Implementation sequence
 
 Ordered by dependency, not by size.
