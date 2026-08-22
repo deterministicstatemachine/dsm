@@ -209,9 +209,40 @@ before it was encoded. Any scheme that appears to do so is really encoding two d
 and calling them one.
 
 Where an object is both hashed and signed, the two are distinguished by domain tag over the same
-bytes — `H(<digest-domain> ‖ CCB(o))` for its identity, `Sign(sk, <signing-domain> ‖ CCB(o))` for
-its authorization. Using one domain for both would make a digest and a signature preimage
-interchangeable, which is the confusion domain separation exists to prevent.
+bytes: one domain for its identity, another for its authorization. Using one domain for both would
+make a digest and a signature preimage interchangeable, which is the confusion domain separation
+exists to prevent.
+
+**The domain-hash construction, stated once.** Everywhere this registry writes `H(<domain> ‖ x)`,
+the bytes are exactly
+
+```
+H_dom(domain, x) = BLAKE3(domain_bytes ‖ 0x00 ‖ x)
+```
+
+where `domain_bytes` is the tag's ASCII spelling **without** a trailing NUL and containing no NUL
+of its own, and `0x00` is the single separator. This is `dsm_domain_hasher`
+(`dsm/src/crypto/blake3.rs:167-177`) and the `TaggedHashDomain` contract it enforces; the registry
+absorbs it rather than inventing a second convention. A tag written here as `DSM/devtree-transition`
+therefore contributes 22 bytes and one separator, never a NUL-terminated 23.
+
+**The signing construction, stated once.** A signature over object `o` is
+
+```
+m_sig = H_dom(<signing-domain>, CCB(o))          # 32 bytes
+σ     = SIGN(sk, m_sig)                          # per the object's declared signature_alg
+```
+
+The signed message is the 32-byte domain hash, **not** `<signing-domain> ‖ CCB(o)` passed to the
+signer directly. Both readings satisfy the phrase "signed over a domain-separated digest of its
+fields", and an implementation choosing either could claim conformance while producing signatures
+the other rejects — precisely the implementation-defined byte this registry exists to eliminate. It
+also matches what the tree already does: `RecoveryAuthorityAnchor` computes a 32-byte
+domain-separated `anchor_digest` (`dsm/src/recovery/authority_anchor.rs:64-74`) and passes exactly
+that to `sphincs_sign` / `sphincs_verify` (`:215-217`, `:139-147`), never a tagged concatenation.
+
+Verification recomputes `m_sig` from the object's CCB and the declared domain. A verifier that
+accepts a signature over any other preimage is non-conformant even if the signature is valid.
 
 A signature carried in a protobuf message alongside CCB bytes is transport, per §2.10.
 
@@ -648,9 +679,9 @@ committed a preimage that contained no key at all.
 
 ### 5.16 `RootProgressionDelegation` — class `0x0019`, schema 1
 
-`del_i = H(DSM/devtree-delegation ‖ CCB(D_i))`, and the same CCB is the byte string the GRK signs
-under `DSM/devtree-delegation-sign` — two domains over one preimage, per §2.9. The signature is not
-a field.
+`del_i = H_dom(DSM/devtree-delegation, CCB(D_i))` is the identity. The GRK signature is over
+`H_dom(DSM/devtree-delegation-sign, CCB(D_i))` — two domains, one preimage, both constructions
+fixed in §2.9. The signature is not a field.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
@@ -674,31 +705,37 @@ position and would activate a delegation at two places at once.
 
 ### 5.17 `DeviceTreeRootTransition` — class `0x001A`, schema 1
 
-`t_j = H(DSM/devtree-transition ‖ CCB(T_j))`, and the same CCB is the byte string the delegated key
-signs under `DSM/devtree-transition-sign`, per §2.9.
+`t_j = H_dom(DSM/devtree-transition, CCB(T_j))` is the identity; the delegated key signs
+`H_dom(DSM/devtree-transition-sign, CCB(T_j))`, per §2.9.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
 | 1 | `genesis_id` (`g_o`) | `digest32` | without it a transition is replayable across identities |
-| 2 | `old_root` | `digest32` | the predecessor's `new_root`; the §5.18 transition sentinel at `j = 0` |
+| 2 | `predecessor_transition_digest` | `digest32` | `t_{j−1}`; the §5.18 transition sentinel at `j = 0` |
 | 3 | `new_root` (`R_G,j`) | `digest32` | the Device Tree Merkle root this transition establishes |
-| 4 | `version_number` | `u64` | strictly monotone along the chain |
+| 4 | `version_number` | `u64` | strictly monotone; an ordering assertion, not the ancestry mechanism |
 | 5 | `delegation_digest` | `digest32` | `del_i` of the delegation this transition acts under |
 
-Fields 1 and 5 are both absent from today's `DeviceTreeRootUpdateV1`
+Fields 1, 2 and 5 are all absent from today's `DeviceTreeRootUpdateV1`
 (`proto/dsm_app.proto:3732-3737`), whose only content fields are `old_root`, `new_root` and
-`version_number` beside a signature.
-That message is replaceable rather than adoptable: without field 1 a transition is replayable
-across identities, and without field 5 a verifier cannot tell which authority to check it against.
+`version_number` beside a signature. That message is replaceable rather than adoptable.
 
-**Why the predecessor is a root value and not a transition digest.** Given that root values recur,
-`old_root` alone does not identify a unique predecessor — `version_number` does, since the chain is
-strictly monotone and two transitions at one version are a fork the verifier refuses outright. The
-pair is therefore sufficient. A `predecessor_transition_digest` field would make the chain
-self-linking, but adding it **beside** `old_root` would put two authoritative copies of one fact in
-one object, which is precisely the alias class the Def 5.2 amendment removed, and replacing
-`old_root` with it would change merged normative semantics rather than encode them. Noted here as
-an alternative, deliberately not taken by this registry.
+**Field 2 is an edge, not a state value, and there is no `old_root`.** Root values recur — §5.16
+cites the shipping assertion — so `old_root` plus a monotone version does **not** identify a unique
+predecessor. One signed transition would attach at two positions with two different ancestries, and
+a party withholding two transitions could shorten an ancestry until a superseded delegation's
+activation fell out of scope and a retired key's signature verified. The amendment recorded under
+*Transition* in the area 8 semantics carries the counterexample in full.
+
+`old_root` is not retained alongside field 2. The predecessor's `new_root` supplies the state value,
+so keeping it would restate a derivable fact and create a disagreement surface — a transition naming
+predecessor `P` while asserting an `old_root` that is not `P.new_root`. An implementation may carry
+that continuity assertion in transport; it is not part of the committed object.
+
+An earlier revision of this section argued the opposite, treating `old_root` and the predecessor
+digest as two encodings of one fact under the Def 5.2 anti-aliasing doctrine. That was wrong, and
+root recurrence is the proof: a state value that can appear at many positions and a history edge
+that appears at exactly one are different facts, not two spellings of one.
 
 ### 5.18 Genesis sentinels
 
@@ -710,8 +747,8 @@ to the encoding layer.
 | delegation origin | `H(DSM/devtree-delegation/genesis-sentinel/v1)` | `0x0019` field 7 at `i = 0` |
 | transition origin | `H(DSM/devtree-transition/genesis-sentinel/v1)` | `0x0019` field 8 at `i = 0`; `0x001A` field 2 at `j = 0` |
 
-Each is the BLAKE3 domain hash of its tag over **empty input** — a constant, not a function of the
-genesis. Three properties fix the shape, and a fourth fixes its scope.
+Each is `H_dom(tag, ε)` — the §2.9 construction over **empty input**, i.e. `BLAKE3(tag ‖ 0x00)`.
+A constant, not a function of the genesis. Three properties fix the shape, and a fourth fixes its scope.
 
 **Domain-separated rather than all-zero.** An all-zero digest is a value a buggy producer reaches
 by accident, so it cannot distinguish "origin of chain" from "field never populated". These cannot

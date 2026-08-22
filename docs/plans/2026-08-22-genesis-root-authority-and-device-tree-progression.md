@@ -257,6 +257,12 @@ Three supporting constraints:
   also indistinguishable from withholding the activating transition — one more reason revocation
   against strangers needs the frontier work rather than this rule.
 
+  **That property depends on ancestry being exact**, and is not free. If a verifier could be shown
+  a *shorter* ancestry for the same transition, withholding would move an activation out of scope
+  and revive a retired delegation — a safety failure wearing a liveness failure's clothes. The
+  predecessor-edge amendment under *Transition* is what forecloses it, by making a transition's
+  ancestry a property of its signed bytes rather than of the material it is presented alongside.
+
 **Roots signed under a superseded delegation remain valid history.** Supersession changes who may
 sign *next*; it does not invalidate what was already authorized.
 
@@ -274,31 +280,84 @@ refuse rather than pick.
 
 ### Transition
 
-A transition binds at minimum: `genesis_id`, `old_root`, `new_root`, `version_number`, and the
-**digest of the delegation it acts under**. Signed by that delegation's `delegated_pk`.
+A transition binds at minimum: `genesis_id`, `predecessor_transition_digest`, `new_root`,
+`version_number`, and the **digest of the delegation it acts under**. Signed by that delegation's
+`delegated_pk`. The predecessor is the transition sentinel at `j = 0`.
+
+#### Amendment: the predecessor is an edge, not a root value
+
+**This replaces an earlier `old_root` field, which was not sufficient.** The original text bound
+`old_root` and relied on `old_root` plus a strictly monotone `version_number` to identify the
+predecessor. That reasoning is false once root values recur — and they do, as the shipping suite
+asserts (`dsm_sdk/src/sdk/storage_node_sdk.rs:4695-4713`).
+
+The counterexample is small. Take a chain whose root returns to an earlier value:
+
+```
+T_0: sentinel → A   (version 0)
+T_1: A → B          (version 1)
+T_2: B → A          (version 2)
+S:   A → C          (version 4)
+```
+
+Under the `old_root` rule, one signed `S` attaches in two places. Presented as `[T_0, T_1, T_2, S]`
+its ancestry is `{T_0, T_1, T_2}`; presented as `[T_0, S]` — with `T_1` and `T_2` withheld — the
+running root is still `A` and `4` is still strictly greater, so it attaches there too and its
+ancestry is `{T_0}`. **The signed bytes never said which occurrence of `A` they consume.**
+
+That is not merely an assembly ambiguity. It breaks the premise the whole activation rule rests on:
+that a transition digest names a unique chain position. It also inverts the cascade's safety
+argument. Suppose `act(D_1) = t(T_2)`. In the full view `D_1` is eligible and active, so `S` must
+bind it. In the truncated view `t(T_2)` never resolves, `D_1` is inert, `D_0` remains applicable —
+and an `S` signed by a **retired** `D_0` verifies. A party who merely withholds two transitions
+resurrects a superseded delegation. That is a safety failure, not the liveness failure the cascade
+section describes, and the cascade's "fails safe" property holds only because this amendment makes
+ancestry exact.
+
+`old_root` and the predecessor digest are **different facts**, which is exactly what root recurrence
+proves: `old_root` names a state *value*, the digest names a history *edge*. The earlier text
+rejected the digest as an alias of `old_root`, applying the Def 5.2 anti-aliasing doctrine to a pair
+that is not a pair. Two values that can coincide at many positions are not two encodings of one
+fact.
+
+`old_root` is **dropped** rather than kept alongside. Once the edge is bound, the predecessor's
+`new_root` supplies the state value, so retaining `old_root` would restate a derivable fact and
+create a disagreement surface — a transition could name predecessor `P` while asserting an
+`old_root` that is not `P.new_root`, which then needs a refusal rule earning nothing. An
+implementation that wants the continuity assertion may carry it in transport; it is not part of the
+committed object, and it can never substitute for the edge.
 
 The delegation digest is load-bearing and is missing from today's `DeviceTreeRootUpdateV1`
-(`proto/dsm_app.proto:3732-3737`), which binds only `old_root`, `new_root` and `version_number`.
-Without `genesis_id` a transition is replayable across identities, and without the delegation digest
-a verifier cannot tell which authority to check it against. **The existing message is insufficient
-even once a signer exists**, which is worth stating plainly so it is replaced rather than adopted.
+(`proto/dsm_app.proto:3732-3737`), whose only content fields are `old_root`, `new_root` and
+`version_number`. Without `genesis_id` a transition is replayable across identities, and without the
+delegation digest a verifier cannot tell which authority to check it against. **The existing message
+is insufficient even once a signer exists**, which is worth stating plainly so it is replaced rather
+than adopted.
 
 Two rules, both wall-clock-free:
 
-- `version_number` is strictly monotone and `old_root` equals the predecessor's `new_root`;
+- `predecessor_transition_digest` is the digest of the transition it extends, and `version_number`
+  is strictly monotone. Ancestry comes from the edge; the version is an ordering assertion checked
+  against it, never the mechanism that establishes position;
 - the bound delegation is **the applicable delegation** for this transition, per the activation
   rule above. Authority never moves backwards, and never lingers past its successor's activation.
 
-**A transition has at most one valid child.** Two transitions consuming the same authenticated
-predecessor are a fork, even when both signatures verify under a properly applicable delegation.
-The delegate is authorized to advance the chain, not to branch it.
+**A transition has at most one valid child.** Two transitions binding the same
+`predecessor_transition_digest` are a fork, even when both signatures verify under a properly
+applicable delegation. The delegate is authorized to advance the chain, not to branch it.
 
-### What the prior root does and does not do
+### What the prior transition does and does not do
 
-The prior authenticated root **constrains which transition is legal** — it fixes `old_root`, and it
-is the state any churn or well-formedness bound is evaluated against. It is **not** what makes
-`delegated_pk` authoritative. Those are two separate predicates over two separate objects, and
-conflating them is exactly the circularity this design exists to avoid.
+The prior authenticated transition **constrains which successor is legal** — its digest is the edge
+a successor must name, and its `new_root` is the state any churn or well-formedness bound is
+evaluated against. It is **not** what makes `delegated_pk` authoritative. Those are two separate
+predicates over two separate objects, and conflating them is exactly the circularity this design
+exists to avoid.
+
+Note which of the two the predecessor *edge* belongs to: it is a legality constraint, not an
+authority one. Binding it does not route authority through the chain — the delegation still descends
+from `g_o` alone. It fixes *where* a transition sits, so that the activation rule has a unique
+position to reason about.
 
 ---
 
@@ -331,7 +390,10 @@ on P2 and break the very ordering property this predicate exists to guarantee.
 At each step the prefix `T_0 … T_{j−1}` is already authenticated, so `T_j` is admitted only when all
 of the following hold against that prefix:
 
-- `old_root` equals the running root and `version_number` is strictly monotone;
+- `predecessor_transition_digest` equals the digest of the transition at the end of the
+  authenticated prefix — or the transition sentinel when the prefix is empty — and
+  `version_number` is strictly monotone. The edge is what fixes position; a transition whose
+  predecessor digest names anything else does not attach here, whatever its root value says;
 - the bound delegation digest identifies some `D_i` on P1's authenticated chain;
 - `D_i` is **activation-eligible** against the current prefix — every activation through
   `act(D_{i−1})` resolves in it and each strictly descends its predecessor, `D_0` by the sentinel;
@@ -354,8 +416,10 @@ never revises a decision it already made.
 Every fact P2 consumes is either authenticated by P0/P1 or by P2's own already-authenticated prefix.
 The induction is over the chain, not over the document's section order.
 
-**P3 — Chain tip, and fork refusal.** Two transitions consuming the same authenticated predecessor
-are a **fork**, and a verifier holding both refuses. It does not take the higher `version_number`:
+**P3 — Chain tip, and fork refusal.** Two transitions binding the same
+`predecessor_transition_digest` are a **fork**, and a verifier holding both refuses. Because the
+predecessor is an edge rather than a root value, "same predecessor" is now an exact test rather
+than an inference from a value that may recur. It does not take the higher `version_number`:
 selecting a branch by ordering would convert equivocation into a rule, and hand any compromised
 delegate a way to overwrite the chain by simply numbering higher. The tip is the end of the unique
 authenticated chain, or a refusal.
@@ -509,22 +573,28 @@ The implementation must carry these as tests, not as comments:
 10. **Unresolvable activation never applies.** A `D_{n+1}` whose `activation_transition_digest`
     names a nonexistent or unauthenticated transition must not become applicable to any transition,
     and must not retire `D_n`.
-11. **Inactivity cascades.** If `act(D_{n+1})` is unresolved, `D_{n+2}` must not become applicable
+11. **Truncated ancestry is refused.** Build a chain whose root value recurs — `sentinel → A`,
+    `A → B`, `B → A` — and a transition `S` extending the third. Presenting `S` with the two middle
+    transitions withheld must fail: its predecessor digest cannot resolve against the shorter
+    prefix. The pre-amendment `old_root` rule accepted it, and with `act(D_1)` at the withheld
+    position that acceptance revived a retired `D_0`, so this test must also assert the delegation
+    outcome and not merely the chain shape.
+12. **Inactivity cascades.** If `act(D_{n+1})` is unresolved, `D_{n+2}` must not become applicable
     **even when `act(D_{n+2})` resolves to an authenticated transition** — the skipped edge was
     never proven, so the lineage is not constructible. The delegation objects stay valid; only
     their activation is blocked.
-12. **No self-activation.** The transition named by `act(D_{n+1})` must verify under `D_n`, and a
+13. **No self-activation.** The transition named by `act(D_{n+1})` must verify under `D_n`, and a
     version of it signed by `D_{n+1}` must be refused — proper ancestry asserted mechanically, not
     inferred from the word "after".
-13. **Stage isolation.** P1 must be unable to consult transition material at all — enforce
+14. **Stage isolation.** P1 must be unable to consult transition material at all — enforce
     structurally (P1 takes no transition input) so activation ordering cannot drift back into it.
     This is the obligation that keeps the ordering property from silently regressing.
-14. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
+15. **Role isolation.** A GRK signature over a non-delegation preimage must not verify in any other
     context; a delegated-key signature over a non-transition preimage likewise.
-15. **No implied frontier.** A verifier handed a truthful *prefix* of the chain must return a
+16. **No implied frontier.** A verifier handed a truthful *prefix* of the chain must return a
     position-scoped result, never a "current" one — asserted against the API surface, since this is
     the failure that hides in naming rather than in logic.
-16. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
+17. **Mutation controls.** Each gate above disabled in turn must turn its test red, per the standing
     rule that an untested gate is an assumed one.
 
 ---
