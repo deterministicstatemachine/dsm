@@ -108,6 +108,15 @@ The following are defined **only after** the `g_o → R_G` edge is specified:
 Step 1 of the required chain is the gate. Everything else in this document is stable regardless of
 how that step is answered, which is why it can be written now.
 
+**Gate status: answered.**
+[`docs/plans/2026-08-22-genesis-root-authority-and-device-tree-progression.md`](./2026-08-22-genesis-root-authority-and-device-tree-progression.md)
+supplies step 1 — a dedicated Genesis Root Key derived from `wallet_seed` without folding `G`, and
+committed inside a Genesis v3 `G` preimage, so a verifier authenticates it by recomputation alone.
+Root progression is authorized by a GRK-signed delegation naming a device key directly, never by
+tree membership. That document restates the required chain above as an ordered acceptance predicate
+(P0–P6) and carries the same order-normativity rule. The items listed under this gate remain
+undefined and are now gated on **that** document being accepted as normative.
+
 ## Sequencing note
 
 This work does not block the Rev 15 items already unblocked — the `q` rule, Anchor V2's encoder,
