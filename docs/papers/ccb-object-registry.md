@@ -5,9 +5,10 @@ Establishes the CCB framework and object registry for finding 7 of
 `docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.**
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
-make Rev 15's commitments independently derivable, because five of nineteen object classes
-still have no contents in the specification — see §4, §6 and the §6a audit. Finding 7 closes when those are
-resolved by the normative amendments listed in §7, not when this document merges.
+make Rev 15's commitments independently derivable, because seven of its twenty-one live
+object classes still have no contents in the specification — see §4, §6 and the §6a audit.
+Finding 7 closes when those are resolved by the normative amendments listed in §7, not when
+this document merges.
 
 This document is **normative and encoder-free**. It contains no Rust, no reference
 implementation and no golden vectors, by design. Its single reviewable question is *are these
@@ -38,7 +39,7 @@ Revision 15 never supplies the metadata those rules consume:
 
 `Canon(...)` is invoked in nineteen places across roughly fifteen object classes and defined
 in none of them. `c_n`, the fulfillment mechanism `M`, `storage_set_id`, the acceptance digest
-`a_B` and the Definition 6.17 settlement resource key are therefore not derivable from the
+`ta_B` and the Definition 6.17 settlement resource key are therefore not derivable from the
 specification alone.
 
 That gap is not hypothetical. `storage_set_id = H(DSM/storage-set ‖ Canon(S))` ships today
@@ -215,31 +216,38 @@ storage address, a resource key or an authority check appears here.
 | `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.6 partial |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.6 partial |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000E` | **blocked, see §6** |
-| `0x0011` | `TraderAcceptance` (`A_B`) | 1 | `a_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | §5.7 partial |
+| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | §5.7 partial |
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
-| `0x0014` | `ExternalCommitmentBody` (`X`) | 1 | `ExtCommit(X) = H(DSM/ext ‖ CCB)` | **blocked — the name is contested, see §6** |
+| `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
+| `0x0017` | `RouteCommitmentBody` (`Q`) | 1 | `X = H(DSM/route-set ‖ CCB(Q))` | **assigned, fields pending §6a finding 5** |
 | `0x0015` | `Allocation` (`a`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.1 — see §6** |
-| `0x0016` | `AllocationBundle` (`A_B`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.2 — see §6** |
+| `0x0016` | `AllocationBundle` (`AB_{A→B}`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.2 — see §6** |
 
-`0x0000` reserved. `0x0003` is **burned**: it was briefly assigned to a `StorageMemberId`
+`0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
+and §6a finding 3 established there is no such object. Re-using that number for
+`RouteCommitmentBody` would be exactly the semantic reassignment §2.8 forbids — an assigned
+identity does not become vacant just because it never received a field table. `0x0003` is
+**burned**: it was briefly assigned to a `StorageMemberId`
 object class before §5.2 established that member ids are bare length-prefixed bytes inside a
 frozen layout, with no envelope and therefore no class. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
 ## 4. Status of this registry
 
-**This first registry PR does not complete every field table, and says so rather than
-inventing the missing ones.**
+**This registry does not complete every field table, and says so rather than inventing the
+missing ones.**
 
-Of the nineteen live object classes above:
+Of the **twenty-one live** object classes above — `0x0014` is burned and not counted:
 
 - **10 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
   `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **7 are blocked**, of which `0x0015` and `0x0016` are newly assigned with their
-  fields already fixed by Def 9.1 and Def 9.2 — see the §6a audit.
+- **7 are blocked** — `0x000C`, `0x000D`, `0x0010`, `0x0012`, `0x0015`, `0x0016`, `0x0017`.
+  Of these, `0x0015` and `0x0016` have their fields already fixed by Def 9.1 and Def 9.2 and
+  need only widths; `0x0017` is blocked on §6a finding 5, which is a specification question
+  rather than a field-table one.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -445,9 +453,9 @@ writing an encoder.**
 | `0x000D` | `Route` `r_i` | **more than "a set member"**: §9.3 gives `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`, "a sequence of logical legs, each leg being either a one-vault allocation or a same-pair allocation bundle" | a §2.5 **sequence** of heterogeneous legs, self-discriminating via `0x0015`/`0x0016` envelopes. Needs `max_hops` enforcement sited, and whether the sequence is the only field |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
 | `0x0012` | `TradeDigest` | commits "the pair, executed amounts, participating vault identifiers, parent bindings, fees, and `X`" | six named components with no types and no ordering for the multi-valued ones |
-| `0x0014` | `ExternalCommitmentBody` `X` | **`X` is used two incompatible ways** — see the audit below | a decision, not a field table |
+| `0x0017` | `RouteCommitmentBody` `Q` | `X = H(DSM/route-set ‖ CCB(Q))`; carries `I`, `R`, the encumbrance commitments and `nonce_X` | **finding 5**: whether the encumbrance commitments belong at all, and if so keyed or as a set. Blocked on the specification stating the type of Def 9.1's `e` |
 | `0x0015` | `Allocation` `a` | Def 9.1: `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)` | widths only. `parent_binding` is the Def 6.4 `p_v`, so `VaultStateAnchorV2` is already its type |
-| `0x0016` | `AllocationBundle` `A_B` | Def 9.2: `A_B = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, one ordered token pair, "canonicalized by vault identifier", bundle conservation over Δ | whether the token pair is carried or derived from members, and where `max_fanout` is enforced |
+| `0x0016` | `AllocationBundle` `AB_{A→B}` | Def 9.2: `A_B = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, one ordered token pair, "canonicalized by vault identifier", bundle conservation over Δ | whether the token pair is carried or derived from members, and where `max_fanout` is enforced |
 
 Two of these have partial tables in §5 rather than none:
 
@@ -500,36 +508,91 @@ The heterogeneous leg needs **no union machinery**. Every element is a complete 
 with its own class discriminant, so a leg is self-discriminating. An ad-hoc tag inside `Route`
 would be a second encoding of a fact the envelope already carries.
 
-### Finding 3 — `X` is overloaded, and this needs a decision
+### Finding 3 — `X` was overloaded; resolved to the body model (settled)
 
 Two incompatible uses:
 
-- §7.2: `ExtCommit(X) = H(DSM/ext ‖ Canon(X))` — `X` is a **body** with a canonical encoding.
-- §9.3: `X = H(DSM/route-set ‖ I ‖ Canon(R) ‖ Canon({E_v}) ‖ nonce_X)` — `X` is a **digest**.
+- §7.2: `ExtCommit(X) = H(DSM/ext ‖ Canon(X))` — `X` as a **body** with a canonical encoding.
+- §9.3: `X = H(DSM/route-set ‖ I ‖ Canon(R) ‖ Canon({E_v}) ‖ nonce_X)` — `X` as a **digest**.
 
-A digest has no `Canon`, so the two cannot both be right. Note also that §9.3 hashes a
-concatenation of four heterogeneous operands rather than one canonical object, which is the
-un-canonicalized shape this registry exists to remove.
+A digest has no `Canon`, so both could not be right. Resolved as:
 
-Two resolutions, and they differ in whether a preimage changes:
+```
+Q = RouteCommitmentBody(…)
+X = H(DSM/route-set ‖ CCB(Q))
+ExtCommit(X) = H(DSM/ext ‖ X)
+```
 
-**(a) `X` is only ever a digest.** §7.2 is a category error; `ExtCommit(X) = H(DSM/ext ‖ X)`
-over the 32-byte digest. Class `0x0014` is **burned** — there is no such object. No preimage
-changes.
+`X` is always a 32-byte route-commitment digest. `Canon(X)` disappears, because a digest is
+already a primitive. The body becomes the canonical object.
 
-**(b) Name the body.** Define a `RouteCommitmentBody` carrying `(I, R, {E_v}, nonce_X)`, with
-`X = H(DSM/route-set ‖ CCB(body))` and `ExtCommit(X) = H(DSM/ext ‖ X)`. Fits the framework —
-every commitment over one CCB — and gives `0x0014` real contents. **This changes §9.3's
-preimage** from a four-operand concatenation to a body encoding, which is a normative change
-and must be made deliberately rather than absorbed.
+**This deliberately changes §9.3's preimage**, from a four-operand concatenation to one body
+encoding. That is the correct direction: the concatenation is precisely the pre-registry
+construction being replaced, and preserving it only to avoid a preimage change would make the
+registry ceremonial rather than authoritative.
 
-### Finding 4 — `A_B` denotes two different objects
+**`0x0014` is burned rather than reused.** It shipped on `main` as `ExternalCommitmentBody`,
+and §2.8 forbids reassigning a shipped identity to different semantics. An assigned class does
+not become vacant because it never received a field table. `RouteCommitmentBody` takes a fresh
+`0x0017`.
 
-Def 6.26 uses `A_B` for the trader-acceptance artifact, bound to the SettlementBundle `B`.
-Def 9.2 uses `A_B` for the allocation bundle over an ordered token pair `(A, B)`. Different
-objects, different subscript meanings, one symbol. The registry keeps them apart as `0x0011`
-and `0x0016`, but the specification should disambiguate the notation before the acceptance
-amendment (2c) cites it, or a reader will resolve the wrong definition.
+### Finding 4 — `A_B` denoted two objects; both renamed (settled)
+
+Def 6.26's trader-acceptance artifact and Def 9.2's allocation bundle shared one symbol with
+different subscript meanings. Renamed mechanically, so no later cross-reference depends on
+prose context:
+
+| Object | Symbol | Class |
+|---|---|---|
+| Trader acceptance for SettlementBundle `B` | `TA_B` | `0x0011` |
+| Allocation bundle for token pair `A→B` | `AB_{A→B}` | `0x0016` |
+
+Bare `A_B` is retained for neither, and the derived digest follows the artifact: Def 14.1's
+`a_B` becomes `ta_B`, so the symbol and its digest cannot drift apart. This matters most for
+amendment 2c, where
+`TraderAcceptance` is security-critical and a reader resolving the wrong definition would be
+reading about routing.
+
+### Finding 5 — `{E_v}` keying, and whether `e` already carries it (OPEN)
+
+`Q` cannot simply hold a set of bare encumbrance digests, but the reason is narrower than it
+first appears, and there is a prior question underneath it.
+
+**Collision across vaults cannot occur.** `E = H(DSM/enc ‖ vault_id ‖ Canon({e_j}))` — the
+vault identifier is *inside* the preimage. Two distinct vaults therefore cannot produce equal
+`E_v` absent a hash collision, so a plain set admits no ambiguity of that kind. The concern
+that motivated a keyed map does not survive contact with the preimage.
+
+**What a plain set does lose is recoverability.** A verifier holding the set cannot ask "which
+`E` belongs to vault `v`" — it can only recompute `E_v` for each vault in `R` and test
+membership. That is workable, since the verifier already iterates `R`, but it is a membership
+check rather than a lookup, and the field table must say which is intended.
+
+**The prior question is aliasing.** Def 9.1 gives an allocation as
+`a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)` and **never states the type of `e`**. If
+`e` is that vault's encumbrance commitment `E_v`, then `{E_v}_{v∈R}` inside `Q` is a second
+copy of a fact every allocation already carries — the same alias pattern as `P_M`/`Φ` in
+Def 5.2, and it should be dropped from the body rather than keyed. If `e` is instead a
+per-allocation claim or claim subset, the two are different facts and both belong.
+
+**This must be decided before `0x0017`'s fields are frozen**, and it is a specification
+question: Rev 15 has to say what `e` is. Deciding it in a field table would settle protocol in
+the registry, which is the failure this document exists to prevent.
+
+### Finding 6 — ownership of the bounds (settled)
+
+Applying the anti-alias rule to three questions this audit exposed:
+
+| Object | Holds | Does **not** hold | Because |
+|---|---|---|---|
+| `Route` `0x000D` | the ordered leg sequence | `max_hops` | authoritative in `TradeIntent` `0x000B` field 6; `Route` validity checks `len(legs) ≤ max_hops` |
+| `AllocationBundle` `0x0016` | the canonical allocations | `max_fanout` | authoritative in `TradeIntent` field 7; the member count is checked against it |
+| `AllocationBundle` `0x0016` | — | the token pair, by default | `p_v` binds the DLV parent, whose state already commits its canonical pair through `P_M`. Carrying it again creates a two-source equality invariant |
+
+The token-pair exclusion is a default, not a certainty: if independent verification turns out
+to need the pair as a distinct fact rather than a derived one — a verifier that has the bundle
+but not the parent states — then it belongs, and the reason should be written down. Absent
+that, it is derived.
 
 ### What remains blocked
 
@@ -577,7 +640,7 @@ In order, and not combined:
    from the current receipt object — the bespoke `post_root` receipt is the thing being
    replaced.
 
-   **Prerequisite inside 2c.** `A_B` carries ordinary DSM successor material
+   **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
    `(C_T^+, σ_T^+)`. The repository's `CanonicalEncode` trait is described as the single
    source of truth for cryptographic commitments, but it only requires deterministic bytes
    per implementation; it is not a cross-implementation normative byte schema. If ordinary
