@@ -601,6 +601,67 @@ explicit non-production dev profile and never on the production birth path.
 ship the schema-6 build and reprovision. If the new build reaches the old fleet first, birth
 refusing is correct.
 
+### The schema-6 sweep — settled instruction set
+
+Every open question is now closed. Recorded in order of execution.
+
+1. **Schema 6 is the clean cut.** Delete the V1 anchor wire types and codecs, delete
+   `AnchorEnforcement` with its DB, proto and runtime branches. No compatibility readers, no
+   optional bypasses, no dual-read, dual-write, silent fallback or auto-upgrade. Schema 6 means
+   V2 only.
+2. **Persist only what reserve leaves cannot recover**: `storage_set_id`, birth-fixed `q`, and
+   `parent_state_commitment = h_n`. Never persist `parent_binding` — derive `p_v`.
+3. **Lineage advancement lives in `execute_on_relationship_inner`**, not in individual callers.
+   The audit above establishes why: all three producers funnel there, and the two wrappers
+   expose different hooks, so a CAS in `write_extra` would miss owner apply. Compute the exact
+   pre-state `c_n` under the state-machine lock and update the record inside the same SQLite
+   transaction that persists the new head.
+4. **The lineage update is CAS-like** — `WHERE vault_id = ? AND parent_state_commitment =
+   expected_h_n`, exactly one row affected, any mismatch aborting the whole advance. Torn or
+   concurrent updates fail closed rather than repair themselves.
+5. **The owner SMT vault-state leaf does NOT expand in this cut.** It keeps its authenticated
+   `(generation, reserves_digest)` role. This resolves the boundary the audit left open, and
+   the reason is structural rather than scheduling: `h_n` advances while the LP is **absent**,
+   so requiring a fresh owner-authenticated leaf per market generation would contradict
+   owner-absent composition — which Def 6.1 defines as the last authenticated owner baseline
+   plus verified realized successors. The externally verifiable proof structure belongs to 2c.
+6. **Birth is strict 5/4.** `h_0` from the V2 genesis-parent domain, exactly five committed
+   members, `q = 4`, sign and publish V2, and refuse production birth on the current
+   three-node set. No majority fallback may override the committed value.
+7. **The route/unlock gate is unconditionally V2.** Recompute the expected `p_v` from local
+   current generation, reserve digest, persisted `h_n`, `storage_set_id` and `q`, and compare
+   against the allocation's `parent_binding`. A fetched anchor proves authorship but may be
+   stale, and is never the source of current truth.
+8. **Rehydration fails closed.** Missing `q`, missing or malformed `h_n`, wrong storage-set
+   identity, incoherent reserve generation — any missing schema-6 reconstruction fact makes the
+   vault unavailable. No zero, default or majority repair.
+9. **One cut, whole lifecycle**: V2 birth, codec, publication, composition, route binding,
+   unlock verification, rehydration, fixtures, close and catch-up. No V1 symbol or
+   enforcement-mode residue survives.
+10. **Crash-test the transaction invariant before reprovision.** Failure before the lineage
+    CAS, after the CAS but before SQLite commit, and after durable commit but before the
+    in-memory head install, with a restart after each. Plus wrong `h_n`, wrong `q`,
+    three-member birth, V1 bytes, absent V2 fields, stale route parent, and a full
+    Fund → market fold → restart → close. The invariant throughout: reserves and generation
+    move together with the lineage checkpoint, or neither moves.
+11. **Only then**: deploy the five-member set, ship schema 6, clean-reprovision, run the
+    hardware proof. Resume 2c afterwards.
+
+**A consequence of 5 + 7 worth expecting rather than discovering.** If `h_n` advances during
+owner absence only when the owner folds market successors locally, then a vault that is behind
+on catch-up holds a stale `h_n`, and the gate of item 7 will recompute a `p_v` that does not
+match a route bound against the realized history. That is fail-closed and therefore safe, but
+it means **a vault behind on catch-up refuses its own unlock until it folds**. Item 3's CAS
+placement is what keeps that state transient rather than permanent, since `ApplySettlement` is
+the fold that advances it.
+
+**Sourcing note.** These architectural and behavioural rules come from the owner's Rev 15 PDF
+snapshot, which this session has not read directly. Where a rule could be checked against the
+landed spec and code on `main` it was — the chokepoint convergence, the leaf's current
+`(sequence, reserves_digest)` contents, the wrapper hook shapes. **The PDF's CCB / 2a / 2b text
+predates the normative amendments landed in #684–#695**, so for canonical object schemas the
+landed registry and specification on `main` are authoritative, not the snapshot.
+
 ### Pre-implementation audit — both inspections done 2026-08-22
 
 **Producer trace: no path bypasses the transaction, so no lineage journal is needed.** Three
