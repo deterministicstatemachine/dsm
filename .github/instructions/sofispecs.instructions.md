@@ -1246,6 +1246,20 @@ The encumbrance commitment is
 E= H(DSM/enc ∥vault
 _
 id ∥Canon({ej })).
+Naming. E is the encumbrance SET, as Definition 4.1 lists it among the members of Vn , and
+Requirement 8.2 below iterates it. The digest above is a distinct object and is written ECv
+for vault v:
+ECv = H(DSM/enc ∥vault
+_
+id ∥Canon(E)).
+The set and its commitment previously shared the symbol E, which made "E" mean a set in
+Definition 4.1 and Requirement 8.2 and a digest here. Only the set is a member of Vn ; ECv is
+derived from it.
+Type of e. The e carried by an allocation in Definition 9.1 is a single encumbrance CLAIM —
+one ej of this section — namely the claim that allocation consumes. It is not ECv . The two
+are different facts: e names what one allocation spends, while ECv commits the whole
+encumbrance state of a vault. An allocation that had to consume several claims would carry a
+set rather than a single e, which is outside the beta shape.
 Requirement 8.1 (Uniqueness). A claim is consumed at most once and its exact removal
 must be visible in the successor state.
 Requirement 8.2 (Solvency). For every token,
@@ -1301,7 +1315,21 @@ The route set is
 R= {r1,...,rk},
 canonicalized by route CCB ascending.
 The route commitment is
-X= H(DSM/route-set ∥I ∥Canon(R) ∥Canon({Ev }v∈R) ∥nonceX ).
+X= H(DSM/route-set ∥CCB(Q)),
+where Q is the canonical RouteCommitmentBody carrying the trade intent I, the route set R,
+the per-vault encumbrance commitments {ECv }v∈R , and nonceX . X is always a 32-byte digest;
+there is no Canon(X), because a digest is already a primitive, and §7.2's external commitment
+is ExtCommit(X) = H(DSM/ext ∥X) over that digest.
+Why {ECv } is carried and is not an alias. Every allocation already names its parent binding
+pv , and pv commits the vault identifier, the generation, the PARENT state commitment hn , the
+reserves digest, the storage set and q. It does not commit the CURRENT generation's
+encumbrance set, which lives in Vn . So {ECv } binds a fact no other operand of X binds, and
+it is distinct from the per-allocation e of Definition 9.1, which names a single consumed
+claim. A plain set suffices rather than a keyed map: vault
+_
+id is inside each ECv preimage, so
+two vaults cannot collide, and a verifier recomputes ECv for each vault named in R and tests
+membership.
 Requirement 9.3. Route canonicalization and allocation canonicalization must not depend
 on node response order, request arrival order, local map iteration, wall-clock information, or the
 identity of the node that served an object.
