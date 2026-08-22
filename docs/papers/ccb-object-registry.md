@@ -6,7 +6,7 @@ Establishes the CCB framework and object registry for finding 7 of
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
 make Rev 15's commitments independently derivable, because five of nineteen object classes
-still have no contents in the specification — see §4 and §6. Finding 7 closes when those are
+still have no contents in the specification — see §4, §6 and the §6a audit. Finding 7 closes when those are
 resolved by the normative amendments listed in §7, not when this document merges.
 
 This document is **normative and encoder-free**. It contains no Rust, no reference
@@ -116,7 +116,30 @@ it would let two logical objects share an encoding.
 The count is part of the preimage. Without it, a set of variable-length elements could be
 re-split, so `{"ab", "c"}` and `{"a", "bc"}` would collide.
 
-### 2.5 Maps
+### 2.5 Sequences
+
+```
+sequence = u32_be(count) ‖ enc(e_1) ‖ enc(e_2) ‖ … ‖ enc(e_count)
+```
+
+Identical bytes to a set, and a **different type**. A sequence preserves the order it was
+given: elements are **not** sorted, and duplicates are legal because position carries meaning.
+A field table must say which it is, because the encoding cannot be told apart from the bytes.
+
+Sequences exist because Rev 15 has ordered objects that a set cannot express. A route is "a
+sequence of logical legs" with `r_i = ⟨A_{i,1}, …, A_{i,h}⟩`; reordering its hops is a
+different route, not the same one written differently. Sorting there would silently merge
+distinct routes into one encoding, which is the Req 3.2 failure the registry exists to
+prevent — the same failure as collapsing a duplicate, arrived at from the opposite direction.
+
+A **heterogeneous** sequence needs no union machinery. Every element is a complete CCB
+beginning with its own `u16` class discriminant per §2.1, so a reader recovers each element's
+type from the element itself. Rev 15's route legs are exactly this: "either a one-vault
+allocation or a same-pair allocation bundle". Giving those two their own object classes makes
+the leg union self-discriminating, where an ad-hoc tag inside `Route` would be a second,
+redundant encoding of a fact the envelope already carries.
+
+### 2.6 Maps
 
 ```
 map = u32_be(count) ‖ (CCB(k_1) ‖ CCB(v_1)) ‖ … ‖ (CCB(k_count) ‖ CCB(v_count))
@@ -125,7 +148,7 @@ map = u32_be(count) ‖ (CCB(k_1) ‖ CCB(v_1)) ‖ … ‖ (CCB(k_count) ‖ CC
 Pairs are sorted ascending by key CCB under the same comparison as §2.4. Duplicate keys are
 invalid.
 
-### 2.6 Nested objects
+### 2.7 Nested objects
 
 A nested object is emitted **inline, by value, as its complete CCB including its own
 discriminant and schema version**. It is not replaced by a digest.
@@ -140,7 +163,7 @@ This rule exists because "sub-object by digest" relocates ambiguity rather than 
 A digest is only well-defined once the preimage is, so a registry that inserted policies by
 digest without defining the policies would leave the same hole one layer down.
 
-### 2.7 The discriminant and field-number namespace
+### 2.8 The discriminant and field-number namespace
 
 Object classes are assigned from the single table in §3. Field numbers are assigned per object
 class in that object's field table. Neither is assigned ad hoc in prose.
@@ -162,7 +185,7 @@ recycled number makes two logical objects share an encoding across releases, whi
 valid CCB blob. `0xFF00`–`0xFFFF` are reserved for experimental and test object classes and
 must never appear in a production commitment.
 
-### 2.8 Relationship to transport
+### 2.9 Relationship to transport
 
 CCB is not protobuf. Req 3.1 states this directly, and Req 3.3 keeps protobuf as the transport
 encoding. A protobuf message may carry an object whose commitment is computed over its CCB,
@@ -195,11 +218,13 @@ storage address, a resource key or an authority check appears here.
 | `0x0011` | `TraderAcceptance` (`A_B`) | 1 | `a_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | §5.7 partial |
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
-| `0x0014` | `ExternalCommitmentBody` (`X`) | 1 | `ExtCommit(X) = H(DSM/ext ‖ CCB)` | **blocked, see §6** |
+| `0x0014` | `ExternalCommitmentBody` (`X`) | 1 | `ExtCommit(X) = H(DSM/ext ‖ CCB)` | **blocked — the name is contested, see §6** |
+| `0x0015` | `Allocation` (`a`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.1 — see §6** |
+| `0x0016` | `AllocationBundle` (`A_B`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.2 — see §6** |
 
 `0x0000` reserved. `0x0003` is **burned**: it was briefly assigned to a `StorageMemberId`
 object class before §5.2 established that member ids are bare length-prefixed bytes inside a
-frozen layout, with no envelope and therefore no class. Per §2.7 a retired class number is
+frozen layout, with no envelope and therefore no class. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
 ## 4. Status of this registry
@@ -213,7 +238,8 @@ Of the nineteen live object classes above:
   `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **5 are blocked** with only a class assignment.
+- **7 are blocked**, of which `0x0015` and `0x0016` are newly assigned with their
+  fields already fixed by Def 9.1 and Def 9.2 — see the §6a audit.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -242,7 +268,7 @@ domain-separated genesis value at `n = 0`.
 | 4 | `generation` (`n`) | `u64` | |
 | 5 | `reserve_a` (`R_A`) | `u64` | base units of `P_M.token_a_policy_commit` |
 | 6 | `reserve_b` (`R_B`) | `u64` | base units of `P_M.token_b_policy_commit` |
-| 7 | `market_policy` (`P_M`) | nested `0x0007` | inline by value per §2.6 |
+| 7 | `market_policy` (`P_M`) | nested `0x0007` | inline by value per §2.7 |
 | 8 | `release_policy` (`P_R`) | nested `0x0009` | inline by value |
 | 9 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value; the single authoritative fee |
 | 10 | `encumbrances` (`E`) | nested `0x0005` | the encumbrance set, inline by value |
@@ -352,7 +378,7 @@ and states that no expiry, timestamp or duration is permitted.
 | 9 | `nonce` | `digest32` | |
 
 No field 10. Adding expiry or any time-like field to this class is forbidden; §9.1 of the
-specification excludes them, and §2.7 forbids extending a shipped schema version.
+specification excludes them, and §2.8 forbids extending a shipped schema version.
 
 ### 5.6 `MarketBounds` — class `0x0008`, schema 1
 
@@ -415,11 +441,13 @@ writing an encoder.**
 
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
-| `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" | the route CCB it is ordered by — i.e. class `0x000D` |
-| `0x000D` | `Route` `r_i` | referenced only as a set member | the entire contents |
+| `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" — a §2.4 **set** ordered by complete `Route` CCB | only `0x000D`; the ordering rule is already fixed |
+| `0x000D` | `Route` `r_i` | **more than "a set member"**: §9.3 gives `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`, "a sequence of logical legs, each leg being either a one-vault allocation or a same-pair allocation bundle" | a §2.5 **sequence** of heterogeneous legs, self-discriminating via `0x0015`/`0x0016` envelopes. Needs `max_hops` enforcement sited, and whether the sequence is the only field |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
 | `0x0012` | `TradeDigest` | commits "the pair, executed amounts, participating vault identifiers, parent bindings, fees, and `X`" | six named components with no types and no ordering for the multi-valued ones |
-| `0x0014` | `ExternalCommitmentBody` `X` | `ExtCommit(X) = H(DSM/ext ‖ Canon(X))` | the entire contents |
+| `0x0014` | `ExternalCommitmentBody` `X` | **`X` is used two incompatible ways** — see the audit below | a decision, not a field table |
+| `0x0015` | `Allocation` `a` | Def 9.1: `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)` | widths only. `parent_binding` is the Def 6.4 `p_v`, so `VaultStateAnchorV2` is already its type |
+| `0x0016` | `AllocationBundle` `A_B` | Def 9.2: `A_B = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, one ordered token pair, "canonicalized by vault identifier", bundle conservation over Δ | whether the token pair is carried or derived from members, and where `max_fanout` is enforced |
 
 Two of these have partial tables in §5 rather than none:
 
@@ -435,6 +463,82 @@ Two of these have partial tables in §5 rather than none:
   successor material rather than a SoFi object, and therefore needs a decision about whether
   the DSM core encoding is referenced or restated.
 
+## 6a. Amendment 2b — opening object audit
+
+Run before any `Route` field number is frozen, because §2.8 makes them permanent. Four
+findings; two are settled by the audit and two need a decision.
+
+### The object graph Rev 15 already fixes
+
+`p_v` is **not** an open question. Def 9.1 defines an allocation as
+`a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)`, and Def 6.4 defines that
+`parent_binding` as the history-bound `p_v`. A route is a sequence of legs over those
+allocations. The legacy `RouteCommitHopV1.vault_state_anchor_digest` therefore has no
+normative future, and it is evidence of past behaviour rather than a template — nothing gets
+canonized merely because that is where the old implementation put it.
+
+```
+Allocation        a   = (vault_id, p_v, Δ_in, Δ_out, e, Φ)          0x0015
+AllocationBundle  A_B = {a…}, one token pair, by vault id           0x0016
+Route             r_i = ⟨leg…⟩, leg ∈ {Allocation, AllocationBundle} 0x000D
+RouteSet          R   = {r…}, ordered by complete Route CCB          0x000C
+```
+
+### Finding 1 — `Allocation` and `AllocationBundle` were missing (settled)
+
+Rev 15 defines both and even reserves the `DSM/allocation` domain, but neither had a class.
+`Route` contains them, so `CCB(Route)` was unspecifiable from the bottom up. Assigned `0x0015`
+and `0x0016`.
+
+### Finding 2 — a route is an ordered sequence, and the framework had no sequence type (settled)
+
+§2.4 defines sets, §2.6 maps, and nothing ordered. §9.3 says a route is "a sequence of logical
+legs"; sorting one would merge distinct routes into a single encoding. §2.5 now defines a
+sequence: identical bytes to a set, a different type, order preserved and duplicates legal.
+
+The heterogeneous leg needs **no union machinery**. Every element is a complete CCB starting
+with its own class discriminant, so a leg is self-discriminating. An ad-hoc tag inside `Route`
+would be a second encoding of a fact the envelope already carries.
+
+### Finding 3 — `X` is overloaded, and this needs a decision
+
+Two incompatible uses:
+
+- §7.2: `ExtCommit(X) = H(DSM/ext ‖ Canon(X))` — `X` is a **body** with a canonical encoding.
+- §9.3: `X = H(DSM/route-set ‖ I ‖ Canon(R) ‖ Canon({E_v}) ‖ nonce_X)` — `X` is a **digest**.
+
+A digest has no `Canon`, so the two cannot both be right. Note also that §9.3 hashes a
+concatenation of four heterogeneous operands rather than one canonical object, which is the
+un-canonicalized shape this registry exists to remove.
+
+Two resolutions, and they differ in whether a preimage changes:
+
+**(a) `X` is only ever a digest.** §7.2 is a category error; `ExtCommit(X) = H(DSM/ext ‖ X)`
+over the 32-byte digest. Class `0x0014` is **burned** — there is no such object. No preimage
+changes.
+
+**(b) Name the body.** Define a `RouteCommitmentBody` carrying `(I, R, {E_v}, nonce_X)`, with
+`X = H(DSM/route-set ‖ CCB(body))` and `ExtCommit(X) = H(DSM/ext ‖ X)`. Fits the framework —
+every commitment over one CCB — and gives `0x0014` real contents. **This changes §9.3's
+preimage** from a four-operand concatenation to a body encoding, which is a normative change
+and must be made deliberately rather than absorbed.
+
+### Finding 4 — `A_B` denotes two different objects
+
+Def 6.26 uses `A_B` for the trader-acceptance artifact, bound to the SettlementBundle `B`.
+Def 9.2 uses `A_B` for the allocation bundle over an ordered token pair `(A, B)`. Different
+objects, different subscript meanings, one symbol. The registry keeps them apart as `0x0011`
+and `0x0016`, but the specification should disambiguate the notation before the acceptance
+amendment (2c) cites it, or a reader will resolve the wrong definition.
+
+### What remains blocked
+
+`TradeDigest` `0x0012` stays last by dependency: §10 binds "the pair, executed amounts,
+participating vault identifiers, parent bindings, fees, and `X`", and those types are
+determinate only once findings 1–3 are settled.
+
+---
+
 ## 7. What follows this document
 
 In order, and not combined:
@@ -449,7 +553,7 @@ In order, and not combined:
    Keep the beta policy family **intentionally narrow**. SoFi beta supports constant-product
    DLV market execution and owner-local full close; specify those actual profiles. `P_M` and
    `P_R` being abstract names is not a reason to design a generalized predicate VM — that can
-   take new object or schema versions later, which is exactly what §2.7 provides for.
+   take new object or schema versions later, which is exactly what §2.8 provides for.
 
    The existing Rust `FulfillmentMechanism` enum spans Payment, CryptoCondition,
    MultiSignature, StateReference, RandomWalk, Bitcoin HTLC, AND/OR and AMM constant product.
