@@ -601,6 +601,38 @@ explicit non-production dev profile and never on the production birth path.
 ship the schema-6 build and reprovision. If the new build reaches the old fleet first, birth
 refusing is correct.
 
+### Pre-implementation audit — both inspections done 2026-08-22
+
+**Producer trace: no path bypasses the transaction, so no lineage journal is needed.** Three
+production sites construct a `VaultReserveMutation`, all in `handlers/dlv_routes.rs` —
+`Fund` at `:691` (birth), `ApplySettlement` at `:1496` (owner apply), `Withdraw` at `:1615`
+(close). Every other construction is inside `types/device_state.rs` itself or in tests. All
+three reach the same transaction through one of two wrappers, and **both funnel into the single
+`execute_on_relationship_inner`**. Nothing needs refactoring into the chokepoint; it is already
+the only way in.
+
+**But the two wrappers expose different in-transaction hooks**, which decides where the CAS
+goes. `execute_on_relationship_staged_with_reserve_mutation` takes `build_artifacts` +
+`write_extra` and sees the `AdvanceOutcome`; `execute_on_relationship_with_reserve_mutation`
+takes a single `in_tx_extra` closure — and `ApplySettlement` uses the latter. Putting the `h_n`
+CAS in `write_extra` would therefore cover two of the three paths and silently miss owner
+apply. **The CAS belongs in `execute_on_relationship_inner`**: one site, all three paths, both
+hook shapes untouched. That is also where the pre-transition state is available under the
+existing lock, which is what the "compute `c_n` from the pre-state, not from
+`outcome.new_device_state`" rule requires without opening a TOCTOU seam.
+
+**Authenticated-state boundary: `h_n`, `q` and `S` will be unauthenticated local state.** The
+vault-state SMT leaf is `compute_vault_smt_value(sequence, reserves_digest)` — those two values
+and nothing else. So the new `amm_vault_records` columns have **no authenticated fact to
+cross-check against**: they are trusted local rows, not reconstruction inputs validated against
+something signed.
+
+That is a real consequence of keeping the unlock gate local-state-derived. The gate resists
+*staleness* — storage cannot choose which history edge it sees — but with the leaf unchanged,
+`h_n`'s integrity rests on the SQLite row rather than on a signed commitment. Evolving the leaf
+to commit the Rev 15 `V_n` material would close that, and would spill into the proof-material
+work `0x0010` still blocks. **Decide this before writing schema 6, not during it.**
+
 ## Implementation sequence
 
 Ordered by dependency, not by size.
