@@ -48,6 +48,13 @@ pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/settlement-slot-claim/v1");
 pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v1");
+/// History-bound vault state anchor, Rev 15 Definition 6.4:
+/// `p_v = H(tag ‖ 0x00 ‖ vault_id ‖ generation ‖ parent_state_commitment
+/// ‖ reserves_digest ‖ storage_set_id ‖ q)`. A distinct domain from the legacy
+/// `DSM/vault-state-anchor\0`, which is what makes Req 6.6's clean cut
+/// structural rather than a matter of caller discipline.
+pub const TAG_DSM_VAULT_STATE_ANCHOR_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/vault-state-anchor/v2");
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =

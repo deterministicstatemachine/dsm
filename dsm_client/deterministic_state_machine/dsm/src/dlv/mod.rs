@@ -15,3 +15,4 @@ pub mod vault_reserve_inclusion;
 pub mod vault_reserve_leaf;
 pub mod vault_smt_leaf;
 pub mod vault_state_anchor;
+pub mod vault_state_anchor_v2; // Rev 15 Def 6.4 — history-bound, clean cut from V1
