@@ -33,8 +33,8 @@ silently absorbed.
 
 ### Amendments since the freeze
 
-The mechanism above has fired four times, as designed. The spec blob is now
-`12c69d4cc95c23a80e7aaa74b7b893773c42004c`.
+The mechanism above has fired five times, as designed. The spec blob is now
+`10c28699abc9138ce6a17827d6d1e118f666b321`.
 
 **`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
 `parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
@@ -107,6 +107,24 @@ This formalizes implementation behaviour verified at `routing_path_sdk.rs:125-15
 stale prose at `proto/dsm_app.proto:202`, which says `reserve_in += input_after_fee` while the
 reserve semantics and their test credit the full input.
 
+**Encumbrance types, and a third symbol overload.** Amendment 2b's field tables were gated on
+one question: the type of `e` in Def 9.1. Rev 15 answers it — Req 8.2 reads
+`∑_{e ∈ E_t} amount(e) ≤ R_t`, iterating `E` and calling `amount(e)`, so lowercase `e` ranges
+over individual claims. Def 9.1's `e` is therefore the claim an allocation consumes, not the
+vault's commitment.
+
+That exposed `E` as overloaded exactly like `X` and `A_B` before it: Def 4.1 lists it as a set
+member of `V_n` and Req 8.2 iterates it, while §8 also defined `E = H(DSM/enc ‖ …)` as a
+digest. The set keeps `E`; the digest becomes `EC_v`. **Three overloads in one specification
+is a pattern rather than three slips** — each was a container and its commitment sharing a
+name, and each stayed invisible until a field table forced the question.
+
+`{EC_v}` is neither an alias of `e` nor implied by `p_v`: `p_v` commits the **parent** state
+commitment and the current reserves digest, but not the current generation's encumbrance set.
+A plain set suffices rather than a keyed map, because `vault_id` sits inside every `EC_v`
+preimage. §9.3's route commitment becomes `X = H(DSM/route-set ‖ CCB(Q))` over the
+`RouteCommitmentBody`.
+
 Rev 15 identity was verified by content markers, not by the title: the "Revision 15" running
 head; the domains `DSM/vault-state-anchor/v2`, `DSM/trader-settlement-acceptance/v2`,
 `DSM/binding-tx`, `DSM/binding-keyset`; Req 6.6's clean `VaultStateAnchorV2` cut; Req 6.13's
@@ -129,7 +147,7 @@ and `SoFi-V2.pdf` are drafting artifacts.
 | 4 | Immutable object vs mutable index | Divergent — two distinct violations |
 | 5 | Trader acceptance realization | Partial, security-relevant — gate correctly placed, witness format non-conformant |
 | 6 | One-phase owner-local close | Non-conformant in candidate completeness and realization boundary |
-| 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6; 10 of 19 classes now specified** |
+| 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6; 13 of 21 live classes now specified** |
 
 Two areas reverse decisions that are currently documented as deliberate in landed code. They
 are called out in **Reversals of landed decisions** below so that neither is made silently.

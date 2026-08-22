@@ -5,7 +5,7 @@ Establishes the CCB framework and object registry for finding 7 of
 `docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.**
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
-make Rev 15's commitments independently derivable, because seven of its twenty-one live
+make Rev 15's commitments independently derivable, because four of its twenty-one live
 object classes still have no contents in the specification — see §4, §6 and the §6a audit.
 Finding 7 closes when those are resolved by the normative amendments listed in §7, not when
 this document merges.
@@ -220,9 +220,9 @@ storage address, a resource key or an authority check appears here.
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
-| `0x0017` | `RouteCommitmentBody` (`Q`) | 1 | `X = H(DSM/route-set ‖ CCB(Q))` | **assigned, fields pending §6a finding 5** |
-| `0x0015` | `Allocation` (`a`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.1 — see §6** |
-| `0x0016` | `AllocationBundle` (`AB_{A→B}`) | 1 | leg element; nested in `0x000D` | **assigned, fields from Def 9.2 — see §6** |
+| `0x0017` | `RouteCommitmentBody` (`Q`) | 1 | `X = H(DSM/route-set ‖ CCB(Q))` | §5.12 defined |
+| `0x0015` | `Allocation` (`a`) | 1 | leg element; nested in `0x000D` | §5.10 defined |
+| `0x0016` | `AllocationBundle` (`AB_{A→B}`) | 1 | leg element; nested in `0x000D` | §5.11 defined |
 
 `0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
 and §6a finding 3 established there is no such object. Re-using that number for
@@ -240,14 +240,13 @@ missing ones.**
 
 Of the **twenty-one live** object classes above — `0x0014` is burned and not counted:
 
-- **10 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
-  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`.
+- **13 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`, `0x0015`, `0x0016`, `0x0017`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **7 are blocked** — `0x000C`, `0x000D`, `0x0010`, `0x0012`, `0x0015`, `0x0016`, `0x0017`.
-  Of these, `0x0015` and `0x0016` have their fields already fixed by Def 9.1 and Def 9.2 and
-  need only widths; `0x0017` is blocked on §6a finding 5, which is a specification question
-  rather than a field-table one.
+- **4 are blocked** — `0x000C`, `0x000D`, `0x0010`, `0x0012`. `RouteSet` and `Route` need only
+  the §2.5 sequence type they now have plus their own tables; `DlvProofMaterial` and
+  `TradeDigest` remain genuinely unspecified.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -441,6 +440,60 @@ A set of `digest32` sorts by the 32 raw bytes; there is no element envelope, bec
 zero or negative effective numerator. The width is 32 bits because that is the representation
 already in use; re-scaling to Q32.32 would change every committed fee without changing any fee.
 
+### 5.10 `Allocation` — class `0x0015`, schema 1
+
+Def 9.1: `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `vault_id` | `digest32` | |
+| 2 | `parent_binding` | `digest32` | the Def 6.4 `p_v` of `VaultStateAnchorV2`; not recomputed by a reader |
+| 3 | `delta_in` | `u64` | base units into the DLV |
+| 4 | `delta_out` | `u64` | base units out of the DLV |
+| 5 | `encumbrance_claim` (`e`) | `digest32` | the single claim this allocation consumes, `e_j` of §8 — **not** `EC_v` |
+| 6 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value |
+
+No token pair: `p_v` binds the parent, whose state commits the pair through `P_M`.
+
+### 5.11 `AllocationBundle` — class `0x0016`, schema 1
+
+Def 9.2: `AB_{A→B} = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, every member converting the same
+input token to the same output token and naming a **distinct** DLV.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `allocations` | set of `0x0015` | §2.4 ordering; "canonicalized by vault identifier" is satisfied because `vault_id` is field 1 of the element, so ordering by element CCB orders by vault id |
+
+`max_fanout` is **not** a field — it is authoritative in `TradeIntent` field 7, and the member
+count is checked against it. Distinct-DLV is a validity condition on construction: two members
+sharing a `vault_id` are refused, not merged.
+
+The ordering claim is worth stating precisely rather than assuming. Element CCB begins
+`u16 class ‖ u16 schema ‖ vault_id`, and class and schema are equal across members of one
+bundle, so lexicographic order over element CCB **is** order by `vault_id` — with ties
+impossible, since a duplicate `vault_id` is refused.
+
+### 5.12 `RouteCommitmentBody` — class `0x0017`, schema 1
+
+`X = H(DSM/route-set ‖ CCB(Q))`. Replaces the four-operand concatenation of §9.3.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `intent` (`I`) | `digest32` | `H(DSM/intent ‖ CCB(TradeIntent))` |
+| 2 | `route_set` (`R`) | nested `0x000C` | inline by value |
+| 3 | `encumbrance_commitments` | set of `digest32` | `{EC_v}_{v∈R}`; a set, not a map — see below |
+| 4 | `nonce_x` | `digest32` | |
+
+`{EC_v}` is a **set of primitives**, so §2.4 orders it over the raw 32-byte values with no
+element envelope. A keyed map is unnecessary: `vault_id` is inside each `EC_v` preimage, so
+two vaults cannot produce equal commitments, and a verifier recomputes `EC_v` for every vault
+named in `R` and tests membership rather than looking one up.
+
+It is also not an alias of `Allocation` field 5. `e` names the single claim one allocation
+consumes; `EC_v` commits a vault's whole encumbrance state. Nor is it implied by `p_v`, which
+commits the **parent** state commitment `h_n` and the current generation's reserves digest, but
+not the current generation's encumbrance set.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -453,9 +506,6 @@ writing an encoder.**
 | `0x000D` | `Route` `r_i` | **more than "a set member"**: §9.3 gives `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`, "a sequence of logical legs, each leg being either a one-vault allocation or a same-pair allocation bundle" | a §2.5 **sequence** of heterogeneous legs, self-discriminating via `0x0015`/`0x0016` envelopes. Needs `max_hops` enforcement sited, and whether the sequence is the only field |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
 | `0x0012` | `TradeDigest` | commits "the pair, executed amounts, participating vault identifiers, parent bindings, fees, and `X`" | six named components with no types and no ordering for the multi-valued ones |
-| `0x0017` | `RouteCommitmentBody` `Q` | `X = H(DSM/route-set ‖ CCB(Q))`; carries `I`, `R`, the encumbrance commitments and `nonce_X` | **finding 5**: whether the encumbrance commitments belong at all, and if so keyed or as a set. Blocked on the specification stating the type of Def 9.1's `e` |
-| `0x0015` | `Allocation` `a` | Def 9.1: `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)` | widths only. `parent_binding` is the Def 6.4 `p_v`, so `VaultStateAnchorV2` is already its type |
-| `0x0016` | `AllocationBundle` `AB_{A→B}` | Def 9.2: `A_B = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, one ordered token pair, "canonicalized by vault identifier", bundle conservation over Δ | whether the token pair is carried or derived from members, and where `max_fanout` is enforced |
 
 Two of these have partial tables in §5 rather than none:
 
@@ -553,31 +603,42 @@ amendment 2c, where
 `TraderAcceptance` is security-critical and a reader resolving the wrong definition would be
 reading about routing.
 
-### Finding 5 — `{E_v}` keying, and whether `e` already carries it (OPEN)
+### Finding 5 — `{E_v}` and `e` are different facts (settled from source)
 
-`Q` cannot simply hold a set of bare encumbrance digests, but the reason is narrower than it
-first appears, and there is a prior question underneath it.
+Resolved by evidence rather than by decision, and one premise for the question turned out not
+to hold.
 
-**Collision across vaults cannot occur.** `E = H(DSM/enc ‖ vault_id ‖ Canon({e_j}))` — the
-vault identifier is *inside* the preimage. Two distinct vaults therefore cannot produce equal
-`E_v` absent a hash collision, so a plain set admits no ambiguity of that kind. The concern
-that motivated a keyed map does not survive contact with the preimage.
+**Collision across vaults cannot occur.** `EC_v = H(DSM/enc ‖ vault_id ‖ Canon(E))` puts the
+vault identifier inside the preimage, so two distinct vaults cannot produce equal commitments
+absent a hash collision. A keyed map is unnecessary; a set suffices, and the verifier
+recomputes `EC_v` for each vault named in `R` and tests membership.
 
-**What a plain set does lose is recoverability.** A verifier holding the set cannot ask "which
-`E` belongs to vault `v`" — it can only recompute `E_v` for each vault in `R` and test
-membership. That is workable, since the verifier already iterates `R`, but it is a membership
-check rather than a lookup, and the field table must say which is intended.
+**`e` is a claim, not a commitment.** Req 8.2 reads `∑_{e ∈ E_t} amount(e) ≤ R_t` — it
+iterates `E` and calls `amount(e)` on each element, so lowercase `e` ranges over individual
+claims. Def 9.1's lowercase singular `e` is that: the claim one allocation consumes.
 
-**The prior question is aliasing.** Def 9.1 gives an allocation as
-`a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)` and **never states the type of `e`**. If
-`e` is that vault's encumbrance commitment `E_v`, then `{E_v}_{v∈R}` inside `Q` is a second
-copy of a fact every allocation already carries — the same alias pattern as `P_M`/`Φ` in
-Def 5.2, and it should be dropped from the body rather than keyed. If `e` is instead a
-per-allocation claim or claim subset, the two are different facts and both belong.
+**`{EC_v}` is not implied by `p_v` either.** `p_v` commits `vault_id`, `generation`, the
+**parent** state commitment `h_n`, the reserves digest, the storage set and `q`. The current
+generation's encumbrance set lives in `V_n` and is not among them. So `{EC_v}` binds a fact no
+other operand of `X` binds.
 
-**This must be decided before `0x0017`'s fields are frozen**, and it is a specification
-question: Rev 15 has to say what `e` is. Deciding it in a field table would settle protocol in
-the registry, which is the failure this document exists to prevent.
+Both therefore belong, and they are not the `P_M`/`Φ` alias pattern.
+
+### Finding 7 — `E` was overloaded too (settled)
+
+The same defect as `X` and `A_B`, a third time. Def 4.1 lists "`E` the encumbrance set" as a
+member of `V_n`, Req 8.2 iterates `E` as a set — and §8 also wrote
+`E = H(DSM/enc ‖ vault_id ‖ Canon({e_j}))`, making `E` a digest in the same section that sums
+over it.
+
+The set keeps the name `E`, because that is what `V_n` contains and what Req 8.2 iterates. The
+digest becomes `EC_v`. Only the set is a member of `V_n`; `EC_v` is derived from it.
+
+Three symbol overloads in one specification is a pattern rather than three slips. Each was a
+container and its commitment sharing a name — `X` body/digest, `A_B` acceptance/bundle, `E`
+set/digest — and each was invisible until a field table forced the question of what the symbol
+denotes. Later amendments should expect more of them wherever a `Canon(...)` or an `H(...)`
+sits next to a set.
 
 ### Finding 6 — ownership of the bounds (settled)
 
