@@ -148,6 +148,7 @@ and `SoFi-V2.pdf` are drafting artifacts.
 | 5 | Trader acceptance realization | Partial, security-relevant — gate correctly placed, witness format non-conformant |
 | 6 | One-phase owner-local close | Non-conformant in candidate completeness and realization boundary |
 | 7 | Canonical commit bytes | **Underspecified protocol-wide — prerequisite to 1–6; 13 of 21 live classes now specified** |
+| 8 | Authenticated owner-device identity resolution | **Absent, security-critical prerequisite — three broken edges; one trust anchor actively unauthenticated** |
 
 Two areas reverse decisions that are currently documented as deliberate in landed code. They
 are called out in **Reversals of landed decisions** below so that neither is made silently.
@@ -155,6 +156,13 @@ are called out in **Reversals of landed decisions** below so that neither is mad
 Area 7 was found while preparing the Anchor V2 work and is a **prerequisite**, not a peer:
 it determines whether two independent implementations can agree on the inputs to the rest of
 Rev 15 at all. It blocks Anchor V2.
+
+Area 8 was found the same way and is also a prerequisite rather than a peer, but it sits one
+layer above area 7. Area 7 asks whether two independent implementations can agree on the
+**bytes**. Area 8 asks whether a foreign verifier can establish **who is authorized to produce
+them**. The two are independent: a complete CCB registry does not make an unauthenticated owner
+key authentic, and an authenticated owner key does not make ambiguous bytes canonical. Area 8
+blocks the end-to-end trader-side market path.
 
 ---
 
@@ -307,6 +315,13 @@ node contract and the consumer's re-hash, not the client's bookkeeping.
 **Cost.** Moderate. A write-once immutable namespace on the node, a canonical address
 derivation shared by both sides, a consumer-side re-hash before decode, and a migration of
 the `/latest` mirrors from identity to index.
+
+**See also area 8.** The same failure shape — a mutable discovery path treated as authoritative,
+against §15.2 item 7 — appears there on `devtree/root`, and the migration this area describes is
+the pattern area 8's publication form will have to follow. The consequences differ in kind: a
+mutable `/latest` path can cause consumers to misidentify **state**, while area 8's mutable root
+can cause them to misidentify **authority**. In neither case is mutability itself the defect;
+making the mutable index authoritative is.
 
 ---
 
@@ -535,6 +550,160 @@ same change.
 
 ---
 
+## 8. Authenticated owner-device identity resolution
+
+Found while preparing the Anchor V2 work. It presented as a narrow question — which key source
+`compose_vault_state` should use — and is not one. A foreign trader has no constructible chain
+from a vault it discovers to an authenticated owner-device authority, and one of the would-be
+trust anchors is actively unauthenticated. This is a substrate defect that SoFi exposes, not a
+SoFi gap.
+
+**Rev 15.** Definition 4.1 (spec:483-493) makes `g_o` and `d_o` members of the vault state tuple
+`V_n`, "where `g_o` and `d_o` bind owner identity", alongside `r_o`, "the authenticated owner
+root". Those three are the specification's entire treatment of the subject: `r_o` is named once
+and never defined, and the words *Device Tree*, *DevID* and *device identity* do not occur in the
+document at all. Rev 15 therefore states that owner identity is bound into the state without
+saying how a verifier resolves or authenticates it.
+
+**Boundary against area 7.** These are not area 7 findings and area 8 does not reopen the CCB
+registry. The `CCB(V_n)` schema and encoder can be **completed** once the fifteen members and
+their encodings are fixed. What cannot be completed is **foreign verification of the authority
+and provenance of `g_o`, `d_o` and `r_o`** — a question that lives above the byte-encoding layer.
+
+### The chain, and its three broken edges
+
+A foreign verifier needs the composed chain
+`g_o → R_G → d_o ∈ R_G → d_o = H(AK_pk ‖ AttA) → AK_pk is owner authority`.
+Every edge of it is broken, in three distinct ways.
+
+**Edge 1 — `AK_pk + AttA → d_o`: construction exists, presentation material absent.**
+`DevID = H("DSM/devid" ‖ AK_pk ‖ AttA)` is implemented and correct
+(`dsm/src/core/identity/genesis_v2.rs:157-163`). `AttA` is
+`KDF(wallet_seed, "DSM/atta/v2" ‖ G ‖ device_slot)` (`genesis_v2.rs:165-176`) — deliberately a
+wallet-seed derivation so `DevID` survives mnemonic recovery, and consequently **not derivable by
+anyone else**. It appears in no proto message and in no published object. The derivation is
+therefore never exercised against foreign material: `derive_devid` occurs three times in the tree
+— its definition (`:158`), the device deriving its own id inside `derive_genesis_v2` (`:242`), and
+one test assertion (`:311`). **No verifier anywhere recomputes another device's `d_o`.**
+
+**Edge 2 — `d_o → R_G`: the inclusion primitive exists, the applicable root is not
+authenticated.** The tree is real: domain-separated `DSM/dev-leaf` / `DSM/dev-merkle` hashing
+(`dsm/src/common/domain_tags/dsm/core.rs:94-95`), a portable `DeviceInclusionProofV1`
+(`proto/dsm_app.proto:3750-3756`) that the node **rebuilds deterministically on every GET and
+never accepts from a caller** (`dsm_storage_node/src/api/identity/devtree.rs:301-304`). But the
+leaf commits a 32-byte identifier and nothing else — `DeviceTreeStateV1` carries `device_ids`
+only (`proto/dsm_app.proto:3813-3816`), with no `AK_pk` and no `AttA` — so inclusion proves
+membership of an identifier and yields no key. And the root it proves membership against is
+whatever last survived the bounded validator, which is edge 3.
+
+**Edge 3 — `g_o → R_G`: no independently authenticated root-progression edge has been
+established.** `PUT /api/v2/identity/{genesis}/devtree/root` accepts any well-formed,
+version-monotonic `DeviceTreeStateV1` for any genesis. Its validator is bounded by design and
+says so: it "does **not** verify Merkle structure, signatures, or DevID derivation — those are
+client-side concerns" (`devtree.rs:16-17`), running only decode, a 32-byte non-zero root, a
+device-count/length check, and an atomic monotonic-version upsert (`devtree.rs:206-295`). The
+route is mounted with a rate limiter and no auth middleware (`dsm_storage_node/src/main.rs:230`),
+in the same file where the object-write router is wrapped in `auth::device_auth` (`:216-220`) —
+so the omission is a property of this route, not of the server. The one field designed to carry
+root authority, `DeviceTreeRootUpdateV1.signature`, is documented as deferred — verification "is
+out of scope for B.1 and lands with the bounded-validator work in Phase B.4 (issue #275) once
+`RootBindingRecord` is in place" (`proto/dsm_app.proto:3722-3737`) — and `RootBindingRecord`
+occurs nowhere but that comment and its generated TypeScript mirror. `DeviceTreeRootUpdateV1`
+itself is constructed only in `dsm/tests/device_tree_root_lifecycle_test.rs`. Nothing in
+production produces or verifies a root-update authorization.
+
+### Subfinding: the device registry is discovery, not authority
+
+The existing device-identity lookup does not close edge 1 and cannot be made to.
+`GET /api/v2/device/{device_id}` returns the stored `(genesis_hash, pubkey, kyber_public_key,
+kyber_binding_sig)` row and describes itself accurately: "Storage nodes remain dumb indexers:
+this is a raw identity lookup only" (`dsm_storage_node/src/api/identity/device_api.rs:167-190`).
+The row is written by `POST /api/v2/device/register`, which validates lengths and presence only
+and is first-writer-wins (`device_api.rs:75-150`). Client-side,
+`fetch_quorum_device_identity` reads that row from every configured endpoint and requires the
+mirrors to agree (`dsm_sdk/src/handlers/app_router_impl.rs:3101-3216`) — which establishes
+agreement about a **record**, not a proof about a **key**. It never checks
+`d_o = H(AK_pk ‖ AttA)`; nothing does. The only signature in the row is `kyber_binding_sig`,
+which binds an ML-KEM key to an AK (`dsm_sdk/src/sdk/kyber_identity.rs:35-82`) and says nothing
+about whether that AK belongs to `d_o`.
+
+Stated as the finding: **the apparent genesis/device birth binding does not currently establish
+`d_o → AK_pk` for a foreign verifier, because its key source ultimately resolves through an
+unauthenticated device-registry row and does not independently verify
+`d_o = H(AK_pk ‖ AttA)`. It therefore cannot serve as the missing non-circular trust root.**
+
+Mutable discovery paths may *locate* candidate `AK_pk` bytes. Those bytes become authoritative
+only after the DSM identity proof chain independently authenticates them.
+
+### Confirmed impact
+
+The unauthenticated `device_id → AK_pk` lookup is already load-bearing in at least two places.
+
+- **SoFi trader-side foreign-vault owner authentication** — the subject of this area.
+- **Recovery/authority-anchor verification.** `dsm/src/recovery/authority_anchor.rs:19-23`
+  documents its genesis binding as a signature by the device's genesis signing key, "which IS
+  genesis-authenticated and fetchable by peers via the device-tree quorum path
+  (`fetch_quorum_device_identity` + `verify_device_tree_evidence_quorum`)". That is the same
+  registry path. The asserted genesis/device binding therefore inherits the same
+  unauthenticated-key dependency.
+
+The identical assumption is restated once more at `dsm_sdk/src/sdk/kyber_identity.rs:86-88`,
+where a peer's AK is described as "already trusted via the registry attestation that binds it to
+`device_id` + `genesis`".
+
+Recorded as confirmed impact of area 8. **Recovery-specific remediation is outside this area's
+implementation scope, and this area is not a recovery conformance audit.**
+
+### Already conformant, do not regress
+
+The primitives underneath are sound and none of them is the defect. The Merkle tree and its
+leaf/pad domain separation; the node-rebuilt, never caller-supplied inclusion proof; the
+bind-once-per-genesis recovery-authority anchor store, which exists precisely so "a later
+device-holding attacker cannot overwrite a legitimately-enrolled authority"
+(`dsm_storage_node/src/api/identity/recovery_anchor.rs:14-21`); and the append-only PD-SMT head
+chain, which enforces chain shape and derives `head_hash` itself so "a client cannot lie about
+chain links" (`dsm_storage_node/src/api/identity/pdsmt_head.rs:12-15`). What is missing is the
+authority edge above them.
+
+**Verdict: absent, security-critical prerequisite.**
+
+### Required property, not a mechanism
+
+A foreign verifier must be able to start from `g_o`, authenticate the current or applicable
+Device Tree root, prove `d_o` is in that tree, recompute `d_o` from independently presented
+`AK_pk` and `AttA`, and only then treat that `AK_pk` as owner authority. Mutable discovery paths
+may locate those objects; they cannot themselves be the authority.
+
+**This finding deliberately does not solve the `R_G` authentication mechanism.** Choosing one
+here would be choosing it from convenience, and the obvious choice is circular: signing `R_G`
+with a device key whose legitimacy is established only by that same `R_G` proves nothing. What
+genesis-authenticated authority actually exists, and whether any of it can authorize Device Tree
+root progression without circularity, is audited in
+[`docs/audits/2026-08-22-owner-device-identity-authority.md`](../audits/2026-08-22-owner-device-identity-authority.md).
+The required semantics of the presentation path are scoped in
+[`docs/plans/2026-08-22-device-identity-presentation-semantics.md`](../plans/2026-08-22-device-identity-presentation-semantics.md),
+which is gated on that audit's answer.
+
+### Standing constraint on `compose_vault_state`
+
+The composition boundary stays exactly where it is. `compose_vault_state`
+(`dsm_sdk/src/sdk/vault_state_composition.rs:259-266`) today authenticates key *continuity* — the
+seq-0 birth anchor must verify and carry the same `owner_public_key` and `storage_set_id` as the
+baseline (`:367-386`) — which is a real and worthwhile check, and is not owner authority: the key
+it pins is self-attested inside the anchor it validates.
+
+`baseline.owner_public_key`, routing-advertisement keys and identity-endpoint keys **must not be
+threaded through as a temporary shim**. The five production call sites
+(`handlers/dlv_routes.rs:1812,2067,2493,4894`; `handlers/route_routes.rs:856`) are paused, not
+adapted. The reason is that a shim does not fail visibly: it would make an unauthenticated key
+indistinguishable from a resolved one at every call site downstream of it, and each of those sites
+would then encode the assumption that identity resolution had already happened.
+
+**Cost.** Large and substrate-wide. Not estimable until the `g_o → R_G` edge exists, because the
+shape of everything above it depends on what that edge turns out to be.
+
+---
+
 ## Reversals of landed decisions
 
 Recorded explicitly so neither is made silently.
@@ -579,6 +748,30 @@ Ordered by dependency, not by size.
 5. **Area 5.** Needs the SettlementBundle identity from step 4.
 6. **Area 6.** Independent of 4–5 in principle, but sequenced last so the close is rebuilt
    once, against final anchor and binding semantics.
+7. **Area 8, the identity-resolution prerequisite.** Sequenced last in this list only because
+   its own first step is an audit rather than an implementation; see below for what it blocks
+   and what it does not.
+
+**What area 8 blocks: the end-to-end trader-side market path.** The blocked edge is
+**foreign-vault composition and parent authentication** — a trader cannot establish that the V2
+anchor and the `V_n` facts it composes against came from the actual DLV owner. That is the whole
+of the dependency, and it must not be overstated into area 5's subject matter: a conformant
+`TraderSettlementAcceptanceV2` proves the **trader's** ordinary DSM accepted successor
+`(C_T^+, σ_T^+)`. That is trader authority, not owner authority, and area 8 does not change what
+the acceptance witness authenticates. Area 5 remains sequenced on the SettlementBundle identity
+from step 4; area 8 blocks the path those two sit on, end to end.
+
+**What area 8 does not block.** Steps 1, 2 and 3 — the `q` rule, Anchor V2's encoder, and area
+4's immutable namespace — all proceed. Area 8 sits above the byte-encoding layer: the
+`CCB(V_n)` schema and encoder can be **completed** once the fifteen members and their encodings
+are fixed. What cannot be completed is foreign verification of the authority and provenance of
+`g_o`, `d_o` and `r_o`.
+
+**Area 8's own first step is not an implementation.** It is the audit of what
+genesis-authenticated authority exists that could authorize Device Tree root progression without
+circularity. Until that edge is specified, the presentation object, its resolver, its immutable
+publication form and any wire schema stay undefined, and the five composition call sites stay
+paused rather than shimmed.
 
 Downstream and gated on this delta being frozen: schema-v5 reprovision; canonical storage-set
 fleet redeploy against the final schema and config contract; the invariant-4 hardware
@@ -624,3 +817,51 @@ which is checked against the receipt's signing preimage at
 The `q` arithmetic is checked against the source rule rather than asserted: `quorum_for` is
 `(node_count as u32 / 2) + 1` (`storage/client_db/publication.rs:75-80`), so `quorum_for(3)`
 is 2 and `quorum_for(5)` is 3, against Req 6.13's required 4.
+
+### Area 8
+
+Area 8's code citations were read at `fbf1d1ba` rather than at the pinned `d0bd5d0d`. That is
+safe here and the check is recorded rather than assumed: every file area 8 cites is
+byte-identical at the two commits, so its citations resolve at the report's baseline as well.
+Re-run the check before amending area 8:
+
+```bash
+for f in dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs \
+         dsm_client/deterministic_state_machine/dsm/src/recovery/authority_anchor.rs \
+         dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs \
+         dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/kyber_identity.rs \
+         dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/vault_state_composition.rs \
+         dsm_storage_node/src/api/identity/devtree.rs \
+         dsm_storage_node/src/api/identity/device_api.rs \
+         dsm_storage_node/src/main.rs proto/dsm_app.proto; do
+  [ "$(git rev-parse d0bd5d0d:$f)" = "$(git rev-parse HEAD:$f)" ] && echo "SAME $f" || echo "DIFF $f"
+done
+```
+
+The load-bearing negatives, which are the finding rather than decoration:
+
+```bash
+git grep -n 'derive_devid' -- 'dsm_client/*' 'dsm_storage_node/*' 'proto/*'
+# 3 hits, all in genesis_v2.rs: the definition (:158), the device deriving its OWN id (:242),
+# and one test (:311). No verifier recomputes a foreign d_o.
+
+git grep -nw 'atta\|AttA' -- 'proto/*'          # zero — AttA is in no wire object
+
+git grep -ln 'RootBindingRecord' -- 'dsm_client/*' 'dsm_storage_node/*' 'proto/*'
+# proto/dsm_app.proto and its generated TS mirror only — a comment, no message, no code
+
+git grep -ln 'DeviceTreeRootUpdateV1' -- 'dsm_client/*' 'dsm_storage_node/*' 'proto/*'
+# proto, its generated TS mirror, and dsm/tests/device_tree_root_lifecycle_test.rs — never
+# produced or verified in production
+```
+
+`git grep -n 'atta'` without `-w` is noisy and must not be used for this claim: it matches
+*attacker*, *attach* and *attested* throughout the proto. The word-boundary form is the check.
+
+The absence of the subject from Rev 15 itself resolves against the current spec blob
+`10c28699`:
+
+```bash
+grep -c 'Device Tree\|DevID\|device identity' .github/instructions/sofispecs.instructions.md   # 0
+grep -n 'authenticated owner root' .github/instructions/sofispecs.instructions.md              # one hit
+```
