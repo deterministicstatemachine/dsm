@@ -5,7 +5,7 @@ Establishes the CCB framework and object registry for finding 7 of
 `docs/reports/2026-08-21-rev15-conformance-delta.md`. **Finding 7 remains OPEN.**
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
-make Rev 15's commitments independently derivable, because four of its twenty-one live
+make Rev 15's commitments independently derivable, because two of its twenty-one live
 object classes still have no contents in the specification — see §4, §6 and the §6a audit.
 Finding 7 closes when those are resolved by the normative amendments listed in §7, not when
 this document merges.
@@ -211,8 +211,8 @@ storage address, a resource key or an authority check appears here.
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | §5.4 defined |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
-| `0x000C` | `RouteSet` (`R`) | 1 | `X = H(DSM/route-set ‖ I ‖ CCB ‖ …)` | **blocked, see §6** |
-| `0x000D` | `Route` (`r_i`) | 1 | set element of `0x000C` | **blocked, see §6** |
+| `0x000C` | `RouteSet` (`R`) | 1 | nested in `0x0017` | §5.14 defined |
+| `0x000D` | `Route` (`r_i`) | 1 | set element of `0x000C` | §5.13 defined |
 | `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.6 partial |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.6 partial |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000E` | **blocked, see §6** |
@@ -240,13 +240,13 @@ missing ones.**
 
 Of the **twenty-one live** object classes above — `0x0014` is burned and not counted:
 
-- **13 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
-  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x0013`, `0x0015`, `0x0016`, `0x0017`.
+- **15 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x0013`, `0x0015`, `0x0016`,
+  `0x0017`.
 - **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
   the field order or names the members but leaves types or a nested class open.
-- **4 are blocked** — `0x000C`, `0x000D`, `0x0010`, `0x0012`. `RouteSet` and `Route` need only
-  the §2.5 sequence type they now have plus their own tables; `DlvProofMaterial` and
-  `TradeDigest` remain genuinely unspecified.
+- **2 are blocked** — `0x0010` `DlvProofMaterial` and `0x0012` `TradeDigest`, both genuinely
+  unspecified in Rev 15 and both belonging to amendment 2c.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
@@ -494,6 +494,49 @@ consumes; `EC_v` commits a vault's whole encumbrance state. Nor is it implied by
 commits the **parent** state commitment `h_n` and the current generation's reserves digest, but
 not the current generation's encumbrance set.
 
+### 5.13 `Route` — class `0x000D`, schema 1
+
+§9.3: "A route is a sequence of logical legs, each leg being either a one-vault allocation or
+a same-pair allocation bundle", `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `legs` | **sequence** of `0x0015` \| `0x0016` | §2.5 ordering — emitted in route order, **never sorted** |
+
+One field, deliberately. `max_hops` is not carried: it is authoritative in `TradeIntent`
+field 6, and route validity checks `len(legs) ≤ max_hops` against the intent the route serves.
+
+**Sequence, not set** — this is the distinction §2.5 exists for. A route's hops are ordered by
+execution; reordering them is a *different route*, not the same one written differently.
+Sorting here would map two distinct routes onto one encoding, which is Req 3.2's failure
+reached from the opposite direction to collapsing a duplicate.
+
+**The heterogeneous element needs no tag.** Each leg is a complete CCB opening with its own
+`u16` class, so a reader sees `0x0015` or `0x0016` and knows what follows. A discriminant
+field inside `Route` would re-encode what the envelope already carries, and the two could then
+disagree.
+
+A leg count of zero is invalid: a route with no legs executes nothing and would give the empty
+sequence a meaning the specification does not define.
+
+### 5.14 `RouteSet` — class `0x000C`, schema 1
+
+§9.3: `R = {r_1,…,r_k}`, "canonicalized by route CCB ascending", with `k` bounded by
+`TradeIntent.k`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `routes` | set of `0x000D` | §2.4 ordering over complete `Route` CCB; duplicates invalid |
+
+`k` is not carried, for the same reason `max_hops` is not: Req 9.1 makes it a `TradeIntent`
+bound — and explicitly an *independent* one, warning that "an implementation must not use `k`
+as the fanout limit". The set's cardinality is checked against `TradeIntent` field 8.
+
+Two routes with identical legs in identical order are the same route, so a duplicate is a
+producer bug and is refused rather than collapsed. Note this is genuinely a **set** while its
+elements are **sequences** — the alternatives `R` retains are unordered, the hops inside each
+are not.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -502,8 +545,6 @@ writing an encoder.**
 
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
-| `0x000C` | `RouteSet` `R` | "`R = {r_1,…,r_k}`, canonicalized by route CCB ascending" — a §2.4 **set** ordered by complete `Route` CCB | only `0x000D`; the ordering rule is already fixed |
-| `0x000D` | `Route` `r_i` | **more than "a set member"**: §9.3 gives `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`, "a sequence of logical legs, each leg being either a one-vault allocation or a same-pair allocation bundle" | a §2.5 **sequence** of heterogeneous legs, self-discriminating via `0x0015`/`0x0016` envelopes. Needs `max_hops` enforcement sited, and whether the sequence is the only field |
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
 | `0x0012` | `TradeDigest` | commits "the pair, executed amounts, participating vault identifiers, parent bindings, fees, and `X`" | six named components with no types and no ordering for the multi-valued ones |
 
@@ -687,7 +728,12 @@ In order, and not combined:
    reserves living outside the predicate — and design the normative objects from Rev 15's beta
    semantics rather than canonizing the enum.
 
-   **2b. Routing and commitment profile.** `Route` `0x000D`, `RouteSet` `0x000C`,
+   **2b. Routing and commitment profile — COMPLETE.** `Route` `0x000D`, `RouteSet` `0x000C`,
+   `Allocation` `0x0015`, `AllocationBundle` `0x0016` and `RouteCommitmentBody` `0x0017` are
+   specified; `ExternalCommitmentBody` `0x0014` is burned. The original framing follows, kept
+   for the record:
+
+   **2b (as originally scoped).** `Route` `0x000D`, `RouteSet` `0x000C`,
    `ExternalCommitmentBody` `0x0014`, `TradeDigest` `0x0012`. One dependency cluster:
    `RouteSet` cannot be canonical until `Route` is, the digest binds `X`, and route ranking
    and membership need one byte identity. Existing route SDK and proto structures are evidence
