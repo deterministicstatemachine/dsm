@@ -26,6 +26,20 @@
 //! from set size is not owner-committed, and two clients with different rules
 //! would disagree with nothing on the wire to detect it.
 //!
+//! ## Signed is not validated
+//!
+//! This primitive proves `q` was **committed**, not that it is **correct**. It
+//! holds `storage_set_id` rather than the resolved set, so it cannot know the
+//! member count and cannot check `q` against the Req 6.13 beta profile — the
+//! tests here deliberately sign `q = 3` to show an out-of-profile value signs
+//! and verifies perfectly well at this layer.
+//!
+//! Closing Area 3 of the conformance delta therefore needs the lifecycle
+//! verifier, which must resolve the authenticated `S`, require exactly five
+//! members, require `q = 4`, and only then verify the anchor. Req 6.11 forbids
+//! lowering the threshold when members disappear, and nothing here can enforce
+//! that. Signature inclusion is a precondition of the rule, not the rule.
+//!
 //! ## Clean cut — Req 6.6
 //!
 //! This "uses a new domain/schema and must not be silently accepted as the
@@ -51,6 +65,10 @@ use crate::crypto::blake3::dsm_domain_hasher;
 pub enum AnchorV2Error {
     SignatureInvalid,
     SignFailed(String),
+    /// The anchor's embedded key is not the owner key the caller authenticated
+    /// elsewhere. Checked before the signature, because a signature verifying
+    /// under a self-declared key proves only that *someone* signed.
+    OwnerKeyMismatch,
 }
 
 impl core::fmt::Display for AnchorV2Error {
@@ -58,6 +76,10 @@ impl core::fmt::Display for AnchorV2Error {
         match self {
             AnchorV2Error::SignatureInvalid => write!(f, "v2 anchor signature verification failed"),
             AnchorV2Error::SignFailed(msg) => write!(f, "v2 anchor sphincs sign failed: {msg}"),
+            AnchorV2Error::OwnerKeyMismatch => write!(
+                f,
+                "v2 anchor is signed by a key other than the authenticated vault owner"
+            ),
         }
     }
 }
@@ -150,10 +172,26 @@ pub fn sign_vault_state_anchor_v2(
     })
 }
 
-/// Verify the owner's signature over the anchor's own public fields.
+/// Verify that **the authenticated vault owner** signed this anchor.
+///
+/// `expected_owner_public_key` must come from material the caller has already
+/// authenticated — the vault's birth state, the reserve-owner record, the
+/// composed `V_n`. It is a parameter rather than something read from the
+/// anchor, deliberately.
+///
+/// An anchor carries `owner_public_key`, and verifying against that embedded
+/// key would prove only "this key signed these bytes". Anyone can generate a
+/// SPHINCS+ pair, put any `vault_id` in an anchor, sign it, and pass such a
+/// check. The legacy anchor has exactly that weakness; the clean cut is the
+/// moment to stop propagating it, so this function cannot be used without an
+/// externally supplied key.
 pub fn verify_vault_state_anchor_v2(
     anchor: &SignedVaultStateAnchorV2,
+    expected_owner_public_key: &[u8],
 ) -> Result<(), AnchorV2Error> {
+    if anchor.owner_public_key != expected_owner_public_key {
+        return Err(AnchorV2Error::OwnerKeyMismatch);
+    }
     let payload = anchor.parent_binding();
     let ok = crate::crypto::sphincs::sphincs_verify(
         &anchor.owner_public_key,
@@ -202,7 +240,47 @@ mod tests {
     fn a_signed_anchor_verifies() {
         let (pk, sk) = keypair();
         let a = anchor(&pk, &sk, 3, [0x01; 32], [0x02; 32], 4);
-        assert_eq!(verify_vault_state_anchor_v2(&a), Ok(()));
+        assert_eq!(verify_vault_state_anchor_v2(&a, &pk), Ok(()));
+    }
+
+    /// A SELF-DECLARED KEY PROVES NOTHING. This is the attack the verifier's
+    /// key parameter exists to stop: anyone can generate a SPHINCS+ pair, put
+    /// any vault_id in an anchor, sign it, and produce something that verifies
+    /// against its own embedded key.
+    #[test]
+    fn an_anchor_signed_by_a_stranger_does_not_verify_as_the_owners() {
+        let (owner_pk, _owner_sk) = keypair();
+        let (attacker_pk, attacker_sk) = keypair();
+
+        // A perfectly well-formed anchor for the victim's vault, signed with
+        // the attacker's own key.
+        let forged = anchor(&attacker_pk, &attacker_sk, 5, [0x01; 32], [0x02; 32], 4);
+
+        // It verifies against the key it carries — which is exactly the
+        // guarantee the legacy primitive offered, and it is not ownership.
+        assert_eq!(
+            verify_vault_state_anchor_v2(&forged, &attacker_pk),
+            Ok(()),
+            "the forgery is internally well-formed, which is the problem"
+        );
+
+        // Against the authenticated owner key it is refused, before the
+        // signature is even examined.
+        assert_eq!(
+            verify_vault_state_anchor_v2(&forged, &owner_pk),
+            Err(AnchorV2Error::OwnerKeyMismatch),
+            "an anchor signed by a stranger must not verify as the owner's"
+        );
+
+        // Relabelling the embedded key does not conjure the owner's signature,
+        // so the check cannot be satisfied by editing that field.
+        let mut relabelled = forged.clone();
+        relabelled.owner_public_key = owner_pk.clone();
+        assert_eq!(
+            verify_vault_state_anchor_v2(&relabelled, &owner_pk),
+            Err(AnchorV2Error::SignatureInvalid),
+            "relabelling the key does not produce the owner's signature"
+        );
     }
 
     /// PINS THE DOMAIN AND THE FIELD ORDER TO REV 15 DEF 6.4.
@@ -240,20 +318,31 @@ mod tests {
             "the binding must be Def 6.4 exactly — domain, order and widths"
         );
 
-        // And it is NOT the legacy domain, which is the whole point of Req 6.6.
-        let mut legacy_domain = blake3::Hasher::new();
-        legacy_domain.update(b"DSM/vault-state-anchor\0");
-        legacy_domain.update(&[0u8]);
-        legacy_domain.update(&vault);
-        legacy_domain.update(&generation.to_be_bytes());
-        legacy_domain.update(&psc);
-        legacy_domain.update(&reserves);
-        legacy_domain.update(&set);
-        legacy_domain.update(&q.to_be_bytes());
+        // And it is not the LEGACY payload for the same vault. Reconstructed
+        // exactly as V1 builds it: the tag literal already ends in NUL and V1
+        // hashes it directly, so there is no second separator, and the legacy
+        // payload carries neither a parent state commitment nor q.
+        let mut legacy = blake3::Hasher::new();
+        legacy.update(b"DSM/vault-state-anchor\0");
+        legacy.update(&vault);
+        legacy.update(&generation.to_be_bytes());
+        legacy.update(&reserves);
+        legacy.update(&set);
+        let legacy: [u8; 32] = *legacy.finalize().as_bytes();
         assert_ne!(
-            expected,
-            *legacy_domain.finalize().as_bytes(),
-            "the v2 domain must differ from the legacy one"
+            expected, legacy,
+            "the v2 binding must differ from the legacy payload for the same vault"
+        );
+        // Cross-check the reconstruction against V1's own code, so this pins
+        // the real legacy construction rather than a guess at it.
+        let (lpk, lsk) = keypair();
+        let legacy_anchor =
+            v1::sign_vault_state_anchor(&vault, generation, &reserves, &set, &lpk, &lsk)
+                .expect("legacy signs");
+        assert!(
+            crate::crypto::sphincs::sphincs_verify(&lpk, &legacy, &legacy_anchor.owner_signature)
+                .expect("verify runs"),
+            "the reconstructed legacy payload must be the one V1 actually signs"
         );
     }
 
@@ -289,6 +378,11 @@ mod tests {
 
     /// `q` is committed, so changing it changes the binding. A reader that
     /// recomputed the threshold locally could not detect a substitution.
+    ///
+    /// Note this signs `q = 3`, which is NOT the Req 6.13 beta profile. That is
+    /// deliberate: it shows the primitive commits whatever it is given.
+    /// Validating `q` against the resolved set is the lifecycle verifier's job,
+    /// because this layer holds only `storage_set_id` and cannot count members.
     #[test]
     fn the_committed_quorum_is_part_of_the_binding() {
         let (pk, sk) = keypair();
@@ -300,7 +394,7 @@ mod tests {
         let mut tampered = at_four.clone();
         tampered.quorum = 3;
         assert_eq!(
-            verify_vault_state_anchor_v2(&tampered),
+            verify_vault_state_anchor_v2(&tampered, &pk),
             Err(AnchorV2Error::SignatureInvalid),
             "lowering the committed threshold must break the signature"
         );
@@ -331,7 +425,7 @@ mod tests {
             owner_signature: legacy.owner_signature.clone(),
         };
         assert_eq!(
-            verify_vault_state_anchor_v2(&smuggled),
+            verify_vault_state_anchor_v2(&smuggled, &pk),
             Err(AnchorV2Error::SignatureInvalid),
             "a legacy signature must not be accepted as a history-bound one"
         );
@@ -403,32 +497,49 @@ mod tests {
         let c0 = vault_state_commitment(&v0).expect("c_0");
         let v1 = mk(1, 1_001_000, 499_547, c0);
 
-        let (pk, sk) = keypair();
-        let a0 = sign_vault_state_anchor_v2(
-            &vault,
-            0,
-            &v0.parent_state_commitment,
-            &[0x02; 32],
-            &[0x55; 32],
-            v0.quorum,
-            &pk,
-            &sk,
-        )
-        .expect("anchor 0");
-        let a1 = sign_vault_state_anchor_v2(
-            &vault,
-            1,
-            &v1.parent_state_commitment,
-            &[0x03; 32],
-            &[0x55; 32],
-            v1.quorum,
-            &pk,
-            &sk,
-        )
-        .expect("anchor 1");
+        // EVERY anchor input is derived from the state it describes. Nothing
+        // synthetic: a test that copies the lineage field across but invents
+        // the reserves digest and the set id proves the field can be carried,
+        // not that one state yields one anchor.
+        let anchor_for = |v: &VaultStateV2, pk: &[u8], sk: &[u8]| {
+            let reserves_digest = crate::dlv::vault_state_anchor::compute_reserves_digest(
+                v.market_policy.token_a(),
+                v.market_policy.token_b(),
+                v.reserve_a,
+                v.reserve_b,
+                v.fee_policy.fee_bps(),
+            );
+            let set_id = crate::ccb::storage_set_id(&v.storage_set).expect("set id");
+            sign_vault_state_anchor_v2(
+                &v.vault_id,
+                v.generation,
+                &v.parent_state_commitment,
+                &reserves_digest,
+                &set_id,
+                v.quorum,
+                pk,
+                sk,
+            )
+            .expect("anchor signs")
+        };
 
-        assert_eq!(verify_vault_state_anchor_v2(&a0), Ok(()));
-        assert_eq!(verify_vault_state_anchor_v2(&a1), Ok(()));
+        let (pk, sk) = keypair();
+        let a0 = anchor_for(&v0, &pk, &sk);
+        let a1 = anchor_for(&v1, &pk, &sk);
+
+        assert_eq!(verify_vault_state_anchor_v2(&a0, &pk), Ok(()));
+        assert_eq!(verify_vault_state_anchor_v2(&a1, &pk), Ok(()));
+
+        // The derived inputs really are the state's, not incidental constants.
+        assert_eq!(
+            a1.storage_set_id,
+            crate::ccb::storage_set_id(&v1.storage_set).expect("set id"),
+            "the anchor's set id is the one committed in V_n"
+        );
+        assert_ne!(
+            a0.reserves_digest, a1.reserves_digest,
+            "different reserves must give different digests, so the digest is derived"
+        );
         assert_eq!(a0.parent_state_commitment, h0);
         assert_eq!(
             a1.parent_state_commitment, c0,
@@ -480,7 +591,7 @@ mod tests {
             let mut tampered = base.clone();
             apply(&mut tampered);
             assert_eq!(
-                verify_vault_state_anchor_v2(&tampered),
+                verify_vault_state_anchor_v2(&tampered, &pk),
                 Err(AnchorV2Error::SignatureInvalid),
                 "{field} must be inside the signature"
             );
