@@ -965,29 +965,17 @@ impl AppRouterImpl {
                             composed.sequence,
                         );
                     }
-                    // A validly-signed pointer sits on the exact sequence this
-                    // composition ended on and nothing witnesses it, so some
-                    // trade may already have consumed the state a quote would be
-                    // built against. Drop the vault rather than quote it.
-                    //
-                    // This is not the safety gate — the first-writer claim
-                    // refuses a contested slot before any advance, so a quote
-                    // built here could not settle twice. It is refusing EARLY,
-                    // so the trader does not sign a RouteCommit and publish X
-                    // against a parent in flight only to be refused at the claim.
-                    //
-                    // Keyed on the narrow signal, never on `pending_chain_skipped`:
-                    // that counter sums malformed, stale and depth-exceeded
-                    // pointers too, and refusing on it would let one junk pointer
-                    // un-quotable a vault forever.
-                    if composed.blocked_by_unreceipted_pointer_at_parent {
-                        log::info!(
-                            "[route.findAndBindBestPath] vault {} dropped from candidates: an unreceipted pending trade holds seq={}",
-                            crate::util::text_id::encode_base32_crockford(&vid),
-                            composed.sequence,
-                        );
-                        continue;
-                    }
+                    // DELIBERATELY NO "parent in flight" drop here. A pending
+                    // pointer is SELF-signed: any keypair can publish one
+                    // naming this vault's current parent, with no RouteCommit,
+                    // no X and no settlement behind it, and the composer
+                    // cannot tell that from a genuine trade whose receipt is a
+                    // moment away. A quote decision keyed on an unwitnessed
+                    // pointer's bare presence would therefore hand liquidity
+                    // suppression to anyone for one storage write. Competing
+                    // quotes race instead, and the loser is refused at the
+                    // first-writer settlement-slot claim — where losing costs
+                    // nothing and winning requires actually holding the slot.
                     if composed.pending_chain_len
                         >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
                     {
@@ -1129,24 +1117,10 @@ mod stamping_tests {
         crate::reset_sdk_context_for_testing();
         crate::sdk::app_state::AppState::reset_memory_for_testing();
         crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (device_id, genesis_hash, binding_key) =
-            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        let _ = crate::storage::client_db::init_database();
+        // The database must exist BEFORE the identity: the v3 fixture
+        // persists the genesis record the presentation builder reads back.
+        crate::storage::client_db::init_database().expect("init db");
+        let (public_key, _did) = crate::sdk::funded_vault_fixture::install_v3_identity(0x0A);
         public_key
     }
 
