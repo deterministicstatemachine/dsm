@@ -261,7 +261,7 @@ storage address, a resource key or an authority check appears here.
 
 | Class | Object | Schema | Commitment it feeds | Status |
 |---|---|---|---|---|
-| `0x0001` | `VaultStateV2` (`V_n`) | 1 | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined |
+| `0x0001` | `VaultStateV2` (`V_n`) | 1, 2 | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 (schema 1), §5.1a (schema 2) |
 | `0x0002` | `StorageSet` (`S`) | 1 | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined |
 | `0x0004` | `EncumbranceClaim` (`e_j`) | 1 | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | 1 | `E = H(DSM/enc ‖ vault_id ‖ CCB)` | §5.3 defined |
@@ -380,7 +380,7 @@ domain-separated genesis value at `n = 0`.
 | 10 | `encumbrances` (`E`) | nested `0x0005` | the encumbrance set, inline by value |
 | 11 | `iteration_budget` (`β`) | optional `u64` | §2.3 presence marker; absent is the common case |
 | 12 | `parent_state_commitment` (`h_n`) | `digest32` | `c_{n-1}`, or the genesis value at `n = 0` |
-| 13 | `owner_root` (`r_o`) | `digest32` | the authenticated owner root |
+| 13 | `owner_root` (`r_o`) | `digest32` | the authenticated owner root — Rev 15's undefined phrase; **schema 1 only**, see §5.1a |
 | 14 | `storage_set` (`S`) | nested `0x0002` | inline by value; note `0x0002` carries the frozen legacy layout of §5.2 |
 | 15 | `quorum` (`q`) | `u32` | the fixed threshold; validity is `q` conformant for `|S|` per the beta profile |
 
@@ -391,6 +391,35 @@ amendment removed.
 
 `q` is a field of the state rather than of `B_M`, and `S` likewise, because Def 4.1 makes both
 members of `V_n`. `M` commits their birth values transitively through `c_0`.
+
+### 5.1a `VaultStateV2` — class `0x0001`, **schema 2**
+
+Identical to schema 1 in every field except 13, which is renamed and given a definition Rev 15 never
+supplied:
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 13 | `owner_authority_transition_digest` | `digest32` | `t_j = H_dom(DSM/devtree-transition, CCB(T_j))` — the exact `0x001A` transition under which the owner asserts the device authority that signs for this vault |
+
+Fields 1–12, 14 and 15 carry their schema-1 declarations unchanged.
+
+**Why a new schema version rather than a redefinition.** §2.8 requires it: once an
+`(object_class, schema_version)` pair ships, changed semantics need a new schema version. Schema 1's
+`owner_root` is Rev 15's undefined "authenticated owner root"; giving those bytes a precise new
+meaning in place is the move §2.8 forbids. That the field happens to be unset in production makes
+the cut cheap — it does not make the redefinition permissible, and an earlier revision of this
+registry treated it as if it did.
+
+The rename is part of the point. A transition digest is not a "root", and carrying that word forward
+would preserve an imprecision inherited from a phrase the specification never defined.
+
+**Why the position lives in the state at all.** A generation and its authority position cannot
+disagree when they are one commitment. A trader authenticates `AK_pk` by discharging the area 8
+predicate at this **bound position**, which is what closes the check without a freshness assumption.
+The value is **invariant across market successors** — copied byte-for-byte, never advanced — because
+a market successor executes while the owner is absent and must not move the owner-authority
+reference. Semantics, publication and the verification staging are in
+[`docs/plans/2026-08-23-sofi-authority-position-commitment.md`](../plans/2026-08-23-sofi-authority-position-commitment.md).
 
 ### 5.2 `StorageSet` — class `0x0002`, schema 1
 
