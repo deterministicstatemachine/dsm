@@ -37,6 +37,7 @@ fn genesis_persists_and_initializes_wallet_metadata() {
         verification_step: None,
         genesis_nonce: String::new(),
         genesis_profile: String::new(),
+        network_id: "dsm-test".into(),
     };
 
     // Store genesis record and ensure wallet state

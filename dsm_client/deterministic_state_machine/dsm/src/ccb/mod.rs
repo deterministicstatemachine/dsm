@@ -45,7 +45,9 @@ pub mod devtree;
 pub mod genesis;
 pub mod state;
 
-pub use decode::{decode_vault_state, DecodeError};
+pub use decode::{
+    decode_delegation, decode_genesis_params, decode_transition, decode_vault_state, DecodeError,
+};
 pub use devtree::{
     delegation_genesis_sentinel, role, transition_genesis_sentinel, DeviceTreeRootTransition,
     RootProgressionDelegation,

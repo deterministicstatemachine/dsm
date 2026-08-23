@@ -19,9 +19,11 @@
 //! bytes**; decoding them into fields is the step-5 resolver's job.
 
 use dsm::ccb::{vault_state_commitment, VaultStateV2};
-use dsm::common::domain_tags::TAG_DSM_VAULT_STATE;
+use dsm::common::domain_tags::{TAG_DSM_ANCHOR_PRESENTATION_V1, TAG_DSM_VAULT_STATE};
 use dsm::types::error::DsmError;
+use prost::Message;
 
+use crate::generated;
 use crate::sdk::storage_node_sdk::StorageNodeSDK;
 
 /// Encode, derive `c_n`, and publish `CCB(V_n)` to every configured node.
@@ -71,4 +73,42 @@ pub async fn fetch_vault_state_bytes(
         ));
     }
     Ok(Some(bytes))
+}
+
+/// Publish an `AnchorPresentationV3` immutably; returns its 32-byte inner
+/// digest `p = H_dom(DSM/anchor-presentation/v1, bytes)` — the value a
+/// discovery path (advertisement) carries. The presentation is transport, so
+/// content-addressing it buys tamper-evident distribution: a mutated bundle
+/// simply fails to resolve at the advertised digest.
+pub async fn publish_anchor_presentation(
+    sdk: &StorageNodeSDK,
+    presentation: &generated::AnchorPresentationV3,
+) -> Result<([u8; 32], String, u32), DsmError> {
+    let bytes = presentation.encode_to_vec();
+    let digest = dsm::storage_object::immutable_inner(TAG_DSM_ANCHOR_PRESENTATION_V1, &bytes);
+    let (addr_b32, acks) = sdk
+        .publish_immutable(TAG_DSM_ANCHOR_PRESENTATION_V1, &bytes)
+        .await?;
+    Ok((digest, addr_b32, acks))
+}
+
+/// Fetch an `AnchorPresentationV3` by its advertised inner digest.
+///
+/// The transport layer's re-hash pins the exact bytes; the decode here is
+/// structure only. NOTHING in the result is authenticated — the caller must
+/// run it through `verify_anchor_presentation` before quoting against it.
+pub async fn fetch_anchor_presentation(
+    sdk: &StorageNodeSDK,
+    digest: &[u8; 32],
+) -> Result<Option<generated::AnchorPresentationV3>, DsmError> {
+    let Some(bytes) = sdk
+        .fetch_immutable_verified(TAG_DSM_ANCHOR_PRESENTATION_V1, digest)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let p = generated::AnchorPresentationV3::decode(bytes.as_slice()).map_err(|e| {
+        DsmError::verification(format!("anchor presentation fetch: decode failed: {e}"))
+    })?;
+    Ok(Some(p))
 }

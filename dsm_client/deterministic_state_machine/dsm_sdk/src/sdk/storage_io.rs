@@ -158,6 +158,35 @@ pub(crate) async fn put_bytes_to_all_members(
     }
 }
 
+/// Immutable-channel sibling of [`put_bytes_to_all_members`]: deliver one
+/// Area-4 `(namespace, payload)` tuple to every member of `set` through the
+/// write-once immutable endpoint. `expected_addr_b32` is the client's own
+/// address derivation; a node that computes a different address refuses.
+pub(crate) async fn put_immutable_to_all_members(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &str,
+    payload: &[u8],
+    expected_addr_b32: &str,
+) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
+    #[cfg(test)]
+    {
+        // The fake fleet stores under a key carrying the address, so tests can
+        // assert exactly which immutable object reached which member.
+        Ok(fake_fleet::put(
+            set,
+            &format!("immutable::{namespace}::{expected_addr_b32}"),
+            payload,
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        Ok(sdk
+            .put_immutable_to_all_members(set, namespace, payload, expected_addr_b32)
+            .await)
+    }
+}
+
 /// Submit one frozen settlement-slot claim envelope to every member of `set`,
 /// each authenticated with its OWN per-node token (lazily back-filled like
 /// [`put_bytes`]). Never decides quorum; never retries — the caller replays the

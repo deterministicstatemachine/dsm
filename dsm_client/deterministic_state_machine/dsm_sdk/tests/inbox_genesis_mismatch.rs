@@ -53,6 +53,7 @@ fn store_verified_genesis(device_id_b32: &str, genesis_bytes: [u8; 32]) {
         verification_step: None,
         genesis_nonce: String::new(),
         genesis_profile: String::new(),
+        network_id: "dsm-test".into(),
     };
 
     client_db::store_genesis_record_with_verification(&record).unwrap();

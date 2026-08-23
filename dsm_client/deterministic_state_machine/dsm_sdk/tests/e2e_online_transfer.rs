@@ -62,6 +62,7 @@ fn persist_live_genesis_record(
         verification_step: None,
         genesis_nonce: String::new(),
         genesis_profile: String::new(),
+        network_id: "dsm-test".into(),
     };
     store_genesis_record_with_verification(&genesis_record)
         .unwrap_or_else(|e| panic!("Failed to store genesis record: {e}"));
