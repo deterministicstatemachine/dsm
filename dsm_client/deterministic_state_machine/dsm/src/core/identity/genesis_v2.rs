@@ -56,7 +56,7 @@ pub enum GenesisEntropyProfile {
 /// (terminated by `0x00`, mirroring `dsm_domain_hasher`) is the HKDF salt; `secret` is the
 /// IKM (any length — `wallet_seed` is the 64-byte BIP39 seed); `parts` are the bound
 /// context. Mirrors the master-seed family's use of `hkdf::extract_and_expand`.
-fn kdf32(secret: &[u8], domain: TaggedHashDomain<'_>, parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn kdf32(secret: &[u8], domain: TaggedHashDomain<'_>, parts: &[&[u8]]) -> [u8; 32] {
     debug_assert!(
         domain.source_bytes().starts_with(b"DSM/"),
         "domain tag must start with DSM/"
