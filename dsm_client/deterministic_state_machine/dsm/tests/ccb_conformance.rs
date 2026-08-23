@@ -638,6 +638,47 @@ fn a_nested_schema_bump_changes_the_enclosing_encoding() {
     );
 }
 
+/// `GenesisParamsV3` `0x0018` agrees with an independent construction whose
+/// domain tag is typed from the REGISTRY, not copied from the code.
+///
+/// That provenance is the point of this test. The `DSM/storage-set/v1` /
+/// `DSM/storage-set` mismatch survived every review precisely because the
+/// "independent" recomputation inherited its tag literal from the
+/// implementation — independent at every input except the one that was wrong.
+/// Here the tag, the class, the schema and the field order are all transcribed
+/// from registry §5.15 and §3.1.
+#[test]
+fn genesis_params_v3_agrees_with_an_independent_construction() {
+    use dsm::ccb::{genesis_v3_commitment, sigalg, GenesisParamsV3};
+
+    let nonce = d(0xB1);
+    let net = b"dsm-test".to_vec();
+    let pk = vec![0x5A; 64]; // SPX256f pk width per registry §3.1
+    let params = GenesisParamsV3::new(nonce, &net, 3, sigalg::SPHINCS_PLUS_SPX256F, &pk)
+        .expect("valid params");
+    let g = genesis_v3_commitment(&params).expect("g");
+
+    // Registry §5.15: envelope(0x0018, 1) ‖ nonce ‖ bytes(network_id) ‖
+    // u32(version) ‖ u16(alg) ‖ bytes(grk_pk).
+    let ccb = [
+        indep::envelope(0x0018, 1),
+        nonce.to_vec(),
+        indep::bytes_field(&net),
+        indep::u32be(3),
+        indep::u16be(0x0001),
+        indep::bytes_field(&pk),
+    ]
+    .concat();
+    assert_eq!(params.encode().expect("encodes"), ccb);
+
+    // Spec domain table: DSM/genesis/v3 — typed here from the document.
+    let mut preimage = b"DSM/genesis/v3".to_vec();
+    preimage.push(0x00);
+    preimage.extend(&ccb);
+    let expected: [u8; 32] = *blake3::hash(&preimage).as_bytes();
+    assert_eq!(g, expected, "G is H_dom(DSM/genesis/v3, CCB) exactly");
+}
+
 /// Validity conditions refuse rather than repair.
 #[test]
 fn invalid_inputs_are_refused_rather_than_normalized() {

@@ -28,6 +28,7 @@ const _: () = assert!(
 pub mod genesis;
 pub mod genesis_session;
 pub mod genesis_v2;
+pub mod genesis_v3;
 // hierarchical_device_management deleted: 1180-line module with zero external
 // callers. Its own doc comment noted "DO NOT use this Merkle implementation for
 // π_dev" — it's legacy superseded by crate::common::device_tree (§5 Device Tree)
