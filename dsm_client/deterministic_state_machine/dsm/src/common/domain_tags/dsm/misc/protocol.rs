@@ -55,6 +55,14 @@ pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1: TaggedHashDomain<'static> =
 /// structural rather than a matter of caller discipline.
 pub const TAG_DSM_VAULT_STATE_ANCHOR_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/vault-state-anchor/v2");
+/// Owner-signed baseline over the canonical state identity, Def 6.4a:
+/// `m_sig = H(tag ‖ 0x00 ‖ c_n)`, and the signature carries **no other
+/// authoritative content** — generation, reserves, storage set and the
+/// authority position are all read from the `V_n` that `c_n` identifies,
+/// never from anchor metadata. The `/v2` domain above is burned by the
+/// state-identity cut; this is the only anchor form.
+pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/vault-state-anchor/v3");
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =
