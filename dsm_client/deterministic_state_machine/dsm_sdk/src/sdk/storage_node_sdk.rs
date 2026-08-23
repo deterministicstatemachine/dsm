@@ -639,6 +639,90 @@ impl StorageNodeClient {
 
     /// Keyed PUT that also returns the node's ECHOED identity
     /// (`x-dsm-node-id` response header), so a fan-out can count an
+    /// PUT one immutable object (Area 4). The node computes the address from
+    /// `(namespace, payload)`; `expected_addr_b32` is sent so a disagreeing
+    /// encoder is refused server-side as a storage error (Req 15.2). Returns
+    /// the node's address string on 200/201.
+    pub async fn put_immutable(
+        &self,
+        namespace: &str,
+        payload: &[u8],
+        expected_addr_b32: &str,
+    ) -> Result<String, StorageNodeError> {
+        let url = format!("{base}/api/v2/immutable/put", base = self.node_info.url);
+        let mut req = self
+            .client
+            .post(&url)
+            .header("x-namespace", namespace)
+            .header("x-expected-addr", expected_addr_b32)
+            .header("Content-Type", "application/octet-stream")
+            .body(payload.to_vec());
+        if let Some(auth) = &self.auth {
+            req = req.header(
+                "authorization",
+                format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+            );
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| StorageNodeError::network(format!("immutable put: {e}")))?;
+        let status = resp.status();
+        if !(status.is_success()) {
+            return Err(StorageNodeError::network(format!(
+                "immutable put: HTTP {status}"
+            )));
+        }
+        resp.text()
+            .await
+            .map_err(|e| StorageNodeError::network(format!("immutable put body: {e}")))
+    }
+
+    /// GET one immutable object by content address. Returns the raw
+    /// `(namespace, payload)` tuple, both **untrusted** — the caller MUST
+    /// recompute the address from this tuple and compare it with the address
+    /// it asked for, before decoding anything (Req 15.3). The node's own
+    /// hash-on-read is defence in depth against corruption; this return value
+    /// crossing the trust boundary is the reason it is not the security
+    /// boundary.
+    pub async fn get_immutable(
+        &self,
+        addr_b32: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageNodeError> {
+        let url = format!(
+            "{base}/api/v2/immutable/{addr}",
+            base = self.node_info.url,
+            addr = addr_b32
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| StorageNodeError::network(format!("immutable get: {e}")))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(StorageNodeError::network(format!(
+                "immutable get: HTTP {}",
+                resp.status()
+            )));
+        }
+        let namespace = resp
+            .headers()
+            .get("x-namespace")
+            .map(|v| v.as_bytes().to_vec())
+            .ok_or_else(|| {
+                StorageNodeError::network("immutable get: response missing x-namespace".into())
+            })?;
+        let payload = resp
+            .bytes()
+            .await
+            .map_err(|e| StorageNodeError::network(format!("immutable get body: {e}")))?;
+        Ok(Some((namespace, payload.to_vec())))
+    }
+
     /// acceptance only when the node that answered is the member the catalog
     /// says lives at this endpoint. Same request shape as [`Self::put`].
     pub async fn put_echoing_node_id(
@@ -1219,6 +1303,88 @@ impl StorageNodeSDK {
     /// endpoint (per-node auth already attached). An acceptance counts only if
     /// the node ECHOES that member's id: "distinct members" is executable, not
     /// administrative.
+    /// Publish an immutable object to every configured node. Returns the
+    /// number of nodes that accepted (201 Created or 200 idempotent re-ack).
+    ///
+    /// The address is computed CLIENT-SIDE from `(namespace, payload)` and
+    /// sent as the expected address, so a node whose derivation disagrees
+    /// refuses rather than storing under a different key.
+    pub async fn publish_immutable(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+        payload: &[u8],
+    ) -> Result<(String, u32), DsmError> {
+        let addr = dsm::storage_object::immutable_addr(namespace, payload);
+        let addr_b32 = crate::util::text_id::encode_base32_crockford(&addr);
+        let ns_str = String::from_utf8(namespace.source_bytes().to_vec())
+            .map_err(|_| DsmError::invalid_parameter("namespace tag is not UTF-8"))?;
+        let mut acks = 0u32;
+        for client in self.clients.iter() {
+            match client.put_immutable(&ns_str, payload, &addr_b32).await {
+                Ok(_) => acks += 1,
+                Err(e) => log::warn!(
+                    "publish_immutable: node {} refused: {e}",
+                    client.node_info.url
+                ),
+            }
+        }
+        Ok((addr_b32, acks))
+    }
+
+    /// Fetch an immutable object by its namespace and inner digest, verifying
+    /// it CLIENT-SIDE before returning — this is the Req 15.3 boundary.
+    ///
+    /// For a registered CCB object the inner digest is the object's identity
+    /// (`c_n` for `V_n`), so a caller holding the identity needs no index and
+    /// no discovery: the address is a computation.
+    ///
+    /// Tries every configured node; the first response whose returned
+    /// `(namespace, payload)` tuple re-hashes to the REQUESTED address wins.
+    /// A response that fails the re-hash is discarded and logged — a hostile
+    /// or corrupt node cannot make the client accept wrong bytes, only fail
+    /// to serve it.
+    pub async fn fetch_immutable_verified(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+        inner: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, DsmError> {
+        let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
+        let addr_b32 = crate::util::text_id::encode_base32_crockford(&addr);
+        let mut any_found = false;
+        for client in self.clients.iter() {
+            let Ok(Some((ns, payload))) = client.get_immutable(&addr_b32).await else {
+                continue;
+            };
+            any_found = true;
+            // The security boundary: recompute from the RETURNED tuple and
+            // compare against the address WE computed — never against
+            // anything the node reports.
+            let Ok(domain) = dsm::crypto::domain::TaggedHashDomain::try_new(&ns) else {
+                log::warn!(
+                    "fetch_immutable_verified: {} returned an invalid namespace — discarded",
+                    client.node_info.url
+                );
+                continue;
+            };
+            let recomputed = dsm::storage_object::immutable_addr(domain, &payload);
+            if recomputed != addr {
+                log::warn!(
+                    "fetch_immutable_verified: {} returned bytes that do not hash to the \
+                     requested address — discarded",
+                    client.node_info.url
+                );
+                continue;
+            }
+            return Ok(Some(payload));
+        }
+        if any_found {
+            return Err(DsmError::verification(
+                "immutable fetch: every response failed the client-side re-hash",
+            ));
+        }
+        Ok(None)
+    }
+
     pub async fn put_bytes_to_all_members(
         &self,
         set: &crate::sdk::storage_set::StorageSet,

@@ -63,6 +63,13 @@ pub const TAG_DSM_VAULT_STATE_ANCHOR_V2: TaggedHashDomain<'static> =
 /// state-identity cut; this is the only anchor form.
 pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/vault-state-anchor/v3");
+/// Immutable content-addressed storage object (Rev 15 §15.3, Area 4):
+/// `addr(N, P) = H(tag ‖ 0x00 ‖ N_bytes ‖ H(N ‖ 0x00 ‖ P))`, where `N` is the
+/// payload's namespace tag. The address is a pure function of `(N, P)` — no
+/// path, no partition id, no writer, no clock — which is what makes
+/// Req 15.2's idempotence meaningful rather than accidental.
+pub const TAG_DSM_STORAGE_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage-object");
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =

@@ -72,7 +72,8 @@ pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
-// pub mod config; // Network detection moved to SDK - no HTTP in core
+pub mod storage_object; // Area 4 immutable content addressing — addr(N, P)
+                        // pub mod config; // Network detection moved to SDK - no HTTP in core
 pub mod core;
 pub mod cpta;
 pub mod crypto;

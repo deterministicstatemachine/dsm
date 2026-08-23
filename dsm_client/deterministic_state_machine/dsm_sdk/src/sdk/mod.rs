@@ -112,6 +112,7 @@ pub mod vault_reserve_proof_codec;
 pub mod vault_smt_inclusion_codec;
 pub mod vault_state_anchor_codec;
 pub mod vault_state_composition;
+pub mod vault_state_v3_codec;
 
 // Recovery system SDK
 pub mod recovery_sdk;
