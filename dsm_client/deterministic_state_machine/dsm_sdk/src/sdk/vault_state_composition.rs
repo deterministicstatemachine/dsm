@@ -92,24 +92,12 @@ pub(crate) struct ComposedVaultState {
     /// DIAGNOSTIC AGGREGATION, never a safety predicate. It sums causes that
     /// mean entirely different things, so a caller that refused on
     /// `pending_chain_skipped > 0` would let anyone un-quotable a vault forever
-    /// by publishing one malformed pointer — reintroducing the free-griefing
-    /// property the receipt gate exists to remove. Use the narrow signal below.
+    /// by publishing one malformed pointer — the free-griefing property the
+    /// receipt gate exists to remove. There is deliberately NO narrower
+    /// "parent in flight" signal either: a pointer is self-signed, so its bare
+    /// presence proves nothing a quote decision may consume, and the
+    /// first-writer settlement-slot claim is where competing quotes serialize.
     pub pending_chain_skipped: usize,
-    /// A pointer that is structurally sound and validly signed sits at exactly
-    /// the sequence this composition ended on, and no verified receipt witnesses
-    /// it.
-    ///
-    /// Some trade may already have consumed the state a quote would be built
-    /// against. It cannot actually double-settle — the first-writer claim
-    /// refuses a contested slot before any advance — so this is not a safety
-    /// signal. It spares the trader from quoting, signing a RouteCommit and
-    /// publishing X against a parent that is in flight, only to be refused at
-    /// the claim.
-    ///
-    /// Deliberately narrow. A malformed, stale, cryptographically invalid or
-    /// depth-exceeded pointer does NOT set this: none of them witness a trade in
-    /// flight, and treating them as if they did is precisely the griefing vector.
-    pub blocked_by_unreceipted_pointer_at_parent: bool,
     /// The vault owner, proven by the presentation's P0–P6 chain at the
     /// state's own committed authority position. Constant across generations
     /// — market successors copy the authority position byte-for-byte.
@@ -315,13 +303,6 @@ pub(crate) async fn compose_vault_state(
     let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
     let mut chain_skipped: usize = 0;
-    // Parents observed to carry a valid-but-unwitnessed pointer. Recorded per
-    // parent rather than as a running flag because the cursor can advance past
-    // an earlier block: two pointers may share a parent, and if the second is
-    // receipted it folds, which makes the first no longer describe the sequence
-    // being quoted. Only a block AT THE FINAL cursor matters.
-    let mut unreceipted_parents: std::collections::BTreeSet<u64> =
-        std::collections::BTreeSet::new();
     for ptr in pointers.into_iter() {
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
             chain_skipped += 1;
@@ -359,17 +340,20 @@ pub(crate) async fn compose_vault_state(
             {
                 Some(r) => r,
                 None => {
-                    // INERT, not invalid. The pointer may be perfectly well-formed
-                    // and its settlement may land a moment from now. Skipping leaves
-                    // effective reserves exactly as if it had never been published,
-                    // which is the whole point.
-                    //
-                    // But it IS a validly-signed claim on this exact parent, so a
-                    // quote built here would be built against a state that may
-                    // already be in flight. Recorded — every earlier `continue`
-                    // in this loop is a pointer that witnesses nothing at all and
-                    // must not block anyone.
-                    unreceipted_parents.insert(ptr.parent_sequence);
+                    // INERT — for reserves AND for quote availability. The
+                    // pointer may be a perfectly well-formed trade whose
+                    // settlement lands a moment from now, or it may be one
+                    // storage write from an arbitrary keypair: the primitive
+                    // cannot tell them apart, because a pointer is
+                    // SELF-signed and establishes no vault authority and no
+                    // settlement. Anything a composer concluded from its bare
+                    // presence — "this parent is in flight", most temptingly —
+                    // would hand liquidity suppression to anyone for the
+                    // price of one write. Skipping leaves the composed state
+                    // exactly as if the pointer had never been published;
+                    // serialization safety lives where it always did, at the
+                    // first-writer settlement-slot claim, where a losing
+                    // quote costs its owner nothing.
                     chain_skipped += 1;
                     continue;
                 }
@@ -378,8 +362,8 @@ pub(crate) async fn compose_vault_state(
             != ptr.expected_receipt_hash
         {
             // A receipt exists but does not witness THIS trade, so this pointer
-            // is as unwitnessed as one with no receipt at all.
-            unreceipted_parents.insert(ptr.parent_sequence);
+            // is as unwitnessed as one with no receipt at all — and exactly as
+            // inert.
             chain_skipped += 1;
             continue;
         }
@@ -390,7 +374,6 @@ pub(crate) async fn compose_vault_state(
         if receipt.trade.parent_sequence != ptr.parent_sequence
             || receipt.trade.new_sequence != ptr.new_sequence
         {
-            unreceipted_parents.insert(ptr.parent_sequence);
             chain_skipped += 1;
             continue;
         }
@@ -528,16 +511,12 @@ pub(crate) async fn compose_vault_state(
         chain_len += 1;
     }
 
-    let blocked = unreceipted_parents.contains(&cursor_state.generation);
     Ok(ComposedVaultState {
         sequence: cursor_state.generation,
         reserves_a: cursor_state.reserve_a,
         reserves_b: cursor_state.reserve_b,
         pending_chain_len: chain_len,
         pending_chain_skipped: chain_skipped,
-        // Only a block at the sequence actually reached. A pointer that blocked
-        // an earlier parent is irrelevant once the cursor has moved past it.
-        blocked_by_unreceipted_pointer_at_parent: blocked,
         owner_devid: owner.device_id,
         owner_genesis: cursor_state.owner_genesis_id,
         owner_public_key: owner.ak_pk,
@@ -899,7 +878,6 @@ mod tests {
         assert_eq!(composed.c_n, c0);
         assert_eq!(composed.state, state);
         assert_eq!(composed.pending_chain_len, 0);
-        assert!(!composed.blocked_by_unreceipted_pointer_at_parent);
         assert_eq!(
             composed.storage_set_id,
             dsm::ccb::storage_set_id(&state.storage_set).expect("set id")
@@ -1018,12 +996,15 @@ mod tests {
         assert_eq!(composed.state.quorum, state.quorum);
     }
 
-    /// A validly-signed pointer with no receipt does not fold, and marks the
-    /// composed parent as blocked.
+    /// An unreceipted pointer is INERT — for reserves and for quote
+    /// availability alike. Even a fully valid RouteCommit with a visible X is
+    /// producible without settling or claiming the slot, so nothing short of
+    /// the receipt may change what a composer reports: the composed state
+    /// must be byte-identical to the no-pointer case.
     #[tokio::test]
-    async fn an_unreceipted_pointer_blocks_but_never_folds() {
+    async fn an_unreceipted_pointer_is_inert_even_with_a_valid_route_and_visible_x() {
         let vault_id = vid(0x07);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (pk, sk) = trader();
         let (_na, _nb, x) = publish_rc_for_swap(
             &x_seed(0x07),
@@ -1042,9 +1023,6 @@ mod tests {
         let out = 1_000_000u64; // any number; no receipt will exist
         let trade = settled_trade(&x, 0, true, 10_000, out);
         publish_pointer(&vault_id, 0, 1, &x, &trade, &pk, &sk).await;
-        // pk/sk sign the pointer; the RC's signer was a different fixture key,
-        // which is fine — pointer publisher and RC initiator need not match.
-        let _ = sk;
 
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
@@ -1053,7 +1031,38 @@ mod tests {
         assert_eq!(composed.pending_chain_len, 0);
         assert_eq!(composed.sequence, 0);
         assert_eq!(composed.c_n, c0);
-        assert!(composed.blocked_by_unreceipted_pointer_at_parent);
+        assert_eq!(
+            composed.state, state,
+            "an unwitnessed intent changes NOTHING a composer reports"
+        );
+    }
+
+    /// The griefing case, pinned as refused: a pointer forged by an arbitrary
+    /// keypair — no RouteCommit, no X, arbitrary receipt commitment — at
+    /// exactly the current parent must leave the vault fully quotable. A
+    /// pointer is self-signed; its bare presence establishes no vault
+    /// authority and no settlement, so it may not suppress liquidity.
+    #[tokio::test]
+    async fn a_forged_pointer_from_an_arbitrary_key_cannot_suppress_liquidity() {
+        let vault_id = vid(0x0C);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (attacker_pk, attacker_sk) = trader();
+        // No X anchor, no RouteCommit, no receipt — one storage write.
+        let x = x_seed(0x0C);
+        let fake_trade = settled_trade(&x, 0, true, 1, 1);
+        publish_pointer(&vault_id, 0, 1, &x, &fake_trade, &attacker_pk, &attacker_sk).await;
+
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
+        assert_eq!(composed.pending_chain_len, 0);
+        assert_eq!(composed.sequence, 0);
+        assert_eq!(composed.c_n, c0);
+        assert_eq!(
+            composed.state, state,
+            "one arbitrary-keypair storage write must not change what any verifier composes"
+        );
     }
 
     /// A hop bound to a parent that is NOT the cursor's c_n is skipped: the
@@ -1125,9 +1134,9 @@ mod tests {
                 .expect("composes");
         assert_eq!(composed.pending_chain_len, 0);
         assert_eq!(composed.sequence, 0);
-        assert!(
-            composed.blocked_by_unreceipted_pointer_at_parent,
-            "an unmatched receipt leaves the pointer unwitnessed at the parent"
+        assert_eq!(
+            composed.c_n, c0,
+            "an unmatched receipt leaves the pointer unwitnessed — and inert"
         );
     }
 

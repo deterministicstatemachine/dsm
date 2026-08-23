@@ -2439,6 +2439,27 @@ impl AppRouterImpl {
                             ));
                         }
                     }
+                    // THE SEQUENCE JOIN. `state_number` is a second, independently
+                    // encodable statement of a fact already inside the V_n that
+                    // `parent_binding` names — and the pointer publisher derives
+                    // its discovery pointer's parent linkage from it. A signed
+                    // route carrying the correct binding beside a wrong number
+                    // would settle against the right parent while publishing a
+                    // pointer whose receipt commitment can never match the
+                    // receipt the settlement produces, leaving the settled
+                    // transition undiscoverable. While the field remains on the
+                    // wire, the two sources must agree byte-for-byte with the
+                    // authenticated state; the field's deletion is the eventual
+                    // fix, this equality is the guard until then.
+                    if hop.state_number != composed.sequence {
+                        return err(format!(
+                            "dlv.unlockRouted: the hop's state_number ({}) disagrees with the \
+                             generation ({}) of the state its parent_binding names — the route \
+                             restates a fact the bound V_n already carries, and the restatement \
+                             must match exactly",
+                            hop.state_number, composed.sequence,
+                        ));
+                    }
                 }
 
                 amm_fee_bps = vault_fee_bps;
@@ -3131,67 +3152,7 @@ mod funded_creation_tests {
     /// keeps its own state — which is the boundary that matters: the trader has
     /// no access to the owner's leaves and must work from published artifacts.
     fn become_device(seed: u8) -> (Vec<u8>, [u8; 32]) {
-        // A REAL v3 identity: the state-identity cut derives every vault
-        // birth's authority chain (GRK → D_0 → T_0) from the wallet seed, so
-        // fixture identities are seed-rooted exactly like production ones.
-        let wallet_seed = vec![seed; 64];
-        let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
-        let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
-            &wallet_seed,
-            b"dsm-test",
-            0,
-            0,
-            3,
-            &aph,
-        )
-        .expect("v3 genesis");
-        let device_id = genesis.devid.to_vec();
-        let genesis_hash = genesis.g.to_vec();
-        // ONE session secret: the signing authority's cached seed IS the
-        // wallet seed (set_binding_key_for_testing writes the same cache the
-        // presentation builder reads), so both derive from the same root.
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &wallet_seed,
-        )
-        .expect("derive signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(wallet_seed);
-        // The persisted genesis record is where the presentation builder reads
-        // its derivation inputs back from (network id in particular).
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: crate::util::text_id::encode_base32_crockford(&genesis.g),
-                device_id: crate::util::text_id::encode_base32_crockford(&genesis.devid),
-                mpc_proof: String::new(),
-                device_birth_binding: String::new(),
-                merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
-                participant_count: 0,
-                progress_marker: "genesis".to_string(),
-                publication_hash: crate::util::text_id::encode_base32_crockford(&genesis.g),
-                storage_nodes: Vec::new(),
-                entropy_hash: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
-                protocol_version: "genesis-v3".to_string(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: crate::util::text_id::encode_base32_crockford(
-                    &genesis.genesis_nonce,
-                ),
-                genesis_profile: "MnemonicV3".to_string(),
-                network_id: "dsm-test".to_string(),
-            },
-        )
-        .expect("store genesis record");
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
-        (public_key, genesis.devid)
+        crate::sdk::funded_vault_fixture::install_v3_identity(seed)
     }
 
     fn named_router(name: &str) -> AppRouterImpl {
@@ -4087,6 +4048,135 @@ mod funded_creation_tests {
     /// reserve proof back out of storage and verifies its signature and SMT
     /// paths, exactly as a separate device would, because it has no privileged
     /// access to the owner's leaves either way.
+    /// The two-source sequence join, pinned as a refusal: a signed route
+    /// carrying the CORRECT `parent_binding` beside a WRONG `state_number`
+    /// would settle against the right parent while the pointer publisher —
+    /// which derives its discovery pointer's parent linkage from
+    /// `state_number` — commits to a receipt the settlement can never
+    /// produce, making the settled transition undiscoverable. While the
+    /// field remains on the wire, the gate requires it to agree with the
+    /// generation of the state the binding names.
+    #[test]
+    #[serial]
+    fn a_correct_binding_beside_a_wrong_state_number_is_refused() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        let frontier = composed_frontier(&vault_id);
+        let input = 1_000u64;
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
+                .expect("curve output");
+        let (pk, sk) = (
+            crate::sdk::signing_authority::current_public_key().expect("pk"),
+            crate::sdk::signing_authority::current_secret_key().expect("sk"),
+        );
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x3D; 32],
+            total_fee_bps: 30,
+            initiator_public_key: pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                // The binding names the REAL frontier; the number lies.
+                state_number: frontier.sequence + 1,
+                parent_binding: frontier.c_n.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign rc");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x, &rc, &pk, &sk, "seq-join",
+                ),
+            )
+            .expect("publish X + pointer");
+
+        let settle = generated::DlvUnlockRoutedV1 {
+            vault_id: vault_id.to_vec(),
+            device_id: {
+                let h = r.core_sdk.device_head().expect("head");
+                h.devid().to_vec()
+            },
+            route_commit_bytes: rc.encode_to_vec(),
+            unlocker_public_key: pk.clone(),
+            signature: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.unlockRouted".to_string(),
+                args: pack(settle.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            !res.success,
+            "a route restating the wrong generation beside a correct binding must be refused"
+        );
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("state_number") && msg.contains("disagrees"),
+            "the refusal names the two-source disagreement, not an incidental gate: {msg}"
+        );
+        // And nothing moved: the vault still composes at its frontier.
+        let after = composed_frontier(&vault_id);
+        assert_eq!(
+            (after.sequence, after.c_n),
+            (frontier.sequence, frontier.c_n)
+        );
+    }
+
     #[test]
     #[serial]
     fn a_settlement_completes_and_the_resulting_state_is_asserted() {
@@ -4792,17 +4882,16 @@ mod funded_creation_tests {
         // exactly the state it claims — so what refuses it is the vault-side
         // byte-equality gate, not a malformed fixture.
         let frontier = composed_frontier(vault_id);
-        let parent_binding = if (frontier.sequence, frontier.reserves_a, frontier.reserves_b)
-            == (seq, ra, rb)
-        {
-            frontier.c_n
-        } else {
-            let mut claimed = frontier.state.clone();
-            claimed.generation = seq;
-            claimed.reserve_a = ra;
-            claimed.reserve_b = rb;
-            dsm::ccb::vault_state_commitment(&claimed).expect("claimed state encodes")
-        };
+        let parent_binding =
+            if (frontier.sequence, frontier.reserves_a, frontier.reserves_b) == (seq, ra, rb) {
+                frontier.c_n
+            } else {
+                let mut claimed = frontier.state.clone();
+                claimed.generation = seq;
+                claimed.reserve_a = ra;
+                claimed.reserve_b = rb;
+                dsm::ccb::vault_state_commitment(&claimed).expect("claimed state encodes")
+            };
         let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
         let mut rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
