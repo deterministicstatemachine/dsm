@@ -430,7 +430,8 @@ DSM/settlement-bundle complete signed settlement bundle
 DSM/trader-settlement-acceptance/v2 canonical trader post-advance acceptance artifact
 DSM/binding-tx client-driven opaque quorum transaction identifier
 DSM/binding-keyset sorted settlement-resource key-set commitment
-DSM/vault-state-anchor/v2 history-bound vault-state anchor
+DSM/vault-state-anchor/v2 BURNED - deleted by the state-identity cut, never reused
+DSM/vault-state-anchor/v3 owner-signed baseline over the canonical state identity
 DSM/storage-object immutable content-addressed storage object
 DSM/storage-set committed storage-set identity
 DSM/unlock-tag receipt identifier only
@@ -489,10 +490,19 @@ SoFi: Sovereign Deterministic Finance Revision 15
 wherego anddo bindowneridentity,nisthevault-localgeneration,RA,RB aretheactualencumbered
 reserves, PM is the bounded market-fulfillment policy, PR is the bounded release/withdraw/close
 policy, Φ the fee policy, E the encumbrance set, β an optional iteration budget, hn the local
-parent commitment, ro the authenticated owner root, S the committed storage set, and q the fixed
-settlement threshold for that set.
-The canonical state commitment is
-cn = H(DSM/vault-state ∥Canon(Vn)).
+parent commitment, ro the committed owner-authority position, S the committed storage set, and q the
+fixed settlement threshold for that set.
+The owner-authority position ro is the digest of the exact DeviceTreeRootTransition under which the
+owner asserts the device authority that signs for this vault, tj = H(DSM/devtree-transition ∥
+CCB(Tj )). It is INVARIANT across market successors - copied byte for byte, never advanced - because
+a market successor executes while the owner is absent and must not move the owner-authority
+reference. Changing it for a live vault requires an explicit owner-authorized successor family,
+which the beta profile does not define.
+The canonical state commitment, and the SOLE canonical identity of a DLV parent state, is
+cn = H(DSM/vault-state ∥CCB(Vn)),
+where CCB(Vn) is the canonical commitment encoding of the complete fifteen-member tuple, fixed by
+the CCB object registry. Every parent reference in this specification - allocations, settlement
+resource keys, SettlementBundle parent material and stale-parent checks - is exactly this value.
 The vault identity is fixed at creation and never changes.
 The local parent commitment hn is the lineage edge into Vn, and is defined by the recurrence
 h0 = H(DSM/vault-state-parent/genesis/v2 ∥vault
@@ -500,8 +510,8 @@ _
 id),
 hn = cn−1 for n > 0.
 The genesis value commits the vault identity and nothing else. Birth reserves, the committed
-storage set S, and the fixed threshold q are already fields of V0 and of the generation-0
-VaultStateAnchorV2, and duplicating them into h0 would blur a field whose only role is the
+storage set S, and the fixed threshold q are already fields of V0 , hence committed by c0 , and
+duplicating them into h0 would blur a field whose only role is the
 predecessor edge. An untyped all-zero sentinel is not used: a domain-separated genesis value is
 a value no other construction produces, and it makes "this is generation zero" a derivation
 rather than a magic-constant comparison.
@@ -577,9 +587,12 @@ Definition 5.1 (Owner authority). A successor Vn+1 carries owner authority if ei
 (b) the witness contains an owner-signed fulfillment mechanism committed before Vn+1 existed,
 plus a proof that Vn+1 satisfies every bound of that mechanism.
 Definition 5.2 (Market fulfillment mechanism).
-M= H(DSM/fulfillment ∥vault
+M= H(DSM/fulfillment ∥c0 ∥CCB(BM )),
+The vault identifier is NOT restated: c0 commits it, because vault
 _
-id ∥c0 ∥CCB(BM )),
+id is a field of V0 . Supplying
+both would admit an encodable pair that disagrees, one generation earlier than the same pattern in
+allocations and resource keys.
 where BM commits the additional owner-committed bounds on market exercise that do not already
 have a home in the vault state or in the predicate family: the per-transition size ceiling and the
 authorized encumbrance purposes.
@@ -768,33 +781,42 @@ input to later sovereign state. Deployment repair after this event is an explici
 action outside ordinary settlement.
 17
 SoFi: Sovereign Deterministic Finance Revision 15
-6.2 History-bound parent anchors
-Definition 6.4 (Parent binding). The parent binding carried by every route allocation is
-pv = H(DSM/vault-state-anchor/v2 ∥vault
-_
-id∥generation
-∥parent_
-state
-_
-commitment∥reserves
-_digest
-∥storage_
-set
-_
-id∥q).
-Requirement 6.5. A parent anchor must bind the history commitment that produced the
+6.2 History-bound parent identity
+Definition 6.4 (Parent identity). The parent identity carried by every route allocation is the
+canonical commitment of the exact DLV state being consumed:
+cn = H(DSM/vault-state ∥CCB(Vn )).
+The former pv anchor tuple is DELETED, together with the DSM/vault-state-anchor/v2 domain.
+Both are burned and never reused. No implementation may accept, emit, or fall back to either.
+Rationale. pv committed a selected PROJECTION of Vn - the vault identifier, the generation,
+the parent state commitment hn , the reserves digest, the storage set and q. cn commits the
+EXACT COMPLETE current state. A parent identity that omits parts of the parent cannot detect
+changes in the parts it omits, and every field of Vn is now load-bearing, including the owner
+authority position ro .
+Definition 6.4a (Owner baseline anchor). An owner-signed baseline is a signature over
+    H(DSM/vault-state-anchor/v3 ∥cn ),
+and carries no other authoritative content. It is the ONLY anchor form; the deleted V2 artifact has
+no successor beyond this. Convenience metadata may accompany it in transport but is never a second
+source of truth: a consumer re-derives every such value from Vn and refuses on disagreement.
+A baseline is not required at every generation. Market successors may advance a DLV while the owner
+is absent, and the current cn is then authenticated by folding realized successor history forward
+from the last owner-authenticated baseline.
+Requirement 6.5. A parent identity must bind the history commitment that produced the
 advertised reserves, not only the vault identifier, local generation, and reserves digest. Two distinct
 histories that happen to produce identical reserve amounts must therefore produce different parent
-bindings whenever their parent state commitments differ.
+identities whenever their parent state commitments differ. cn satisfies this a fortiori, since hn is
+itself a member of Vn .
 The parent state commitment carried here is exactly the local parent commitment hn of
 Definition 4.1: hn = cn−1 for n > 0, and the domain-separated genesis value at n = 0. It is
 the canonical prior DLV state, not a chain over anchor serializations and not the trader's
 ordinary DSM relationship root — the trader's parent and successor are bound separately by
 the SettlementBundle and by the initiating-trader fence of Requirement 6.23.
-Requirement 6.6 (Clean anchor cut). The history-bound VaultStateAnchorV2 defined
-here uses a new domain/schema and must not be silently accepted as the legacy anchor format or
-vice versa. Beta deployment uses a schema bump and clean reprovision rather than a dual-read or
-fallback path.
+Requirement 6.6 (Clean state-identity cut). cn is the SOLE canonical identity of a DLV
+parent state, in allocations, resource keys, SettlementBundle parent references and stale-parent
+checks alike. The VaultStateAnchorV2 artifact, the pv tuple, the DSM/vault-state-anchor/v2 domain,
+and the per-vault encumbrance operand {ECv } are removed from the active protocol. Their identifiers
+are recorded as burned so they are never reused; no implementation may decode, accept, emit, route,
+compose or fall back to any of them. Beta deployment uses a clean reprovision - no migration, no
+compatibility path, no dual read.
 6.3 Stale construction
 Theorem 6.7 (Stale-state rejection). If a constructor learns a realized successor has advanced a
 vault from parent p to p′, any route still bound to p fails parent binding before value moves.
@@ -811,7 +833,10 @@ of distinct storage-member identities and to a fixed settlement threshold q. The
 storage_
 set
 _
-id= H(DSM/storage-set ∥Canon(S)).
+id= H(DSM/storage-set ∥CCB(S)),
+where CCB(S) is the ordinary canonical commitment encoding of the storage-set object fixed by the
+CCB object registry. The previously frozen deployed layout is burned with the anchors that committed
+it.
 Transport endpoints are resolution metadata and are not member identity.
 Requirement 6.10 (Owner-committed threshold). The vault birth state must commit
 either the explicit integer q or a versioned quorum rule whose output for the committed S is unique.
@@ -867,9 +892,11 @@ _
 contains the exact already-signed bilateral successor CCB that represents the trader’s side of the
 exchange. That trader transition remains governed by ordinary DSM parent, pending, signature,
 conservation, and Tripwire rules; the storage quorum does not become authority over the trader’s
-chain. For every consumed DLV v, Tv contains the exact vault identifier, parent generation, parent
-state commitment, parent reserves digest, complete DLV successor CCB, exact reserve deltas, and
-every witness required to verify that successor. Pv contains proof material required to verify and later
+chain. For every consumed DLV v, the parent side of Tv is the exact cn of the consumed state and nothing
+else; the vault identifier, parent generation, parent state commitment hn and parent reserves digest
+are NOT carried, because every one of them is a field of Vn and is read from the authenticated state
+that cn identifies. Tv otherwise contains the complete DLV successor CCB, the exact reserve deltas,
+and every witness required to verify that successor. Pv contains proof material required to verify and later
 compose that DLV continuation. The bundle binds every allocation in every horizontal allocation
 bundle so the ordinary trader-side transition and the selected DLV fulfillment are cryptographically
 one economic exchange.
@@ -893,12 +920,14 @@ id and the same fixed q.
 Cross-storage-set atomic settlement is not specified by this revision.
 6.6 Settlement resource keys
 Definition 6.17 (Resource key). A settlement resource key is
-kv = H(DSM/binding-keyset ∥vault
+kv = H(DSM/binding-keyset ∥cn,v ).
+The vault identifier is NOT restated. cn commits vault
 _
-idv ∥parent_
-state
+id because it is a field of Vn , so supplying
+both would admit an encodable (vault
 _
-commitmentv ).
+id, cn ) pair that disagrees. The domain tag already says the
+key names a binding resource, and cn already says which DLV parent state it is.
 A SettlementBundle consumes the sorted set
 K(B) = {kv : v∈B}.
 The resource key is opaque storage metadata. A node need not know that it represents a vault
@@ -1226,10 +1255,12 @@ i,t + ∑︂ int−feet.
 i
 Checked unsigned arithmetic is used throughout.
 7.2 External commitments
-ExtCommit(X) = H(DSM/ext ∥Canon(X)).
-X binds the entire user intent, route set, allocation bundles, every distinct vault parent binding,
-and every required encumbrance commitment. A participating vault must reject a hop not bound
-by the same X.
+ExtCommit(X) = H(DSM/ext ∥X).
+There is no Canon(X): X is already a 32-byte digest, and a digest is a primitive with no canonical
+form of its own. X binds the entire user intent, route set, allocation bundles and every distinct
+vault parent identity cn . It does NOT bind a separate encumbrance commitment: the deleted {ECv }
+operand was the only one, and each cn commits its vault's encumbrance set directly. A participating
+vault must reject a hop not bound by the same X.
 Requirement 7.2. Multi-vault execution is all-or-none. No Class C verifier may accept a subset
 as successful execution of the original route, and no Class K implementation may invoke separate
 26
@@ -1237,28 +1268,29 @@ SoFi: Sovereign Deterministic Finance Revision 15
 settlement commits for individual vaults of one atomic route. The selected route is finalized only
 through the one SettlementBundle that binds all of its vault transitions.
 8 Deterministic Encumbrance Accounting
-For a claim ej against vault parent p:
-ej= H(DSM/enc-claim ∥vault
-_
-id ∥p∥claim
+For a claim ej against vault parent p, where p is the cn of the DLV parent state the claim is made
+against (Definition 6.4) and never the deleted pv .
+Creation parent, and acyclicity. E is a member of Vn , so a claim is nested inside the state whose
+identity is cn . p is therefore the CREATION parent and never the containing state: if the transition
+Vn → Vn+1 creates ej , then p = cn and ej is inserted into En+1 . A persisting claim is carried byte
+for byte across later successors and its p is NEVER rewritten to the containing state's ck . Reading
+p as the containing state would give the fixed point cn → CCB(Vn ) → En → ej → cn , which no encoder
+can compute and no verifier can check. Every claim in En+1 binds a ck with k ≤ n, all already
+computed when cn+1 is formed.
+ej= H(DSM/enc-claim ∥p∥claim
 _seq ∥amount ∥token ∥purpose).
-The encumbrance commitment is
-E= H(DSM/enc ∥vault
+The vault identifier is NOT carried: p is the cn of the parent state, and cn commits vault
 _
-id ∥Canon({ej })).
-Naming. E is the encumbrance SET, as Definition 4.1 lists it among the members of Vn , and
-Requirement 8.2 below iterates it. The digest above is a distinct object and is written ECv
-for vault v:
-ECv = H(DSM/enc ∥vault
-_
-id ∥Canon(E)).
-The set and its commitment previously shared the symbol E, which made "E" mean a set in
-Definition 4.1 and Requirement 8.2 and a digest here. Only the set is a member of Vn ; ECv is
-derived from it.
+id .
+Naming. E is the encumbrance SET, and Definition 4.1 lists it among the members of Vn , so cn
+commits it. The separately derived per-vault commitment ECv is DELETED: it existed to carry the
+current encumbrance state into the route commitment X, and X no longer carries it because cn already
+does. No live construction consumes ECv , and it is not replaced. The symbol is burned so it cannot
+return as an alias of a fact cn commits.
 Type of e. The e carried by an allocation in Definition 9.1 is a single encumbrance CLAIM —
-one ej of this section — namely the claim that allocation consumes. It is not ECv . The two
-are different facts: e names what one allocation spends, while ECv commits the whole
-encumbrance state of a vault. An allocation that had to consume several claims would carry a
+one ej of this section — namely the claim that allocation consumes. It survives the cut precisely
+because it is not a commitment: cn AUTHENTICATES the parent's whole encumbrance state, while e
+SELECTS the one claim that allocation spends. An allocation that had to consume several claims would carry a
 set rather than a single e, which is outside the beta shape.
 Requirement 8.1 (Uniqueness). A claim is consumed at most once and its exact removal
 must be visible in the successor state.
@@ -1282,13 +1314,18 @@ of route alternatives. Both bounds must be finite and committed before execution
 9.2 Allocation bundles
 A single logical pair conversion may draw from more than one independent DLV.
 Definition 9.1 (Allocation).
-a= (vault
-_id,parent_binding,∆in,∆out,e,Φ).
+a= (parent_binding,∆in,∆out,e,Φ),
+where parent
+_binding = cn of the consumed DLV state. The vault identifier is NOT a member. cn
+commits it, so carrying both would admit an encodable pair that disagrees; a verifier resolves Vn
+from cn and reads the authoritative vault identifier there.
 Definition 9.2 (Allocation bundle). For one ordered token pair (A,B),
 AB = {a1,...,af }, 1 ≤f ≤maxf anout,
 where every ai converts the same input token to the same output token and names a distinct DLV.
-The bundle is canonicalized by vault identifier and commits the exact integer input and output
-assigned to every DLV.
+The bundle is canonicalized by complete Allocation CCB ascending, and commits the exact integer
+input and output assigned to every DLV. Distinctness of DLVs is checked against the vault
+identifiers recovered from the bound Vn states, not against a duplicate identifier carried in the
+allocation.
 27
 SoFi: Sovereign Deterministic Finance Revision 15
 Bundle conservation requires
@@ -1317,19 +1354,18 @@ canonicalized by route CCB ascending.
 The route commitment is
 X= H(DSM/route-set ∥CCB(Q)),
 where Q is the canonical RouteCommitmentBody carrying the trade intent I, the route set R,
-the per-vault encumbrance commitments {ECv }v∈R , and nonceX . X is always a 32-byte digest;
+and nonceX . X is always a 32-byte digest;
 there is no Canon(X), because a digest is already a primitive, and §7.2's external commitment
 is ExtCommit(X) = H(DSM/ext ∥X) over that digest.
-Why {ECv } is carried and is not an alias. Every allocation already names its parent binding
-pv , and pv commits the vault identifier, the generation, the PARENT state commitment hn , the
-reserves digest, the storage set and q. It does not commit the CURRENT generation's
-encumbrance set, which lives in Vn . So {ECv } binds a fact no other operand of X binds, and
-it is distinct from the per-allocation e of Definition 9.1, which names a single consumed
-claim. A plain set suffices rather than a keyed map: vault
-_
-id is inside each ECv preimage, so
-two vaults cannot collide, and a verifier recomputes ECv for each vault named in R and tests
-membership.
+Why {ECv } is DELETED. It was carried because every allocation named pv , and pv committed the
+PARENT state commitment hn and the reserves digest but not the CURRENT generation's
+encumbrance set. That justification was conditional on pv . Allocations now name cn , and E is a
+member of Vn , so cn commits the current encumbrance set already. Carrying {ECv } beside cn would
+commit one fact twice in two independently encodable values free to disagree. The operand is
+removed from Q and is not replaced.
+The per-allocation e of Definition 9.1 REMAINS and is not an alias: cn AUTHENTICATES the parent's
+entire encumbrance state, while e SELECTS the single claim that allocation consumes. No parent
+identity tells a verifier which claim a leg spends.
 Requirement 9.3. Route canonicalization and allocation canonicalization must not depend
 on node response order, request arrival order, local map iteration, wall-clock information, or the
 identity of the node that served an object.
@@ -1388,9 +1424,13 @@ Requirement 6.23, and the SDK continues or resumes recovery when a qualifying qu
 Beta defines no timeout-based escape that converts this state into ABORT or authorizes a different
 successor from the fenced parent.
 10 Trade Digests: Unordered Evidence
-For each verified execution, a trade digest commits the pair, executed amounts, participating vault
-identifiers, parent bindings, fees, and X:
-d= H(DSM/digest ∥Canon(TradeDigest)).
+For each verified execution, a trade digest commits the pair, executed amounts, the parent identity
+cn of every participating DLV, fees, and X:
+d= H(DSM/digest ∥CCB(TradeDigest)).
+Participating vault identifiers are NOT carried separately: each cn commits the vault
+_
+id of the DLV
+it identifies.
 29
 SoFi: Sovereign Deterministic Finance Revision 15
 Requirement 10.1. A TradeDigest must not contain a global height, predecessor digest, shared
@@ -1660,7 +1700,7 @@ binding evidence; it is not a node-selected field.
 15.8 Object and index classes
 Canonical immutable object classes include:
 1. VaultAdvertisement;
-2. VaultStateAnchorV2;
+2. the canonical state identity cn ;
 3. ExternalCommitment;
 4. RouteSet;
 5. AllocationBundle;
@@ -2390,7 +2430,7 @@ below the render layer.
 index stores content addresses, not duplicate mutable payload bytes.
 10. The owner-committed q is carried in authenticated vault birth/anchor data. A generic helper
 that silently derives strict majority must not override that committed value.
-11. VaultStateAnchorV2 binds the parent state commitment and uses a clean new schema/domain;
+11. cn is the sole parent identity and the pv /VaultStateAnchorV2 model is deleted;
 the legacy anchor format is not retained as a compatibility fallback.
 12. Settlement-specific node endpoints that parse claims, vault ids, routes, or economic payloads
 are removed. The node exposes only generic immutable-object, index, binding-read, and
