@@ -138,15 +138,23 @@ production path decodes, accepts, emits, routes, composes or falls back to any r
 
 | Retired | Replacement |
 |---|---|
-| `VaultStateV2 0x0001` schema 1 | schema 2 only; field 13 is `owner_authority_transition_digest` |
+| `VaultStateV2 0x0001` schemas **1 and 2** | **schema 3 only**; field 13 is `owner_authority_transition_digest`, nesting `0x0002` and `0x0005` at schema 2 |
 | `StorageSet 0x0002` schema 1 | schema 2 only — the frozen `storage_set_id` layout becomes an ordinary CCB object |
-| `EncumbranceClaim/Set 0x0004`, `0x0005` schema 1 | schema 2 only; claim parent is `c_n`, no `vault_id`; `EC_v` deleted |
+| `EncumbranceClaim/Set 0x0004`, `0x0005` schema 1 | schema 2 only; claim parent is the **creation** `c_n`, no `vault_id`; `EC_v` deleted |
 | `VaultStateAnchorV2` and Def 6.4 | **removed from the active protocol** — AnchorV3 is the only anchor/baseline form; the `/v2` domain is burned |
 | `Allocation 0x0015` schema 1 (`p_v`) | schema 2 only, `parent_binding = c_n` |
-| `RouteCommitmentBody 0x0017` schema 1 | schema 2 only, no `{EC_v}` |
-| `0x0016` schema 1 | schema 2 only, ordered by complete Allocation CCB |
+| `AllocationBundle 0x0016` schema 1 | schema 2 only, ordered by complete Allocation CCB |
+| `Route 0x000D` schema 1 | schema 2 only — legs nest `0x0015`/`0x0016` at schema 2 |
+| `RouteSet 0x000C` schema 1 | schema 2 only — nests `Route` at schema 2 |
+| `RouteCommitmentBody 0x0017` schema 1 | schema 2 only, no `{EC_v}`, nesting `RouteSet` at schema 2 |
 | `RouteCommitHopV1` triple | deleted, not adapted — the hop carries `c_n` |
 | resource keys on `h_n` | `k_v = H_dom(DSM/binding-keyset, c_n)` |
+
+**`0x0001` is the only class retiring two schemas**, and the reason is worth stating where the table
+is read: schema 2's *field list* is identical to schema 3's. Only its nested `0x0002`/`0x0005`
+versions differ, and §2.7 nests by complete CCB, so the bytes — and therefore `c_n` — differ anyway.
+A table that listed "schema 2 only" here would be the contradictory forward guidance this cut exists
+to remove.
 
 **AnchorV2 is not preserved as a "historical primitive".** An earlier revision proposed keeping it
 that way; that was still coexistence, and it is withdrawn. It is removed from the protocol, and its
