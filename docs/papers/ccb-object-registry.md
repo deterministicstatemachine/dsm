@@ -288,7 +288,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
 | `0x0017` | `RouteCommitmentBody` (`Q`) | **2** | `X = H(DSM/route-set ‖ CCB(Q))` | §5.12 defined; schema 1 **burned** |
 | `0x0015` | `Allocation` (`a`) | **2** | leg element; nested in `0x000D` | §5.10 defined; schema 1 **burned** |
-| `0x0016` | `AllocationBundle` (`AB_{A→B}`) | 1 | leg element; nested in `0x000D` | §5.11 defined |
+| `0x0016` | `AllocationBundle` (`AB_{A→B}`) | **2** | leg element; nested in `0x000D` | §5.11 defined; schema 1 **burned** |
 | `0x0018` | **substrate** `GenesisParamsV3` | 1 | `G = H(DSM/genesis/v3 ‖ CCB)` | §5.15 defined |
 | `0x0019` | **substrate** `RootProgressionDelegation` (`D_i`) | 1 | `del_i = H(DSM/devtree-delegation ‖ CCB)`, and the GRK-signed bytes | §5.16 defined |
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
@@ -302,7 +302,7 @@ object class before §5.2 established that member ids are bare length-prefixed b
 frozen layout, with no envelope and therefore no class. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
-**Burned schema versions.** `0x0001` schema 1, `0x0015` schema 1 and `0x0017` schema 1 are burned by
+**Burned schema versions.** `0x0001`, `0x0015`, `0x0016` and `0x0017` all have schema 1 burned by
 the state/route identity cut. They are recorded so their numbers are never re-assigned; no
 production path decodes or emits them.
 
@@ -565,16 +565,20 @@ already in use; re-scaling to Q32.32 would change every committed fee without ch
 
 ### 5.10 `Allocation` — class `0x0015`, schema 2
 
-Def 9.1: `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)`.
+Def 9.1: `a = (parent_binding, Δ_in, Δ_out, e, Φ)`.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `vault_id` | `digest32` | |
-| 2 | `parent_binding` | `digest32` | `c_n = H_dom(DSM/vault-state, CCB(V_n))` — the exact complete current state |
-| 3 | `delta_in` | `u64` | base units into the DLV |
-| 4 | `delta_out` | `u64` | base units out of the DLV |
-| 5 | `encumbrance_claim` (`e`) | `digest32` | the single claim this allocation consumes, `e_j` of §8 — **not** `EC_v` |
-| 6 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value |
+| 1 | `parent_binding` | `digest32` | `c_n = H_dom(DSM/vault-state, CCB(V_n))` — the exact complete current state |
+| 2 | `delta_in` | `u64` | base units into the DLV |
+| 3 | `delta_out` | `u64` | base units out of the DLV |
+| 4 | `encumbrance_claim` (`e`) | `digest32` | the single claim this allocation consumes, `e_j` of §8 |
+| 5 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value |
+
+**`vault_id` is not a member.** `c_n` commits it, because `vault_id` is a field of `V_n`. Carrying
+both would admit an encodable `(vault_id, c_n)` pair that disagrees — one naming a vault, the other
+naming a state belonging to a different one. A verifier resolves `V_n` from `c_n` and reads the
+authoritative identifier there.
 
 No token pair: `c_n` commits `P_M`, which commits the pair.
 
@@ -584,23 +588,28 @@ projection* of `V_n` (vault id, generation, the predecessor edge `h_n`, the rese
 `q`), whereas `c_n` commits the **exact complete current state**. A parent identity that omits parts
 of the parent is a parent identity that cannot detect changes in the parts it omits.
 
-### 5.11 `AllocationBundle` — class `0x0016`, schema 1
+### 5.11 `AllocationBundle` — class `0x0016`, schema 2
 
 Def 9.2: `AB_{A→B} = {a_1,…,a_f}`, `1 ≤ f ≤ max_fanout`, every member converting the same
 input token to the same output token and naming a **distinct** DLV.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `allocations` | set of `0x0015` | §2.4 ordering; "canonicalized by vault identifier" is satisfied because `vault_id` is field 1 of the element, so ordering by element CCB orders by vault id |
+| 1 | `allocations` | set of `0x0015` | §2.4 ordering over complete element CCB |
 
 `max_fanout` is **not** a field — it is authoritative in `TradeIntent` field 7, and the member
-count is checked against it. Distinct-DLV is a validity condition on construction: two members
-sharing a `vault_id` are refused, not merged.
+count is checked against it.
 
-The ordering claim is worth stating precisely rather than assuming. Element CCB begins
-`u16 class ‖ u16 schema ‖ vault_id`, and class and schema are equal across members of one
-bundle, so lexicographic order over element CCB **is** order by `vault_id` — with ties
-impossible, since a duplicate `vault_id` is refused.
+**Schema 2 canonicalizes by complete Allocation CCB, and schema 1 is burned.** Schema 1's ordering
+argument depended on `vault_id` being field 1 of the element, so that ordering by element CCB *was*
+ordering by vault id. Schema-2 `Allocation` has no `vault_id`, so that argument no longer holds and
+is not patched — the set is ordered by the whole element under §2.4, which is well-defined without
+it.
+
+**Distinct-DLV is checked against the bound states, not against a carried identifier.** Two members
+are distinct DLVs when the `vault_id` values recovered from their bound `V_n` differ. Retaining a
+duplicate identifier inside the allocation purely to preserve a sorting explanation would be the
+alias this cut removes.
 
 ### 5.12 `RouteCommitmentBody` — class `0x0017`, schema 2
 
