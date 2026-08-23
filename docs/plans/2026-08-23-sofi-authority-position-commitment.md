@@ -75,7 +75,7 @@ identity of a DLV state, everywhere it is referenced**, and what it replaces is 
 ```
 V_n canonical identity        c_n = H_dom(DSM/vault-state, CCB(V_n))
 Allocation.parent_binding     c_n
-settlement resource key       k_v = H_dom(DSM/binding-keyset, vault_id ‖ c_n)
+settlement resource key       k_v = H_dom(DSM/binding-keyset, c_n)
 SettlementBundle parent refs   c_n
 RouteCommitmentBody            carries no current-encumbrance commitments
 ```
@@ -95,6 +95,24 @@ put the argument on the wrong footing.
 of `V_n`. `c_n` commits the **exact complete current state**. A parent identity that omits parts of
 the parent cannot detect changes in the parts it omits, and the omitted part that matters most here
 is the one the position work introduced: the authority position itself.
+
+### `c_n` absorbs `vault_id`, so the copies go too
+
+`c_n` commits `vault_id`, because `vault_id` is a field of `V_n`. Every place that supplies both is
+therefore an encodable pair that can disagree — one naming a vault, the other naming a state
+belonging to a different one. Two such copies remained after the first pass and are removed:
+
+- **`k_v = H_dom(DSM/binding-keyset, c_n)`.** The domain tag already says the key names a binding
+  resource; `c_n` already says which DLV parent state. Restating `vault_id` adds no safety.
+- **`Allocation` drops `vault_id`** — `(c_n, Δ_in, Δ_out, e, Φ)`. A verifier resolves `V_n` from
+  `c_n` and reads the authoritative identifier there.
+
+**The `AllocationBundle` knock-on is real and is taken, not worked around.** `0x0016` schema 1
+ordered its set by element CCB and justified that as ordering by vault id, which held only because
+`vault_id` was field 1 of the element. With `vault_id` gone that argument disappears, so `0x0016`
+becomes schema 2 canonicalized by complete Allocation CCB, with schema 1 burned. Distinct-DLV is
+checked against the identifiers recovered from the bound `V_n` states. Keeping a duplicate
+identifier purely to preserve a sorting explanation would be exactly the alias being removed.
 
 ### The knock-on: `{EC_v}` goes
 
@@ -124,8 +142,9 @@ production path decodes, accepts, emits, routes, composes or falls back to any r
 | `VaultStateAnchorV2` and Def 6.4 | **removed from the active protocol** — AnchorV3 is the only anchor/baseline form; the `/v2` domain is burned |
 | `Allocation 0x0015` schema 1 (`p_v`) | schema 2 only, `parent_binding = c_n` |
 | `RouteCommitmentBody 0x0017` schema 1 | schema 2 only, no `{EC_v}` |
+| `0x0016` schema 1 | schema 2 only, ordered by complete Allocation CCB |
 | `RouteCommitHopV1` triple | deleted, not adapted — the hop carries `c_n` |
-| resource keys on `h_n` | `k_v = H_dom(DSM/binding-keyset, vault_id ‖ c_n)` |
+| resource keys on `h_n` | `k_v = H_dom(DSM/binding-keyset, c_n)` |
 
 **AnchorV2 is not preserved as a "historical primitive".** An earlier revision proposed keeping it
 that way; that was still coexistence, and it is withdrawn. It is removed from the protocol, and its
@@ -137,13 +156,21 @@ migrate *from*, because no old-format state remains valid.
 
 ### Normative amendment surface
 
-One coherent change, not a scatter of edits: Def 9.1 and §9.3 (`Allocation.parent_binding` and `X`),
-Def 6.17 (`k_v`), the stale-parent checks, the `SettlementBundle` DLV parent fields, and the removal
-of Def 6.4 from the active protocol. All of them resolve to **the same exact current-state identity**
-`c_n`, which is the property that makes this a cut rather than a set of amendments.
+One coherent change, not a scatter of edits: **Def 4.1** (`r_o` gains its concrete meaning),
+**Def 6.4** (deleted, with the V2 anchor and its domain), **Req 6.6** (restated as the state-identity
+cut), **Def 6.17** (`k_v`), **Def 9.1** and **Def 9.2** (`Allocation`, bundle canonicalization),
+**§9.3** (`X` loses `{EC_v}`), **§8** (the claim parent `p` pinned to `c_n`), the `SettlementBundle`
+DLV-parent fields and the stale-parent checks. All resolve to **the same exact current-state
+identity**, which is what makes this a cut rather than a set of amendments.
 
-This document does not make those amendments. The specification is the authority; this states what
-the amendment must say.
+**§8 matters more than its size suggests.** The `e_j` preimage carries a vault parent `p`; leaving
+`p` ambiguous after deleting `p_v` would preserve the old parent model through the encumbrance path,
+where nobody would look for it. It is pinned to `c_n` explicitly.
+
+**These amendments are made in this change**, in `.github/instructions/sofispecs.instructions.md`.
+The no-legacy rule is why: a registry declaring `c_n` while the specification still declares `p_v`
+is precisely the temporary disagreement a clean cut forbids, and the specification would win in any
+implementation that read it.
 
 ## The position is invariant across market successors
 
@@ -291,7 +318,14 @@ can do, since it forecloses moving the reference mid-vault.
     `SettlementBundle` parent reference resolve to the identical `c_n` for a given state. A test
     that computes it two ways and compares is the cheapest guard against the projection problem
     returning.
-11. **Mutation controls.** Each gate above disabled in turn must turn its test red.
+11. **No `vault_id` copy survives.** No object supplies both a `vault_id` and a `c_n`. Asserted
+    structurally, because the failure is silent: a mismatched pair is perfectly encodable, and a
+    verifier that trusted the carried identifier over the bound state would never notice.
+12. **Bundle ordering without `vault_id`.** An `AllocationBundle` whose members are ordered by
+    complete Allocation CCB is canonical, and two members whose bound `V_n` share a `vault_id` are
+    refused as non-distinct DLVs — the check that replaces the removed identifier rather than
+    dropping it.
+13. **Mutation controls.** Each gate above disabled in turn must turn its test red.
 
 ## Sequence
 
