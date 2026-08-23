@@ -62,10 +62,7 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
 /// process (tests, multi-profile) each keep their own row; picking by
 /// recency would hand one identity another's derivation inputs.
 pub fn get_genesis_record_by_id(genesis_id_b32: &str) -> Result<Option<GenesisRecord>> {
-    get_verified_genesis_record_where(
-        "WHERE genesis_id = ?1",
-        rusqlite::params![genesis_id_b32],
-    )
+    get_verified_genesis_record_where("WHERE genesis_id = ?1", rusqlite::params![genesis_id_b32])
 }
 
 pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
