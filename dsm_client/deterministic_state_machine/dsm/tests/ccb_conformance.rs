@@ -56,7 +56,7 @@ mod indep {
     /// ascending raw-byte order.
     pub fn storage_set(mut ids: Vec<Vec<u8>>) -> Vec<u8> {
         ids.sort();
-        let mut out = u32be(ids.len() as u32);
+        let mut out = [envelope(0x0002, 2), u32be(ids.len() as u32)].concat();
         for id in ids {
             out.extend(bytes_field(&id));
         }
@@ -83,17 +83,15 @@ mod indep {
     }
 
     pub fn encumbrance_claim(
-        vault_id: [u8; 32],
-        psc: [u8; 32],
+        parent_binding: [u8; 32],
         claim_seq: u64,
         amount: u64,
         token: [u8; 32],
         purpose: u16,
     ) -> Vec<u8> {
         [
-            envelope(0x0004, 1),
-            vault_id.to_vec(),
-            psc.to_vec(),
+            envelope(0x0004, 2),
+            parent_binding.to_vec(),
             u64be(claim_seq),
             u64be(amount),
             token.to_vec(),
@@ -104,7 +102,7 @@ mod indep {
 
     pub fn encumbrance_set(mut claims: Vec<Vec<u8>>) -> Vec<u8> {
         claims.sort();
-        let mut out = [envelope(0x0005, 1), u32be(claims.len() as u32)].concat();
+        let mut out = [envelope(0x0005, 2), u32be(claims.len() as u32)].concat();
         for c in claims {
             out.extend(c);
         }
@@ -134,7 +132,7 @@ mod indep {
             Some(v) => [vec![0x01], u64be(v)].concat(),
         };
         [
-            envelope(0x0001, 1),
+            envelope(0x0001, 3),
             g_o.to_vec(),
             d_o.to_vec(),
             vault_id.to_vec(),
@@ -250,9 +248,8 @@ fn parse_vault_state(bytes: &[u8]) -> ParsedVaultState {
     let encumbrance_count = c.u32();
     for _ in 0..encumbrance_count {
         assert_eq!(c.u16(), 0x0004, "set element must be an EncumbranceClaim");
-        let _ = c.u16();
-        let _ = c.digest32();
-        let _ = c.digest32();
+        assert_eq!(c.u16(), 2, "claim schema 1 is burned");
+        let _ = c.digest32(); // parent_binding — the creation parent
         let _ = c.u64();
         let _ = c.u64();
         let _ = c.digest32();
@@ -269,10 +266,13 @@ fn parse_vault_state(bytes: &[u8]) -> ParsedVaultState {
     let parent_state_commitment = c.digest32(); // 12
     let _r_o = c.digest32(); // 13
 
-    // 14 StorageSet — NO ENVELOPE. This is the boundary that matters: the
-    // reader must know from the registry alone that field 14 starts at a count
-    // rather than at a 0x0002 discriminant, and must stop at exactly the right
-    // byte so that field 15 reads as `q`.
+    // 14 StorageSet — an ordinary object now, envelope and all. The boundary
+    // still matters: the reader must stop at exactly the right byte so that
+    // field 15 reads as `q`. What changed is that it no longer has to know
+    // from the registry alone that this field starts at a count — the
+    // discriminant says so, like every other nested member.
+    assert_eq!(c.u16(), 0x0002, "field 14 must be a StorageSet envelope");
+    assert_eq!(c.u16(), 2, "storage-set schema 1 is burned");
     let member_count = c.u32();
     let mut storage_members = Vec::new();
     for _ in 0..member_count {
@@ -332,7 +332,7 @@ fn state(generation: u64, r_a: u64, r_b: u64, h_n: [u8; 32], beta: Option<u64>) 
         encumbrances: EncumbranceSet::empty(),
         iteration_budget: beta,
         parent_state_commitment: h_n,
-        owner_root: d(0xA3),
+        owner_authority_transition_digest: d(0xA3),
         storage_set: beta_set(),
         quorum: 4,
     }
@@ -430,13 +430,18 @@ fn the_lineage_recurrence_distinguishes_histories_with_equal_reserves() {
 
 /// THE BOUNDARY THAT MATTERS.
 ///
-/// Field 14 nests `StorageSet` in its frozen envelope-less layout, and field 15
-/// is a bare `u32`. If a generic "nested object gets an envelope" helper ever
-/// wrapped `S`, the bytes would still be deterministic and would no longer be
-/// normative. This parses the whole object back and requires that every field
-/// lands where the registry says, with nothing left over.
+/// Field 14 nests `StorageSet` and field 15 is a bare `u32`, so a reader must
+/// stop at exactly the right byte or `q` reads as garbage. This parses the
+/// whole object back and requires every field to land where the registry says,
+/// with nothing left over.
+///
+/// The old form of this test asserted the *opposite* property — that field 14
+/// carried no envelope — and it passed because the frozen layout was normative.
+/// The state-identity cut deleted the anchors that froze it, so the assertion
+/// is inverted here rather than removed: a test that pinned the old property is
+/// the likeliest place for the old property to survive a rewrite.
 #[test]
-fn the_envelope_less_storage_set_stays_uniquely_parseable_against_the_quorum_field() {
+fn the_storage_set_nests_with_an_envelope_and_still_ends_exactly_at_the_quorum_field() {
     let h0 = genesis_parent_commitment(&VAULT_ID);
     let v = state(7, 4_242, 8_888, h0, Some(99));
     let bytes = v.encode().expect("encodes");
@@ -447,7 +452,7 @@ fn the_envelope_less_storage_set_stays_uniquely_parseable_against_the_quorum_fie
         "the layout must consume exactly its bytes"
     );
     assert_eq!(parsed.class, 0x0001);
-    assert_eq!(parsed.schema, 1);
+    assert_eq!(parsed.schema, 3, "schemas 1 and 2 are burned");
     assert_eq!(parsed.generation, 7);
     assert_eq!(parsed.reserve_a, 4_242);
     assert_eq!(parsed.reserve_b, 8_888);
@@ -502,26 +507,134 @@ fn the_optional_budget_marker_is_never_skipped() {
     assert_eq!(parse_vault_state(&present_zero).iteration_budget, Some(0));
 }
 
-/// The frozen `storage_set_id` construction is unchanged by this work: the id
-/// derived through the CCB path equals the shipping helper's value.
+/// `storage_set_id` is the ordinary CCB construction, and is deliberately NOT
+/// the shipping one.
+///
+/// Both halves are asserted. The positive half fixes the new bytes:
+/// `H_dom(DSM/storage-set, CCB(S))` over an enveloped `0x0002` schema 2. The
+/// negative half is the one that matters — the id must **differ** from the
+/// burned construction, because equality would mean the frozen layout survived
+/// the cut somewhere. Deployed set ids therefore change, which is the
+/// reprovision rather than a regression.
 #[test]
-fn the_storage_set_id_matches_the_shipping_construction() {
+fn the_storage_set_id_is_the_ccb_construction_and_not_the_burned_one() {
     let members = beta_set();
     let via_ccb = storage_set_id(&members).expect("id");
 
-    // Recompute independently: H(tag ‖ 0x00 ‖ count ‖ (len ‖ id)*).
     let mut ids: Vec<Vec<u8>> = MEMBERS.iter().map(|m| m.to_vec()).collect();
     ids.sort();
-    let mut preimage = b"DSM/storage-set/v1".to_vec();
+
+    // New: H(DSM/storage-set ‖ 0x00 ‖ envelope ‖ count ‖ (len ‖ id)*).
+    let mut preimage = b"DSM/storage-set".to_vec();
     preimage.push(0x00);
+    preimage.extend(indep::envelope(0x0002, 2));
     preimage.extend(indep::u32be(ids.len() as u32));
     for id in &ids {
         preimage.extend(indep::bytes_field(id));
     }
     let expected: [u8; 32] = *blake3::hash(&preimage).as_bytes();
+    assert_eq!(via_ccb, expected, "the CCB construction fixes these bytes");
+
+    // Burned: the old tag over the envelope-less layout.
+    let mut burned = b"DSM/storage-set/v1".to_vec();
+    burned.push(0x00);
+    burned.extend(indep::u32be(ids.len() as u32));
+    for id in &ids {
+        burned.extend(indep::bytes_field(id));
+    }
+    let burned_id: [u8; 32] = *blake3::hash(&burned).as_bytes();
+    assert_ne!(
+        via_ccb, burned_id,
+        "equality here would mean the frozen layout survived the cut"
+    );
+}
+
+/// Every live schema matches the registry, and none is burned.
+///
+/// The registry is the authority; this asserts the encoder agrees with it, so
+/// a table edit that is not mirrored in code fails here rather than silently
+/// producing different `c_n` bytes. Burned pairs are listed so a later change
+/// cannot quietly re-adopt one.
+#[test]
+fn live_schemas_match_the_registry_and_none_is_burned() {
+    use dsm::ccb::{schema, CcbObject};
+
+    let live: &[(&str, u16, u16)] = &[
+        ("VaultStateV2", VaultStateV2::CLASS, VaultStateV2::SCHEMA),
+        (
+            "StorageSet",
+            StorageSetMembers::CLASS,
+            StorageSetMembers::SCHEMA,
+        ),
+        (
+            "EncumbranceClaim",
+            EncumbranceClaim::CLASS,
+            EncumbranceClaim::SCHEMA,
+        ),
+        (
+            "EncumbranceSet",
+            EncumbranceSet::CLASS,
+            EncumbranceSet::SCHEMA,
+        ),
+        ("MarketPolicy", MarketPolicy::CLASS, MarketPolicy::SCHEMA),
+        ("ReleasePolicy", ReleasePolicy::CLASS, ReleasePolicy::SCHEMA),
+        ("FeePolicy", FeePolicy::CLASS, FeePolicy::SCHEMA),
+    ];
+
+    // Registry §3, the live column.
+    let expected: &[(u16, u16)] = &[
+        (0x0001, 3),
+        (0x0002, 2),
+        (0x0004, 2),
+        (0x0005, 2),
+        (0x0007, 1),
+        (0x0009, 1),
+        (0x000A, 1),
+    ];
+
+    for (name, class, sch) in live {
+        assert!(
+            expected.contains(&(*class, *sch)),
+            "{name}: ({class:#06x}, {sch}) is not the registry's live pair"
+        );
+        assert!(
+            !schema::is_burned(*class, *sch),
+            "{name}: encoding at a burned schema"
+        );
+    }
     assert_eq!(
-        via_ccb, expected,
-        "the frozen layout must survive being reached through the CCB module"
+        live.len(),
+        expected.len(),
+        "a class is missing from one list"
+    );
+}
+
+/// A nested-schema bump changes the enclosing bytes, which is why it
+/// propagates.
+///
+/// The failure this guards is silent: `0x0001` schema 2 had a field list
+/// IDENTICAL to schema 3's and differed only in the nested `0x0002`/`0x0005`
+/// versions. Nothing errors in that situation — `c_n` is simply a different
+/// value — so the guard has to be a byte comparison rather than a decode.
+#[test]
+fn a_nested_schema_bump_changes_the_enclosing_encoding() {
+    let h0 = genesis_parent_commitment(&VAULT_ID);
+    let v = state(1, 10, 20, h0, None);
+    let produced = v.encode().expect("encodes");
+
+    // The same fields, with field 14 written at the burned storage-set schema
+    // and nothing else changed.
+    let mut forged = produced.clone();
+    let needle = indep::envelope(0x0002, 2);
+    let at = forged
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+        .expect("field 14 envelope present");
+    forged[at + 2..at + 4].copy_from_slice(&1u16.to_be_bytes());
+
+    assert_ne!(
+        produced, forged,
+        "a nested schema version is part of the enclosing bytes"
     );
 }
 
@@ -552,8 +665,7 @@ fn invalid_inputs_are_refused_rather_than_normalized() {
     );
 
     let claim = EncumbranceClaim {
-        vault_id: VAULT_ID,
-        parent_state_commitment: d(0x01),
+        parent_binding: d(0x01),
         claim_seq: 1,
         amount: 5,
         token: TOKEN_A,
@@ -574,8 +686,7 @@ fn invalid_inputs_are_refused_rather_than_normalized() {
 fn a_populated_encumbrance_set_agrees_and_is_ordered_by_element_encoding() {
     let h0 = genesis_parent_commitment(&VAULT_ID);
     let mk = |seq: u64, amount: u64, purpose: u16| EncumbranceClaim {
-        vault_id: VAULT_ID,
-        parent_state_commitment: h0,
+        parent_binding: h0,
         claim_seq: seq,
         amount,
         token: TOKEN_A,
@@ -593,14 +704,7 @@ fn a_populated_encumbrance_set_agrees_and_is_ordered_by_element_encoding() {
     let indep_claims: Vec<Vec<u8>> = claims
         .iter()
         .map(|c| {
-            indep::encumbrance_claim(
-                c.vault_id,
-                c.parent_state_commitment,
-                c.claim_seq,
-                c.amount,
-                c.token,
-                c.purpose,
-            )
+            indep::encumbrance_claim(c.parent_binding, c.claim_seq, c.amount, c.token, c.purpose)
         })
         .collect();
     let expected = indep::vault_state(

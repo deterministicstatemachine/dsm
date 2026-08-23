@@ -28,8 +28,6 @@
 //! `storage_io::put_bytes_to_all_members`) an acceptance counts only when the
 //! node echoes the configured id the catalog says lives at that endpoint.
 
-use dsm::common::domain_tags::TAG_DSM_STORAGE_SET_V1;
-use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::types::error::DsmError;
 
 /// One member of a storage set: its protocol identity and its current
@@ -48,41 +46,24 @@ pub struct StorageSet {
     members: Vec<StorageMember>,
 }
 
-/// Canonical storage-set id over member identities.
+/// Canonical storage-set id over member identities:
+/// `storage_set_id = H_dom(DSM/storage-set, CCB(S))`.
 ///
-/// `H(TAG ‖ 0x00 ‖ u32_be(count) ‖ for each id in lexicographic byte order:
-/// u32_be(len(id)) ‖ id)`. Counted and length-prefixed so variable-length ids
-/// cannot be re-split (`["ab","c"]` ≠ `["a","bc"]`); order-independent because
-/// the ids are sorted first; duplicates refused.
+/// **Delegates to the CCB encoder rather than recomputing the bytes.** This
+/// function used to carry its own copy of the layout, and the storage node
+/// called it directly so the two agreed by sharing code — implementation
+/// monoculture, which holds only until a second implementation exists. The
+/// bytes now come from `dsm::ccb`, which is written from the object registry.
+///
+/// Validity conditions live in the encoder too: at least one member, no empty
+/// id, no duplicate. Duplicates are refused rather than collapsed, since
+/// collapsing would map two logical inputs onto one encoding.
 pub fn compute_storage_set_id(member_ids: &[&str]) -> Result<[u8; 32], DsmError> {
-    if member_ids.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "storage set: a set must have at least one member",
-        ));
-    }
-    let mut ids: Vec<&[u8]> = member_ids.iter().map(|s| s.as_bytes()).collect();
-    if ids.iter().any(|id| id.is_empty()) {
-        return Err(DsmError::invalid_operation(
-            "storage set: a member id must not be empty",
-        ));
-    }
-    ids.sort_unstable();
-    if ids.windows(2).any(|w| w[0] == w[1]) {
-        return Err(DsmError::invalid_operation(
-            "storage set: member ids must be distinct",
-        ));
-    }
-    let count = u32::try_from(ids.len())
-        .map_err(|_| DsmError::invalid_operation("storage set: too many members"))?;
-    let mut h = dsm_domain_hasher(TAG_DSM_STORAGE_SET_V1);
-    h.update(&count.to_be_bytes());
-    for id in ids {
-        let len = u32::try_from(id.len())
-            .map_err(|_| DsmError::invalid_operation("storage set: member id too long"))?;
-        h.update(&len.to_be_bytes());
-        h.update(id);
-    }
-    Ok(*h.finalize().as_bytes())
+    let ids: Vec<&[u8]> = member_ids.iter().map(|s| s.as_bytes()).collect();
+    let members = dsm::ccb::StorageSetMembers::new(&ids)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))?;
+    dsm::ccb::storage_set_id(&members)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))
 }
 
 impl StorageSet {
