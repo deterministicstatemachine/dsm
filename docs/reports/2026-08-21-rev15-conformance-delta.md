@@ -31,10 +31,30 @@ citations in this report therefore resolve at `5efc1d3a`; code citations resolve
 Recording the blob hash means a later revision landing on that path is detected rather than
 silently absorbed.
 
+**Two classes of claim, kept apart.** Everything above is *durable*: `d0bd5d0d`, `5efc1d3a` and the
+blob `726e7372` are fixed points, and a sentence about them is true forever. A sentence about the
+*current* head of a mutable path is a different kind of claim — it is true when written and false
+after the next legitimate edit. This report therefore states no current-head value anywhere. To
+obtain one, compute it:
+
+```bash
+git hash-object .github/instructions/sofispecs.instructions.md
+```
+
+An earlier revision embedded a current-head assertion in this otherwise historical artifact, and it
+went stale exactly as that predicts.
+
 ### Amendments since the freeze
 
-The mechanism above has fired five times, as designed. The spec blob is now
-`10c28699abc9138ce6a17827d6d1e118f666b321`.
+The mechanism above has fired repeatedly, as designed; the passes it caught are recorded below and
+that list, not a count, is the register.
+
+`10c28699abc9138ce6a17827d6d1e118f666b321` is **the blob this report observed** when its amendment
+passes were written. It is recorded as an observation, and deliberately not as a statement about the
+current head — the specification has been amended since, including by the state-identity cut, and
+any value written here would be stale again by the next amendment. What stays true is the
+comparison: a spec blob differing from `10c28699` means normative text has moved since this report
+last looked, which is precisely the detection the pin exists to provide.
 
 **`parent_state_commitment` recurrence and genesis rule.** Rev 15 named
 `parent_state_commitment` in three places — Def 6.4, the settlement resource key of Def 6.17,
