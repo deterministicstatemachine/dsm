@@ -480,7 +480,7 @@ mod tests {
             encumbrances: EncumbranceSet::empty(),
             iteration_budget: None,
             parent_state_commitment: h_n,
-            owner_root: [0xA3; 32],
+            owner_authority_transition_digest: [0xA3; 32],
             storage_set: StorageSetMembers::new(&members).expect("five members"),
             quorum: 4,
         };
