@@ -299,8 +299,9 @@ can do, since it forecloses moving the reference mid-vault.
 
 ## Landing sites
 
-- **Registry**: class `0x0001` gains schema 2; §5.1 gains the schema-2 field table and the field's
-  definition. Schema 1 is untouched.
+- **Registry**: `0x0001` reaches **schema 3** with schemas 1 and 2 burned — schema 2 defined field
+  13 but nested `0x0002`/`0x0005` schema 1, and §2.7 nests by complete CCB, so its bytes differ.
+  The bump propagates the same way through `0x000D` and `0x000C`.
 - **AnchorV3**: a new domain and a new signed payload. `VaultStateAnchorV2`, its `parent_binding`
   helper and its pinning test at `dlv/vault_state_anchor_v2.rs:286` are **deleted**, not modified.
 - **`RouteCommitHopV1`**: the `(anchor_seq, reserves_digest, anchor_digest)` triple at
@@ -351,17 +352,31 @@ can do, since it forecloses moving the reference mid-vault.
     complete Allocation CCB is canonical, and two members whose bound `V_n` share a `vault_id` are
     refused as non-distinct DLVs — the check that replaces the removed identifier rather than
     dropping it.
-13. **Mutation controls.** Each gate above disabled in turn must turn its test red.
+13. **Claim parents are creation parents, and are never refreshed.** With a non-empty successor
+    encumbrance set, every claim in `E_{n+1}` binds a `c_k` with `k ≤ n`, and a claim persisting
+    across a successor is byte-identical to its prior form. A claim whose `parent_binding` equals
+    the containing state's own `c_{n+1}` must be refused — that is the hash fixed point
+    `c_n → CCB(V_n) → E_n → e_j → c_n`, and "refreshing" a claim's parent is how an implementation
+    arrives at it while believing it is tidying up.
+14. **Nested schema bumps propagate.** Encoding `V_n` with any nested member at a burned schema
+    must be impossible, not merely wrong: `0x0001` schema 3 nests `0x0002` and `0x0005` at schema 2
+    only. Asserted structurally, because the failure is a silently different `c_n` rather than an
+    error.
+15. **Mutation controls.** Each gate above disabled in turn must turn its test red.
 
 ## Sequence
 
-**The normative cut gates this work and is not this document's to make.** Def 9.1 and §9.3, Def 6.17,
-the stale-parent checks, the `SettlementBundle` parent fields, and the removal of Def 6.4 — all
-resolving to `c_n`. It is one change because it is one identity.
+**The normative cut is made in this change**, in `.github/instructions/sofispecs.instructions.md`:
+Def 4.1, Def 5.2, Def 6.4 and 6.4a, Req 6.6, Def 6.14, Def 6.17, Def 9.1 and 9.2, §7.2, §8, §9.3 and
+§10 — all resolving to `c_n`. It is one change because it is one identity, and under the no-legacy
+rule it cannot lag the registry even briefly.
 
-After it lands, in order: registry schemas (`0x0001`, `0x0015`, `0x0017` to schema 2, schema 1 burned
-in each), then AnchorV3 with V2 deleted, then `CCB(V_n)` publication on the Area 4 substrate, then
-the composer staging above including the step-6 key equality, then the five call sites resume.
+Implementation order after this merges: registry schemas (`0x0001`→3, `0x0002`/`0x0004`/`0x0005`/
+`0x000C`/`0x000D`/`0x0015`/`0x0016`/`0x0017`→2), then AnchorV3 with V2 deleted, then `CCB(V_n)`
+publication on the Area 4 substrate, then the composer staging above including the step-6 key
+equality, then the five call sites resume. No migration step appears in that list: a clean
+reprovision means no old state is valid, so there is nothing to migrate and no compatibility code to
+write.
 
 There is no migration step in that list, and that is deliberate: a clean reprovision means no old
 state is valid, so there is nothing to migrate and no compatibility code to write.

@@ -269,18 +269,18 @@ storage address, a resource key or an authority check appears here.
 
 | Class | Object | Schema | Commitment it feeds | Status |
 |---|---|---|---|---|
-| `0x0001` | `VaultStateV2` (`V_n`) | **2** | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined; schema 1 **burned** |
+| `0x0001` | `VaultStateV2` (`V_n`) | **3** | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined; schemas 1 and 2 **burned** |
 | `0x0002` | `StorageSet` (`S`) | **2** | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined; schema 1 **burned** |
 | `0x0004` | `EncumbranceClaim` (`e_j`) | **2** | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined; schema 1 **burned** |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | **2** | nested in `0x0001`; `EC_v` **deleted** | §5.3 defined; schema 1 **burned** |
-| `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
+| `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
 | `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | §5.7 defined |
 | `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | §5.6 defined |
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | §5.4 defined |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
-| `0x000C` | `RouteSet` (`R`) | 1 | nested in `0x0017` | §5.14 defined |
-| `0x000D` | `Route` (`r_i`) | 1 | set element of `0x000C` | §5.13 defined |
+| `0x000C` | `RouteSet` (`R`) | **2** | nested in `0x0017` | §5.14 defined; schema 1 **burned** |
+| `0x000D` | `Route` (`r_i`) | **2** | set element of `0x000C` | §5.13 defined; schema 1 **burned** |
 | `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.6 partial |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.6 partial |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000E` | **blocked, see §6** |
@@ -304,9 +304,30 @@ object class before members were settled as bare `bytes` under §2.2 — a set o
 element class (§2.4), so there is nothing for the number to name. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
-**Burned schema versions.** `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0015`, `0x0016` and `0x0017` all have schema 1 burned by
-the state/route identity cut. They are recorded so their numbers are never re-assigned; no
-production path decodes or emits them.
+**Burned schema versions.** `0x0002`, `0x0004`, `0x0005`, `0x000C`, `0x000D`, `0x0015`, `0x0016`
+and `0x0017` have schema 1 burned by the state/route identity cut. `0x0001` has schemas **1 and 2**
+burned. They are recorded so their numbers are never re-assigned; no production path decodes or
+emits them.
+
+**Schema bumps are transitive, because nesting is by complete CCB.** §2.7 emits a nested object as
+its full CCB *including its own class and schema version*, so changing a nested object's schema
+changes the enclosing object's bytes — which §2.8 makes a changed semantics requiring its own new
+schema version. The cut therefore propagates upward, and the propagation is mechanical rather than a
+judgement call:
+
+```
+0x0002 StorageSet   1→2 ─┐
+0x0005 EncumbranceSet 1→2─┴─► 0x0001 VaultStateV2  2→3   (fields 14 and 10)
+0x0015 Allocation   1→2 ─┐
+0x0016 AllocBundle  1→2 ─┴─► 0x000D Route          1→2   (leg elements)
+                             └─► 0x000C RouteSet    1→2   (set elements)
+                                  └─► 0x0017 Q      already 2, unmerged — defined against RouteSet 2
+```
+
+`0x0001` reaching schema 3 is the notable one: schema 2 shipped on `main` and is burned without ever
+having been the live form for a full release. That is the rule working, not the rule failing — an
+object whose nested members changed is a different object, and pretending otherwise is exactly the
+silent-divergence §2.8 exists to prevent.
 
 `0x0018`–`0x001A` are **DSM substrate**, not Rev 15 objects. They are allocated from this table
 because the namespace is single and indivisible (§2.8), and they carry the same immutability rules
@@ -372,7 +393,7 @@ direction of independence runs both ways — the substrate objects are derivable
 *(Sections 5.1–5.8 follow the framework above. Objects marked blocked in §3 carry only their
 class assignment until §6 is resolved.)*
 
-### 5.1 `VaultStateV2` — class `0x0001`, schema 2
+### 5.1 `VaultStateV2` — class `0x0001`, schema 3
 
 The fifteen members of the Def 4.1 tuple, numbered in the order that definition states them.
 `c_n = H(DSM/vault-state ‖ CCB(V_n))`, and `h_n` — field 12 — is `c_{n-1}` for `n > 0` and the
@@ -389,11 +410,11 @@ domain-separated genesis value at `n = 0`.
 | 7 | `market_policy` (`P_M`) | nested `0x0007` | inline by value per §2.7 |
 | 8 | `release_policy` (`P_R`) | nested `0x0009` | inline by value |
 | 9 | `fee_policy` (`Φ`) | nested `0x000A` | inline by value; the single authoritative fee |
-| 10 | `encumbrances` (`E`) | nested `0x0005` | the encumbrance set, inline by value |
+| 10 | `encumbrances` (`E`) | nested `0x0005` schema 2 | the encumbrance set, inline by value |
 | 11 | `iteration_budget` (`β`) | optional `u64` | §2.3 presence marker; absent is the common case |
 | 12 | `parent_state_commitment` (`h_n`) | `digest32` | `c_{n-1}`, or the genesis value at `n = 0` |
 | 13 | `owner_authority_transition_digest` (`r_o`) | `digest32` | `t_j = H_dom(DSM/devtree-transition, CCB(T_j))` — the `0x001A` transition under which the owner asserts the device authority signing for this vault |
-| 14 | `storage_set` (`S`) | nested `0x0002` | inline by value; note `0x0002` carries the frozen legacy layout of §5.2 |
+| 14 | `storage_set` (`S`) | nested `0x0002` schema 2 | inline by value; an ordinary CCB object (§5.2) |
 | 15 | `quorum` (`q`) | `u32` | the fixed threshold; validity is `q` conformant for `|S|` per the beta profile |
 
 Reserve ordering follows the token pair in `P_M`: field 5 is the leg whose policy commitment is
@@ -415,8 +436,10 @@ authority position cannot disagree: they are one commitment. Semantics, publicat
 verification staging are in
 [`docs/plans/2026-08-23-sofi-authority-position-commitment.md`](../plans/2026-08-23-sofi-authority-position-commitment.md).
 
-**Schema 1 is burned.** It carried the undefined `owner_root` and is not decodable by any production
-path. Its number is recorded only so it is never re-assigned.
+**Schemas 1 and 2 are burned.** Schema 1 carried the undefined `owner_root`. Schema 2 defined field
+13 but nested `0x0002` schema 1 and `0x0005` schema 1, so its bytes differ from schema 3's even
+though its field *list* is identical — §2.7 nests by complete CCB, including the nested schema
+version. Schema 3 is the only decodable form.
 
 ### 5.2 `StorageSet` — class `0x0002`, schema 2
 
@@ -460,6 +483,29 @@ DLV parent state the claim is made against.
 **Schema 1 is burned.** It carried `vault_id` alongside a `parent_state_commitment` documented as
 `h_n` — the old parent model surviving through the accounting path, which is the least visible place
 for it to survive. Schema 2 pins the parent to `c_n` and drops `vault_id`, which `c_n` commits.
+
+#### `parent_binding` is the CREATION parent, and this is what keeps the encoding acyclic
+
+`E` is a member of `V_n`, so a claim is nested inside the very state whose identity is `c_n`. Reading
+"the claim's parent is `c_n`" as *the containing state's* `c_n` would give
+
+```
+c_n → CCB(V_n) → E_n → e_j → c_n
+```
+
+— a hash fixed point, which no encoder can compute and no verifier can check. The rule is therefore
+stated in transition terms and is not optional:
+
+> If the transition `V_n → V_{n+1}` creates claim `e_j`, then `e_j.parent_binding = c_n` — the
+> identity of the state the transition consumed — and `e_j` is inserted into `E_{n+1}`. If the claim
+> persists across later successors it is carried **byte for byte**; its `parent_binding` is never
+> rewritten to the containing state's `c_k`.
+
+Every claim inside `E_{n+1}` therefore binds a `c_k` with `k ≤ n`, all of them already computed when
+`c_{n+1}` is formed. The preimage is finite and the dependency graph runs strictly backwards.
+
+The "carried byte for byte" half is the part an implementation is likely to get wrong, because
+refreshing a claim's parent to the current state looks like bookkeeping hygiene. It is the cycle.
 
 `EncumbranceSet` — class `0x0005`, schema 2 — is a set of `EncumbranceClaim` under §2.4. It is
 nested by value in `0x0001` field 10 and **no longer feeds a standalone digest**: the derived
@@ -615,7 +661,7 @@ alias this cut removes.
 | # | Field | Type | Notes |
 |---|---|---|---|
 | 1 | `intent` (`I`) | `digest32` | `H(DSM/intent ‖ CCB(TradeIntent))` |
-| 2 | `route_set` (`R`) | nested `0x000C` | inline by value |
+| 2 | `route_set` (`R`) | nested `0x000C` schema 2 | inline by value |
 | 3 | `nonce_x` | `digest32` | |
 
 **Schema 2 removes `{EC_v}`, and schema 1 is burned.** Schema 1 carried it for a reason the registry
@@ -635,14 +681,17 @@ the parent's entire encumbrance state*, while `e` *selects the one claim this al
 Authentication and selection are different jobs, and no amount of parent commitment tells a verifier
 which claim a leg is spending.
 
-### 5.13 `Route` — class `0x000D`, schema 1
+### 5.13 `Route` — class `0x000D`, schema 2
 
 §9.3: "A route is a sequence of logical legs, each leg being either a one-vault allocation or
 a same-pair allocation bundle", `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_hops`.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `legs` | **sequence** of `0x0015` \| `0x0016` | §2.5 ordering — emitted in route order, **never sorted** |
+| 1 | `legs` | **sequence** of `0x0015` \| `0x0016`, both schema 2 | §2.5 ordering — emitted in route order, **never sorted** |
+
+**Schema 2, schema 1 burned.** Both leg classes moved to schema 2 and legs nest by complete CCB, so
+this object's bytes changed even though its single field did not.
 
 One field, deliberately. `max_hops` is not carried: it is authoritative in `TradeIntent`
 field 6, and route validity checks `len(legs) ≤ max_hops` against the intent the route serves.
@@ -660,14 +709,17 @@ disagree.
 A leg count of zero is invalid: a route with no legs executes nothing and would give the empty
 sequence a meaning the specification does not define.
 
-### 5.14 `RouteSet` — class `0x000C`, schema 1
+### 5.14 `RouteSet` — class `0x000C`, schema 2
 
 §9.3: `R = {r_1,…,r_k}`, "canonicalized by route CCB ascending", with `k` bounded by
 `TradeIntent.k`.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `routes` | set of `0x000D` | §2.4 ordering over complete `Route` CCB; duplicates invalid |
+| 1 | `routes` | set of `0x000D` schema 2 | §2.4 ordering over complete `Route` CCB; duplicates invalid |
+
+**Schema 2, schema 1 burned.** `Route` moved to schema 2, and this set nests complete `Route` CCB,
+so its own bytes changed. Nothing else about it did.
 
 `k` is not carried, for the same reason `max_hops` is not: Req 9.1 makes it a `TradeIntent`
 bound — and explicitly an *independent* one, warning that "an implementation must not use `k`
@@ -819,15 +871,15 @@ writing an encoder.**
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
 | `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
-| `0x0012` | `TradeDigest` | commits "the pair, executed amounts, participating vault identifiers, parent bindings, fees, and `X`" | six named components with no types and no ordering for the multi-valued ones |
+| `0x0012` | `TradeDigest` | commits the pair, executed amounts, the parent identity `c_n` of every participating DLV, fees, and `X` | the component types and the ordering of the multi-valued ones. Participating vault identifiers are **not** components: each `c_n` commits its own `vault_id` |
 
 Two of these have partial tables in §5 rather than none:
 
 - `0x0006` `FulfillmentMechanism` is fixed as a preimage —
-  `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))` — so its field order is known and only
-  `0x0008` blocks it. `Canon(P_M)` was removed from this preimage by the Def 5.2 amendment:
-  `P_M` is a member of `V_0` and `c_0` commits the complete canonical `V_0`, so the mechanism
-  already committed it transitively and the second copy was an alias, not a binding.
+  `M = H(DSM/fulfillment ‖ c_0 ‖ CCB(B_M))` — so its field order is known and only `0x0008`
+  blocks it. Two operands were removed for the same reason, one amendment apart: `Canon(P_M)` by
+  the Def 5.2 amendment, and `vault_id` by the state-identity cut. Both are members of `V_0`, and
+  `c_0` commits the complete canonical `V_0`, so each was an alias rather than a binding.
 - `0x000E` `SettlementBundle` and `0x000F` `ConsumedDlvTransition` have their members named by
   Def 6.14 and the prose that follows it, and block on the types of those members plus
   `0x0010`.
@@ -984,9 +1036,10 @@ that, it is derived.
 
 ### What remains blocked
 
-`TradeDigest` `0x0012` stays last by dependency: §10 binds "the pair, executed amounts,
-participating vault identifiers, parent bindings, fees, and `X`", and those types are
-determinate only once findings 1–3 are settled.
+`TradeDigest` `0x0012` stays last by dependency: §10 binds the pair, executed amounts, the parent
+identity `c_n` of every participating DLV, fees and `X`, and those types are determinate only once
+findings 1–3 are settled. Note what it no longer binds — participating vault identifiers were
+dropped by the state-identity cut, since each `c_n` commits its own.
 
 ---
 
