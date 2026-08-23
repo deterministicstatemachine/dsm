@@ -327,6 +327,21 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     first_written_tick INTEGER NOT NULL
                 );
 
+                -- IMMUTABLE OBJECT STORE (Area 4, Rev 15 §15.3). Keyed by the
+                -- content address addr(N, P); write-once forever — no UPDATE
+                -- and no DELETE statement exists against this table anywhere.
+                -- The node recomputes the address on write AND on read; it
+                -- never decodes the payload. Deletion, if ever needed for
+                -- capacity, is a node-policy concern that must not be
+                -- implemented as overwrite, and no validity rule may key on
+                -- absence.
+                CREATE TABLE IF NOT EXISTS immutable_objects (
+                    addr_b32           TEXT PRIMARY KEY,
+                    namespace          BLOB NOT NULL,
+                    payload            BLOB NOT NULL,
+                    first_written_tick INTEGER NOT NULL
+                );
+
                 -- SETTLEMENT-SLOT CLAIM REGISTER: one-shot, write-once per
                 -- (vault_id, parent_sequence); no update, no delete. See pg.rs.
                 CREATE TABLE IF NOT EXISTS settlement_slot_claims (
@@ -851,6 +866,89 @@ pub async fn insert_recovery_authority_anchor_if_absent(
 
         tx.commit()?;
         Ok(outcome)
+    })
+    .await
+}
+
+/// Outcome of [`insert_immutable_object_if_absent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImmutablePutOutcome {
+    /// No object existed at this address; the row was newly inserted.
+    Inserted,
+    /// The identical `(namespace, payload)` tuple already exists — idempotent.
+    AlreadyExistsIdentical,
+    /// A DIFFERENT tuple already exists at this address. By construction this
+    /// is unreachable without a hash collision or a damaged store, which is
+    /// exactly why it is surfaced as its own outcome rather than assumed away.
+    Conflict,
+}
+
+/// Write-once insert of an immutable object, keyed by content address.
+///
+/// Idempotence compares the stored `(namespace, payload)` TUPLE, not payload
+/// bytes alone: the namespace is stored beside the payload rather than
+/// derived from it, so a corrupted or mis-migrated namespace column is
+/// exactly the divergence a bytes-only comparison would pass over.
+pub async fn insert_immutable_object_if_absent(
+    pool: &DBPool,
+    addr_b32: &str,
+    namespace: &[u8],
+    payload: &[u8],
+    first_written_tick: u64,
+) -> Result<ImmutablePutOutcome> {
+    let addr_b32 = addr_b32.to_string();
+    let namespace = namespace.to_vec();
+    let payload = payload.to_vec();
+    let tick_i64 = i64::try_from(first_written_tick)
+        .map_err(|_| anyhow!("first_written_tick {first_written_tick} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let prior: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT namespace, payload FROM immutable_objects WHERE addr_b32=?1",
+                params![addr_b32],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let outcome = match prior {
+            Some((ns, pl)) if ns == namespace && pl == payload => {
+                ImmutablePutOutcome::AlreadyExistsIdentical
+            }
+            Some(_) => ImmutablePutOutcome::Conflict,
+            None => {
+                tx.execute(
+                    "INSERT INTO immutable_objects
+                       (addr_b32, namespace, payload, first_written_tick)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![addr_b32, namespace, payload, tick_i64],
+                )?;
+                ImmutablePutOutcome::Inserted
+            }
+        };
+
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// Return the `(namespace, payload)` tuple at a content address, or `None`.
+pub async fn get_immutable_object(
+    pool: &DBPool,
+    addr_b32: &str,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let addr_b32 = addr_b32.to_string();
+    with_conn(pool, move |conn| {
+        let row: Option<(Vec<u8>, Vec<u8>)> = conn
+            .query_row(
+                "SELECT namespace, payload FROM immutable_objects WHERE addr_b32=?1",
+                params![addr_b32],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row)
     })
     .await
 }
@@ -1998,6 +2096,73 @@ mod tests {
         let pool = Arc::new(Mutex::new(conn));
         init_db(&pool).await.expect("init schema");
         pool
+    }
+
+    // -----------------------------------------------------------------
+    // Area 4 — immutable object store: write-once on the TUPLE.
+    // -----------------------------------------------------------------
+
+    /// Obligation: idempotence on the tuple. Two puts of the identical
+    /// `(namespace, payload)` leave one row; a differing PAYLOAD at the same
+    /// address is a conflict; and a differing NAMESPACE with the identical
+    /// payload is ALSO a conflict — the case a bytes-only comparison would
+    /// pass over, which is why the comparison is on the tuple.
+    #[tokio::test]
+    async fn immutable_put_is_write_once_on_the_tuple() {
+        let pool = make_inmem_pool().await;
+        let addr = "ADDR1";
+        let ns = b"DSM/vault-state".to_vec();
+        let payload = b"canonical bytes".to_vec();
+
+        let first = insert_immutable_object_if_absent(&pool, addr, &ns, &payload, 1)
+            .await
+            .expect("insert");
+        assert_eq!(first, ImmutablePutOutcome::Inserted);
+
+        let replay = insert_immutable_object_if_absent(&pool, addr, &ns, &payload, 2)
+            .await
+            .expect("replay");
+        assert_eq!(replay, ImmutablePutOutcome::AlreadyExistsIdentical);
+
+        let other_payload = insert_immutable_object_if_absent(&pool, addr, &ns, b"different", 3)
+            .await
+            .expect("query");
+        assert_eq!(other_payload, ImmutablePutOutcome::Conflict);
+
+        let other_ns =
+            insert_immutable_object_if_absent(&pool, addr, b"DSM/genesis/v3", &payload, 4)
+                .await
+                .expect("query");
+        assert_eq!(
+            other_ns,
+            ImmutablePutOutcome::Conflict,
+            "a mutated namespace with identical payload must NOT re-ack"
+        );
+
+        let (got_ns, got_payload) = get_immutable_object(&pool, addr)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(got_ns, ns);
+        assert_eq!(got_payload, payload);
+    }
+
+    /// Obligation: no overwrite path exists — behaviourally, the losing write
+    /// leaves the first tuple untouched.
+    #[tokio::test]
+    async fn a_conflicting_put_leaves_the_first_write_untouched() {
+        let pool = make_inmem_pool().await;
+        insert_immutable_object_if_absent(&pool, "A", b"DSM/vault-state", b"first", 1)
+            .await
+            .expect("insert");
+        let _ = insert_immutable_object_if_absent(&pool, "A", b"DSM/vault-state", b"second", 2)
+            .await
+            .expect("query");
+        let (_, payload) = get_immutable_object(&pool, "A")
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(payload, b"first".to_vec());
     }
 
     #[tokio::test]
