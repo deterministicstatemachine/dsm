@@ -146,7 +146,13 @@ fn p1_delegation_chain(
         return Err(ResolveFailure::Absent("P1: no delegations presented"));
     }
     // Forks are refused, never chosen: two delegations at one number are
-    // evidence, and a verifier holding both stops.
+    // evidence, and a verifier holding both stops. The comparison is over the
+    // ENTIRE signed entry, deterministically: an identical duplicate is
+    // idempotent, a different OBJECT at one number is a fork, and the same
+    // object with DIFFERENT signature bytes is an ambiguous presentation —
+    // refused, because otherwise whichever copy the bag happened to yield
+    // last would supply the signature, and an unordered bag would have an
+    // order-dependent outcome.
     let mut by_number: std::collections::BTreeMap<u64, &SignedDelegation> =
         std::collections::BTreeMap::new();
     for sd in bag {
@@ -154,6 +160,13 @@ fn p1_delegation_chain(
             if prev.delegation != sd.delegation {
                 return Err(invalid(format!(
                     "P1: delegation fork at number {} — refused, not chosen",
+                    sd.delegation.delegation_number
+                )));
+            }
+            if prev.grk_signature != sd.grk_signature {
+                return Err(invalid(format!(
+                    "P1: delegation {} presented with two different signatures — \
+                     ambiguous, refused so the outcome cannot depend on bag order",
                     sd.delegation.delegation_number
                 )));
             }
@@ -207,7 +220,8 @@ struct ChainedTransition {
 }
 
 /// P2 — fold the transition chain by predecessor EDGE, evaluating activation
-/// against the already-authenticated prefix.
+/// against the already-authenticated prefix, and stopping AT the bound
+/// position.
 ///
 /// Every fact consumed here is authenticated by P0/P1 or by this fold's own
 /// prefix. Activation eligibility is the **contiguous resolved prefix** rule:
@@ -217,8 +231,19 @@ struct ChainedTransition {
 /// lineage can never skip an edge it did not prove. The failure mode of that
 /// rule is liveness (an older delegation stays applicable), never safety —
 /// a property that holds precisely because ancestry is the signed edge.
+///
+/// **Position-scoping is enforced here, not merely promised.** The fold stops
+/// the moment it authenticates the transition whose digest equals the bound
+/// position, and never inspects that transition's successors — a fork or an
+/// invalidly-signed successor strictly AFTER the position therefore cannot
+/// disturb a proof bound to it. Forks and invalid edges WITHIN the
+/// authenticated prefix still refuse. An earlier revision indexed and
+/// fork-checked the entire presented bag before looking for the position,
+/// which let anyone break a valid bound proof by appending garbage after it —
+/// the contract said "ignored", the code said "inspected", and the code lost.
 fn p2_fold_transitions(
     g_o: &[u8; 32],
+    position: &[u8; 32],
     delegations: &[RootProgressionDelegation],
     bag: &[SignedTransition],
 ) -> Result<Vec<ChainedTransition>, ResolveFailure> {
@@ -228,19 +253,17 @@ fn p2_fold_transitions(
         .map(|d| d.digest().map_err(|e| invalid(format!("P2: {e}"))))
         .collect::<Result<_, _>>()?;
 
-    // Index transitions by the predecessor edge they bind. Two transitions
-    // binding one predecessor are a fork: refused, never ordered — taking the
-    // higher version would convert equivocation into a selection rule.
-    let mut by_predecessor: std::collections::HashMap<[u8; 32], &SignedTransition> =
+    // Group transitions by the predecessor edge they bind. Grouping is not
+    // judging: fork detection happens DURING the fold, only for edges the
+    // fold actually walks, so material after the bound position is never
+    // examined at all.
+    let mut by_predecessor: std::collections::HashMap<[u8; 32], Vec<&SignedTransition>> =
         std::collections::HashMap::new();
     for st in bag {
-        if let Some(prev) = by_predecessor.insert(st.transition.predecessor_transition_digest, st) {
-            if prev.transition != st.transition {
-                return Err(invalid(
-                    "P2: transition fork — two successors of one predecessor, refused",
-                ));
-            }
-        }
+        by_predecessor
+            .entry(st.transition.predecessor_transition_digest)
+            .or_default()
+            .push(st);
     }
 
     let mut chain: Vec<ChainedTransition> = Vec::new();
@@ -260,7 +283,27 @@ fn p2_fold_transitions(
         })
         .collect();
 
-    while let Some(st) = by_predecessor.get(&cursor) {
+    while let Some(candidates) = by_predecessor.get(&cursor) {
+        // Fork and ambiguity detection, scoped to THIS edge only. An
+        // identical duplicate is idempotent; two different transitions off
+        // one predecessor are a fork (refused, never ordered — the higher
+        // version must not win); one transition with two different signature
+        // bytes is an ambiguous presentation, refused so an unordered bag
+        // cannot have an order-dependent outcome.
+        let st = candidates[0];
+        for other in &candidates[1..] {
+            if other.transition != st.transition {
+                return Err(invalid(
+                    "P2: transition fork — two successors of one predecessor, refused",
+                ));
+            }
+            if other.delegate_signature != st.delegate_signature {
+                return Err(invalid(
+                    "P2: one transition presented with two different signatures — \
+                     ambiguous, refused so the outcome cannot depend on bag order",
+                ));
+            }
+        }
         let t = &st.transition;
         if t.genesis_id != *g_o {
             return Err(invalid("P2: transition bound to a different genesis"));
@@ -347,6 +390,13 @@ fn p2_fold_transitions(
                 resolved_at[i] = Some(chain.len());
             }
         }
+
+        // THE STOP. The bound position is authenticated; its successors are
+        // not this proof's business, and inspecting them would let material
+        // after the position disturb a proof bound to it.
+        if digest == *position {
+            return Ok(chain);
+        }
         cursor = digest;
     }
 
@@ -388,8 +438,8 @@ pub fn resolve_owner_authority_at_position(
     // P1 — delegation objects.
     let delegations = p1_delegation_chain(g_o, &grk_pk, presented.delegations)?;
 
-    // P2 — transition chain, activation evaluated against the fold's prefix.
-    let chain = p2_fold_transitions(g_o, &delegations, presented.transitions)?;
+    // P2 — transition chain, folded TO the bound position and no further.
+    let chain = p2_fold_transitions(g_o, position, &delegations, presented.transitions)?;
 
     // P3 — the bound position must be ON the authenticated chain.
     let at = chain
