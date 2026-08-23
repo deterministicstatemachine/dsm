@@ -380,7 +380,7 @@ domain-separated genesis value at `n = 0`.
 | 10 | `encumbrances` (`E`) | nested `0x0005` | the encumbrance set, inline by value |
 | 11 | `iteration_budget` (`β`) | optional `u64` | §2.3 presence marker; absent is the common case |
 | 12 | `parent_state_commitment` (`h_n`) | `digest32` | `c_{n-1}`, or the genesis value at `n = 0` |
-| 13 | `owner_root` (`r_o`) | `digest32` | the authenticated owner root |
+| 13 | `owner_root` (`r_o`) | `digest32` | the committed device-authority position — `t_j` of class `0x001A`; see below |
 | 14 | `storage_set` (`S`) | nested `0x0002` | inline by value; note `0x0002` carries the frozen legacy layout of §5.2 |
 | 15 | `quorum` (`q`) | `u32` | the fixed threshold; validity is `q` conformant for `|S|` per the beta profile |
 
@@ -391,6 +391,16 @@ amendment removed.
 
 `q` is a field of the state rather than of `B_M`, and `S` likewise, because Def 4.1 makes both
 members of `V_n`. `M` commits their birth values transitively through `c_0`.
+
+**Field 13 — `owner_root` is the committed device-authority position.** Rev 15 names `r_o` "the
+authenticated owner root" once and defines it nowhere. It is
+`t_j = H_dom(DSM/devtree-transition, CCB(T_j))`: the exact `0x001A` transition under which the owner
+asserts the device authority that signs for this vault. A trader authenticates `AK_pk` by
+discharging the area 8 predicate **at that bound position**, which is what lets the check be closed
+without a freshness assumption. The field is placed in the state rather than in a separate object so
+that a generation and its authority position cannot disagree — they are one commitment. Semantics,
+publication and the required Def 6.4 amendment are in
+[`docs/plans/2026-08-23-sofi-authority-position-commitment.md`](../plans/2026-08-23-sofi-authority-position-commitment.md).
 
 ### 5.2 `StorageSet` — class `0x0002`, schema 1
 
