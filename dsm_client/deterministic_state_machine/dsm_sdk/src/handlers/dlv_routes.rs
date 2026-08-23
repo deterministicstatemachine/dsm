@@ -203,7 +203,7 @@ impl AppRouterImpl {
                 closed: v.reserve_a == 0 && v.reserve_b == 0,
                 // Derived from the frozen-artifact table: PUBLISHED iff every
                 // birth object has reached quorum on the vault's birth set.
-                publication_state: if birth_is_published(&v.vault_id) {
+                publication_state: if baseline_is_published(&v.vault_id) {
                     generated::VaultPublicationState::Published as i32
                 } else {
                     generated::VaultPublicationState::Pending as i32
@@ -686,8 +686,8 @@ impl AppRouterImpl {
                                 anchor_enforcement: spec.anchor_enforcement,
                                 policy_digest: pd,
                                 storage_set_id: birth_set_id,
-                                birth_state_ccb: Vec::new(),
-                                birth_presentation: Vec::new(),
+                                baseline_state_ccb: Vec::new(),
+                                baseline_presentation: Vec::new(),
                             },
                         )
                     }
@@ -736,7 +736,7 @@ impl AppRouterImpl {
                 "INSERT INTO amm_vault_records(
                     vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
                     fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-                    birth_state_ccb, birth_presentation, created_at)
+                    baseline_state_ccb, baseline_presentation, created_at)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     rec.vault_id.as_slice(),
@@ -748,8 +748,8 @@ impl AppRouterImpl {
                     rec.anchor_enforcement,
                     rec.policy_digest.as_slice(),
                     rec.storage_set_id.as_slice(),
-                    rec.birth_state_ccb.as_slice(),
-                    rec.birth_presentation.as_slice(),
+                    rec.baseline_state_ccb.as_slice(),
+                    rec.baseline_presentation.as_slice(),
                     crate::util::deterministic_time::tick() as i64,
                 ],
             )
@@ -795,8 +795,8 @@ impl AppRouterImpl {
                     // state and its presentation — so every later owner-side
                     // composition starts from what the market actually saw.
                     let mut rec_with_birth = rec.clone();
-                    rec_with_birth.birth_state_ccb = artifacts.state_ccb.clone();
-                    rec_with_birth.birth_presentation = artifacts.presentation.clone();
+                    rec_with_birth.baseline_state_ccb = artifacts.state_ccb.clone();
+                    rec_with_birth.baseline_presentation = artifacts.presentation.clone();
                     write_record(tx, &rec_with_birth)?;
                     for (key, bytes) in &artifacts.objects {
                         crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
@@ -1603,6 +1603,22 @@ impl AppRouterImpl {
                     ))
                 }
             }
+            // The record's baseline ADVANCES to the terminal state in the same
+            // transaction: from here on, every composition of this vault —
+            // the owner's own and any stranger's via the record-served
+            // presentation — starts at the death, not the birth.
+            crate::storage::client_db::amm_vault_records::update_baseline_with_conn(
+                tx,
+                vault_id,
+                &artifacts.state_ccb,
+                &artifacts.presentation,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("dlv.close: baseline advance failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
             for (key, bytes) in &artifacts.objects {
                 crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
                     tx,
@@ -2953,33 +2969,34 @@ fn build_vault_publication_artifacts(
     })
 }
 
-/// The object keys a vault's BIRTH published, derived from the record's own
-/// stored bytes. `None` when the record is absent or pre-dates the blobs —
-/// which reads as "not published", failing closed.
-pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> Option<[String; 2]> {
+/// The object keys of a vault's CURRENT published baseline (birth at
+/// creation, terminal after close), derived from the record's own stored
+/// bytes. `None` when the record is absent or carries no baseline — which
+/// reads as "not published", failing closed.
+pub(crate) fn baseline_object_keys(vault_id: &[u8; 32]) -> Option<[String; 2]> {
     let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
         .ok()
         .flatten()?;
-    if record.birth_state_ccb.is_empty() || record.birth_presentation.is_empty() {
+    if record.baseline_state_ccb.is_empty() || record.baseline_presentation.is_empty() {
         return None;
     }
     Some([
         immutable_object_key(
             dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
-            &record.birth_state_ccb,
+            &record.baseline_state_ccb,
         ),
         immutable_object_key(
             dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
-            &record.birth_presentation,
+            &record.baseline_presentation,
         ),
     ])
 }
 
-/// `true` iff both of a vault's birth objects have reached quorum on the
-/// vault's birth storage set — the activation boundary: FUNDED locally is not
-/// MARKET-ACTIVE until this holds.
-pub(crate) fn birth_is_published(vault_id: &[u8; 32]) -> bool {
-    let Some(keys) = birth_object_keys(vault_id) else {
+/// `true` iff both objects of the vault's current baseline have reached
+/// quorum on the vault's storage set — the activation boundary: FUNDED
+/// locally is not MARKET-ACTIVE until this holds.
+pub(crate) fn baseline_is_published(vault_id: &[u8; 32]) -> bool {
+    let Some(keys) = baseline_object_keys(vault_id) else {
         return false;
     };
     keys.iter().all(|k| {
@@ -3000,7 +3017,7 @@ async fn compose_own_vault(
     let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
         .map_err(|e| format!("vault record read failed: {e}"))?
         .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
-    if record.birth_state_ccb.is_empty() || record.birth_presentation.is_empty() {
+    if record.baseline_state_ccb.is_empty() || record.baseline_presentation.is_empty() {
         return Err(
             "the vault record carries no birth state/presentation — reprovision (no legacy \
              upgrade path exists)"
@@ -3008,7 +3025,7 @@ async fn compose_own_vault(
         );
     }
     let presentation =
-        crate::generated::AnchorPresentationV3::decode(record.birth_presentation.as_slice())
+        crate::generated::AnchorPresentationV3::decode(record.baseline_presentation.as_slice())
             .map_err(|e| format!("stored birth presentation does not decode: {e}"))?;
     let pair = dsm::types::device_state::VaultStatePair::new(
         record.policy_commit_a,
@@ -3019,7 +3036,7 @@ async fn compose_own_vault(
     crate::sdk::vault_state_composition::compose_vault_state(
         vault_id,
         &presentation,
-        &record.birth_state_ccb,
+        &record.baseline_state_ccb,
         &pair.a(),
         &pair.b(),
         pair.fee_bps(),
@@ -4769,14 +4786,23 @@ mod funded_creation_tests {
         });
         assert!(res.success, "sync failed: {:?}", res.error_message);
 
-        // The parent this trade consumes, exactly as the vault-side gate will
-        // re-derive it: the composed frontier's c_n.
+        // The parent this trade consumes. A caller naming the composed
+        // frontier binds its real c_n; a caller deliberately naming some
+        // OTHER (already-consumed or not-yet-existing) state gets the c_n of
+        // exactly the state it claims — so what refuses it is the vault-side
+        // byte-equality gate, not a malformed fixture.
         let frontier = composed_frontier(vault_id);
-        assert_eq!(
-            (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
-            (seq, ra, rb),
-            "the caller's expected frontier must be the composed one"
-        );
+        let parent_binding = if (frontier.sequence, frontier.reserves_a, frontier.reserves_b)
+            == (seq, ra, rb)
+        {
+            frontier.c_n
+        } else {
+            let mut claimed = frontier.state.clone();
+            claimed.generation = seq;
+            claimed.reserve_a = ra;
+            claimed.reserve_b = rb;
+            dsm::ccb::vault_state_commitment(&claimed).expect("claimed state encodes")
+        };
         let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
         let mut rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
@@ -4791,7 +4817,7 @@ mod funded_creation_tests {
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
                 state_number: seq,
-                parent_binding: frontier.c_n.to_vec(),
+                parent_binding: parent_binding.to_vec(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -5669,7 +5695,7 @@ mod funded_creation_tests {
             &owner, &pc_a, &pc_b, 10_000, 5_000,
         );
         assert!(
-            birth_is_published(&vault_id),
+            baseline_is_published(&vault_id),
             "the vault must be born and published before this test unplugs the fleet"
         );
 
@@ -5886,9 +5912,14 @@ mod funded_creation_tests {
             !msg.contains("not in local DLVManager"),
             "the probe must know the vault and be refused on its state: {msg}"
         );
+        // The claimed parent — generation 2 with the PRE-close reserves — is a
+        // state this vault never held, so the byte-equality gate refuses it
+        // before the curve is even consulted. (Under the old three-field gate
+        // the sequence matched and the refusal fell through to the AMM
+        // re-simulation against the zero reserves; the binding subsumes both.)
         assert!(
-            msg.contains("re-simulation rejected"),
-            "the settle side re-simulates the curve against the composed (zero) reserves: {msg}"
+            msg.contains("binds a different parent state"),
+            "the refusal is the parent-binding gate, on the vault's own composed state: {msg}"
         );
         let h = probe.core_sdk.device_head().expect("probe head");
         assert_eq!(

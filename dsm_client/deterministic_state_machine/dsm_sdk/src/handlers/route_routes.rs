@@ -490,7 +490,7 @@ impl AppRouterImpl {
         // So the ad may not go out until every birth object has reached quorum.
         // Same fail-closed posture as the encumbrance check above; the sweep
         // keeps replaying the frozen bytes, so this clears on its own.
-        if !crate::handlers::dlv_routes::birth_is_published(&vault_id) {
+        if !crate::handlers::dlv_routes::baseline_is_published(&vault_id) {
             return err(
                 "route.publishRoutingAdvertisement: this vault's birth proofs have not yet reached \
                  quorum on its storage set (publication pending) — the advertisement would point \
@@ -573,7 +573,7 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-            if record.birth_presentation.is_empty() {
+            if record.baseline_presentation.is_empty() {
                 return err(
                     "route.publishRoutingAdvertisement: the vault record carries no birth \
                      presentation — reprovision (no legacy upgrade path exists)"
@@ -582,7 +582,7 @@ impl AppRouterImpl {
             }
             dsm::storage_object::immutable_inner(
                 dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
-                &record.birth_presentation,
+                &record.baseline_presentation,
             )
         };
 
@@ -1453,7 +1453,7 @@ mod stamping_tests {
         let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
         r.core_sdk.set_device_head_for_testing(v.head.clone());
         assert!(
-            !crate::handlers::dlv_routes::birth_is_published(&v.vault_id),
+            !crate::handlers::dlv_routes::baseline_is_published(&v.vault_id),
             "precondition: this vault's birth proofs are not published"
         );
 

@@ -1170,13 +1170,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- the value the vault's signed birth anchor binds. Consumers resolve
             -- the anchor's set; this cache must equal it (fail closed on mismatch).
             storage_set_id      BLOB NOT NULL,
-            -- The vault's BIRTH state and its verification bundle, exactly as
-            -- published: `CCB(V_0)` (schema-3 vault state) and the owner's
-            -- `AnchorPresentationV3` proto bytes. Every owner-side composition
-            -- starts from these; c_0 recomputes from the blob, so no digest
-            -- is cached beside it.
-            birth_state_ccb     BLOB NOT NULL DEFAULT X'',
-            birth_presentation  BLOB NOT NULL DEFAULT X'',
+            -- The owner's CURRENT published baseline: `CCB(V_n)` (schema-3
+            -- vault state) and its `AnchorPresentationV3` proto bytes, exactly
+            -- as published — the birth state at creation, the terminal state
+            -- after close. Every owner-side composition starts from these;
+            -- c_n recomputes from the blob, so no digest is cached beside it.
+            baseline_state_ccb     BLOB NOT NULL DEFAULT X'',
+            baseline_presentation  BLOB NOT NULL DEFAULT X'',
             created_at          INTEGER NOT NULL
         );
 
