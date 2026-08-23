@@ -382,6 +382,7 @@ mod tests {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: String::new(),
+            network_id: "dsm-test".into(),
         };
         store_genesis_record_with_verification(&gen).expect("store genesis");
         initialize_wallet_from_verified_genesis(&gen).expect("init wallet");

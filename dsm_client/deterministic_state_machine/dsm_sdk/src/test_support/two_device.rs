@@ -146,6 +146,7 @@ impl TestDevice {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: "MnemonicV2".to_string(),
+            network_id: "dsm-test".into(),
         })
         .expect("seed genesis record");
         let router = AppRouterImpl::new(crate::init::SdkConfig {

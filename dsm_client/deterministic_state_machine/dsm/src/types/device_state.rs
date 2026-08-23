@@ -830,7 +830,7 @@ impl VaultStatePair {
     /// The reserves digest for `(reserve_a, reserve_b)` over this pair — the one
     /// definition every anchor, inclusion proof and quote agree on.
     pub fn reserves_digest(&self, reserve_a: u64, reserve_b: u64) -> [u8; 32] {
-        crate::dlv::vault_state_anchor::compute_reserves_digest(
+        crate::dlv::vault_smt_leaf::compute_reserves_digest(
             &self.policy_commit_a,
             &self.policy_commit_b,
             reserve_a,
@@ -3401,9 +3401,7 @@ mod tests {
             input_policy_commit: input_pc,
             output_policy_commit: output_pc,
             parent_sequence: 0,
-            parent_reserves_digest: [0x11; 32],
-            reserve_proof_root: [0x22; 32],
-            predicate_digest: [0x33; 32],
+            parent_binding: [0x11; 32],
             route_commit_bytes: vec![0x44; 8],
             external_commitment_x: [0x55; 32],
             input_amount,
@@ -3790,8 +3788,6 @@ mod tests {
             pending_pointer_x: [0x55; 32],
             parent_sequence: 0,
             new_sequence: 1,
-            parent_reserves_digest: [0x11; 32],
-            new_reserves_digest: [0x12; 32],
             input_policy_commit: era,
             output_policy_commit: rigb,
             input_amount: 1_000,
@@ -5574,8 +5570,6 @@ mod tests {
                 pending_pointer_x: [0x55; 32],
                 parent_sequence: 0,
                 new_sequence: 1,
-                parent_reserves_digest: pair.reserves_digest(10_000, 5_000),
-                new_reserves_digest: pair.reserves_digest(11_000, 5_000 - out_amt),
                 input_policy_commit: input,
                 output_policy_commit: output,
                 input_amount: 1_000,
@@ -5851,8 +5845,6 @@ mod tests {
             pending_pointer_x: [0x55; 32],
             parent_sequence: 0,
             new_sequence: 1,
-            parent_reserves_digest: pair.reserves_digest(10_000, 5_000),
-            new_reserves_digest: pair.reserves_digest(11_000, 4_030),
             input_policy_commit: era,
             output_policy_commit: rigb,
             input_amount: 1_000,

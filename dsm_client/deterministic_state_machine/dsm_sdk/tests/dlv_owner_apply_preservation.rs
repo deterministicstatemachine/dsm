@@ -145,9 +145,6 @@ fn owner_apply_op_as_built_by_reconcile() -> Operation {
         pending_pointer_x: [0x88; 32],
         parent_sequence: 0,
         new_sequence: 1,
-        // dlv_routes.rs:1401-1402 zeroes both.
-        parent_reserves_digest: [0u8; 32],
-        new_reserves_digest: [0u8; 32],
         input_policy_commit: era(),
         output_policy_commit: sofi(),
         input_amount: 100,
@@ -205,8 +202,6 @@ fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operati
         pending_pointer_x: pointer_x,
         parent_sequence: 0,
         new_sequence: 1,
-        parent_reserves_digest: [0u8; 32],
-        new_reserves_digest: [0u8; 32],
         input_policy_commit: era(),
         output_policy_commit: sofi(),
         input_amount: 100,

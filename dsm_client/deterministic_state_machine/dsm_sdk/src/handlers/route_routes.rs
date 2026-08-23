@@ -551,6 +551,41 @@ impl AppRouterImpl {
         let mut unlock_digest = [0u8; 32];
         unlock_digest.copy_from_slice(&req.unlock_spec_digest);
 
+        // The ad carries the DISCOVERY handle for the owner's verification
+        // bundle: the inner digest of the exact presentation bytes the birth
+        // published (stored on the vault record). No record blob, no ad — a
+        // vault the trader cannot verify must not be discoverable.
+        let presentation_digest = {
+            let record =
+                match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                {
+                    Ok(Some(r)) => r,
+                    Ok(None) => {
+                        return err(
+                            "route.publishRoutingAdvertisement: no AMM vault record for this \
+                             vault on this device"
+                                .into(),
+                        )
+                    }
+                    Err(e) => {
+                        return err(format!(
+                            "route.publishRoutingAdvertisement: vault record read failed: {e}"
+                        ))
+                    }
+                };
+            if record.birth_presentation.is_empty() {
+                return err(
+                    "route.publishRoutingAdvertisement: the vault record carries no birth \
+                     presentation — reprovision (no legacy upgrade path exists)"
+                        .into(),
+                );
+            }
+            dsm::storage_object::immutable_inner(
+                dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+                &record.birth_presentation,
+            )
+        };
+
         let publish_input = crate::sdk::routing_sdk::PublishRoutingAdInput {
             vault_id: &vault_id,
             token_a: &req.token_a,
@@ -562,6 +597,7 @@ impl AppRouterImpl {
             unlock_spec_key: req.unlock_spec_key,
             owner_public_key: &req.owner_public_key,
             vault_proto_bytes: &req.vault_proto_bytes,
+            anchor_presentation_digest: presentation_digest,
         };
         if let Err(e) = crate::sdk::routing_sdk::publish_active_advertisement(publish_input).await {
             return err(format!(
@@ -805,11 +841,29 @@ impl AppRouterImpl {
         // Tier-2 anchor-state bindings, keyed by vault_id, computed from
         // each vault's composed+synced current state.  Stamped onto the
         // unsigned RouteCommit hops after binding so the signature + X
-        // cover them (see `stamp_anchor_bindings`).
-        let mut hop_anchor_bindings: std::collections::HashMap<
+        // cover them (see `stamp_parent_bindings`).
+        let mut hop_parent_bindings: std::collections::HashMap<
             [u8; 32],
-            crate::sdk::route_commit_sdk::HopAnchorBinding,
+            crate::sdk::route_commit_sdk::HopParentBinding,
         > = std::collections::HashMap::new();
+        // ONE storage-node SDK for the sweep: the immutable fetches below are
+        // content-addressed and client-side re-hashed, so which mirror served
+        // the bytes never matters.
+        let storage_sdk = {
+            let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return err(format!(
+                        "route.findAndBindBestPath: no storage node config: {e}"
+                    ))
+                }
+            };
+            match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+                Ok(s) => s,
+                Err(e) => return err(format!("route.findAndBindBestPath: storage node sdk: {e}")),
+            }
+        };
         for mut ad in ads.into_iter() {
             if ad.vault_id.len() != 32 {
                 ads_after_composition.push(ad);
@@ -817,45 +871,80 @@ impl AppRouterImpl {
             }
             let mut vid = [0u8; 32];
             vid.copy_from_slice(&ad.vault_id);
-            // The advertisement's reserves are a HINT for logging only. They
-            // used to seed composition, which meant a trader quoted against
-            // numbers it read out of a published record — the same
-            // advertisement-as-authority shape deleted from syncVaultsForPair.
-            // `compose_vault_state` now takes them out of the owner's verified
-            // reserve inclusion proof instead.
+            // The advertisement's reserves are a HINT for logging only — the
+            // numbers a quote is built against come out of the verified
+            // composition below.
             let advertised_reserve_a = ad.reserve_a;
             let advertised_reserve_b = ad.reserve_b;
 
-            // Fetch the latest vault state anchor. Without one there is no
-            // signed baseline to compose against, so the vault is DROPPED —
-            // never quoted from the advertisement's own numbers. (Every
-            // advertised vault has published its birth proofs: the ad publish
-            // is gated on it. A storage error is a drop too: an unproven
-            // reserve is not a quote.)
-            let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
-                &vid,
+            // The ad's ONE verification handle: the digest of the owner's
+            // published presentation. Without it there is nothing to verify,
+            // so the vault is DROPPED — never quoted from the ad's own
+            // numbers.
+            let Ok(presentation_digest) =
+                <[u8; 32]>::try_from(ad.anchor_presentation_digest.as_slice())
+            else {
+                log::debug!(
+                    "[route.findAndBindBestPath] dropping {}: ad carries no presentation digest",
+                    crate::util::text_id::encode_base32_crockford(&vid)
+                );
+                continue;
+            };
+            let presentation = match crate::sdk::vault_state_v3_codec::fetch_anchor_presentation(
+                &storage_sdk,
+                &presentation_digest,
             )
             .await
             {
-                Ok(Some(a)) => a,
+                Ok(Some(p)) => p,
                 Ok(None) => {
                     log::debug!(
-                        "[route.findAndBindBestPath] dropping {}: no signed anchor published",
+                        "[route.findAndBindBestPath] dropping {}: presentation not resolvable",
                         crate::util::text_id::encode_base32_crockford(&vid)
                     );
                     continue;
                 }
                 Err(e) => {
                     log::debug!(
-                        "[route.findAndBindBestPath] dropping {}: anchor fetch failed: {e}",
+                        "[route.findAndBindBestPath] dropping {}: presentation fetch failed: {e}",
                         crate::util::text_id::encode_base32_crockford(&vid)
                     );
                     continue;
                 }
             };
+            // The state the anchor commits, resolved by its identity alone —
+            // the address is a computation from c_n, no index anywhere.
+            let Ok(c_n) = <[u8; 32]>::try_from(presentation.state_commitment.as_slice()) else {
+                log::debug!(
+                    "[route.findAndBindBestPath] dropping {}: malformed presentation commitment",
+                    crate::util::text_id::encode_base32_crockford(&vid)
+                );
+                continue;
+            };
+            let vn_bytes =
+                match crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&storage_sdk, &c_n)
+                    .await
+                {
+                    Ok(Some(b)) => b,
+                    Ok(None) => {
+                        log::debug!(
+                        "[route.findAndBindBestPath] dropping {}: V_n not resolvable at its c_n",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                        continue;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "[route.findAndBindBestPath] dropping {}: V_n fetch failed: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vid)
+                        );
+                        continue;
+                    }
+                };
             match crate::sdk::vault_state_composition::compose_vault_state(
                 &vid,
-                &anchor,
+                &presentation,
+                &vn_bytes,
                 &ad.token_a,
                 &ad.token_b,
                 ad.fee_bps,
@@ -914,32 +1003,16 @@ impl AppRouterImpl {
                     ad.reserve_a = composed.reserves_a;
                     ad.reserve_b = composed.reserves_b;
                     ad.updated_state_number = composed.sequence;
-                    // Record this vault's anchor-state binding over the
-                    // SAME composed values the vault-side unlock gate will
-                    // re-derive from its local `current_sequence` +
-                    // `current_reserves_digest`.  A vault that advances
-                    // between quote and unlock will mismatch here → the
-                    // Required-policy gate fails closed (stale-state
-                    // rejection).  Uses the ad's canonical token_a/token_b
-                    // ordering, matching the vault's fulfillment condition.
-                    let reserves_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
-                        &ad.token_a,
-                        &ad.token_b,
-                        composed.reserves_a,
-                        composed.reserves_b,
-                        ad.fee_bps,
-                    );
-                    let anchor_digest = dsm::dlv::vault_state_anchor::compute_anchor_digest(
-                        &vid,
-                        composed.sequence,
-                        &reserves_digest,
-                    );
-                    hop_anchor_bindings.insert(
+                    // Record this vault's parent binding: the c_n of the exact
+                    // composed state a hop on this vault will consume. The
+                    // vault-side gate recomputes its own composition and
+                    // requires byte-equality — a vault that advances between
+                    // quote and unlock mismatches and the route is rejected
+                    // (stale-parent refusal).
+                    hop_parent_bindings.insert(
                         vid,
-                        crate::sdk::route_commit_sdk::HopAnchorBinding {
-                            seq: composed.sequence,
-                            reserves_digest: reserves_digest.to_vec(),
-                            anchor_digest: anchor_digest.to_vec(),
+                        crate::sdk::route_commit_sdk::HopParentBinding {
+                            parent_binding: composed.c_n,
                         },
                     );
                     ads_after_composition.push(ad);
@@ -992,7 +1065,7 @@ impl AppRouterImpl {
         // Stamp the anchor-state binding onto every hop BEFORE the client
         // signs, so the SPHINCS+ signature and external commitment X cover
         // it and it cannot be tampered.
-        crate::sdk::route_commit_sdk::stamp_anchor_bindings(&mut unsigned, &hop_anchor_bindings);
+        crate::sdk::route_commit_sdk::stamp_parent_bindings(&mut unsigned, &hop_parent_bindings);
         let unsigned_bytes = unsigned.encode_to_vec();
         let resp = generated::AppStateResponse {
             key: "route.findAndBindBestPath".to_string(),
@@ -1108,7 +1181,7 @@ mod stamping_tests {
                 token_out: vec![0x22; 32],
                 input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
                 expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-                vault_state_anchor_seq: 0,
+                state_number: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1186,7 +1259,7 @@ mod stamping_tests {
         // The pointer must be READABLE at the key the slot claim lists.
         let hop = &signed.hops[0];
         let vault_id: [u8; 32] = hop.vault_id.as_slice().try_into().expect("vault id");
-        let parent_sequence = hop.vault_state_anchor_seq;
+        let parent_sequence = hop.state_number;
         let new_sequence = parent_sequence + 1;
         let key =
             crate::sdk::route_commit_sdk::vault_pending_pointer_key(&vault_id, new_sequence, &x);

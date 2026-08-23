@@ -31,8 +31,8 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
              genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
              participant_count,chain_tip,publication_hash,storage_nodes,
              entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-             verification_step,created_at,genesis_nonce,genesis_profile)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             verification_step,created_at,genesis_nonce,genesis_profile,network_id)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
             record.genesis_id,
             record.device_id,
@@ -51,12 +51,31 @@ pub fn store_genesis_record_with_verification(record: &GenesisRecord) -> Result<
             ts as i64,
             record.genesis_nonce,
             record.genesis_profile,
+            record.network_id,
         ],
     )?;
     Ok(())
 }
 
+/// Read the genesis record for one exact genesis id — the identity the
+/// caller actually holds — rather than "the latest row". Devices sharing a
+/// process (tests, multi-profile) each keep their own row; picking by
+/// recency would hand one identity another's derivation inputs.
+pub fn get_genesis_record_by_id(genesis_id_b32: &str) -> Result<Option<GenesisRecord>> {
+    Ok(get_verified_genesis_record_where(
+        "WHERE genesis_id = ?1",
+        rusqlite::params![genesis_id_b32],
+    )?)
+}
+
 pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
+    get_verified_genesis_record_where("", rusqlite::params![])
+}
+
+fn get_verified_genesis_record_where(
+    filter: &str,
+    filter_params: &[&dyn rusqlite::ToSql],
+) -> Result<Option<GenesisRecord>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned in get_verified_genesis_record, recovering");
@@ -80,16 +99,20 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
         Option<i64>,
         String,
         String,
+        String,
     )> = conn
         .query_row(
-            "SELECT genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
-                    participant_count,chain_tip,publication_hash,storage_nodes,
-                    entropy_hash,protocol_version,hash_chain_proof,smt_proof,
-                    verification_step,genesis_nonce,genesis_profile
-               FROM genesis_records
-           ORDER BY created_at DESC
-              LIMIT 1",
-            [],
+            &format!(
+                "SELECT genesis_id,device_id,mpc_proof,device_birth_binding,merkle_root,
+                        participant_count,chain_tip,publication_hash,storage_nodes,
+                        entropy_hash,protocol_version,hash_chain_proof,smt_proof,
+                        verification_step,genesis_nonce,genesis_profile,network_id
+                   FROM genesis_records
+                 {filter}
+               ORDER BY created_at DESC
+                  LIMIT 1"
+            ),
+            filter_params,
             |r| {
                 Ok((
                     r.get(0)?,
@@ -108,6 +131,7 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
                     r.get(13)?,
                     r.get(14)?,
                     r.get(15)?,
+                    r.get(16)?,
                 ))
             },
         )
@@ -130,6 +154,7 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
         v_ts,
         genesis_nonce,
         genesis_profile,
+        network_id,
     )) = row
     {
         let storage_nodes: Vec<String> = if nodes_csv.is_empty() {
@@ -155,6 +180,7 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
             verification_step: v_ts.map(|v| v as u64),
             genesis_nonce,
             genesis_profile,
+            network_id,
         };
 
         if let Some(proof) = hash_proof {
@@ -198,6 +224,7 @@ mod tests {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: String::new(),
+            network_id: "dsm-test".into(),
         }
     }
 

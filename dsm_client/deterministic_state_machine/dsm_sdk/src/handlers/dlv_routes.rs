@@ -43,7 +43,6 @@ impl AppRouterImpl {
     pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
         match q.path.as_str() {
             "dlv.listOwnedAmmVaults" => self.dlv_list_owned_amm_vaults(q).await,
-            "dlv.getVaultStateAnchor" => self.dlv_get_vault_state_anchor(q).await,
             other => err(format!("unknown dlv query path: {other}")),
         }
     }
@@ -222,60 +221,6 @@ impl AppRouterImpl {
         let resp = generated::AppStateResponse {
             key: "dlv.listOwnedAmmVaults".to_string(),
             value: Some(lines.join("\n")),
-        };
-        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
-    }
-
-    /// `dlv.getVaultStateAnchor` (query) — fetch the latest signed
-    /// `VaultStateAnchorV1` proto blob published at
-    /// `sofi/vault-state/{vault_id_b32}/latest`.  Vault internal
-    /// state is authoritative; this route serves the
-    /// off-device-trader discovery path only.  Returns the Base32
-    /// Crockford encoding of the proto bytes in
-    /// `AppStateResponse.value`, or an empty value when no anchor
-    /// has been published yet.
-    ///
-    /// Input: `q.params` carries the vault_id Base32 string as
-    /// UTF-8 bytes.
-    async fn dlv_get_vault_state_anchor(&self, q: crate::bridge::AppQuery) -> AppResult {
-        let vault_id_b32 = match std::str::from_utf8(&q.params) {
-            Ok(s) => s.trim().to_string(),
-            Err(e) => {
-                return err(format!(
-                    "dlv.getVaultStateAnchor: vault id is not valid UTF-8: {e}"
-                ));
-            }
-        };
-        if vault_id_b32.is_empty() {
-            return err("dlv.getVaultStateAnchor: vault id is empty".into());
-        }
-        let vault_id_bytes = match crate::util::text_id::decode_base32_crockford(&vault_id_b32) {
-            Some(v) => v,
-            None => {
-                return err(
-                    "dlv.getVaultStateAnchor: vault id is not valid Base32 Crockford".into(),
-                );
-            }
-        };
-        if vault_id_bytes.len() != 32 {
-            return err(format!(
-                "dlv.getVaultStateAnchor: vault id must decode to 32 bytes, got {}",
-                vault_id_bytes.len()
-            ));
-        }
-        let key = format!("sofi/vault-state/{}/latest", vault_id_b32);
-        let value = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await
-        {
-            Ok(proto_bytes) => crate::util::text_id::encode_base32_crockford(&proto_bytes),
-            Err(_) => {
-                // No anchor published yet (or storage backend unreachable).
-                // Return empty value — caller treats absent as "no anchor".
-                String::new()
-            }
-        };
-        let resp = generated::AppStateResponse {
-            key: "dlv.getVaultStateAnchor".to_string(),
-            value: Some(value),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
@@ -741,6 +686,8 @@ impl AppRouterImpl {
                                 anchor_enforcement: spec.anchor_enforcement,
                                 policy_digest: pd,
                                 storage_set_id: birth_set_id,
+                                birth_state_ccb: Vec::new(),
+                                birth_presentation: Vec::new(),
                             },
                         )
                     }
@@ -788,8 +735,9 @@ impl AppRouterImpl {
             tx.execute(
                 "INSERT INTO amm_vault_records(
                     vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
-                    fee_bps, anchor_enforcement, policy_digest, storage_set_id, created_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    fee_bps, anchor_enforcement, policy_digest, storage_set_id,
+                    birth_state_ccb, birth_presentation, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     rec.vault_id.as_slice(),
                     rec.owner_genesis.as_slice(),
@@ -800,6 +748,8 @@ impl AppRouterImpl {
                     rec.anchor_enforcement,
                     rec.policy_digest.as_slice(),
                     rec.storage_set_id.as_slice(),
+                    rec.birth_state_ccb.as_slice(),
+                    rec.birth_presentation.as_slice(),
                     crate::util::deterministic_time::tick() as i64,
                 ],
             )
@@ -827,35 +777,34 @@ impl AppRouterImpl {
             (Some(funding_mutation), Some(rec)) => {
                 let birth_set_id = rec.storage_set_id;
                 let pair = funding_mutation.pair();
-                let (owner_pk, owner_sk) = match (
-                    crate::sdk::signing_authority::current_public_key(),
-                    crate::sdk::signing_authority::current_secret_key(),
-                ) {
-                    (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
-                    _ => {
-                        return err(
-                            "dlv.create: signing authority unavailable (wallet locked) — a \
-                             vault cannot be born without its signed birth proofs"
-                                .into(),
-                        )
-                    }
-                };
                 let build = |outcome: &dsm::types::device_state::AdvanceOutcome|
                  -> Result<VaultPublicationArtifacts, dsm::types::error::DsmError> {
-                    build_vault_publication_artifacts(outcome, &vault_id, &pair, &birth_set_id, &owner_pk, &owner_sk)
+                    build_vault_publication_artifacts(
+                        outcome,
+                        &vault_id,
+                        &pair,
+                        &birth_set_id,
+                        dsm::ccb::genesis_parent_commitment(&vault_id),
+                    )
                 };
                 let write = |tx: &rusqlite::Transaction<'_>,
                              _o: &dsm::types::device_state::AdvanceOutcome,
                              artifacts: &VaultPublicationArtifacts|
                  -> Result<(), dsm::types::error::DsmError> {
-                    write_record(tx, rec)?;
+                    // The record carries the EXACT published bytes — the birth
+                    // state and its presentation — so every later owner-side
+                    // composition starts from what the market actually saw.
+                    let mut rec_with_birth = rec.clone();
+                    rec_with_birth.birth_state_ccb = artifacts.state_ccb.clone();
+                    rec_with_birth.birth_presentation = artifacts.presentation.clone();
+                    write_record(tx, &rec_with_birth)?;
                     for (key, bytes) in &artifacts.objects {
                         crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
                             tx,
                             &birth_set_id,
                             key,
                             bytes,
-                            &artifacts.root,
+                            &artifacts.c_n,
                             BIRTH_ARTIFACT_PURPOSE,
                         )
                         .map_err(|e| {
@@ -1441,8 +1390,6 @@ impl AppRouterImpl {
             pending_pointer_x: x,
             parent_sequence: receipt.trade.parent_sequence,
             new_sequence: receipt.trade.new_sequence,
-            parent_reserves_digest: [0u8; 32],
-            new_reserves_digest: [0u8; 32],
             input_policy_commit: receipt.trade.input_policy_commit,
             output_policy_commit: receipt.trade.output_policy_commit,
             input_amount: receipt.trade.input_amount,
@@ -1595,8 +1542,7 @@ impl AppRouterImpl {
         op: dsm::types::operations::Operation,
         reserve_a: u64,
         reserve_b: u64,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
+        parent_binding: [u8; 32],
     ) -> Result<(), String> {
         use crate::storage::client_db::dlv_close_intent as intent_db;
         // One staged advance: the release, the consume-once claim for this
@@ -1625,8 +1571,7 @@ impl AppRouterImpl {
                 vault_id,
                 pair,
                 storage_set_id,
-                owner_pk,
-                owner_sk,
+                parent_binding,
             )
         };
         let write = |tx: &rusqlite::Transaction<'_>,
@@ -1664,7 +1609,7 @@ impl AppRouterImpl {
                     storage_set_id,
                     key,
                     bytes,
-                    &artifacts.root,
+                    &artifacts.c_n,
                     TERMINAL_ARTIFACT_PURPOSE,
                 )
                 .map_err(|e| {
@@ -1802,22 +1747,10 @@ impl AppRouterImpl {
                 abandon("the vault pair is not canonical");
                 continue;
             };
-            let Ok(Some(baseline)) =
-                crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(&intent.vault_id)
-                    .await
-            else {
-                // Storage says nothing: keep the intent and try again later.
-                continue;
-            };
-            let Ok(composed) = crate::sdk::vault_state_composition::compose_vault_state(
-                &intent.vault_id,
-                &baseline,
-                &pair.a(),
-                &pair.b(),
-                pair.fee_bps(),
-            )
-            .await
-            else {
+            let _ = &pair; // pair validity was the gate above; composition re-derives it
+            let Ok(composed) = compose_own_vault(&intent.vault_id).await else {
+                // Composition unavailable (baseline unpublished, storage
+                // unreachable): keep the intent and try again later.
                 continue;
             };
             // THE FROZEN ENVELOPE, FROM STORAGE. This is the only claim this
@@ -1951,13 +1884,18 @@ impl AppRouterImpl {
         reserve_a: u64,
         reserve_b: u64,
     ) -> Result<(), String> {
-        let (owner_pk, owner_sk) = match (
-            crate::sdk::signing_authority::current_public_key(),
-            crate::sdk::signing_authority::current_secret_key(),
-        ) {
-            (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => (pk, sk),
-            _ => return Err("signing authority unavailable (wallet locked)".to_string()),
-        };
+        // The terminal state's predecessor edge: the c_n of the frontier this
+        // close consumes, recomputed from the vault's own published baseline.
+        let composed = compose_own_vault(vault_id)
+            .await
+            .map_err(|e| format!("resumed close: {e}"))?;
+        if composed.sequence != parent_sequence {
+            return Err(format!(
+                "resumed close: the composed frontier is at generation {} but this close \
+                 consumes {parent_sequence} — reconcile first",
+                composed.sequence
+            ));
+        }
         self.commit_canonical_close(
             vault_id,
             parent_sequence,
@@ -1968,8 +1906,7 @@ impl AppRouterImpl {
             op,
             reserve_a,
             reserve_b,
-            &owner_pk,
-            &owner_sk,
+            composed.c_n,
         )
         .await
     }
@@ -2053,30 +1990,11 @@ impl AppRouterImpl {
         // contains. Sequence equality alone is not enough: the reserves must
         // agree too, or a close could drain amounts the market has already
         // moved past. Any composition failure is a refusal — never close blind.
-        let baseline =
-            match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(&vault_id).await
-            {
-                Ok(Some(a)) => a,
-                Ok(None) => return err(
-                    "dlv.close: this vault has no published state anchor — its frontier cannot be \
-                     verified; publish (or let the sync republish) before closing"
-                        .into(),
-                ),
-                Err(e) => return err(format!("dlv.close: anchor fetch failed: {e}")),
-            };
-        let composed = match crate::sdk::vault_state_composition::compose_vault_state(
-            &vault_id,
-            &baseline,
-            &pair.a(),
-            &pair.b(),
-            pair.fee_bps(),
-        )
-        .await
-        {
+        let composed = match compose_own_vault(&vault_id).await {
             Ok(c) => c,
             Err(e) => {
                 return err(format!(
-                    "dlv.close: the vault's composed state could not be verified ({e:?}) — \
+                    "dlv.close: the vault's composed state could not be verified ({e}) — \
                      refusing to close blind"
                 ))
             }
@@ -2097,12 +2015,12 @@ impl AppRouterImpl {
                     .into(),
             );
         }
-        // The set is the vault's BIRTH-bound one, from its signed anchor; the
-        // local record is a cache and must agree.
+        // The set is the vault's BIRTH-bound one, a member list inside the
+        // signed `V_n` itself; the local record is a cache and must agree.
         if record.storage_set_id != composed.storage_set_id {
             return err(
                 "dlv.close: the local vault record names a different storage set than the vault's \
-                 signed anchor — refusing"
+                 signed state — refusing"
                     .into(),
             );
         }
@@ -2299,8 +2217,7 @@ impl AppRouterImpl {
                 op,
                 live.reserve_a,
                 live.reserve_b,
-                &owner_pk,
-                &owner_sk,
+                composed.c_n,
             )
             .await
         {
@@ -2431,12 +2348,9 @@ impl AppRouterImpl {
             // Filled by the composition block below; the settle terms are only
             // built on the path where that block succeeded.
             let amm_fee_bps;
-            let pair_a_for_digest;
-            let pair_b_for_digest;
-            let fee_bps_for_digest;
             let reserve_owner_devid;
             let reserve_owner_genesis;
-            let reserve_root;
+            let parent_binding;
             let composed_sequence;
             let vault_storage_set_id;
             let (proven_a, proven_b) = {
@@ -2451,176 +2365,77 @@ impl AppRouterImpl {
                     return err("dlv.unlockRouted: routed settlement requires an AMM vault".into());
                 };
 
-                // DELEGATED LIQUIDITY. The vault's state at the hop's generation is
-                // COMPOSED: the owner's baseline — signed anchor, state-inclusion
-                // proof and reserve-inclusion proof, all owner-signed and SMT-rooted
-                // in the owner's device root, published once at creation — plus
-                // every verified trader generation folded on top of it (a
-                // trader-signed pending pointer, a trader-signed settlement receipt
+                // DELEGATED LIQUIDITY. The vault's state at the hop's parent is
+                // COMPOSED: the owner's baseline — the exact `CCB(V_0)` and
+                // `AnchorPresentationV3` the birth published, re-verified
+                // through the full P0-P6 predicate — plus every verified
+                // trader generation folded on top of it (a trader-signed
+                // pending pointer, a trader-signed settlement receipt
                 // SMT-verified against that trader's own root and matching the
-                // pointer's committed hash, the RouteCommit bound to X and eligible,
-                // the hop's digest matching the fold cursor, and the AMM
-                // re-simulation reproducing the trader's expected output).
+                // pointer's committed hash, the RouteCommit bound to X and
+                // eligible, the hop's parent binding naming the fold cursor's
+                // c_n, and the AMM re-simulation reproducing the trader's
+                // expected output).
                 //
-                // This is exactly the authority the QUOTE side already trusts when it
-                // binds a hop to a generation, and it is what lets the market keep
-                // moving while the LP is offline: no owner signature is needed on any
-                // transition after the baseline. Demanding an owner-published proof
-                // AT the hop's generation instead — as this path once did — made
-                // every vault a one-settlement vault, because the owner publishes
-                // proofs only at creation.
-                let anchor = match crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(
-                    &vault_id,
-                )
-                .await
-                {
-                    Ok(Some(a)) => a,
-                    Ok(None) => {
-                        return err(format!(
-                            "dlv.unlockRouted: no verified reserve proof for vault {} — the owner has \
-                             published no vault-state baseline; its liquidity is unproven and \
-                             cannot be settled against",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                        ));
-                    }
-                    Err(e) => {
-                        return err(format!(
-                            "dlv.unlockRouted: vault-state baseline fetch failed for vault {}: {e}",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                        ));
-                    }
-                };
-                let composed = match crate::sdk::vault_state_composition::compose_vault_state(
-                    &vault_id,
-                    &anchor,
-                    vt_a,
-                    vt_b,
-                    vault_fee_bps,
-                )
-                .await
-                {
+                // This is exactly the authority the QUOTE side already trusts
+                // when it binds a hop to a parent, and it is what lets the
+                // market keep moving while the LP is offline: no owner
+                // signature is needed on any transition after the baseline.
+                let composed = match compose_own_vault(&vault_id).await {
                     Ok(c) => c,
-                    // Every composition failure is "the liquidity is unproven": a
-                    // missing or invalid baseline proof, an unparseable pair. Fail
-                    // closed — nothing here may be guessed at.
+                    // Every composition failure is "the liquidity is unproven".
+                    // Fail closed — nothing here may be guessed at.
                     Err(e) => {
                         return err(format!(
-                            "dlv.unlockRouted: no verified reserve proof for vault {} — its state \
-                             cannot be composed from the owner's baseline ({e}); its liquidity is \
-                             unproven and cannot be settled against",
+                            "dlv.unlockRouted: vault {} cannot be composed from its published \
+                             baseline ({e}); its liquidity is unproven and cannot be settled \
+                             against",
                             crate::util::text_id::encode_base32_crockford(&vault_id),
                         ));
                     }
                 };
 
-                // THE DELEGATION GUARD — policy-independent, before anything moves.
-                // The hop must bind EXACTLY the generation the composition reached.
-                // Behind it, the parent was already consumed by an earlier trader
-                // (the trader-side twin of the owner's consume-once claim). Ahead
-                // of it, the trader is pre-settling a generation that does not
-                // exist — and because the AMM re-simulation below runs against the
-                // composed reserves, a probe that computes its amounts from the
-                // CURRENT reserves while naming a future parent would otherwise
-                // pass every other check and emit a receipt for a parent it never
-                // consumed: a self-credit no owner fold could ever honour.
-                if composed.sequence != hop.vault_state_anchor_seq {
-                    return err(format!(
-                        "dlv.unlockRouted: vault {} is at generation {} but the route binds \
-                         generation {} — that parent is {} and cannot be settled against",
-                        crate::util::text_id::encode_base32_crockford(&vault_id),
-                        composed.sequence,
-                        hop.vault_state_anchor_seq,
-                        if hop.vault_state_anchor_seq < composed.sequence {
-                            "already consumed"
-                        } else {
-                            "not yet reached (unproven)"
-                        },
-                    ));
+                // THE PARENT BINDING GUARD — before anything moves. The hop
+                // must name EXACTLY the c_n the composition reached: one
+                // byte-equality that pins the generation, the reserves, the
+                // pair and the fee all at once, because they are members of
+                // the identified V_n. Behind the frontier, the parent was
+                // already consumed by an earlier trader; ahead of it, the
+                // trader is pre-settling a state that does not exist. Both
+                // read as a binding mismatch and both are refusals.
+                {
+                    use crate::sdk::route_commit_sdk::{enforce_parent_binding, ParentBindingReject};
+                    match enforce_parent_binding(&hop, &composed.c_n) {
+                        Ok(()) => {}
+                        Err(ParentBindingReject::MissingBinding) => {
+                            return err("dlv.unlockRouted: the RouteCommit hop carries no parent \
+                                 binding — an unbound hop names no state and cannot be \
+                                 settled"
+                                .to_string());
+                        }
+                        Err(ParentBindingReject::StaleParent) => {
+                            return err(format!(
+                                "dlv.unlockRouted: vault {} is at generation {} but the route \
+                                 binds a different parent state — that parent is stale, \
+                                 already consumed, or was never this vault's state",
+                                crate::util::text_id::encode_base32_crockford(&vault_id),
+                                composed.sequence,
+                            ));
+                        }
+                    }
                 }
 
                 amm_fee_bps = vault_fee_bps;
-                pair_a_for_digest = vt_a.clone();
-                pair_b_for_digest = vt_b.clone();
-                fee_bps_for_digest = vault_fee_bps;
-                // The settlement records the BASELINE root and owner: the composed
-                // reserves at generation N are derived from that root plus N verified
-                // receipts and have no owner root of their own.
+                // The settlement records the owner the composition PROVED (the
+                // P0-P6 chain at the state's committed authority position) and
+                // the parent identity it consumes.
                 reserve_owner_devid = composed.owner_devid;
                 reserve_owner_genesis = composed.owner_genesis;
-                reserve_root = composed.baseline_reserve_root;
+                parent_binding = composed.c_n;
                 composed_sequence = composed.sequence;
                 vault_storage_set_id = composed.storage_set_id;
                 (composed.reserves_a, composed.reserves_b)
             };
-            {
-                use crate::sdk::route_commit_sdk::{AnchorGateReject, AnchorPosture};
-                use dsm::types::proto::AnchorEnforcement;
-                let policy = AnchorEnforcement::try_from(vault.anchor_enforcement)
-                    .unwrap_or(AnchorEnforcement::Unspecified);
-                // Fail-closed anchor gate: the hop's bound (seq,
-                // reserves_digest, anchor_digest) must match the vault's
-                // COMPOSED current state per policy.  A mismatch means the
-                // vault advanced since the RouteCommit was bound (stale
-                // state).  Pure — no storage read happens here.
-                // The digest the gate compares against is derived from the
-                // COMPOSED reserves (the same values the AMM re-simulation runs
-                // against), and the sequence is the composed generation — not
-                // the local mirror's `current_sequence`, which never advances and
-                // would pin every Required vault to generation 0 forever.
-                let proven_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
-                    &pair_a_for_digest,
-                    &pair_b_for_digest,
-                    proven_a,
-                    proven_b,
-                    fee_bps_for_digest,
-                );
-                match crate::sdk::route_commit_sdk::enforce_anchor_binding(
-                    policy,
-                    &hop,
-                    &vault_id,
-                    composed_sequence,
-                    Some(proven_digest),
-                ) {
-                    Ok(AnchorPosture::Enforced) => {}
-                    Ok(AnchorPosture::BypassedOptional)
-                    | Ok(AnchorPosture::BypassedUnspecified) => {
-                        log::info!(
-                            "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
-                             vault={} policy={:?}",
-                            crate::util::text_id::encode_base32_crockford(&vault_id),
-                            policy,
-                        );
-                    }
-                    Err(AnchorGateReject::MissingFields) => {
-                        return err("dlv.unlockRouted: vault requires anchor binding but \
-                             RouteCommit hop omits one or more fields \
-                             (vault_state_reserves_digest / vault_state_anchor_digest)"
-                            .to_string());
-                    }
-                    Err(AnchorGateReject::SequenceMismatch { route, vault }) => {
-                        return err(format!(
-                            "dlv.unlockRouted: vault state anchor sequence mismatch \
-                             (route={route}, vault={vault})"
-                        ));
-                    }
-                    Err(AnchorGateReject::ReservesDigestMismatch) => {
-                        return err(
-                            "dlv.unlockRouted: vault state reserves digest mismatch".to_string()
-                        );
-                    }
-                    Err(AnchorGateReject::AnchorDigestMismatch) => {
-                        return err(
-                            "dlv.unlockRouted: vault state anchor digest mismatch".to_string()
-                        );
-                    }
-                    Err(AnchorGateReject::ReservesDigestUnavailable) => {
-                        return err("dlv.unlockRouted: AMM reserves digest unavailable \
-                             for non-AMM vault"
-                            .to_string());
-                    }
-                }
-            }
-
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
                 &hop,
                 &vault.fulfillment_condition,
@@ -2653,14 +2468,6 @@ impl AppRouterImpl {
                             "dlv.unlockRouted: hop amounts do not fit u64 base units".into()
                         );
                     };
-                    let mut parent_digest = [0u8; 32];
-                    if hop.vault_state_reserves_digest.len() == 32 {
-                        parent_digest.copy_from_slice(&hop.vault_state_reserves_digest);
-                    }
-                    let mut anchor_digest = [0u8; 32];
-                    if hop.vault_state_anchor_digest.len() == 32 {
-                        anchor_digest.copy_from_slice(&hop.vault_state_anchor_digest);
-                    }
                     settle_terms = Some(SettleTerms {
                         owner_public_key: vault.creator_public_key.clone(),
                         owner_devid: reserve_owner_devid,
@@ -2669,9 +2476,8 @@ impl AppRouterImpl {
                         output_policy_commit: out_pc,
                         input_amount: in_amt,
                         output_amount: out_amt,
-                        parent_reserves_digest: parent_digest,
-                        reserve_proof_root: reserve_root,
-                        predicate_digest: anchor_digest,
+                        parent_binding,
+                        parent_sequence: composed_sequence,
                         fee_bps: amm_fee_bps,
                         sigma: [0u8; 32],
                         storage_set_id: vault_storage_set_id,
@@ -2740,7 +2546,7 @@ impl AppRouterImpl {
         // read as a different claimant at every member that already holds ours).
         let frozen_claim = match crate::sdk::settlement_slot::frozen_claim_envelope(
             &vault_id,
-            hop.vault_state_anchor_seq,
+            settle.parent_sequence,
             &x,
             &settle.storage_set_id,
         ) {
@@ -2751,7 +2557,7 @@ impl AppRouterImpl {
             &claim_set,
             &frozen_claim,
             &vault_id,
-            hop.vault_state_anchor_seq,
+            settle.parent_sequence,
             &x,
         )
         .await
@@ -2767,10 +2573,8 @@ impl AppRouterImpl {
             owner_genesis: settle.owner_genesis,
             input_policy_commit: settle.input_policy_commit,
             output_policy_commit: settle.output_policy_commit,
-            parent_sequence: hop.vault_state_anchor_seq,
-            parent_reserves_digest: settle.parent_reserves_digest,
-            reserve_proof_root: settle.reserve_proof_root,
-            predicate_digest: settle.predicate_digest,
+            parent_sequence: settle.parent_sequence,
+            parent_binding: settle.parent_binding,
             route_commit_bytes: req.route_commit_bytes.clone(),
             external_commitment_x: x,
             input_amount: settle.input_amount,
@@ -2867,8 +2671,8 @@ impl AppRouterImpl {
             };
             let trade = dsm::dlv::settlement_receipt_leaf::SettledTrade {
                 x,
-                parent_sequence: hop.vault_state_anchor_seq,
-                new_sequence: hop.vault_state_anchor_seq.saturating_add(1),
+                parent_sequence: settle.parent_sequence,
+                new_sequence: settle.parent_sequence.saturating_add(1),
                 input_policy_commit: settle.input_policy_commit,
                 input_amount: settle.input_amount,
                 output_policy_commit: settle.output_policy_commit,
@@ -2939,55 +2743,111 @@ impl AppRouterImpl {
     }
 }
 
-/// Purpose label frozen on a vault's five birth objects (opaque to the
+/// Purpose label frozen on a vault's birth objects (opaque to the
 /// publication layer; for operators and proofs).
 const BIRTH_ARTIFACT_PURPOSE: &str = "dlv-birth";
-/// Purpose label frozen on a vault's five TERMINAL objects.
+/// Purpose label frozen on a vault's TERMINAL objects.
 const TERMINAL_ARTIFACT_PURPOSE: &str = "dlv-terminal";
 
-/// A vault's birth publication set, built and signed off ONE `AdvanceOutcome`
-/// — the exact root the funding advance produced — before anything is
-/// persisted, then frozen byte-for-byte inside the advance transaction.
+/// A vault generation's publication set, built and signed off ONE
+/// `AdvanceOutcome` — the exact reserves the advance landed — before anything
+/// is persisted, then frozen byte-for-byte inside the advance transaction.
 ///
-/// Three logical proofs are FIVE durable objects, because the publication
-/// primitive is keyed by object key and each key is its own quorum:
-/// (1) the owner-signed vault-state anchor at its seq-pinned key (the
-/// birth-pinned lineage reference), (2) the same anchor bytes at `latest`,
-/// (3) the vault-state inclusion proof at its seq-pinned key, (4) the same
-/// bytes at `latest`, (5) the reserve inclusion proof at its seq key.
+/// TWO durable objects, each an Area-4 immutable `(namespace, payload)`
+/// tuple: `CCB(V_n)` under `DSM/vault-state`, and the owner's
+/// `AnchorPresentationV3` under `DSM/anchor-presentation/v1`. Everything the
+/// old five-object set restated — the anchor, the `/latest` mirrors, the
+/// inclusion and reserve proofs — is a field of the `V_n` that `c_n`
+/// identifies, or is proven by the presentation's P0–P6 chain, so nothing
+/// else is published.
 struct VaultPublicationArtifacts {
-    /// `(object_key, exact bytes)` — what gets frozen and replayed.
+    /// `(object_key, exact bytes)` — what gets frozen and replayed. Keys use
+    /// [`immutable_object_key`], so the sweep replays them through the
+    /// immutable endpoint (write-once on the tuple), never the mutable KV path.
     objects: Vec<(String, Vec<u8>)>,
-    /// The device root every object binds (`outcome.child_r_a`).
-    root: [u8; 32],
+    /// `c_n` of the published state — recorded as the artifact binding.
+    c_n: [u8; 32],
+    /// `CCB(V_n)`, exactly as published (also stored on the vault record).
+    state_ccb: Vec<u8>,
+    /// The presentation proto bytes, exactly as published.
+    presentation: Vec<u8>,
 }
 
-/// Build + sign the five birth objects from the funding advance's outcome.
+/// The frozen-artifact object key for an immutable `(namespace, payload)`
+/// tuple: `immutable::{namespace}::{addr_b32}`. The address is the Area-4
+/// derivation, so the key names exactly one byte string forever — the sweep
+/// parses this shape and delivers through the immutable endpoint.
+pub(crate) fn immutable_object_key(
+    namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    payload: &[u8],
+) -> String {
+    let addr = dsm::storage_object::immutable_addr(namespace, payload);
+    format!(
+        "immutable::{}::{}",
+        String::from_utf8_lossy(namespace.source_bytes()),
+        crate::util::text_id::encode_base32_crockford(&addr)
+    )
+}
+
+/// The owner-identity inputs for presentation building, resolved from the
+/// persisted genesis record. Fail-closed: a device with no v3 genesis record
+/// cannot author a presentation and cannot birth a vault.
+fn owner_presentation_inputs() -> Result<(Vec<u8>, String, [u8; 32]), dsm::types::error::DsmError> {
+    use dsm::types::error::DsmError;
+    let seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::invalid_operation("vault publication: wallet locked — no cached seed")
+        })?;
+    // THE record for the identity this process holds — looked up by the
+    // installed genesis id, never "the latest row". Two identities sharing a
+    // process (tests, multi-profile) each keep their own row, and recency
+    // would hand one identity another's derivation inputs.
+    let g_vec = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+    let g = <[u8; 32]>::try_from(g_vec.as_slice()).map_err(|_| {
+        DsmError::invalid_operation("vault publication: no installed genesis identity")
+    })?;
+    let g_b32 = crate::util::text_id::encode_base32_crockford(&g);
+    let record = crate::storage::client_db::get_genesis_record_by_id(&g_b32)
+        .map_err(|e| {
+            DsmError::storage(
+                format!("vault publication: genesis record read: {e}"),
+                None::<std::io::Error>,
+            )
+        })?
+        .ok_or_else(|| {
+            DsmError::invalid_operation("vault publication: no genesis record on this device")
+        })?;
+    Ok((seed.to_vec(), record.network_id, g))
+}
+
+/// Build + sign the two publication objects for one vault generation, from
+/// the advance's own outcome.
 ///
-/// Reads ONLY `outcome` (this runs under the state-machine lock in
-/// `pre_write`; `device_head()` would deadlock). The reserves digest and the
-/// vault-state siblings come from `outcome.vault_state_proof` — what `advance`
-/// DERIVED and landed — so the anchor signs the state the root actually
-/// commits; the reserve legs are proven off `outcome.new_device_state`, the
-/// same tree. All five bind `outcome.child_r_a`, so
-/// `compose_vault_state`'s root-equality holds by construction.
+/// Reads ONLY `outcome` plus device-local configuration (this runs under the
+/// state-machine lock in `pre_write`; `device_head()` would deadlock). The
+/// reserves come from `outcome.new_device_state` — what `advance` DERIVED and
+/// landed — so the state the anchor commits is the state the root actually
+/// holds. `parent_state_commitment` is the caller's edge: the genesis parent
+/// at birth, the consumed frontier's `c_n` at close.
 fn build_vault_publication_artifacts(
     outcome: &dsm::types::device_state::AdvanceOutcome,
     vault_id: &[u8; 32],
     pair: &dsm::types::device_state::VaultStatePair,
-    birth_storage_set_id: &[u8; 32],
-    owner_pk: &[u8],
-    owner_sk: &[u8],
+    birth_set_id: &[u8; 32],
+    parent_state_commitment: [u8; 32],
 ) -> Result<VaultPublicationArtifacts, dsm::types::error::DsmError> {
+    use dsm::ccb::{
+        vault_state_commitment, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy,
+        StorageSetMembers, VaultStateV2,
+    };
     use dsm::types::error::DsmError;
     use prost::Message;
 
     let head = &outcome.new_device_state;
-    let root = outcome.child_r_a;
     let witness = outcome.vault_state_proof.as_ref().ok_or_else(|| {
         DsmError::invalid_operation(
-            "dlv.create: the funding advance produced no vault-state witness — refusing to \
-             sign a birth without it",
+            "vault publication: the advance produced no vault-state witness — refusing to \
+             publish a generation without it",
         )
     })?;
     if witness.vault_id != *vault_id {
@@ -2995,107 +2855,177 @@ fn build_vault_publication_artifacts(
             "vault publication: the advance's vault-state witness names a different vault",
         ));
     }
-    let sequence = witness.sequence;
+    let generation = witness.sequence;
+    let reserve_a = head.vault_reserve(vault_id, &pair.a());
+    let reserve_b = head.vault_reserve(vault_id, &pair.b());
 
-    // (1)+(2) The anchor: (vault, seq 0, DERIVED digest, birth set), owner-signed.
-    let anchor = dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
-        vault_id,
-        sequence,
-        &witness.reserves_digest,
-        birth_storage_set_id,
-        owner_pk,
-        owner_sk,
-    )
-    .map_err(|e| {
-        DsmError::crypto(
-            format!("dlv.create: sign birth anchor: {e}"),
-            None::<std::io::Error>,
+    // The storage set the vault is born under, as MEMBERS — the id is derived
+    // from them, and it must re-derive to the record's cached id or the record
+    // and the published state would name different sets.
+    let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config().map_err(|e| {
+        DsmError::invalid_operation(format!("vault publication: storage-set catalog: {e}"))
+    })?;
+    let set = catalog.resolve(birth_set_id).ok_or_else(|| {
+        DsmError::invalid_operation(
+            "vault publication: the vault's storage set is not resolvable through this \
+             device's catalog",
         )
     })?;
-    let anchor_bytes = crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(&anchor);
+    let member_ids: Vec<&[u8]> = set
+        .members()
+        .iter()
+        .map(|m| m.member_id.as_bytes())
+        .collect();
+    let storage_set = StorageSetMembers::new(&member_ids)
+        .map_err(|e| DsmError::invalid_operation(format!("vault publication: set members: {e}")))?;
+    if dsm::ccb::storage_set_id(&storage_set)
+        .map_err(|e| DsmError::invalid_operation(format!("vault publication: set id: {e}")))?
+        != *birth_set_id
+    {
+        return Err(DsmError::invalid_operation(
+            "vault publication: resolved set members do not re-derive the birth set id",
+        ));
+    }
 
-    // (3)+(4) The vault-state inclusion proof under `root`.
-    let inclusion = dsm::dlv::vault_smt_leaf::sign_vault_state_inclusion_proof(
-        vault_id,
-        sequence,
-        &witness.reserves_digest,
-        &root,
-        witness.siblings.clone(),
-        owner_pk,
-        owner_sk,
-    )
-    .map_err(|e| {
-        DsmError::crypto(
-            format!("dlv.create: sign birth inclusion proof: {e:?}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let inclusion_bytes =
-        crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&inclusion);
+    // The owner's authority position — invariant across every generation this
+    // owner authors — and the identity it belongs to.
+    let (seed, network_id, g) = owner_presentation_inputs()?;
+    let inputs = crate::sdk::identity_presentation::OwnerIdentityInputs {
+        network_id: network_id.as_bytes(),
+        wallet_index: 0,
+        device_slot: 0,
+        genesis_version: 3,
+    };
+    let auth = crate::sdk::identity_presentation::derive_own_authority_context(&seed, inputs)?;
+    if auth.g != g {
+        return Err(DsmError::invalid_operation(format!(
+            "vault publication: re-derived G ({}) does not match the installed genesis id ({}) \
+             under network id {:?} (fail closed)",
+            crate::util::text_id::encode_base32_crockford(&auth.g),
+            crate::util::text_id::encode_base32_crockford(&g),
+            network_id,
+        )));
+    }
 
-    // (5) The reserve inclusion proof: both legs proven off the SAME tree.
-    let legs = head.vault_reserve_leg_proofs(vault_id, &[pair.a(), pair.b()])?;
-    let reserve_proof = dsm::dlv::vault_reserve_inclusion::sign_vault_reserve_inclusion_proof(
-        vault_id,
-        sequence,
-        &root,
-        &head.genesis(),
-        &head.devid(),
-        legs,
-        owner_pk,
-        owner_sk,
-    )
-    .map_err(|e| {
-        DsmError::crypto(
-            format!("dlv.create: sign birth reserve proof: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let reserve_bytes =
-        crate::sdk::vault_reserve_proof_codec::reserve_proof_to_proto(&reserve_proof)
-            .encode_to_vec();
+    let state = VaultStateV2 {
+        owner_genesis_id: auth.g,
+        owner_device_id: auth.devid,
+        vault_id: *vault_id,
+        generation,
+        reserve_a,
+        reserve_b,
+        market_policy: MarketPolicy::beta_constant_product(pair.a(), pair.b())
+            .map_err(|e| DsmError::invalid_parameter(format!("vault publication: pair: {e}")))?,
+        release_policy: ReleasePolicy::beta_owner_local_full_close(),
+        fee_policy: FeePolicy::new(pair.fee_bps())
+            .map_err(|e| DsmError::invalid_parameter(format!("vault publication: fee: {e}")))?,
+        encumbrances: EncumbranceSet::empty(),
+        iteration_budget: None,
+        parent_state_commitment,
+        owner_authority_transition_digest: auth.position,
+        storage_set,
+        quorum: set.quorum(),
+    };
+    let state_ccb = state
+        .encode()
+        .map_err(|e| DsmError::invalid_parameter(format!("vault publication: encode: {e}")))?;
+    let c_n = vault_state_commitment(&state)
+        .map_err(|e| DsmError::invalid_parameter(format!("vault publication: c_n: {e}")))?;
 
-    let keys = vault_object_keys(vault_id, sequence);
-    let [anchor_seq, anchor_latest, incl_seq, incl_latest, reserve_key] = keys;
+    let presentation = crate::sdk::identity_presentation::build_own_anchor_presentation(
+        &seed, inputs, &auth.g, &c_n,
+    )?;
+    let presentation_bytes = presentation.encode_to_vec();
+
+    let vn_key = immutable_object_key(dsm::common::domain_tags::TAG_DSM_VAULT_STATE, &state_ccb);
+    let pres_key = immutable_object_key(
+        dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+        &presentation_bytes,
+    );
     Ok(VaultPublicationArtifacts {
         objects: vec![
-            (anchor_seq, anchor_bytes.clone()),
-            (anchor_latest, anchor_bytes),
-            (incl_seq, inclusion_bytes.clone()),
-            (incl_latest, inclusion_bytes),
-            (reserve_key, reserve_bytes),
+            (vn_key, state_ccb.clone()),
+            (pres_key, presentation_bytes.clone()),
         ],
-        root,
+        c_n,
+        state_ccb,
+        presentation: presentation_bytes,
     })
 }
 
-/// The five object keys one generation of a vault publishes, in the same order
-/// `build_vault_publication_artifacts` freezes them: anchor (seq-pinned, then
-/// the `latest` mirror), inclusion proof (seq-pinned, then `latest`), reserve
-/// proof.
-pub(crate) fn vault_object_keys(vault_id: &[u8; 32], sequence: u64) -> [String; 5] {
-    [
-        crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, sequence),
-        crate::sdk::vault_state_anchor_codec::anchor_latest_key(vault_id),
-        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_seq_key(vault_id, sequence),
-        crate::sdk::vault_smt_inclusion_codec::inclusion_proof_latest_key(vault_id),
-        crate::sdk::vault_reserve_proof_codec::vault_reserve_proof_key(vault_id, sequence),
-    ]
+/// The object keys a vault's BIRTH published, derived from the record's own
+/// stored bytes. `None` when the record is absent or pre-dates the blobs —
+/// which reads as "not published", failing closed.
+pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> Option<[String; 2]> {
+    let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+        .ok()
+        .flatten()?;
+    if record.birth_state_ccb.is_empty() || record.birth_presentation.is_empty() {
+        return None;
+    }
+    Some([
+        immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
+            &record.birth_state_ccb,
+        ),
+        immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+            &record.birth_presentation,
+        ),
+    ])
 }
 
-/// The five object keys a vault's BIRTH publishes.
-pub(crate) fn birth_object_keys(vault_id: &[u8; 32]) -> [String; 5] {
-    vault_object_keys(vault_id, 0)
-}
-
-/// `true` iff every one of a vault's birth objects has reached quorum on the
+/// `true` iff both of a vault's birth objects have reached quorum on the
 /// vault's birth storage set — the activation boundary: FUNDED locally is not
 /// MARKET-ACTIVE until this holds.
 pub(crate) fn birth_is_published(vault_id: &[u8; 32]) -> bool {
-    birth_object_keys(vault_id).iter().all(|k| {
+    let Some(keys) = birth_object_keys(vault_id) else {
+        return false;
+    };
+    keys.iter().all(|k| {
         crate::storage::client_db::frozen_publication_artifact::is_artifact_published(k)
             .unwrap_or(false)
     })
+}
+
+/// Compose this device's OWN vault from its stored birth objects: the exact
+/// `CCB(V_0)` + `AnchorPresentationV3` the birth published, with every
+/// receipted trader generation folded on top. ONE composition path — the
+/// owner verifies its own vault exactly the way a stranger does, so the two
+/// can never disagree about what the frontier is.
+async fn compose_own_vault(
+    vault_id: &[u8; 32],
+) -> Result<crate::sdk::vault_state_composition::ComposedVaultState, String> {
+    use prost::Message as _;
+    let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+        .map_err(|e| format!("vault record read failed: {e}"))?
+        .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
+    if record.birth_state_ccb.is_empty() || record.birth_presentation.is_empty() {
+        return Err(
+            "the vault record carries no birth state/presentation — reprovision (no legacy \
+             upgrade path exists)"
+                .to_string(),
+        );
+    }
+    let presentation =
+        crate::generated::AnchorPresentationV3::decode(record.birth_presentation.as_slice())
+            .map_err(|e| format!("stored birth presentation does not decode: {e}"))?;
+    let pair = dsm::types::device_state::VaultStatePair::new(
+        record.policy_commit_a,
+        record.policy_commit_b,
+        record.fee_bps,
+    )
+    .map_err(|e| format!("vault record pair is not canonical: {e}"))?;
+    crate::sdk::vault_state_composition::compose_vault_state(
+        vault_id,
+        &presentation,
+        &record.birth_state_ccb,
+        &pair.a(),
+        &pair.b(),
+        pair.fee_bps(),
+    )
+    .await
+    .map_err(|e| format!("composition failed: {e}"))
 }
 
 /// Everything `Operation::DlvSettle` must carry, captured from the hop that was
@@ -3112,9 +3042,12 @@ struct SettleTerms {
     output_policy_commit: [u8; 32],
     input_amount: u64,
     output_amount: u64,
-    parent_reserves_digest: [u8; 32],
-    reserve_proof_root: [u8; 32],
-    predicate_digest: [u8; 32],
+    /// `c_n` of the exact composed state this settlement consumes — the ONE
+    /// parent fact; generation, reserves and predicate are members of the
+    /// `V_n` it identifies — plus its generation, for the slot claim and the
+    /// receipt (both are keyed by sequence).
+    parent_binding: [u8; 32],
+    parent_sequence: u64,
     fee_bps: u32,
     sigma: [u8; 32],
     settler_devid: [u8; 32],
@@ -3168,23 +3101,10 @@ mod funded_creation_tests {
         crate::sdk::app_state::AppState::reset_memory_for_testing();
         crate::sdk::app_state::AppState::prime_memory_for_testing();
         crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (device_id, genesis_hash, binding_key) =
-            (vec![0x0Au8; 32], vec![0x0Bu8; 32], vec![0x0Cu8; 32]);
-        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+        // The database must exist BEFORE the identity: `become_device`
+        // persists the genesis record the presentation builder reads back.
         crate::storage::client_db::init_database().expect("init db");
+        become_device(0x0A);
     }
 
     /// Install an identity keyed by `seed`, WITHOUT resetting storage.
@@ -3194,17 +3114,59 @@ mod funded_creation_tests {
     /// keeps its own state — which is the boundary that matters: the trader has
     /// no access to the owner's leaves and must work from published artifacts.
     fn become_device(seed: u8) -> (Vec<u8>, [u8; 32]) {
-        let device_id = vec![seed; 32];
-        let genesis_hash = vec![seed.wrapping_add(1); 32];
-        let binding_key = vec![seed.wrapping_add(2); 32];
+        // A REAL v3 identity: the state-identity cut derives every vault
+        // birth's authority chain (GRK → D_0 → T_0) from the wallet seed, so
+        // fixture identities are seed-rooted exactly like production ones.
+        let wallet_seed = vec![seed; 64];
+        let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+        let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
+            &wallet_seed,
+            b"dsm-test",
+            0,
+            0,
+            3,
+            &aph,
+        )
+        .expect("v3 genesis");
+        let device_id = genesis.devid.to_vec();
+        let genesis_hash = genesis.g.to_vec();
+        // ONE session secret: the signing authority's cached seed IS the
+        // wallet seed (set_binding_key_for_testing writes the same cache the
+        // presentation builder reads), so both derive from the same root.
         crate::sdk::signing_authority::clear_binding_key_for_testing();
         let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
             &device_id,
             &genesis_hash,
-            &binding_key,
+            &wallet_seed,
         )
         .expect("derive signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::signing_authority::set_binding_key_for_testing(wallet_seed);
+        // The persisted genesis record is where the presentation builder reads
+        // its derivation inputs back from (network id in particular).
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: crate::util::text_id::encode_base32_crockford(&genesis.g),
+                device_id: crate::util::text_id::encode_base32_crockford(&genesis.devid),
+                mpc_proof: String::new(),
+                device_birth_binding: String::new(),
+                merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+                participant_count: 0,
+                progress_marker: "genesis".to_string(),
+                publication_hash: crate::util::text_id::encode_base32_crockford(&genesis.g),
+                storage_nodes: Vec::new(),
+                entropy_hash: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
+                protocol_version: "genesis-v3".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: crate::util::text_id::encode_base32_crockford(
+                    &genesis.genesis_nonce,
+                ),
+                genesis_profile: "MnemonicV3".to_string(),
+                network_id: "dsm-test".to_string(),
+            },
+        )
+        .expect("store genesis record");
         crate::sdk::app_state::AppState::set_identity_info(
             device_id.clone(),
             public_key.clone(),
@@ -3212,9 +3174,7 @@ mod funded_creation_tests {
             vec![0u8; 32],
         );
         crate::sdk::app_state::AppState::set_has_identity(true);
-        let mut did = [0u8; 32];
-        did.copy_from_slice(&device_id);
-        (public_key, did)
+        (public_key, genesis.devid)
     }
 
     fn named_router(name: &str) -> AppRouterImpl {
@@ -3940,26 +3900,20 @@ mod funded_creation_tests {
         });
         assert!(res.success, "trader sync failed: {:?}", res.error_message);
 
-        // And the reserve proof it will settle against — fetched and verified
-        // from storage, with no access to the owner's leaves.
-        let proof = crate::runtime::get_runtime()
-            .block_on(
-                crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(&vault_id, 0),
-            )
-            .expect("the trader must be able to verify the owner's published reserves");
+        // And the verified state it will settle against — the presentation +
+        // `CCB(V_0)` fetched and verified with no access to the owner's
+        // leaves: the reserves come OUT of the authenticated state.
+        let frontier = composed_frontier(&vault_id);
         assert_eq!(
-            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
-            Some(10_000)
+            (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
+            (0, 10_000, 5_000),
+            "the trader's verified view is the owner's published birth state"
         );
 
         let input = 1_000u64;
         let expected_out =
             crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
                 .expect("curve output");
-        let reserves_digest =
-            dsm::dlv::vault_state_anchor::compute_reserves_digest(&pc_a, &pc_b, 10_000, 5_000, 30);
-        let anchor_digest =
-            dsm::dlv::vault_state_anchor::compute_anchor_digest(&vault_id, 0, &reserves_digest);
         let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
         let mut rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
@@ -3973,9 +3927,8 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                vault_state_anchor_seq: 0,
-                vault_state_reserves_digest: reserves_digest.to_vec(),
-                vault_state_anchor_digest: anchor_digest.to_vec(),
+                state_number: 0,
+                parent_binding: frontier.c_n.to_vec(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -4171,29 +4124,24 @@ mod funded_creation_tests {
         assert_eq!(before.vault_reserve(&vault_id, &pc_a), 10_000);
         assert_eq!(before.vault_reserve(&vault_id, &pc_b), 5_000);
 
-        // (2) The proof the settling path will read back. Its existence is the
-        // precondition the reserve gate enforces.
-        let proof = crate::runtime::get_runtime()
-            .block_on(
-                crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(&vault_id, 0),
-            )
-            .expect("dlv.create must publish a verifiable reserve proof");
+        // (2) The verified baseline the settling path will read back. Its
+        // existence — a P0-P6-verifiable presentation and the exact CCB(V_0)
+        // — is the precondition the composition gate enforces.
+        let frontier = composed_frontier(&vault_id);
         assert_eq!(
-            dsm::dlv::vault_reserve_inclusion::proven_amount(&proof, &pc_a),
-            Some(10_000)
+            (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
+            (0, 10_000, 5_000),
+            "dlv.create must publish a verifiable birth state"
         );
 
-        // (3) Build and sign the RouteCommit the trader settles with. The hop's
-        // bindings must match what the anchor gate re-derives from the PROVEN
-        // reserves, so they are computed the same way rather than guessed.
+        // (3) Build and sign the RouteCommit the trader settles with. The
+        // hop's parent binding must be the c_n the vault-side gate re-derives
+        // from its own composition, so it is computed the same way rather
+        // than guessed.
         let input = 1_000u64;
         let expected_out =
             crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
                 .expect("curve output");
-        let reserves_digest =
-            dsm::dlv::vault_state_anchor::compute_reserves_digest(&pc_a, &pc_b, 10_000, 5_000, 30);
-        let anchor_digest =
-            dsm::dlv::vault_state_anchor::compute_anchor_digest(&vault_id, 0, &reserves_digest);
         let (pk, sk) = (
             crate::sdk::signing_authority::current_public_key().expect("pk"),
             crate::sdk::signing_authority::current_secret_key().expect("sk"),
@@ -4210,9 +4158,8 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                vault_state_anchor_seq: 0,
-                vault_state_reserves_digest: reserves_digest.to_vec(),
-                vault_state_anchor_digest: anchor_digest.to_vec(),
+                state_number: 0,
+                parent_binding: frontier.c_n.to_vec(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -4498,9 +4445,7 @@ mod funded_creation_tests {
             input_policy_commit: *pc_in,
             output_policy_commit: *pc_out,
             parent_sequence: 0,
-            parent_reserves_digest: [0u8; 32],
-            reserve_proof_root: [0u8; 32],
-            predicate_digest: [0u8; 32],
+            parent_binding: [0u8; 32],
             route_commit_bytes: Vec::new(),
             external_commitment_x: x,
             input_amount,
@@ -4824,10 +4769,14 @@ mod funded_creation_tests {
         });
         assert!(res.success, "sync failed: {:?}", res.error_message);
 
-        let reserves_digest =
-            dsm::dlv::vault_state_anchor::compute_reserves_digest(pc_a, pc_b, ra, rb, 30);
-        let anchor_digest =
-            dsm::dlv::vault_state_anchor::compute_anchor_digest(vault_id, seq, &reserves_digest);
+        // The parent this trade consumes, exactly as the vault-side gate will
+        // re-derive it: the composed frontier's c_n.
+        let frontier = composed_frontier(vault_id);
+        assert_eq!(
+            (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
+            (seq, ra, rb),
+            "the caller's expected frontier must be the composed one"
+        );
         let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
         let mut rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
@@ -4841,9 +4790,8 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                vault_state_anchor_seq: seq,
-                vault_state_reserves_digest: reserves_digest.to_vec(),
-                vault_state_anchor_digest: anchor_digest.to_vec(),
+                state_number: seq,
+                parent_binding: frontier.c_n.to_vec(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -4883,18 +4831,35 @@ mod funded_creation_tests {
         (res, x)
     }
 
-    /// The vault's composed state as the production QUOTE side sees it: the
-    /// owner's seq-0 baseline plus every verified trader generation folded on.
-    fn composed(vault_id: &[u8; 32], pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64, u64) {
-        let anchor = crate::runtime::get_runtime()
-            .block_on(crate::sdk::vault_state_anchor_codec::fetch_latest_signed_anchor(vault_id))
-            .expect("anchor fetch")
-            .expect("owner published a baseline anchor");
-        let c = crate::runtime::get_runtime()
-            .block_on(crate::sdk::vault_state_composition::compose_vault_state(
-                vault_id, &anchor, pc_a, pc_b, 30,
-            ))
-            .expect("compose");
+    /// The vault's full composed frontier, as ANY verifier derives it: the
+    /// birth presentation + `CCB(V_0)` through P0-P6, plus every verified
+    /// trader generation folded on.
+    fn composed_frontier(
+        vault_id: &[u8; 32],
+    ) -> crate::sdk::vault_state_composition::ComposedVaultState {
+        crate::runtime::get_runtime()
+            .block_on(compose_own_vault(vault_id))
+            .expect("the vault composes from its published baseline")
+    }
+
+    /// Every immutable object key the fleet has seen a PUT for. The terminal
+    /// set's keys are content-derived, so tests read them back from the
+    /// delivery log rather than re-deriving the terminal state by hand.
+    fn immutable_keys_in_fleet() -> Vec<String> {
+        let mut keys: Vec<String> = crate::sdk::storage_io::fake_fleet::put_log()
+            .into_iter()
+            .filter(|(_, key, _)| key.starts_with("immutable::"))
+            .map(|(_, key, _)| key)
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// The composed state as the production QUOTE side sees it, reduced to
+    /// `(sequence, reserve_a, reserve_b)`.
+    fn composed(vault_id: &[u8; 32], _pc_a: &[u8; 32], _pc_b: &[u8; 32]) -> (u64, u64, u64) {
+        let c = composed_frontier(vault_id);
         (c.sequence, c.reserves_a, c.reserves_b)
     }
 
@@ -5437,15 +5402,24 @@ mod funded_creation_tests {
             "the market composes the vault's death from its published terminal set"
         );
 
-        // The five terminal objects of the CLOSING generation, at quorum.
-        for key in vault_object_keys(&vault_id, 2) {
+        // The terminal objects of the CLOSING generation — the terminal
+        // `CCB(V_n)` and its presentation — at quorum. Their keys are
+        // content-derived, so they are read back from the delivery log: the
+        // birth published two immutable objects, the close two more.
+        let keys = immutable_keys_in_fleet();
+        assert_eq!(
+            keys.len(),
+            4,
+            "birth + terminal = four immutable objects, got {keys:?}"
+        );
+        for key in &keys {
             assert!(
-                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(&key)
+                crate::storage::client_db::frozen_publication_artifact::is_artifact_published(key)
                     .expect("artifact state"),
-                "terminal object {key} must have reached quorum"
+                "immutable object {key} must have reached quorum"
             );
             assert!(
-                crate::sdk::storage_io::fake_fleet::any_member_holding(&key).is_some(),
+                crate::sdk::storage_io::fake_fleet::any_member_holding(key).is_some(),
                 "…and the fleet must actually hold {key}"
             );
         }
@@ -5799,10 +5773,14 @@ mod funded_creation_tests {
             "…and that envelope is the one frozen with the intent"
         );
 
-        // The terminal set published, and each seq-pinned object was PUT with
-        // exactly one content digest across every attempt.
-        let terminal = vault_object_keys(&vault_id, 1);
-        for key in [&terminal[0], &terminal[2], &terminal[4]] {
+        // The terminal set published, and each content-addressed object was
+        // PUT with exactly one content digest across every attempt.
+        let terminal = immutable_keys_in_fleet();
+        assert!(
+            terminal.len() >= 2,
+            "the terminal V_n and presentation must both have been delivered"
+        );
+        for key in &terminal {
             assert!(
                 crate::storage::client_db::frozen_publication_artifact::is_artifact_published(key)
                     .expect("artifact state"),

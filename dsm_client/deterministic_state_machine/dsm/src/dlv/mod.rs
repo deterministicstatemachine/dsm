@@ -14,6 +14,7 @@ pub mod vault_pending_pointer;
 pub mod vault_reserve_inclusion;
 pub mod vault_reserve_leaf;
 pub mod vault_smt_leaf;
-pub mod vault_state_anchor;
-pub mod vault_state_anchor_v2; // Rev 15 Def 6.4 — history-bound, clean cut from V1
+// vault_state_anchor (V1) and vault_state_anchor_v2 are DELETED by the
+// state-identity cut. Their names and domains are burned, never reused; the
+// only anchor form is V3 below, whose sole content is c_n.
 pub mod vault_state_anchor_v3; // Def 6.4a — owner baseline over c_n; the only anchor form after the cut

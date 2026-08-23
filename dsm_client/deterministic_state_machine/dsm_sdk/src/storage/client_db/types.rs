@@ -40,6 +40,9 @@ pub struct GenesisRecord {
     pub genesis_nonce: String,
     /// Genesis entropy profile: "MnemonicV2" (canonical) / "CommitRevealMpcV1" (legacy); empty for old rows.
     pub genesis_profile: String,
+    /// The network id the genesis was created under (v3: a GRK derivation
+    /// input, so the authority chain is re-derivable after restart).
+    pub network_id: String,
 }
 
 #[derive(Debug, Clone)]
