@@ -431,6 +431,7 @@ DSM/trader-settlement-acceptance/v2 canonical trader post-advance acceptance art
 DSM/binding-tx client-driven opaque quorum transaction identifier
 DSM/binding-keyset sorted settlement-resource key-set commitment
 DSM/vault-state-anchor/v2 BURNED - deleted by the state-identity cut, never reused
+DSM/vault-state-anchor/v3 owner-signed baseline over the canonical state identity
 DSM/storage-object immutable content-addressed storage object
 DSM/storage-set committed storage-set identity
 DSM/unlock-tag receipt identifier only
@@ -497,8 +498,11 @@ CCB(Tj )). It is INVARIANT across market successors - copied byte for byte, neve
 a market successor executes while the owner is absent and must not move the owner-authority
 reference. Changing it for a live vault requires an explicit owner-authorized successor family,
 which the beta profile does not define.
-The canonical state commitment is
-cn = H(DSM/vault-state ∥Canon(Vn)).
+The canonical state commitment, and the SOLE canonical identity of a DLV parent state, is
+cn = H(DSM/vault-state ∥CCB(Vn)),
+where CCB(Vn) is the canonical commitment encoding of the complete fifteen-member tuple, fixed by
+the CCB object registry. Every parent reference in this specification - allocations, settlement
+resource keys, SettlementBundle parent material and stale-parent checks - is exactly this value.
 The vault identity is fixed at creation and never changes.
 The local parent commitment hn is the lineage edge into Vn, and is defined by the recurrence
 h0 = H(DSM/vault-state-parent/genesis/v2 ∥vault
@@ -583,9 +587,12 @@ Definition 5.1 (Owner authority). A successor Vn+1 carries owner authority if ei
 (b) the witness contains an owner-signed fulfillment mechanism committed before Vn+1 existed,
 plus a proof that Vn+1 satisfies every bound of that mechanism.
 Definition 5.2 (Market fulfillment mechanism).
-M= H(DSM/fulfillment ∥vault
+M= H(DSM/fulfillment ∥c0 ∥CCB(BM )),
+The vault identifier is NOT restated: c0 commits it, because vault
 _
-id ∥c0 ∥CCB(BM )),
+id is a field of V0 . Supplying
+both would admit an encodable pair that disagrees, one generation earlier than the same pattern in
+allocations and resource keys.
 where BM commits the additional owner-committed bounds on market exercise that do not already
 have a home in the vault state or in the predicate family: the per-transition size ceiling and the
 authorized encumbrance purposes.
@@ -785,6 +792,14 @@ the parent state commitment hn , the reserves digest, the storage set and q. cn 
 EXACT COMPLETE current state. A parent identity that omits parts of the parent cannot detect
 changes in the parts it omits, and every field of Vn is now load-bearing, including the owner
 authority position ro .
+Definition 6.4a (Owner baseline anchor). An owner-signed baseline is a signature over
+    H(DSM/vault-state-anchor/v3 ∥cn ),
+and carries no other authoritative content. It is the ONLY anchor form; the deleted V2 artifact has
+no successor beyond this. Convenience metadata may accompany it in transport but is never a second
+source of truth: a consumer re-derives every such value from Vn and refuses on disagreement.
+A baseline is not required at every generation. Market successors may advance a DLV while the owner
+is absent, and the current cn is then authenticated by folding realized successor history forward
+from the last owner-authenticated baseline.
 Requirement 6.5. A parent identity must bind the history commitment that produced the
 advertised reserves, not only the vault identifier, local generation, and reserves digest. Two distinct
 histories that happen to produce identical reserve amounts must therefore produce different parent
@@ -874,9 +889,11 @@ _
 contains the exact already-signed bilateral successor CCB that represents the trader’s side of the
 exchange. That trader transition remains governed by ordinary DSM parent, pending, signature,
 conservation, and Tripwire rules; the storage quorum does not become authority over the trader’s
-chain. For every consumed DLV v, Tv contains the exact vault identifier, parent generation, parent
-state commitment, parent reserves digest, complete DLV successor CCB, exact reserve deltas, and
-every witness required to verify that successor. Pv contains proof material required to verify and later
+chain. For every consumed DLV v, the parent side of Tv is the exact cn of the consumed state and nothing
+else; the vault identifier, parent generation, parent state commitment hn and parent reserves digest
+are NOT carried, because every one of them is a field of Vn and is read from the authenticated state
+that cn identifies. Tv otherwise contains the complete DLV successor CCB, the exact reserve deltas,
+and every witness required to verify that successor. Pv contains proof material required to verify and later
 compose that DLV continuation. The bundle binds every allocation in every horizontal allocation
 bundle so the ordinary trader-side transition and the selected DLV fulfillment are cryptographically
 one economic exchange.
@@ -1248,27 +1265,20 @@ through the one SettlementBundle that binds all of its vault transitions.
 8 Deterministic Encumbrance Accounting
 For a claim ej against vault parent p, where p is the cn of the DLV parent state the claim is made
 against (Definition 6.4) and never the deleted pv :
-ej= H(DSM/enc-claim ∥vault
-_
-id ∥p∥claim
+ej= H(DSM/enc-claim ∥p∥claim
 _seq ∥amount ∥token ∥purpose).
-The encumbrance commitment is
-E= H(DSM/enc ∥vault
+The vault identifier is NOT carried: p is the cn of the parent state, and cn commits vault
 _
-id ∥Canon({ej })).
-Naming. E is the encumbrance SET, as Definition 4.1 lists it among the members of Vn , and
-Requirement 8.2 below iterates it. The digest above is a distinct object and is written ECv
-for vault v:
-ECv = H(DSM/enc ∥vault
-_
-id ∥Canon(E)).
-The set and its commitment previously shared the symbol E, which made "E" mean a set in
-Definition 4.1 and Requirement 8.2 and a digest here. Only the set is a member of Vn ; ECv is
-derived from it.
+id .
+Naming. E is the encumbrance SET, and Definition 4.1 lists it among the members of Vn , so cn
+commits it. The separately derived per-vault commitment ECv is DELETED: it existed to carry the
+current encumbrance state into the route commitment X, and X no longer carries it because cn already
+does. No live construction consumes ECv , and it is not replaced. The symbol is burned so it cannot
+return as an alias of a fact cn commits.
 Type of e. The e carried by an allocation in Definition 9.1 is a single encumbrance CLAIM —
-one ej of this section — namely the claim that allocation consumes. It is not ECv . The two
-are different facts: e names what one allocation spends, while ECv commits the whole
-encumbrance state of a vault. An allocation that had to consume several claims would carry a
+one ej of this section — namely the claim that allocation consumes. It survives the cut precisely
+because it is not a commitment: cn AUTHENTICATES the parent's whole encumbrance state, while e
+SELECTS the one claim that allocation spends. An allocation that had to consume several claims would carry a
 set rather than a single e, which is outside the beta shape.
 Requirement 8.1 (Uniqueness). A claim is consumed at most once and its exact removal
 must be visible in the successor state.
@@ -1402,9 +1412,13 @@ Requirement 6.23, and the SDK continues or resumes recovery when a qualifying qu
 Beta defines no timeout-based escape that converts this state into ABORT or authorizes a different
 successor from the fenced parent.
 10 Trade Digests: Unordered Evidence
-For each verified execution, a trade digest commits the pair, executed amounts, participating vault
-identifiers, parent bindings, fees, and X:
-d= H(DSM/digest ∥Canon(TradeDigest)).
+For each verified execution, a trade digest commits the pair, executed amounts, the parent identity
+cn of every participating DLV, fees, and X:
+d= H(DSM/digest ∥CCB(TradeDigest)).
+Participating vault identifiers are NOT carried separately: each cn commits the vault
+_
+id of the DLV
+it identifies.
 29
 SoFi: Sovereign Deterministic Finance Revision 15
 Requirement 10.1. A TradeDigest must not contain a global height, predecessor digest, shared

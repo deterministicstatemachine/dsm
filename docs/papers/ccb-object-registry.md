@@ -57,8 +57,10 @@ specification alone.
 That gap is not hypothetical. `storage_set_id = H(DSM/storage-set ‖ Canon(S))` ships today
 with a layout chosen only in Rust, and the storage node agrees with the client because it
 calls the client's helper directly. Agreement by shared code is implementation monoculture,
-and it ends the moment a second implementation exists. §5 of this document absorbs that
-layout as written rather than changing it.
+and it ends the moment a second implementation exists. §5.2 **replaces** that layout with an
+ordinary CCB object. An earlier revision absorbed it as shipped, on the ground that deployed signed
+anchors already committed it — the state-identity cut deletes those anchors and reprovisions, so the
+only reason to keep it is gone.
 
 ## 2. Framework
 
@@ -268,9 +270,9 @@ storage address, a resource key or an authority check appears here.
 | Class | Object | Schema | Commitment it feeds | Status |
 |---|---|---|---|---|
 | `0x0001` | `VaultStateV2` (`V_n`) | **2** | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined; schema 1 **burned** |
-| `0x0002` | `StorageSet` (`S`) | 1 | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined |
-| `0x0004` | `EncumbranceClaim` (`e_j`) | 1 | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined |
-| `0x0005` | `EncumbranceSet` (`{e_j}`) | 1 | `E = H(DSM/enc ‖ vault_id ‖ CCB)` | §5.3 defined |
+| `0x0002` | `StorageSet` (`S`) | **2** | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined; schema 1 **burned** |
+| `0x0004` | `EncumbranceClaim` (`e_j`) | **2** | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined; schema 1 **burned** |
+| `0x0005` | `EncumbranceSet` (`{e_j}`) | **2** | nested in `0x0001`; `EC_v` **deleted** | §5.3 defined; schema 1 **burned** |
 | `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ vault_id ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
 | `0x0007` | `MarketPolicy` (`P_M`) | 1 | nested in `0x0001` | §5.7 defined |
 | `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | §5.6 defined |
@@ -298,11 +300,11 @@ and §6a finding 3 established there is no such object. Re-using that number for
 `RouteCommitmentBody` would be exactly the semantic reassignment §2.8 forbids — an assigned
 identity does not become vacant just because it never received a field table. `0x0003` is
 **burned**: it was briefly assigned to a `StorageMemberId`
-object class before §5.2 established that member ids are bare length-prefixed bytes inside a
-frozen layout, with no envelope and therefore no class. Per §2.8 a retired class number is
+object class before members were settled as bare `bytes` under §2.2 — a set of primitives needs no
+element class (§2.4), so there is nothing for the number to name. Per §2.8 a retired class number is
 never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
-**Burned schema versions.** `0x0001`, `0x0015`, `0x0016` and `0x0017` all have schema 1 burned by
+**Burned schema versions.** `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0015`, `0x0016` and `0x0017` all have schema 1 burned by
 the state/route identity cut. They are recorded so their numbers are never re-assigned; no
 production path decodes or emits them.
 
@@ -416,58 +418,53 @@ verification staging are in
 **Schema 1 is burned.** It carried the undefined `owner_root` and is not decodable by any production
 path. Its number is recorded only so it is never re-assigned.
 
-### 5.2 `StorageSet` — class `0x0002`, schema 1
+### 5.2 `StorageSet` — class `0x0002`, schema 2
 
-**Absorbs the shipping layout without change.** `sdk/storage_set.rs` computes
-
-```
-storage_set_id = H(TAG_DSM_STORAGE_SET_V1 ‖ 0x00 ‖ u32_be(count)
-                   ‖ for each id in lexicographic byte order: u32_be(len(id)) ‖ id)
-```
-
-and the storage node derives the same value through the same helper. Every deployed vault's
-signed anchor already commits an id under this construction, so changing it would invalidate
-them. The registry therefore adopts it as the normative encoding of `Canon(S)` rather than
-replacing it.
+`storage_set_id = H_dom(DSM/storage-set, CCB(S))`, an ordinary CCB object with no exceptions.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `members` | set of `bytes` | ordered and encoded as spelled out below, **not** by §2.4 |
+| 1 | `members` | set of `bytes` | §2.4 ordering over `enc(e)`; each member is a UTF-8 identity string |
 
-`members` is a set of UTF-8 member identity strings, each emitted as a bare `u32_be(len) ‖ id`
-with no object envelope. Ordering is ascending lexicographic over the **raw id bytes**, which
-for this frozen layout is the same as ordering over the emitted element bytes only because
-every element carries an equal-width length prefix. An empty id, a duplicate id and an empty
-set are each invalid.
+An empty id, a duplicate id and an empty set are each invalid.
 
-**Two deliberate deviations from the framework, recorded rather than hidden.**
+**Schema 1 is burned — this was the registry's largest explicit legacy encoding.** It froze the
+shipping `sdk/storage_set.rs` layout: no §2.1 envelope, bare length-prefixed elements instead of
+`enc(e)`, and a preimage beginning with the domain tag rather than
+`u16_be(class) ‖ u16_be(version)`. It said of itself that it "must not be 'cleaned up'".
 
-1. The §2.1 envelope is *not* prepended. The shipping preimage begins with the domain tag and
-   a `0x00` separator — the output of `dsm_domain_hasher` — where a conformant object would
-   begin with `u16_be(class) ‖ u16_be(version)`.
-2. Elements are bare length-prefixed bytes rather than the `enc(e)` of §2.4, and there is no
-   `StorageMemberId` object class. Class `0x0003` was briefly assigned to one and is burned.
+That freeze existed for exactly one reason, stated in its own text: **"every deployed vault's signed
+anchor already commits a `storage_set_id` under this construction, and adopting the framework would
+invalidate all of them."** The state-identity cut deletes those anchors and reprovisions, so no
+deployed signature depends on the layout any more. The rationale is void, and keeping the encoding
+after its reason has gone would be legacy preserved by habit — while this document claims no legacy
+anywhere.
 
-Both deviations exist because every deployed vault's signed anchor already commits a
-`storage_set_id` under this construction, and adopting the framework would invalidate all of
-them. This class is frozen as shipped. A future `StorageSetV2` under a new class number may
-adopt the standard envelope; **this one must not be "cleaned up".**
+Class `0x0003` remains burned: it was briefly assigned to a `StorageMemberId` object before members
+were settled as bare strings, and schema 2 does not revive it — members are `bytes` under §2.2, and
+a set of primitives needs no element class (§2.4).
 
-### 5.3 `EncumbranceClaim` — class `0x0004`, schema 1
+### 5.3 `EncumbranceClaim` — class `0x0004`, schema 2
 
-The specification fixes the preimage directly:
-`e_j = H(DSM/enc-claim ‖ vault_id ‖ p ‖ claim_seq ‖ amount ‖ token ‖ purpose)`.
+`e_j = H(DSM/enc-claim ‖ p ‖ claim_seq ‖ amount ‖ token ‖ purpose)`, where `p` is the `c_n` of the
+DLV parent state the claim is made against.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `vault_id` | `digest32` | |
-| 2 | `parent_state_commitment` | `digest32` | the `p` of the claim, per Def 4.1 `h_n` |
-| 3 | `claim_seq` | `u64` | |
-| 4 | `amount` | `u64` | base units; §3.4 fixed-point applies to derived ratios, not to this field |
-| 5 | `token` | `digest32` | token policy commitment |
-| 6 | `purpose` | `u16` | enumeration; values are declared where the purpose set is defined |
+| 1 | `parent_binding` | `digest32` | the `p` of the claim — `c_n`, never the deleted `h_n` projection |
+| 2 | `claim_seq` | `u64` | |
+| 3 | `amount` | `u64` | base units; §3.4 fixed-point applies to derived ratios, not to this field |
+| 4 | `token` | `digest32` | token policy commitment |
+| 5 | `purpose` | `u16` | enumeration; values are declared where the purpose set is defined |
 
-`EncumbranceSet` — class `0x0005`, schema 1 — is a set of `EncumbranceClaim` under §2.4.
+**Schema 1 is burned.** It carried `vault_id` alongside a `parent_state_commitment` documented as
+`h_n` — the old parent model surviving through the accounting path, which is the least visible place
+for it to survive. Schema 2 pins the parent to `c_n` and drops `vault_id`, which `c_n` commits.
+
+`EncumbranceSet` — class `0x0005`, schema 2 — is a set of `EncumbranceClaim` under §2.4. It is
+nested by value in `0x0001` field 10 and **no longer feeds a standalone digest**: the derived
+per-vault commitment `EC_v` is deleted, because `c_n` commits the set already. Schema 1 is burned
+with the claim schema it contained.
 
 ### 5.4 `ReleasePolicy` — class `0x0009`, schema 1
 
@@ -843,9 +840,15 @@ Two of these have partial tables in §5 rather than none:
 Run before any `Route` field number is frozen, because §2.8 makes them permanent. Four
 findings; two are settled by the audit and two need a decision.
 
-### The object graph Rev 15 already fixes
+> **Superseded by the state-identity cut, and retained as a record.** Everything below reasons from
+> `p_v` as the allocation parent binding and from `{EC_v}` as an operand of `X`. Both are deleted:
+> `Allocation` `0x0015` schema 2 binds `c_n` and carries no `vault_id`, and `0x0017` schema 2 has no
+> encumbrance operand. The *findings* stand as reasoning about the model that existed when they were
+> made; the object graph they describe does not. Read §3 and §5 for what is live.
 
-`p_v` is **not** an open question. Def 9.1 defines an allocation as
+### The object graph Rev 15 already fixed (pre-cut)
+
+`p_v` was **not** an open question at the time of this audit. Def 9.1 defines an allocation as
 `a = (vault_id, parent_binding, Δ_in, Δ_out, e, Φ)`, and Def 6.4 defines that
 `parent_binding` as the history-bound `p_v`. A route is a sequence of legs over those
 allocations. The legacy `RouteCommitHopV1.vault_state_anchor_digest` therefore has no
@@ -1046,10 +1049,16 @@ this registry is to stop implementation accidents becoming protocol.
 | Tier | When | Rust's role |
 |---|---|---|
 | **Transcribe** | Rev 15 already fixes the logical fields | confirms nothing is missed |
-| **Absorb as shipped** | compatibility is itself protocol-significant, as with the deployed `storage_set_id` of §5.2 | authoritative, because changing it breaks live commitments |
 | **Design normatively** | the specification only names a concept | **evidence, not authority** |
 
-Most of §6 falls in the third tier.
+Most of §6 falls in the second tier.
+
+**There is no "absorb as shipped" tier.** An earlier revision had one, justified by the deployed
+`storage_set_id`: compatibility was said to be protocol-significant because changing the layout
+would break live commitments. The state-identity cut deletes the anchors that carried those
+commitments and reprovisions, so nothing live depends on any shipped layout. Under a no-legacy rule
+that tier has no members and no way to acquire one — a shipped encoding is evidence of what an
+implementation does, never authority over what the protocol is.
 
 ### The substrate classes are not in this queue
 

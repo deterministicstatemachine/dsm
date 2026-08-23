@@ -139,6 +139,8 @@ production path decodes, accepts, emits, routes, composes or falls back to any r
 | Retired | Replacement |
 |---|---|
 | `VaultStateV2 0x0001` schema 1 | schema 2 only; field 13 is `owner_authority_transition_digest` |
+| `StorageSet 0x0002` schema 1 | schema 2 only — the frozen `storage_set_id` layout becomes an ordinary CCB object |
+| `EncumbranceClaim/Set 0x0004`, `0x0005` schema 1 | schema 2 only; claim parent is `c_n`, no `vault_id`; `EC_v` deleted |
 | `VaultStateAnchorV2` and Def 6.4 | **removed from the active protocol** — AnchorV3 is the only anchor/baseline form; the `/v2` domain is burned |
 | `Allocation 0x0015` schema 1 (`p_v`) | schema 2 only, `parent_binding = c_n` |
 | `RouteCommitmentBody 0x0017` schema 1 | schema 2 only, no `{EC_v}` |
@@ -163,9 +165,33 @@ cut), **Def 6.17** (`k_v`), **Def 9.1** and **Def 9.2** (`Allocation`, bundle ca
 DLV-parent fields and the stale-parent checks. All resolve to **the same exact current-state
 identity**, which is what makes this a cut rather than a set of amendments.
 
-**§8 matters more than its size suggests.** The `e_j` preimage carries a vault parent `p`; leaving
+**§8 matters more than its size suggests.** The `e_j` preimage carried a vault parent `p`; leaving
 `p` ambiguous after deleting `p_v` would preserve the old parent model through the encumbrance path,
-where nobody would look for it. It is pinned to `c_n` explicitly.
+where nobody would look for it. It is pinned to `c_n`, and the claim's own `vault_id` goes with it.
+
+**Four further sites closed in the same sweep**, each the old model surviving somewhere quieter:
+
+- **Def 6.14 `T_v`** carried the vault identifier, parent generation, parent state commitment and
+  parent reserves digest — the `p_v` projection under another name. The parent side of `T_v` is now
+  exactly `c_n`; everything else is read from the authenticated state.
+- **Def 5.2 `M`** committed `vault_id` beside `c_0` — the same `(vault_id, c_n)` alias one
+  generation earlier. Dropped.
+- **`TradeDigest`** carried participating vault identifiers beside parent bindings. Once those are
+  `c_n`, the identifiers are redundant. Dropped.
+- **`EC_v` itself** was still *defined* in §8 while §9.3 deleted its only consumer. A derived
+  commitment with no consumer is an alias waiting to be re-adopted, so it is deleted and its symbol
+  burned.
+
+**Def 6.4a defines AnchorV3 normatively.** An earlier revision declared it only in this plan while
+the specification deleted the sole anchor it defined — leaving the replacement living in a document
+with no normative force. The `/v3` domain is now reserved in the domain table and the owner-signed
+baseline over `c_n` is defined in the specification itself.
+
+**The `StorageSet` freeze is gone.** `0x0002` schema 1 was the registry's largest explicit legacy
+encoding, kept because "every deployed vault's signed anchor already commits a `storage_set_id`
+under this construction". The cut deletes those anchors, so the rationale is void. The registry's
+"absorb as shipped" tier goes with it: it had exactly one member and, under a no-legacy rule, no way
+to acquire another.
 
 **These amendments are made in this change**, in `.github/instructions/sofispecs.instructions.md`.
 The no-legacy rule is why: a registry declaring `c_n` while the specification still declares `p_v`
