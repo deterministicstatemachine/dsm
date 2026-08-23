@@ -679,6 +679,46 @@ fn genesis_params_v3_agrees_with_an_independent_construction() {
     assert_eq!(g, expected, "G is H_dom(DSM/genesis/v3, CCB) exactly");
 }
 
+/// The production decoder round-trips the encoder, refuses burned schemas
+/// with an error naming the reprovision, and refuses trailing bytes.
+#[test]
+fn the_decoder_round_trips_and_refuses_burned_schemas() {
+    use dsm::ccb::{decode_vault_state, DecodeError};
+
+    let h0 = genesis_parent_commitment(&VAULT_ID);
+    let v = state(5, 100, 200, h0, Some(7));
+    let bytes = v.encode().expect("encodes");
+
+    let decoded = decode_vault_state(&bytes).expect("decodes");
+    assert_eq!(decoded, v, "decode is the inverse of encode");
+    assert_eq!(
+        decoded.encode().expect("re-encodes"),
+        bytes,
+        "and re-encoding reproduces the exact bytes"
+    );
+
+    // A burned schema is refused AS burned, not as a parse error.
+    let mut burned = bytes.clone();
+    burned[2..4].copy_from_slice(&2u16.to_be_bytes());
+    assert_eq!(
+        decode_vault_state(&burned),
+        Err(DecodeError::BurnedSchema { got: 2 }),
+        "schema 2 must be named as burned — no upgrade path"
+    );
+
+    // Trailing bytes are refused: a V_n with a suffix is not a V_n.
+    let mut trailing = bytes.clone();
+    trailing.push(0x00);
+    assert_eq!(
+        decode_vault_state(&trailing),
+        Err(DecodeError::TrailingBytes { extra: 1 }),
+    );
+
+    // Truncation is refused.
+    let truncated = &bytes[..bytes.len() - 3];
+    assert_eq!(decode_vault_state(truncated), Err(DecodeError::Truncated));
+}
+
 /// Validity conditions refuse rather than repair.
 #[test]
 fn invalid_inputs_are_refused_rather_than_normalized() {
