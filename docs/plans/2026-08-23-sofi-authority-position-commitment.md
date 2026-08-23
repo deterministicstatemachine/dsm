@@ -314,7 +314,6 @@ can do, since it forecloses moving the reference mid-vault.
   helper and its pinning test at `dlv/vault_state_anchor_v2.rs:286` are **deleted**, not modified.
 - **`RouteCommitHopV1`**: the `(anchor_seq, reserves_digest, anchor_digest)` triple at
   `proto/dsm_app.proto:1225-1227` is deleted; the hop carries `c_n`. Both field numbers are burned.
-- **Registry**: `0x0001`, `0x0015` and `0x0017` move to schema 2, with schema 1 burned in each.
 - **The five composition call sites** resume only after both preconditions hold: P6 dischargeable,
   and this commitment present.
 
