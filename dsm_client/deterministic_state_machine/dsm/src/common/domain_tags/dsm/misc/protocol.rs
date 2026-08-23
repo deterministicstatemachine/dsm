@@ -64,10 +64,16 @@ pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =
 /// members of `V_0`.
 pub const TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/vault-state-parent/genesis/v2");
-/// Canonical storage-set identity: `H(tag ‖ 0x00 ‖ u32_be(count) ‖ for each
-/// member id in lexicographic byte order: u32_be(len) ‖ id)`.
-pub const TAG_DSM_STORAGE_SET_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/storage-set/v1");
+/// Canonical storage-set identity: `storage_set_id = H(tag ‖ 0x00 ‖ CCB(S))`
+/// over the ordinary `StorageSet` CCB object (class `0x0002`, schema 2).
+///
+/// The tag is `DSM/storage-set`, matching the normative domain table. The
+/// shipping `DSM/storage-set/v1` is **burned** by the state-identity cut: it
+/// tagged the frozen envelope-less layout, which was kept only because
+/// deployed anchors committed set ids under it. Those anchors are deleted, so
+/// both the layout and its tag go.
+pub const TAG_DSM_STORAGE_SET: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/storage-set");
 /// Content address of an A-side receipt-evidence artifact (ADR 0003).
 ///
 /// Separated BY ROLE from the B-side tag below. Every evidence artifact is a

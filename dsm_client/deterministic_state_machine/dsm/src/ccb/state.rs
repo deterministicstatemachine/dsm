@@ -4,20 +4,24 @@
 
 use super::{
     class, family, push_absent, push_bytes, push_digest32, push_envelope, push_present, push_u16,
-    push_u32, push_u64, CcbError, FEE_DENOMINATOR,
+    push_u32, push_u64, CcbError, CcbObject, FEE_DENOMINATOR,
 };
 
-/// `0x0002` — the committed storage set.
+/// `0x0002` schema 2 — the committed storage set, an ordinary CCB object.
 ///
-/// **This class does not carry the §2.1 envelope.** Its encoding is the frozen
-/// shipping layout: a count, then each member id as bare length-prefixed bytes.
-/// Every deployed vault's signed anchor already commits a `storage_set_id`
-/// under this construction, so wrapping it now would invalidate all of them.
-/// A generic "nested object gets an envelope" helper must never be applied
-/// here — the result would be perfectly deterministic and not normative.
+/// Schema 1 froze an envelope-less layout because deployed anchors committed
+/// set ids under it. The state-identity cut deletes those anchors, so the
+/// exception is gone and this class carries the §2.1 envelope like every
+/// other. The special-case warning that used to live here is deleted with the
+/// special case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageSetMembers {
     members: Vec<Vec<u8>>,
+}
+
+impl CcbObject for StorageSetMembers {
+    const CLASS: u16 = class::STORAGE_SET;
+    const SCHEMA: u16 = 2;
 }
 
 impl StorageSetMembers {
@@ -48,9 +52,11 @@ impl StorageSetMembers {
         self.members.is_empty()
     }
 
-    /// `u32_be(count) ‖ for each id in ascending byte order: u32_be(len) ‖ id`.
+    /// `envelope ‖ u32_be(count) ‖ for each id in ascending byte order:
+    /// u32_be(len) ‖ id`.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
+        push_envelope::<Self>(&mut out);
         let count = u32::try_from(self.members.len()).map_err(|_| CcbError::LengthOverflow)?;
         push_u32(&mut out, count);
         for id in &self.members {
@@ -60,23 +66,37 @@ impl StorageSetMembers {
     }
 }
 
-/// `0x0004` — one encumbrance claim.
+/// `0x0004` schema 2 — one encumbrance claim.
+///
+/// `parent_binding` is the **creation parent**: the `c_n` of the state the
+/// transition that created this claim consumed. It is never the containing
+/// state's own `c_k`. `E` is a member of `V_n`, so reading it that way would
+/// give `c_n → CCB(V_n) → E_n → e_j → c_n` — a hash fixed point no encoder can
+/// compute. A claim surviving into a later successor is carried **byte for
+/// byte**; refreshing its parent to the current state is how an implementation
+/// reaches the cycle while believing it is tidying up.
+///
+/// `vault_id` is not a field: `parent_binding` commits it, and carrying both
+/// would admit an encodable pair that disagrees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncumbranceClaim {
-    pub vault_id: [u8; 32],
-    pub parent_state_commitment: [u8; 32],
+    pub parent_binding: [u8; 32],
     pub claim_seq: u64,
     pub amount: u64,
     pub token: [u8; 32],
     pub purpose: u16,
 }
 
+impl CcbObject for EncumbranceClaim {
+    const CLASS: u16 = class::ENCUMBRANCE_CLAIM;
+    const SCHEMA: u16 = 2;
+}
+
 impl EncumbranceClaim {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::ENCUMBRANCE_CLAIM, 1);
-        push_digest32(&mut out, &self.vault_id);
-        push_digest32(&mut out, &self.parent_state_commitment);
+        push_envelope::<Self>(&mut out);
+        push_digest32(&mut out, &self.parent_binding);
         push_u64(&mut out, self.claim_seq);
         push_u64(&mut out, self.amount);
         push_digest32(&mut out, &self.token);
@@ -89,6 +109,11 @@ impl EncumbranceClaim {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncumbranceSet {
     claims: Vec<EncumbranceClaim>,
+}
+
+impl CcbObject for EncumbranceSet {
+    const CLASS: u16 = class::ENCUMBRANCE_SET;
+    const SCHEMA: u16 = 2;
 }
 
 impl EncumbranceSet {
@@ -111,7 +136,7 @@ impl EncumbranceSet {
 
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::ENCUMBRANCE_SET, 1);
+        push_envelope::<Self>(&mut out);
         let count = u32::try_from(self.claims.len()).map_err(|_| CcbError::LengthOverflow)?;
         push_u32(&mut out, count);
         for claim in &self.claims {
@@ -128,6 +153,11 @@ pub struct MarketPolicy {
     family_version: u16,
     token_a_policy_commit: [u8; 32],
     token_b_policy_commit: [u8; 32],
+}
+
+impl CcbObject for MarketPolicy {
+    const CLASS: u16 = class::MARKET_POLICY;
+    const SCHEMA: u16 = 1;
 }
 
 impl MarketPolicy {
@@ -159,7 +189,7 @@ impl MarketPolicy {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::MARKET_POLICY, 1);
+        push_envelope::<Self>(&mut out);
         push_u16(&mut out, self.family_id);
         push_u16(&mut out, self.family_version);
         push_digest32(&mut out, &self.token_a_policy_commit);
@@ -173,6 +203,11 @@ impl MarketPolicy {
 pub struct ReleasePolicy {
     family_id: u16,
     family_version: u16,
+}
+
+impl CcbObject for ReleasePolicy {
+    const CLASS: u16 = class::RELEASE_POLICY;
+    const SCHEMA: u16 = 1;
 }
 
 impl ReleasePolicy {
@@ -189,7 +224,7 @@ impl ReleasePolicy {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::RELEASE_POLICY, 1);
+        push_envelope::<Self>(&mut out);
         push_u16(&mut out, self.family_id);
         push_u16(&mut out, self.family_version);
         out
@@ -200,6 +235,11 @@ impl ReleasePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FeePolicy {
     fee_bps: u32,
+}
+
+impl CcbObject for FeePolicy {
+    const CLASS: u16 = class::FEE_POLICY;
+    const SCHEMA: u16 = 1;
 }
 
 impl FeePolicy {
@@ -216,7 +256,7 @@ impl FeePolicy {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::FEE_POLICY, 1);
+        push_envelope::<Self>(&mut out);
         push_u32(&mut out, self.fee_bps);
         out
     }
@@ -237,23 +277,33 @@ pub struct VaultStateV2 {
     pub encumbrances: EncumbranceSet,
     pub iteration_budget: Option<u64>,
     pub parent_state_commitment: [u8; 32],
-    pub owner_root: [u8; 32],
+    /// Field 13 — the committed device-authority position: `t_j` of the
+    /// `DeviceTreeRootTransition` under which the owner asserts the device
+    /// authority signing for this vault. **Invariant across market
+    /// successors** — copied byte for byte, never advanced, because a market
+    /// successor executes while the owner is absent and must not move the
+    /// owner-authority reference.
+    pub owner_authority_transition_digest: [u8; 32],
     pub storage_set: StorageSetMembers,
     pub quorum: u32,
 }
 
+impl CcbObject for VaultStateV2 {
+    const CLASS: u16 = class::VAULT_STATE_V2;
+    /// Schema 3. Schema 2 named field 13 but nested `0x0002`/`0x0005` at
+    /// schema 1; §2.7 nests by complete CCB, so its bytes differ from these
+    /// despite an identical field list.
+    const SCHEMA: u16 = 3;
+}
+
 impl VaultStateV2 {
-    /// Fields 1..15 in Def 4.1 order.
+    /// Fields 1..15 in Def 4.1 order, every nested member by complete CCB.
     ///
-    /// Field 14 nests the storage set by its **frozen layout**, with no
-    /// envelope. That is the one place this encoder deviates from §2.6, and it
-    /// is deliberate. The result stays uniquely parseable because the set
-    /// begins with its own count and every member is length-prefixed, so a
-    /// reader knows exactly where field 14 ends and the `u32` of field 15
-    /// begins.
+    /// There is no longer a deviation to explain: field 14 nests `0x0002`
+    /// schema 2 with its envelope, exactly like fields 7–10.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
-        push_envelope(&mut out, class::VAULT_STATE_V2, 1);
+        push_envelope::<Self>(&mut out);
         push_digest32(&mut out, &self.owner_genesis_id); // 1
         push_digest32(&mut out, &self.owner_device_id); // 2
         push_digest32(&mut out, &self.vault_id); // 3
@@ -273,8 +323,8 @@ impl VaultStateV2 {
             }
         }
         push_digest32(&mut out, &self.parent_state_commitment); // 12
-        push_digest32(&mut out, &self.owner_root); // 13
-        out.extend_from_slice(&self.storage_set.encode()?); // 14 — no envelope
+        push_digest32(&mut out, &self.owner_authority_transition_digest); // 13
+        out.extend_from_slice(&self.storage_set.encode()?); // 14
         push_u32(&mut out, self.quorum); // 15
         Ok(out)
     }

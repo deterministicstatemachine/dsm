@@ -36,7 +36,7 @@
 use blake3::Hasher;
 
 use crate::common::domain_tags::{
-    TAG_DSM_STORAGE_SET_V1, TAG_DSM_VAULT_STATE, TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2,
+    TAG_DSM_STORAGE_SET, TAG_DSM_VAULT_STATE, TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -60,6 +60,50 @@ pub mod class {
     pub const MARKET_POLICY: u16 = 0x0007;
     pub const RELEASE_POLICY: u16 = 0x0009;
     pub const FEE_POLICY: u16 = 0x000A;
+}
+
+/// Live schema versions, and the ones the state-identity cut burned.
+///
+/// A burned `(class, schema)` pair is recorded so its number is never
+/// re-assigned. **Nothing decodes or emits one.** There is no fallback, no
+/// dual-read and no upgrade path: a clean reprovision means no old-format
+/// state is valid, so there is nothing to migrate from.
+pub mod schema {
+    /// `(class, schema)` pairs retired by the cut, in registry order.
+    ///
+    /// `0x0001` retires **two**. Schema 2 defined field 13 but nested
+    /// `0x0002` and `0x0005` at schema 1, and §2.7 nests by complete CCB
+    /// including the nested schema version — so its bytes differ from schema
+    /// 3's even though the field *list* is identical. That is exactly the
+    /// silent divergence §2.8 exists to prevent, and it is why a bump
+    /// propagates upward through every enclosing object.
+    pub const BURNED: &[(u16, u16)] = &[
+        (super::class::VAULT_STATE_V2, 1),
+        (super::class::VAULT_STATE_V2, 2),
+        (super::class::STORAGE_SET, 1),
+        (super::class::ENCUMBRANCE_CLAIM, 1),
+        (super::class::ENCUMBRANCE_SET, 1),
+    ];
+
+    /// Whether a `(class, schema)` pair is retired. Never true for a live
+    /// object's own `SCHEMA`, which [`super::CcbObject`] supplies.
+    pub fn is_burned(object_class: u16, schema_version: u16) -> bool {
+        BURNED.contains(&(object_class, schema_version))
+    }
+}
+
+/// A class whose canonical bytes this module emits.
+///
+/// The class and schema are **associated constants, not parameters**. That is
+/// the whole point: a call site cannot pass the wrong schema, because it never
+/// passes one. When a nested object's schema moves, every enclosing object's
+/// envelope follows from its own constant and the change cannot be applied to
+/// some call sites and missed at others.
+pub trait CcbObject {
+    /// Object-class discriminant from the single namespace of registry §3.
+    const CLASS: u16;
+    /// The one live schema version for that class.
+    const SCHEMA: u16;
 }
 
 /// The beta families. Each is the only admissible member of its class at
@@ -140,13 +184,16 @@ impl std::error::Error for CcbError {}
 
 /// The §2.1 envelope: `u16_be(class) ‖ u16_be(schema_version)`.
 ///
-/// Every conformant object begins with this. `StorageSet` is the one class
-/// that does not: see [`StorageSetMembers::encode`], which starts straight at
-/// the count because its shipping preimage already begins with the domain tag
-/// and a `0x00` separator.
-pub(crate) fn push_envelope(out: &mut Vec<u8>, object_class: u16, schema_version: u16) {
-    out.extend_from_slice(&object_class.to_be_bytes());
-    out.extend_from_slice(&schema_version.to_be_bytes());
+/// **Every** conformant object begins with this, with no exceptions. The
+/// state-identity cut removed the last one: `StorageSet` used to start
+/// straight at its count, carrying a frozen envelope-less layout kept because
+/// deployed anchors committed set ids under it. Those anchors are gone.
+///
+/// Takes the object as a type parameter rather than the numbers as arguments,
+/// so a wrong schema is unwritable rather than merely unwritten.
+pub(crate) fn push_envelope<T: CcbObject>(out: &mut Vec<u8>) {
+    out.extend_from_slice(&T::CLASS.to_be_bytes());
+    out.extend_from_slice(&T::SCHEMA.to_be_bytes());
 }
 
 pub(crate) fn push_u16(out: &mut Vec<u8>, v: u16) {
@@ -213,15 +260,16 @@ pub fn parent_state_commitment_for_successor_of(
     vault_state_commitment(parent)
 }
 
-/// `storage_set_id = H(TAG ‖ 0x00 ‖ CCB-of-the-frozen-layout)`.
+/// `storage_set_id = H_dom(DSM/storage-set, CCB(S))`.
 ///
-/// The tag and its `0x00` separator come from `dsm_domain_hasher`, which is
-/// why this class carries no envelope: the shipping preimage already starts
-/// with them, and adding a discriminant would change every deployed vault's
-/// committed set id.
+/// An ordinary CCB object under an ordinary domain. Both halves changed with
+/// the cut: the frozen envelope-less layout became `0x0002` schema 2, and the
+/// `DSM/storage-set/v1` tag that named it is burned in favour of the
+/// normative `DSM/storage-set`. Set ids therefore differ from the deployed
+/// ones, which is the reprovision rather than a regression.
 pub fn storage_set_id(members: &StorageSetMembers) -> Result<[u8; 32], CcbError> {
     let body = members.encode()?;
-    let mut h: Hasher = dsm_domain_hasher(TAG_DSM_STORAGE_SET_V1);
+    let mut h: Hasher = dsm_domain_hasher(TAG_DSM_STORAGE_SET);
     h.update(&body);
     Ok(*h.finalize().as_bytes())
 }
