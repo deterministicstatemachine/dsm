@@ -482,6 +482,109 @@ fn two_individually_valid_halves_do_not_join() {
     );
 }
 
+/// Position-scoping is enforced, not promised: material strictly AFTER the
+/// bound position — an invalidly-signed successor, and a fork whose
+/// predecessor IS the position — must not disturb a proof bound to it. The
+/// earlier `a_longer_chain…` test could not catch this, because its longer
+/// tail was valid: it proved a valid tail is harmless, not that the tail is
+/// ignored.
+#[test]
+fn garbage_after_the_bound_position_cannot_disturb_the_proof() {
+    let w = world();
+    let dels = vec![w.d0.clone(), w.d1.clone()];
+    let proof = w.tree.proof(&w.d_o).expect("fixture");
+    let position = w.transitions[2].transition.digest(); // bound at T2
+
+    // An invalidly-signed successor of T2.
+    let bad_succ = DeviceTreeRootTransition {
+        genesis_id: w.g_o,
+        predecessor_transition_digest: position,
+        new_root: [0xAB; 32],
+        version_number: 3,
+        delegation_digest: w.d1.delegation.digest().expect("fixture"),
+    };
+    let bad_signed = SignedTransition {
+        transition: bad_succ.clone(),
+        delegate_signature: vec![0u8; 64], // garbage
+    };
+    let mut trans = w.transitions[..3].to_vec();
+    trans.push(bad_signed);
+    let p = presented(w, &dels, &trans, &proof);
+    resolve_owner_authority_at_position(&w.g_o, &position, &p)
+        .expect("an invalid successor AFTER the position is not this proof's business");
+
+    // A fork whose predecessor IS the bound position: two distinct,
+    // validly-signed successors of T2.
+    let succ_a = DeviceTreeRootTransition {
+        genesis_id: w.g_o,
+        predecessor_transition_digest: position,
+        new_root: [0xAC; 32],
+        version_number: 3,
+        delegation_digest: w.d1.delegation.digest().expect("fixture"),
+    };
+    let succ_b = DeviceTreeRootTransition {
+        genesis_id: w.g_o,
+        predecessor_transition_digest: position,
+        new_root: [0xAD; 32],
+        version_number: 5,
+        delegation_digest: w.d1.delegation.digest().expect("fixture"),
+    };
+    let mut trans2 = w.transitions[..3].to_vec();
+    trans2.push(sign_transition(&succ_a, &w.delegate0));
+    trans2.push(sign_transition(&succ_b, &w.delegate0));
+    let p2 = presented(w, &dels, &trans2, &proof);
+    resolve_owner_authority_at_position(&w.g_o, &position, &p2)
+        .expect("a fork strictly after the position is evidence about a later edge, not this one");
+}
+
+/// An unordered bag has an order-independent outcome. The same object
+/// presented twice with DIFFERENT signature bytes is ambiguous and refused —
+/// in both presentation orders, identically — rather than letting whichever
+/// copy the bag yields last supply the signature.
+#[test]
+fn duplicate_objects_with_differing_signatures_are_refused_in_both_orders() {
+    let w = world();
+    let proof = w.tree.proof(&w.d_o).expect("fixture");
+    let position = w.transitions[2].transition.digest();
+
+    // Delegation: D1 with its real signature and with garbage.
+    let d1_garbage = SignedDelegation {
+        delegation: w.d1.delegation.clone(),
+        grk_signature: vec![0u8; 64],
+    };
+    for dels in [
+        vec![w.d0.clone(), w.d1.clone(), d1_garbage.clone()],
+        vec![w.d0.clone(), d1_garbage.clone(), w.d1.clone()],
+    ] {
+        let p = presented(w, &dels, &w.transitions, &proof);
+        let r = resolve_owner_authority_at_position(&w.g_o, &position, &p);
+        assert!(is_invalid(&r), "ambiguous delegation must refuse: {r:?}");
+    }
+
+    // Transition: T1 (WITHIN the prefix) with its real signature and garbage.
+    let t1_garbage = SignedTransition {
+        transition: w.transitions[1].transition.clone(),
+        delegate_signature: vec![0u8; 64],
+    };
+    let dels = vec![w.d0.clone(), w.d1.clone()];
+    for trans in [
+        {
+            let mut t = w.transitions.clone();
+            t.push(t1_garbage.clone());
+            t
+        },
+        {
+            let mut t = vec![t1_garbage.clone()];
+            t.extend(w.transitions.clone());
+            t
+        },
+    ] {
+        let p = presented(w, &dels, &trans, &proof);
+        let r = resolve_owner_authority_at_position(&w.g_o, &position, &p);
+        assert!(is_invalid(&r), "ambiguous transition must refuse: {r:?}");
+    }
+}
+
 /// A bound position that is authentic but beyond the presented material is
 /// Incomplete — absence and withholding are indistinguishable without a
 /// frontier, and the resolver says so rather than guessing.
