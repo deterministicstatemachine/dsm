@@ -53,13 +53,14 @@ pub struct AmmVaultRecord {
     /// the anchor's set; a caller that has both must require equality and fail
     /// closed on mismatch (the anchor chooses the set; this only caches it).
     pub storage_set_id: [u8; 32],
-    /// `CCB(V_0)` — the vault's birth state, exactly as published immutably.
-    /// `c_0` recomputes from these bytes; owner-side composition decodes them.
-    pub birth_state_ccb: Vec<u8>,
-    /// The owner's birth `AnchorPresentationV3` proto bytes, exactly as
-    /// published — reused for every owner-side composition so the authority
-    /// chain is not re-signed per quote.
-    pub birth_presentation: Vec<u8>,
+    /// `CCB(V_n)` — the owner's CURRENT published baseline (birth at
+    /// creation, terminal after close), exactly as published immutably.
+    /// `c_n` recomputes from these bytes; owner-side composition decodes them.
+    pub baseline_state_ccb: Vec<u8>,
+    /// The `AnchorPresentationV3` proto bytes anchoring that baseline,
+    /// exactly as published — reused for every owner-side composition so the
+    /// authority chain is not re-signed per quote.
+    pub baseline_presentation: Vec<u8>,
 }
 
 pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
@@ -73,7 +74,7 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
         "INSERT OR REPLACE INTO amm_vault_records(
             vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
             fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-            birth_state_ccb, birth_presentation, created_at)
+            baseline_state_ccb, baseline_presentation, created_at)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             rec.vault_id.as_slice(),
@@ -85,11 +86,32 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
             rec.anchor_enforcement,
             rec.policy_digest.as_slice(),
             rec.storage_set_id.as_slice(),
-            rec.birth_state_ccb.as_slice(),
-            rec.birth_presentation.as_slice(),
+            rec.baseline_state_ccb.as_slice(),
+            rec.baseline_presentation.as_slice(),
             now as i64,
         ],
     )?;
+    Ok(())
+}
+
+/// Advance the record's published baseline inside an open transaction — the
+/// close writes its terminal `CCB(V_n)` + presentation here so the record and
+/// the frozen publication commit together or not at all.
+pub fn update_baseline_with_conn(
+    tx: &rusqlite::Transaction<'_>,
+    vault_id: &[u8; 32],
+    state_ccb: &[u8],
+    presentation: &[u8],
+) -> Result<()> {
+    let changed = tx.execute(
+        "UPDATE amm_vault_records
+            SET baseline_state_ccb = ?2, baseline_presentation = ?3
+          WHERE vault_id = ?1",
+        params![vault_id.as_slice(), state_ccb, presentation],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("baseline update touched {changed} rows for one vault id");
+    }
     Ok(())
 }
 
@@ -110,7 +132,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         .query_row(
             "SELECT vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
                     fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-                    birth_state_ccb, birth_presentation
+                    baseline_state_ccb, baseline_presentation
              FROM amm_vault_records WHERE vault_id = ?1",
             params![vault_id.as_slice()],
             |r| {
@@ -140,8 +162,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         anchor_enforcement,
         pd,
         ss,
-        birth_state_ccb,
-        birth_presentation,
+        baseline_state_ccb,
+        baseline_presentation,
     )) = row
     else {
         return Ok(None);
@@ -166,8 +188,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         anchor_enforcement,
         policy_digest,
         storage_set_id,
-        birth_state_ccb,
-        birth_presentation,
+        baseline_state_ccb,
+        baseline_presentation,
     }))
 }
 
@@ -219,8 +241,8 @@ mod tests {
             anchor_enforcement: 2,
             policy_digest: [0x5A; 32],
             storage_set_id: [0x6B; 32],
-            birth_state_ccb: Vec::new(),
-            birth_presentation: Vec::new(),
+            baseline_state_ccb: Vec::new(),
+            baseline_presentation: Vec::new(),
         }
     }
 

@@ -330,8 +330,8 @@ mod tests {
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
             storage_set_id: [0x6B; 32],
-            birth_state_ccb: Vec::new(),
-            birth_presentation: Vec::new(),
+            baseline_state_ccb: Vec::new(),
+            baseline_presentation: Vec::new(),
         };
         (record, head)
     }
@@ -566,8 +566,8 @@ mod tests {
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
             storage_set_id: [0x6B; 32],
-            birth_state_ccb: Vec::new(),
-            birth_presentation: Vec::new(),
+            baseline_state_ccb: Vec::new(),
+            baseline_presentation: Vec::new(),
         };
         assert_eq!(
             rehydrate_amm_vault(&record, &head),
