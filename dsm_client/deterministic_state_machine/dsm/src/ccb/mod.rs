@@ -40,8 +40,10 @@ use crate::common::domain_tags::{
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 
+pub mod genesis;
 pub mod state;
 
+pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetMembers,
     VaultStateV2,
@@ -60,6 +62,8 @@ pub mod class {
     pub const MARKET_POLICY: u16 = 0x0007;
     pub const RELEASE_POLICY: u16 = 0x0009;
     pub const FEE_POLICY: u16 = 0x000A;
+    /// Substrate class — the Genesis v3 parameter set (registry §5.15).
+    pub const GENESIS_PARAMS_V3: u16 = 0x0018;
 }
 
 /// Live schema versions, and the ones the state-identity cut burned.
@@ -146,6 +150,14 @@ pub enum CcbError {
     },
     /// A length did not fit the 4-byte prefix the format allows.
     LengthOverflow,
+    /// A `signature_alg` value the registry does not declare.
+    UnknownSignatureAlg { alg: u16 },
+    /// A public key whose length is not the declared width for its algorithm.
+    KeyLengthMismatch {
+        alg: u16,
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl core::fmt::Display for CcbError {
@@ -174,6 +186,15 @@ impl core::fmt::Display for CcbError {
                  is not the beta profile"
             ),
             CcbError::LengthOverflow => write!(f, "length does not fit a 4-byte prefix"),
+            CcbError::UnknownSignatureAlg { alg } => write!(
+                f,
+                "signature_alg {alg:#06x} is not declared in the registry; \
+                 enumerations range over declared values, never call-site inventions"
+            ),
+            CcbError::KeyLengthMismatch { alg, expected, got } => write!(
+                f,
+                "public key for signature_alg {alg:#06x} must be {expected} bytes, got {got}"
+            ),
         }
     }
 }
