@@ -38,19 +38,22 @@ set by nothing outside the `[0xA3; 32]` fixtures at `dlv/vault_state_anchor_v2.r
 `tests/ccb_conformance.rs:335` — is useful deployment information. It means the cut is cheap. It
 does not repeal the registry rule, and an earlier revision of this design treated it as if it did.
 
-**Schema 1 is not retired and not re-pointed.** It keeps its original, undefined field 13. Schema 2
-renames the field, because a transition digest is not a "root" and calling it one was inherited
-imprecision from a phrase the specification never defined.
+**Schema 1 is burned, not kept.** Its number is recorded so it is never re-assigned; nothing in
+production decodes it. Schema 2 renames the field, because a transition digest is not a "root" and
+calling it one was inherited imprecision from a phrase the specification never defined.
 
 ## AnchorV3, not a mutated V2
 
-`VaultStateAnchorV2`'s domain and field order are the Def 6.4 primitive, pinned deliberately —
-including by a test that says so in capitals (`dlv/vault_state_anchor_v2.rs:286`). Changing that
-preimage in place would break the pin it exists to hold. An earlier revision of this design proposed
-exactly that; it is withdrawn.
+`VaultStateAnchorV2` is **removed from the active protocol**, not amended and not preserved as a
+historical primitive. Two earlier revisions of this design got this wrong in opposite directions:
+the first proposed mutating its preimage in place, which would have broken the pin that preimage
+exists to hold (`dlv/vault_state_anchor_v2.rs:286`); the second proposed keeping it alive as a
+legacy artifact, which is coexistence. Both are withdrawn. The `/v2` domain is burned and never
+reused, and its pinning test is deleted with the artifact it pinned rather than amended to track a
+live format.
 
-If an owner-signed baseline artifact remains useful, it is **AnchorV3** under a new domain, and its
-authoritative payload is the current state commitment and nothing else:
+**AnchorV3 is the only anchor/baseline form.** Its authoritative payload is the current state
+commitment and nothing else:
 
 ```
 signed_payload = H_dom(DSM/vault-state-anchor/v3, c_n)
@@ -64,52 +67,83 @@ Convenience metadata (generation, reserves, storage set) may travel beside it in
 **never a second source of truth**: a consumer re-derives every such value from `V_n` and refuses on
 disagreement rather than preferring either copy.
 
-## Route parent identity — and the normative amendment it requires
+## The state/route identity cut
 
-**"Parent binding" names two different things, and an earlier revision of this document used one
-word for both.** They must be separated before either can be stated.
+Not an amendment bolted onto the existing model, and not a coexistence plan. **`c_n` becomes the one
+identity of a DLV state, everywhere it is referenced**, and what it replaces is deleted.
 
-| Role | What it is today |
+```
+V_n canonical identity        c_n = H_dom(DSM/vault-state, CCB(V_n))
+Allocation.parent_binding     c_n
+settlement resource key       k_v = H_dom(DSM/binding-keyset, vault_id ‖ c_n)
+SettlementBundle parent refs   c_n
+RouteCommitmentBody            carries no current-encumbrance commitments
+```
+
+### What is being replaced, stated normatively
+
+The normative predecessor is **`p_v`, a single digest** — Def 9.1 gives `Allocation` a
+`parent_binding`, §9.3 makes it `p_v`, and the registry declares exactly that
+(`0x0015` schema 1, field 2). An earlier revision of this document pointed instead at
+`RouteCommitHopV1`'s `(anchor_seq, reserves_digest, anchor_digest)` triple and called it "route
+parent identity today". That triple is the **shipping implementation representation** and a deletion
+target; it is not the thing the specification says a route binds, and using it as the predecessor
+put the argument on the wrong footing.
+
+**The reason for the replacement is projection, not duplication.** `p_v` commits `vault_id`,
+`generation`, the predecessor edge `h_n`, the reserves digest, `S` and `q` — a *selected projection*
+of `V_n`. `c_n` commits the **exact complete current state**. A parent identity that omits parts of
+the parent cannot detect changes in the parts it omits, and the omitted part that matters most here
+is the one the position work introduced: the authority position itself.
+
+### The knock-on: `{EC_v}` goes
+
+Rev 15 §9.3 carries `{EC_v}` in `Q`, and the registry says plainly why: it "is not implied by `p_v`,
+which commits the parent state commitment `h_n` and the current generation's reserves digest, but
+not the current generation's encumbrance set."
+
+**That justification is conditional on `p_v` and does not survive `c_n`.** `E` is a field of `V_n`,
+so `c_n` commits the current encumbrance set already. Keeping `{EC_v}` beside it would commit one
+fact twice in one object, in two independently encodable values free to disagree — the alias class
+removed from `B_M`, from the transition object, and now from the parent binding. It would survive by
+inertia rather than by argument.
+
+**`Allocation.e` stays.** It is not an alias: `c_n` *authenticates the parent's entire encumbrance
+state*, `e` *selects the one claim this allocation consumes*. Authentication and selection are
+different jobs, and no parent commitment tells a verifier which claim a leg is spending.
+
+### The cut, with no legacy anywhere
+
+Schema and domain numbers are recorded as **burned** so they are never re-assigned. That is the only
+thing carried forward — it prevents accidental reuse and is not compatibility support. **No
+production path decodes, accepts, emits, routes, composes or falls back to any retired form.**
+
+| Retired | Replacement |
 |---|---|
-| **Anchor payload** | the Def 6.4 `p_v` tuple — `vault_id ‖ generation ‖ h_n ‖ reserves_digest ‖ storage_set_id ‖ q` — the bytes an owner signs (`dlv/vault_state_anchor_v2.rs:109-128`) |
-| **Route parent identity** | the triple `(vault_state_anchor_seq, vault_state_reserves_digest, vault_state_anchor_digest)` carried on `RouteCommitHopV1` (`proto/dsm_app.proto:1225-1227`) |
+| `VaultStateV2 0x0001` schema 1 | schema 2 only; field 13 is `owner_authority_transition_digest` |
+| `VaultStateAnchorV2` and Def 6.4 | **removed from the active protocol** — AnchorV3 is the only anchor/baseline form; the `/v2` domain is burned |
+| `Allocation 0x0015` schema 1 (`p_v`) | schema 2 only, `parent_binding = c_n` |
+| `RouteCommitmentBody 0x0017` schema 1 | schema 2 only, no `{EC_v}` |
+| `RouteCommitHopV1` triple | deleted, not adapted — the hop carries `c_n` |
+| resource keys on `h_n` | `k_v = H_dom(DSM/binding-keyset, vault_id ‖ c_n)` |
 
-AnchorV3 addresses the **first** role: baseline authentication of `c_n`. It does not touch the
-second. A route allocation's parent identity is fixed by the specification, not by which artifact an
-owner happens to sign, so **AnchorV3 alone changes nothing about what a route must carry.**
+**AnchorV2 is not preserved as a "historical primitive".** An earlier revision proposed keeping it
+that way; that was still coexistence, and it is withdrawn. It is removed from the protocol, and its
+pinning test goes with the artifact it pinned rather than being amended to track a live format.
 
-### Required amendment
+Storage, database and proto state take a **clean schema cut and reprovision**: no migrations, no
+compatibility columns, no `if old_version` branches, no fallback parsing. There is nothing to
+migrate *from*, because no old-format state remains valid.
 
-> For schema-2 DLV state, the canonical route/allocation parent identity is
-> `c_n = H_dom(DSM/vault-state, CCB(V_n))`.
+### Normative amendment surface
 
-It replaces the three-field triple, and the reason is the alias rule applied where it genuinely
-holds: `c_n` already commits `generation`, the reserves, `h_n`, the authority position, `S` and `q`,
-because every one is a field of `V_n`. The triple restates a subset of those facts — and
-`vault_state_anchor_digest` itself commits `vault_id`, sequence and reserves again — so a hop
-carrying both would hold several authoritative copies of the same facts, able to encode validly
-while disagreeing. That is the class the Def 5.2 amendment removed and the reason `old_root` left
-the transition object.
+One coherent change, not a scatter of edits: Def 9.1 and §9.3 (`Allocation.parent_binding` and `X`),
+Def 6.17 (`k_v`), the stale-parent checks, the `SettlementBundle` DLV parent fields, and the removal
+of Def 6.4 from the active protocol. All of them resolve to **the same exact current-state identity**
+`c_n`, which is the property that makes this a cut rather than a set of amendments.
 
-`c_n` is also the value the trader has already authenticated by the time it evaluates a hop, so the
-binding it checks and the state it verified become the same object rather than two views of one.
-
-**`h_n` survives the change untouched**, because it is a different fact: `h_n = c_{n-1}` is the
-**predecessor edge**, `c_n` is the **identity of the present state**. Root recurrence taught that
-distinction expensively.
-
-### Two ways to land it, and this document does not choose
-
-Either **retire the Def 6.4 name for schema-2 routing** while keeping `VaultStateAnchorV2` as a
-historical primitive with its pinned semantics intact; or **split the definitions explicitly**, so
-that `VaultStateAnchorV2` remains the pinned owner-signature artifact and a new definition names
-`c_n` as the canonical DLV parent identity consumed by allocations, bundles, stale-state checks and
-binding resource keys.
-
-Either is coherent. What is **not** coherent is the position an earlier revision of this document
-took — asserting `parent_binding := c_n` while also concluding that no specification amendment was
-required. The plan and the normative specification would simply disagree, and the specification
-would win in every implementation that read it.
+This document does not make those amendments. The specification is the authority; this states what
+the amendment must say.
 
 ## The position is invariant across market successors
 
@@ -214,8 +248,11 @@ can do, since it forecloses moving the reference mid-vault.
 
 - **Registry**: class `0x0001` gains schema 2; §5.1 gains the schema-2 field table and the field's
   definition. Schema 1 is untouched.
-- **AnchorV3**: a new domain and a new signed payload. `VaultStateAnchorV2` and its pinning test at
-  `dlv/vault_state_anchor_v2.rs:286` are **not** modified.
+- **AnchorV3**: a new domain and a new signed payload. `VaultStateAnchorV2`, its `parent_binding`
+  helper and its pinning test at `dlv/vault_state_anchor_v2.rs:286` are **deleted**, not modified.
+- **`RouteCommitHopV1`**: the `(anchor_seq, reserves_digest, anchor_digest)` triple at
+  `proto/dsm_app.proto:1225-1227` is deleted; the hop carries `c_n`. Both field numbers are burned.
+- **Registry**: `0x0001`, `0x0015` and `0x0017` move to schema 2, with schema 1 burned in each.
 - **The five composition call sites** resume only after both preconditions hold: P6 dischargeable,
   and this commitment present.
 
@@ -244,16 +281,27 @@ can do, since it forecloses moving the reference mid-vault.
    its own.
 7. **No second source of truth.** AnchorV3 transport metadata disagreeing with `V_n` is a refusal,
    not a preference for either value.
-8. **Mutation controls.** Each gate above disabled in turn must turn its test red.
+8. **No legacy path exists.** Statically: no decoder branches on schema 1 for `0x0001`, `0x0015` or
+   `0x0017`; the `DSM/vault-state-anchor/v2` domain appears nowhere outside the burn record; the hop
+   triple's field numbers are unused. Behaviourally: a schema-1 blob is refused, not upgraded.
+9. **`{EC_v}` is absent and unmissed.** A route whose parent bindings are `c_n` verifies its
+   encumbrance state end-to-end with no `{EC_v}` present — the test that shows the removal lost
+   nothing rather than merely that the field is gone.
+10. **One identity everywhere.** `Allocation.parent_binding`, `k_v`, the stale-parent check and every
+    `SettlementBundle` parent reference resolve to the identical `c_n` for a given state. A test
+    that computes it two ways and compares is the cheapest guard against the projection problem
+    returning.
+11. **Mutation controls.** Each gate above disabled in turn must turn its test red.
 
 ## Sequence
 
-**A normative amendment gates this work and is not this document's to make**: route/allocation parent
-identity becomes `c_n` for schema-2 DLV state, landed either by retiring the Def 6.4 name for
-schema-2 routing or by splitting the definitions, as above. The earlier proposal to amend Def 6.4's
-*anchor preimage* stays withdrawn — AnchorV3 leaves the pinned V2 primitive intact — but withdrawing
-that is not the same as needing no amendment at all, which is what an earlier revision concluded.
+**The normative cut gates this work and is not this document's to make.** Def 9.1 and §9.3, Def 6.17,
+the stale-parent checks, the `SettlementBundle` parent fields, and the removal of Def 6.4 — all
+resolving to `c_n`. It is one change because it is one identity.
 
-After it lands: registry schema 2, then AnchorV3 and its payload, then `CCB(V_n)` publication on the
-Area 4 substrate, then the composer staging above including the step-6 key equality, then the five
-call sites resume.
+After it lands, in order: registry schemas (`0x0001`, `0x0015`, `0x0017` to schema 2, schema 1 burned
+in each), then AnchorV3 with V2 deleted, then `CCB(V_n)` publication on the Area 4 substrate, then
+the composer staging above including the step-6 key equality, then the five call sites resume.
+
+There is no migration step in that list, and that is deliberate: a clean reprovision means no old
+state is valid, so there is nothing to migrate and no compatibility code to write.
