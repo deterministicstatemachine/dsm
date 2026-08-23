@@ -482,6 +482,18 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     first_written_tick BIGINT NOT NULL
                 );
 
+                -- IMMUTABLE OBJECT STORE (Area 4, Rev 15 §15.3). Keyed by the
+                -- content address addr(N, P); write-once forever — no UPDATE
+                -- and no DELETE statement exists against this table anywhere.
+                -- The node recomputes the address on write AND on read; it
+                -- never decodes the payload.
+                CREATE TABLE IF NOT EXISTS immutable_objects (
+                    addr_b32           TEXT PRIMARY KEY,
+                    namespace          BYTEA NOT NULL,
+                    payload            BYTEA NOT NULL,
+                    first_written_tick BIGINT NOT NULL
+                );
+
                 -- SETTLEMENT-SLOT CLAIM REGISTER: a distributed, crash-fault-
                 -- tolerant, ONE-SHOT quorum register keyed (vault_id,
                 -- parent_sequence). This node holds AT MOST ONE value per slot,
@@ -946,6 +958,87 @@ pub async fn insert_recovery_authority_anchor_if_absent(
 
 /// Return the persisted recovery-authority anchor payload bytes for a genesis,
 /// or `None` if none has been written.
+/// Outcome of [`insert_immutable_object_if_absent`]. See `sqlite.rs` for the
+/// contract; the two backends implement one behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImmutablePutOutcome {
+    Inserted,
+    AlreadyExistsIdentical,
+    Conflict,
+}
+
+/// Write-once insert of an immutable object, keyed by content address.
+/// Idempotence compares the stored `(namespace, payload)` TUPLE.
+pub async fn insert_immutable_object_if_absent(
+    pool: &Pool,
+    addr_b32: &str,
+    namespace: &[u8],
+    payload: &[u8],
+    first_written_tick: u64,
+) -> Result<ImmutablePutOutcome> {
+    use tokio_postgres::IsolationLevel;
+
+    let tick_i64 = i64::try_from(first_written_tick).map_err(|_| {
+        anyhow::anyhow!("first_written_tick {first_written_tick} does not fit in i64")
+    })?;
+
+    let mut client = pool.get().await?;
+    let tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .await?;
+
+    let row = tx
+        .query_opt(
+            "SELECT namespace, payload FROM immutable_objects WHERE addr_b32 = $1 FOR UPDATE",
+            &[&addr_b32],
+        )
+        .await?;
+
+    let outcome = match row {
+        Some(r) => {
+            let ns: Vec<u8> = r.get(0);
+            let pl: Vec<u8> = r.get(1);
+            if ns == namespace && pl == payload {
+                ImmutablePutOutcome::AlreadyExistsIdentical
+            } else {
+                ImmutablePutOutcome::Conflict
+            }
+        }
+        None => {
+            let stmt = tx
+                .prepare_cached(
+                    "INSERT INTO immutable_objects
+                       (addr_b32, namespace, payload, first_written_tick)
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .await?;
+            tx.execute(&stmt, &[&addr_b32, &namespace, &payload, &tick_i64])
+                .await?;
+            ImmutablePutOutcome::Inserted
+        }
+    };
+
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Return the `(namespace, payload)` tuple at a content address, or `None`.
+pub async fn get_immutable_object(
+    pool: &Pool,
+    addr_b32: &str,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT namespace, payload FROM immutable_objects WHERE addr_b32 = $1",
+            &[&addr_b32],
+        )
+        .await?;
+    Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
 pub async fn get_recovery_authority_anchor_payload(
     pool: &Pool,
     genesis_b32: &str,

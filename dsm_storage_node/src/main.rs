@@ -215,6 +215,17 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     });
     let object_write_router = api::objects::store::create_write_router()
         .layer(axum::middleware::from_fn_with_state(
+            object_write_auth_state.clone(),
+            auth::device_auth,
+        ))
+        .layer(Extension(state.clone()));
+    // Immutable content-addressed store (Area 4): reads public, writes behind
+    // the same device auth as the mutable object store. The node is
+    // content-blind on this path — no payload decode, ever.
+    let immutable_read_router =
+        api::objects::immutable::create_read_router(state.clone()).layer(public_rate_layer.clone());
+    let immutable_write_router = api::objects::immutable::create_write_router()
+        .layer(axum::middleware::from_fn_with_state(
             object_write_auth_state,
             auth::device_auth,
         ))
@@ -288,6 +299,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
         .merge(object_read_router)
         .merge(object_write_router)
+        .merge(immutable_read_router)
+        .merge(immutable_write_router)
         .merge(object_list_router)
         .merge(registry_router) // exposes /api/v2/registry/* as in your tests
         .merge(policy_router)
