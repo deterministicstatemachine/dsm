@@ -833,7 +833,10 @@ of distinct storage-member identities and to a fixed settlement threshold q. The
 storage_
 set
 _
-id= H(DSM/storage-set ∥Canon(S)).
+id= H(DSM/storage-set ∥CCB(S)),
+where CCB(S) is the ordinary canonical commitment encoding of the storage-set object fixed by the
+CCB object registry. The previously frozen deployed layout is burned with the anchors that committed
+it.
 Transport endpoints are resolution metadata and are not member identity.
 Requirement 6.10 (Owner-committed threshold). The vault birth state must commit
 either the explicit integer q or a versioned quorum rule whose output for the committed S is unique.
@@ -1252,10 +1255,12 @@ i,t + ∑︂ int−feet.
 i
 Checked unsigned arithmetic is used throughout.
 7.2 External commitments
-ExtCommit(X) = H(DSM/ext ∥Canon(X)).
-X binds the entire user intent, route set, allocation bundles, every distinct vault parent binding,
-and every required encumbrance commitment. A participating vault must reject a hop not bound
-by the same X.
+ExtCommit(X) = H(DSM/ext ∥X).
+There is no Canon(X): X is already a 32-byte digest, and a digest is a primitive with no canonical
+form of its own. X binds the entire user intent, route set, allocation bundles and every distinct
+vault parent identity cn . It does NOT bind a separate encumbrance commitment: the deleted {ECv }
+operand was the only one, and each cn commits its vault's encumbrance set directly. A participating
+vault must reject a hop not bound by the same X.
 Requirement 7.2. Multi-vault execution is all-or-none. No Class C verifier may accept a subset
 as successful execution of the original route, and no Class K implementation may invoke separate
 26
@@ -1264,7 +1269,14 @@ settlement commits for individual vaults of one atomic route. The selected route
 through the one SettlementBundle that binds all of its vault transitions.
 8 Deterministic Encumbrance Accounting
 For a claim ej against vault parent p, where p is the cn of the DLV parent state the claim is made
-against (Definition 6.4) and never the deleted pv :
+against (Definition 6.4) and never the deleted pv .
+Creation parent, and acyclicity. E is a member of Vn , so a claim is nested inside the state whose
+identity is cn . p is therefore the CREATION parent and never the containing state: if the transition
+Vn → Vn+1 creates ej , then p = cn and ej is inserted into En+1 . A persisting claim is carried byte
+for byte across later successors and its p is NEVER rewritten to the containing state's ck . Reading
+p as the containing state would give the fixed point cn → CCB(Vn ) → En → ej → cn , which no encoder
+can compute and no verifier can check. Every claim in En+1 binds a ck with k ≤ n, all already
+computed when cn+1 is formed.
 ej= H(DSM/enc-claim ∥p∥claim
 _seq ∥amount ∥token ∥purpose).
 The vault identifier is NOT carried: p is the cn of the parent state, and cn commits vault
