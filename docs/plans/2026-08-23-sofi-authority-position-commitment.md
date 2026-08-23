@@ -64,22 +64,52 @@ Convenience metadata (generation, reserves, storage set) may travel beside it in
 **never a second source of truth**: a consumer re-derives every such value from `V_n` and refuses on
 disagreement rather than preferring either copy.
 
-## The parent binding is exactly `c_n`
+## Route parent identity — and the normative amendment it requires
 
-```
-parent_binding := c_n = H_dom(DSM/vault-state, CCB(V_n))
-```
+**"Parent binding" names two different things, and an earlier revision of this document used one
+word for both.** They must be separated before either can be stated.
 
-Not the Def 6.4 tuple with `c_n` appended. `c_n` already commits `generation`, the reserves, `h_n`,
-the authority position, `S` and `q`, because every one of them is a field of `V_n`. Appending `c_n`
-to a tuple that separately restates those facts would put two authoritative copies of each in one
-preimage — the alias class the Def 5.2 amendment removed, and the reason `old_root` was dropped from
+| Role | What it is today |
+|---|---|
+| **Anchor payload** | the Def 6.4 `p_v` tuple — `vault_id ‖ generation ‖ h_n ‖ reserves_digest ‖ storage_set_id ‖ q` — the bytes an owner signs (`dlv/vault_state_anchor_v2.rs:109-128`) |
+| **Route parent identity** | the triple `(vault_state_anchor_seq, vault_state_reserves_digest, vault_state_anchor_digest)` carried on `RouteCommitHopV1` (`proto/dsm_app.proto:1225-1227`) |
+
+AnchorV3 addresses the **first** role: baseline authentication of `c_n`. It does not touch the
+second. A route allocation's parent identity is fixed by the specification, not by which artifact an
+owner happens to sign, so **AnchorV3 alone changes nothing about what a route must carry.**
+
+### Required amendment
+
+> For schema-2 DLV state, the canonical route/allocation parent identity is
+> `c_n = H_dom(DSM/vault-state, CCB(V_n))`.
+
+It replaces the three-field triple, and the reason is the alias rule applied where it genuinely
+holds: `c_n` already commits `generation`, the reserves, `h_n`, the authority position, `S` and `q`,
+because every one is a field of `V_n`. The triple restates a subset of those facts — and
+`vault_state_anchor_digest` itself commits `vault_id`, sequence and reserves again — so a hop
+carrying both would hold several authoritative copies of the same facts, able to encode validly
+while disagreeing. That is the class the Def 5.2 amendment removed and the reason `old_root` left
 the transition object.
 
-The distinction against `h_n` is the one that matters and it survives: `h_n = c_{n-1}` is the
-**predecessor edge**, `c_n` is the **identity of the present state**. Different facts, as root
-recurrence taught expensively. Def 6.4 binds selected current facts plus the predecessor edge; a
-route consuming `V_n` should bind `V_n`.
+`c_n` is also the value the trader has already authenticated by the time it evaluates a hop, so the
+binding it checks and the state it verified become the same object rather than two views of one.
+
+**`h_n` survives the change untouched**, because it is a different fact: `h_n = c_{n-1}` is the
+**predecessor edge**, `c_n` is the **identity of the present state**. Root recurrence taught that
+distinction expensively.
+
+### Two ways to land it, and this document does not choose
+
+Either **retire the Def 6.4 name for schema-2 routing** while keeping `VaultStateAnchorV2` as a
+historical primitive with its pinned semantics intact; or **split the definitions explicitly**, so
+that `VaultStateAnchorV2` remains the pinned owner-signature artifact and a new definition names
+`c_n` as the canonical DLV parent identity consumed by allocations, bundles, stale-state checks and
+binding resource keys.
+
+Either is coherent. What is **not** coherent is the position an earlier revision of this document
+took — asserting `parent_binding := c_n` while also concluding that no specification amendment was
+required. The plan and the normative specification would simply disagree, and the specification
+would win in every implementation that read it.
 
 ## The position is invariant across market successors
 
@@ -128,19 +158,33 @@ be assumed at step one.
 
 The correct order, with the key held as a **candidate** throughout:
 
-1. **Cryptographic check only.** Verify the signature under the *presented candidate key*. This
-   establishes "this key signed these bytes" and **nothing about whose key it is** — the weakness
-   the V2 doc comment names about embedded keys.
+1. **Cryptographic check only.** Verify the signature under the *presented candidate key*, and
+   retain **the exact key bytes used**, call them `K_cand`. This establishes "this key signed these
+   bytes" and **nothing about whose key it is** — the weakness the V2 doc comment names about
+   embedded keys.
 2. **Integrity-bind the candidate to the state.** The signed payload is `c_n`, so a valid signature
-   binds *that candidate key* to *that state commitment*. Still no authority.
+   binds *`K_cand`* to *that state commitment*. Still no authority.
 3. **Fetch and re-hash `V_n`.** Resolve `CCB(V_n)` on the Area 4 substrate; require
    `H_dom(DSM/vault-state, CCB(V_n)) = c_n` before decoding.
 4. **Read the bound facts** — `g_o`, `d_o`, and `owner_authority_transition_digest`.
 5. **Discharge P0–P6** of the area 8 predicate at that **bound position**: authenticate the Device
    Tree root at that exact transition, prove `d_o` included, recompute
-   `d_o = H("DSM/devid" ‖ AK_pk ‖ AttA)` from independently presented material.
-6. **Promote.** Only now is the candidate `AK_pk` owner authority, and only now may the signature
-   from step 1 be reinterpreted as an owner-authenticated signature.
+   `d_o = H("DSM/devid" ‖ AK_pk ‖ AttA)` from independently presented material. Call the key
+   proven here `K_proven`.
+6. **Require `K_cand == K_proven`, byte for byte.** Only then is that key owner authority, and only
+   then may the step-1 signature be reinterpreted as an owner-authenticated signature.
+
+### The equality in step 6 is a predicate, not bookkeeping
+
+Steps 1 and 5 each take a key as input, and **nothing in steps 2–5 forces them to be the same key.**
+An implementation that keeps two variables — `K_anchor` which signed a valid `c_n`, and `K_owner`
+which passes P0–P6 — can prove authority for one and then reinterpret the *other's* signature as
+owner-authenticated. Both objects are individually valid; the conclusion is false.
+
+That is an attack shape, not naming hygiene. An attacker who can present any state commitment signed
+by a key it controls, alongside a genuine identity proof for the real owner's key, would have the
+composer treat its own signature as the owner's. The equality is the only step that rules it out, so
+it is stated as its own numbered requirement rather than folded into "promote".
 
 **No stage before 6 may call anything "owner verified",** in code, in a variable name, or in a log
 line. The failure this design exists to prevent is precisely a verifier that believes it has checked
@@ -193,13 +237,23 @@ can do, since it forecloses moving the reference mid-vault.
    test that presents a valid signature over a valid `c_n` whose `d_o` does not recompute from the
    presented `AK_pk`/`AttA`. This is the mutation control for the entire area — it must fail before
    this change and pass after.
-6. **No second source of truth.** AnchorV3 transport metadata disagreeing with `V_n` is a refusal,
+6. **Two-key confusion is refused.** A valid AnchorV3 signature under `K1` **plus** a valid P0–P6
+   identity proof for a *distinct* `K2` must be refused, even though both objects are individually
+   valid and neither is forged. This is the case an implementation reaches by keeping two variables,
+   and it is the one a test suite built only from valid/invalid object pairs will not generate on
+   its own.
+7. **No second source of truth.** AnchorV3 transport metadata disagreeing with `V_n` is a refusal,
    not a preference for either value.
-7. **Mutation controls.** Each gate above disabled in turn must turn its test red.
+8. **Mutation controls.** Each gate above disabled in turn must turn its test red.
 
 ## Sequence
 
-Registry schema 2, then AnchorV3 and its payload, then `CCB(V_n)` publication on the Area 4
-substrate, then the composer staging above, then the five call sites resume. No Def 6.4 amendment is
-required — that proposal is withdrawn in favour of AnchorV3, which leaves the pinned V2 primitive
-intact.
+**A normative amendment gates this work and is not this document's to make**: route/allocation parent
+identity becomes `c_n` for schema-2 DLV state, landed either by retiring the Def 6.4 name for
+schema-2 routing or by splitting the definitions, as above. The earlier proposal to amend Def 6.4's
+*anchor preimage* stays withdrawn — AnchorV3 leaves the pinned V2 primitive intact — but withdrawing
+that is not the same as needing no amendment at all, which is what an earlier revision concluded.
+
+After it lands: registry schema 2, then AnchorV3 and its payload, then `CCB(V_n)` publication on the
+Area 4 substrate, then the composer staging above including the step-6 key equality, then the five
+call sites resume.
