@@ -25,6 +25,7 @@ const _: () = assert!(
     "MPC security requires at least 3 participants (n-of-n commit-then-reveal)"
 );
 
+pub mod authority_resolver;
 pub mod genesis;
 pub mod genesis_session;
 pub mod genesis_v2;

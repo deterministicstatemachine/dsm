@@ -40,9 +40,16 @@ use crate::common::domain_tags::{
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 
+pub mod decode;
+pub mod devtree;
 pub mod genesis;
 pub mod state;
 
+pub use decode::{decode_vault_state, DecodeError};
+pub use devtree::{
+    delegation_genesis_sentinel, role, transition_genesis_sentinel, DeviceTreeRootTransition,
+    RootProgressionDelegation,
+};
 pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetMembers,
@@ -64,6 +71,10 @@ pub mod class {
     pub const FEE_POLICY: u16 = 0x000A;
     /// Substrate class — the Genesis v3 parameter set (registry §5.15).
     pub const GENESIS_PARAMS_V3: u16 = 0x0018;
+    /// Substrate class — GRK-signed root-progression delegation (§5.16).
+    pub const ROOT_PROGRESSION_DELEGATION: u16 = 0x0019;
+    /// Substrate class — delegate-signed Device Tree root transition (§5.17).
+    pub const DEVICE_TREE_ROOT_TRANSITION: u16 = 0x001A;
 }
 
 /// Live schema versions, and the ones the state-identity cut burned.

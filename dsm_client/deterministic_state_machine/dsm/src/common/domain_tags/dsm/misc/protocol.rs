@@ -70,6 +70,34 @@ pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
 /// Req 15.2's idempotence meaningful rather than accidental.
 pub const TAG_DSM_STORAGE_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-object");
+
+// --- Device Tree root progression (area 8 / registry §5.16–§5.18). Each
+// object has TWO domains over ONE preimage per registry §2.9: an identity
+// domain for its digest and a signing domain for its signature. Using one
+// for both would make a digest and a signature preimage interchangeable. ---
+/// Delegation identity: `del_i = H(tag ‖ 0x00 ‖ CCB(D_i))`.
+pub const TAG_DSM_DEVTREE_DELEGATION: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-delegation");
+/// Delegation signing: the GRK signs `H(tag ‖ 0x00 ‖ CCB(D_i))`.
+pub const TAG_DSM_DEVTREE_DELEGATION_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-delegation-sign");
+/// Transition identity: `t_j = H(tag ‖ 0x00 ‖ CCB(T_j))`.
+pub const TAG_DSM_DEVTREE_TRANSITION: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-transition");
+/// Transition signing: the delegated key signs `H(tag ‖ 0x00 ‖ CCB(T_j))`.
+pub const TAG_DSM_DEVTREE_TRANSITION_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-transition-sign");
+/// Delegation chain origin (registry §5.18): `H(tag ‖ 0x00)` over EMPTY
+/// input — a constant no other construction produces, deliberately not
+/// all-zero (which a buggy producer reaches by accident) and deliberately
+/// not per-genesis (every carrier already binds `genesis_id`).
+pub const TAG_DSM_DEVTREE_DELEGATION_GENESIS_SENTINEL_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-delegation/genesis-sentinel/v1");
+/// Transition chain origin (registry §5.18): `H(tag ‖ 0x00)` over EMPTY
+/// input. Distinct from the delegation sentinel so a delegation-parent field
+/// can never validate against a transition origin.
+pub const TAG_DSM_DEVTREE_TRANSITION_GENESIS_SENTINEL_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/devtree-transition/genesis-sentinel/v1");
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =
