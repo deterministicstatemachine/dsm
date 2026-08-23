@@ -130,87 +130,172 @@ fn p0_genesis_binding(g_o: &[u8; 32], params: &GenesisParamsV3) -> Result<Vec<u8
     Ok(params.grk_pk.clone())
 }
 
-/// P1 — authenticate delegation OBJECTS under the GRK.
+/// P1 — index the delegation bag, judging nothing.
 ///
-/// Activation digests are **recorded, never evaluated**: whether one
-/// activation descends from another is a fact about the transition chain,
-/// which this stage has not authenticated and must not consult — checking it
-/// here would make P1 depend on P2 and break the ordering property the
-/// predicate exists to guarantee.
-fn p1_delegation_chain(
-    g_o: &[u8; 32],
-    grk_pk: &[u8],
-    bag: &[SignedDelegation],
-) -> Result<Vec<RootProgressionDelegation>, ResolveFailure> {
-    if bag.is_empty() {
-        return Err(ResolveFailure::Absent("P1: no delegations presented"));
-    }
-    // Forks are refused, never chosen: two delegations at one number are
-    // evidence, and a verifier holding both stops. The comparison is over the
-    // ENTIRE signed entry, deterministically: an identical duplicate is
-    // idempotent, a different OBJECT at one number is a fork, and the same
-    // object with DIFFERENT signature bytes is an ambiguous presentation —
-    // refused, because otherwise whichever copy the bag happened to yield
-    // last would supply the signature, and an unordered bag would have an
-    // order-dependent outcome.
-    let mut by_number: std::collections::BTreeMap<u64, &SignedDelegation> =
+/// Authentication is **lazy and relevance-driven**, performed by the fold as
+/// activations become resolvable — because whether a delegation can affect
+/// the authenticated prefix through the bound position is a fact about the
+/// transition chain, which only the fold holds. An earlier revision
+/// authenticated the whole bag up front, which let a delegation whose
+/// activation lies strictly AFTER the bound position — ambiguous, forked, or
+/// garbage-signed — poison a proof it could never have participated in: the
+/// same contract violation the fold's stop-at-position fixed for
+/// transitions, one stage up.
+fn p1_index(bag: &[SignedDelegation]) -> std::collections::BTreeMap<u64, Vec<&SignedDelegation>> {
+    let mut by_number: std::collections::BTreeMap<u64, Vec<&SignedDelegation>> =
         std::collections::BTreeMap::new();
     for sd in bag {
-        if let Some(prev) = by_number.insert(sd.delegation.delegation_number, sd) {
-            if prev.delegation != sd.delegation {
-                return Err(invalid(format!(
-                    "P1: delegation fork at number {} — refused, not chosen",
-                    sd.delegation.delegation_number
-                )));
-            }
-            if prev.grk_signature != sd.grk_signature {
-                return Err(invalid(format!(
-                    "P1: delegation {} presented with two different signatures — \
-                     ambiguous, refused so the outcome cannot depend on bag order",
-                    sd.delegation.delegation_number
-                )));
-            }
+        by_number
+            .entry(sd.delegation.delegation_number)
+            .or_default()
+            .push(sd);
+    }
+    by_number
+}
+
+/// The contiguous authenticated delegation prefix, grown lazily by the fold.
+///
+/// A number is **consulted** — fork-checked, ambiguity-checked, GRK-verified
+/// — only when (a) its predecessor's activation has resolved on the chain
+/// (the contiguity that makes inactivity cascade), and (b) some entry at that
+/// number claims an activation the chain has actually resolved. Material
+/// failing either gate is not "tolerated"; it is never examined, exactly as
+/// transitions after the bound position are never examined. A forged entry
+/// *claiming* an in-prefix activation does get examined and refused — a claim
+/// of relevance to this prefix is the one thing that cannot be ignored
+/// without verifying it, since if true it would retire the predecessor.
+struct DelegationLadder<'a> {
+    grk_pk: &'a [u8],
+    g_o: &'a [u8; 32],
+    by_number: std::collections::BTreeMap<u64, Vec<&'a SignedDelegation>>,
+    /// Authenticated delegations, contiguous from number 0.
+    auth: Vec<RootProgressionDelegation>,
+    digests: Vec<[u8; 32]>,
+    /// Chain position at which each authenticated delegation activated
+    /// (0 = before `T_0`); strictly ascending, enforced on admission.
+    activation_pos: Vec<usize>,
+    expected_parent: [u8; 32],
+}
+
+impl<'a> DelegationLadder<'a> {
+    fn new(
+        grk_pk: &'a [u8],
+        g_o: &'a [u8; 32],
+        by_number: std::collections::BTreeMap<u64, Vec<&'a SignedDelegation>>,
+    ) -> Self {
+        Self {
+            grk_pk,
+            g_o,
+            by_number,
+            auth: Vec::new(),
+            digests: Vec::new(),
+            activation_pos: Vec::new(),
+            expected_parent: delegation_genesis_sentinel(),
         }
     }
 
-    let mut chain: Vec<RootProgressionDelegation> = Vec::with_capacity(by_number.len());
-    let mut expected_parent = delegation_genesis_sentinel();
-    for (i, (number, sd)) in by_number.iter().enumerate() {
-        let d = &sd.delegation;
-        if *number != i as u64 {
-            return Err(ResolveFailure::Incomplete(
-                "P1: delegation numbering has a gap — the chain does not reach its own tip",
-            ));
+    /// Advance the ladder as far as the resolved chain permits.
+    ///
+    /// `position_of` maps an authenticated transition digest to the chain
+    /// position at which a delegation activating there takes effect; the
+    /// transition sentinel maps to 0.
+    fn advance(
+        &mut self,
+        position_of: &std::collections::HashMap<[u8; 32], usize>,
+    ) -> Result<(), ResolveFailure> {
+        loop {
+            let next = self.auth.len() as u64;
+            let Some(candidates) = self.by_number.get(&next) else {
+                return Ok(());
+            };
+
+            // Relevance gate: does any entry CLAIM an activation this chain
+            // has resolved (or the sentinel, for number 0)? If none, the
+            // number cannot yet participate — and is not examined.
+            let resolves = |d: &RootProgressionDelegation| -> Option<usize> {
+                if d.activation_transition_digest == transition_genesis_sentinel() {
+                    Some(0)
+                } else {
+                    position_of.get(&d.activation_transition_digest).copied()
+                }
+            };
+            if !candidates
+                .iter()
+                .any(|sd| resolves(&sd.delegation).is_some())
+            {
+                return Ok(());
+            }
+
+            // The number is relevant: NOW it is examined in full. Fork and
+            // ambiguity refusal are scoped to consulted numbers, exactly as
+            // the fold scopes them to walked edges.
+            let sd = candidates[0];
+            for other in &candidates[1..] {
+                if other.delegation != sd.delegation {
+                    return Err(invalid(format!(
+                        "P1: delegation fork at number {next} — refused, not chosen"
+                    )));
+                }
+                if other.grk_signature != sd.grk_signature {
+                    return Err(invalid(format!(
+                        "P1: delegation {next} presented with two different signatures — \
+                         ambiguous, refused so the outcome cannot depend on bag order"
+                    )));
+                }
+            }
+            let d = &sd.delegation;
+            if d.genesis_id != *self.g_o {
+                return Err(invalid("P1: delegation bound to a different genesis"));
+            }
+            if d.role != role::DEVICE_TREE_ROOT_PROGRESSION
+                || d.role_version != role::BETA_ROLE_VERSION
+            {
+                return Err(invalid(format!(
+                    "P1: role {:#06x} v{} is not a supported root-progression role",
+                    d.role, d.role_version
+                )));
+            }
+            if d.parent_delegation_digest != self.expected_parent {
+                return Err(invalid(format!(
+                    "P1: delegation {next} does not chain its predecessor"
+                )));
+            }
+            let pos = resolves(d).ok_or_else(|| {
+                invalid(format!(
+                    "P1: delegation {next} was consulted without a resolved activation"
+                ))
+            })?;
+            if let Some(prev) = self.activation_pos.last() {
+                if pos <= *prev {
+                    return Err(invalid(
+                        "P2: retroactive activation — a delegation activates at or before \
+                         its predecessor, which is history retraction",
+                    ));
+                }
+            }
+            let msg = d
+                .signing_digest()
+                .map_err(|e| invalid(format!("P1: {e}")))?;
+            let ok = sphincs_verify(self.grk_pk, &msg, &sd.grk_signature)
+                .map_err(|e| invalid(format!("P1: {e}")))?;
+            if !ok {
+                return Err(invalid(format!("P1: delegation {next} is not GRK-signed")));
+            }
+            self.expected_parent = d.digest().map_err(|e| invalid(format!("P1: {e}")))?;
+            self.digests.push(self.expected_parent);
+            self.activation_pos.push(pos);
+            self.auth.push(d.clone());
         }
-        if d.genesis_id != *g_o {
-            return Err(invalid("P1: delegation bound to a different genesis"));
-        }
-        if d.role != role::DEVICE_TREE_ROOT_PROGRESSION || d.role_version != role::BETA_ROLE_VERSION
-        {
-            return Err(invalid(format!(
-                "P1: role {:#06x} v{} is not a supported root-progression role",
-                d.role, d.role_version
-            )));
-        }
-        if d.parent_delegation_digest != expected_parent {
-            return Err(invalid(format!(
-                "P1: delegation {number} does not chain its predecessor"
-            )));
-        }
-        let msg = d
-            .signing_digest()
-            .map_err(|e| invalid(format!("P1: {e}")))?;
-        let ok = sphincs_verify(grk_pk, &msg, &sd.grk_signature)
-            .map_err(|e| invalid(format!("P1: {e}")))?;
-        if !ok {
-            return Err(invalid(format!(
-                "P1: delegation {number} is not GRK-signed"
-            )));
-        }
-        expected_parent = d.digest().map_err(|e| invalid(format!("P1: {e}")))?;
-        chain.push(d.clone());
     }
-    Ok(chain)
+
+    /// The applicable delegation: the ladder top. Every admitted delegation's
+    /// activation is in the current proper ancestry (it resolved on the
+    /// chain, strictly ascending), so the highest number both retires every
+    /// predecessor and is the one a conforming transition must bind.
+    fn applicable(&self) -> Option<(usize, &RootProgressionDelegation, &[u8; 32])> {
+        let i = self.auth.len().checked_sub(1)?;
+        Some((i, &self.auth[i], &self.digests[i]))
+    }
 }
 
 /// One authenticated position on the transition chain.
@@ -219,44 +304,33 @@ struct ChainedTransition {
     new_root: [u8; 32],
 }
 
-/// P2 — fold the transition chain by predecessor EDGE, evaluating activation
-/// against the already-authenticated prefix, and stopping AT the bound
-/// position.
+/// P2 — fold the transition chain by predecessor EDGE, stopping AT the bound
+/// position, authenticating delegations lazily as their activations resolve.
 ///
-/// Every fact consumed here is authenticated by P0/P1 or by this fold's own
-/// prefix. Activation eligibility is the **contiguous resolved prefix** rule:
-/// `D_i` (`i > 0`) is eligible only if every predecessor activation through
-/// `act(D_{i−1})` resolves on the chain and each strictly descends its
-/// predecessor — an unresolved predecessor blocks all descendants, so the
-/// lineage can never skip an edge it did not prove. The failure mode of that
-/// rule is liveness (an older delegation stays applicable), never safety —
-/// a property that holds precisely because ancestry is the signed edge.
-///
-/// **Position-scoping is enforced here, not merely promised.** The fold stops
-/// the moment it authenticates the transition whose digest equals the bound
-/// position, and never inspects that transition's successors — a fork or an
-/// invalidly-signed successor strictly AFTER the position therefore cannot
-/// disturb a proof bound to it. Forks and invalid edges WITHIN the
-/// authenticated prefix still refuse. An earlier revision indexed and
-/// fork-checked the entire presented bag before looking for the position,
-/// which let anyone break a valid bound proof by appending garbage after it —
-/// the contract said "ignored", the code said "inspected", and the code lost.
+/// Every fact consumed here is authenticated by P0 or by this fold's own
+/// prefix. **A proof at position P depends only on material capable of
+/// affecting the authenticated prefix through P** — for transitions, the fold
+/// stops at P and never inspects successors; for delegations, the ladder
+/// consults a number only when its predecessor's activation has resolved AND
+/// some entry claims an activation the chain has resolved. Forks, ambiguity
+/// and bad signatures within that scope refuse; outside it they are never
+/// seen. The inactivity cascade is the contiguity gate itself: an unresolved
+/// predecessor stops the ladder, so descendants are structurally
+/// unconsultable rather than merely ineligible.
 fn p2_fold_transitions(
     g_o: &[u8; 32],
     position: &[u8; 32],
-    delegations: &[RootProgressionDelegation],
+    grk_pk: &[u8],
+    delegation_bag: &[SignedDelegation],
     bag: &[SignedTransition],
 ) -> Result<Vec<ChainedTransition>, ResolveFailure> {
-    // Digests and signing material, precomputed once.
-    let del_digests: Vec<[u8; 32]> = delegations
-        .iter()
-        .map(|d| d.digest().map_err(|e| invalid(format!("P2: {e}"))))
-        .collect::<Result<_, _>>()?;
+    if delegation_bag.is_empty() {
+        return Err(ResolveFailure::Absent("P1: no delegations presented"));
+    }
+    let mut ladder = DelegationLadder::new(grk_pk, g_o, p1_index(delegation_bag));
 
-    // Group transitions by the predecessor edge they bind. Grouping is not
-    // judging: fork detection happens DURING the fold, only for edges the
-    // fold actually walks, so material after the bound position is never
-    // examined at all.
+    // Group transitions by predecessor edge. Grouping is not judging: fork
+    // detection happens during the fold, only for edges actually walked.
     let mut by_predecessor: std::collections::HashMap<[u8; 32], Vec<&SignedTransition>> =
         std::collections::HashMap::new();
     for st in bag {
@@ -269,27 +343,12 @@ fn p2_fold_transitions(
     let mut chain: Vec<ChainedTransition> = Vec::new();
     let mut cursor = transition_genesis_sentinel();
     let mut last_version: Option<u64> = None;
-
-    // Position (index into `chain`) at which each delegation's activation
-    // resolved, if it has. The genesis sentinel resolves "before T_0".
-    let mut resolved_at: Vec<Option<usize>> = delegations
-        .iter()
-        .map(|d| {
-            if d.activation_transition_digest == transition_genesis_sentinel() {
-                Some(0)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Digest → the chain position a delegation activating there occupies.
+    let mut position_of: std::collections::HashMap<[u8; 32], usize> =
+        std::collections::HashMap::new();
 
     while let Some(candidates) = by_predecessor.get(&cursor) {
-        // Fork and ambiguity detection, scoped to THIS edge only. An
-        // identical duplicate is idempotent; two different transitions off
-        // one predecessor are a fork (refused, never ordered — the higher
-        // version must not win); one transition with two different signature
-        // bytes is an ambiguous presentation, refused so an unordered bag
-        // cannot have an order-dependent outcome.
+        // Fork and ambiguity, scoped to THIS edge only.
         let st = candidates[0];
         for other in &candidates[1..] {
             if other.transition != st.transition {
@@ -317,57 +376,25 @@ fn p2_fold_transitions(
             }
         }
 
-        // Activation eligibility: contiguous resolved prefix, strictly
-        // ascending positions. Evaluated against `resolved_at` as it stands —
-        // i.e. against the chain authenticated SO FAR, which is what makes
-        // "act(D) resolves in this transition's PROPER ancestry" exact: a
-        // digest can only have resolved at an index < chain.len() + 1.
-        let mut applicable: Option<usize> = None;
-        let mut prefix_ok = true;
-        let mut last_pos: Option<usize> = None;
-        for (i, pos) in resolved_at.iter().enumerate() {
-            match pos {
-                Some(p) if prefix_ok => {
-                    if let Some(lp) = last_pos {
-                        if *p <= lp && i > 0 {
-                            return Err(invalid(
-                                "P2: retroactive activation — a delegation activates at or \
-                                 before its predecessor, which is history retraction",
-                            ));
-                        }
-                    }
-                    last_pos = Some(*p);
-                    applicable = Some(i);
-                }
-                Some(_) => {
-                    // Resolved, but a predecessor has not: the lineage skipped
-                    // an edge it never proved. Inactivity cascades — this
-                    // delegation neither activates nor retires.
-                }
-                None => {
-                    prefix_ok = false;
-                }
-            }
-        }
-        let applicable_idx = applicable.ok_or(ResolveFailure::Incomplete(
-            "P2: no activation-eligible delegation for this position",
-        ))?;
-
-        if t.delegation_digest != del_digests[applicable_idx] {
+        // Grow the ladder with everything the chain has resolved so far,
+        // then require this transition to bind the applicable delegation.
+        ladder.advance(&position_of)?;
+        let Some((_, applicable, applicable_digest)) = ladder.applicable() else {
+            return Err(ResolveFailure::Absent(
+                "P1: no delegation at number 0 with a genesis-sentinel activation",
+            ));
+        };
+        if t.delegation_digest != *applicable_digest {
             return Err(invalid(format!(
-                "P2: transition v{} is not bound to the applicable delegation \
-                 (expected delegation {}, and superseded delegations are retired — \
-                 a signature by a retired key does not verify authority)",
-                t.version_number, applicable_idx
+                "P2: transition v{} is not bound to the applicable delegation — \
+                 superseded delegations are retired, and a signature by a retired \
+                 key does not verify authority",
+                t.version_number
             )));
         }
         let msg = t.signing_digest();
-        let ok = sphincs_verify(
-            &delegations[applicable_idx].delegated_pk,
-            &msg,
-            &st.delegate_signature,
-        )
-        .map_err(|e| invalid(format!("P2: {e}")))?;
+        let ok = sphincs_verify(&applicable.delegated_pk, &msg, &st.delegate_signature)
+            .map_err(|e| invalid(format!("P2: {e}")))?;
         if !ok {
             return Err(invalid(format!(
                 "P2: transition v{} signature does not verify under the applicable \
@@ -382,18 +409,11 @@ fn p2_fold_transitions(
             new_root: t.new_root,
         });
         last_version = Some(t.version_number);
-
-        // A newly authenticated transition may resolve later delegations'
-        // activations — at the position AFTER this transition.
-        for (i, d) in delegations.iter().enumerate() {
-            if resolved_at[i].is_none() && d.activation_transition_digest == digest {
-                resolved_at[i] = Some(chain.len());
-            }
-        }
+        position_of.insert(digest, chain.len());
 
         // THE STOP. The bound position is authenticated; its successors are
-        // not this proof's business, and inspecting them would let material
-        // after the position disturb a proof bound to it.
+        // not this proof's business, and neither is any delegation whose
+        // activation only a successor could resolve.
         if digest == *position {
             return Ok(chain);
         }
@@ -435,11 +455,17 @@ pub fn resolve_owner_authority_at_position(
     // P0 — GRK by recomputation.
     let grk_pk = p0_genesis_binding(g_o, presented.genesis_params)?;
 
-    // P1 — delegation objects.
-    let delegations = p1_delegation_chain(g_o, &grk_pk, presented.delegations)?;
-
-    // P2 — transition chain, folded TO the bound position and no further.
-    let chain = p2_fold_transitions(g_o, position, &delegations, presented.transitions)?;
+    // P1+P2 — the fold, delegations authenticated lazily as their
+    // activations resolve, stopping at the bound position. A proof at a
+    // position depends only on material capable of affecting the prefix
+    // through it — for BOTH chains.
+    let chain = p2_fold_transitions(
+        g_o,
+        position,
+        &grk_pk,
+        presented.delegations,
+        presented.transitions,
+    )?;
 
     // P3 — the bound position must be ON the authenticated chain.
     let at = chain

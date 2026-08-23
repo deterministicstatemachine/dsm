@@ -585,6 +585,46 @@ fn duplicate_objects_with_differing_signatures_are_refused_in_both_orders() {
     }
 }
 
+/// The delegation-side symmetry of position-scoping: a delegation whose
+/// activation lies strictly AFTER the bound position — here presented
+/// ambiguously, with a second garbage signature — cannot poison a proof
+/// bound before it. `D_1` activates at `T_1`; bound at `T_0`, it can never
+/// participate, so it is never consulted, so its ambiguity is never seen.
+/// Before the ladder, P1 authenticated the whole bag up front and this
+/// presentation returned `Invalid`.
+#[test]
+fn irrelevant_future_delegation_material_cannot_poison_an_earlier_proof() {
+    let w = world();
+    let proof = w.tree.proof(&w.d_o).expect("fixture");
+    let position = w.transitions[0].transition.digest(); // bound at T0
+
+    let d1_garbage = SignedDelegation {
+        delegation: w.d1.delegation.clone(),
+        grk_signature: vec![0u8; 64],
+    };
+    // Both orders, since the whole point is order-independence of bags.
+    for dels in [
+        vec![w.d0.clone(), w.d1.clone(), d1_garbage.clone()],
+        vec![w.d0.clone(), d1_garbage.clone(), w.d1.clone()],
+    ] {
+        let p = presented(w, &dels, &w.transitions[..1], &proof);
+        resolve_owner_authority_at_position(&w.g_o, &position, &p)
+            .expect("D1 cannot participate at T0, so its ambiguity is not this proof's business");
+    }
+
+    // The same ambiguity IS refused once the position makes D1 relevant:
+    // bound at T2, D1's activation (T1) has resolved, the number is
+    // consulted, and the contradiction surfaces.
+    let position_t2 = w.transitions[2].transition.digest();
+    let dels = vec![w.d0.clone(), w.d1.clone(), d1_garbage];
+    let p = presented(w, &dels, &w.transitions, &proof);
+    let r = resolve_owner_authority_at_position(&w.g_o, &position_t2, &p);
+    assert!(
+        is_invalid(&r),
+        "at T2 the ambiguity is in scope and must refuse: {r:?}"
+    );
+}
+
 /// A bound position that is authentic but beyond the presented material is
 /// Incomplete — absence and withholding are indistinguishable without a
 /// frontier, and the resolver says so rather than guessing.
