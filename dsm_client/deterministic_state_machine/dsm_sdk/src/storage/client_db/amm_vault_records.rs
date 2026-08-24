@@ -61,6 +61,12 @@ pub struct AmmVaultRecord {
     /// exactly as published — reused for every owner-side composition so the
     /// authority chain is not re-signed per quote.
     pub baseline_presentation: Vec<u8>,
+    /// The vault's frozen `VaultPostProto` bytes, produced once at
+    /// `dlv.create` after the vault is finalized and stamped. The routing
+    /// advertisement's full proto mirror replays these exact bytes, so
+    /// publishing survives a restart without consulting the in-memory
+    /// DLVManager. Empty means the producer never ran; consumers fail closed.
+    pub vault_post_proto: Vec<u8>,
 }
 
 pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
@@ -74,8 +80,8 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
         "INSERT OR REPLACE INTO amm_vault_records(
             vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
             fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-            baseline_state_ccb, baseline_presentation, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            baseline_state_ccb, baseline_presentation, vault_post_proto, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             rec.vault_id.as_slice(),
             rec.owner_genesis.as_slice(),
@@ -88,6 +94,7 @@ pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
             rec.storage_set_id.as_slice(),
             rec.baseline_state_ccb.as_slice(),
             rec.baseline_presentation.as_slice(),
+            rec.vault_post_proto.as_slice(),
             now as i64,
         ],
     )?;
@@ -115,6 +122,28 @@ pub fn update_baseline_with_conn(
     Ok(())
 }
 
+/// Stamp the vault's frozen `VaultPostProto` bytes onto its record. Runs once,
+/// at `dlv.create`, after the vault is finalized and its enforcement/policy
+/// digest are stamped — the earliest point at which the bytes are final.
+pub fn update_vault_post_proto(vault_id: &[u8; 32], post_proto: &[u8]) -> Result<()> {
+    if post_proto.is_empty() {
+        anyhow::bail!("refusing to stamp empty vault-post bytes");
+    }
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in update_vault_post_proto, recovering");
+        poisoned.into_inner()
+    });
+    let changed = conn.execute(
+        "UPDATE amm_vault_records SET vault_post_proto = ?2 WHERE vault_id = ?1",
+        params![vault_id.as_slice(), post_proto],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("vault-post stamp touched {changed} rows for one vault id");
+    }
+    Ok(())
+}
+
 fn fixed32(v: Vec<u8>) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(v.as_slice()).ok()
 }
@@ -132,7 +161,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         .query_row(
             "SELECT vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
                     fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-                    baseline_state_ccb, baseline_presentation
+                    baseline_state_ccb, baseline_presentation, vault_post_proto
              FROM amm_vault_records WHERE vault_id = ?1",
             params![vault_id.as_slice()],
             |r| {
@@ -148,6 +177,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
                     r.get::<_, Vec<u8>>(8)?,
                     r.get::<_, Vec<u8>>(9)?,
                     r.get::<_, Vec<u8>>(10)?,
+                    r.get::<_, Vec<u8>>(11)?,
                 ))
             },
         )
@@ -164,6 +194,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         ss,
         baseline_state_ccb,
         baseline_presentation,
+        vault_post_proto,
     )) = row
     else {
         return Ok(None);
@@ -190,6 +221,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         storage_set_id,
         baseline_state_ccb,
         baseline_presentation,
+        vault_post_proto,
     }))
 }
 
@@ -243,6 +275,7 @@ mod tests {
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
+            vault_post_proto: vec![0xC3; 48],
         }
     }
 

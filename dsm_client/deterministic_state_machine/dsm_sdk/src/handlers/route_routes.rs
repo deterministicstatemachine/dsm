@@ -498,33 +498,40 @@ impl AppRouterImpl {
                     .into(),
             );
         }
-        // Derive vault_proto_bytes from the local DLVManager when the
-        // caller passes empty.  This is the path the SoFi test +
-        // production wallet UIs use: the wallet has the canonical
-        // vault state via `dlv.create`; making the caller serialise
-        // VaultPostProto bytes themselves is redundant + error-prone
-        // (the test was passing a UTF-8 placeholder string which then
-        // failed to decode as VaultPostProto at the trader's
-        // `route.syncVaultsForPair` step, leaving the trader's
-        // DLVManager empty and `dlv.unlockRouted` rejecting with
-        // "vault not in local DLVManager").  When the caller does
-        // pass non-empty bytes (router-service integrations), we
-        // honour them verbatim.
-        if req.vault_proto_bytes.is_empty() {
-            let dlv_manager = self.bitcoin_tap.dlv_manager();
-            let mut vid_arr = [0u8; 32];
-            vid_arr.copy_from_slice(&req.vault_id);
-            match dlv_manager
-                .create_vault_post(&vid_arr, "route.publishRoutingAdvertisement", None)
-                .await
-            {
-                Ok(bytes) => req.vault_proto_bytes = bytes,
+        // THE RECORD IS THE DURABLE SOURCE for everything below: the frozen
+        // `VaultPostProto` bytes and the birth presentation digest. Loaded
+        // once, here. The in-memory DLVManager is deliberately NOT consulted
+        // — its vaults are process-lifetime, so deriving the proto mirror
+        // from it made ad publication impossible after a restart. `dlv.create`
+        // froze the exact bytes onto the record; this publisher replays them.
+        let record =
+            match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return err(
+                        "route.publishRoutingAdvertisement: no AMM vault record for this \
+                         vault on this device"
+                            .into(),
+                    )
+                }
                 Err(e) => {
                     return err(format!(
-                        "route.publishRoutingAdvertisement: vault_proto_bytes empty + local DLVManager create_vault_post failed: {e}"
-                    ));
+                        "route.publishRoutingAdvertisement: vault record read failed: {e}"
+                    ))
                 }
+            };
+        // Frozen at `dlv.create`, replayed verbatim when the caller passes
+        // empty. Non-empty caller bytes (router-service integrations) are
+        // honoured verbatim, as before.
+        if req.vault_proto_bytes.is_empty() {
+            if record.vault_post_proto.is_empty() {
+                return err(
+                    "route.publishRoutingAdvertisement: the vault record carries no frozen \
+                     vault post — reprovision (no legacy upgrade path exists)"
+                        .into(),
+                );
             }
+            req.vault_proto_bytes = record.vault_post_proto.clone();
         }
         // Accept-or-stamp: empty owner pk → wallet pk; non-empty →
         // caller-supplied.  Same pattern as chunk #6 / Track C.4 /
@@ -556,23 +563,6 @@ impl AppRouterImpl {
         // published (stored on the vault record). No record blob, no ad — a
         // vault the trader cannot verify must not be discoverable.
         let presentation_digest = {
-            let record =
-                match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
-                {
-                    Ok(Some(r)) => r,
-                    Ok(None) => {
-                        return err(
-                            "route.publishRoutingAdvertisement: no AMM vault record for this \
-                             vault on this device"
-                                .into(),
-                        )
-                    }
-                    Err(e) => {
-                        return err(format!(
-                            "route.publishRoutingAdvertisement: vault record read failed: {e}"
-                        ))
-                    }
-                };
             if record.baseline_presentation.is_empty() {
                 return err(
                     "route.publishRoutingAdvertisement: the vault record carries no birth \
@@ -1902,6 +1892,106 @@ mod stamping_tests {
             )
             .expect("verify"),
             "and the signature covers the identity that replaced it"
+        );
+    }
+
+    /// THE RESTART, not the process that created the vault.
+    ///
+    /// `dlv.create` freezes the vault's `VaultPostProto` bytes onto its
+    /// record; the advertisement publisher replays them from there. A fresh
+    /// router — a fresh (empty) DLVManager over the same durable state — must
+    /// therefore publish the ad. Before this cut the publisher derived the
+    /// proto mirror from the in-memory manager, so this exact sequence failed
+    /// with "Vault not found" on hardware.
+    #[test]
+    #[serial]
+    fn the_advertisement_publishes_from_durable_state_after_a_restart() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+
+        // The producer ran: the record carries decodable frozen bytes.
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("record read")
+            .expect("record exists");
+        assert!(
+            !record.vault_post_proto.is_empty(),
+            "dlv.create must freeze the vault post onto the record"
+        );
+        let post = generated::VaultPostProto::decode(record.vault_post_proto.as_slice())
+            .expect("the frozen bytes are a VaultPostProto");
+        assert_eq!(post.vault_id, vault_id.to_vec());
+        assert!(
+            !post.vault_data.is_empty(),
+            "the frozen post carries the encoded LimboVaultProto"
+        );
+
+        // THE RESTART: a new router is a new (empty) DLVManager. The device
+        // head survives a real restart via the persistence codec, so it is
+        // carried over; the manager's contents are not.
+        let head = r.core_sdk.device_head().expect("head after create");
+        let r2 = router();
+        r2.core_sdk.set_device_head_for_testing(head);
+        publish_ad(&r2, &vault_id, &pc_a, &pc_b);
+    }
+
+    /// MUTATION CONTROL for the frozen-post gate: a record whose
+    /// `vault_post_proto` is empty (the producer never ran) must refuse to
+    /// publish rather than fall back to any in-memory derivation.
+    #[test]
+    #[serial]
+    fn an_empty_frozen_post_refuses_to_publish_instead_of_rederiving() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+
+        // Blank the frozen bytes — the state a pre-cut record would be in.
+        {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            conn.execute(
+                "UPDATE amm_vault_records SET vault_post_proto = X'' WHERE vault_id = ?1",
+                rusqlite::params![vault_id.as_slice()],
+            )
+            .expect("blank the frozen post");
+        }
+
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(!res.success, "an empty frozen post must refuse to publish");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("no frozen vault post"),
+            "the refusal names the missing producer, got: {msg}"
         );
     }
 }
