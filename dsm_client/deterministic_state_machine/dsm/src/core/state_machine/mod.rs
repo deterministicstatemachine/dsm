@@ -354,48 +354,47 @@ mod state_machine_tests {
     /// balance over a correct canonical head.
     #[test]
     fn current_state_always_reflects_the_canonical_head_never_an_override() {
-        use crate::types::device_state::{BalanceDelta, BalanceDirection};
-        use crate::types::operations::Operation;
-
         let devid = [0x42u8; 32];
-        let head0 =
-            crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
-
-        // Mint 275 to self so the head carries a real balance, exactly like 8XK.
+        // Install a real ERA balance on the head by RESTORE, not by minting.
+        //
+        // The subject here is that `current_state` reflects the canonical head rather
+        // than an override — how the head came to hold a balance is incidental. Minting
+        // is no longer a way to get one: `advance` refuses builtin issuance (ERA/dBTC
+        // are not self-authorizable), and only builtins survive the compat projection
+        // that `token_balances` is read from, so a synthetic asset would project as
+        // empty. `restore` is the honest fixture: it is exactly the shape a reloaded
+        // device has.
         let policy = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
         let rel = crate::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
         let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &devid, &devid,
         );
-        let outcome = head0
-            .advance(
+        let mut balances = std::collections::BTreeMap::new();
+        balances.insert(policy, 275u64);
+        let restored = crate::types::device_state::DeviceState::restore(
+            devid,
+            devid,
+            vec![0xAAu8; 32],
+            None,
+            balances,
+            vec![(
                 rel,
-                devid,
-                Operation::Mint {
-                    amount: crate::types::token_types::Balance::from_state(275, [0u8; 32]),
-                    token_id: b"ERA".to_vec(),
-                    policy_commit: crate::core::token::builtin_policy_commit_for_token("ERA")
-                        .unwrap(),
-                    authorized_by: b"self".to_vec(),
-                    proof_of_authorization: Vec::new(),
-                    message: "mint".to_string(),
+                crate::types::device_state::RelChainTip {
+                    chain_tip: init,
+                    counterparty_devid: devid,
+                    tip_entropy: vec![0x11u8; 32],
+                    value_capability: crate::types::device_state::ValueCapability::Yes,
                 },
-                vec![0x11u8; 32],
-                None,
-                &[BalanceDelta {
-                    policy_commit: policy,
-                    direction: BalanceDirection::Credit,
-                    amount: 275,
-                }],
-                Some(init),
-                None,
-                None,
-                None,
-            )
-            .expect("mint advance");
+            )],
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            64,
+        )
+        .expect("restore a head carrying a real balance");
 
         let mut sm = StateMachine::new();
-        sm.set_device_head(outcome.new_device_state.clone());
+        sm.set_device_head(restored.clone());
 
         let cs = sm.current_state().expect("state from head");
         let era = cs
@@ -408,11 +407,7 @@ mod state_machine_tests {
             era, 275,
             "current_state must reflect the canonical head's balance"
         );
-        assert_eq!(
-            cs.hash,
-            outcome.new_device_state.root(),
-            "hash is the canonical SMT root"
-        );
+        assert_eq!(cs.hash, restored.root(), "hash is the canonical SMT root");
     }
     use crate::types::state_types::DeviceInfo;
     use crate::types::token_types::Balance;

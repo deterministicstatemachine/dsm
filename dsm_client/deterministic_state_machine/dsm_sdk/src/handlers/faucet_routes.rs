@@ -9,7 +9,6 @@ use prost::Message;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::{AppRouterImpl, FaucetState, build_testnet_faucet_policy};
 use super::response_helpers::{pack_envelope_ok, err};
-use crate::util::deterministic_time as dt;
 
 impl AppRouterImpl {
     /// Dispatch handler for `faucet.check_nearby` query route.
@@ -35,12 +34,15 @@ impl AppRouterImpl {
                     return err("faucet.check_nearby: device_id must be 32 bytes".into());
                 }
 
-                // Testnet faucet - always available
+                // Builtin faucet issuance is unavailable (see `faucet.claim`): report
+                // it here rather than advertising a faucet that must refuse.
                 let resp = generated::FaucetClaimResponse {
-                    success: true,
+                    success: false,
                     tokens_received: 0,
                     next_available_index: 0,
-                    message: "Testnet faucet available".to_string(),
+                    message: "builtin faucet issuance unavailable — no authenticated issuance \
+                              predicate is defined for ERA/dBTC"
+                        .to_string(),
                 };
                 // Return as Envelope.faucetClaimResponse (field 24)
                 pack_envelope_ok(generated::envelope::Payload::FaucetClaimResponse(resp))
@@ -74,58 +76,29 @@ impl AppRouterImpl {
                     return err("faucet.claim: device_id must be 32 bytes".into());
                 }
 
-                log::info!(
-                    "[faucet.claim] device_id_b32={}",
-                    crate::util::text_id::encode_base32_crockford(&dev)
-                );
-
-                let identity = crate::util::text_id::encode_base32_crockford(&dev);
-                let now = dt::tick();
-
-                let (amount, next_available) = {
-                    let mut faucet = self.faucet_state.lock().await;
-                    match faucet.claim(&identity, now) {
-                        Ok(v) => v,
-                        Err(msg) => return err(format!("faucet.claim: {msg}")),
-                    }
-                };
-
-                log::info!(
-                    "[faucet.claim] granted amount={} next_available_index={}",
-                    amount,
-                    next_available
-                );
-
-                match self.wallet.mint_for_self(amount, Some("ERA")).await {
-                    Ok(_) => {
-                        log::error!(
-                            "[faucet.claim] ❗ mint_for_self succeeded, amount={}",
-                            amount
-                        );
-
-                        // Verify the canonical projection row was updated.
-                        let device_id_txt =
-                            crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                        if let Ok(Some(record)) =
-                            crate::storage::client_db::get_balance_projection(&device_id_txt, "ERA")
-                        {
-                            log::error!("[faucet.claim] ❗ Post-mint ERA projection verification: device_id={} available={} locked={}", 
-                                device_id_txt, record.available, record.locked);
-                        } else {
-                            log::error!("[faucet.claim] ❌ Post-mint ERA projection verification FAILED: projection not found");
-                        }
-
-                        let resp = generated::FaucetClaimResponse {
-                            success: true,
-                            tokens_received: amount,
-                            next_available_index: next_available,
-                            message: "Faucet claim successful".to_string(),
-                        };
-                        // NEW: Return as Envelope.faucetClaimResponse (field 24)
-                        pack_envelope_ok(generated::envelope::Payload::FaucetClaimResponse(resp))
-                    }
-                    Err(e) => err(format!("faucet.claim failed: {e}")),
-                }
+                // BUILTIN FAUCET ISSUANCE IS UNAVAILABLE.
+                //
+                // This route minted builtin ERA on the strength of a caller-supplied
+                // `device_id` plus a local cooldown — no independently verifiable right
+                // to issue, which is the same defect class the accepting-layer gate
+                // exists to close. `DeviceState::advance` now refuses builtin issuance
+                // outright, so the mint would fail regardless; refusing here names the
+                // reason instead of surfacing a confusing lower-layer error.
+                //
+                // This refusal is a MESSAGE, not the control. The authoritative gate is
+                // the one at the accepting transition — delete this block and nothing can
+                // be minted anyway. Do NOT turn it into an exemption, a dev flag that
+                // bypasses `advance`, or a magic faucet key: any of those would make the
+                // repair a disguised backdoor. Restoring a faucet means defining a real
+                // issuance predicate whose evidence the accepting layer validates.
+                //
+                // The minting body is DELETED rather than left unreachable: a dead path
+                // that still knows how to mint is the thing a later edit resurrects.
+                err(
+                    "faucet.claim: builtin faucet issuance unavailable — no authenticated \
+                     issuance predicate is defined for ERA/dBTC"
+                        .into(),
+                )
             }
 
             // -------- faucet.clean (InvokeOp) --------
