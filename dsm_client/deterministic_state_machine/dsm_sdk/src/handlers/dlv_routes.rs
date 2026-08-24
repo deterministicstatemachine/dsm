@@ -2439,27 +2439,6 @@ impl AppRouterImpl {
                             ));
                         }
                     }
-                    // THE SEQUENCE JOIN. `state_number` is a second, independently
-                    // encodable statement of a fact already inside the V_n that
-                    // `parent_binding` names — and the pointer publisher derives
-                    // its discovery pointer's parent linkage from it. A signed
-                    // route carrying the correct binding beside a wrong number
-                    // would settle against the right parent while publishing a
-                    // pointer whose receipt commitment can never match the
-                    // receipt the settlement produces, leaving the settled
-                    // transition undiscoverable. While the field remains on the
-                    // wire, the two sources must agree byte-for-byte with the
-                    // authenticated state; the field's deletion is the eventual
-                    // fix, this equality is the guard until then.
-                    if hop.state_number != composed.sequence {
-                        return err(format!(
-                            "dlv.unlockRouted: the hop's state_number ({}) disagrees with the \
-                             generation ({}) of the state its parent_binding names — the route \
-                             restates a fact the bound V_n already carries, and the restatement \
-                             must match exactly",
-                            hop.state_number, composed.sequence,
-                        ));
-                    }
                 }
 
                 amm_fee_bps = vault_fee_bps;
@@ -3905,7 +3884,7 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                state_number: 0,
+                fee_bps: 30,
                 parent_binding: frontier.c_n.to_vec(),
                 ..Default::default()
             }],
@@ -4048,135 +4027,6 @@ mod funded_creation_tests {
     /// reserve proof back out of storage and verifies its signature and SMT
     /// paths, exactly as a separate device would, because it has no privileged
     /// access to the owner's leaves either way.
-    /// The two-source sequence join, pinned as a refusal: a signed route
-    /// carrying the CORRECT `parent_binding` beside a WRONG `state_number`
-    /// would settle against the right parent while the pointer publisher —
-    /// which derives its discovery pointer's parent linkage from
-    /// `state_number` — commits to a receipt the settlement can never
-    /// produce, making the settled transition undiscoverable. While the
-    /// field remains on the wire, the gate requires it to agree with the
-    /// generation of the state the binding names.
-    #[test]
-    #[serial]
-    fn a_correct_binding_beside_a_wrong_state_number_is_refused() {
-        use prost::Message as _;
-
-        install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
-        let create = generated::DlvInstantiateV1 {
-            spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
-                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
-                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
-                ..Default::default()
-            }),
-            creator_public_key: Vec::new(),
-            signature: Vec::new(),
-            funding_legs: vec![
-                generated::DlvFundingLegV1 {
-                    policy_commit: pc_a.to_vec(),
-                    amount: 10_000,
-                },
-                generated::DlvFundingLegV1 {
-                    policy_commit: pc_b.to_vec(),
-                    amount: 5_000,
-                },
-            ],
-        };
-        let res = crate::runtime::get_runtime().block_on(async {
-            r.invoke(AppInvoke {
-                method: "dlv.create".to_string(),
-                args: pack(create.encode_to_vec()),
-            })
-            .await
-        });
-        assert!(res.success, "create failed: {:?}", res.error_message);
-        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
-            .expect("list")
-            .pop()
-            .expect("one vault")
-            .vault_id;
-
-        let frontier = composed_frontier(&vault_id);
-        let input = 1_000u64;
-        let expected_out =
-            crate::sdk::routing_path_sdk::constant_product_output(input, 10_000, 5_000, 30)
-                .expect("curve output");
-        let (pk, sk) = (
-            crate::sdk::signing_authority::current_public_key().expect("pk"),
-            crate::sdk::signing_authority::current_secret_key().expect("sk"),
-        );
-        let mut rc = generated::RouteCommitV1 {
-            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
-            nonce: vec![0x3D; 32],
-            total_fee_bps: 30,
-            initiator_public_key: pk.clone(),
-            initiator_signature: Vec::new(),
-            hops: vec![generated::RouteCommitHopV1 {
-                vault_id: vault_id.to_vec(),
-                token_in: pc_a.to_vec(),
-                token_out: pc_b.to_vec(),
-                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
-                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                // The binding names the REAL frontier; the number lies.
-                state_number: frontier.sequence + 1,
-                parent_binding: frontier.c_n.to_vec(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let canonical =
-            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
-        rc.initiator_signature =
-            dsm::crypto::sphincs::sphincs_sign(&sk, &canonical).expect("sign rc");
-        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
-        crate::runtime::get_runtime()
-            .block_on(
-                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
-                    &x, &rc, &pk, &sk, "seq-join",
-                ),
-            )
-            .expect("publish X + pointer");
-
-        let settle = generated::DlvUnlockRoutedV1 {
-            vault_id: vault_id.to_vec(),
-            device_id: {
-                let h = r.core_sdk.device_head().expect("head");
-                h.devid().to_vec()
-            },
-            route_commit_bytes: rc.encode_to_vec(),
-            unlocker_public_key: pk.clone(),
-            signature: Vec::new(),
-        };
-        let res = crate::runtime::get_runtime().block_on(async {
-            r.invoke(AppInvoke {
-                method: "dlv.unlockRouted".to_string(),
-                args: pack(settle.encode_to_vec()),
-            })
-            .await
-        });
-        assert!(
-            !res.success,
-            "a route restating the wrong generation beside a correct binding must be refused"
-        );
-        let msg = res.error_message.unwrap_or_default();
-        assert!(
-            msg.contains("state_number") && msg.contains("disagrees"),
-            "the refusal names the two-source disagreement, not an incidental gate: {msg}"
-        );
-        // And nothing moved: the vault still composes at its frontier.
-        let after = composed_frontier(&vault_id);
-        assert_eq!(
-            (after.sequence, after.c_n),
-            (frontier.sequence, frontier.c_n)
-        );
-    }
-
     #[test]
     #[serial]
     fn a_settlement_completes_and_the_resulting_state_is_asserted() {
@@ -4231,6 +4081,28 @@ mod funded_creation_tests {
         assert_eq!(before.vault_reserve(&vault_id, &pc_a), 10_000);
         assert_eq!(before.vault_reserve(&vault_id, &pc_b), 5_000);
 
+        // The advertisement: the discovery record the pointer publisher (and
+        // any trader) resolves the vault through. Production traders always
+        // hold one — it is how they found the vault at all.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/settle-test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(publish.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "ad publish failed: {:?}", res.error_message);
+
         // (2) The verified baseline the settling path will read back. Its
         // existence — a P0-P6-verifiable presentation and the exact CCB(V_0)
         // — is the precondition the composition gate enforces.
@@ -4265,7 +4137,7 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                state_number: 0,
+                fee_bps: 30,
                 parent_binding: frontier.c_n.to_vec(),
                 ..Default::default()
             }],
@@ -4905,7 +4777,7 @@ mod funded_creation_tests {
                 token_out: pc_b.to_vec(),
                 input_amount_u128: (input as u128).to_be_bytes().to_vec(),
                 expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
-                state_number: seq,
+                fee_bps: 30,
                 parent_binding: parent_binding.to_vec(),
                 ..Default::default()
             }],

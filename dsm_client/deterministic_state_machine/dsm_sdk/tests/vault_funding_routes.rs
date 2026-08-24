@@ -335,7 +335,6 @@ fn eligibility_is_rejected_before_any_reserve_or_settlement_work() {
             token_out: vec![0x22; 32],
             input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
             expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-            state_number: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -450,7 +449,6 @@ fn settlement_reaches_the_reserve_gate_and_refuses_unproven_liquidity() {
             token_out: vec![0x22; 32],
             input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
             expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-            state_number: 0,
             ..Default::default()
         }],
         ..Default::default()
