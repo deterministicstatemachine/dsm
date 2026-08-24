@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The Rev 15 beta storage profile — a FIXED PROFILE, not a quorum function.
+//! The beta storage profile — a FIXED PROFILE, not a quorum function.
 //!
-//! Requirement 6.13 says: "For the five-member beta storage set, q = 4. If one
-//! member is unavailable, all four remaining members are required. If two or
-//! more members are unavailable, a new settlement decision cannot be
-//! established until the fixed threshold is again reachable."
+//! OWNER DECISION (2026-08-23): the deployed beta storage set is the
+//! THREE-member Alibaba ECS fleet, and the profile is fixed at `q = 2`. If
+//! one member is unavailable, both remaining members are required; if two or
+//! more are unavailable, a new settlement decision cannot be established
+//! until the fixed threshold is again reachable. Rev 15 Req 6.13's text
+//! still describes the earlier five-member/q=4 profile — the spec amendment
+//! is owed; code is authoritative for the deployed set per the
+//! reconciliation doctrine.
 //!
-//! That is a threshold for ONE cardinality. Rev 15 defines no quorum function
+//! That is a threshold for ONE cardinality. There is no quorum function
 //! over arbitrary `n`, so this module refuses every other set size rather than
 //! interpolating one. `n-1`, a lookup table over `{1,3,5}`, and a piecewise
 //! majority rule would each invent protocol semantics the specification never
@@ -31,19 +35,20 @@
 //! It is intentionally left alone; whether that threshold should change is a
 //! separate design question that has not been reviewed.
 //!
-//! ## Not yet wired to anything
+//! ## Wiring status
 //!
-//! `VaultStateAnchorV2` does not exist yet. Until it does, the live storage set
-//! keeps using the legacy V1 path and its majority helper — a three-member
-//! fleet at `q=2` stays exactly as it is. This module is deliberately landed
-//! ahead of that work so the profile is fixed, tested and reviewable before any
-//! anchor commits to it.
+//! The state-identity cut commits `q` inside the signed `V_n` (field 15),
+//! sourced at birth from `quorum_for(|S|)` over the resolved catalog set —
+//! which equals this profile's threshold for the three-member fleet. This
+//! module remains the named, testable statement of the fixed profile a
+//! conformance check reads against, rather than a recomputation.
 
-/// The one storage-set cardinality Rev 15 Req 6.13 defines a threshold for.
-pub const SOFI_BETA_MEMBERS: usize = 5;
+/// The one storage-set cardinality the beta profile defines a threshold
+/// for: the deployed three-member fleet.
+pub const SOFI_BETA_MEMBERS: usize = 3;
 
-/// The threshold Req 6.13 fixes for that cardinality.
-pub const SOFI_BETA_QUORUM: u32 = 4;
+/// The fixed threshold for that cardinality.
+pub const SOFI_BETA_QUORUM: u32 = 2;
 
 /// A storage set that is not the Rev 15 beta profile.
 ///
@@ -58,8 +63,8 @@ impl core::fmt::Display for NonconformantProfile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "storage set has {} members; Rev 15 Req 6.13 defines a threshold only for \
-             the {}-member beta profile, and no quorum function over other cardinalities",
+            "storage set has {} members; the beta profile defines a threshold only for \
+             the {}-member set, and no quorum function over other cardinalities",
             self.members, SOFI_BETA_MEMBERS
         )
     }
@@ -111,23 +116,23 @@ pub fn dev_only_single_node_quorum() -> u32 {
 mod tests {
     use super::*;
 
-    /// The profile Req 6.13 actually defines.
+    /// The profile the owner fixed for the deployed fleet.
     #[test]
-    fn the_five_member_beta_set_commits_four() {
-        assert_eq!(sofi_beta_quorum_for(5).expect("the beta profile"), 4);
-        assert_eq!(SOFI_BETA_QUORUM, 4);
-        assert_eq!(SOFI_BETA_MEMBERS, 5);
+    fn the_three_member_beta_set_commits_two() {
+        assert_eq!(sofi_beta_quorum_for(3).expect("the beta profile"), 2);
+        assert_eq!(SOFI_BETA_QUORUM, 2);
+        assert_eq!(SOFI_BETA_MEMBERS, 3);
     }
 
     /// EVERY other cardinality is refused, including the ones that look
-    /// plausible. `3` is today's live fleet, `1` is local dev, and `4` and `6`
-    /// are one step either side of the profile — none of them is a Rev 15 beta
-    /// storage set, and none may be silently mapped to a threshold.
+    /// plausible. `5` is the superseded profile, `1` is local dev, and `2`
+    /// and `4` are one step either side — none of them is the beta storage
+    /// set, and none may be silently mapped to a threshold.
     #[test]
     fn every_other_cardinality_is_refused_rather_than_mapped() {
-        for n in [0usize, 1, 2, 3, 4, 6, 7, 9, 100] {
+        for n in [0usize, 1, 2, 4, 5, 6, 7, 9, 100] {
             let err = sofi_beta_quorum_for(n)
-                .expect_err("only the five-member profile has a defined threshold");
+                .expect_err("only the three-member profile has a defined threshold");
             assert_eq!(err.members, n, "the error names the set it was handed");
         }
     }
@@ -138,7 +143,7 @@ mod tests {
     /// helper would have produced are NOT returned.
     #[test]
     fn no_majority_fallback_survives_behind_the_refusal() {
-        for (n, majority) in [(1usize, 1u32), (3, 2), (6, 4), (7, 4)] {
+        for (n, majority) in [(1usize, 1u32), (5, 3), (6, 4), (7, 4)] {
             match sofi_beta_quorum_for(n) {
                 Err(_) => {}
                 Ok(q) => panic!(
@@ -153,12 +158,18 @@ mod tests {
     /// committed `q` that is merely plausible for the set size.
     #[test]
     fn a_committed_q_is_checked_against_the_profile_not_recomputed() {
-        assert!(is_conformant_commitment(5, 4));
-        assert!(!is_conformant_commitment(5, 3), "majority of five is not q");
-        assert!(!is_conformant_commitment(5, 5), "unanimity is not q either");
+        assert!(is_conformant_commitment(3, 2));
         assert!(
-            !is_conformant_commitment(3, 2),
-            "a three-member set is not a Rev 15 beta profile at any q"
+            !is_conformant_commitment(3, 3),
+            "unanimity of three is not q"
+        );
+        assert!(
+            !is_conformant_commitment(3, 1),
+            "one-of-three is not q either"
+        );
+        assert!(
+            !is_conformant_commitment(5, 4),
+            "the superseded five-member profile is no longer conformant at any q"
         );
     }
 
