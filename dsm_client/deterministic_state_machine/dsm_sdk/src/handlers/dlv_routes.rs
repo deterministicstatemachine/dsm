@@ -2397,7 +2397,23 @@ impl AppRouterImpl {
                 // when it binds a hop to a parent, and it is what lets the
                 // market keep moving while the LP is offline: no owner
                 // signature is needed on any transition after the baseline.
-                let composed = match compose_own_vault(&vault_id).await {
+                //
+                // THE DISCOVERED PATH, DELIBERATELY. The settler is usually a
+                // TRADER device that holds no amm_vault_record — its whole
+                // knowledge of the vault came from storage. Composing through
+                // the owner's local record here would work on the owner's
+                // device and on every shared-database test fixture, and then
+                // refuse on real foreign hardware; the discovered path is the
+                // one both kinds of device can run, and it is the same
+                // verification either way.
+                let composed = match crate::sdk::vault_state_composition::compose_discovered_vault(
+                    &vault_id,
+                    vt_a,
+                    vt_b,
+                    vault_fee_bps,
+                )
+                .await
+                {
                     Ok(c) => c,
                     // Every composition failure is "the liquidity is unproven".
                     // Fail closed — nothing here may be guessed at.
@@ -3826,6 +3842,26 @@ mod funded_creation_tests {
         assert!(res.success, "publish failed: {:?}", res.error_message);
 
         // ── TRADER ───────────────────────────────────────────────────────────
+        // THE FOREIGN-DEVICE CONDITION, made real rather than nominal: on
+        // hardware the trader holds NO amm_vault_record — its whole knowledge
+        // of the vault came from storage. The shared test database would hand
+        // the trader the owner's record for free and mask any settle-path
+        // dependence on it, so the record is REMOVED for the trader phase and
+        // restored when the owner returns. A settle that needs it is a settle
+        // that only works on the owner's own device.
+        let owner_record =
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .expect("owner has the record");
+        {
+            let conn = crate::storage::client_db::get_connection().expect("db");
+            let conn = conn.lock().expect("db lock");
+            conn.execute(
+                "DELETE FROM amm_vault_records WHERE vault_id = ?1",
+                rusqlite::params![vault_id.as_slice()],
+            )
+            .expect("simulate the foreign device: no local record");
+        }
         let (trader_pk, trader_did) = become_device(0x51);
         assert_ne!(trader_pk, owner_pk, "the two devices must be distinct");
         let trader = named_router("trader");
@@ -3859,8 +3895,15 @@ mod funded_creation_tests {
 
         // And the verified state it will settle against — the presentation +
         // `CCB(V_0)` fetched and verified with no access to the owner's
-        // leaves: the reserves come OUT of the authenticated state.
-        let frontier = composed_frontier(&vault_id);
+        // leaves OR the owner's record: the discovered path is the trader's
+        // only path, and the reserves come OUT of the authenticated state.
+        let frontier = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::vault_state_composition::compose_discovered_vault(
+                    &vault_id, &pc_a, &pc_b, 30,
+                ),
+            )
+            .expect("the foreign device composes from published artifacts alone");
         assert_eq!(
             (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
             (0, 10_000, 5_000),
@@ -3939,6 +3982,10 @@ mod funded_creation_tests {
         );
 
         // ── OWNER RECONCILES ─────────────────────────────────────────────────
+        // The owner's device gets its record back (it never lost it — the
+        // deletion above simulated the TRADER's device).
+        crate::storage::client_db::amm_vault_records::put_amm_vault_record(&owner_record)
+            .expect("restore the owner's record");
         let _ = become_device(0x41);
         let owner_before = owner.core_sdk.device_head().expect("owner head");
         assert_eq!(
