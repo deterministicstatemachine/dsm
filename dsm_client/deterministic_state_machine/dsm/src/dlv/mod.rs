@@ -5,7 +5,7 @@
 //! flow.  This module deliberately holds no proto / I/O / runtime
 //! state; each submodule is a self-contained crypto primitive.
 
-pub mod beta_storage_profile; // Rev 15 Req 6.13 five-member beta profile — fixed, not a formula
+pub mod beta_storage_profile; // the deployed three-member beta profile — fixed, not a formula
 pub mod controller_rotation;
 pub mod pair_identity;
 pub mod settlement_receipt_leaf;
