@@ -113,20 +113,24 @@ EOF
 }
 
 # --- Gather devices ---
-serials=( $(adb devices | awk '/\tdevice$/{print $1}') )
-if [[ ${#serials[@]} -eq 0 ]]; then
+# Address devices by transport id, not serial: wireless (mDNS) serials contain
+# spaces ("adb-XXXX-yyyy (2)._adb-tls-connect._tcp"), which word-splitting
+# truncates into a serial `adb -s` cannot resolve. Transport ids are plain
+# integers and unambiguous.
+transports=( $(adb devices -l | awk '/ device /{for(i=1;i<=NF;i++) if($i ~ /^transport_id:/){sub("transport_id:","",$i); print $i}}') )
+if [[ ${#transports[@]} -eq 0 ]]; then
   echo "No connected adb devices in device state."
   adb devices -l
   exit 2
 fi
 
-echo "Detected devices: $serials"
+echo "Detected device transports: $transports"
 
-for d in $serials; do
-  echo "=== Processing $d ==="
+for d in $transports; do
+  echo "=== Processing transport $d ==="
 
   # Ensure app-private files dir exists
-  adb -s "$d" shell run-as "$APP_PKG" mkdir -p files || true
+  adb -t "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
   if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
     # --- Remote mode (AWS / GCP / Alibaba) ---
@@ -135,24 +139,24 @@ for d in $serials; do
     # launch (FileOutputStream ... false), so a push there is clobbered. The override
     # (dsm_env_config.override.toml) is checked first and wins.
     echo "Pushing $MODE storage node config to $d (developer override)..."
-    adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
+    adb -t "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
 
     echo "Pushing CA cert to $d..."
-    adb -s "$d" push "$CA_CERT" /data/local/tmp/ca.crt
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
+    adb -t "$d" push "$CA_CERT" /data/local/tmp/ca.crt
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
 
     # Remove any stale adb reverse ports (not needed for remote)
     for p in $PORTS 18443; do
-      adb -s "$d" reverse --remove tcp:$p 2>/dev/null || true
+      adb -t "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
     echo "Config: $MODE storage nodes (HTTPS + custom CA, via override file)"
-    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
+    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
 
   else
     # --- Local mode ---
-    is_emulator=$(adb -s "$d" shell getprop ro.kernel.qemu | tr -d '\r' | tr -d '\n')
+    is_emulator=$(adb -t "$d" shell getprop ro.kernel.qemu | tr -d '\r' | tr -d '\n')
     if [[ "$is_emulator" == "1" ]]; then
       host="10.0.2.2"
       echo "Device $d identified as emulator (ro.kernel.qemu=1). Using host=$host"
@@ -160,7 +164,7 @@ for d in $serials; do
       host="127.0.0.1"
       echo "Device $d identified as physical. Using host=$host and setting reverse ports"
       for p in $PORTS 18443; do
-        adb -s "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
+        adb -t "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
       done
     fi
 
@@ -171,31 +175,31 @@ for d in $serials; do
     make_env_toml "$host" > "$tmpfile"
     echo "Generated local dev config:"; head -10 "$tmpfile"
 
-    adb -s "$d" push "$tmpfile" /data/local/tmp/dsm_env_config.toml
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
-    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml
+    adb -t "$d" push "$tmpfile" /data/local/tmp/dsm_env_config.toml
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
+    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml
     rm -f "$tmpfile"
 
     echo "Config: 5 local dev nodes (HTTP via adb reverse)"
   fi
 
   # Uninstall/install APK if not present
-  pm_out=$(adb -s "$d" shell pm list packages | grep -c "$APP_PKG" || true)
+  pm_out=$(adb -t "$d" shell pm list packages | grep -c "$APP_PKG" || true)
   if [[ "$pm_out" == "0" ]]; then
     echo "App not installed on $d; installing APK..."
-    adb -s "$d" install -r "$APK_PATH" || echo "Install failed; continuing"
+    adb -t "$d" install -r "$APK_PATH" || echo "Install failed; continuing"
   fi
 
   echo "Restarting app on $d..."
-  adb -s "$d" shell am force-stop "$APP_PKG" || true
-  adb -s "$d" shell am start -n "$APP_PKG"/.ui.MainActivity || echo "Failed to start on $d"
+  adb -t "$d" shell am force-stop "$APP_PKG" || true
+  adb -t "$d" shell am start -n "$APP_PKG"/.ui.MainActivity || echo "Failed to start on $d"
 
   echo "Verifying startup logs for $d..."
   sleep 2
   if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
-    adb -s "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
+    adb -t "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
   else
-    adb -s "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
+    adb -t "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
   fi
   echo "=== Done $d ==="
   echo
