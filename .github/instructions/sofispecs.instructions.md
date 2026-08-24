@@ -859,15 +859,16 @@ member; and
 5. locally evaluates whether at least q qualifying members support the same transaction fact.
 A Class N member does not count other members, does not know whether the caller has reached q,
 and does not announce “quorum reached.”
-Requirement 6.13 (Five-member beta profile). For the five-member beta storage set,
-q = 4. If one member is unavailable, all four remaining members are required. If two or more
+Requirement 6.13 (Three-member beta profile). For the three-member beta storage set,
+q = 2. If one member is unavailable, both remaining members are required. If two or more
 members are unavailable, a new settlement decision cannot be established until the fixed threshold
 is again reachable.
-Durability rationale. With n= 5 and q= 4,
-|Q1 ∩Q2|≥4 + 4−5 = 3.
-If one record from a previously chosen quorum is later unavailable, at least two surviving members
-of that choice still intersect every later four-member quorum. This is a durability margin; it does
-not authorize nodes to vote on economic validity.
+Durability rationale. With n= 3 and q= 2,
+|Q1 ∩Q2|≥2 + 2−3 = 1.
+q = 2 is the strict majority of three, which is exactly the intersection Theorem 18.1 requires. If one
+member is unavailable, every later two-member quorum consists of the two remaining members, so
+any previously chosen quorum still intersects it in at least one surviving member. This is the minimal
+margin; it does not authorize nodes to vote on economic validity.
 6.5 Complete SettlementBundle
 Definition 6.14 (SettlementBundle). A SettlementBundle B is the complete immutable object
 that Class K proposes as the one route result. It binds at minimum:
@@ -1930,11 +1931,12 @@ durable;
 Then two different SettlementBundles with overlapping K(B) cannot both be chosen binding-final
 for the same DLV resource by conforming quorum transactions.
 The proof obligation is quorum intersection plus preservation of a value that may already have
-been chosen. A strict majority, including 3/5, is sufficient for this uniqueness theorem under the
-theorem’s assumption that accepted member records remain atomic and durable. The beta 4/5
-profile is intentionally stricter: it supplies an additional durability margin when a previously accepted
-record or member later becomes unavailable. Requirement 6.13 therefore does not contradict this
-theorem or imply that 3/5 lacks intersection safety under perfect durability.
+been chosen. A strict majority, including 2/3, is sufficient for this uniqueness theorem under the
+theorem’s assumption that accepted member records remain atomic and durable. The beta 2/3
+profile is exactly that strict majority: Requirement 6.13 adopts the minimal intersecting threshold
+and carries no durability margin beyond it. The earlier five-member draft profile (4/5) supplied such
+a margin; it was retired with the deployed three-member fleet, and this theorem’s assumptions are
+unchanged by that retirement.
 This is the concurrent DLV case. History-bound parent composition handles the sequential
 case in which a constructor observes a prior realized DLV settlement before attempting a new
 transaction.
@@ -2205,13 +2207,13 @@ immutable-store/ same bytes replay idempotently; different bytes cannot overwrit
 one canonical address
 path-index/ mutable logical-path updates alter only address/index metadata,
 never canonical payload bytes
-quorum-fixed/ five-member beta uses owner-committed four-of-five; one unavail-
-able member still requires all four remaining; threshold never falls
-back to strict majority
-quorum-margin/ three-of-five satisfies the uniqueness theorem when accepted
-records remain durable; four-of-five beta preserves the stated
-intersection margin after one accepted record/member becomes
-unavailable
+quorum-fixed/ three-member beta uses owner-committed two-of-three; one un-
+available member still requires both remaining; the threshold never
+degrades below two
+quorum-margin/ two-of-three is the strict majority the uniqueness theorem requires
+when accepted records remain durable; with one member unavail-
+able, every later quorum is the two survivors, so a previously chosen
+quorum still intersects it in at least one member
 quorum-client/ no node computes quorum; Class K counts distinct authenticated
 responses from the exact committed set
 binding-race/ two complete bundles sharing one parent cannot both become
@@ -2630,10 +2632,9 @@ realized market DLV advances leaves an increasingly deep composition chain. If t
 while the DLV remains active, deterministic catch-up produces a new authenticated baseline and
 collapses that verified history for future composition; a terminally closed DLV needs no separate
 catch-up.
-Thefive-memberbetastorageprofileusesanowner-committedthresholdoffour. Astrictmajority
-is sufficient for the basic uniqueness theorem when accepted member records remain durable; four-of-
-five is deliberately stronger to preserve the stated intersection margin after one previously accepted
-record/member becomes unavailable. This is a scoped DLV contention mechanism, not a global
+The three-member beta storage profile uses an owner-committed threshold of two. A strict majority
+is sufficient for the basic uniqueness theorem when accepted member records remain durable;
+two-of-three is exactly that strict majority, the minimal intersecting threshold for the deployed fleet. This is a scoped DLV contention mechanism, not a global
 consensus layer: there is no global ledger, validator ordering market, global mempool, shared global
 sequence, or required order between disjoint DLV resource sets.
 If two distinct binding-final SettlementBundles are ever established for one DLV parent, the
