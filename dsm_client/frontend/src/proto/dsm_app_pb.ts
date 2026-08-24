@@ -8553,90 +8553,156 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
 }
 
 /**
- * Per-vault signed state anchor.  Owner publishes one at vault
- * creation (sequence=0) and one after every accepted routed unlock
- * (sequence=N+1).  Stored at `sofi/vault-state/{vault_id_b32}/latest`
- * for off-device traders to read at quote time.  The chunks #7 gate
- * does NOT read this — it verifies against the local DLVManager.
+ * One signed root-progression object as it travels: the CCB bytes (class
+ * 0x0019 or 0x001A) plus the signature that is NEVER a CCB field (§2.9).
  *
- * `reserves_digest` =
- *   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
- *          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
- *
- * `owner_signature` is SPHINCS+ over
- *   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
- *          reserves_digest)
- *
- * @generated from message dsm.VaultStateAnchorV1
+ * @generated from message dsm.SignedAuthorityObjectV1
  */
-export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
+export class SignedAuthorityObjectV1 extends Message<SignedAuthorityObjectV1> {
   /**
-   * @generated from field: bytes vault_id = 1;
+   * @generated from field: bytes ccb = 1;
    */
-  vaultId = new Uint8Array(0);
+  ccb = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 sequence = 2;
-   */
-  sequence = protoInt64.zero;
-
-  /**
-   * @generated from field: bytes reserves_digest = 3;
-   */
-  reservesDigest = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes owner_public_key = 4;
-   */
-  ownerPublicKey = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes owner_signature = 5;
-   */
-  ownerSignature = new Uint8Array(0);
-
-  /**
-   * The canonical storage set the vault was born under (BLAKE3 over its
-   * sorted, length-prefixed member ids), INSIDE the owner-signed preimage
-   * and birth-fixed across the vault's lineage. Consumers resolve it through
-   * their local storage-set catalog by re-hashing; the anchor chooses the
-   * set, configuration only resolves it. Publication artifacts and the
-   * settlement-slot register for this vault are scoped to this set.
+   * SPHINCS+ SPX256f
    *
-   * @generated from field: bytes storage_set_id = 6;
+   * @generated from field: bytes signature = 2;
    */
-  storageSetId = new Uint8Array(0);
+  signature = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<VaultStateAnchorV1>) {
+  constructor(data?: PartialMessage<SignedAuthorityObjectV1>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.VaultStateAnchorV1";
+  static readonly typeName = "dsm.SignedAuthorityObjectV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 3, name: "reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultStateAnchorV1 {
-    return new VaultStateAnchorV1().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SignedAuthorityObjectV1 {
+    return new SignedAuthorityObjectV1().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
-    return new VaultStateAnchorV1().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SignedAuthorityObjectV1 {
+    return new SignedAuthorityObjectV1().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
-    return new VaultStateAnchorV1().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SignedAuthorityObjectV1 {
+    return new SignedAuthorityObjectV1().fromJsonString(jsonString, options);
   }
 
-  static equals(a: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined, b: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined): boolean {
-    return proto3.util.equals(VaultStateAnchorV1, a, b);
+  static equals(a: SignedAuthorityObjectV1 | PlainMessage<SignedAuthorityObjectV1> | undefined, b: SignedAuthorityObjectV1 | PlainMessage<SignedAuthorityObjectV1> | undefined): boolean {
+    return proto3.util.equals(SignedAuthorityObjectV1, a, b);
+  }
+}
+
+/**
+ * The owner's complete verification bundle for one vault state: the AnchorV3
+ * signature over c_n, the candidate key, and everything a stranger needs to
+ * discharge P0–P6 at the state's committed authority position. TRANSPORT
+ * ONLY (§2.10): nothing here is trusted as presented — the consumer
+ * recomputes G from genesis_params_ccb, authenticates every delegation and
+ * transition, re-derives d_o from ak_pk + atta, and enforces
+ * K_cand == K_proven against candidate_public_key. Published as an immutable
+ * object; discovery paths carry its 32-byte content address, never bytes.
+ *
+ * @generated from message dsm.AnchorPresentationV3
+ */
+export class AnchorPresentationV3 extends Message<AnchorPresentationV3> {
+  /**
+   * c_n
+   *
+   * @generated from field: bytes state_commitment = 1;
+   */
+  stateCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes candidate_public_key = 2;
+   */
+  candidatePublicKey = new Uint8Array(0);
+
+  /**
+   * over H(DSM/vault-state-anchor/v3 ‖ c_n)
+   *
+   * @generated from field: bytes anchor_signature = 3;
+   */
+  anchorSignature = new Uint8Array(0);
+
+  /**
+   * class 0x0018
+   *
+   * @generated from field: bytes genesis_params_ccb = 4;
+   */
+  genesisParamsCcb = new Uint8Array(0);
+
+  /**
+   * class 0x0019, chain order
+   *
+   * @generated from field: repeated dsm.SignedAuthorityObjectV1 delegations = 5;
+   */
+  delegations: SignedAuthorityObjectV1[] = [];
+
+  /**
+   * class 0x001A, chain order
+   *
+   * @generated from field: repeated dsm.SignedAuthorityObjectV1 transitions = 6;
+   */
+  transitions: SignedAuthorityObjectV1[] = [];
+
+  /**
+   * DevTreeProof::to_bytes
+   *
+   * @generated from field: bytes inclusion_proof = 7;
+   */
+  inclusionProof = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ak_public_key = 8;
+   */
+  akPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes atta = 9;
+   */
+  atta = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AnchorPresentationV3>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AnchorPresentationV3";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "state_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "candidate_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "anchor_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "genesis_params_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "delegations", kind: "message", T: SignedAuthorityObjectV1, repeated: true },
+    { no: 6, name: "transitions", kind: "message", T: SignedAuthorityObjectV1, repeated: true },
+    { no: 7, name: "inclusion_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "ak_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "atta", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorPresentationV3 {
+    return new AnchorPresentationV3().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AnchorPresentationV3 {
+    return new AnchorPresentationV3().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AnchorPresentationV3 {
+    return new AnchorPresentationV3().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AnchorPresentationV3 | PlainMessage<AnchorPresentationV3> | undefined, b: AnchorPresentationV3 | PlainMessage<AnchorPresentationV3> | undefined): boolean {
+    return proto3.util.equals(AnchorPresentationV3, a, b);
   }
 }
 
@@ -8707,25 +8773,15 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
   ownerPublicKey = new Uint8Array(0);
 
   /**
-   * Tier 2 Foundation state-anchor binding.  Trader stamps these
-   * from the vault's `sofi/vault-state/{vault_id}/latest` at quote
-   * time.  Gate verifies against local DLVManager state (NOT storage).
-   * For vaults with `anchor_enforcement = REQUIRED` these fields are
-   * mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+   * The parent identity: c_n of the EXACT complete state this hop consumes.
+   * The trader computes it from the composed successor V_n; the vault
+   * recomputes its own local c_n and compares. Equality binds the hop to the
+   * whole state — reserves, generation, lineage edge, authority position —
+   * with no projection to disagree with.
    *
-   * @generated from field: uint64 vault_state_anchor_seq = 11;
+   * @generated from field: bytes parent_binding = 15;
    */
-  vaultStateAnchorSeq = protoInt64.zero;
-
-  /**
-   * @generated from field: bytes vault_state_reserves_digest = 12;
-   */
-  vaultStateReservesDigest = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes vault_state_anchor_digest = 13;
-   */
-  vaultStateAnchorDigest = new Uint8Array(0);
+  parentBinding = new Uint8Array(0);
 
   constructor(data?: PartialMessage<RouteCommitHopV1>) {
     super();
@@ -8745,9 +8801,7 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
     { no: 8, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 9, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 11, name: "vault_state_anchor_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 12, name: "vault_state_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 13, name: "vault_state_anchor_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "parent_binding", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitHopV1 {
@@ -9600,6 +9654,17 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
    */
   updatedStateNumber = protoInt64.zero;
 
+  /**
+   * Inner digest of the owner's published `AnchorPresentationV3`
+   * (`H(DSM/anchor-presentation/v1 ‖ proto_bytes)`). DISCOVERY ONLY: the ad
+   * locates the presentation; the presentation authenticates itself through
+   * P0–P6 and the c_n it carries resolves the exact `CCB(V_n)` bytes. A
+   * trader quotes against NOTHING from this ad — reserves here are hints.
+   *
+   * @generated from field: bytes anchor_presentation_digest = 19;
+   */
+  anchorPresentationDigest = new Uint8Array(0);
+
   constructor(data?: PartialMessage<RoutingVaultAdvertisementV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -9622,6 +9687,7 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
     { no: 12, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "lifecycle_state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "updated_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 19, name: "anchor_presentation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RoutingVaultAdvertisementV1 {

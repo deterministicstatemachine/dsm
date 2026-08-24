@@ -41,6 +41,34 @@ const DOMAIN_VAULT_SMT_VALUE: &[u8] = b"DSM/vault-smt-value\0";
 /// roots.
 const DOMAIN_INCLUSION_PROOF: &[u8] = b"DSM/vault-state-inclusion\0";
 
+const DOMAIN_RESERVES: &[u8] = b"DSM/amm-reserves\0";
+
+/// Compute the canonical reserves digest for an AMM constant-product vault —
+/// the value the per-device vault-state LEAF commits
+/// ([`compute_vault_smt_value`]). Stable across endianness because all
+/// integer fields are big-endian encoded.
+///
+/// This is a DEVICE-PROJECTION digest: it lives in the owner's own SMT leaf
+/// as the advance's local witness. The market-facing identity of a vault
+/// state is `c_n` over the full `CCB(V_n)`; nothing outside the device tree
+/// consumes this digest.
+pub fn compute_reserves_digest(
+    token_a: &[u8],
+    token_b: &[u8],
+    reserve_a: u64,
+    reserve_b: u64,
+    fee_bps: u32,
+) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(DOMAIN_RESERVES);
+    h.update(token_a);
+    h.update(token_b);
+    h.update(&reserve_a.to_be_bytes());
+    h.update(&reserve_b.to_be_bytes());
+    h.update(&fee_bps.to_be_bytes());
+    *h.finalize().as_bytes()
+}
+
 /// 256-bit SMT key for a vault state leaf.
 ///
 /// Computed as `BLAKE3(DOMAIN_VAULT_SMT_KEY || vault_id)`.  Pure
@@ -249,7 +277,7 @@ pub fn verify_vault_state_inclusion_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dlv::vault_state_anchor::compute_reserves_digest;
+    use super::compute_reserves_digest;
 
     fn fixture_keys() -> (Vec<u8>, Vec<u8>) {
         crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair")

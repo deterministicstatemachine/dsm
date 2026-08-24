@@ -356,13 +356,10 @@ internal class SoFiTestContext(
             // computes them per the accept-or-compute path.
             .setFulfillmentBytes(ByteString.copyFrom(fulfillmentBytes))
             .setContent(ByteString.copyFrom(content))
-            // Tier-2 Foundation anchor binding (REQUIRED) demands that
-            // RouteCommit hops carry vault_state_reserves_digest +
-            // vault_state_anchor_digest stamped from the latest
-            // VaultStateAnchorV1.  `route.findAndBindBestPath` doesn't
-            // wire those fields yet — that's a separate workstream.
-            // For this end-to-end test, OPTIONAL is sufficient to
-            // exercise the full Tier-2 envelope + composition path.
+            // The state-identity cut replaced the per-hop anchor fields
+            // with one mandatory `parent_binding` (the parent state's c_n),
+            // enforced unconditionally at the routed-unlock gate; this
+            // policy field no longer gates that check.
             .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_OPTIONAL)
             .build()
         val req = DlvInstantiateV1.newBuilder()

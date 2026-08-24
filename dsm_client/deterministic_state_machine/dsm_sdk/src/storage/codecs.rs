@@ -568,6 +568,7 @@ mod tests {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: String::new(),
+            network_id: "dsm-test".into(),
         };
         let enc1 = encode_genesis_record_bytes(&rec);
         let enc2 = encode_genesis_record_bytes(&rec);

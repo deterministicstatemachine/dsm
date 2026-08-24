@@ -122,6 +122,83 @@ fn invalid(e: CcbError) -> DecodeError {
     DecodeError::Invalid(e.to_string())
 }
 
+/// Decode a `GenesisParamsV3` — class `0x0018`, schema 1, strict.
+pub fn decode_genesis_params(bytes: &[u8]) -> Result<super::genesis::GenesisParamsV3, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(class::GENESIS_PARAMS_V3, 1)?;
+    let genesis_nonce = c.digest32()?;
+    let nid_len = c.u32()? as usize;
+    let network_id = c.take(nid_len)?.to_vec();
+    let genesis_version = c.u32()?;
+    let grk_alg_id = c.u16()?;
+    let pk_len = c.u32()? as usize;
+    let grk_pk = c.take(pk_len)?.to_vec();
+    if c.i != bytes.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        });
+    }
+    super::genesis::GenesisParamsV3::new(
+        genesis_nonce,
+        &network_id,
+        genesis_version,
+        grk_alg_id,
+        &grk_pk,
+    )
+    .map_err(invalid)
+}
+
+/// Decode a `RootProgressionDelegation` — class `0x0019`, schema 1, strict.
+pub fn decode_delegation(
+    bytes: &[u8],
+) -> Result<super::devtree::RootProgressionDelegation, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(class::ROOT_PROGRESSION_DELEGATION, 1)?;
+    let d = super::devtree::RootProgressionDelegation {
+        genesis_id: c.digest32()?,
+        role: c.u16()?,
+        role_version: c.u16()?,
+        delegated_alg_id: c.u16()?,
+        delegated_pk: {
+            let len = c.u32()? as usize;
+            c.take(len)?.to_vec()
+        },
+        delegation_number: c.u64()?,
+        parent_delegation_digest: c.digest32()?,
+        activation_transition_digest: c.digest32()?,
+    };
+    if c.i != bytes.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        });
+    }
+    // Round-trip through the validating encoder so a decoded delegation
+    // cannot carry a key its declared algorithm refuses.
+    d.encode().map_err(invalid)?;
+    Ok(d)
+}
+
+/// Decode a `DeviceTreeRootTransition` — class `0x001A`, schema 1, strict.
+pub fn decode_transition(
+    bytes: &[u8],
+) -> Result<super::devtree::DeviceTreeRootTransition, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(class::DEVICE_TREE_ROOT_TRANSITION, 1)?;
+    let t = super::devtree::DeviceTreeRootTransition {
+        genesis_id: c.digest32()?,
+        predecessor_transition_digest: c.digest32()?,
+        new_root: c.digest32()?,
+        version_number: c.u64()?,
+        delegation_digest: c.digest32()?,
+    };
+    if c.i != bytes.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        });
+    }
+    Ok(t)
+}
+
 /// Decode `CCB(V_n)` — class `0x0001`, schema 3, strict, no trailing bytes.
 pub fn decode_vault_state(bytes: &[u8]) -> Result<VaultStateV2, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };

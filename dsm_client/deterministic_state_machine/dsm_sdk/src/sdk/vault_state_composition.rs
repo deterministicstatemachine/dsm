@@ -1,71 +1,59 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Phase 6: vault-state composition for SoFi quote-time correctness.
+//! Vault-state composition — quote-time derivation of a vault's canonical
+//! current state from its published, verified artifacts.
 //!
-//! Background
-//! ----------
-//! SoFi spec §2.3 + §4.1 specify that once a valid σ (stitched proof of
-//! completion) exists on storage, the unlock is computable by anyone and
-//! "settlement executes deterministically".  In particular this implies
-//! that the **next trader** quoting against a vault should derive the
-//! vault's canonical current state from:
+//! Baseline
+//! --------
+//! The baseline is the owner's `AnchorPresentationV3` plus the exact
+//! `CCB(V_n)` bytes its anchor commits. `verify_anchor_presentation` runs the
+//! full P0–P6 owner-authority predicate and re-hashes the bytes against the
+//! signed `c_n`, so everything the old anchor stack restated — sequence,
+//! reserves, pair, fee, storage set, owner identity — is read out of ONE
+//! authenticated object with one identity:
 //!
-//!   1. The latest owner-signed `VaultStateAnchorV1` (the baseline)
-//!   2. PLUS any pending `VaultPendingPointerV1` records published since
-//!      the baseline that chain forward by one sequence step
+//! ```text
+//! c_n = H_dom(DSM/vault-state, CCB(V_n))
+//! ```
 //!
-//! Without this composition, traders see only the latest owner-published
-//! anchor.  If the owner is offline between trades, concurrent traders
-//! all build against the stale anchor and Tripwire prunes all but one of
-//! them — the owner becomes a continuous-throughput bottleneck.
+//! There is no inclusion proof, no reserve proof, no birth anchor and no
+//! `/latest` here — those were parallel restatements of state facts, and the
+//! state-identity cut removes the duplicate sources rather than
+//! cross-checking them.
 //!
-//! What this module does
-//! ---------------------
-//! `compose_vault_state` takes a vault id + owner-signed baseline anchor
-//! + the canonical (token_a, token_b, fee_bps) tuple. It:
+//! Pending fold
+//! ------------
+//! On top of the verified baseline the composer folds any published
+//! `VaultPendingPointerV1` records that chain forward by one sequence step,
+//! so concurrent traders quoting against the same vault while the owner is
+//! offline see each other's settled trades and serialize on top of them.
+//! Each fold step:
 //!
-//! - Lists `sofi/vault-pending/{vault_id_b32}/` (lex-ordered by `new_sequence`)
-//! - For each pointer: verifies the SPHINCS+ signature; fetches
-//!   `sofi/extcommit/{x_b32}` to confirm the X anchor is published;
-//!   fetches `sofi/extcommit-rc/{x_b32}` to obtain the signed RouteCommit;
-//!   locates the hop touching this vault, verifies the hop's bound
-//!   reserves digest matches the cursor, and re-simulates the AMM swap
-//!   to advance both the sequence AND the reserves
-//! - Stops at first pointer that fails any check, or at
-//!   `MAX_PENDING_CHAIN_DEPTH`, or when a sequence gap is detected
-//! - Returns the composed state (sequence + composed reserves)
+//! - verifies the pointer's SPHINCS+ signature;
+//! - demands a verified settlement receipt matching the pointer's committed
+//!   receipt hash (the receipt gate — the only artifact that cannot exist
+//!   without a real settlement);
+//! - fetches the signed `RouteCommit` bound to the pointer's `X` and
+//!   re-derives `X` from its bytes;
+//! - requires the hop's `parent_binding` to equal the `c_n` of the CURRENT
+//!   cursor state — the one byte-equality that replaces the old
+//!   (sequence, reserves digest, anchor digest) triple;
+//! - re-simulates the AMM swap against the cursor's reserves and demands the
+//!   exact claimed output;
+//! - constructs the successor `V_{n+1}` — generation advanced, reserves
+//!   moved, `parent_state_commitment` set to the consumed state's `c_n`,
+//!   every other field copied byte-for-byte — and advances the cursor to its
+//!   commitment.
 //!
-//! Reserve folding
-//! ---------------
-//! The composer walks each pointer in sequence order and applies the
-//! AMM swap embedded in the corresponding signed RouteCommit (fetched
-//! from `sofi/extcommit-rc/{X_b32}`).  Concretely, for each pointer:
-//!
-//! - Look up the hop in the RouteCommit whose `vault_id` matches.
-//! - Verify the hop's `vault_state_reserves_digest` equals the cursor's
-//!   current reserves digest (this is the cryptographic link between
-//!   pointer and cursor state).
-//! - Re-simulate `constant_product_output(input, reserve_in, reserve_out,
-//!   fee_bps)` against the cursor.  The simulated output must equal the
-//!   hop's claimed `expected_output_amount`; if it doesn't the pointer
-//!   was signed against a different baseline and folding it is unsafe.
-//! - Advance the cursor's reserves (`+input` on the input side, `-output`
-//!   on the output side) and bump the sequence.
-//!
-//! The result is a derived state where both `sequence` AND `reserves`
-//! reflect everything published so far, not just the owner-signed
-//! baseline.  Path search consumes this composed view, so concurrent
-//! traders quoting against the same vault while the owner is offline
-//! see each other's pending trades and serialize on top of them
-//! instead of all colliding against the stale anchor.
+//! The composed result is therefore a full `VaultStateV2` with a canonical
+//! identity of its own: the `c_n` a new trade's hop must bind as its parent.
 
+use dsm::ccb::{vault_state_commitment, VaultStateV2};
 use dsm::dlv::vault_pending_pointer::{verify_vault_pending_pointer, SignedVaultPendingPointer};
-use dsm::dlv::vault_state_anchor::{
-    compute_reserves_digest, verify_vault_state_anchor, SignedVaultStateAnchor,
-};
 use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
+use crate::sdk::identity_presentation::verify_anchor_presentation;
 use crate::sdk::route_commit_sdk::{
     compute_external_commitment, external_commitment_rc_key,
     verify_route_commit_unlock_eligibility, vault_pending_prefix,
@@ -78,18 +66,21 @@ use crate::sdk::routing_path_sdk::constant_product_output;
 /// per quote.
 pub(crate) const MAX_PENDING_CHAIN_DEPTH: usize = 64;
 
-/// Result of composing pending pointers onto an owner-signed baseline.
+/// Result of composing pending pointers onto a presentation-verified
+/// baseline.
 #[derive(Debug, Clone)]
 pub(crate) struct ComposedVaultState {
-    /// Latest sequence number the composer was able to verify.  This is
-    /// the baseline's sequence when no valid pointers were folded; the
-    /// last successfully-folded pointer's `new_sequence` otherwise.
+    /// The composed state itself — the baseline `V_n` when no pointers
+    /// folded, the constructed successor otherwise. Every fact a consumer
+    /// needs (generation, reserves, pair, fee, storage set, encumbrances,
+    /// authority position) is a field of this one object.
+    pub state: VaultStateV2,
+    /// `c_n` of `state` — the canonical identity of the composed frontier,
+    /// and the exact value a new trade's hop must carry as `parent_binding`.
+    pub c_n: [u8; 32],
+    /// `state.generation`, broken out for callers that only order by it.
     pub sequence: u64,
-    /// Composed reserves after applying every successfully-folded
-    /// pending pointer's AMM swap.  Path search consumes these for
-    /// quote-time AMM math; the chunks-#7 gate verifies against the
-    /// vault's local DLVManager at unlock time so the chain is
-    /// authoritative for the actual settlement.
+    /// `state.reserve_a` / `state.reserve_b`, broken out for AMM math.
     pub reserves_a: u64,
     pub reserves_b: u64,
     /// Number of pending pointers successfully verified + chained.
@@ -101,114 +92,57 @@ pub(crate) struct ComposedVaultState {
     /// DIAGNOSTIC AGGREGATION, never a safety predicate. It sums causes that
     /// mean entirely different things, so a caller that refused on
     /// `pending_chain_skipped > 0` would let anyone un-quotable a vault forever
-    /// by publishing one malformed pointer — reintroducing the free-griefing
-    /// property the receipt gate exists to remove. Use the narrow signal below.
+    /// by publishing one malformed pointer — the free-griefing property the
+    /// receipt gate exists to remove. There is deliberately NO narrower
+    /// "parent in flight" signal either: a pointer is self-signed, so its bare
+    /// presence proves nothing a quote decision may consume, and the
+    /// first-writer settlement-slot claim is where competing quotes serialize.
     pub pending_chain_skipped: usize,
-    /// A pointer that is structurally sound and validly signed sits at exactly
-    /// the sequence this composition ended on, and no verified receipt witnesses
-    /// it.
-    ///
-    /// Some trade may already have consumed the state a quote would be built
-    /// against. It cannot actually double-settle — the first-writer claim
-    /// refuses a contested slot before any advance — so this is not a safety
-    /// signal. It spares the trader from quoting, signing a RouteCommit and
-    /// publishing X against a parent that is in flight, only to be refused at
-    /// the claim.
-    ///
-    /// Deliberately narrow. A malformed, stale, cryptographically invalid or
-    /// depth-exceeded pointer does NOT set this: none of them witness a trade in
-    /// flight, and treating them as if they did is precisely the griefing vector.
-    pub blocked_by_unreceipted_pointer_at_parent: bool,
-    /// The owner's device root the BASELINE reserves were proven against — the
-    /// only root any generation of this composition is ultimately rooted in. A
-    /// settling trader records it as the settlement's `reserve_proof_root`: the
-    /// composed reserves at generation N are derived from this root plus N
-    /// verified receipts, and have no owner root of their own.
-    pub baseline_reserve_root: [u8; 32],
-    /// The vault owner, as the baseline reserve proof names it — the device whose
-    /// SMT the reserve leaves live in. Constant across generations.
+    /// The vault owner, proven by the presentation's P0–P6 chain at the
+    /// state's own committed authority position. Constant across generations
+    /// — market successors copy the authority position byte-for-byte.
     pub owner_devid: [u8; 32],
     pub owner_genesis: [u8; 32],
     pub owner_public_key: Vec<u8>,
-    /// The canonical storage set the vault was born under, read from the
-    /// vault's OWN signed anchors (the seq-0 birth anchor and the baseline
-    /// agree, or composition refuses). Consumers resolve THIS through their
-    /// local catalog — the anchor chooses the set; configuration only resolves
-    /// it — for the settlement-slot register and any publication scoped to the
-    /// vault. Never derived from local config.
+    /// `storage_set_id = H_dom(DSM/storage-set, CCB(S))` over the state's OWN
+    /// storage-set member list — a derived view of a `V_n` field, never a
+    /// second source. Consumers resolve it through their local catalog.
     pub storage_set_id: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompositionError {
-    /// The vault's seq-0 (birth) anchor is missing, fails verification, is
-    /// signed by a different owner key than the baseline, or names a
-    /// different `storage_set_id` than the baseline. `storage_set_id` is
-    /// birth-fixed across the lineage: a validly signed later anchor with a
-    /// different set is not caught by its own signature — only by this
-    /// lineage check. Fail closed.
-    StorageSetLineageBroken,
-    /// Baseline anchor's SPHINCS+ signature failed verification.  Fail
-    /// closed — without a valid baseline the entire composition is moot.
-    InvalidBaselineAnchor,
-    /// SoFi spec §4.1.2 / §8.4 step 2: a vault state inclusion proof
-    /// was published for this vault BUT the proof's signature, SMT
-    /// inclusion path, OR (vault_id, sequence, reserves_digest) tuple
-    /// disagrees with the baseline anchor.  Fail closed — either the
-    /// owner equivocated or someone tampered with one of the two
-    /// records; both possibilities make the vault unsafe to quote.
-    InvalidInclusionProof,
-    /// SoFi spec §4.1.2 strict mode: NO inclusion proof was published
-    /// for this vault.  The vault may pre-date the Phase-7 SMT flow
-    /// (legacy advertisement) OR the owner has not yet republished
-    /// after the upgrade.  Either way, strict-mode composition refuses
-    /// to fold it — the trader cannot prove the vault state is in the
-    /// owner's PD-SMT, which is what the spec demands.
-    MissingInclusionProof,
+    /// The presentation failed P0–P6, the `CCB(V_n)` bytes do not hash to the
+    /// anchor's commitment, or the bytes do not strictly decode. Fail closed
+    /// — without an authenticated baseline the entire composition is moot.
+    InvalidBaselinePresentation(String),
+    /// The baseline verified, but it describes a different market than the
+    /// caller asked to compose: wrong vault id, wrong pair, or wrong fee.
+    /// The signed state is authoritative; a disagreeing caller tuple means
+    /// the caller's view is stale or fabricated.
+    BaselineMismatch(String),
     /// Storage listing the pending prefix failed.
     StorageListFailed(String),
     /// Decoding a pointer proto failed in a non-recoverable way.  The
     /// individual pointer is skipped; this variant fires only if the
     /// whole list page failed.
     PointerDecodeFailed(String),
-    /// No verified `VaultReserveInclusionProofV1` exists for the baseline
-    /// sequence. The vault's liquidity is therefore unproven, and a quote
-    /// against unproven liquidity is a quote against a number.
-    ///
-    /// The owner's signed reserves digest is NOT a substitute: it is one-way, so
-    /// checking it can only confirm that numbers someone already supplied hash
-    /// to what the owner signed. The owner signing a digest of its own claim
-    /// establishes authorship, not solvency.
-    MissingReserveProof,
-    /// A reserve proof exists but does not agree with the vault-state inclusion
-    /// proof on `(vault_id, sequence, smt_root)`, or its own verification fails.
-    /// Either the owner equivocated or a record was tampered with; a vault that
-    /// can show reserves at one state and vault-state at another could show
-    /// funded reserves beside a drained state.
-    InvalidReserveProof,
-    /// The vault names its pair by label rather than by 32-byte policy commits,
-    /// so a proven reserve leg cannot be matched to a side of the pair.
-    ///
-    /// FAILS CLOSED. Guessing the mapping would defeat the proof: the whole
-    /// point is that the magnitudes come out of authenticated leaves keyed by
-    /// asset identity, and a label is not an identity — this session had two
-    /// distinct tokens sharing the ticker RIGB.
+    /// The caller names the pair by something other than 32-byte policy
+    /// commits, so it cannot be matched against the signed state's market
+    /// policy. FAILS CLOSED — a label is not an identity.
     PairIsNotPolicyCommits,
 }
 
 impl std::fmt::Display for CompositionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CompositionError::InvalidBaselineAnchor => {
-                write!(f, "baseline anchor signature invalid")
+            CompositionError::InvalidBaselinePresentation(msg) => {
+                write!(f, "baseline presentation failed verification: {msg}")
             }
-            CompositionError::InvalidInclusionProof => {
-                write!(f, "vault state inclusion proof failed verification")
-            }
-            CompositionError::MissingInclusionProof => {
+            CompositionError::BaselineMismatch(msg) => {
                 write!(
                     f,
-                    "vault has no published VaultStateInclusionProofV1 — strict mode requires one (SoFi §4.1.2)"
+                    "baseline disagrees with the caller's market tuple: {msg}"
                 )
             }
             CompositionError::StorageListFailed(msg) => {
@@ -217,22 +151,10 @@ impl std::fmt::Display for CompositionError {
             CompositionError::PointerDecodeFailed(msg) => {
                 write!(f, "pointer decode failed: {msg}")
             }
-            CompositionError::MissingReserveProof => write!(
-                f,
-                "vault has no verified VaultReserveInclusionProofV1 at its baseline sequence — its liquidity is unproven"
-            ),
-            CompositionError::InvalidReserveProof => write!(
-                f,
-                "reserve proof disagrees with the vault-state inclusion proof, or failed verification"
-            ),
             CompositionError::PairIsNotPolicyCommits => write!(
                 f,
-                "vault pair must be 32-byte policy commits so proven reserve legs can be matched to a side"
-            ),
-            CompositionError::StorageSetLineageBroken => write!(
-                f,
-                "vault storage-set lineage broken: the seq-0 birth anchor is missing, unverifiable, \
-                 signed by another key, or names a different storage_set_id than the baseline"
+                "caller pair must be 32-byte policy commits so it can be matched to the signed \
+                 state's market policy"
             ),
         }
     }
@@ -240,152 +162,64 @@ impl std::fmt::Display for CompositionError {
 
 impl std::error::Error for CompositionError {}
 
-/// Fold pending pointers onto an owner-signed baseline.
+/// Fold pending pointers onto a presentation-verified baseline.
 ///
-/// `baseline` is the latest `VaultStateAnchorV1` the owner has published
-/// (typically fetched via `dlv.getVaultStateAnchor` or via the routing
-/// advertisement's `state_number`).  Its signature is re-verified here
-/// — fail-closed if the baseline itself is broken.
+/// `presentation` + `vn_bytes` are the owner's published verification bundle
+/// and the exact `CCB(V_n)` bytes its anchor commits — both fetched through
+/// the immutable store (which already re-hashed the bytes against the
+/// requested identity) or built locally by the owner. Verification here is
+/// full P0–P6; nothing is trusted as presented.
 ///
-/// `baseline_reserves` are the (reserve_a, reserve_b) values committed
-/// in the baseline's `reserves_digest`.  Caller supplies them because
-/// the digest is one-way (verification re-derives + compares, but the
-/// composer needs the magnitudes to compute the running cursor).
-///
-/// Returns the composed `(sequence, reserves_a, reserves_b)` plus
-/// telemetry (`pending_chain_len` / `pending_chain_skipped`) so the
-/// path search handler can log progress and drop saturated vaults
-/// from the candidate set.
+/// `(token_a, token_b, fee_bps)` is the market tuple the caller intends to
+/// quote. It is checked AGAINST the signed state and refused on mismatch —
+/// the state is authoritative, the tuple is the caller's intent.
 pub(crate) async fn compose_vault_state(
     vault_id: &[u8; 32],
-    baseline: &SignedVaultStateAnchor,
+    presentation: &crate::generated::AnchorPresentationV3,
+    vn_bytes: &[u8],
     token_a: &[u8],
     token_b: &[u8],
     fee_bps: u32,
 ) -> Result<ComposedVaultState, CompositionError> {
-    // Verify the baseline anchor's signature.  No further composition
-    // is meaningful without this.
-    verify_vault_state_anchor(baseline).map_err(|_| CompositionError::InvalidBaselineAnchor)?;
+    // ── The baseline: one authenticated object. ──────────────────────────
+    let verified = verify_anchor_presentation(presentation, vn_bytes)
+        .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?;
+    let baseline_state = verified.state;
+    let baseline_c_n = verified.c_n;
+    let owner = verified.owner;
 
-    // SoFi spec §4.1.2 / §8.4 step 2 — STRICT MODE.  Verify the
-    // owner's PD-SMT inclusion proof for the baseline vault state.
-    // The anchor signature above is *necessary* but not *sufficient*:
-    // an attacker who recovered the signing key could forge a signed anchor.
-    // The inclusion proof additionally commits the SMT root + a
-    // 256-sibling Merkle path that
-    // dsm::dlv::vault_smt_leaf::verify_vault_smt_inclusion recomputes
-    // against the device's actual SMT — forgery requires also
-    // fabricating SMT consistency, which a stateless attacker cannot.
-    //
-    // Strict mode: a vault with no published inclusion proof is
-    // dropped from the candidate set.  This is the documented Phase-7
-    // migration behaviour — legacy ads pre-dating this code do not
-    // pass.
-    let inclusion = crate::sdk::vault_smt_inclusion_codec::fetch_latest_inclusion_proof(vault_id)
-        .await
-        .map_err(|e| CompositionError::StorageListFailed(format!("inclusion fetch: {e}")))?;
-    let inclusion = match inclusion {
-        Some(p) => p,
-        None => return Err(CompositionError::MissingInclusionProof),
-    };
-    // Cross-bind the inclusion proof to the baseline: same
-    // (vault_id, sequence, reserves_digest) tuple.  If they disagree,
-    // the owner equivocated and the vault is unsafe.
-    if inclusion.vault_id != baseline.vault_id
-        || inclusion.sequence != baseline.sequence
-        || inclusion.reserves_digest != baseline.reserves_digest
-    {
-        return Err(CompositionError::InvalidInclusionProof);
-    }
-    // Verify the inclusion proof end-to-end (signature + SMT path).
-    dsm::dlv::vault_smt_leaf::verify_vault_state_inclusion_proof(&inclusion)
-        .map_err(|_| CompositionError::InvalidInclusionProof)?;
-
-    // GATE 1 — the reserves are PROVEN, not supplied.
-    //
-    // This function used to take the baseline reserves as arguments and check
-    // them against the owner's signed digest. A digest is one-way, so that check
-    // could only confirm that numbers the caller already held hash to the value
-    // the owner signed: whoever chose the numbers chose what the vault appeared
-    // to hold, and in production they came straight out of a published
-    // advertisement. The magnitudes now come OUT of an authenticated proof.
-    let reserve_proof = crate::sdk::vault_reserve_proof_codec::fetch_verified_reserve_proof(
-        vault_id,
-        baseline.sequence,
-    )
-    .await
-    .ok_or(CompositionError::MissingReserveProof)?;
-
-    // Bind it to the state proof. Reserve leaves carry the VAULT's own sequence
-    // rather than a per-leaf counter precisely so both proofs meet at one root;
-    // an owner able to present reserves at one state and vault-state at another
-    // could show funded reserves beside a later, drained state.
-    if reserve_proof.smt_root != inclusion.smt_root
-        || reserve_proof.sequence != inclusion.sequence
-        || reserve_proof.vault_id != inclusion.vault_id
-    {
-        return Err(CompositionError::InvalidReserveProof);
+    if baseline_state.vault_id != *vault_id {
+        return Err(CompositionError::BaselineMismatch(
+            "the presented state is for a different vault".into(),
+        ));
     }
 
-    // Match proven legs to the sides of the pair. A leg is keyed by 32-byte
-    // policy commit, so a vault naming its pair by label cannot be matched and
-    // fails closed rather than being guessed at.
-    // Through the ONE pair parser, so the identity a vault was funded under, the
-    // identity a pointer commits to, and the identity a quote is bound to are
-    // derived by the same code and cannot disagree.
+    // The caller's tuple must be the state's own market, through the ONE pair
+    // parser, so the identity a vault was funded under, the identity a
+    // pointer commits to, and the identity a quote is bound to are derived by
+    // the same code and cannot disagree.
     let Ok(pair) = dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) else {
         return Err(CompositionError::PairIsNotPolicyCommits);
     };
     let (pc_a, pc_b) = (pair.a(), pair.b());
-    let (Some(proven_a), Some(proven_b)) = (
-        dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_a),
-        dsm::dlv::vault_reserve_inclusion::proven_amount(&reserve_proof, &pc_b),
-    ) else {
-        // A proof that omits a side has not shown that side holds nothing — it
-        // has shown nothing about it. Treating an absent leg as zero would let a
-        // half-funded vault quote as if it were empty on one side.
-        return Err(CompositionError::InvalidReserveProof);
-    };
-    let baseline_reserves = (proven_a, proven_b);
-
-    // The owner's signed digest must agree with what its own leaves prove. Both
-    // are the owner's, so disagreement means the two records were produced from
-    // different states — the vault is not safe to quote either way. The digest
-    // is always over the CANONICAL pair order (lex-lower first) — the order the
-    // owner's own advance derived it in — never the caller's token order.
-    let expected_digest = compute_reserves_digest(
-        &pc_a,
-        &pc_b,
-        baseline_reserves.0,
-        baseline_reserves.1,
-        fee_bps,
-    );
-    if expected_digest != baseline.reserves_digest {
-        return Err(CompositionError::InvalidReserveProof);
-    }
-
-    // STORAGE-SET LINEAGE. The set a vault is born under is fixed for its
-    // lifetime, and every later generation must derive it from the birth
-    // state — callers never supply it. The seq-0 pinned anchor is the
-    // birth-pinned reference: it must exist, verify, be signed by the SAME
-    // owner key as the baseline, and name the SAME `storage_set_id`. A baseline
-    // that names another set is a lineage break (or an equivocating owner),
-    // and quoting it would let a trader claim against a set the vault was
-    // never bound to.
-    let birth = crate::sdk::vault_state_anchor_codec::fetch_signed_anchor_at_sequence(vault_id, 0)
-        .await
-        .map_err(|e| CompositionError::StorageListFailed(format!("birth anchor fetch: {e}")))?
-        .ok_or(CompositionError::StorageSetLineageBroken)?;
-    verify_vault_state_anchor(&birth).map_err(|_| CompositionError::StorageSetLineageBroken)?;
-    if birth.vault_id != baseline.vault_id
-        || birth.sequence != 0
-        || birth.owner_public_key != baseline.owner_public_key
-        || birth.storage_set_id != baseline.storage_set_id
+    if *baseline_state.market_policy.token_a() != pc_a
+        || *baseline_state.market_policy.token_b() != pc_b
     {
-        return Err(CompositionError::StorageSetLineageBroken);
+        return Err(CompositionError::BaselineMismatch(
+            "the caller's pair is not the signed state's market pair".into(),
+        ));
     }
-    let storage_set_id = birth.storage_set_id;
+    if baseline_state.fee_policy.fee_bps() != fee_bps {
+        return Err(CompositionError::BaselineMismatch(format!(
+            "the caller's fee ({fee_bps} bps) is not the signed state's fee ({})",
+            baseline_state.fee_policy.fee_bps()
+        )));
+    }
 
+    let storage_set_id = dsm::ccb::storage_set_id(&baseline_state.storage_set)
+        .map_err(|e| CompositionError::InvalidBaselinePresentation(format!("storage set: {e}")))?;
+
+    // ── Collect pending pointers. ────────────────────────────────────────
     let prefix = vault_pending_prefix(vault_id);
     let mut cursor: Option<String> = None;
     const LIST_LIMIT: u32 = 256;
@@ -416,7 +250,6 @@ pub(crate) async fn compose_vault_state(
                     continue;
                 }
             };
-            // Convert proto → typed struct for verification.
             if proto.vault_id.len() != 32
                 || proto.x.len() != 32
                 || proto.new_reserves_digest.len() != 32
@@ -465,42 +298,17 @@ pub(crate) async fn compose_vault_state(
     // Sort by new_sequence ascending so chain folding is deterministic.
     pointers.sort_by(|a, b| a.new_sequence.cmp(&b.new_sequence).then(a.x.cmp(&b.x)));
 
-    // Fold pointers onto the baseline.  Full Phase-6 fold-rule:
-    //   - Pointer's parent_sequence must equal the running cursor.
-    //   - Pointer's signature must verify.
-    //   - The X it references must actually exist on storage (so we
-    //     never advance the cursor against a pointer for a non-published
-    //     trade).
-    //   - The signed RouteCommit at defi/extcommit-rc/{x_b32} must be
-    //     present + decode + carry a hop touching this vault.
-    //   - The hop's vault_state_reserves_digest (the digest the trader
-    //     signed against) must match the running cursor's reserves +
-    //     fee_bps — this ties the pointer to the cursor's actual state.
-    //   - The AMM swap math against the cursor's reserves must succeed.
-    //   - Up to MAX_PENDING_CHAIN_DEPTH folds total.
-    //
-    // Both sequence AND reserves advance.  This is the load-bearing
-    // step that makes "math speaks for itself" observable: the
-    // composer derives the canonical current state from published
-    // proofs, not from the owner's (possibly stale) signed anchor.
-    let mut cursor_seq = baseline.sequence;
-    let mut cursor_reserve_a = baseline_reserves.0;
-    let mut cursor_reserve_b = baseline_reserves.1;
+    // ── The fold. Cursor = a full state + its commitment. ────────────────
+    let mut cursor_state = baseline_state;
+    let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
     let mut chain_skipped: usize = 0;
-    // Parents observed to carry a valid-but-unwitnessed pointer. Recorded per
-    // parent rather than as a running flag because the cursor can advance past
-    // an earlier block: two pointers may share a parent, and if the second is
-    // receipted it folds, which makes the first no longer describe the sequence
-    // being quoted. Only a block AT THE FINAL cursor matters.
-    let mut unreceipted_parents: std::collections::BTreeSet<u64> =
-        std::collections::BTreeSet::new();
     for ptr in pointers.into_iter() {
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
             chain_skipped += 1;
             continue;
         }
-        if ptr.parent_sequence != cursor_seq {
+        if ptr.parent_sequence != cursor_state.generation {
             chain_skipped += 1;
             continue;
         }
@@ -532,17 +340,20 @@ pub(crate) async fn compose_vault_state(
             {
                 Some(r) => r,
                 None => {
-                    // INERT, not invalid. The pointer may be perfectly well-formed
-                    // and its settlement may land a moment from now. Skipping leaves
-                    // effective reserves exactly as if it had never been published,
-                    // which is the whole point.
-                    //
-                    // But it IS a validly-signed claim on this exact parent, so a
-                    // quote built here would be built against a state that may
-                    // already be in flight. Recorded — every earlier `continue`
-                    // in this loop is a pointer that witnesses nothing at all and
-                    // must not block anyone.
-                    unreceipted_parents.insert(ptr.parent_sequence);
+                    // INERT — for reserves AND for quote availability. The
+                    // pointer may be a perfectly well-formed trade whose
+                    // settlement lands a moment from now, or it may be one
+                    // storage write from an arbitrary keypair: the primitive
+                    // cannot tell them apart, because a pointer is
+                    // SELF-signed and establishes no vault authority and no
+                    // settlement. Anything a composer concluded from its bare
+                    // presence — "this parent is in flight", most temptingly —
+                    // would hand liquidity suppression to anyone for the
+                    // price of one write. Skipping leaves the composed state
+                    // exactly as if the pointer had never been published;
+                    // serialization safety lives where it always did, at the
+                    // first-writer settlement-slot claim, where a losing
+                    // quote costs its owner nothing.
                     chain_skipped += 1;
                     continue;
                 }
@@ -551,8 +362,8 @@ pub(crate) async fn compose_vault_state(
             != ptr.expected_receipt_hash
         {
             // A receipt exists but does not witness THIS trade, so this pointer
-            // is as unwitnessed as one with no receipt at all.
-            unreceipted_parents.insert(ptr.parent_sequence);
+            // is as unwitnessed as one with no receipt at all — and exactly as
+            // inert.
             chain_skipped += 1;
             continue;
         }
@@ -563,7 +374,6 @@ pub(crate) async fn compose_vault_state(
         if receipt.trade.parent_sequence != ptr.parent_sequence
             || receipt.trade.new_sequence != ptr.new_sequence
         {
-            unreceipted_parents.insert(ptr.parent_sequence);
             chain_skipped += 1;
             continue;
         }
@@ -572,9 +382,8 @@ pub(crate) async fn compose_vault_state(
         let rc_bytes = match BitcoinTapSdk::storage_get_bytes(&rc_key).await {
             Ok(b) => b,
             Err(_) => {
-                // RC not yet published (publisher crashed between X and
-                // RC writes, or publisher used the legacy bare-anchor
-                // path).  Cannot fold reserves without the RC; skip.
+                // RC not yet published (publisher crashed between X and RC
+                // writes). Cannot fold reserves without the RC; skip.
                 chain_skipped += 1;
                 continue;
             }
@@ -605,15 +414,14 @@ pub(crate) async fn compose_vault_state(
                 continue;
             }
         };
-        // Verify the hop's bound reserves_digest matches the cursor's
-        // current reserves.  If it doesn't, this pointer's RC was
-        // signed against a different parent state and folding it would
-        // diverge from the canonical chain — skip.  Note: this is the
-        // cryptographic link between pointer and cursor.
-        let cursor_digest =
-            compute_reserves_digest(&pc_a, &pc_b, cursor_reserve_a, cursor_reserve_b, fee_bps);
-        if !hop.vault_state_reserves_digest.is_empty()
-            && hop.vault_state_reserves_digest.as_slice() != cursor_digest.as_slice()
+        // THE PARENT BINDING. The hop must name the c_n of the exact cursor
+        // state it consumes — one byte-equality that pins the generation, the
+        // reserves, the pair, the fee and the authority position all at once,
+        // because they are members of the identified V_n. A hop bound to any
+        // other state (stale, future, fabricated) was signed against a
+        // different parent and folding it would diverge from the canonical
+        // chain. Mandatory: an unbound hop is skipped, never tolerated.
+        if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice()
         {
             chain_skipped += 1;
             continue;
@@ -637,17 +445,17 @@ pub(crate) async fn compose_vault_state(
             chain_skipped += 1;
             continue;
         };
-        // Determine trade direction against the lex-canonical vault pair.
-        let input_is_a = hop.token_in.as_slice() == token_a && hop.token_out.as_slice() == token_b;
-        let input_is_b = hop.token_in.as_slice() == token_b && hop.token_out.as_slice() == token_a;
+        // Determine trade direction against the state's own canonical pair.
+        let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
+        let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
         if !input_is_a && !input_is_b {
             chain_skipped += 1;
             continue;
         }
         let (cursor_in, cursor_out) = if input_is_a {
-            (cursor_reserve_a, cursor_reserve_b)
+            (cursor_state.reserve_a, cursor_state.reserve_b)
         } else {
-            (cursor_reserve_b, cursor_reserve_a)
+            (cursor_state.reserve_b, cursor_state.reserve_a)
         };
         // Re-simulate against the cursor.  The composer demands the
         // simulated output equals the trader's claimed expected_output
@@ -665,265 +473,97 @@ pub(crate) async fn compose_vault_state(
             chain_skipped += 1;
             continue;
         }
-        // Apply the swap to the cursor.  Saturating-sub on the output
-        // side defends against malformed RCs that claim more than the
-        // allocation can pay; the re-sim above should already exclude these,
-        // but defense-in-depth is cheap.
+        // Construct the successor state: generation advanced, reserves moved,
+        // predecessor edge set to the consumed state's identity, and EVERY
+        // other field — pair, fee, release policy, encumbrances, authority
+        // position, storage set, quorum — copied byte-for-byte. Saturating-sub
+        // on the output side defends against malformed RCs; the re-sim above
+        // should already exclude these, but defense-in-depth is cheap.
         let (new_a, new_b) = if input_is_a {
             (
-                cursor_reserve_a.saturating_add(input_amount),
-                cursor_reserve_b.saturating_sub(expected_output),
+                cursor_state.reserve_a.saturating_add(input_amount),
+                cursor_state.reserve_b.saturating_sub(expected_output),
             )
         } else {
             (
-                cursor_reserve_a.saturating_sub(expected_output),
-                cursor_reserve_b.saturating_add(input_amount),
+                cursor_state.reserve_a.saturating_sub(expected_output),
+                cursor_state.reserve_b.saturating_add(input_amount),
             )
         };
-        cursor_reserve_a = new_a;
-        cursor_reserve_b = new_b;
-        cursor_seq = ptr.new_sequence;
+        let mut next_state = cursor_state.clone();
+        next_state.generation = ptr.new_sequence;
+        next_state.reserve_a = new_a;
+        next_state.reserve_b = new_b;
+        next_state.parent_state_commitment = cursor_c_n;
+        let next_c_n = match vault_state_commitment(&next_state) {
+            Ok(c) => c,
+            Err(e) => {
+                // A successor of a decoded-valid state re-encodes unless the
+                // fold produced something the constructors refuse; treat as a
+                // skip, never a partial advance.
+                log::warn!("[compose_vault_state] successor encode refused: {e}");
+                chain_skipped += 1;
+                continue;
+            }
+        };
+        cursor_state = next_state;
+        cursor_c_n = next_c_n;
         chain_len += 1;
     }
 
     Ok(ComposedVaultState {
-        sequence: cursor_seq,
-        reserves_a: cursor_reserve_a,
-        reserves_b: cursor_reserve_b,
+        sequence: cursor_state.generation,
+        reserves_a: cursor_state.reserve_a,
+        reserves_b: cursor_state.reserve_b,
         pending_chain_len: chain_len,
         pending_chain_skipped: chain_skipped,
-        // Only a block at the sequence actually reached. A pointer that blocked
-        // an earlier parent is irrelevant once the cursor has moved past it.
-        blocked_by_unreceipted_pointer_at_parent: unreceipted_parents.contains(&cursor_seq),
-        baseline_reserve_root: reserve_proof.smt_root,
-        owner_devid: reserve_proof.owner_devid,
-        owner_genesis: reserve_proof.owner_genesis,
-        owner_public_key: reserve_proof.owner_public_key.clone(),
+        owner_devid: owner.device_id,
+        owner_genesis: cursor_state.owner_genesis_id,
+        owner_public_key: owner.ak_pk,
         storage_set_id,
+        c_n: cursor_c_n,
+        state: cursor_state,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dsm::ccb::{
+        genesis_parent_commitment, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy,
+        StorageSetMembers,
+    };
     use dsm::crypto::sphincs::{generate_keypair, SphincsVariant};
-
-    /// The pair, as 32-byte policy commits. Labels are no longer admissible:
-    /// a proven reserve leg is keyed by asset identity, and a ticker is not one
-    /// — this repo has had two distinct tokens sharing the ticker RIGB.
-    /// TOKEN_A is lex-lower, matching the canonical pair order.
-    const TOKEN_A: [u8; 32] = [0x11; 32];
-    const TOKEN_B: [u8; 32] = [0x22; 32];
-    /// Owner identity the reserve leaves are keyed under.
-    const OWNER_GENESIS: [u8; 32] = [0xA0; 32];
-    const OWNER_DEVID: [u8; 32] = [0xB0; 32];
-    /// The storage set every fixture vault is born under (any 32 bytes: the
-    /// lineage check compares birth vs baseline, it does not resolve it).
-    const TEST_STORAGE_SET: [u8; 32] = [0x6B; 32];
     use dsm::dlv::settlement_receipt_leaf::{
         derive_receipt_id, receipt_commitment, settlement_receipt_key, settlement_receipt_value,
         sign_trader_settlement_receipt, SettledTrade,
     };
     use dsm::dlv::vault_pending_pointer::sign_vault_pending_pointer;
-    use dsm::dlv::vault_state_anchor::sign_vault_state_anchor;
 
-    /// Sign-only baseline anchor.  Used by negative tests that want
-    /// to deliberately skip the inclusion-proof publish (so strict
-    /// mode rejects the vault).
-    #[allow(clippy::too_many_arguments)]
-    fn make_baseline_anchor_only(
-        vault_id: &[u8; 32],
-        seq: u64,
-        token_a: &[u8],
-        token_b: &[u8],
-        reserve_a: u64,
-        reserve_b: u64,
-        fee_bps: u32,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) -> SignedVaultStateAnchor {
-        let digest = compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
-        sign_vault_state_anchor(
-            vault_id,
-            seq,
-            &digest,
-            &TEST_STORAGE_SET,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign anchor")
-    }
+    use crate::sdk::identity_presentation::{
+        build_own_anchor_presentation, derive_own_authority_context, OwnerIdentityInputs,
+    };
 
-    /// Publish the vault's BIRTH-PINNED (seq-0) anchor under the same owner key
-    /// and storage set, so the composer's lineage check finds it. Production
-    /// freezes this at `dlv.create`; fixtures publish it directly.
-    async fn publish_birth_anchor(
-        vault_id: &[u8; 32],
-        token_a: &[u8],
-        token_b: &[u8],
-        fee_bps: u32,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) {
-        let birth = make_baseline_anchor_only(
-            vault_id, 0, token_a, token_b, 1, 1, fee_bps, owner_pk, owner_sk,
-        );
-        let bytes = crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(&birth);
-        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(
-            &crate::sdk::vault_state_anchor_codec::anchor_seq_key(vault_id, 0),
-            &bytes,
-        )
-        .await
-        .expect("publish birth anchor");
-    }
+    /// The one wallet the fixtures own. Everything — GRK, device key, AttA,
+    /// D_0/T_0 — re-derives from it, exactly as production does.
+    const SEED: &[u8] = b"test-bip39-wallet-seed-64-bytes-............................xxxx";
+    const NET: &[u8] = b"dsm-test";
+    const INPUTS: OwnerIdentityInputs<'static> = OwnerIdentityInputs {
+        network_id: NET,
+        wallet_index: 0,
+        device_slot: 0,
+        genesis_version: 3,
+    };
 
-    /// Phase-7 strict-mode-compatible baseline: sign the anchor AND
-    /// publish a matching `VaultStateInclusionProofV1` so
-    /// `compose_vault_state` sees a verifiable PD-SMT witness.  Most
-    /// composition tests use this — it's the production-equivalent
-    /// path.
-    #[allow(clippy::too_many_arguments)]
-    async fn make_baseline(
-        vault_id: &[u8; 32],
-        seq: u64,
-        token_a: &[u8],
-        token_b: &[u8],
-        reserve_a: u64,
-        reserve_b: u64,
-        fee_bps: u32,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) -> SignedVaultStateAnchor {
-        let anchor = make_baseline_anchor_only(
-            vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
-        );
-        publish_birth_anchor(vault_id, token_a, token_b, fee_bps, owner_pk, owner_sk).await;
-        publish_baseline_inclusion_proof(
-            vault_id, seq, token_a, token_b, reserve_a, reserve_b, fee_bps, owner_pk, owner_sk,
-        )
-        .await;
-        anchor
-    }
+    /// The pair, as 32-byte policy commits (lex-ordered: TOKEN_A < TOKEN_B).
+    const TOKEN_A: [u8; 32] = [0x11; 32];
+    const TOKEN_B: [u8; 32] = [0x22; 32];
+    const FEE_BPS: u32 = 30;
 
-    /// Phase 7 test helper: publish a real
-    /// `VaultStateInclusionProofV1` for the baseline `(vault_id,
-    /// sequence, reserves_digest)` so strict-mode composition accepts
-    /// it.  Mirrors what `publish_vault_state_inclusion_proof` does on
-    /// the live `dlv.create` path, but driven from test code by
-    /// building a fresh SMT and signing with the supplied owner key.
-    #[allow(clippy::too_many_arguments)]
-    async fn publish_baseline_inclusion_proof(
-        vault_id: &[u8; 32],
-        sequence: u64,
-        token_a: &[u8],
-        token_b: &[u8],
-        reserve_a: u64,
-        reserve_b: u64,
-        fee_bps: u32,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) {
-        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
-        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
-        use dsm::dlv::vault_smt_leaf::{
-            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
-        };
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let reserves_digest =
-            compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
-
-        // ONE tree carrying the vault-state leaf AND both reserve leaves, which
-        // is what a real owner's device SMT looks like. Two separate trees would
-        // produce two roots, and the composer requires the state proof and the
-        // reserve proof to meet at one — a fixture that could not satisfy that
-        // would be testing a shape production never produces.
-        let mut tree = SparseMerkleTree::new(64);
-        let leaf_key = compute_vault_smt_key(vault_id);
-        let leaf_value = compute_vault_smt_value(sequence, &reserves_digest);
-        tree.update_leaf(&leaf_key, &leaf_value)
-            .expect("update_leaf");
-
-        let pair: [(&[u8], u64); 2] = [(token_a, reserve_a), (token_b, reserve_b)];
-        for (token, amount) in pair {
-            let pc = <[u8; 32]>::try_from(token).expect("pair must be policy commits");
-            tree.update_leaf(
-                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
-                &vault_reserve_value(amount, sequence),
-            )
-            .expect("reserve leaf");
-        }
-
-        let smt_root = *tree.root();
-        let proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
-
-        let signed = sign_vault_state_inclusion_proof(
-            vault_id,
-            sequence,
-            &reserves_digest,
-            &smt_root,
-            proof.siblings,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign inclusion proof");
-
-        let proto_bytes =
-            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
-        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(
-            vault_id,
-            sequence,
-            &proto_bytes,
-        )
-        .await
-        .expect("publish inclusion proof");
-
-        // The reserve proof, against the SAME root and sequence.
-        let mut legs: Vec<ReserveLegProof> = pair
-            .iter()
-            .map(|(token, amount)| {
-                let pc = <[u8; 32]>::try_from(*token).expect("pair must be policy commits");
-                ReserveLegProof {
-                    policy_commit: pc,
-                    amount: *amount,
-                    smt_siblings: tree
-                        .get_inclusion_proof(
-                            &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
-                            256,
-                        )
-                        .expect("reserve proof")
-                        .siblings,
-                }
-            })
-            .collect();
-        legs.sort_by_key(|a| a.policy_commit);
-        let reserve_proof = sign_vault_reserve_inclusion_proof(
-            vault_id,
-            sequence,
-            &smt_root,
-            &OWNER_GENESIS,
-            &OWNER_DEVID,
-            legs,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign reserve proof");
-        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&reserve_proof)
-            .await
-            .expect("publish reserve proof");
-    }
-
-    fn marker_digest(x: &[u8; 32], hop_index: u32) -> [u8; 32] {
-        let mut h = dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/pending-marker"));
-        h.update(x);
-        h.update(&hop_index.to_le_bytes());
-        *h.finalize().as_bytes()
-    }
-
-    fn vid_seed(b: u8) -> [u8; 32] {
+    fn vid(b: u8) -> [u8; 32] {
         let mut v = [0u8; 32];
-        v[0] = b;
-        v[31] = b.wrapping_mul(13).wrapping_add(7);
+        v[0] = 0x7A;
+        v[1] = b;
         v
     }
 
@@ -933,6 +573,44 @@ mod tests {
         v[1] = b;
         v[31] = b.wrapping_mul(31).wrapping_add(11);
         v
+    }
+
+    /// Build the owner's `V_0` for a fixture vault, its `CCB(V_0)` bytes, its
+    /// `c_0`, and the presentation anchoring it — all through the production
+    /// builders.
+    fn baseline_fixture(
+        vault_id: [u8; 32],
+        reserve_a: u64,
+        reserve_b: u64,
+    ) -> (
+        crate::generated::AnchorPresentationV3,
+        Vec<u8>,
+        VaultStateV2,
+        [u8; 32],
+    ) {
+        let auth = derive_own_authority_context(SEED, INPUTS).expect("authority context");
+        let state = VaultStateV2 {
+            owner_genesis_id: auth.g,
+            owner_device_id: auth.devid,
+            vault_id,
+            generation: 0,
+            reserve_a,
+            reserve_b,
+            market_policy: MarketPolicy::beta_constant_product(TOKEN_A, TOKEN_B).expect("pair"),
+            release_policy: ReleasePolicy::beta_owner_local_full_close(),
+            fee_policy: FeePolicy::new(FEE_BPS).expect("fee"),
+            encumbrances: EncumbranceSet::empty(),
+            iteration_budget: None,
+            parent_state_commitment: genesis_parent_commitment(&vault_id),
+            owner_authority_transition_digest: auth.position,
+            storage_set: StorageSetMembers::new(&[b"n1", b"n2", b"n3", b"n4", b"n5"]).expect("set"),
+            quorum: 4,
+        };
+        let ccb = state.encode().expect("encode");
+        let c0 = vault_state_commitment(&state).expect("c_0");
+        let presentation =
+            build_own_anchor_presentation(SEED, INPUTS, &auth.g, &c0).expect("presentation");
+        (presentation, ccb, state, c0)
     }
 
     /// Publish the minimal ExtCommit anchor at `sofi/extcommit/{X_b32}`.
@@ -949,29 +627,22 @@ mod tests {
             .expect("X publish");
     }
 
-    /// Publish a `RouteCommitV1` with a single AMM hop touching
-    /// `vault_id` at `sofi/extcommit-rc/{X_b32}`.  Returns the swap's
-    /// post-trade reserves plus the canonical commitment `X` so callers
-    /// can publish matching anchors/pointers.  The hop's
-    /// `vault_state_reserves_digest` is bound
-    /// to the supplied parent reserves so the composer's
-    /// cursor-vs-hop digest check passes.
+    /// Publish a `RouteCommitV1` with a single AMM hop touching `vault_id`,
+    /// bound to `parent_binding` (the c_n of the state it consumes). Returns
+    /// the swap's post-trade reserves plus the canonical commitment `X`.
     #[allow(clippy::too_many_arguments)]
     async fn publish_rc_for_swap(
         nonce_seed: &[u8; 32],
         vault_id: &[u8; 32],
-        token_a: &[u8],
-        token_b: &[u8],
         parent_reserve_a: u64,
         parent_reserve_b: u64,
-        fee_bps: u32,
         parent_sequence: u64,
+        parent_binding: &[u8; 32],
         input_is_a: bool,
         input_amount: u64,
         trader_pk: &[u8],
         trader_sk: &[u8],
     ) -> (u64, u64, [u8; 32]) {
-        // Reserves cursor logic mirrors compose_vault_state.
         let (reserve_in, reserve_out) = if input_is_a {
             (parent_reserve_a, parent_reserve_b)
         } else {
@@ -981,7 +652,7 @@ mod tests {
             input_amount,
             reserve_in,
             reserve_out,
-            fee_bps,
+            FEE_BPS,
         )
         .expect("test inputs must yield a swap");
         let (new_a, new_b) = if input_is_a {
@@ -996,20 +667,10 @@ mod tests {
             )
         };
 
-        // Digest the parent reserves so the composer's cursor digest
-        // matches this hop's bound digest.
-        let parent_digest = compute_reserves_digest(
-            token_a,
-            token_b,
-            parent_reserve_a,
-            parent_reserve_b,
-            fee_bps,
-        );
-
         let (hop_token_in, hop_token_out) = if input_is_a {
-            (token_a.to_vec(), token_b.to_vec())
+            (TOKEN_A.to_vec(), TOKEN_B.to_vec())
         } else {
-            (token_b.to_vec(), token_a.to_vec())
+            (TOKEN_B.to_vec(), TOKEN_A.to_vec())
         };
         let hop = generated::RouteCommitHopV1 {
             vault_id: vault_id.to_vec(),
@@ -1017,23 +678,21 @@ mod tests {
             token_out: hop_token_out,
             input_amount_u128: u128::from(input_amount).to_be_bytes().to_vec(),
             expected_output_amount_u128: u128::from(simulated).to_be_bytes().to_vec(),
-            fee_bps,
+            fee_bps: FEE_BPS,
             advertisement_digest: vec![0u8; 32],
             state_number: parent_sequence,
             unlock_spec_digest: vec![0u8; 32],
             owner_public_key: Vec::new(),
-            vault_state_anchor_seq: parent_sequence,
-            vault_state_reserves_digest: parent_digest.to_vec(),
-            vault_state_anchor_digest: vec![0u8; 32],
+            parent_binding: parent_binding.to_vec(),
         };
         let rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
             nonce: nonce_seed.to_vec(),
-            input_token: token_a.to_vec(),
-            output_token: token_b.to_vec(),
+            input_token: TOKEN_A.to_vec(),
+            output_token: TOKEN_B.to_vec(),
             input_amount_u128: u128::from(input_amount).to_be_bytes().to_vec(),
             expected_final_output_amount_u128: u128::from(simulated).to_be_bytes().to_vec(),
-            total_fee_bps: fee_bps as u64,
+            total_fee_bps: FEE_BPS as u64,
             hops: vec![hop],
             initiator_public_key: trader_pk.to_vec(),
             initiator_signature: Vec::new(),
@@ -1051,29 +710,25 @@ mod tests {
         (new_a, new_b, x)
     }
 
-    /// Deterministic 32-byte stand-in for a token's policy commit. These
-    /// fixtures name their pair by label (`&TOKEN_A`); a settled trade is stated
-    /// in policy commits, so the two are bridged here rather than in production
-    /// code.
-    fn pc_of(label: &[u8]) -> [u8; 32] {
-        *blake3::hash(label).as_bytes()
-    }
-
     fn settled_trade(
         x: &[u8; 32],
         parent_seq: u64,
-        input_policy_commit: &[u8; 32],
+        input_is_a: bool,
         input_amount: u64,
-        output_policy_commit: &[u8; 32],
         output_amount: u64,
     ) -> SettledTrade {
+        let (in_pc, out_pc) = if input_is_a {
+            (TOKEN_A, TOKEN_B)
+        } else {
+            (TOKEN_B, TOKEN_A)
+        };
         SettledTrade {
             x: *x,
             parent_sequence: parent_seq,
             new_sequence: parent_seq + 1,
-            input_policy_commit: *input_policy_commit,
+            input_policy_commit: in_pc,
             input_amount,
-            output_policy_commit: *output_policy_commit,
+            output_policy_commit: out_pc,
             output_amount,
         }
     }
@@ -1114,184 +769,24 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Publish a standalone reserve proof at `sequence` proving `(a, b)`, under
-    /// a root of its own. Used to state a reserve proof that disagrees with what
-    /// the owner signed.
-    /// Publish only the vault-state inclusion proof, withholding the reserve
-    /// proof — the "state known, holdings unproven" case.
-    async fn publish_state_inclusion_proof_only(
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserve_a: u64,
-        reserve_b: u64,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) {
-        use dsm::dlv::vault_smt_leaf::{
-            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
-        };
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, reserve_a, reserve_b, 30);
-        let mut tree = SparseMerkleTree::new(64);
-        let key = compute_vault_smt_key(vault_id);
-        tree.update_leaf(&key, &compute_vault_smt_value(sequence, &digest))
-            .expect("state leaf");
-        let root = *tree.root();
-        let proof = tree.get_inclusion_proof(&key, 256).expect("proof");
-        let signed = sign_vault_state_inclusion_proof(
-            vault_id,
-            sequence,
-            &digest,
-            &root,
-            proof.siblings,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign");
-        let bytes = crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
-        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(vault_id, sequence, &bytes)
-            .await
-            .expect("publish");
-    }
-
-    /// A reserve proof that verifies against its OWN root but not the root the
-    /// vault-state proof committed to.
-    async fn publish_reserve_proof_with_foreign_root(
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserve_a: u64,
-        reserve_b: u64,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) {
-        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
-        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        // No vault-state leaf in this tree, so its root differs from the one the
-        // state proof binds while every leg still verifies internally.
-        let mut tree = SparseMerkleTree::new(64);
-        for (pc, amount) in [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)] {
-            tree.update_leaf(
-                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
-                &vault_reserve_value(amount, sequence),
-            )
-            .expect("reserve leaf");
-        }
-        let root = *tree.root();
-        let mut legs: Vec<ReserveLegProof> = [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)]
-            .iter()
-            .map(|(pc, amount)| ReserveLegProof {
-                policy_commit: *pc,
-                amount: *amount,
-                smt_siblings: tree
-                    .get_inclusion_proof(
-                        &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, pc),
-                        256,
-                    )
-                    .expect("proof")
-                    .siblings,
-            })
-            .collect();
-        legs.sort_by_key(|a| a.policy_commit);
-        let proof = sign_vault_reserve_inclusion_proof(
-            vault_id,
-            sequence,
-            &root,
-            &OWNER_GENESIS,
-            &OWNER_DEVID,
-            legs,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign");
-        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&proof)
-            .await
-            .expect("publish");
-    }
-
-    async fn publish_reserve_proof_for(
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserve_a: u64,
-        reserve_b: u64,
-        owner_pk: &[u8],
-        owner_sk: &[u8],
-    ) {
-        use dsm::dlv::vault_reserve_inclusion::{sign_vault_reserve_inclusion_proof, ReserveLegProof};
-        use dsm::dlv::vault_reserve_leaf::{vault_reserve_key, vault_reserve_value};
-        use dsm::dlv::vault_smt_leaf::{compute_vault_smt_key, compute_vault_smt_value};
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        // Include the vault-state leaf at the SAME digest the baseline was
-        // signed over, so the root still matches the published state proof and
-        // the ONLY disagreement under test is the reserve magnitudes.
-        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
-        let mut tree = SparseMerkleTree::new(64);
-        tree.update_leaf(
-            &compute_vault_smt_key(vault_id),
-            &compute_vault_smt_value(sequence, &digest),
-        )
-        .expect("state leaf");
-        for (pc, amount) in [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)] {
-            tree.update_leaf(
-                &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, &pc),
-                &vault_reserve_value(amount, sequence),
-            )
-            .expect("reserve leaf");
-        }
-        let root = *tree.root();
-        let mut legs: Vec<ReserveLegProof> = [(TOKEN_A, reserve_a), (TOKEN_B, reserve_b)]
-            .iter()
-            .map(|(pc, amount)| ReserveLegProof {
-                policy_commit: *pc,
-                amount: *amount,
-                smt_siblings: tree
-                    .get_inclusion_proof(
-                        &vault_reserve_key(&OWNER_GENESIS, &OWNER_DEVID, vault_id, pc),
-                        256,
-                    )
-                    .expect("proof")
-                    .siblings,
-            })
-            .collect();
-        legs.sort_by_key(|a| a.policy_commit);
-        let proof = sign_vault_reserve_inclusion_proof(
-            vault_id,
-            sequence,
-            &root,
-            &OWNER_GENESIS,
-            &OWNER_DEVID,
-            legs,
-            owner_pk,
-            owner_sk,
-        )
-        .expect("sign");
-        crate::sdk::vault_reserve_proof_codec::publish_reserve_proof(&proof)
-            .await
-            .expect("publish");
-    }
-
-    #[allow(clippy::too_many_arguments)]
     async fn publish_pointer(
         vault_id: &[u8; 32],
         parent_seq: u64,
         new_seq: u64,
         x: &[u8; 32],
-        digest: &[u8; 32],
         trade: &SettledTrade,
         publisher_pk: &[u8],
         publisher_sk: &[u8],
     ) {
         let receipt_id = derive_receipt_id(vault_id, x);
         let expected_receipt_hash = receipt_commitment(vault_id, &receipt_id, trade);
+        let marker = [0x5Au8; 32];
         let signed = sign_vault_pending_pointer(
             vault_id,
             parent_seq,
             new_seq,
             x,
-            digest,
+            &marker,
             &expected_receipt_hash,
             publisher_pk,
             publisher_sk,
@@ -1313,1585 +808,378 @@ mod tests {
             .expect("publish pointer");
     }
 
-    /// Combined helper that publishes the three storage records needed
-    /// for one fold-able pending trade: X anchor, full RC, and the
-    /// vault-keyed pointer.  Returns the swap's post-trade reserves.
+    fn trader() -> (Vec<u8>, Vec<u8>) {
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keypair");
+        (kp.public_key.clone(), kp.secret_key.clone())
+    }
+
+    /// One settled trade end-to-end: X anchor, signed RC bound to
+    /// `parent_binding`, pointer, and a matching receipt. Returns the
+    /// post-trade reserves.
     #[allow(clippy::too_many_arguments)]
-    async fn publish_trade(
+    async fn publish_settled_trade(
         vault_id: &[u8; 32],
         nonce_seed: &[u8; 32],
-        token_a: &[u8],
-        token_b: &[u8],
         parent_reserve_a: u64,
         parent_reserve_b: u64,
-        fee_bps: u32,
         parent_sequence: u64,
+        parent_binding: &[u8; 32],
         input_is_a: bool,
         input_amount: u64,
-        trader_pk: &[u8],
-        trader_sk: &[u8],
-        with_receipt: bool,
     ) -> (u64, u64) {
+        let (pk, sk) = trader();
         let (new_a, new_b, x) = publish_rc_for_swap(
             nonce_seed,
             vault_id,
-            token_a,
-            token_b,
             parent_reserve_a,
             parent_reserve_b,
-            fee_bps,
             parent_sequence,
+            parent_binding,
             input_is_a,
             input_amount,
-            trader_pk,
-            trader_sk,
+            &pk,
+            &sk,
         )
         .await;
-        publish_extcommit(&x, trader_pk).await;
-        let (input_pc, output_pc, output_amount) = if input_is_a {
-            (&TOKEN_A, &TOKEN_B, parent_reserve_b - new_b)
+        publish_extcommit(&x, &pk).await;
+        let output = if input_is_a {
+            parent_reserve_b - new_b
         } else {
-            (&TOKEN_B, &TOKEN_A, parent_reserve_a - new_a)
+            parent_reserve_a - new_a
         };
-        let trade = settled_trade(
-            &x,
-            parent_sequence,
-            input_pc,
-            input_amount,
-            output_pc,
-            output_amount,
-        );
+        let trade = settled_trade(&x, parent_sequence, input_is_a, input_amount, output);
+        publish_receipt(vault_id, &trade, &pk, &sk).await;
         publish_pointer(
             vault_id,
             parent_sequence,
             parent_sequence + 1,
             &x,
-            &marker_digest(&x, 0),
             &trade,
-            trader_pk,
-            trader_sk,
+            &pk,
+            &sk,
         )
         .await;
-        // A pointer alone is inert. Publishing the receipt is what makes this
-        // trade fold — which is exactly what `publish_trade_without_receipt`
-        // withholds.
-        if with_receipt {
-            publish_receipt(vault_id, &trade, trader_pk, trader_sk).await;
-        }
         (new_a, new_b)
     }
 
-    // ── storage-set lineage ────────────────────────────────────────────────
-    //
-    // The set a vault is born under is fixed for its lifetime; every later
-    // generation derives it from the birth state, and a caller never supplies
-    // it. A validly signed later anchor naming another set is not caught by its
-    // own signature — only by comparing it to the birth-pinned anchor.
-
-    /// Birth under S1, an otherwise-valid signed generation-K anchor under S2:
-    /// composition refuses (`StorageSetLineageBroken`), even though the K
-    /// anchor, its inclusion proof and its reserve proof all verify.
+    /// No pointers: the composed state IS the verified baseline, identity
+    /// included.
     #[tokio::test]
-    async fn a_generation_naming_a_different_storage_set_than_birth_is_refused() {
-        let vault_id = vid_seed(0x91);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        // Publishes the birth anchor under TEST_STORAGE_SET and a valid gen-3
-        // inclusion + reserve proof.
-        let _ = make_baseline(
-            &vault_id,
-            3,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        // The gen-3 baseline the trader is handed names ANOTHER set — signed
-        // correctly by the same owner.
-        let digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
-        let mut other_set = TEST_STORAGE_SET;
-        other_set[0] ^= 0xff;
-        let baseline_s2 = sign_vault_state_anchor(
-            &vault_id,
-            3,
-            &digest,
-            &other_set,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .expect("sign");
-        let err = compose_vault_state(&vault_id, &baseline_s2, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("a lineage break must refuse composition");
-        assert_eq!(err, CompositionError::StorageSetLineageBroken);
-
-        // Positive control: the same generation under the birth set composes and
-        // exposes the birth-bound set for consumers to resolve.
-        let baseline_s1 = sign_vault_state_anchor(
-            &vault_id,
-            3,
-            &digest,
-            &TEST_STORAGE_SET,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .expect("sign");
-        let composed = compose_vault_state(&vault_id, &baseline_s1, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("same set composes");
-        assert_eq!(composed.storage_set_id, TEST_STORAGE_SET);
-    }
-
-    /// No birth anchor at all, or a birth anchor signed by a different key:
-    /// refused. The lineage reference must be the vault's own.
-    #[tokio::test]
-    async fn a_missing_or_foreign_key_birth_anchor_is_refused() {
-        let vault_id = vid_seed(0x92);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline_anchor_only(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        );
-        // Inclusion + reserve proofs exist, but no seq-0 anchor was published.
-        publish_baseline_inclusion_proof(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("no birth anchor");
-        assert_eq!(err, CompositionError::StorageSetLineageBroken);
-
-        // A birth anchor signed by SOMEONE ELSE under the same set: refused.
-        let stranger = generate_keypair(SphincsVariant::SPX256f).expect("stranger kp");
-        publish_birth_anchor(
-            &vault_id,
-            &TOKEN_A,
-            &TOKEN_B,
-            30,
-            &stranger.public_key,
-            &stranger.secret_key,
-        )
-        .await;
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("foreign-key birth anchor");
-        assert_eq!(err, CompositionError::StorageSetLineageBroken);
-
-        // The owner's own birth anchor: composes.
-        publish_birth_anchor(
-            &vault_id,
-            &TOKEN_A,
-            &TOKEN_B,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("owner's birth anchor restores composition");
-    }
-
-    #[tokio::test]
-    async fn composes_empty_chain_returns_baseline() {
-        let vault_id = vid_seed(0x10);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline(
-            &vault_id,
-            5,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(composed.sequence, 5);
-        assert_eq!(composed.reserves_a, 1_000_000);
-        assert_eq!(composed.reserves_b, 500_000);
-        assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.pending_chain_skipped, 0);
-    }
-
-    // ── the reserve-proof gate ─────────────────────────────────────────────
-    //
-    // The reserves a trader quotes against must come out of an authenticated
-    // proof, not out of an argument or an advertisement.
-
-    /// A vault whose owner published no reserve proof cannot be quoted, even
-    /// with a perfectly good signed anchor and state inclusion proof.
-    ///
-    /// Those two establish WHICH state the vault is in; neither establishes what
-    /// it HOLDS. Composing without the third would be quoting against a number.
-    #[tokio::test]
-    async fn a_vault_with_no_reserve_proof_cannot_be_quoted() {
-        let vault_id = vid_seed(0x50);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        // Anchor + state inclusion proof, deliberately without the reserve proof.
-        let anchor = make_baseline_anchor_only(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        );
-        publish_state_inclusion_proof_only(
-            &vault_id,
-            0,
-            1_000_000,
-            500_000,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        let err = compose_vault_state(&vault_id, &anchor, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("unproven liquidity must not be quotable");
-        assert!(matches!(err, CompositionError::MissingReserveProof));
-    }
-
-    /// A reserve proof for a DIFFERENT state must not be accepted for this one.
-    ///
-    /// Reserve leaves carry the vault's own sequence so both proofs meet at one
-    /// root. Without that binding an owner could present funded reserves beside
-    /// a later, drained vault state.
-    #[tokio::test]
-    async fn a_reserve_proof_from_another_state_is_refused() {
-        let vault_id = vid_seed(0x51);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        // Overwrite the sequence-0 proof with one whose root is its own, so the
-        // amounts still verify internally but the root no longer matches the
-        // state proof.
-        publish_reserve_proof_for(
-            &vault_id,
-            0,
-            1_000_000,
-            500_000,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        // That helper reproduces the same digest, so it must still compose —
-        // this establishes the negative case below is about the ROOT, not the
-        // amounts.
-        compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("a consistent re-publish still composes");
-
-        // Now a proof carrying a foreign root.
-        publish_reserve_proof_with_foreign_root(
-            &vault_id,
-            0,
-            1_000_000,
-            500_000,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("a reserve proof must meet the state proof at one root");
-        assert!(matches!(err, CompositionError::InvalidReserveProof));
-    }
-
-    /// A vault naming its pair by label fails CLOSED. A proven leg is keyed by
-    /// asset identity, and a ticker is not one — guessing the mapping would
-    /// defeat the proof it is being matched against.
-    #[tokio::test]
-    async fn a_label_pair_cannot_be_matched_to_proven_legs() {
-        let vault_id = vid_seed(0x52);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let err = compose_vault_state(&vault_id, &baseline, b"AAA", b"BBB", 30)
-            .await
-            .expect_err("a label pair must fail closed");
-        assert!(matches!(err, CompositionError::PairIsNotPolicyCommits));
-    }
-
-    // ── the quote block ────────────────────────────────────────────────────
-    //
-    // A vault carrying a valid-but-unwitnessed pointer at the sequence being
-    // quoted is dropped from the candidate set. Narrow on purpose: the signal
-    // must fire for a trade in flight and for nothing else, or one junk pointer
-    // would un-quotable a vault forever.
-
-    /// LOAD-BEARING: a malformed pointer must NOT block quoting.
-    ///
-    /// Publishing junk under the slot prefix costs nothing. If that were enough
-    /// to stop a vault being quoted, the free-griefing property the receipt gate
-    /// removed would be back through a different door.
-    #[tokio::test]
-    async fn a_malformed_pointer_does_not_block_quoting() {
-        let vault_id = vid_seed(0x70);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        // Undecodable bytes sitting exactly where a pointer for parent 0 lives.
-        let key =
-            crate::sdk::route_commit_sdk::vault_pending_pointer_key(&vault_id, 1, &x_seed(0x71));
-        BitcoinTapSdk::storage_put_bytes(&key, b"not a pointer at all")
-            .await
-            .expect("publish junk");
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert!(
-            !composed.blocked_by_unreceipted_pointer_at_parent,
-            "junk witnesses no trade and must not stop anyone quoting"
-        );
-        assert_eq!(composed.sequence, 0);
-        assert_eq!(
-            (composed.reserves_a, composed.reserves_b),
-            (1_000_000, 500_000)
-        );
-    }
-
-    /// LOAD-BEARING: a valid but unreceipted pointer at the quoted parent DOES
-    /// block. Some trade may already have consumed that state.
-    #[tokio::test]
-    async fn a_valid_unreceipted_pointer_at_the_quoted_parent_blocks() {
-        let vault_id = vid_seed(0x72);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        publish_trade(
-            &vault_id,
-            &x_seed(0x73),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            false, // published, never settled
-        )
-        .await;
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert!(
-            composed.blocked_by_unreceipted_pointer_at_parent,
-            "a trade in flight on the quoted sequence must stop the quote"
-        );
-        // And the reserves are still untouched — the pointer consumed nothing.
-        // Blocking is about not quoting a state in flight, not about the pointer
-        // having moved anything.
-        assert_eq!(
-            (composed.reserves_a, composed.reserves_b),
-            (1_000_000, 500_000)
-        );
-        assert_eq!(composed.sequence, 0);
-    }
-
-    /// An unreceipted pointer at a DIFFERENT parent is irrelevant to this quote.
-    ///
-    /// Pins that the signal tracks the sequence actually reached, not merely
-    /// "some pointer somewhere is unwitnessed".
-    #[tokio::test]
-    async fn an_unreceipted_pointer_at_another_parent_does_not_block() {
-        let vault_id = vid_seed(0x74);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        // Unwitnessed, but claiming parent 7 while this vault is at 0.
-        publish_trade(
-            &vault_id,
-            &x_seed(0x75),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            7,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            false,
-        )
-        .await;
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert!(
-            !composed.blocked_by_unreceipted_pointer_at_parent,
-            "a pointer on a sequence this vault is not at must not block it"
-        );
-        assert_eq!(composed.sequence, 0);
-    }
-
-    /// Once the receipt appears the vault is quotable again — and from the
-    /// FOLDED state, not the stale parent it was blocked at.
-    ///
-    /// The block must be a pause, not a trapdoor: a vault that stayed
-    /// un-quotable after its trade settled would be permanently removed from
-    /// routing by its own successful use.
-    #[tokio::test]
-    async fn the_receipt_unblocks_the_vault_at_the_folded_state() {
-        let vault_id = vid_seed(0x76);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let x = x_seed(0x77);
-        let (folded_a, folded_b) = publish_trade(
-            &vault_id,
-            &x,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            false,
-        )
-        .await;
-
-        let blocked = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert!(blocked.blocked_by_unreceipted_pointer_at_parent);
-
-        // The trader settles and publishes its receipt.
-        let trade = settled_trade(
-            &publish_rc_for_swap(
-                &x,
-                &vault_id,
-                &TOKEN_A,
-                &TOKEN_B,
-                1_000_000,
-                500_000,
-                30,
-                0,
-                true,
-                1_000,
-                &trader.public_key,
-                &trader.secret_key,
-            )
-            .await
-            .2,
-            0,
-            &TOKEN_A,
-            1_000,
-            &TOKEN_B,
-            500_000 - folded_b,
-        );
-        publish_receipt(&vault_id, &trade, &trader.public_key, &trader.secret_key).await;
-
-        let unblocked = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert!(
-            !unblocked.blocked_by_unreceipted_pointer_at_parent,
-            "a witnessed trade must not keep the vault out of routing"
-        );
-        assert_eq!(unblocked.sequence, 1, "quotable from the folded sequence");
-        assert_eq!(
-            (unblocked.reserves_a, unblocked.reserves_b),
-            (folded_a, folded_b),
-            "and from the folded reserves, not the stale parent's"
-        );
-    }
-
-    // ── the receipt gate ───────────────────────────────────────────────────
-    //
-    // A pending pointer is INERT until a verified settlement receipt binds it.
-    // These are the tests that rule exists for.
-
-    /// THE GRIEFING CASE, end to end.
-    ///
-    /// A trader publishes everything the old fold rule asked for — X, the signed
-    /// RouteCommit, a valid pointer with exact AMM math — and then simply never
-    /// advances its own chain. It has paid nothing and taken nothing. Under the
-    /// old rule the vault's quotable liquidity dropped anyway, for every other
-    /// trader, indefinitely, for the price of one storage write.
-    ///
-    /// Effective reserves must be byte-identical to a vault nobody ever pointed
-    /// at. Not "close", not "eventually corrected" — identical.
-    #[tokio::test]
-    async fn an_abandoned_pointer_consumes_no_liquidity() {
-        let vault_id = vid_seed(0x40);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let griefer = generate_keypair(SphincsVariant::SPX256f).expect("griefer kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        // Everything except the one artifact that requires actually settling.
-        publish_trade(
-            &vault_id,
-            &x_seed(0x41),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            250_000, // a large bite, so a partial fold would be obvious
-            &griefer.public_key,
-            &griefer.secret_key,
-            false, // no receipt: the advance never happened
-        )
-        .await;
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-
-        assert_eq!(
-            (composed.reserves_a, composed.reserves_b),
-            (1_000_000, 500_000),
-            "an unreceipted pointer must not move effective reserves"
-        );
-        assert_eq!(
-            composed.sequence, 0,
-            "nor advance the sequence past the owner's baseline"
-        );
-        assert_eq!(composed.pending_chain_len, 0, "nothing was folded");
-        assert_eq!(
-            composed.pending_chain_skipped, 1,
-            "and the pointer was seen and deliberately skipped, not missed"
-        );
-    }
-
-    /// The same trade, with and without its receipt. Everything else about the
-    /// two runs is identical, so the receipt is provably the only thing that
-    /// moves reserves — the assertion above cannot be passing because the fold
-    /// broke for some unrelated reason.
-    #[tokio::test]
-    async fn the_receipt_is_the_only_difference_between_inert_and_folded() {
-        async fn run(vault_seed: u8, x: u8, with_receipt: bool) -> ComposedVaultState {
-            let vault_id = vid_seed(vault_seed);
-            let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-            let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-            let baseline = make_baseline(
-                &vault_id,
-                0,
-                &TOKEN_A,
-                &TOKEN_B,
-                1_000_000,
-                500_000,
-                30,
-                &owner.public_key,
-                &owner.secret_key,
-            )
-            .await;
-            publish_trade(
-                &vault_id,
-                &x_seed(x),
-                &TOKEN_A,
-                &TOKEN_B,
-                1_000_000,
-                500_000,
-                30,
-                0,
-                true,
-                1_000,
-                &trader.public_key,
-                &trader.secret_key,
-                with_receipt,
-            )
-            .await;
-            compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
+    async fn composes_the_verified_baseline_when_no_pointers_exist() {
+        let vault_id = vid(0x01);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
-                .expect("compose succeeds")
-        }
-
-        let inert = run(0x42, 0x43, false).await;
-        let folded = run(0x44, 0x45, true).await;
-
-        assert_eq!((inert.reserves_a, inert.reserves_b), (1_000_000, 500_000));
-        assert_eq!(inert.sequence, 0);
-        assert!(
-            folded.reserves_a > 1_000_000 && folded.reserves_b < 500_000,
-            "the receipted run must actually move reserves, or this test proves nothing"
-        );
-        assert_eq!(folded.sequence, 1);
-    }
-
-    /// A receipt for a DIFFERENT trade must not activate this pointer.
-    ///
-    /// Without the commitment check a trader could publish a pointer taking
-    /// 250,000 out of the vault and then satisfy it with a receipt for a
-    /// one-unit settlement it was willing to actually pay for.
-    #[tokio::test]
-    async fn a_receipt_for_a_different_trade_leaves_the_pointer_inert() {
-        let vault_id = vid_seed(0x46);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let x = x_seed(0x47);
-        publish_trade(
-            &vault_id,
-            &x,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            250_000,
-            &trader.public_key,
-            &trader.secret_key,
-            false,
-        )
-        .await;
-
-        // A perfectly valid receipt — signed, with a genuine inclusion path —
-        // for a settlement that is not the one this pointer claims.
-        let (_, _, canonical_x) = publish_rc_for_swap(
-            &x,
-            &vault_id,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            250_000,
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-        let cheap = settled_trade(&canonical_x, 0, &TOKEN_A, 1, &TOKEN_B, 1);
-        publish_receipt(&vault_id, &cheap, &trader.public_key, &trader.secret_key).await;
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(
-            (composed.reserves_a, composed.reserves_b),
-            (1_000_000, 500_000),
-            "a receipt for a cheaper trade must not satisfy this pointer"
-        );
+                .expect("composes");
+        assert_eq!(composed.sequence, 0);
+        assert_eq!(composed.reserves_a, 1_000_000);
+        assert_eq!(composed.reserves_b, 500_000);
+        assert_eq!(composed.c_n, c0);
+        assert_eq!(composed.state, state);
         assert_eq!(composed.pending_chain_len, 0);
-    }
-
-    /// Composing twice over the same receipted pointer yields the same state.
-    ///
-    /// The fold is what every quote runs, so a receipt that folded twice would
-    /// let the vault drift further from the owner's actual reserves on every
-    /// quote — with no attacker involved at all.
-    #[tokio::test]
-    async fn replaying_a_receipted_pointer_is_a_no_op() {
-        let vault_id = vid_seed(0x48);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        publish_trade(
-            &vault_id,
-            &x_seed(0x49),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            true,
-        )
-        .await;
-
-        let first = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        let second = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-
-        assert_eq!(first.sequence, second.sequence);
-        assert_eq!(first.reserves_a, second.reserves_a);
-        assert_eq!(first.reserves_b, second.reserves_b);
-        assert_eq!(first.pending_chain_len, second.pending_chain_len);
         assert_eq!(
-            first.sequence, 1,
-            "and it folded exactly once, not zero times"
+            composed.storage_set_id,
+            dsm::ccb::storage_set_id(&state.storage_set).expect("set id")
         );
+        assert_eq!(composed.owner_devid, state.owner_device_id);
+        assert_eq!(composed.owner_genesis, state.owner_genesis_id);
     }
 
-    /// A receipt that fails verification is worth exactly as much as no receipt.
-    ///
-    /// Publishing well-formed bytes under the right key is free; producing a
-    /// valid inclusion path is not. This pins that the fold depends on the
-    /// second, not the first.
+    /// The presentation authenticates a state; handing the composer the bytes
+    /// of a DIFFERENT state must refuse — the anchor's commitment does not
+    /// match the bytes.
     #[tokio::test]
-    async fn a_receipt_with_a_broken_inclusion_path_leaves_the_pointer_inert() {
-        let vault_id = vid_seed(0x4A);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
+    async fn bytes_of_a_different_state_are_refused() {
+        let vault_id = vid(0x02);
+        let (presentation, _ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (_p2, other_ccb, _s2, _c2) = baseline_fixture(vault_id, 999, 999);
+        let err = compose_vault_state(
             &vault_id,
-            0,
+            &presentation,
+            &other_ccb,
             &TOKEN_A,
             &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
+            FEE_BPS,
         )
-        .await;
-        publish_trade(
-            &vault_id,
-            &x_seed(0x4B),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            true,
-        )
-        .await;
-
-        // Overwrite the good receipt with one whose path has been corrupted.
-        let pointers_prefix = vault_pending_prefix(&vault_id);
-        let listing = BitcoinTapSdk::storage_list_objects(&pointers_prefix, None, 16)
-            .await
-            .expect("list pointers");
-        let ptr_bytes = BitcoinTapSdk::storage_get_bytes(&listing.items[0].key)
-            .await
-            .expect("fetch pointer");
-        let ptr = generated::VaultPendingPointerV1::decode(ptr_bytes.as_slice()).expect("decode");
-        let mut x = [0u8; 32];
-        x.copy_from_slice(&ptr.x);
-
-        let key = crate::sdk::settlement_receipt_codec::vault_receipt_key(&vault_id, &x);
-        let good = BitcoinTapSdk::storage_get_bytes(&key)
-            .await
-            .expect("fetch receipt");
-        let mut r = generated::TraderSettlementReceiptV1::decode(good.as_slice()).expect("decode");
-        r.smt_siblings[0][0] ^= 0xff;
-        BitcoinTapSdk::storage_put_bytes(&key, &r.encode_to_vec())
-            .await
-            .expect("overwrite receipt");
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(
-            (composed.reserves_a, composed.reserves_b),
-            (1_000_000, 500_000),
-            "a receipt whose inclusion path does not check must not consume liquidity"
-        );
-        assert_eq!(composed.pending_chain_len, 0);
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(
+            err,
+            CompositionError::InvalidBaselinePresentation(_)
+        ));
     }
 
+    /// A caller tuple that disagrees with the signed state (wrong fee) is a
+    /// baseline mismatch, not something to quote around.
     #[tokio::test]
-    async fn folds_single_valid_pointer_advances_sequence_and_reserves() {
-        let vault_id = vid_seed(0x11);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
+    async fn a_caller_tuple_disagreeing_with_the_signed_state_is_refused() {
+        let vault_id = vid(0x03);
+        let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let err = compose_vault_state(
             &vault_id,
-            0,
+            &presentation,
+            &ccb,
             &TOKEN_A,
             &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
+            FEE_BPS + 1,
         )
-        .await;
-        let x = x_seed(0x21);
-        let (expected_a, expected_b) = publish_trade(
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(err, CompositionError::BaselineMismatch(_)));
+
+        let wrong_pair = compose_vault_state(
             &vault_id,
-            &x,
-            &TOKEN_A,
-            &TOKEN_B,
+            &presentation,
+            &ccb,
+            &[0x33u8; 32],
+            &[0x44u8; 32],
+            FEE_BPS,
+        )
+        .await
+        .expect_err("must refuse");
+        assert!(matches!(wrong_pair, CompositionError::BaselineMismatch(_)));
+    }
+
+    /// Composing under a different vault id than the state names is refused.
+    #[tokio::test]
+    async fn a_presentation_for_another_vault_is_refused() {
+        let vault_id = vid(0x04);
+        let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let other = vid(0x05);
+        let err = compose_vault_state(&other, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("must refuse");
+        assert!(matches!(err, CompositionError::BaselineMismatch(_)));
+    }
+
+    /// One receipted trade folds: the generation advances by one, the
+    /// reserves move by exactly the simulated swap, and the successor's
+    /// predecessor edge is the baseline's identity — the c_n chain is real.
+    #[tokio::test]
+    async fn a_receipted_pointer_folds_and_advances_the_commitment_chain() {
+        let vault_id = vid(0x06);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (new_a, new_b) = publish_settled_trade(
+            &vault_id,
+            &x_seed(0x06),
             1_000_000,
             500_000,
-            30,
             0,
-            true, // input is A (1000 AAA → some BBB out)
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
+            &c0,
             true,
+            10_000,
         )
         .await;
 
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
+        assert_eq!(composed.pending_chain_len, 1);
         assert_eq!(composed.sequence, 1);
+        assert_eq!(composed.reserves_a, new_a);
+        assert_eq!(composed.reserves_b, new_b);
+        // The successor is a real V_n: parent edge = c_0, identity recomputes.
+        assert_eq!(composed.state.parent_state_commitment, c0);
         assert_eq!(
-            composed.reserves_a, expected_a,
-            "reserve_a should grow by the trader's input"
+            composed.c_n,
+            vault_state_commitment(&composed.state).expect("c_1")
         );
+        assert_ne!(composed.c_n, c0);
+        // Everything not moved by the trade is copied byte-for-byte.
         assert_eq!(
-            composed.reserves_b, expected_b,
-            "reserve_b should shrink by the simulated output"
+            composed.state.owner_authority_transition_digest,
+            state.owner_authority_transition_digest
         );
-        assert!(composed.reserves_a > 1_000_000);
-        assert!(composed.reserves_b < 500_000);
-        assert_eq!(composed.pending_chain_len, 1);
-        assert_eq!(composed.pending_chain_skipped, 0);
+        assert_eq!(composed.state.storage_set, state.storage_set);
+        assert_eq!(composed.state.quorum, state.quorum);
     }
 
+    /// An unreceipted pointer is INERT — for reserves and for quote
+    /// availability alike. Even a fully valid RouteCommit with a visible X is
+    /// producible without settling or claiming the slot, so nothing short of
+    /// the receipt may change what a composer reports: the composed state
+    /// must be byte-identical to the no-pointer case.
     #[tokio::test]
-    async fn folds_chained_pointers_reserves_track_each_swap() {
-        let vault_id = vid_seed(0x12);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
+    async fn an_unreceipted_pointer_is_inert_even_with_a_valid_route_and_visible_x() {
+        let vault_id = vid(0x07);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (pk, sk) = trader();
+        let (_na, _nb, x) = publish_rc_for_swap(
+            &x_seed(0x07),
             &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
             1_000_000,
             500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
+            0,
+            &c0,
+            true,
+            10_000,
+            &pk,
+            &sk,
         )
         .await;
-        // Three sequential trades.  Each picks up where the previous
-        // left off so the composer sees a coherent chain.
-        let mut cur_a: u64 = 1_000_000;
-        let mut cur_b: u64 = 500_000;
-        let mut expected_final_a = cur_a;
-        let mut expected_final_b = cur_b;
-        for (parent_seq, seed_byte, input_is_a, input_amount) in [
-            (0u64, 0x31u8, true, 1_000u64),
-            (1, 0x32, false, 500),
-            (2, 0x33, true, 2_000),
-        ]
-        .iter()
-        {
-            let x = x_seed(*seed_byte);
-            let (new_a, new_b) = publish_trade(
-                &vault_id,
-                &x,
-                &TOKEN_A,
-                &TOKEN_B,
-                cur_a,
-                cur_b,
-                30,
-                *parent_seq,
-                *input_is_a,
-                *input_amount,
-                &trader.public_key,
-                &trader.secret_key,
-                true,
-            )
-            .await;
-            cur_a = new_a;
-            cur_b = new_b;
-            expected_final_a = new_a;
-            expected_final_b = new_b;
-        }
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(composed.sequence, 3);
-        assert_eq!(composed.reserves_a, expected_final_a);
-        assert_eq!(composed.reserves_b, expected_final_b);
-        assert_eq!(composed.pending_chain_len, 3);
-        assert_eq!(composed.pending_chain_skipped, 0);
-    }
+        publish_extcommit(&x, &pk).await;
+        let out = 1_000_000u64; // any number; no receipt will exist
+        let trade = settled_trade(&x, 0, true, 10_000, out);
+        publish_pointer(&vault_id, 0, 1, &x, &trade, &pk, &sk).await;
 
-    #[tokio::test]
-    async fn skips_pointer_with_missing_x_anchor() {
-        let vault_id = vid_seed(0x13);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let x = x_seed(0x41);
-        // Intentionally do NOT publish the X anchor (or the RC).
-        publish_pointer(
-            &vault_id,
-            0,
-            1,
-            &x,
-            &marker_digest(&x, 0),
-            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(composed.sequence, 0, "cursor stays at baseline");
-        assert_eq!(composed.reserves_a, 1_000_000);
-        assert_eq!(composed.reserves_b, 500_000);
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
         assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.pending_chain_skipped, 1);
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn skips_pointer_when_rc_missing_even_if_x_present() {
-        // Cross-version safety: a legacy publisher might write the X
-        // anchor without the paired RC bytes.  The composer must skip
-        // that pointer (it can't verify the swap math without the RC)
-        // and report it as skipped, not silently advance the cursor.
-        let vault_id = vid_seed(0x16);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let x = x_seed(0x61);
-        publish_extcommit(&x, &trader.public_key).await;
-        // Skip the RC publish.
-        publish_pointer(
-            &vault_id,
-            0,
-            1,
-            &x,
-            &marker_digest(&x, 0),
-            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.reserves_a, 1_000_000);
-        assert_eq!(composed.reserves_b, 500_000);
+        assert_eq!(composed.c_n, c0);
+        assert_eq!(
+            composed.state, state,
+            "an unwitnessed intent changes NOTHING a composer reports"
+        );
+    }
+
+    /// The griefing case, pinned as refused: a pointer forged by an arbitrary
+    /// keypair — no RouteCommit, no X, arbitrary receipt commitment — at
+    /// exactly the current parent must leave the vault fully quotable. A
+    /// pointer is self-signed; its bare presence establishes no vault
+    /// authority and no settlement, so it may not suppress liquidity.
+    #[tokio::test]
+    async fn a_forged_pointer_from_an_arbitrary_key_cannot_suppress_liquidity() {
+        let vault_id = vid(0x0C);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (attacker_pk, attacker_sk) = trader();
+        // No X anchor, no RouteCommit, no receipt — one storage write.
+        let x = x_seed(0x0C);
+        let fake_trade = settled_trade(&x, 0, true, 1, 1);
+        publish_pointer(&vault_id, 0, 1, &x, &fake_trade, &attacker_pk, &attacker_sk).await;
+
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
         assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.pending_chain_skipped, 1);
-    }
-
-    #[tokio::test]
-    async fn stops_at_sequence_gap_and_preserves_partial_reserve_advance() {
-        let vault_id = vid_seed(0x14);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        // Publish seq=1 (chainable) and seq=3 (gap; parent=2 missing).
-        // After folding, the cursor advances to seq=1 with reserves
-        // reflecting that one trade and stops.
-        let (after_first_a, after_first_b) = publish_trade(
-            &vault_id,
-            &x_seed(0x51),
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            0,
-            true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
-            true,
-        )
-        .await;
-        // Orphan pointer at seq=3 (skips seq=2).
-        let orphan_x = x_seed(0x53);
-        publish_trade(
-            &vault_id,
-            &orphan_x,
-            &TOKEN_A,
-            &TOKEN_B,
-            after_first_a,
-            after_first_b,
-            30,
-            2, // parent=2, no preceding seq=2 trade
-            true,
-            500,
-            &trader.public_key,
-            &trader.secret_key,
-            true,
-        )
-        .await;
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
-        assert_eq!(composed.sequence, 1, "advances through seq=1 then stops");
-        assert_eq!(composed.reserves_a, after_first_a);
-        assert_eq!(composed.reserves_b, after_first_b);
-        assert_eq!(composed.pending_chain_len, 1);
-        assert_eq!(composed.pending_chain_skipped, 1);
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn rejects_pointer_whose_rc_hop_baseline_disagrees_with_cursor() {
-        // A trader publishes a RouteCommit whose hop's
-        // vault_state_reserves_digest doesn't match the composer's
-        // cursor (i.e., the trader signed against the wrong baseline).
-        // The composer must reject — folding would diverge from the
-        // canonical chain.
-        let vault_id = vid_seed(0x17);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let nonce_seed = x_seed(0x71);
-        // Build the RC with WRONG parent reserves (777, 888 instead of
-        // the real 1_000_000, 500_000).
-        let (_, _, x) = publish_rc_for_swap(
-            &nonce_seed,
-            &vault_id,
-            &TOKEN_A,
-            &TOKEN_B,
-            777, // wrong parent_reserve_a
-            888, // wrong parent_reserve_b
-            30,
-            0,
-            true,
-            10,
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-        publish_extcommit(&x, &trader.public_key).await;
-        publish_pointer(
-            &vault_id,
-            0,
-            1,
-            &x,
-            &marker_digest(&x, 0),
-            &settled_trade(&x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
         assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.reserves_a, 1_000_000);
-        assert_eq!(composed.reserves_b, 500_000);
-        assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.pending_chain_skipped, 1);
+        assert_eq!(composed.c_n, c0);
+        assert_eq!(
+            composed.state, state,
+            "one arbitrary-keypair storage write must not change what any verifier composes"
+        );
     }
 
+    /// A hop bound to a parent that is NOT the cursor's c_n is skipped: the
+    /// trade was signed against a different state and cannot be folded here.
     #[tokio::test]
-    #[serial_test::serial]
-    async fn rejects_pointer_when_route_commit_x_mismatches_pointer_x() {
-        let vault_id = vid_seed(0x18);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let trader = generate_keypair(SphincsVariant::SPX256f).expect("trader kp");
-        let baseline = make_baseline(
+    async fn a_hop_bound_to_a_stale_parent_is_skipped() {
+        let vault_id = vid(0x08);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let stale_binding = [0xEEu8; 32];
+        assert_ne!(stale_binding, c0);
+        let (_new_a, _new_b) = publish_settled_trade(
             &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
+            &x_seed(0x08),
             1_000_000,
             500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-
-        // Publish a valid signed RouteCommit and obtain its canonical X.
-        let nonce_seed = x_seed(0x81);
-        let (_, _, canonical_x) = publish_rc_for_swap(
-            &nonce_seed,
-            &vault_id,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
             0,
+            &stale_binding,
             true,
-            1_000,
-            &trader.public_key,
-            &trader.secret_key,
+            10_000,
         )
         .await;
 
-        // Copy the same RC bytes under a different storage key to simulate
-        // storage-key spoofing (keys are untrusted labels).
-        let spoofed_x = x_seed(0x82);
-        let canonical_key = external_commitment_rc_key(&canonical_x);
-        let spoofed_key = external_commitment_rc_key(&spoofed_x);
-        let rc_bytes = BitcoinTapSdk::storage_get_bytes(&canonical_key)
-            .await
-            .expect("fetch canonical rc");
-        BitcoinTapSdk::storage_put_bytes(&spoofed_key, &rc_bytes)
-            .await
-            .expect("publish spoofed rc");
-
-        // Make both anchors visible; eligibility-by-signature alone would pass,
-        // so only pointer.x ↔ canonical X binding should reject folding.
-        publish_extcommit(&canonical_x, &trader.public_key).await;
-        publish_extcommit(&spoofed_x, &trader.public_key).await;
-        publish_pointer(
-            &vault_id,
-            0,
-            1,
-            &spoofed_x,
-            &marker_digest(&spoofed_x, 0),
-            &settled_trade(&spoofed_x, 0, &TOKEN_A, 1, &TOKEN_B, 1),
-            &trader.public_key,
-            &trader.secret_key,
-        )
-        .await;
-
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds");
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
+        assert_eq!(composed.pending_chain_len, 0, "stale binding must not fold");
         assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.reserves_a, 1_000_000);
-        assert_eq!(composed.reserves_b, 500_000);
-        assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.pending_chain_skipped, 1);
+        assert_eq!(composed.c_n, c0);
+        assert!(composed.pending_chain_skipped >= 1);
     }
 
-    /// The headline scenario the Phase-6 plan targets: Alice (vault
-    /// owner) is offline; Bob's trade has settled cryptographically
-    /// (X published + RC published + pointer published); Carol comes
-    /// along and computes a composed state — she should see sequence=1
-    /// AND reserves shifted by Bob's exact trade.  This is the property
-    /// that lets concurrent traders serialize against a vault without
-    /// the owner online between trades.
+    /// A receipt that witnesses a DIFFERENT trade than the pointer committed
+    /// to does not activate the pointer.
     #[tokio::test]
-    async fn multi_trader_serialization_without_owner_refresh() {
-        let vault_id = vid_seed(0x99);
-        let alice = generate_keypair(SphincsVariant::SPX256f).expect("alice kp");
-        let bob = generate_keypair(SphincsVariant::SPX256f).expect("bob kp");
-        let _carol = generate_keypair(SphincsVariant::SPX256f).expect("carol kp");
-
-        // Alice publishes the baseline anchor at seq=0.  Alice's chain
-        // is the authority; everyone else sees this anchor on storage.
-        let baseline = make_baseline(
+    async fn a_receipt_for_a_different_trade_does_not_activate_the_pointer() {
+        let vault_id = vid(0x09);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (pk, sk) = trader();
+        let (new_a, _new_b, x) = publish_rc_for_swap(
+            &x_seed(0x09),
             &vault_id,
+            1_000_000,
+            500_000,
             0,
-            &TOKEN_A,
-            &TOKEN_B,
-            10_000,
-            10_000,
-            30,
-            &alice.public_key,
-            &alice.secret_key,
-        )
-        .await;
-
-        // Bob trades.  His RouteCommit settles; X + RC + pointer are
-        // published.  CRUCIALLY: Alice is offline — she does NOT publish
-        // a refreshed anchor at seq=1.
-        let bob_x = x_seed(0xBB);
-        let (after_bob_a, after_bob_b) = publish_trade(
-            &vault_id,
-            &bob_x,
-            &TOKEN_A,
-            &TOKEN_B,
-            10_000,
-            10_000,
-            30,
-            0,
-            true, // Bob sends AAA in
-            500,
-            &bob.public_key,
-            &bob.secret_key,
+            &c0,
             true,
+            10_000,
+            &pk,
+            &sk,
         )
         .await;
+        publish_extcommit(&x, &pk).await;
+        let _ = new_a;
+        // The pointer commits to the REAL trade …
+        let real_out = crate::sdk::routing_path_sdk::constant_product_output(
+            10_000, 1_000_000, 500_000, FEE_BPS,
+        )
+        .expect("sim");
+        let committed = settled_trade(&x, 0, true, 10_000, real_out);
+        publish_pointer(&vault_id, 0, 1, &x, &committed, &pk, &sk).await;
+        // … but the receipt witnesses a much smaller one.
+        let witnessed = settled_trade(&x, 0, true, 10, 3);
+        publish_receipt(&vault_id, &witnessed, &pk, &sk).await;
 
-        // Carol composes.  She sees Alice's seq=0 baseline + Bob's
-        // pending pointer + Bob's RC = composed cursor at seq=1 with
-        // reserves reflecting Bob's exact trade.  Concurrent
-        // serialization without Alice's involvement.
-        let composed = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect("compose succeeds for Carol");
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
+        assert_eq!(composed.pending_chain_len, 0);
+        assert_eq!(composed.sequence, 0);
         assert_eq!(
-            composed.sequence, 1,
-            "Carol should see Bob's pending advance even though Alice is offline",
+            composed.c_n, c0,
+            "an unmatched receipt leaves the pointer unwitnessed — and inert"
         );
-        assert_eq!(
-            composed.reserves_a, after_bob_a,
-            "reserve_a reflects Bob's input"
-        );
-        assert_eq!(
-            composed.reserves_b, after_bob_b,
-            "reserve_b reflects Bob's simulated output"
-        );
-        assert!(composed.reserves_a > 10_000);
-        assert!(composed.reserves_b < 10_000);
-        assert_eq!(composed.pending_chain_len, 1);
-        assert_eq!(composed.pending_chain_skipped, 0);
     }
 
+    /// Two settled trades chain: c_0 → c_1 → c_2, each successor binding the
+    /// previous identity, with the second hop bound to c_1 (not c_0).
     #[tokio::test]
-    async fn rejects_reserve_proof_disagreeing_with_the_signed_digest() {
-        let vault_id = vid_seed(0x15);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline(
+    async fn two_settled_trades_chain_by_commitment() {
+        let vault_id = vid(0x0A);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (a1, b1) = publish_settled_trade(
             &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
+            &x_seed(0x0A),
             1_000_000,
             500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
+            0,
+            &c0,
+            true,
+            10_000,
         )
         .await;
-        // The proven reserves and the owner's signed digest are BOTH the
-        // owner's. Disagreement means the two records came from different
-        // states, so the vault is unsafe to quote either way. Overwrite the
-        // published reserve proof with one proving different amounts under a
-        // consistent root of its own.
-        publish_reserve_proof_for(
-            &vault_id,
-            0,
-            777_777,
-            888_888,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .await;
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("proven reserves disagreeing with the signed digest must reject");
-        assert!(matches!(err, CompositionError::InvalidReserveProof));
-    }
+        // Recompute c_1 exactly as the composer will.
+        let (_p, _ccb2, state0, _c0b) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let mut s1 = state0.clone();
+        s1.generation = 1;
+        s1.reserve_a = a1;
+        s1.reserve_b = b1;
+        s1.parent_state_commitment = c0;
+        let c1 = vault_state_commitment(&s1).expect("c_1");
+        let (a2, b2) =
+            publish_settled_trade(&vault_id, &x_seed(0x0B), a1, b1, 1, &c1, false, 7_000).await;
 
-    // ───────────────────────────────────────────────────────────
-    // Phase 7 — SoFi spec §4.1.2 / §8.4 step 2 strict-mode tests
-    // ───────────────────────────────────────────────────────────
-
-    /// Strict mode refuses to fold a vault whose owner never published
-    /// a `VaultStateInclusionProofV1` — the legacy anchor alone is
-    /// insufficient.  This is the signing-key-forgery hole closure: an
-    /// attacker with the owner's key can forge a signed anchor but
-    /// cannot fabricate SMT consistency.
-    #[tokio::test]
-    async fn strict_mode_rejects_vault_without_inclusion_proof() {
-        let vault_id = vid_seed(0x80);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        // Only sign the anchor — DO NOT publish an inclusion proof.
-        // make_baseline_anchor_only is the escape hatch for exactly
-        // this negative-test scenario.
-        let baseline = make_baseline_anchor_only(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes");
+        assert_eq!(composed.pending_chain_len, 2);
+        assert_eq!(composed.sequence, 2);
+        assert_eq!(composed.reserves_a, a2);
+        assert_eq!(composed.reserves_b, b2);
+        assert_eq!(composed.state.parent_state_commitment, c1);
+        assert_eq!(
+            composed.c_n,
+            vault_state_commitment(&composed.state).expect("c_2")
         );
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("strict mode must refuse vault without inclusion proof");
-        assert!(matches!(err, CompositionError::MissingInclusionProof));
-    }
-
-    /// Strict mode catches owner equivocation: the inclusion proof
-    /// references a different (sequence, reserves_digest) than the
-    /// baseline anchor.  This would happen if a compromised owner
-    /// signed two records with the same key but disagreeing payloads.
-    #[tokio::test]
-    async fn strict_mode_rejects_inclusion_proof_disagreeing_with_baseline() {
-        use dsm::dlv::vault_smt_leaf::{
-            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
-        };
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let vault_id = vid_seed(0x81);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        // Anchor is at sequence=0 with the canonical reserves.
-        let baseline = make_baseline_anchor_only(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        );
-
-        // Publish an inclusion proof at sequence=5 — disagreeing with
-        // the baseline's sequence=0.
-        let bogus_reserves_digest =
-            compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
-        let mut tree = SparseMerkleTree::new(64);
-        let leaf_key = compute_vault_smt_key(&vault_id);
-        let leaf_value = compute_vault_smt_value(5, &bogus_reserves_digest);
-        tree.update_leaf(&leaf_key, &leaf_value)
-            .expect("update_leaf");
-        let smt_root = *tree.root();
-        let proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
-        let signed = sign_vault_state_inclusion_proof(
-            &vault_id,
-            5, // <-- disagrees with baseline's seq=0
-            &bogus_reserves_digest,
-            &smt_root,
-            proof.siblings,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .expect("sign inclusion proof");
-        let proto_bytes =
-            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
-        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(&vault_id, 5, &proto_bytes)
-            .await
-            .expect("publish");
-
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("strict mode must reject disagreeing inclusion proof");
-        assert!(matches!(err, CompositionError::InvalidInclusionProof));
-    }
-
-    /// Strict mode catches a tampered SMT path: the inclusion proof's
-    /// (vault_id, sequence, reserves_digest) match the baseline, the
-    /// signature is valid (because it doesn't sign over the siblings —
-    /// only over the root), but the supplied siblings DON'T hash up to
-    /// the claimed root.  Verifier rejects via the SMT inclusion
-    /// check.
-    #[tokio::test]
-    async fn strict_mode_rejects_inclusion_proof_with_tampered_siblings() {
-        use dsm::dlv::vault_smt_leaf::{
-            compute_vault_smt_key, compute_vault_smt_value, sign_vault_state_inclusion_proof,
-        };
-        use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-        let vault_id = vid_seed(0x82);
-        let owner = generate_keypair(SphincsVariant::SPX256f).expect("owner kp");
-        let baseline = make_baseline_anchor_only(
-            &vault_id,
-            0,
-            &TOKEN_A,
-            &TOKEN_B,
-            1_000_000,
-            500_000,
-            30,
-            &owner.public_key,
-            &owner.secret_key,
-        );
-
-        // Build a real SMT, then corrupt one sibling before signing —
-        // the signed payload (which excludes siblings, by design)
-        // still verifies, but the inclusion check rejects.
-        let reserves_digest = compute_reserves_digest(&TOKEN_A, &TOKEN_B, 1_000_000, 500_000, 30);
-        let mut tree = SparseMerkleTree::new(64);
-        let leaf_key = compute_vault_smt_key(&vault_id);
-        let leaf_value = compute_vault_smt_value(0, &reserves_digest);
-        tree.update_leaf(&leaf_key, &leaf_value)
-            .expect("update_leaf");
-        let smt_root = *tree.root();
-        let mut proof = tree.get_inclusion_proof(&leaf_key, 256).expect("proof");
-        // Corrupt one sibling.
-        proof.siblings[0][0] ^= 0xff;
-
-        let signed = sign_vault_state_inclusion_proof(
-            &vault_id,
-            0,
-            &reserves_digest,
-            &smt_root,
-            proof.siblings,
-            &owner.public_key,
-            &owner.secret_key,
-        )
-        .expect("sign inclusion proof");
-        let proto_bytes =
-            crate::sdk::vault_smt_inclusion_codec::encode_inclusion_proof_to_proto(&signed);
-        crate::sdk::vault_smt_inclusion_codec::publish_inclusion_proof(&vault_id, 0, &proto_bytes)
-            .await
-            .expect("publish");
-
-        let err = compose_vault_state(&vault_id, &baseline, &TOKEN_A, &TOKEN_B, 30)
-            .await
-            .expect_err("strict mode must reject tampered SMT path");
-        assert!(matches!(err, CompositionError::InvalidInclusionProof));
     }
 }

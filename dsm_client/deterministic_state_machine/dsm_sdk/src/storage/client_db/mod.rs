@@ -389,7 +389,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// written before any external step so recovery resumes instead of re-signing).
 /// Also durable protocol state that decides what "published", "which set" and
 /// "which claim" mean; same rule as v4 — the version is the authority, no shim.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 5;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 6;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -460,7 +460,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             verification_step INTEGER,
             created_at        INTEGER NOT NULL,
             genesis_nonce     TEXT NOT NULL DEFAULT '',
-            genesis_profile   TEXT NOT NULL DEFAULT ''
+            genesis_profile   TEXT NOT NULL DEFAULT '',
+            -- The network id the genesis was CREATED under. Required to
+            -- re-derive the GRK / authority chain (Genesis v3): the
+            -- derivation is seeded by (wallet_seed, network_id, index,
+            -- version), and the seed alone cannot recover a value the
+            -- user chose at creation time.
+            network_id        TEXT NOT NULL DEFAULT 'mainnet'
         );
 
         -- Identity publication lifecycle (§ "local genesis durable != identity ready").
@@ -1164,6 +1170,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- the value the vault's signed birth anchor binds. Consumers resolve
             -- the anchor's set; this cache must equal it (fail closed on mismatch).
             storage_set_id      BLOB NOT NULL,
+            -- The owner's CURRENT published baseline: `CCB(V_n)` (schema-3
+            -- vault state) and its `AnchorPresentationV3` proto bytes, exactly
+            -- as published — the birth state at creation, the terminal state
+            -- after close. Every owner-side composition starts from these;
+            -- c_n recomputes from the blob, so no digest is cached beside it.
+            baseline_state_ccb     BLOB NOT NULL DEFAULT X'',
+            baseline_presentation  BLOB NOT NULL DEFAULT X'',
             created_at          INTEGER NOT NULL
         );
 
@@ -2027,6 +2040,7 @@ mod tests {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: String::new(),
+            network_id: "dsm-test".into(),
         };
 
         if let Err(e) = store_genesis_record_with_verification(&rec) {
@@ -2066,6 +2080,7 @@ mod tests {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: String::new(),
+            network_id: "dsm-test".into(),
         };
 
         if let Err(e) = store_genesis_record_with_verification(&gen) {

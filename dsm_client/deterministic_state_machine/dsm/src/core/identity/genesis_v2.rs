@@ -48,6 +48,8 @@ pub enum GenesisEntropyProfile {
     /// Canonical: mnemonic-rooted, deterministic, no storage-node entropy.
     #[default]
     MnemonicV2,
+    /// Canonical (Genesis v3): mnemonic-rooted with `G` committing the GRK.
+    MnemonicV3,
     /// Optional: n-of-n commit-reveal multipart entropy (legacy / high-assurance).
     CommitRevealMpcV1,
 }

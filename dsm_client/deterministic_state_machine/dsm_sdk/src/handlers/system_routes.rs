@@ -95,6 +95,9 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             // Legacy / optional MPC profile: no public mnemonic nonce.
             genesis_nonce: String::new(),
             genesis_profile: "CommitRevealMpcV1".to_string(),
+            // Legacy MPC profile: not a v3 identity, so no GRK derivation
+            // inputs exist to record. Empty marks the row as non-v3.
+            network_id: String::new(),
         };
 
         crate::storage::client_db::store_genesis_record_with_verification(&genesis_record)
@@ -209,8 +212,8 @@ pub(crate) fn handle_generate_mnemonic_query() -> AppResult {
 }
 
 /// system.createGenesisV2 — canonical mnemonic-rooted wallet creation (whitepaper §2.5,
-/// GenesisEntropyProfile::MnemonicV2). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
-/// cache it in the unlocked session, then run `create_genesis_v2_self_attested` and install the
+/// GenesisEntropyProfile::MnemonicV3). The BIP39 mnemonic is the sole root: derive `wallet_seed`,
+/// cache it in the unlocked session, then run `create_genesis_v3_self_attested` and install the
 /// resulting GenesisState. No storage nodes, no MPC, no silicon, no random genesis entropy, no
 /// C-DBRW, no persisted s0/Smaster. Fails closed if the wallet seed cannot be derived/cached.
 pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
@@ -296,14 +299,14 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     };
     emit(LifecycleKind::GenesisKindSecuringProgress, 30);
 
-    // 2. Canonical mnemonic-rooted genesis (self-attested AttA; no silicon/random/MPC).
+    // 2. Canonical mnemonic-rooted Genesis v3 (self-attested AttA; G commits the GRK).
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
-    let outcome = match dsm::core::identity::genesis::create_genesis_v2_self_attested(
+    let outcome = match dsm::core::identity::genesis::create_genesis_v3_self_attested(
         &wallet_seed,
         network_id.as_bytes(),
         0,
         0,
-        2,
+        3,
         &aph,
     ) {
         Ok(o) => o,
@@ -317,7 +320,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
     let genesis_state = &outcome.state;
     let devid = match genesis_state.device_id {
         Some(d) => d,
-        None => return err("system.createGenesisV2: v2 genesis missing device_id".into()),
+        None => return err("system.createGenesisV2: v3 genesis missing device_id".into()),
     };
     let g = genesis_state.hash;
     let ak_pk = genesis_state.signing_key.public_key.clone();
@@ -350,12 +353,13 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         publication_hash: genesis_id_b32,
         storage_nodes: Vec::new(),
         entropy_hash: nonce_b32.clone(),
-        protocol_version: "genesis-v2".to_string(),
+        protocol_version: "genesis-v3".to_string(),
         hash_chain_proof: None,
         smt_proof: None,
         verification_step: None,
         genesis_nonce: nonce_b32,
-        genesis_profile: "MnemonicV2".to_string(),
+        genesis_profile: "MnemonicV3".to_string(),
+        network_id: network_id.clone(),
     };
     if let Err(e) = crate::storage::client_db::store_genesis_record_with_verification(&record) {
         return err(format!(

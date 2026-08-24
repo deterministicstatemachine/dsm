@@ -633,6 +633,7 @@ mod tests {
             owner_public_key: vec![0xABu8; 64],
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
             updated_state_number: state_number,
+            anchor_presentation_digest: vec![0u8; 32],
         }
     }
 
@@ -769,6 +770,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/good".into(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &good_proto,
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish good");
@@ -783,6 +785,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/bad".into(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &bad_proto,
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish bad");

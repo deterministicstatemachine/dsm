@@ -160,15 +160,12 @@ pub(crate) fn bind_path_to_route_commit(
             state_number: hop.state_number,
             unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
             owner_public_key: hop.owner_public_key.clone(),
-            // Anchor-state binding fields left empty here; the caller
-            // stamps them from the composed+synced vault state via
-            // `stamp_anchor_bindings` on the UNSIGNED RouteCommit before
-            // signing (so the signature + external commitment cover
-            // them).  A hop left empty means "no fetchable anchor" — the
-            // vault-side gate then fails closed for a `Required` vault.
-            vault_state_anchor_seq: 0,
-            vault_state_reserves_digest: Vec::new(),
-            vault_state_anchor_digest: Vec::new(),
+            // Parent binding left empty here; the caller stamps it from the
+            // composed vault state via `stamp_parent_bindings` on the
+            // UNSIGNED RouteCommit before signing (so the signature + the
+            // external commitment cover it). A hop left empty means "no
+            // verifiable parent state" — the vault-side gate fails closed.
+            parent_binding: Vec::new(),
         });
     }
 
@@ -211,37 +208,31 @@ pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8;
     dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes)
 }
 
-/// One vault's anchor-state binding, computed by the route binder
-/// from the composed+synced vault state at quote time.  Carries the exact
-/// values the vault-side unlock gate re-derives and compares against its
-/// LOCAL current state (`current_sequence` + `current_reserves_digest`).
+/// One vault's parent-state binding: the canonical identity
+/// `c_n = H(DSM/vault-state, CCB(V_n))` of the composed state this trade
+/// consumes, computed by the route binder at quote time. ONE field replaces
+/// the old (seq, reserves digest, anchor digest) triple — the generation,
+/// the reserves and the pair are members of the `V_n` that `c_n` identifies,
+/// so binding `c_n` binds all of them at once with no second source of truth.
 #[derive(Debug, Clone)]
-pub(crate) struct HopAnchorBinding {
-    /// The vault's composed current sequence at quote time.
-    pub seq: u64,
-    /// `compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps)`
-    /// over the composed reserves.
-    pub reserves_digest: Vec<u8>,
-    /// `compute_anchor_digest(vault_id, seq, reserves_digest)`.
-    pub anchor_digest: Vec<u8>,
+pub(crate) struct HopParentBinding {
+    pub parent_binding: [u8; 32],
 }
 
-/// Stamp each hop's anchor-state binding fields (`vault_state_anchor_seq`,
-/// `vault_state_reserves_digest`, `vault_state_anchor_digest`) from
-/// `bindings`, keyed by the hop's 32-byte `vault_id`.  A route binds one
-/// path, so this stamps that path's hops.
+/// Stamp each hop's `parent_binding` from `bindings`, keyed by the hop's
+/// 32-byte `vault_id`.  A route binds one path, so this stamps that path's
+/// hops.
 ///
 /// MUST run on the UNSIGNED RouteCommit, before the initiator signs it, so
 /// the SPHINCS+ signature and the external commitment `X` both cover the
-/// anchor binding (a hop's binding cannot be tampered post-signing).
+/// binding (a hop's binding cannot be tampered post-signing).
 ///
-/// A hop whose vault has no entry in `bindings` (e.g. no signed anchor was
-/// fetchable for it at quote time) is left with empty anchor fields; the
-/// vault-side gate then fails closed for a `Required`-policy vault — the
-/// intended behaviour, never a silent bypass.
-pub(crate) fn stamp_anchor_bindings(
+/// A hop whose vault has no entry in `bindings` (no verifiable state was
+/// composable for it at quote time) is left empty; the vault-side gate then
+/// fails closed — the intended behaviour, never a silent bypass.
+pub(crate) fn stamp_parent_bindings(
     rc: &mut generated::RouteCommitV1,
-    bindings: &std::collections::HashMap<[u8; 32], HopAnchorBinding>,
+    bindings: &std::collections::HashMap<[u8; 32], HopParentBinding>,
 ) {
     for hop in rc.hops.iter_mut() {
         if hop.vault_id.len() != 32 {
@@ -250,100 +241,46 @@ pub(crate) fn stamp_anchor_bindings(
         let mut vid = [0u8; 32];
         vid.copy_from_slice(&hop.vault_id);
         if let Some(b) = bindings.get(&vid) {
-            hop.vault_state_anchor_seq = b.seq;
-            hop.vault_state_reserves_digest = b.reserves_digest.clone();
-            hop.vault_state_anchor_digest = b.anchor_digest.clone();
+            hop.parent_binding = b.parent_binding.to_vec();
         }
     }
 }
 
-/// Outcome of the anchor-enforcement gate for one hop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AnchorPosture {
-    /// Fields present and matched the vault's live state (Required or
-    /// Optional policy).  The trade is bound to a specific attested state.
-    Enforced,
-    /// Optional policy with fields absent — identity binding was NOT
-    /// enforced (grandfathered path); callers should surface this.
-    BypassedOptional,
-    /// Unspecified policy — grandfathered; no enforcement.
-    BypassedUnspecified,
-}
-
-/// Reason the anchor-enforcement gate rejected a hop.  Every variant is a
-/// fail-closed rejection; there is no "soft" mismatch.
+/// Reason the parent-binding gate rejected a hop. Every variant is a
+/// fail-closed rejection; there is no "soft" mismatch and no policy bypass —
+/// the binding is mandatory for every routed hop.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AnchorGateReject {
-    /// Required policy but the hop omits `vault_state_reserves_digest`
-    /// and/or `vault_state_anchor_digest`.
-    MissingFields,
-    /// The hop's bound sequence != the vault's live `current_sequence`
-    /// (the vault advanced since the RouteCommit was bound — stale state).
-    SequenceMismatch { route: u64, vault: u64 },
-    /// The hop's bound reserves digest != the vault's live reserves digest.
-    ReservesDigestMismatch,
-    /// The hop's bound anchor digest != the digest re-derived from the
-    /// vault's live `(sequence, reserves_digest)`.
-    AnchorDigestMismatch,
-    /// The vault is not an AMM vault, so no reserves digest exists to
-    /// compare against — a routed AMM unlock cannot proceed.
-    ReservesDigestUnavailable,
+pub(crate) enum ParentBindingReject {
+    /// The hop carries no 32-byte `parent_binding` at all. An unbound hop
+    /// names no parent state, so nothing about it is checkable.
+    MissingBinding,
+    /// The hop's bound `parent_binding` != the `c_n` of the vault's composed
+    /// current state — the vault advanced since the RouteCommit was bound
+    /// (stale parent), or the route was bound against a state that never
+    /// existed. Either way the parent it names cannot be consumed.
+    StaleParent,
 }
 
-/// Enforce a hop's anchor-state binding against the vault's LOCAL current
-/// state, per the vault's `anchor_enforcement` policy.  Pure and
-/// storage-free: it re-derives the expected anchor digest, never re-reads
-/// storage (that would re-introduce storage trust).
+/// Enforce a hop's parent binding against the `c_n` the verifier composed
+/// for this vault. Pure and storage-free: the caller composes the state
+/// through the presentation-verified fold and passes its commitment; this
+/// gate is one byte-equality.
 ///
-/// * `Required` — all three anchor fields MUST be present and match the
-///   live `(sequence, reserves_digest)`; any absent or mismatched field
-///   fails closed.
-/// * `Optional` — if fields present, they must match; if absent, bypass
-///   with `BypassedOptional` so callers can audit.
-/// * `Unspecified` — grandfathered; no enforcement.
-///
-/// A mismatch means the vault advanced between quote and unlock: the
-/// RouteCommit is bound to stale state and must be rejected.  This is the
-/// producer↔consumer half that makes `stamp_anchor_bindings` load-bearing.
-pub(crate) fn enforce_anchor_binding(
-    policy: generated::AnchorEnforcement,
+/// A mismatch means the vault advanced between quote and unlock (or the
+/// route was bound to a fabricated parent): the RouteCommit is bound to a
+/// state that is not the current one and must be rejected. This is the
+/// producer↔consumer half that makes `stamp_parent_bindings` load-bearing.
+pub(crate) fn enforce_parent_binding(
     hop: &generated::RouteCommitHopV1,
-    vault_id: &[u8; 32],
-    vault_current_sequence: u64,
-    vault_current_reserves_digest: Option<[u8; 32]>,
-) -> Result<AnchorPosture, AnchorGateReject> {
-    use generated::AnchorEnforcement;
-    // `vault_state_anchor_seq` is u64 and 0 is a valid genesis sequence,
-    // so presence is decided by the two fixed-length digest fields.
-    let has_anchor_fields =
-        !hop.vault_state_reserves_digest.is_empty() && !hop.vault_state_anchor_digest.is_empty();
-    match (policy, has_anchor_fields) {
-        (AnchorEnforcement::Required, false) => Err(AnchorGateReject::MissingFields),
-        (AnchorEnforcement::Required, true) | (AnchorEnforcement::Optional, true) => {
-            if hop.vault_state_anchor_seq != vault_current_sequence {
-                return Err(AnchorGateReject::SequenceMismatch {
-                    route: hop.vault_state_anchor_seq,
-                    vault: vault_current_sequence,
-                });
-            }
-            let internal_digest =
-                vault_current_reserves_digest.ok_or(AnchorGateReject::ReservesDigestUnavailable)?;
-            if hop.vault_state_reserves_digest != internal_digest.to_vec() {
-                return Err(AnchorGateReject::ReservesDigestMismatch);
-            }
-            let expected_anchor_digest = dsm::dlv::vault_state_anchor::compute_anchor_digest(
-                vault_id,
-                vault_current_sequence,
-                &internal_digest,
-            );
-            if hop.vault_state_anchor_digest != expected_anchor_digest.to_vec() {
-                return Err(AnchorGateReject::AnchorDigestMismatch);
-            }
-            Ok(AnchorPosture::Enforced)
-        }
-        (AnchorEnforcement::Optional, false) => Ok(AnchorPosture::BypassedOptional),
-        (AnchorEnforcement::Unspecified, _) => Ok(AnchorPosture::BypassedUnspecified),
+    composed_c_n: &[u8; 32],
+) -> Result<(), ParentBindingReject> {
+    if hop.parent_binding.len() != 32 {
+        return Err(ParentBindingReject::MissingBinding);
     }
+    if hop.parent_binding.as_slice() != composed_c_n.as_slice() {
+        return Err(ParentBindingReject::StaleParent);
+    }
+    Ok(())
 }
 
 /// Publish the external-commitment anchor to storage nodes.  The
@@ -372,9 +309,10 @@ pub(crate) async fn publish_external_commitment(
 /// can log/audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishPointerError {
-    /// Hop's `vault_state_anchor_seq` field was missing or unset; without
-    /// a parent sequence we cannot produce a valid pointer.
-    HopMissingAnchorSeq { hop_index: usize },
+    /// Hop is malformed for pointer linkage: `state_number` overflowed or
+    /// `vault_id` is not 32 bytes — without a parent sequence and vault
+    /// identity we cannot produce a valid pointer.
+    HopMissingParentLinkage { hop_index: usize },
     /// Hop's tokens / reserves / amounts failed to round-trip the AMM
     /// re-simulation — i.e., the embedded RouteCommit is internally
     /// inconsistent.  Publishing a pointer would commit to a digest the
@@ -398,8 +336,11 @@ pub(crate) enum PublishPointerError {
 impl std::fmt::Display for PublishPointerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PublishPointerError::HopMissingAnchorSeq { hop_index } => {
-                write!(f, "hop {hop_index}: missing vault_state_anchor_seq")
+            PublishPointerError::HopMissingParentLinkage { hop_index } => {
+                write!(
+                    f,
+                    "hop {hop_index}: missing parent linkage (state_number/vault_id)"
+                )
             }
             PublishPointerError::HopReSimulationFailed { hop_index } => {
                 write!(
@@ -472,18 +413,20 @@ pub(crate) async fn publish_route_anchor_with_pointers(
     //    same arithmetic the chunks-#7 gate uses at unlock time.
     let mut errors: Vec<PublishPointerError> = Vec::new();
     for (hop_index, hop) in rc.hops.iter().enumerate() {
-        // Hop must carry an anchor seq for pointer parent linkage.
-        let parent_sequence = hop.vault_state_anchor_seq;
+        // The hop's `state_number` is the generation of the parent state its
+        // `parent_binding` identifies — stamped from the SAME composed state
+        // at quote time — and the pointer chain links by sequence.
+        let parent_sequence = hop.state_number;
         let new_sequence = match parent_sequence.checked_add(1) {
             Some(v) => v,
             None => {
-                errors.push(PublishPointerError::HopMissingAnchorSeq { hop_index });
+                errors.push(PublishPointerError::HopMissingParentLinkage { hop_index });
                 continue;
             }
         };
         // vault_id must be exactly 32 bytes per proto (dsm_fixed_len=32).
         if hop.vault_id.len() != 32 {
-            errors.push(PublishPointerError::HopMissingAnchorSeq { hop_index });
+            errors.push(PublishPointerError::HopMissingParentLinkage { hop_index });
             continue;
         }
         let mut vault_id_arr = [0u8; 32];
@@ -491,9 +434,9 @@ pub(crate) async fn publish_route_anchor_with_pointers(
 
         // Derive the new reserves digest by replaying the AMM swap.
         // We need the vault's lex-canonical (token_a, token_b) + the
-        // direction the hop is trading.  The hop binds token_in /
-        // token_out + parent reserves via vault_state_reserves_digest;
-        // but the digest itself doesn't expose the reserve magnitudes.
+        // direction the hop is trading.  The hop binds its parent state via
+        // `parent_binding` (c_n); the commitment doesn't expose the reserve
+        // magnitudes.
         // So we re-derive from the hop's amounts:
         //
         //   - input_amount enters reserve_in
@@ -1142,7 +1085,7 @@ mod tests {
                 token_out: vec![0x22; 32],
                 input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
                 expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-                vault_state_anchor_seq: 0,
+                state_number: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1220,8 +1163,10 @@ mod tests {
                 }),
             ),
             (
-                "anchor seq",
-                Box::new(|r: &mut generated::RouteCommitV1| r.hops[0].vault_state_anchor_seq += 1),
+                "parent binding",
+                Box::new(|r: &mut generated::RouteCommitV1| {
+                    r.hops[0].parent_binding = vec![0x5Eu8; 32]
+                }),
             ),
         ];
         for (what, mutate) in mutations {
@@ -1914,11 +1859,9 @@ mod tests {
             state_number: 1,
             unlock_spec_digest: [0u8; 32].to_vec(),
             owner_public_key: vec![0xABu8; 64],
-            // Anchor binding absent: OPTIONAL/UNSPECIFIED enforcement
-            // passes through; REQUIRED fails closed at the gate.
-            vault_state_anchor_seq: 0,
-            vault_state_reserves_digest: Vec::new(),
-            vault_state_anchor_digest: Vec::new(),
+            // Parent binding absent: the gate fails closed on every unbound
+            // hop — there is no policy bypass.
+            parent_binding: Vec::new(),
         }
     }
 
@@ -2306,6 +2249,7 @@ mod tests {
                 unlock_spec_key: "sofi/spec/demo".to_string(),
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
+                anchor_presentation_digest: [0u8; 32],
             },
         )
         .await
@@ -2499,6 +2443,7 @@ mod tests {
                 unlock_spec_key: "sofi/spec/demo".to_string(),
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
+                anchor_presentation_digest: [0u8; 32],
             },
         )
         .await
@@ -2574,27 +2519,21 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Tier-2 anchor-state binding: producer (stamp) ↔ consumer (gate)
+    // Parent binding: producer (stamp) ↔ consumer (gate)
     // ─────────────────────────────────────────────────────────────────
 
-    use dsm::dlv::vault_state_anchor::{compute_anchor_digest, compute_reserves_digest};
-
-    /// Build a one-hop RouteCommit over `vault_id` and stamp its anchor
-    /// binding exactly as `route.findAndBindBestPath` does.  Returns the
-    /// stamped primary hop and the `(seq, reserves_digest)` it was bound
-    /// to — the values a fresh vault re-derives at unlock.
+    /// Build a one-hop RouteCommit over `vault_id` and stamp its parent
+    /// binding exactly as `route.findAndBindBestPath` does. Returns the
+    /// stamped primary hop and the `c_n` it was bound to — the value a fresh
+    /// vault re-derives from its own composition at unlock.
     fn stamped_hop(
         vault_id: [u8; 32],
         token_a: &[u8],
         token_b: &[u8],
-        reserve_a: u64,
-        reserve_b: u64,
         fee_bps: u32,
         seq: u64,
-    ) -> (generated::RouteCommitHopV1, [u8; 32]) {
-        let reserves_digest =
-            compute_reserves_digest(token_a, token_b, reserve_a, reserve_b, fee_bps);
-        let anchor_digest = compute_anchor_digest(&vault_id, seq, &reserves_digest);
+        c_n: [u8; 32],
+    ) -> generated::RouteCommitHopV1 {
         let path = Path {
             input_token: token_a.to_vec(),
             output_token: token_b.to_vec(),
@@ -2621,30 +2560,25 @@ mod tests {
             initiator_signature: vec![],
         })
         .expect("bind");
-        // The binder leaves anchor fields empty; the stamp fills them.
-        assert!(rc.hops[0].vault_state_reserves_digest.is_empty());
+        // The binder leaves the binding empty; the stamp fills it.
+        assert!(rc.hops[0].parent_binding.is_empty());
         let mut bindings = std::collections::HashMap::new();
         bindings.insert(
             vault_id,
-            HopAnchorBinding {
-                seq,
-                reserves_digest: reserves_digest.to_vec(),
-                anchor_digest: anchor_digest.to_vec(),
+            HopParentBinding {
+                parent_binding: c_n,
             },
         );
-        stamp_anchor_bindings(&mut rc, &bindings);
+        stamp_parent_bindings(&mut rc, &bindings);
         let hop = rc.hops.remove(0);
-        assert_eq!(hop.vault_state_anchor_seq, seq);
-        assert_eq!(hop.vault_state_reserves_digest, reserves_digest.to_vec());
-        assert_eq!(hop.vault_state_anchor_digest, anchor_digest.to_vec());
-        (hop, reserves_digest)
+        assert_eq!(hop.parent_binding, c_n.to_vec());
+        hop
     }
 
     #[test]
     fn stamp_fills_bound_hops_and_skips_unknown() {
-        // A 2-hop path (vaults 1,2). Bind an anchor for vault 1 only;
-        // vault 2 has none and must be left empty (fail-closed at a
-        // Required vault).
+        // A 2-hop path (vaults 1,2). Bind a parent for vault 1 only;
+        // vault 2 has none and must be left empty (fail-closed at the gate).
         let a = token("AAA");
         let b = token("BBB");
         let c = token("CCC");
@@ -2667,60 +2601,47 @@ mod tests {
         let mut bindings = std::collections::HashMap::new();
         bindings.insert(
             vid(1),
-            HopAnchorBinding {
-                seq: 11,
-                reserves_digest: vec![0x11u8; 32],
-                anchor_digest: vec![0xA1u8; 32],
+            HopParentBinding {
+                parent_binding: [0x11u8; 32],
             },
         );
-        stamp_anchor_bindings(&mut rc, &bindings);
+        stamp_parent_bindings(&mut rc, &bindings);
 
         // Hop 0 (vault 1) stamped.
-        assert_eq!(rc.hops[0].vault_state_anchor_seq, 11);
-        assert_eq!(rc.hops[0].vault_state_reserves_digest, vec![0x11u8; 32]);
-        assert_eq!(rc.hops[0].vault_state_anchor_digest, vec![0xA1u8; 32]);
-        // Hop 1 (vault 2) has no binding → left empty (fail-closed at a
-        // Required vault).
-        assert_eq!(rc.hops[1].vault_state_anchor_seq, 0);
-        assert!(rc.hops[1].vault_state_reserves_digest.is_empty());
-        assert!(rc.hops[1].vault_state_anchor_digest.is_empty());
+        assert_eq!(rc.hops[0].parent_binding, vec![0x11u8; 32]);
+        // Hop 1 (vault 2) has no binding → left empty (fail-closed).
+        assert!(rc.hops[1].parent_binding.is_empty());
     }
 
-    /// Route-level integration proof of stale-state rejection: the REAL
-    /// producer (`stamp_anchor_bindings`) and the REAL consumer gate
-    /// (`enforce_anchor_binding`, which `dlv.unlockRouted` calls with the
-    /// loaded vault's live state) agree byte-for-byte on a fresh vault and
+    /// Route-level integration proof of stale-parent rejection: the REAL
+    /// producer (`stamp_parent_bindings`) and the REAL consumer gate
+    /// (`enforce_parent_binding`, which `dlv.unlockRouted` calls with its own
+    /// freshly composed `c_n`) agree byte-for-byte on a fresh vault and
     /// reject every way the vault can have moved on.
     #[test]
-    fn anchor_gate_accepts_fresh_and_rejects_stale() {
-        use generated::AnchorEnforcement::Required;
+    fn parent_gate_accepts_fresh_and_rejects_stale() {
         let vault_id = vid(5);
-        let (hop, rd) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000_000, 2_000_000, 30, 7);
+        let c_n = [0x77u8; 32];
+        let hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, 7, c_n);
 
-        // FRESH — vault still at the quoted (seq, reserves) → enforced.
-        assert_eq!(
-            enforce_anchor_binding(Required, &hop, &vault_id, 7, Some(rd)),
-            Ok(AnchorPosture::Enforced)
-        );
+        // FRESH — the vault's own composition reaches the same c_n → enforced.
+        assert_eq!(enforce_parent_binding(&hop, &c_n), Ok(()));
 
-        // STALE sequence — vault advanced to seq 8.
+        // STALE — the vault advanced: its composed c_n moved, so the equality
+        // fails no matter WHICH member of the state changed (generation,
+        // reserves, fee, pair — all are inside the identified V_n).
+        let mut moved = c_n;
+        moved[0] ^= 0xFF;
         assert_eq!(
-            enforce_anchor_binding(Required, &hop, &vault_id, 8, Some(rd)),
-            Err(AnchorGateReject::SequenceMismatch { route: 7, vault: 8 })
-        );
-
-        // STALE reserves — same seq, but the vault's live reserves moved.
-        let moved = compute_reserves_digest(b"AAA", b"BBB", 999_000, 2_001_000, 30);
-        assert_eq!(
-            enforce_anchor_binding(Required, &hop, &vault_id, 7, Some(moved)),
-            Err(AnchorGateReject::ReservesDigestMismatch)
+            enforce_parent_binding(&hop, &moved),
+            Err(ParentBindingReject::StaleParent)
         );
     }
 
+    /// An unbound hop is refused unconditionally — the policy bypasses died
+    /// with the legacy anchor gate.
     #[test]
-    fn anchor_gate_missing_fields_required_rejects_optional_bypasses() {
-        use generated::AnchorEnforcement::{Optional, Required, Unspecified};
-        let vault_id = vid(6);
+    fn parent_gate_rejects_unbound_hops_with_no_bypass() {
         let path = Path {
             input_token: token("AAA"),
             output_token: token("BBB"),
@@ -2737,43 +2658,31 @@ mod tests {
         })
         .expect("bind");
         let bare = &rc.hops[0];
-        assert!(bare.vault_state_reserves_digest.is_empty());
+        assert!(bare.parent_binding.is_empty());
+        assert_eq!(
+            enforce_parent_binding(bare, &[0u8; 32]),
+            Err(ParentBindingReject::MissingBinding)
+        );
 
-        // Required + absent fields → fail closed.
+        // A mis-sized binding is as unbound as an empty one.
+        let mut short = bare.clone();
+        short.parent_binding = vec![0x11u8; 31];
         assert_eq!(
-            enforce_anchor_binding(Required, bare, &vault_id, 0, Some([0u8; 32])),
-            Err(AnchorGateReject::MissingFields)
-        );
-        // Optional + absent → bypass (audited posture, not a hard fail).
-        assert_eq!(
-            enforce_anchor_binding(Optional, bare, &vault_id, 0, Some([0u8; 32])),
-            Ok(AnchorPosture::BypassedOptional)
-        );
-        // Unspecified → grandfathered bypass.
-        assert_eq!(
-            enforce_anchor_binding(Unspecified, bare, &vault_id, 0, Some([0u8; 32])),
-            Ok(AnchorPosture::BypassedUnspecified)
+            enforce_parent_binding(&short, &[0u8; 32]),
+            Err(ParentBindingReject::MissingBinding)
         );
     }
 
+    /// A tampered binding — one bit anywhere — is a stale-parent refusal.
     #[test]
-    fn anchor_gate_rejects_tampered_digest_and_non_amm_vault() {
-        use generated::AnchorEnforcement::Required;
+    fn parent_gate_rejects_tampered_binding() {
         let vault_id = vid(7);
-        let (mut hop, rd) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000, 2_000, 30, 3);
-
-        // Tampered anchor digest (seq + reserves still match) → reject.
-        hop.vault_state_anchor_digest[0] ^= 0xFF;
+        let c_n = [0x42u8; 32];
+        let mut hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, 3, c_n);
+        hop.parent_binding[0] ^= 0xFF;
         assert_eq!(
-            enforce_anchor_binding(Required, &hop, &vault_id, 3, Some(rd)),
-            Err(AnchorGateReject::AnchorDigestMismatch)
-        );
-
-        // Non-AMM vault (no reserves digest available) → reject.
-        let (fresh, _) = stamped_hop(vault_id, b"AAA", b"BBB", 1_000, 2_000, 30, 3);
-        assert_eq!(
-            enforce_anchor_binding(Required, &fresh, &vault_id, 3, None),
-            Err(AnchorGateReject::ReservesDigestUnavailable)
+            enforce_parent_binding(&hop, &c_n),
+            Err(ParentBindingReject::StaleParent)
         );
     }
 }

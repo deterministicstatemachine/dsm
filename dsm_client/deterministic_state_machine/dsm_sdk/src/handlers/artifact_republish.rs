@@ -18,6 +18,15 @@
 use crate::sdk::storage_set::StorageSetCatalog;
 use crate::storage::client_db::frozen_publication_artifact as fpa;
 
+/// Split an `immutable::{namespace}::{addr_b32}` object key into its parts.
+/// Returns `None` for ordinary keyed objects. The namespace itself contains
+/// `/` but never `::`, so splitting on the LAST `::` is unambiguous.
+fn parse_immutable_object_key(key: &str) -> Option<(&str, &str)> {
+    let rest = key.strip_prefix("immutable::")?;
+    let idx = rest.rfind("::")?;
+    Some((&rest[..idx], &rest[idx + 2..]))
+}
+
 /// Bounded work per pass so a large backlog cannot starve the rest of a sync.
 pub(crate) const ARTIFACT_REPUBLISH_ROWS_PER_POLL: u32 = 8;
 
@@ -105,13 +114,23 @@ async fn republish_rows(rows: Vec<fpa::FrozenArtifact>) -> Result<u32, String> {
         };
 
         // The exact frozen bytes, to the exact set. Nothing is regenerated.
-        let fanout = match crate::sdk::storage_io::put_bytes_to_all_members(
-            set,
-            &row.object_key,
-            &row.payload,
-        )
-        .await
-        {
+        // Keys of the shape `immutable::{namespace}::{addr_b32}` are Area-4
+        // immutable tuples and travel through the write-once immutable
+        // endpoint; everything else is an ordinary keyed object.
+        let fanout_result =
+            if let Some((namespace, addr_b32)) = parse_immutable_object_key(&row.object_key) {
+                crate::sdk::storage_io::put_immutable_to_all_members(
+                    set,
+                    namespace,
+                    &row.payload,
+                    addr_b32,
+                )
+                .await
+            } else {
+                crate::sdk::storage_io::put_bytes_to_all_members(set, &row.object_key, &row.payload)
+                    .await
+            };
+        let fanout = match fanout_result {
             Ok(f) => f,
             Err(e) => {
                 fpa::upsert_artifact_publication_state(
