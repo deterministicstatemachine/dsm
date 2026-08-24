@@ -1458,6 +1458,77 @@ impl StorageNodeSDK {
         }
     }
 
+    /// Immutable-channel fan-out to every member of `set`: PUT the exact
+    /// `(namespace, payload)` tuple through `/api/v2/immutable/put` with the
+    /// caller's expected address, on each member's own client. Write-once on
+    /// the tuple node-side, so replays are idempotent and a divergent byte
+    /// string under the same address refuses loudly (409) instead of storing.
+    ///
+    /// Never decides quorum — the caller counts acceptances against the set's
+    /// own threshold, exactly like `put_bytes_to_all_members`.
+    pub async fn put_immutable_to_all_members(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        namespace: &str,
+        payload: &[u8],
+        expected_addr_b32: &str,
+    ) -> KeyedPutFanout {
+        let mut outcomes = Vec::with_capacity(set.len());
+        let mut accepted = 0u32;
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let outcome = match client {
+                None => MemberPutOutcome {
+                    member_id: member.member_id.clone(),
+                    endpoint: member.endpoint.clone(),
+                    accepted: false,
+                    echoed_node_id: None,
+                    error: Some("no client for this member's endpoint".to_string()),
+                },
+                Some(c) => match c.put_immutable(namespace, payload, expected_addr_b32).await {
+                    Ok(_) => {
+                        let _ = crate::network::report_storage_success(&member.endpoint);
+                        MemberPutOutcome {
+                            member_id: member.member_id.clone(),
+                            endpoint: member.endpoint.clone(),
+                            accepted: true,
+                            echoed_node_id: None,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        let _ = crate::network::report_storage_failure(&member.endpoint);
+                        MemberPutOutcome {
+                            member_id: member.member_id.clone(),
+                            endpoint: member.endpoint.clone(),
+                            accepted: false,
+                            echoed_node_id: None,
+                            error: Some(e.to_string()),
+                        }
+                    }
+                },
+            };
+            if outcome.accepted {
+                accepted += 1;
+            }
+            outcomes.push(outcome);
+        }
+        log::info!(
+            "put_immutable_to_all_members: addr={} accepted={}/{} members",
+            &expected_addr_b32[..expected_addr_b32.len().min(24)],
+            accepted,
+            set.len()
+        );
+        KeyedPutFanout {
+            outcomes,
+            accepted,
+            total: set.len() as u32,
+        }
+    }
+
     /// Write to ALL configured storage nodes (spec §6: redundant mirrors).
     ///
     /// DSM storage nodes are independent endpoints — there is NO server-

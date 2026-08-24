@@ -330,6 +330,8 @@ mod tests {
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
             storage_set_id: [0x6B; 32],
+            baseline_state_ccb: Vec::new(),
+            baseline_presentation: Vec::new(),
         };
         (record, head)
     }
@@ -403,7 +405,7 @@ mod tests {
         // The reserves digest a trader binds is identical too — that is what
         // makes a pre-restart quote still verifiable after one.
         let digest = |v: &RehydratedVault| {
-            dsm::dlv::vault_state_anchor::compute_reserves_digest(
+            dsm::dlv::vault_smt_leaf::compute_reserves_digest(
                 &v.pair.a(),
                 &v.pair.b(),
                 v.reserve_a,
@@ -564,6 +566,8 @@ mod tests {
             anchor_enforcement: REQUIRED,
             policy_digest: [0x5A; 32],
             storage_set_id: [0x6B; 32],
+            baseline_state_ccb: Vec::new(),
+            baseline_presentation: Vec::new(),
         };
         assert_eq!(
             rehydrate_amm_vault(&record, &head),

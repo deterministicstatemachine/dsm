@@ -1182,19 +1182,37 @@ enum VaultPublicationState {
 // `owner_signature` is SPHINCS+ over
 //   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
 //          reserves_digest)
-message VaultStateAnchorV1 {
-  bytes  vault_id           = 1 [(dsm_fixed_len)=32];
-  uint64 sequence           = 2;
-  bytes  reserves_digest    = 3 [(dsm_fixed_len)=32];
-  bytes  owner_public_key   = 4 [(dsm_max_len)=65535];
-  bytes  owner_signature    = 5 [(dsm_max_len)=65535];
-  // The canonical storage set the vault was born under (BLAKE3 over its
-  // sorted, length-prefixed member ids), INSIDE the owner-signed preimage
-  // and birth-fixed across the vault's lineage. Consumers resolve it through
-  // their local storage-set catalog by re-hashing; the anchor chooses the
-  // set, configuration only resolves it. Publication artifacts and the
-  // settlement-slot register for this vault are scoped to this set.
-  bytes  storage_set_id     = 6 [(dsm_fixed_len)=32];
+// VaultStateAnchorV1 is DELETED by the state-identity cut. The message name
+// is burned and never reused; no implementation decodes it. Its replacement
+// is AnchorPresentationV3 below — the anchor signs c_n and nothing else, and
+// every fact the V1 anchor restated (sequence, reserves digest, storage set)
+// is a field of the V_n that c_n identifies.
+
+// One signed root-progression object as it travels: the CCB bytes (class
+// 0x0019 or 0x001A) plus the signature that is NEVER a CCB field (§2.9).
+message SignedAuthorityObjectV1 {
+  bytes ccb       = 1 [(dsm_max_len)=4096];
+  bytes signature = 2 [(dsm_max_len)=65535]; // SPHINCS+ SPX256f
+}
+
+// The owner's complete verification bundle for one vault state: the AnchorV3
+// signature over c_n, the candidate key, and everything a stranger needs to
+// discharge P0–P6 at the state's committed authority position. TRANSPORT
+// ONLY (§2.10): nothing here is trusted as presented — the consumer
+// recomputes G from genesis_params_ccb, authenticates every delegation and
+// transition, re-derives d_o from ak_pk + atta, and enforces
+// K_cand == K_proven against candidate_public_key. Published as an immutable
+// object; discovery paths carry its 32-byte content address, never bytes.
+message AnchorPresentationV3 {
+  bytes  state_commitment       = 1 [(dsm_fixed_len)=32];  // c_n
+  bytes  candidate_public_key   = 2 [(dsm_max_len)=65535];
+  bytes  anchor_signature       = 3 [(dsm_max_len)=65535]; // over H(DSM/vault-state-anchor/v3 ‖ c_n)
+  bytes  genesis_params_ccb     = 4 [(dsm_max_len)=4096];  // class 0x0018
+  repeated SignedAuthorityObjectV1 delegations = 5;         // class 0x0019, chain order
+  repeated SignedAuthorityObjectV1 transitions = 6;         // class 0x001A, chain order
+  bytes  inclusion_proof        = 7 [(dsm_max_len)=16384];  // DevTreeProof::to_bytes
+  bytes  ak_public_key          = 8 [(dsm_max_len)=65535];
+  bytes  atta                   = 9 [(dsm_fixed_len)=32];
 }
 
 // One hop in a `RouteCommitV1`.  Bound at routing time to the vault
@@ -1222,9 +1240,16 @@ message RouteCommitHopV1 {
   // time.  Gate verifies against local DLVManager state (NOT storage).
   // For vaults with `anchor_enforcement = REQUIRED` these fields are
   // mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
-  uint64 vault_state_anchor_seq      = 11;
-  bytes  vault_state_reserves_digest = 12 [(dsm_fixed_len)=32];
-  bytes  vault_state_anchor_digest   = 13 [(dsm_fixed_len)=32];
+  // Fields 11–13 carried the V1 anchor projection (sequence, reserves
+  // digest, anchor digest) — three separately-carried copies of facts the
+  // canonical state commits. Burned by the state-identity cut.
+  reserved 11, 12, 13;
+  // The parent identity: c_n of the EXACT complete state this hop consumes.
+  // The trader computes it from the composed successor V_n; the vault
+  // recomputes its own local c_n and compares. Equality binds the hop to the
+  // whole state — reserves, generation, lineage edge, authority position —
+  // with no projection to disagree with.
+  bytes  parent_binding              = 15 [(dsm_fixed_len)=32];
   // 14 = min_output_amount_u128 — per-hop slippage floor (removed). A
   // hop is bound to an exact anchored reserve state; the unlock-time
   // AMM re-simulation must reproduce `expected_output_amount_u128`
@@ -1546,6 +1571,12 @@ message RoutingVaultAdvertisementV1 {
   bytes  owner_public_key        = 12 [(dsm_max_len)=65535];
   string lifecycle_state         = 13; // "active" | "exhausted" | "withdrawn"
   uint64 updated_state_number    = 14; // dedup signal; matches dBTC + posted-dlv pattern
+  // Inner digest of the owner's published `AnchorPresentationV3`
+  // (`H(DSM/anchor-presentation/v1 ‖ proto_bytes)`). DISCOVERY ONLY: the ad
+  // locates the presentation; the presentation authenticates itself through
+  // P0–P6 and the c_n it carries resolves the exact `CCB(V_n)` bytes. A
+  // trader quotes against NOTHING from this ad — reserves here are hints.
+  bytes  anchor_presentation_digest = 19 [(dsm_fixed_len)=32];
 }
 
 // Typed request for `dlv.unlockRouted` — the routed atomic-unlock

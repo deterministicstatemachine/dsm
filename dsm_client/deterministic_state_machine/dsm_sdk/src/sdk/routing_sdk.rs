@@ -108,6 +108,10 @@ pub(crate) struct PublishRoutingAdInput<'a> {
     pub unlock_spec_key: String,
     pub owner_public_key: &'a [u8],
     pub vault_proto_bytes: &'a [u8],
+    /// Inner digest of the vault's published `AnchorPresentationV3` —
+    /// discovery material for the trader's verification chain; the ad itself
+    /// authenticates nothing.
+    pub anchor_presentation_digest: [u8; 32],
 }
 
 /// Publish an active-state advertisement + the full vault proto mirror.
@@ -153,6 +157,7 @@ pub(crate) async fn publish_active_advertisement(
         owner_public_key: input.owner_public_key.to_vec(),
         lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
         updated_state_number: 1,
+        anchor_presentation_digest: input.anchor_presentation_digest.to_vec(),
     };
 
     BitcoinTapSdk::storage_put_bytes(&proto_key_str, input.vault_proto_bytes).await?;
@@ -486,6 +491,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish");
@@ -547,6 +553,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish");
@@ -623,6 +630,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &proto,
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish_active_advertisement");
@@ -688,6 +696,7 @@ mod tests {
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &fake_vault_proto_bytes(0x02),
+            anchor_presentation_digest: [0u8; 32],
         })
         .await
         .expect("publish");
@@ -832,6 +841,7 @@ mod tests {
             owner_public_key: vec![0xABu8; 64],
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
             updated_state_number: 5,
+            anchor_presentation_digest: vec![0u8; 32],
         };
         BitcoinTapSdk::storage_put_bytes(&proto_key_str, &proto)
             .await

@@ -117,6 +117,13 @@ pub const TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2: TaggedHashDomain<'static> =
 /// both the layout and its tag go.
 pub const TAG_DSM_STORAGE_SET: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-set");
+/// Immutable namespace for a published `AnchorPresentationV3` — the owner's
+/// complete verification bundle for one vault state (proto bytes as payload).
+/// The object is pure transport: every claim inside is re-derived by the
+/// consumer through P0–P6, so content-addressing it is about tamper-evident
+/// distribution, not about making the bytes authoritative.
+pub const TAG_DSM_ANCHOR_PRESENTATION_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/anchor-presentation/v1");
 /// Content address of an A-side receipt-evidence artifact (ADR 0003).
 ///
 /// Separated BY ROLE from the B-side tag below. Every evidence artifact is a

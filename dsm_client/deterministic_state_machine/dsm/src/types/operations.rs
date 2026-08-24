@@ -607,14 +607,14 @@ pub enum Operation {
         /// cannot name a reserve leaf.
         input_policy_commit: [u8; 32],
         output_policy_commit: [u8; 32],
-        /// The exact vault state consumed: sequence, the digest over its reserves,
-        /// and the SMT root those reserves were proved against.
+        /// The exact vault state consumed: its generation, and its canonical
+        /// identity `c_n = H(DSM/vault-state, CCB(V_n))`. One binding replaces
+        /// the old (reserves digest, SMT root, predicate digest) triple — the
+        /// reserves, the pair and the market policy are FIELDS of the `V_n`
+        /// that `c_n` identifies, so restating any of them here would create a
+        /// second source of truth.
         parent_sequence: u64,
-        parent_reserves_digest: [u8; 32],
-        reserve_proof_root: [u8; 32],
-        /// Digest of the owner-published predicate, so a substituted condition
-        /// cannot be pointed at.
-        predicate_digest: [u8; 32],
+        parent_binding: [u8; 32],
         /// The signed quote and the external commitment it derives.
         route_commit_bytes: Vec<u8>,
         external_commitment_x: [u8; 32],
@@ -655,9 +655,6 @@ pub enum Operation {
         /// The sequence this advances from, and to. Exactly one step.
         parent_sequence: u64,
         new_sequence: u64,
-        /// Reserve digests before and after, so the recorded state is pinned.
-        parent_reserves_digest: [u8; 32],
-        new_reserves_digest: [u8; 32],
         /// The pair whose leaves move, and by how much.
         input_policy_commit: [u8; 32],
         output_policy_commit: [u8; 32],
@@ -1519,9 +1516,7 @@ impl Operation {
                 input_policy_commit,
                 output_policy_commit,
                 parent_sequence,
-                parent_reserves_digest,
-                reserve_proof_root,
-                predicate_digest,
+                parent_binding,
                 route_commit_bytes,
                 external_commitment_x,
                 input_amount,
@@ -1542,9 +1537,7 @@ impl Operation {
                 put_bytes(&mut out, input_policy_commit);
                 put_bytes(&mut out, output_policy_commit);
                 put_u64(&mut out, *parent_sequence);
-                put_bytes(&mut out, parent_reserves_digest);
-                put_bytes(&mut out, reserve_proof_root);
-                put_bytes(&mut out, predicate_digest);
+                put_bytes(&mut out, parent_binding);
                 put_bytes(&mut out, route_commit_bytes);
                 put_bytes(&mut out, external_commitment_x);
                 put_u64(&mut out, *input_amount);
@@ -1563,8 +1556,6 @@ impl Operation {
                 pending_pointer_x,
                 parent_sequence,
                 new_sequence,
-                parent_reserves_digest,
-                new_reserves_digest,
                 input_policy_commit,
                 output_policy_commit,
                 input_amount,
@@ -1578,8 +1569,6 @@ impl Operation {
                 put_bytes(&mut out, pending_pointer_x);
                 put_u64(&mut out, *parent_sequence);
                 put_u64(&mut out, *new_sequence);
-                put_bytes(&mut out, parent_reserves_digest);
-                put_bytes(&mut out, new_reserves_digest);
                 put_bytes(&mut out, input_policy_commit);
                 put_bytes(&mut out, output_policy_commit);
                 put_u64(&mut out, *input_amount);
@@ -2308,9 +2297,7 @@ impl Operation {
                 let input_policy_commit = get_arr32(&mut input)?;
                 let output_policy_commit = get_arr32(&mut input)?;
                 let parent_sequence = get_u64(&mut input)?;
-                let parent_reserves_digest = get_arr32(&mut input)?;
-                let reserve_proof_root = get_arr32(&mut input)?;
-                let predicate_digest = get_arr32(&mut input)?;
+                let parent_binding = get_arr32(&mut input)?;
                 let route_commit_bytes = get_bytes(&mut input)?;
                 let external_commitment_x = get_arr32(&mut input)?;
                 let input_amount = get_u64(&mut input)?;
@@ -2330,9 +2317,7 @@ impl Operation {
                     input_policy_commit,
                     output_policy_commit,
                     parent_sequence,
-                    parent_reserves_digest,
-                    reserve_proof_root,
-                    predicate_digest,
+                    parent_binding,
                     route_commit_bytes,
                     external_commitment_x,
                     input_amount,
@@ -2352,8 +2337,6 @@ impl Operation {
                 let pending_pointer_x = get_arr32(&mut input)?;
                 let parent_sequence = get_u64(&mut input)?;
                 let new_sequence = get_u64(&mut input)?;
-                let parent_reserves_digest = get_arr32(&mut input)?;
-                let new_reserves_digest = get_arr32(&mut input)?;
                 let input_policy_commit = get_arr32(&mut input)?;
                 let output_policy_commit = get_arr32(&mut input)?;
                 let input_amount = get_u64(&mut input)?;
@@ -2366,8 +2349,6 @@ impl Operation {
                     pending_pointer_x,
                     parent_sequence,
                     new_sequence,
-                    parent_reserves_digest,
-                    new_reserves_digest,
                     input_policy_commit,
                     output_policy_commit,
                     input_amount,

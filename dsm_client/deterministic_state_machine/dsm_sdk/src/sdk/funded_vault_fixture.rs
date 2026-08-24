@@ -107,6 +107,69 @@ pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
 ///
 /// Falls back to the old placeholder when no identity is installed, so fixtures that
 /// never sign keep working unchanged.
+/// Install a REAL v3 identity for `seed` — the state-identity cut derives
+/// every vault birth's authority chain (GRK → D_0 → T_0) from the wallet
+/// seed, so fixture identities must be seed-rooted exactly like production
+/// ones. Persists the genesis record (the presentation builder reads its
+/// derivation inputs back from it, network id in particular), installs the
+/// signing authority from the SAME wallet seed (the signing cache IS the
+/// wallet-seed cache), and primes AppState. The database must already be
+/// initialized. Returns `(signing_public_key, device_id)`.
+#[cfg(test)]
+pub(crate) fn install_v3_identity(seed: u8) -> (Vec<u8>, [u8; 32]) {
+    let wallet_seed = vec![seed; 64];
+    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
+        &wallet_seed,
+        b"dsm-test",
+        0,
+        0,
+        3,
+        &aph,
+    )
+    .expect("v3 genesis");
+    let device_id = genesis.devid.to_vec();
+    let genesis_hash = genesis.g.to_vec();
+    crate::sdk::signing_authority::clear_binding_key_for_testing();
+    let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+        &device_id,
+        &genesis_hash,
+        &wallet_seed,
+    )
+    .expect("derive signing keypair");
+    crate::sdk::signing_authority::set_binding_key_for_testing(wallet_seed);
+    crate::storage::client_db::store_genesis_record_with_verification(
+        &crate::storage::client_db::GenesisRecord {
+            genesis_id: crate::util::text_id::encode_base32_crockford(&genesis.g),
+            device_id: crate::util::text_id::encode_base32_crockford(&genesis.devid),
+            mpc_proof: String::new(),
+            device_birth_binding: String::new(),
+            merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+            participant_count: 0,
+            progress_marker: "genesis".to_string(),
+            publication_hash: crate::util::text_id::encode_base32_crockford(&genesis.g),
+            storage_nodes: Vec::new(),
+            entropy_hash: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
+            protocol_version: "genesis-v3".to_string(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+            genesis_nonce: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
+            genesis_profile: "MnemonicV3".to_string(),
+            network_id: "dsm-test".to_string(),
+        },
+    )
+    .expect("store genesis record");
+    crate::sdk::app_state::AppState::set_identity_info(
+        device_id,
+        public_key.clone(),
+        genesis_hash,
+        vec![0u8; 32],
+    );
+    crate::sdk::app_state::AppState::set_has_identity(true);
+    (public_key, genesis.devid)
+}
+
 fn fixture_public_key() -> Vec<u8> {
     crate::sdk::signing_authority::current_public_key().unwrap_or_else(|_| vec![9u8; 32])
 }

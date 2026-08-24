@@ -99,6 +99,7 @@ pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod dlv_pre_commitment_sdk;
 pub mod dlv_receipt_sdk;
+pub mod identity_presentation;
 pub mod posted_dlv_sdk;
 pub mod route_commit_sdk;
 pub mod routing_path_sdk;
@@ -108,9 +109,6 @@ pub mod settlement_slot;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 pub mod vault_rehydration;
-pub mod vault_reserve_proof_codec;
-pub mod vault_smt_inclusion_codec;
-pub mod vault_state_anchor_codec;
 pub mod vault_state_composition;
 pub mod vault_state_v3_codec;
 
