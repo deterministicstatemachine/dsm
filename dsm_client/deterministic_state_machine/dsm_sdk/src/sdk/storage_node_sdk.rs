@@ -658,10 +658,18 @@ impl StorageNodeClient {
             .header("Content-Type", "application/octet-stream")
             .body(payload.to_vec());
         if let Some(auth) = &self.auth {
-            req = req.header(
-                "authorization",
-                format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-            );
+            // The device-auth middleware requires the replay-protection
+            // message id beside the token — same contract as every other
+            // authenticated write. A FRESH nonce per attempt, deliberately:
+            // the server enforces unique(device_id, message_id), and the
+            // tuple's idempotence lives in the write-once store, not here.
+            let msg_id = Self::generate_message_id(expected_addr_b32);
+            req = req
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
+                .header("x-dsm-message-id", msg_id);
         }
         let resp = req
             .send()
