@@ -6,10 +6,9 @@
 //! THREE-member Alibaba ECS fleet, and the profile is fixed at `q = 2`. If
 //! one member is unavailable, both remaining members are required; if two or
 //! more are unavailable, a new settlement decision cannot be established
-//! until the fixed threshold is again reachable. Rev 15 Req 6.13's text
-//! still describes the earlier five-member/q=4 profile — the spec amendment
-//! is owed; code is authoritative for the deployed set per the
-//! reconciliation doctrine.
+//! until the fixed threshold is again reachable. Rev 15 Req 6.13 states
+//! this same three-member/q=2 profile (amended 2026-08-24 from the earlier
+//! five-member/q=4 draft).
 //!
 //! That is a threshold for ONE cardinality. There is no quorum function
 //! over arbitrary `n`, so this module refuses every other set size rather than
