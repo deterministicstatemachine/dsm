@@ -526,6 +526,70 @@ pub(crate) async fn compose_vault_state(
     })
 }
 
+/// Compose a DISCOVERED vault from its published artifacts alone.
+///
+/// This is the ONE composition entry for a party holding nothing but a
+/// vault id and its pair: the advertisement (located by pair + vault id)
+/// carries the presentation digest — discovery, never authority — and
+/// everything after that is the verified path: presentation → `c_n` →
+/// exact `CCB(V_n)` bytes → full P0–P6 → receipted fold. Both the trader's
+/// quote path and the pointer publisher resolve a vault THROUGH this
+/// function, so no caller can substitute its own statement of any fact the
+/// authenticated state carries.
+pub(crate) async fn compose_discovered_vault(
+    vault_id: &[u8; 32],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+) -> Result<ComposedVaultState, CompositionError> {
+    let ad_key = crate::sdk::routing_sdk::advertisement_key(token_a, token_b, vault_id);
+    let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key)
+        .await
+        .map_err(|e| {
+            CompositionError::InvalidBaselinePresentation(format!(
+                "advertisement not resolvable: {e}"
+            ))
+        })?;
+    let ad = crate::generated::RoutingVaultAdvertisementV1::decode(ad_bytes.as_slice()).map_err(
+        |e| CompositionError::InvalidBaselinePresentation(format!("advertisement decode: {e}")),
+    )?;
+    let Ok(presentation_digest) = <[u8; 32]>::try_from(ad.anchor_presentation_digest.as_slice())
+    else {
+        return Err(CompositionError::InvalidBaselinePresentation(
+            "advertisement carries no presentation digest".into(),
+        ));
+    };
+    let presentation =
+        crate::sdk::vault_state_v3_codec::fetch_anchor_presentation(&presentation_digest)
+            .await
+            .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
+            .ok_or_else(|| {
+                CompositionError::InvalidBaselinePresentation(
+                    "presentation not resolvable at its advertised digest".into(),
+                )
+            })?;
+    let Ok(c_n) = <[u8; 32]>::try_from(presentation.state_commitment.as_slice()) else {
+        return Err(CompositionError::InvalidBaselinePresentation(
+            "presentation carries a malformed state commitment".into(),
+        ));
+    };
+    let vn_bytes = crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&c_n)
+        .await
+        .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
+        .ok_or_else(|| {
+            CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
+        })?;
+    compose_vault_state(
+        vault_id,
+        &presentation,
+        &vn_bytes,
+        token_a,
+        token_b,
+        fee_bps,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,7 +700,6 @@ mod tests {
         vault_id: &[u8; 32],
         parent_reserve_a: u64,
         parent_reserve_b: u64,
-        parent_sequence: u64,
         parent_binding: &[u8; 32],
         input_is_a: bool,
         input_amount: u64,
@@ -680,7 +743,6 @@ mod tests {
             expected_output_amount_u128: u128::from(simulated).to_be_bytes().to_vec(),
             fee_bps: FEE_BPS,
             advertisement_digest: vec![0u8; 32],
-            state_number: parent_sequence,
             unlock_spec_digest: vec![0u8; 32],
             owner_public_key: Vec::new(),
             parent_binding: parent_binding.to_vec(),
@@ -833,7 +895,6 @@ mod tests {
             vault_id,
             parent_reserve_a,
             parent_reserve_b,
-            parent_sequence,
             parent_binding,
             input_is_a,
             input_amount,
@@ -1011,7 +1072,6 @@ mod tests {
             &vault_id,
             1_000_000,
             500_000,
-            0,
             &c0,
             true,
             10_000,
@@ -1107,7 +1167,6 @@ mod tests {
             &vault_id,
             1_000_000,
             500_000,
-            0,
             &c0,
             true,
             10_000,

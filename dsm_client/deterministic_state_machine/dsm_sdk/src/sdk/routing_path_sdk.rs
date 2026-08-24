@@ -69,8 +69,6 @@ pub(crate) struct VaultHop {
     /// recipient can re-verify the proto without re-running BLAKE3 from
     /// scratch.
     pub advertisement_digest: [u8; 32],
-    /// Ad's `updated_state_number` at search time.
-    pub state_number: u64,
     /// Digest of the CPTA spec describing the vault's unlock condition.
     pub unlock_spec_digest: [u8; 32],
     /// SPHINCS+ pk of the vault owner (needed downstream to compute
@@ -197,7 +195,6 @@ struct DirectedEdge {
     reserve_out: u64,
     fee_bps: u32,
     advertisement_digest: [u8; 32],
-    state_number: u64,
     unlock_spec_digest: [u8; 32],
     owner_public_key: Vec<u8>,
 }
@@ -277,7 +274,6 @@ fn build_adjacency(
             reserve_out: reserve_b,
             fee_bps: ad.fee_bps,
             advertisement_digest: ad_digest,
-            state_number: ad.updated_state_number,
             unlock_spec_digest: unlock_digest,
             owner_public_key: ad.owner_public_key.clone(),
         };
@@ -290,7 +286,6 @@ fn build_adjacency(
             reserve_out: reserve_a,
             fee_bps: ad.fee_bps,
             advertisement_digest: ad_digest,
-            state_number: ad.updated_state_number,
             unlock_spec_digest: unlock_digest,
             owner_public_key: ad.owner_public_key.clone(),
         };
@@ -399,7 +394,6 @@ fn enumerate(
             expected_output_amount: output,
             fee_bps: edge.fee_bps,
             advertisement_digest: edge.advertisement_digest,
-            state_number: edge.state_number,
             unlock_spec_digest: edge.unlock_spec_digest,
             owner_public_key: edge.owner_public_key.clone(),
         };
@@ -710,7 +704,6 @@ mod tests {
         // wins regardless of fee / reserves.
         let fresh = ad(v, &a, &b, 100_000, 100_000, 30, 99);
         let path = find_best_path(&[stale, fresh], &a, &b, 10_000, DEFAULT_MAX_HOPS).expect("path");
-        assert_eq!(path.hops[0].state_number, 99);
         // Output reflects the FRESH (shallow) reserves, not the stale ones.
         let stale_only = vec![ad(v, &a, &b, 10_000_000, 10_000_000, 30, 1)];
         let stale_path =
