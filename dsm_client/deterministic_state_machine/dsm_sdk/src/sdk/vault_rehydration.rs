@@ -332,6 +332,7 @@ mod tests {
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
+            vault_post_proto: Vec::new(),
         };
         (record, head)
     }
@@ -568,6 +569,7 @@ mod tests {
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
+            vault_post_proto: Vec::new(),
         };
         assert_eq!(
             rehydrate_amm_vault(&record, &head),

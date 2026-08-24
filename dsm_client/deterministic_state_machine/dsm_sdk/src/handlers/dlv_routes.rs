@@ -753,6 +753,9 @@ impl AppRouterImpl {
                                 storage_set_id: birth_set_id,
                                 baseline_state_ccb: Vec::new(),
                                 baseline_presentation: Vec::new(),
+                                // Stamped after finalize + policy stamping below,
+                                // the earliest point at which the bytes are final.
+                                vault_post_proto: Vec::new(),
                             },
                         )
                     }
@@ -801,8 +804,8 @@ impl AppRouterImpl {
                 "INSERT INTO amm_vault_records(
                     vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
                     fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-                    baseline_state_ccb, baseline_presentation, created_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    baseline_state_ccb, baseline_presentation, vault_post_proto, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 rusqlite::params![
                     rec.vault_id.as_slice(),
                     rec.owner_genesis.as_slice(),
@@ -815,6 +818,7 @@ impl AppRouterImpl {
                     rec.storage_set_id.as_slice(),
                     rec.baseline_state_ccb.as_slice(),
                     rec.baseline_presentation.as_slice(),
+                    rec.vault_post_proto.as_slice(),
                     crate::util::deterministic_time::tick() as i64,
                 ],
             )
@@ -1018,6 +1022,32 @@ impl AppRouterImpl {
         // The vault's record was persisted INSIDE the advance transaction above,
         // so it cannot outlive a rolled-back creation or be lost to a crash that
         // leaves the reserves encumbered.
+
+        // FREEZE THE VAULT POST. The routing advertisement's full proto mirror
+        // is the encoded `VaultPostProto`; deriving it from the in-memory
+        // DLVManager made ad publication impossible after a restart (the
+        // manager's vaults are process-lifetime, by doctrine). The bytes are
+        // final only now — after `finalize_vault` applied the creator
+        // signature and the block above stamped enforcement + policy digest —
+        // so they are produced once here and stamped onto the vault's record,
+        // where the publisher replays them from durable state. MANDATORY for
+        // an AMM vault: a vault whose post cannot be frozen could never be
+        // advertised, so that is surfaced here rather than at first publish.
+        if record_to_persist.is_some() {
+            let post_bytes = match dlv_manager
+                .create_vault_post(&vault_id, "dlv.create", None)
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => return err(format!("dlv.create: freezing the vault post failed: {e}")),
+            };
+            if let Err(e) = crate::storage::client_db::amm_vault_records::update_vault_post_proto(
+                &vault_id,
+                &post_bytes,
+            ) {
+                return err(format!("dlv.create: stamping the vault post failed: {e}"));
+            }
+        }
 
         // PUBLISH THE BIRTH — best-effort now; the generic sweep (cold boot and
         // every `storage.sync`) replays the exact frozen bytes until a quorum of
