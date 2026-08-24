@@ -8758,11 +8758,6 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
   advertisementDigest = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 state_number = 8;
-   */
-  stateNumber = protoInt64.zero;
-
-  /**
    * @generated from field: bytes unlock_spec_digest = 9;
    */
   unlockSpecDigest = new Uint8Array(0);
@@ -8798,7 +8793,6 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
     { no: 5, name: "expected_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 7, name: "advertisement_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 8, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 9, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "parent_binding", kind: "scalar", T: 12 /* ScalarType.BYTES */ },

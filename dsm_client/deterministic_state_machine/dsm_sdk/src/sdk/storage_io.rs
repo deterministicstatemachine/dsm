@@ -187,6 +187,66 @@ pub(crate) async fn put_immutable_to_all_members(
     }
 }
 
+/// Fetch one Area-4 immutable `(namespace, payload)` object by its inner
+/// digest, from whichever mirror holds it. The CLIENT-side re-hash against
+/// the requested identity is performed HERE, in both cfg branches — it is
+/// the Req 15.3 boundary, so no caller inherits it silently and no test seam
+/// can weaken it.
+pub(crate) async fn fetch_immutable_payload(
+    namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    inner: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    #[cfg(test)]
+    {
+        // The frozen-artifact sweep delivers immutable tuples to the fake
+        // fleet under `immutable::{namespace}::{addr_b32}` — read them back
+        // from whichever member holds the key, exactly as a live fetch takes
+        // the first mirror that answers.
+        let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
+        let key = format!(
+            "immutable::{}::{}",
+            String::from_utf8_lossy(namespace.source_bytes()),
+            crate::util::text_id::encode_base32_crockford(&addr)
+        );
+        let Some(payload) = fake_fleet::any_member_holding(&key) else {
+            return Ok(None);
+        };
+        if dsm::storage_object::immutable_inner(namespace, &payload) != *inner {
+            return Err(DsmError::verification(
+                "immutable fetch: bytes do not hash to the requested identity",
+            ));
+        }
+        Ok(Some(payload))
+    }
+    #[cfg(not(test))]
+    {
+        let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+            DsmError::storage(
+                format!("load storage node config: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        let sdk = StorageNodeSDK::new(config).await.map_err(|e| {
+            DsmError::storage(
+                format!("construct storage node sdk: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        let Some(payload) = sdk.fetch_immutable_verified(namespace, inner).await? else {
+            return Ok(None);
+        };
+        // fetch_immutable_verified already re-hashed against the requested
+        // address; re-state the inner-digest equality here so this function's
+        // contract does not depend on a callee keeping it.
+        if dsm::storage_object::immutable_inner(namespace, &payload) != *inner {
+            return Err(DsmError::verification(
+                "immutable fetch: bytes do not hash to the requested identity",
+            ));
+        }
+        Ok(Some(payload))
+    }
+}
+
 /// Submit one frozen settlement-slot claim envelope to every member of `set`,
 /// each authenticated with its OWN per-node token (lazily back-filled like
 /// [`put_bytes`]). Never decides quorum; never retries — the caller replays the

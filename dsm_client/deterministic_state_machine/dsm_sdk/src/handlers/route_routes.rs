@@ -846,24 +846,6 @@ impl AppRouterImpl {
             [u8; 32],
             crate::sdk::route_commit_sdk::HopParentBinding,
         > = std::collections::HashMap::new();
-        // ONE storage-node SDK for the sweep: the immutable fetches below are
-        // content-addressed and client-side re-hashed, so which mirror served
-        // the bytes never matters.
-        let storage_sdk = {
-            let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return err(format!(
-                        "route.findAndBindBestPath: no storage node config: {e}"
-                    ))
-                }
-            };
-            match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
-                Ok(s) => s,
-                Err(e) => return err(format!("route.findAndBindBestPath: storage node sdk: {e}")),
-            }
-        };
         for mut ad in ads.into_iter() {
             if ad.vault_id.len() != 32 {
                 ads_after_composition.push(ad);
@@ -891,7 +873,6 @@ impl AppRouterImpl {
                 continue;
             };
             let presentation = match crate::sdk::vault_state_v3_codec::fetch_anchor_presentation(
-                &storage_sdk,
                 &presentation_digest,
             )
             .await
@@ -922,9 +903,7 @@ impl AppRouterImpl {
                 continue;
             };
             let vn_bytes =
-                match crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&storage_sdk, &c_n)
-                    .await
-                {
+                match crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&c_n).await {
                     Ok(Some(b)) => b,
                     Ok(None) => {
                         log::debug!(
@@ -1155,7 +1134,6 @@ mod stamping_tests {
                 token_out: vec![0x22; 32],
                 input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
                 expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-                state_number: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1192,6 +1170,31 @@ mod stamping_tests {
     /// message's own canonical bytes. Then the stamped key is altered and
     /// verification must break — which is what distinguishes "signed over the
     /// stamped identity" from "stamped after signing".
+    /// Publish the vault's routing advertisement through the production
+    /// route (fail-closed on the baseline-publication gate, digest stamped
+    /// from the record's stored presentation).
+    fn publish_ad(r: &AppRouterImpl, vault_id: &[u8; 32], pc_a: &[u8; 32], pc_b: &[u8; 32]) {
+        use prost::Message as _;
+        let req = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_key: "sofi/spec/test".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "ad publish failed: {:?}", res.error_message);
+    }
+
     /// PRODUCER AND CONSUMER, against one route and one slot.
     ///
     /// `route.publishExternalCommitment` writes the pending pointer;
@@ -1200,14 +1203,65 @@ mod stamping_tests {
     /// route took a no-RouteCommit branch, published the X anchor alone,
     /// reported SUCCESS, and wrote no pointer. On hardware the trader anchored
     /// a commitment that could never settle and only learned at the gate:
-    /// "settlement slot not held". Storage confirmed it — `sofi/vault-pending/`
-    /// was empty at every sequence while the advertisement sat next to it.
+    /// "settlement slot not held".
+    ///
+    /// This is ALSO the field-8 regression pin: the hop carries NO generation
+    /// of its own any more — its only parent fact is `parent_binding` (c_n) —
+    /// so the pointer's `parent_sequence` below can only have come from the
+    /// authenticated state that binding resolves to. There is no independently
+    /// supplied number left to disagree with it.
     #[test]
     #[serial]
-    fn publishing_a_commitment_writes_the_pointer_its_own_slot_claim_requires() {
+    fn publishing_a_commitment_writes_the_pointer_at_the_authenticated_generation() {
+        use prost::Message as _;
+
         install_identity();
         let r = router();
-        let rc = rc_fixture();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        publish_ad(&r, &vault_id, &pc_a, &pc_b);
+
+        // The one composition entry for a discovered vault — the same path the
+        // pointer publisher takes internally.
+        let composed = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::vault_state_composition::compose_discovered_vault(
+                    &vault_id, &pc_a, &pc_b, 30,
+                ),
+            )
+            .expect("the advertised vault composes from its published artifacts");
+        let input = 1_000u64;
+        let expected_out = crate::sdk::routing_path_sdk::constant_product_output(
+            input,
+            composed.reserves_a,
+            composed.reserves_b,
+            30,
+        )
+        .expect("curve output");
+        let rc = generated::RouteCommitV1 {
+            version: 1,
+            nonce: vec![0x11; 32],
+            total_fee_bps: 30,
+            initiator_public_key: Vec::new(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                fee_bps: 30,
+                parent_binding: composed.c_n.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
         let signed = sign_through_router(&r, &rc);
 
         // X is derived from the signed RC, exactly as the settle path derives it.
@@ -1230,10 +1284,10 @@ mod stamping_tests {
         });
         assert!(res.success, "publish failed: {:?}", res.error_message);
 
-        // The pointer must be READABLE at the key the slot claim lists.
-        let hop = &signed.hops[0];
-        let vault_id: [u8; 32] = hop.vault_id.as_slice().try_into().expect("vault id");
-        let parent_sequence = hop.state_number;
+        // The pointer must be READABLE at the key the slot claim lists — and
+        // its parent is the AUTHENTICATED generation, sourced from the state
+        // `parent_binding` names, because no other source exists.
+        let parent_sequence = composed.sequence;
         let new_sequence = parent_sequence + 1;
         let key =
             crate::sdk::route_commit_sdk::vault_pending_pointer_key(&vault_id, new_sequence, &x);
@@ -1261,9 +1315,7 @@ mod stamping_tests {
 
         // THE CONSUMER. The pointer above is DISCOVERY (composition folds it);
         // exclusivity is decided by the settlement-slot REGISTER, over the same
-        // canonical tuple. Both must work for a trade to settle: the pointer so
-        // the next quote sees the trade in flight, the register so exactly one
-        // contestant may consume this parent.
+        // canonical tuple.
         let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .expect("catalog")
             .sole_set()
@@ -1295,6 +1347,91 @@ mod stamping_tests {
             "a held slot means quorum accepted OUR bytes: {}/{}",
             claim.accepted(),
             claim.total()
+        );
+    }
+
+    /// The other half of the field-8 regression pin: a route bound to a parent
+    /// the authenticated state does not name gets NO pointer at any sequence.
+    /// With the hop's own generation field burned, the publisher's only source
+    /// is the composition that resolves `parent_binding` — and when the
+    /// binding is not the composed frontier, it refuses rather than invent a
+    /// linkage.
+    #[test]
+    #[serial]
+    fn no_pointer_is_published_for_a_parent_the_authenticated_state_does_not_name() {
+        use prost::Message as _;
+
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        publish_ad(&r, &vault_id, &pc_a, &pc_b);
+
+        let composed = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::vault_state_composition::compose_discovered_vault(
+                    &vault_id, &pc_a, &pc_b, 30,
+                ),
+            )
+            .expect("composes");
+        let mut stale_binding = composed.c_n;
+        stale_binding[0] ^= 0xFF;
+        let rc = generated::RouteCommitV1 {
+            version: 1,
+            nonce: vec![0x13; 32],
+            total_fee_bps: 30,
+            initiator_public_key: Vec::new(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
+                expected_output_amount_u128: 900u128.to_be_bytes().to_vec(),
+                fee_bps: 30,
+                parent_binding: stale_binding.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let signed = sign_through_router(&r, &rc);
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&signed);
+        let anchor = generated::ExternalCommitmentV1 {
+            version: 1,
+            x: x.to_vec(),
+            publisher_public_key: Vec::new(),
+            label: "stale".to_string(),
+        };
+        let _ = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishExternalCommitment".to_string(),
+                args: pack(anchor.encode_to_vec()),
+            })
+            .await
+        });
+
+        // No pointer for this X exists at ANY sequence under the vault's
+        // pending prefix — the publisher refused rather than fabricate a
+        // parent linkage the authenticated state does not carry.
+        let prefix = crate::sdk::route_commit_sdk::vault_pending_prefix(&vault_id);
+        let listing = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_list_objects(
+                    &prefix, None, 256,
+                ),
+            )
+            .expect("list");
+        let x_b32 = crate::util::text_id::encode_base32_crockford(&x);
+        assert!(
+            listing.items.iter().all(|i| !i.key.ends_with(&x_b32)),
+            "a stale-bound route must publish no pointer: {:?}",
+            listing.items.iter().map(|i| &i.key).collect::<Vec<_>>()
         );
     }
 
