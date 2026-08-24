@@ -389,7 +389,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// written before any external step so recovery resumes instead of re-signing).
 /// Also durable protocol state that decides what "published", "which set" and
 /// "which claim" mean; same rule as v4 — the version is the authority, no shim.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 6;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 7;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -1177,6 +1177,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- c_n recomputes from the blob, so no digest is cached beside it.
             baseline_state_ccb     BLOB NOT NULL DEFAULT X'',
             baseline_presentation  BLOB NOT NULL DEFAULT X'',
+            -- The vault's frozen `VaultPostProto` bytes, produced once at
+            -- `dlv.create` after the vault is finalized and stamped. The
+            -- routing advertisement's full proto mirror replays these exact
+            -- bytes, so publishing survives a restart without consulting the
+            -- in-memory DLVManager. Empty means the producer never ran: the
+            -- ad publisher fails closed rather than re-deriving.
+            vault_post_proto       BLOB NOT NULL DEFAULT X'',
             created_at          INTEGER NOT NULL
         );
 
