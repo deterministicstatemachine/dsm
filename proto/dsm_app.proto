@@ -1232,7 +1232,13 @@ message RouteCommitHopV1 {
   uint32 fee_bps                   = 6;
   // BLAKE3("DSM/routing-vault-ad", vault_proto_bytes) at routing time.
   bytes  advertisement_digest      = 7 [(dsm_fixed_len)=32];
-  uint64 state_number              = 8;
+  // Field 8 (`state_number`) is BURNED: it restated the generation already
+  // inside the V_n that `parent_binding` names — an independently encodable
+  // duplicate a signed route could set to disagree with the authenticated
+  // state. The parent generation is derived ONLY from the composition that
+  // resolves `parent_binding`; no field replaces this one.
+  reserved 8;
+  reserved "state_number";
   bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
   bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
   // Tier 2 Foundation state-anchor binding.  Trader stamps these

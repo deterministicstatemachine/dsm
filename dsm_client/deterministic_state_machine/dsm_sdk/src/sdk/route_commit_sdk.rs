@@ -157,7 +157,6 @@ pub(crate) fn bind_path_to_route_commit(
             expected_output_amount_u128: u128_to_be_bytes(u128::from(hop.expected_output_amount)),
             fee_bps: hop.fee_bps,
             advertisement_digest: hop.advertisement_digest.to_vec(),
-            state_number: hop.state_number,
             unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
             owner_public_key: hop.owner_public_key.clone(),
             // Parent binding left empty here; the caller stamps it from the
@@ -309,10 +308,21 @@ pub(crate) async fn publish_external_commitment(
 /// can log/audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PublishPointerError {
-    /// Hop is malformed for pointer linkage: `state_number` overflowed or
-    /// `vault_id` is not 32 bytes — without a parent sequence and vault
-    /// identity we cannot produce a valid pointer.
+    /// Hop is malformed for pointer linkage: `vault_id` is not 32 bytes, or
+    /// the authenticated generation overflowed — without a parent sequence
+    /// and vault identity we cannot produce a valid pointer.
     HopMissingParentLinkage { hop_index: usize },
+    /// The hop's vault could not be resolved through the verified discovery
+    /// path (advertisement → presentation → V_n → P0-P6 → fold), so the
+    /// parent generation — which comes ONLY from that authenticated state —
+    /// cannot be derived. No pointer is published.
+    HopParentNotResolvable { hop_index: usize, msg: String },
+    /// The hop's `parent_binding` is not the c_n of the vault's CURRENT
+    /// composed frontier: the vault moved between quote and publication, or
+    /// the route was bound to a state that never existed. Either way the
+    /// settle would be refused at the byte-equality gate, so a pointer would
+    /// advertise a trade that can never be witnessed.
+    HopParentNotCurrent { hop_index: usize },
     /// Hop's tokens / reserves / amounts failed to round-trip the AMM
     /// re-simulation — i.e., the embedded RouteCommit is internally
     /// inconsistent.  Publishing a pointer would commit to a digest the
@@ -339,7 +349,21 @@ impl std::fmt::Display for PublishPointerError {
             PublishPointerError::HopMissingParentLinkage { hop_index } => {
                 write!(
                     f,
-                    "hop {hop_index}: missing parent linkage (state_number/vault_id)"
+                    "hop {hop_index}: missing parent linkage (vault_id/generation)"
+                )
+            }
+            PublishPointerError::HopParentNotResolvable { hop_index, msg } => {
+                write!(
+                    f,
+                    "hop {hop_index}: the parent generation is derived only from the \
+                     authenticated state, and the vault did not resolve: {msg}"
+                )
+            }
+            PublishPointerError::HopParentNotCurrent { hop_index } => {
+                write!(
+                    f,
+                    "hop {hop_index}: parent_binding is not the current composed frontier — \
+                     no pointer published for an unsettleable hop"
                 )
             }
             PublishPointerError::HopReSimulationFailed { hop_index } => {
@@ -413,17 +437,6 @@ pub(crate) async fn publish_route_anchor_with_pointers(
     //    same arithmetic the chunks-#7 gate uses at unlock time.
     let mut errors: Vec<PublishPointerError> = Vec::new();
     for (hop_index, hop) in rc.hops.iter().enumerate() {
-        // The hop's `state_number` is the generation of the parent state its
-        // `parent_binding` identifies — stamped from the SAME composed state
-        // at quote time — and the pointer chain links by sequence.
-        let parent_sequence = hop.state_number;
-        let new_sequence = match parent_sequence.checked_add(1) {
-            Some(v) => v,
-            None => {
-                errors.push(PublishPointerError::HopMissingParentLinkage { hop_index });
-                continue;
-            }
-        };
         // vault_id must be exactly 32 bytes per proto (dsm_fixed_len=32).
         if hop.vault_id.len() != 32 {
             errors.push(PublishPointerError::HopMissingParentLinkage { hop_index });
@@ -431,6 +444,46 @@ pub(crate) async fn publish_route_anchor_with_pointers(
         }
         let mut vault_id_arr = [0u8; 32];
         vault_id_arr.copy_from_slice(&hop.vault_id);
+
+        // THE PARENT GENERATION COMES FROM THE AUTHENTICATED STATE, and from
+        // nowhere else. The hop names its parent by `parent_binding` (c_n)
+        // alone; this publisher resolves the vault through the same verified
+        // discovery path every composer uses and takes the generation from
+        // the state it composed. A hop whose binding is not the CURRENT
+        // composed frontier gets no pointer: either the vault moved between
+        // quote and publication (the settle will be refused at the
+        // byte-equality gate anyway, so a pointer would advertise a trade
+        // that can never be witnessed) or the route was bound to a state
+        // that never existed.
+        let composed = match crate::sdk::vault_state_composition::compose_discovered_vault(
+            &vault_id_arr,
+            &hop.token_in,
+            &hop.token_out,
+            hop.fee_bps,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(PublishPointerError::HopParentNotResolvable {
+                    hop_index,
+                    msg: e.to_string(),
+                });
+                continue;
+            }
+        };
+        if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != composed.c_n {
+            errors.push(PublishPointerError::HopParentNotCurrent { hop_index });
+            continue;
+        }
+        let parent_sequence = composed.sequence;
+        let new_sequence = match parent_sequence.checked_add(1) {
+            Some(v) => v,
+            None => {
+                errors.push(PublishPointerError::HopMissingParentLinkage { hop_index });
+                continue;
+            }
+        };
 
         // Derive the new reserves digest by replaying the AMM swap.
         // We need the vault's lex-canonical (token_a, token_b) + the
@@ -1085,7 +1138,6 @@ mod tests {
                 token_out: vec![0x22; 32],
                 input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
                 expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
-                state_number: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -1262,7 +1314,6 @@ mod tests {
             expected_output_amount: 9_870,
             fee_bps: 30,
             advertisement_digest: [tag; 32],
-            state_number: u64::from(tag),
             unlock_spec_digest: [tag.wrapping_add(1); 32],
             owner_public_key: vec![0xABu8; 64],
         }
@@ -1306,7 +1357,6 @@ mod tests {
             assert_eq!(proto_hop.token_in, path_hop.token_in);
             assert_eq!(proto_hop.token_out, path_hop.token_out);
             assert_eq!(proto_hop.fee_bps, path_hop.fee_bps);
-            assert_eq!(proto_hop.state_number, path_hop.state_number);
             assert_eq!(
                 proto_hop.advertisement_digest,
                 path_hop.advertisement_digest.to_vec()
@@ -1441,10 +1491,6 @@ mod tests {
         let mut tampered = baseline.clone();
         tampered.hops[0].fee_bps += 1;
         assert_ne!(compute_external_commitment(&tampered), baseline_x);
-
-        let mut tampered2 = baseline.clone();
-        tampered2.hops[0].state_number += 1;
-        assert_ne!(compute_external_commitment(&tampered2), baseline_x);
 
         let mut tampered3 = baseline.clone();
         tampered3.hops[1].advertisement_digest[0] ^= 0xFF;
@@ -1856,7 +1902,6 @@ mod tests {
             expected_output_amount_u128: u128::from(expected_output).to_be_bytes().to_vec(),
             fee_bps,
             advertisement_digest: [0u8; 32].to_vec(),
-            state_number: 1,
             unlock_spec_digest: [0u8; 32].to_vec(),
             owner_public_key: vec![0xABu8; 64],
             // Parent binding absent: the gate fails closed on every unbound
@@ -2531,7 +2576,6 @@ mod tests {
         token_a: &[u8],
         token_b: &[u8],
         fee_bps: u32,
-        seq: u64,
         c_n: [u8; 32],
     ) -> generated::RouteCommitHopV1 {
         let path = Path {
@@ -2548,7 +2592,6 @@ mod tests {
                 expected_output_amount: 9_870,
                 fee_bps,
                 advertisement_digest: [7u8; 32],
-                state_number: seq,
                 unlock_spec_digest: [9u8; 32],
                 owner_public_key: vec![0xABu8; 64],
             }],
@@ -2622,7 +2665,7 @@ mod tests {
     fn parent_gate_accepts_fresh_and_rejects_stale() {
         let vault_id = vid(5);
         let c_n = [0x77u8; 32];
-        let hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, 7, c_n);
+        let hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, c_n);
 
         // FRESH — the vault's own composition reaches the same c_n → enforced.
         assert_eq!(enforce_parent_binding(&hop, &c_n), Ok(()));
@@ -2678,7 +2721,7 @@ mod tests {
     fn parent_gate_rejects_tampered_binding() {
         let vault_id = vid(7);
         let c_n = [0x42u8; 32];
-        let mut hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, 3, c_n);
+        let mut hop = stamped_hop(vault_id, b"AAA", b"BBB", 30, c_n);
         hop.parent_binding[0] ^= 0xFF;
         assert_eq!(
             enforce_parent_binding(&hop, &c_n),
