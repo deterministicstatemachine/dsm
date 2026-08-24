@@ -519,6 +519,7 @@ fn every_sofi_route_is_reachable_through_the_dispatcher() {
     // anchor and its /latest key are gone); it is deliberately absent here.
     for path in [
         "dlv.listOwnedAmmVaults",
+        "dlv.composeVault",
         "route.computeExternalCommitment",
         "route.isExternalCommitmentVisible",
         "route.listAdvertisementsForPair",

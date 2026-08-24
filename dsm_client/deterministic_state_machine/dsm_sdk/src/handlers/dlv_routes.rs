@@ -43,6 +43,7 @@ impl AppRouterImpl {
     pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
         match q.path.as_str() {
             "dlv.listOwnedAmmVaults" => self.dlv_list_owned_amm_vaults(q).await,
+            "dlv.composeVault" => self.dlv_compose_vault(q).await,
             other => err(format!("unknown dlv query path: {other}")),
         }
     }
@@ -221,6 +222,70 @@ impl AppRouterImpl {
         let resp = generated::AppStateResponse {
             key: "dlv.listOwnedAmmVaults".to_string(),
             value: Some(lines.join("\n")),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// `dlv.composeVault` (query, read-only) — the composed frontier of a
+    /// DISCOVERED vault, exactly as any verifier derives it: advertisement →
+    /// presentation → `c_n` → exact `CCB(V_n)` bytes → P0–P6 → receipted
+    /// fold. Owner and stranger run the SAME path here, which is the point:
+    /// two devices querying this route about one vault must answer with the
+    /// same bytes or the milestone's symmetry claim is false.
+    ///
+    /// Input (`q.params`, UTF-8): `"<vault_id_b32>:<token_a_b32>:<token_b_b32>:<fee_bps>"`.
+    /// Output (`AppStateResponse.value`): `"<generation>:<reserve_a>:<reserve_b>:<c_n_b32>"`.
+    async fn dlv_compose_vault(&self, q: crate::bridge::AppQuery) -> AppResult {
+        let params = match std::str::from_utf8(&q.params) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => return err(format!("dlv.composeVault: params not UTF-8: {e}")),
+        };
+        let parts: Vec<&str> = params.split(':').collect();
+        if parts.len() != 4 {
+            return err(
+                "dlv.composeVault: params must be vault_id:token_a:token_b:fee_bps (Base32 \
+                 Crockford ids)"
+                    .into(),
+            );
+        }
+        let decode32 = |what: &str, s: &str| -> Result<[u8; 32], String> {
+            crate::util::text_id::decode_base32_crockford(s)
+                .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+                .ok_or_else(|| format!("dlv.composeVault: {what} is not a 32-byte Base32 id"))
+        };
+        let vault_id = match decode32("vault_id", parts[0]) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        let token_a = match decode32("token_a", parts[1]) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        let token_b = match decode32("token_b", parts[2]) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        let fee_bps: u32 = match parts[3].parse() {
+            Ok(v) => v,
+            Err(e) => return err(format!("dlv.composeVault: fee_bps: {e}")),
+        };
+        let composed = match crate::sdk::vault_state_composition::compose_discovered_vault(
+            &vault_id, &token_a, &token_b, fee_bps,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return err(format!("dlv.composeVault: {e}")),
+        };
+        let resp = generated::AppStateResponse {
+            key: "dlv.composeVault".to_string(),
+            value: Some(format!(
+                "{}:{}:{}:{}",
+                composed.sequence,
+                composed.reserves_a,
+                composed.reserves_b,
+                crate::util::text_id::encode_base32_crockford(&composed.c_n),
+            )),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
@@ -4027,6 +4092,74 @@ mod funded_creation_tests {
     /// reserve proof back out of storage and verifies its signature and SMT
     /// paths, exactly as a separate device would, because it has no privileged
     /// access to the owner's leaves either way.
+    /// The e2e observable answers with EXACTLY the composed frontier: the
+    /// route runs the discovered-vault path, the helper runs the owner's own
+    /// record path, and the two must agree byte-for-byte — the single-device
+    /// form of the two-device symmetry claim.
+    #[test]
+    #[serial]
+    fn the_compose_vault_query_answers_with_the_composed_frontier() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        r.core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
+                50_000, 20_000,
+            ));
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        // The discovered path needs the ad, exactly like any stranger.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_key: "sofi/spec/observable".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "route.publishRoutingAdvertisement".to_string(),
+                args: pack(publish.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "ad publish failed: {:?}", res.error_message);
+
+        let params = format!(
+            "{}:{}:{}:30",
+            crate::util::text_id::encode_base32_crockford(&vault_id),
+            crate::util::text_id::encode_base32_crockford(&pc_a),
+            crate::util::text_id::encode_base32_crockford(&pc_b),
+        );
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.query(crate::bridge::AppQuery {
+                path: "dlv.composeVault".to_string(),
+                params: params.into_bytes(),
+            })
+            .await
+        });
+        assert!(res.success, "composeVault failed: {:?}", res.error_message);
+        let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
+        let generated::envelope::Payload::AppStateResponse(resp) = env.payload.expect("payload")
+        else {
+            panic!("unexpected payload")
+        };
+        let value = resp.value.expect("value");
+        let frontier = composed_frontier(&vault_id);
+        assert_eq!(
+            value,
+            format!(
+                "0:10000:5000:{}",
+                crate::util::text_id::encode_base32_crockford(&frontier.c_n)
+            ),
+            "the observable is the composed frontier, byte for byte"
+        );
+    }
+
     #[test]
     #[serial]
     fn a_settlement_completes_and_the_resulting_state_is_asserted() {
