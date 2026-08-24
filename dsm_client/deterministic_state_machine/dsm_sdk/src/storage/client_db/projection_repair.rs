@@ -299,41 +299,45 @@ mod tests {
     /// Build a canonical head carrying `amount` ERA via a self-mint advance, and
     /// return (devid, head).
     fn head_with_era(amount: u64) -> ([u8; 32], dsm::types::device_state::DeviceState) {
-        use dsm::types::device_state::{BalanceDelta, BalanceDirection};
         let devid = [0x8Cu8; 32];
-        let base = dsm::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
         let policy = crate::policy::builtin_policy_commit("ERA").unwrap();
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
         let init = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &devid, &devid,
         );
-        let outcome = base
-            .advance(
+
+        // Install the ERA balance by RESTORE, not by minting.
+        //
+        // `advance` refuses builtin issuance (ERA/dBTC are not self-authorizable), and
+        // ERA specifically IS load-bearing here: the projection resolves a ticker FROM
+        // the builtin commit, so a synthetic asset would project as empty and these
+        // tests would assert against nothing. `restore` is the honest fixture — it is
+        // exactly the shape a reloaded device has, which is also the case these tests
+        // are about.
+        let mut balances = std::collections::BTreeMap::new();
+        balances.insert(policy, amount);
+        let head = dsm::types::device_state::DeviceState::restore(
+            devid,
+            devid,
+            vec![0xAAu8; 32],
+            None,
+            balances,
+            vec![(
                 rel,
-                devid,
-                dsm::types::operations::Operation::Mint {
-                    amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
-                    token_id: b"ERA".to_vec(),
-                    policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA")
-                        .unwrap(),
-                    authorized_by: b"self".to_vec(),
-                    proof_of_authorization: Vec::new(),
-                    message: "mint".to_string(),
+                dsm::types::device_state::RelChainTip {
+                    chain_tip: init,
+                    counterparty_devid: devid,
+                    tip_entropy: vec![0x11u8; 32],
+                    value_capability: dsm::types::device_state::ValueCapability::Yes,
                 },
-                vec![0x11u8; 32],
-                None,
-                &[BalanceDelta {
-                    policy_commit: policy,
-                    direction: BalanceDirection::Credit,
-                    amount,
-                }],
-                Some(init),
-                None,
-                None,
-                None,
-            )
-            .expect("mint advance");
-        (devid, outcome.new_device_state)
+            )],
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            64,
+        )
+        .expect("restore a head carrying a real ERA balance");
+        (devid, head)
     }
 
     /// THE 8XK CASE. Head intact at 275, projection empty (blanked out-of-band, no

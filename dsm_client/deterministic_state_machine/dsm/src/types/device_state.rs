@@ -1383,6 +1383,51 @@ impl DeviceState {
             )?;
         }
 
+        // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
+        //
+        // A `Mint` naming a builtin policy commit (ERA, dBTC) creates units of a
+        // supply nobody may unilaterally expand. Every check that used to stand
+        // between a caller and that credit was satisfiable by the caller alone:
+        // the route builds its own authorization and stamps `authorized_by` with
+        // the caller's own device id; ERA's preloaded policy carries zero
+        // conditions and zero roles, so the enforcer iterates nothing and
+        // returns "allowed"; dBTC has no registered policy at all and takes the
+        // builtin escape hatch; and `validate_conservation` only checks that the
+        // single credit delta matches the amount and asset the same caller
+        // signed. Nothing anywhere established a right to issue.
+        //
+        // The gate lives HERE, at the accepting transition, and not on the route,
+        // because a route guard binds only the callers that go through it: any
+        // future route, or any direct `advance` caller, would silently reopen the
+        // hole. This is the chokepoint every mint must cross.
+        //
+        // Fail-closed with no exemption: `EXCEPT through an explicit issuance
+        // predicate whose evidence THIS verifier validates` is the intended
+        // shape, and no such predicate exists yet — so there is no admissible
+        // builtin issuance today rather than a placeholder one. A `SupplyCap`
+        // condition would NOT be that predicate: it reads `circulating_le` from
+        // caller-supplied enforcement context, and no canonical producer
+        // authenticates that number.
+        // Keyed on `policy_commit`, which is the identity that actually moves
+        // value: `validate_conservation` binds the credit delta to it, `balances`
+        // is keyed by it, and the compat projection resolves a ticker FROM it.
+        // The `token_id` string is metadata — a mint carrying the ticker "ERA"
+        // with a non-builtin commit credits that non-builtin asset and can never
+        // project as ERA, so rejecting on the string would refuse honest mints
+        // without closing anything.
+        if let Operation::Mint { policy_commit, .. } = &operation {
+            if let Some(name) =
+                crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+                    policy_commit,
+                )
+            {
+                return Err(DsmError::invalid_operation(format!(
+                    "advance: refusing to mint the builtin token {name} — builtin issuance is not \
+                     self-authorizable, and no authenticated issuance predicate is defined for it"
+                )));
+            }
+        }
+
         // Offline-bearer spend: draw the value from the device-bound offline-cash allocation instead of
         // the online balance. Requires the anchor-state advance (a bearer transfer always advances
         // the anchor leaf), so the allocation debit and the transition land in ONE atomic device root.
@@ -2964,6 +3009,99 @@ mod tests {
             err.contains("underflow") || err.to_lowercase().contains("insufficient"),
             "must fail as a balance shortfall, got: {err}"
         );
+    }
+
+    /// BUILTIN ISSUANCE IS REFUSED AT THE ACCEPTING TRANSITION.
+    ///
+    /// Not at the route — at `advance`, the chokepoint every mint must cross.
+    /// Before this gate, `token.mint {token_id: "ERA", amount: <any>}` was a live
+    /// production route that credited the caller: the handler signs its own
+    /// authorization and stamps `authorized_by` with the caller's own device id;
+    /// ERA's preloaded policy has zero conditions and zero roles, so enforcement
+    /// returns "allowed"; dBTC has no policy at all and takes the builtin escape
+    /// hatch; and conservation only checks that the single credit matches the
+    /// amount and asset the same caller signed.
+    ///
+    /// MUTATION CONTROL: delete the builtin-issuance block in `advance` and this
+    /// test goes green by minting ERA from air — which is precisely the defect.
+    #[test]
+    fn a_builtin_token_cannot_be_minted_from_air_at_the_accepting_transition() {
+        for ticker in ["ERA", "dBTC"] {
+            let pc = crate::core::token::builtin_policy_commit_for_token(ticker)
+                .expect("builtin commit");
+            let dev = DeviceState::new(devid(0xA1), devid(0xA1), vec![0x01; 32], 64);
+            let rk =
+                crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+            let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev.devid, &dev.devid,
+            );
+            let outcome = dev.advance(
+                rk,
+                dev.devid,
+                mint_op_for(u64::MAX, pc),
+                entropy(7),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc,
+                    direction: BalanceDirection::Credit,
+                    amount: u64::MAX,
+                }],
+                Some(tip),
+                None,
+                None,
+                None,
+            );
+            // Fail for the RIGHT reason — an `is_err()` assertion would pass just
+            // as happily on an unrelated error.
+            let err = format!(
+                "{}",
+                outcome.expect_err("minting a builtin token from air must be refused")
+            );
+            assert!(
+                err.contains("builtin issuance is not self-authorizable") && err.contains(ticker),
+                "must fail as unauthorized builtin issuance naming {ticker}, got: {err}"
+            );
+        }
+    }
+
+    /// The gate is keyed on the ASSET, not the ticker string. A mint carrying a
+    /// builtin ticker with a non-builtin `policy_commit` credits that non-builtin
+    /// asset and can never project as ERA, so refusing it would reject honest
+    /// issuance without closing anything. This pins that the gate stays narrow.
+    #[test]
+    fn a_non_builtin_asset_still_mints_even_under_a_builtin_ticker() {
+        let pc = [0x5Au8; 32];
+        assert!(
+            crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
+                .is_none(),
+            "fixture must not accidentally name a builtin"
+        );
+        let dev = DeviceState::new(devid(0xA2), devid(0xA2), vec![0x02; 32], 64);
+        let rk =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &dev.devid,
+        );
+        // `mint_op_for` hard-codes the ticker "ERA" while naming this commit.
+        let out = dev
+            .advance(
+                rk,
+                dev.devid,
+                mint_op_for(1_000, pc),
+                entropy(8),
+                None,
+                &[BalanceDelta {
+                    policy_commit: pc,
+                    direction: BalanceDirection::Credit,
+                    amount: 1_000,
+                }],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("a non-builtin asset is unaffected by the builtin-issuance gate");
+        assert_eq!(out.new_device_state.balance(&pc), 1_000);
     }
 
     // ── reserve authority: the PRODUCTION funding path ─────────────────────
