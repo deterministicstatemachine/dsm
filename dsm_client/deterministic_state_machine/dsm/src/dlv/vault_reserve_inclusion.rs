@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Reserve inclusion proof — the reserves a trader quotes against are PROVEN.
+//! Reserve inclusion proof — reserves are committed under a root the OWNER
+//! published. That is strictly more than a signed digest and strictly less than
+//! proof of solvency; see "What this does not establish" below.
 //!
 //! WHY THIS EXISTS. `compose_vault_state` takes the baseline reserves as
 //! *arguments*. It cross-checks them against the owner's signed digest, which
@@ -10,11 +12,32 @@
 //! hold. The owner signing a digest of its own claim adds authorship, not
 //! solvency — an owner can sign a digest of reserves it never funded.
 //!
-//! This proof closes that. Each leg carries a 256-sibling path from the owner's
+//! This proof narrows that. Each leg carries a 256-sibling path from the owner's
 //! own vault-reserve leaf ([`crate::dlv::vault_reserve_leaf`]) up to the
 //! `smt_root` the owner published, so "the vault holds 10,000 ERA" becomes "the
-//! owner's device root commits 10,000 ERA encumbered in that vault at that
-//! sequence". The magnitudes come OUT of the proof rather than going in.
+//! owner's published root commits 10,000 ERA encumbered in that vault at that
+//! sequence". The magnitudes come OUT of the proof rather than going in, which is
+//! a real gain: a caller can no longer choose what the vault appears to hold.
+//!
+//! ## What this does NOT establish
+//!
+//! **Retracted claim.** This header previously said the proof "closes" the
+//! digest problem it diagnoses above. It does not close it — it moves it up one
+//! level, and the text is corrected rather than softened because the original
+//! wording invited exactly the misreading it had just warned against.
+//!
+//! `smt_root` is still a value the OWNER chose. The proof shows the reserve
+//! leaves are consistent with that root; nothing here binds the root to an
+//! independently verifiable state transition, so "the owner published a tree it
+//! built" is the honest reading. The diagnosis one paragraph up — that signing a
+//! claim adds authorship, not solvency — applies to the root as well as to the
+//! digest.
+//!
+//! This is the same self-rooting limitation the trader side carries (see
+//! [`crate::dlv::settlement_receipt_leaf`], whose `post_root` is likewise
+//! self-named); the market is symmetric, and both sides present self-rooted
+//! proofs. Closing it requires binding the root to a verifiable transition, which
+//! is specified but not implemented.
 //!
 //! ONE ROOT, ONE SEQUENCE. `smt_root` and `sequence` must equal the vault-state
 //! inclusion proof's. Reserve leaves carry the vault's own sequence rather than
