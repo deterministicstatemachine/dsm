@@ -9,29 +9,25 @@
 //! conjunctive obligation — a closed write set alone cannot distinguish a
 //! funded credit from an invented one.
 //!
-//! ## Why the input is not a CCB object yet
+//! ## The witness object and the verifier input
 //!
-//! `EconomicTransitionWitness` (class `0x001D`) additionally carries
-//! `credit_sources`, whose members are classes `0x0023`–`0x0028`. Those field
-//! tables are not defined: the plan fixes those classes' semantic roles, not
-//! an encoding exact enough to burn. A witness names its credit sources, so
-//! its own encoding cannot be fixed before theirs.
+//! [`EconomicTransitionWitness`] (class `0x001D`) is the wire object: it
+//! carries the roots, the operation identity, the mutations, and the **inline**
+//! credit sources that fund the transition's credits. Its encoding is frozen.
 //!
-//! Writing an encoder for `0x001D` now would therefore fix, by implementation
-//! accident, how a witness references its provenance — the "encoder defines
-//! the protocol" inversion [`crate::ccb`] refuses in its own header. `0x001D`
-//! is **allocated in [`crate::ccb::reserved`] and unusable on the wire** until
-//! the provenance-wire freeze installs the schema; it is not merely
-//! unimplemented, it has no canonical bytes to produce, hash-address or sign.
+//! [`EconomicMutationSequence`] remains a **verification input, not a wire
+//! object** — no class, no canonical bytes, nothing to sign. It exists because
+//! recomputing a post-root needs only roots and mutations, and a verifier that
+//! can be handed exactly that is a verifier that cannot accidentally depend on
+//! provenance it has not checked.
 //!
-//! That freeze is the **immediately following** PR, not a distant one, because
-//! the admission manifest and evidence DAG need an exact, hash-addressable
-//! transition witness. Carrying a noncanonical witness through lineage and
-//! admission would mean retrofitting its hash identity afterwards, which is
-//! the same mistake arriving later and more expensively.
+//! ## What the witness proves, and what it does not
 //!
-//! [`EconomicMutationSequence`] is therefore a **verification input, not a
-//! wire object**: no class, no canonical bytes, nothing to sign.
+//! Structurally checkable from the bytes alone, with nothing fetched: source
+//! count, source classes, ordering, credit-mutation indices, duplicate
+//! mappings, and the credit/source bijection. Whether a named source
+//! **actually establishes** the units it claims is acceptance semantics, and
+//! none of that is implemented here.
 //!
 //! ## Why sequential
 //!
@@ -40,9 +36,191 @@
 //! against a single root would accept two mutations that each look valid in
 //! isolation but whose paths describe incompatible trees.
 
-use crate::ccb::CcbError;
+use crate::ccb::{class, push_digest32, push_envelope, push_u32, CcbError, CcbObject};
+use crate::economic::credit::CreditSource;
 use crate::types::identifiers::encode_crockford;
 use crate::economic::mutation::EconomicLeafMutation;
+
+/// `0x001D` schema 1 — a complete pre-root → post-root economic transition.
+///
+/// `operation_digest` and `economic_operation_id` are both members, and both
+/// are load-bearing. Without a shared `operation_digest` binding the witness to
+/// the local acceptance, a trader could present a valid successor and a valid
+/// economic transition **describing different operations**.
+///
+/// The witness does **not** carry `trader_genesis` / `trader_devid`. Those come
+/// from the authority resolution, and a witness that named its own identity
+/// would let a producer choose whose tree it was mutating. That is also why
+/// mutation key-ordering is checked by the verifier rather than the encoder:
+/// leaf keys bind `G ‖ DevID`, which the encoder does not have and must not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomicTransitionWitness {
+    pub pre_economic_root: [u8; 32],
+    pub post_economic_root: [u8; 32],
+    pub economic_operation_id: [u8; 32],
+    pub operation_digest: [u8; 32],
+    pub mutations: Vec<EconomicLeafMutation>,
+    /// Strictly ascending by `credit_mutation_index`. Inline, heterogeneous
+    /// CCB objects of classes `0x0023`–`0x0028`; each carries its own envelope,
+    /// which is what keeps the sequence parseable without a side-channel
+    /// discriminant.
+    pub credit_sources: Vec<CreditSource>,
+}
+
+impl CcbObject for EconomicTransitionWitness {
+    const CLASS: u16 = class::ECONOMIC_TRANSITION_WITNESS;
+    const SCHEMA: u16 = 1;
+}
+
+impl EconomicTransitionWitness {
+    /// Checks every structural rule, so an ill-formed witness has no canonical
+    /// bytes and cannot be hash-addressed into an evidence DAG.
+    pub fn new(
+        pre_economic_root: [u8; 32],
+        post_economic_root: [u8; 32],
+        economic_operation_id: [u8; 32],
+        operation_digest: [u8; 32],
+        mutations: Vec<EconomicLeafMutation>,
+        credit_sources: Vec<CreditSource>,
+    ) -> Result<Self, CcbError> {
+        let w = Self {
+            pre_economic_root,
+            post_economic_root,
+            economic_operation_id,
+            operation_digest,
+            mutations,
+            credit_sources,
+        };
+        w.check()?;
+        Ok(w)
+    }
+
+    /// The frozen structural rules:
+    ///
+    /// ```text
+    /// credit_sources strictly ascending by credit_mutation_index
+    /// exactly one source for every positive credit
+    /// no duplicate credit_mutation_index          (implied by strict ascent)
+    /// no source for a non-credit mutation
+    /// ```
+    ///
+    /// All four are decidable from the witness bytes alone.
+    pub fn check(&self) -> Result<(), CcbError> {
+        if self.mutations.is_empty() {
+            return Err(CcbError::WitnessHasNoMutations);
+        }
+
+        let mut previous: Option<u32> = None;
+        for (i, source) in self.credit_sources.iter().enumerate() {
+            let index = source.credit_mutation_index();
+            if let Some(prev) = previous {
+                if index <= prev {
+                    return Err(CcbError::CreditSourcesNotStrictlyAscending { index: i });
+                }
+            }
+            previous = Some(index);
+
+            let position = usize::try_from(index).map_err(|_| CcbError::CreditIndexOutOfRange {
+                index,
+                mutations: self.mutations.len(),
+            })?;
+            let mutation = self
+                .mutations
+                .get(position)
+                .ok_or(CcbError::CreditIndexOutOfRange {
+                    index,
+                    mutations: self.mutations.len(),
+                })?;
+            if !mutation.is_positive_credit() {
+                return Err(CcbError::SourceForNonCredit {
+                    mutation_index: index,
+                });
+            }
+            if let CreditSource::SameTransitionMove(m) = source {
+                let debit = usize::try_from(m.debit_mutation_index).map_err(|_| {
+                    CcbError::CreditIndexOutOfRange {
+                        index: m.debit_mutation_index,
+                        mutations: self.mutations.len(),
+                    }
+                })?;
+                if debit >= self.mutations.len() {
+                    return Err(CcbError::CreditIndexOutOfRange {
+                        index: m.debit_mutation_index,
+                        mutations: self.mutations.len(),
+                    });
+                }
+                if debit == position {
+                    return Err(CcbError::SameTransitionMoveIsSelfFunding { index });
+                }
+            }
+        }
+
+        // The other half of the bijection: every credit is funded. Checked
+        // last so the more specific errors above win.
+        for (i, mutation) in self.mutations.iter().enumerate() {
+            if mutation.is_positive_credit()
+                && !self
+                    .credit_sources
+                    .iter()
+                    .any(|s| usize::try_from(s.credit_mutation_index()) == Ok(i))
+            {
+                return Err(CcbError::UnfundedCredit { mutation_index: i });
+            }
+        }
+        Ok(())
+    }
+
+    /// Every distinct external evidence address the credit sources reference,
+    /// sorted and deduplicated. This is exactly what
+    /// `EconomicAdmissionManifest::provenance_evidence_addrs` must equal.
+    pub fn derived_provenance_index(&self) -> Vec<[u8; 32]> {
+        let mut addrs: Vec<[u8; 32]> = self
+            .credit_sources
+            .iter()
+            .filter_map(CreditSource::external_evidence_addr)
+            .collect();
+        addrs.sort_unstable();
+        addrs.dedup();
+        addrs
+    }
+
+    /// Fields 1..6 in registry order. Both sequences are `u32` counts followed
+    /// by inline complete CCB objects.
+    pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
+        self.check()?;
+        let mut out = Vec::new();
+        push_envelope::<Self>(&mut out);
+        push_digest32(&mut out, &self.pre_economic_root); // 1
+        push_digest32(&mut out, &self.post_economic_root); // 2
+        push_digest32(&mut out, &self.economic_operation_id); // 3
+        push_digest32(&mut out, &self.operation_digest); // 4
+
+        let mutations =
+            u32::try_from(self.mutations.len()).map_err(|_| CcbError::LengthOverflow)?;
+        push_u32(&mut out, mutations); // 5
+        for mutation in &self.mutations {
+            out.extend_from_slice(&mutation.encode()?);
+        }
+
+        let sources =
+            u32::try_from(self.credit_sources.len()).map_err(|_| CcbError::LengthOverflow)?;
+        push_u32(&mut out, sources); // 6
+        for source in &self.credit_sources {
+            out.extend_from_slice(&source.encode()?);
+        }
+        Ok(out)
+    }
+
+    /// The mutation sequence this witness asserts, for
+    /// [`verify_mutation_sequence`].
+    pub fn mutation_sequence(&self) -> EconomicMutationSequence {
+        EconomicMutationSequence {
+            pre_economic_root: self.pre_economic_root,
+            post_economic_root: self.post_economic_root,
+            mutations: self.mutations.clone(),
+        }
+    }
+}
 
 /// What a verifier is given to check a transition's write set.
 #[derive(Debug, Clone, PartialEq, Eq)]
