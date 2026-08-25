@@ -64,6 +64,7 @@ pub mod decode;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;
+pub mod provenance;
 pub mod register;
 pub mod state;
 pub mod tree;
