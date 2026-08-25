@@ -2394,9 +2394,11 @@ unresolved market-lock multiplicity is exactly bounded by one, and (f) no trade-
 been realized merely by DLV binding. This is an exposure-characterization vector, not a claim that
 beta prevents the attack.
 Requirement 21.19. quorum-margin/ must distinguish uniqueness from durability margin: it
-must demonstrate the strict-majority intersection argument with three-of-five under durable records
-and the beta four-of-five surviving-intersection claim after one previously accepted record/member
-becomes unavailable.
+must demonstrate the strict-majority intersection argument with two-of-three under durable records,
+and must show that with one member unavailable every later quorum consists of the two survivors, so
+a previously chosen quorum still intersects it in at least one member. The beta profile carries no
+durability margin beyond that minimal intersection; the retired five-member draft's four-of-five
+surviving-intersection claim is not a conformance obligation.
 Requirement 21.20. binding-evidence/ must prove fail-closed route construction. Present
 a discovery advertisement for a DLV whose current parent cannot be established because required
 binding evidence is unavailable. The candidate must be excluded from R, and Class K must report
