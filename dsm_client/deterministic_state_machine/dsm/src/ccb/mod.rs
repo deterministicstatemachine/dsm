@@ -100,6 +100,19 @@ pub mod class {
     pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
     pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
     pub const ECONOMIC_CONSUMED_SOURCE_STATE: u16 = 0x0022;
+
+    /// A complete pre-root → post-root economic transition, carrying its
+    /// mutations and its inline credit sources.
+    pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
+
+    // Credit-provenance classes. Six arms, closed: a credit that names none
+    // of them is unfunded, and there is deliberately no `Custom`.
+    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
+    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
+    pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
+    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
+    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
+    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
@@ -121,36 +134,24 @@ pub mod class {
 /// it. Reaching into `reserved` from a `CcbObject` impl is caught by
 /// `reserved_classes_have_no_encoder`.
 pub mod reserved {
-    /// A complete pre-root → post-root economic transition. Blocked on the
-    /// provenance field tables below: the witness names its credit sources,
-    /// so its own encoding cannot be fixed before theirs.
-    pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
-
-    // Credit-provenance classes. Six arms, closed: a credit that names none
-    // of them is unfunded, and there is deliberately no `Custom`. The plan
-    // fixes their semantic ROLES; it does not yet give field tables exact
-    // enough to burn as protocol.
-    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
-    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
-    pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
-    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
-    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
-    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
     /// The authorization an `AuthorizedIssuance` credit resolves against.
+    ///
+    /// Still reserved after the provenance wire freeze, and deliberately. A
+    /// field table for this object would encode **who may issue what**, and
+    /// this protocol has no authenticated issuance predicate — that absence is
+    /// the finding behind the builtin ERA/dBTC mint repair, where the
+    /// accepting layer now refuses builtin issuance precisely because no such
+    /// predicate exists to validate against.
+    ///
+    /// Nothing is blocked by the reservation: `0x0023` references its
+    /// authorization by **address**, so the credit source is complete on the
+    /// wire while the object behind the address stays undefined until the
+    /// predicate it encodes does.
     pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
 
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
-    pub const ALL: &[u16] = &[
-        ECONOMIC_TRANSITION_WITNESS,
-        CREDIT_SOURCE_AUTHORIZED_ISSUANCE,
-        CREDIT_SOURCE_SAME_TRANSITION_MOVE,
-        CREDIT_SOURCE_VALIDATED_PEER_DEBIT,
-        CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION,
-        CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
-        CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY,
-        ISSUANCE_AUTHORIZATION_BODY,
-    ];
+    pub const ALL: &[u16] = &[ISSUANCE_AUTHORIZATION_BODY];
 
     /// Whether a discriminant is allocated with no encoder. Never true for a
     /// live object's own `CLASS`, which [`super::CcbObject`] supplies.
@@ -278,6 +279,28 @@ pub enum CcbError {
     /// An admission manifest naming both substrates, or neither. The object
     /// shape is what states the substrate; exactly one is present.
     ManifestSubstrateNotExactlyOne,
+    /// A `SameTransitionMove` whose credit and debit are the same mutation.
+    /// A mutation cannot fund itself.
+    SameTransitionMoveIsSelfFunding { index: u32 },
+    /// An offline reentry naming one boundary as its own predecessor.
+    OfflineReentryBoundaryIsItsOwnParent,
+    /// Credit sources out of order, or two sources for one credit.
+    CreditSourcesNotStrictlyAscending { index: usize },
+    /// A source naming a mutation index the witness does not have.
+    CreditIndexOutOfRange { index: u32, mutations: usize },
+    /// A mutation that increases a quantity with no source funding it.
+    UnfundedCredit { mutation_index: usize },
+    /// A source funding a mutation that is not a positive credit.
+    SourceForNonCredit { mutation_index: u32 },
+    /// A witness with no mutations. A transition that changes no economic
+    /// leaf has no witness; it has `EconomicEffect::None`.
+    WitnessHasNoMutations,
+    /// The manifest's provenance index does not equal the sorted, unique set
+    /// of external evidence addresses the witness's credit sources reference.
+    ManifestProvenanceIndexMismatch {
+        manifest_count: usize,
+        derived_count: usize,
+    },
 }
 
 impl core::fmt::Display for CcbError {
@@ -355,6 +378,50 @@ impl core::fmt::Display for CcbError {
                 "economic admission manifest: exactly one of dsm_successor_evidence_addr \
                  and offline_boundary_evidence_addr must be present — the object shape is \
                  what states the substrate"
+            ),
+            CcbError::SameTransitionMoveIsSelfFunding { index } => write!(
+                f,
+                "credit source: mutation {index} is named as both the credit and the debit — \
+                 a mutation cannot fund itself"
+            ),
+            CcbError::OfflineReentryBoundaryIsItsOwnParent => write!(
+                f,
+                "credit source: prior_boundary_id equals unload_boundary_id — the consumed \
+                 checkpoint must be the PREDECESSOR of the reentry, not the reentry itself"
+            ),
+            CcbError::CreditSourcesNotStrictlyAscending { index } => write!(
+                f,
+                "economic transition witness: credit source {index} is not strictly after its \
+                 predecessor by credit_mutation_index — repeats would fund one credit twice"
+            ),
+            CcbError::CreditIndexOutOfRange { index, mutations } => write!(
+                f,
+                "economic transition witness: a credit source names mutation {index}, but the \
+                 witness carries {mutations} mutations"
+            ),
+            CcbError::UnfundedCredit { mutation_index } => write!(
+                f,
+                "economic transition witness: mutation {mutation_index} increases a quantity \
+                 with no credit source funding it — a closed write set proves what changed, \
+                 never that a credit was funded"
+            ),
+            CcbError::SourceForNonCredit { mutation_index } => write!(
+                f,
+                "economic transition witness: a credit source funds mutation {mutation_index}, \
+                 which is not a positive credit — provenance for a debit or an insertion is \
+                 provenance for nothing"
+            ),
+            CcbError::WitnessHasNoMutations => write!(
+                f,
+                "economic transition witness: no mutations — a transition that changes no \
+                 economic leaf has no witness, it has EconomicEffect::None"
+            ),
+            CcbError::ManifestProvenanceIndexMismatch { manifest_count, derived_count } => write!(
+                f,
+                "economic admission manifest: provenance_evidence_addrs holds {manifest_count} \
+                 addresses but the witness's credit sources reference {derived_count} distinct \
+                 external addresses — the field is a DERIVED publication index, not a second \
+                 description of provenance"
             ),
         }
     }
