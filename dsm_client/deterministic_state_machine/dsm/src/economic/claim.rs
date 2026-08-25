@@ -31,6 +31,7 @@ use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::economic::witness::EconomicTransitionWitness;
 
 /// Which substrate carried the local acceptance this economic transition
 /// corresponds to.
@@ -60,9 +61,23 @@ pub struct EconomicAdmissionManifest {
     pub authority_evidence_addr: [u8; 32],
     pub substrate: AdmissionSubstrate,
     /// Content addresses of the provenance objects funding this transition's
-    /// credits. Canonically ordered; duplicates are invalid rather than
-    /// deduplicated, since a repeated address is a producer naming one source
-    /// twice for two credits.
+    /// credits.
+    ///
+    /// **Derived and non-authoritative.** This field is a publication and
+    /// durability index — the set of objects a quorum must be holding before
+    /// the admission is verifiable — and NOT a second description of
+    /// provenance. The semantics live in the witness's inline credit sources;
+    /// this must equal
+    ///
+    /// ```text
+    /// sort_unique(every direct external evidence address referenced by
+    ///             witness.credit_sources)
+    /// ```
+    ///
+    /// and a mismatch rejects. Keeping it derived is what stops the manifest
+    /// and the witness from disagreeing about what funds the transition:
+    /// there is only one description, and this is an index over it. See
+    /// [`verify_manifest_provenance_index`].
     provenance_evidence_addrs: Vec<[u8; 32]>,
 }
 
@@ -221,4 +236,29 @@ impl EconomicRootClaimBody {
         h.update(&ccb);
         Ok(*h.finalize().as_bytes())
     }
+}
+
+/// Check the manifest's provenance index against the witness it names.
+///
+/// The manifest is reached first and the witness hangs off it, so this is the
+/// edge where a producer could otherwise publish an index that does not cover
+/// the evidence its own sources reference — leaving a verifier to discover a
+/// missing object only after fetching, or worse, to treat the index as the
+/// authority on what provenance exists.
+///
+/// `SameTransitionMove` contributes nothing here, by design: it is
+/// intra-transition and references no external object, so a transition funded
+/// entirely by internal moves has an empty index and that is correct.
+pub fn verify_manifest_provenance_index(
+    manifest: &EconomicAdmissionManifest,
+    witness: &EconomicTransitionWitness,
+) -> Result<(), CcbError> {
+    let derived = witness.derived_provenance_index();
+    if manifest.provenance_evidence_addrs() != derived.as_slice() {
+        return Err(CcbError::ManifestProvenanceIndexMismatch {
+            manifest_count: manifest.provenance_evidence_addrs().len(),
+            derived_count: derived.len(),
+        });
+    }
+    Ok(())
 }

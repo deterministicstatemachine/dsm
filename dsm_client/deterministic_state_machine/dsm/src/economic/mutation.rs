@@ -133,6 +133,23 @@ impl EconomicLeafMutation {
             })
     }
 
+    /// Whether this mutation increases a quantity, and therefore owes a
+    /// funding source.
+    ///
+    /// Computable from the mutation **alone** — no identity, no fetched
+    /// evidence, no tree. That is what lets a verifier check the
+    /// credit/source bijection before retrieving a single provenance blob.
+    /// An absent state counts as zero, so an insertion of 25 is a credit and a
+    /// removal is not.
+    pub fn is_positive_credit(&self) -> bool {
+        let amount = |s: &Option<EconomicLeafState>| {
+            s.as_ref()
+                .and_then(EconomicLeafState::credit_amount)
+                .unwrap_or(0)
+        };
+        amount(&self.post_state) > amount(&self.pre_state)
+    }
+
     /// Fields 1..3 in registry order. Optionals carry their marker even when
     /// absent, so an absent pre-state cannot shift the post-state into its
     /// place.
