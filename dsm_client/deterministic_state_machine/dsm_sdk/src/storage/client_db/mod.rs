@@ -31,6 +31,7 @@ mod contacts;
 pub mod counterparty_canonical_heads;
 pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
 mod dlv_receipts;
+pub mod economic_admission;
 mod export;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
@@ -1035,6 +1036,37 @@ fn create_schema(conn: &Connection) -> Result<()> {
             smt_root    BLOB NOT NULL,         -- 32B (r_A — stored for sanity check)
             head_bytes  BLOB NOT NULL,         -- canonical DeviceState bytes
             updated_at  INTEGER NOT NULL
+        );
+
+        -- The economic admission in flight, if any. AT MOST ONE per device:
+        -- the position cannot advance while pending, so a second concurrent
+        -- admission is not a thing that can exist. PRIMARY KEY(device_id)
+        -- enforces that structurally rather than by convention.
+        --
+        -- Written in the SAME transaction as the head advance that created it
+        -- (see dual_write_advance_outcome_with_extra). That atomicity is the
+        -- durability invariant: a value-bearing local acceptance must not
+        -- become durable unless every input needed to recover the EXACT,
+        -- byte-identical admission evidence is durable with it. If these could
+        -- commit separately, a crash between them would leave either fenced
+        -- value with no record of why, or a fence with no accepted value.
+        --
+        -- Deliberately NOT inside head_bytes: that would need a
+        -- DEVICE_STATE_VERSION bump, which under the beta no-legacy rule means
+        -- wiping every existing head. DeviceState::restore takes it as a
+        -- REQUIRED argument instead, so every rebuild path must supply it.
+        CREATE TABLE IF NOT EXISTS economic_pending_admissions(
+            device_id               BLOB PRIMARY KEY,   -- 32B
+            kind                    INTEGER NOT NULL,   -- 0 dsm, 1 load, 2 unload
+            fenced_asset            BLOB,               -- 32B, NULL for kind 0
+            lifecycle_state         INTEGER NOT NULL,   -- 0..4, forward only
+            economic_position       INTEGER NOT NULL,
+            pre_economic_root       BLOB NOT NULL,      -- 32B
+            post_economic_root      BLOB NOT NULL,      -- 32B
+            operation_digest        BLOB NOT NULL,      -- 32B
+            accepted_substrate_addr BLOB NOT NULL,      -- 32B
+            admission_manifest_addr BLOB NOT NULL,      -- 32B
+            updated_at              INTEGER NOT NULL
         );
 
         -- Device head storage is BCR-only (§4.3): no state counter and no

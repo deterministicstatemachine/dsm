@@ -334,6 +334,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
+            None, // no admission pending in this fixture
             64,
         )
         .expect("restore a head carrying a real ERA balance");

@@ -17,7 +17,7 @@ fn head_byte_budget() {
     println!("\n=== HEAD BYTE BUDGET: {path} ===");
     println!("total head_bytes: {}", bytes.len());
 
-    let (head, stored_root) = match decode_device_state(&bytes) {
+    let (head, stored_root) = match decode_device_state(&bytes, None) {
         Ok(v) => v,
         Err(e) => panic!("decode failed: {e}"),
     };

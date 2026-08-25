@@ -202,6 +202,64 @@ impl CoreSDK {
     /// effect of the apply commits together — all exist, or none do). The
     /// closure returning `Err` aborts the whole transaction; the in-memory head
     /// is then never installed and the operation is observable as never-happened.
+    /// Commit an advance and the economic admission it starts, ATOMICALLY.
+    ///
+    /// This exists so that a producer of a `PendingEconomicAdmission` cannot
+    /// accidentally write the row in a second transaction. If the two could
+    /// commit separately, a crash between them leaves one of two states, and
+    /// the device cannot tell which happened:
+    ///
+    /// ```text
+    /// head committed, pending row missing => value accepted with no record of
+    ///                                        why it must be fenced: it is
+    ///                                        spendable, and its economic
+    ///                                        ancestry will never be registered
+    /// pending row committed, head missing => a fence with no accepted value
+    ///                                        behind it, and a register position
+    ///                                        reserved for a transition that
+    ///                                        never happened
+    /// ```
+    ///
+    /// The first is the dangerous one — it is a silent unfencing, not a stall.
+    ///
+    /// The head passed in must ALREADY carry the pending admission (build it
+    /// with `DeviceState::with_pending_economic_admission`), so the durable
+    /// head and the durable row agree by construction rather than by the
+    /// caller remembering to set both.
+    pub(crate) fn commit_advance_with_pending_admission(
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+        bump_capsule: bool,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> Result<(), DsmError> {
+        let devid = outcome.new_device_state.devid();
+        if !dsm::economic::admission::head_carries_admission(
+            outcome.new_device_state.pending_economic_admission(),
+            pending,
+        ) {
+            return Err(DsmError::invalid_operation(
+                "commit_advance_with_pending_admission: the head being committed does not carry                  this admission — the durable head and the durable row would disagree about                  whether the device is fenced",
+            ));
+        }
+        let now = crate::util::deterministic_time::tick() as i64;
+        let pending = pending.clone();
+        Self::dual_write_advance_outcome_with_extra(
+            outcome,
+            bump_capsule,
+            Some(&move |tx: &rusqlite::Transaction<'_>,
+                        _o: &dsm::types::device_state::AdvanceOutcome| {
+                crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+                    tx, &devid, &pending, now,
+                )
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("commit pending economic admission: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })
+            }),
+        )
+    }
+
     fn dual_write_advance_outcome_with_extra(
         outcome: &dsm::types::device_state::AdvanceOutcome,
         bump_capsule: bool,
