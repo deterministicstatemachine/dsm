@@ -8,11 +8,13 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 mod addressing;
+mod economic;
 mod protocol;
 mod testing;
 mod token_ops;
 
 pub use addressing::*;
+pub use economic::*;
 pub use protocol::*;
 pub use testing::*;
 pub use token_ops::*;
@@ -35,6 +37,15 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_DETERMINISTIC_TIME,
     TAG_DSM_DEV_ENT_V2,
     TAG_DSM_DJTE_SHARD_MERKLE,
+    TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+    TAG_DSM_ECONOMIC_BALANCE_KEY,
+    TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY,
+    TAG_DSM_ECONOMIC_LEAF_STATE,
+    TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN,
+    TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY,
+    TAG_DSM_ECONOMIC_SMT_LEAF,
+    TAG_DSM_ECONOMIC_SMT_NODE,
+    TAG_DSM_ECONOMIC_VAULT_RESERVE_KEY,
     TAG_DSM_DLV_CLOSE_COMMIT,
     TAG_DSM_DLV_CLOSE_X,
     TAG_DSM_EXTERNAL_EVIDENCE,
