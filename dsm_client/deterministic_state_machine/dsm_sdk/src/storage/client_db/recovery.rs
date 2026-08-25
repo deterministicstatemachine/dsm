@@ -1088,13 +1088,9 @@ pub fn get_capsule_counterparty_ids() -> Result<Vec<[u8; 32]>> {
             blob.len()
         ));
     }
-    let mut ids = Vec::with_capacity(blob.len() / 32);
-    for chunk in blob.chunks_exact(32) {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(chunk);
-        ids.push(arr);
-    }
-    Ok(ids)
+    // `as_chunks` yields `&[u8; 32]` directly, so the length check above is the
+    // only remainder handling needed and the copy_from_slice dance goes away.
+    Ok(blob.as_chunks::<32>().0.to_vec())
 }
 
 /// Store the tombstone hash for the recovering device (our old device).
