@@ -1438,6 +1438,39 @@ message SettlementSlotClaimV1 {
   bytes  signature               = 2 [(dsm_max_len)=65535];
 }
 
+// A trader's claim on one cell of the economic root register: the write-once
+// value at K_root = H("DSM/trader-economic-root-register-key/v1" || 0x00 || G
+// || DevID || u64_be(economic_position)).
+//
+// Registering establishes NON-EQUIVOCATION and nothing else: this identity
+// named one root at this position and can never name a second. It does NOT
+// establish that the root resulted from a valid transition — a malicious
+// trader registers an arbitrary root perfectly consistently. accepted_root is
+// not valid_root, and nodes never judge which it is.
+//
+// The body travels as its EXACT CCB bytes (object class 0x001B, schema 1),
+// NOT as a nested proto mirror. Canonicalization for the body already exists
+// and is what the signature covers; a proto mirror would be a second canonical
+// form of one object, and the two could disagree. So this envelope is a
+// carrier, not a re-description.
+//
+// The signature covers the BODY only (you cannot sign bytes containing the
+// signature): SPHINCS+(sk, BLAKE3("DSM/economic-root-claim-sign/v1" || 0x00 ||
+// body_ccb)). Members verify claimant ATTRIBUTION only — the body's
+// claimant_public_key must be the authenticated caller's device key, the
+// body's trader_devid must be the caller's device, the signature must verify,
+// and the body's storage_set_id must be this member's own set. Attribution is
+// not politeness: the register is write-once, so without it anyone could
+// preempt a victim's next position and permanently burn it.
+//
+// Strict: decode -> re-encode equality. The client encodes ONCE and retains
+// the exact envelope bytes for every retry, because a byte-different re-encode
+// is a different value at a write-once cell.
+message EconomicRootClaimV1 {
+  bytes body_ccb           = 1 [(dsm_max_len)=65535];
+  bytes claimant_signature = 2 [(dsm_max_len)=65535];
+}
+
 // Proof that a trader's own DlvSettle advance COMMITTED — the witness a
 // pending pointer needs before it may consume anyone's liquidity.
 //

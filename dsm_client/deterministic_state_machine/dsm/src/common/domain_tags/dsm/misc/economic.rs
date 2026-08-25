@@ -66,3 +66,18 @@ pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN: TaggedHashDomain<'static> =
 /// edge, and everything else hangs off the manifest.
 pub const TAG_DSM_ECONOMIC_ADMISSION_MANIFEST: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-admission-manifest/v1");
+
+/// The write-once register cell one identity's economic root occupies at one
+/// position: `K_root = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64_be(economic_position))`.
+///
+/// Binding `G ‖ DevID` **identity-scopes** the cell: it gives each identity its
+/// own coordinate space, so two identities never collide at a position.
+///
+/// It does **not**, by itself, stop a third party writing there. Anyone who
+/// knows a victim's `G` and `DevID` can compute `K_root(G_v, D_v, k)`, and
+/// since the register is write-once, a value landing in that cell burns it
+/// permanently. What prevents that is the member-side **claimant attribution**
+/// check — see `economic::claim_envelope::verify_claim_attribution`. The two
+/// properties are separate and both are required.
+pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/trader-economic-root-register-key/v1");
