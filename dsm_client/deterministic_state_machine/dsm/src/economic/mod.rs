@@ -57,13 +57,26 @@
 
 pub mod claim;
 pub mod classifier;
+pub mod credit;
+pub mod decode;
 pub mod keys;
 pub mod mutation;
 pub mod state;
 pub mod tree;
 pub mod witness;
 
-pub use claim::{AdmissionSubstrate, EconomicAdmissionManifest, EconomicRootClaimBody};
+pub use claim::{
+    verify_manifest_provenance_index, AdmissionSubstrate, EconomicAdmissionManifest,
+    EconomicRootClaimBody,
+};
+pub use decode::{
+    decode_credit_source, decode_leaf_mutation, decode_leaf_state, decode_transition_witness,
+};
+pub use credit::{
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
+    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
+    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
+};
 pub use classifier::{
     check_tripwire, classify, EconomicEffect, EconomicTripwire, ObservedEconomicChange,
 };
@@ -74,4 +87,7 @@ pub use state::{
     EconomicSettlementReceiptState, EconomicVaultReserveState,
 };
 pub use tree::{empty_economic_root, EconomicSmt, ECONOMIC_SMT_HEIGHT};
-pub use witness::{verify_mutation_sequence, EconomicMutationSequence, EconomicWitnessError};
+pub use witness::{
+    verify_mutation_sequence, EconomicMutationSequence, EconomicTransitionWitness,
+    EconomicWitnessError,
+};

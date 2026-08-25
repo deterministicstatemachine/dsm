@@ -616,11 +616,15 @@ fn a_reserved_class_is_unusable_on_the_wire_until_its_schema_is_installed() {
     // so there are no canonical bytes to produce, hash-address, nest or sign.
     // The witness verifier consequently takes EconomicMutationSequence, which
     // has no class and is explicitly not a wire object.
+    // 0x001D and 0x0023-0x0028 were promoted by the provenance wire freeze,
+    // and having to edit this line is the point: promotion is a deliberate
+    // diff, arriving with the field tables that make those classes encodable.
+    // 0x0029 stays reserved because its field table would encode an issuance
+    // predicate this protocol does not have.
     assert_eq!(
         reserved::ALL,
-        &[0x001D, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027, 0x0028, 0x0029],
-        "the reserved set is exact — promoting a class must be a deliberate diff here, \
-         arriving with the field table that makes it encodable"
+        &[0x0029],
+        "the reserved set is exact — promoting a class must be a deliberate diff here"
     );
     for c in reserved::ALL {
         assert!(reserved::is_reserved(*c));
@@ -644,11 +648,18 @@ fn reserved_classes_have_no_encoder() {
     let encodable = [
         EconomicRootClaimBody::CLASS,
         EconomicAdmissionManifest::CLASS,
+        dsm::economic::witness::EconomicTransitionWitness::CLASS,
         EconomicLeafMutation::CLASS,
         EconomicBalanceState::CLASS,
         EconomicVaultReserveState::CLASS,
         EconomicSettlementReceiptState::CLASS,
         EconomicConsumedSourceState::CLASS,
+        dsm::economic::credit::CreditSourceAuthorizedIssuance::CLASS,
+        dsm::economic::credit::CreditSourceSameTransitionMove::CLASS,
+        dsm::economic::credit::CreditSourceValidatedPeerDebit::CLASS,
+        dsm::economic::credit::CreditSourceDlvReserveConsumption::CLASS,
+        dsm::economic::credit::CreditSourceValidatedDlvSettlementPayment::CLASS,
+        dsm::economic::credit::CreditSourceVerifiedOfflineReentry::CLASS,
     ];
     for class in encodable {
         assert!(
@@ -660,6 +671,9 @@ fn reserved_classes_have_no_encoder() {
     // And the live economic classes are exactly the ones with field tables.
     assert_eq!(
         encodable,
-        [0x001B, 0x001C, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022]
+        [
+            0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025,
+            0x0026, 0x0027, 0x0028
+        ]
     );
 }

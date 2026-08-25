@@ -276,6 +276,22 @@ impl EconomicLeafState {
         Ok(*h.finalize().as_bytes())
     }
 
+    /// The amount this leaf holds, for leaf classes where "more than before"
+    /// means a credit. `None` for classes where presence is the meaning and
+    /// there is no quantity to increase.
+    ///
+    /// A settlement receipt and a consumed-source marker are INSERTIONS, not
+    /// credits: they record that something happened, they do not add spendable
+    /// units. Treating them as credits would demand a funding source for a
+    /// bookkeeping entry.
+    pub fn credit_amount(&self) -> Option<u64> {
+        match self {
+            Self::Balance(s) => Some(s.amount),
+            Self::VaultReserve(s) => Some(s.amount),
+            Self::SettlementReceipt(_) | Self::ConsumedSource(_) => None,
+        }
+    }
+
     /// The class and identifying fields that together fix this state's
     /// position, without needing an identity to hash against.
     ///

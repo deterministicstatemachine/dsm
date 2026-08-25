@@ -64,13 +64,15 @@ impl core::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
-struct Cursor<'a> {
-    b: &'a [u8],
-    i: usize,
+/// Shared by the economic decoders so there is ONE set of truncation and
+/// envelope semantics in the crate, not two that can drift apart.
+pub(crate) struct Cursor<'a> {
+    pub(crate) b: &'a [u8],
+    pub(crate) i: usize,
 }
 
 impl<'a> Cursor<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
         let end = self.i.checked_add(n).ok_or(DecodeError::Truncated)?;
         if end > self.b.len() {
             return Err(DecodeError::Truncated);
@@ -79,30 +81,43 @@ impl<'a> Cursor<'a> {
         self.i = end;
         Ok(s)
     }
-    fn u8(&mut self) -> Result<u8, DecodeError> {
+    pub(crate) fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(self.take(1)?[0])
     }
-    fn u16(&mut self) -> Result<u16, DecodeError> {
+    pub(crate) fn u16(&mut self) -> Result<u16, DecodeError> {
         let s = self.take(2)?;
         Ok(u16::from_be_bytes([s[0], s[1]]))
     }
-    fn u32(&mut self) -> Result<u32, DecodeError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
         let s = self.take(4)?;
         Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
-    fn u64(&mut self) -> Result<u64, DecodeError> {
+    pub(crate) fn u64(&mut self) -> Result<u64, DecodeError> {
         let s = self.take(8)?;
         let mut a = [0u8; 8];
         a.copy_from_slice(s);
         Ok(u64::from_be_bytes(a))
     }
-    fn digest32(&mut self) -> Result<[u8; 32], DecodeError> {
+    pub(crate) fn digest32(&mut self) -> Result<[u8; 32], DecodeError> {
         let s = self.take(32)?;
         let mut a = [0u8; 32];
         a.copy_from_slice(s);
         Ok(a)
     }
-    fn envelope(&mut self, want_class: u16, want_schema: u16) -> Result<(), DecodeError> {
+    /// The class of the object at the cursor, without consuming it. Needed
+    /// for a heterogeneous inline sequence, where the envelope IS the
+    /// discriminant.
+    pub(crate) fn peek_class(&self) -> Result<u16, DecodeError> {
+        if self.i + 2 > self.b.len() {
+            return Err(DecodeError::Truncated);
+        }
+        Ok(u16::from_be_bytes([self.b[self.i], self.b[self.i + 1]]))
+    }
+    pub(crate) fn envelope(
+        &mut self,
+        want_class: u16,
+        want_schema: u16,
+    ) -> Result<(), DecodeError> {
         let c = self.u16()?;
         let s = self.u16()?;
         if c != want_class {
@@ -118,7 +133,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn invalid(e: CcbError) -> DecodeError {
+pub(crate) fn invalid(e: CcbError) -> DecodeError {
     DecodeError::Invalid(e.to_string())
 }
 
