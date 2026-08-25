@@ -1344,7 +1344,7 @@ mod stamping_tests {
     /// the authenticated state does not name gets NO pointer at any sequence.
     /// With the hop's own generation field burned, the publisher's only source
     /// is the composition that resolves `parent_binding` — and when the
-    /// binding is not the composed frontier, it refuses rather than invent a
+    /// binding is not the composed state's c_n, it refuses rather than invent a
     /// linkage.
     #[test]
     #[serial]

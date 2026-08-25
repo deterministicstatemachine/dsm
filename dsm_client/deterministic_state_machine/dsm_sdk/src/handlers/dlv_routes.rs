@@ -226,7 +226,7 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
-    /// `dlv.composeVault` (query, read-only) — the composed frontier of a
+    /// `dlv.composeVault` (query, read-only) — the composed STATE of a
     /// DISCOVERED vault, exactly as any verifier derives it: advertisement →
     /// presentation → `c_n` → exact `CCB(V_n)` bytes → P0–P6 → receipted
     /// fold. Owner and stranger run the SAME path here, which is the point:
@@ -235,6 +235,14 @@ impl AppRouterImpl {
     ///
     /// Input (`q.params`, UTF-8): `"<vault_id_b32>:<token_a_b32>:<token_b_b32>:<fee_bps>"`.
     /// Output (`AppStateResponse.value`): `"<generation>:<reserve_a>:<reserve_b>:<c_n_b32>"`.
+    ///
+    /// NOT a frontier answer. Two devices agreeing here proves they derive the
+    /// same successor from the same published artifacts — which is what the
+    /// two-device verdict checks and all it checks. It does NOT prove the state
+    /// is the latest: the fold stops when the pointer listing it read runs out,
+    /// that listing came from one member, and absence is indistinguishable from
+    /// omission. Establishing maximality needs a live quorum read this query
+    /// does not perform.
     async fn dlv_compose_vault(&self, q: crate::bridge::AppQuery) -> AppResult {
         let params = match std::str::from_utf8(&q.params) {
             Ok(s) => s.trim().to_string(),
@@ -1892,7 +1900,7 @@ impl AppRouterImpl {
                 continue;
             }
             if composed.sequence != intent.parent_sequence {
-                abandon("the composed frontier moved past this close's generation");
+                abandon("the composed state moved past this close's generation");
                 continue;
             }
             let Ok(catalog) = crate::sdk::storage_set::StorageSetCatalog::from_env_config() else {
@@ -2002,7 +2010,7 @@ impl AppRouterImpl {
             .map_err(|e| format!("resumed close: {e}"))?;
         if composed.sequence != parent_sequence {
             return Err(format!(
-                "resumed close: the composed frontier is at generation {} but this close \
+                "resumed close: the composed state is at generation {} but this close \
                  consumes {parent_sequence} — reconcile first",
                 composed.sequence
             ));
@@ -4169,7 +4177,7 @@ mod funded_creation_tests {
     /// reserve proof back out of storage and verifies its signature and SMT
     /// paths, exactly as a separate device would, because it has no privileged
     /// access to the owner's leaves either way.
-    /// The e2e observable answers with EXACTLY the composed frontier: the
+    /// The e2e observable answers with EXACTLY the composed state: the
     /// route runs the discovered-vault path, the helper runs the owner's own
     /// record path, and the two must agree byte-for-byte — the single-device
     /// form of the two-device symmetry claim.
@@ -4233,7 +4241,7 @@ mod funded_creation_tests {
                 "0:10000:5000:{}",
                 crate::util::text_id::encode_base32_crockford(&frontier.c_n)
             ),
-            "the observable is the composed frontier, byte for byte"
+            "the observable is the composed state, byte for byte"
         );
     }
 
@@ -5028,7 +5036,7 @@ mod funded_creation_tests {
         (res, x)
     }
 
-    /// The vault's full composed frontier, as ANY verifier derives it: the
+    /// The vault's full composed state, as ANY verifier derives it: the
     /// birth presentation + `CCB(V_0)` through P0-P6, plus every verified
     /// trader generation folded on.
     fn composed_frontier(

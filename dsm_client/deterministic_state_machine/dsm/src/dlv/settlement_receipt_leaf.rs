@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Trader settlement receipt — proof that a settlement actually committed.
+//! Trader settlement receipt — a trader's SELF-ATTESTED claim that a settlement
+//! committed. **Not** a proof of it. See "What this does not establish" below.
 //!
 //! WHY THIS EXISTS. A pending pointer says "I am about to settle against this
 //! vault at this sequence". Folding that claim into effective reserves is what
@@ -11,12 +12,36 @@
 //! RouteCommit valid, AMM math exact) is satisfied by that trader, because all
 //! of them describe an *intent* and none of them witness an *advance*.
 //!
-//! A receipt is the missing witness. It proves the trader's own `DlvSettle`
-//! advance committed: the settlement is bound into a leaf of the trader's device
-//! SMT, and the receipt carries that leaf's inclusion path against the trader's
-//! post-advance root, signed by the trader. So a pointer is inert until its
-//! receipt is produced and verified — the griefer cannot manufacture one without
-//! actually paying the input.
+//! A receipt was intended to be the missing witness, and against a trader who
+//! runs this software it is one: an honest client only produces a receipt after
+//! its own `DlvSettle` advance commits, so a pointer stays inert until then.
+//!
+//! ## What this does NOT establish
+//!
+//! **Retracted claim.** This header previously said "the griefer cannot
+//! manufacture one without actually paying the input". That is false, and the
+//! text is corrected rather than softened because a verifier that believes it
+//! checked an advance when it checked a signature is exactly the failure this
+//! subsystem exists to prevent.
+//!
+//! [`verify_trader_settlement_receipt`] reads `trader_public_key`,
+//! `trader_genesis`, `trader_devid` and `post_root` **out of the receipt
+//! itself**. It confirms those fields are internally consistent: the signature
+//! verifies under the key the receipt names, and the recomputed leaf is included
+//! under the root the receipt names. Nothing binds that root to a published
+//! device root, and nothing binds that key to a device. The cheapest tree
+//! satisfying the inclusion check has ONE leaf, so the honest-path fixture and a
+//! forgery are byte-identical constructions — anyone holding a SPHINCS+ keypair
+//! can build both.
+//!
+//! So the griefing property above holds against a trader who runs this software,
+//! and does not hold against one who does not. The same limitation is symmetric
+//! on the owner's side (see [`crate::dlv::vault_reserve_inclusion`], whose
+//! `smt_root` is likewise owner-chosen).
+//!
+//! Closing this requires binding `post_root` to an independently verifiable
+//! trader state transition. That work is specified but not implemented; until it
+//! lands, **do not read this type as evidence that value moved.**
 //!
 //! Shape is cloned from [`crate::dlv::vault_smt_leaf`] (signature over the
 //! committed tuple, then a 256-sibling SMT path re-verified from a recomputed
@@ -315,16 +340,40 @@ pub fn sign_trader_settlement_receipt(
     })
 }
 
-/// Verify a settlement receipt end-to-end: trade shape, then the trader's
-/// signature, then SMT inclusion of the recomputed leaf under `post_root`.
+/// Check a settlement receipt for INTERNAL CONSISTENCY: trade shape, then the
+/// signature under the key the receipt names, then SMT inclusion of the
+/// recomputed leaf under the root the receipt names.
 ///
-/// Passing means the trader's own device root commits this exact settlement —
-/// the input was paid and the output taken on a chain the trader signed. That is
-/// the fact a pointer needs before it may consume anyone's liquidity.
+/// # What passing means
 ///
-/// Stateless and fail-closed. Note what it does NOT establish: that `post_root`
-/// is the trader's *current* root. It does not need to — a committed settlement
-/// stays committed, and a trader cannot un-pay an input by advancing further.
+/// Only that those three facts agree with each other. `trader_public_key`,
+/// `trader_genesis`, `trader_devid` and `post_root` are all read OUT OF THE
+/// RECEIPT, so a passing result is a statement the receipt makes about itself.
+///
+/// # What passing does NOT mean
+///
+/// **Retracted claim.** This doc previously said passing meant "the input was
+/// paid and the output taken on a chain the trader signed". It does not:
+///
+/// - `post_root` is not bound to any published device root. The cheapest tree
+///   satisfying the inclusion check has one leaf, and the test fixture in this
+///   module builds exactly that — the honest construction and a forgery are
+///   byte-identical.
+/// - `trader_public_key` is not bound to `trader_devid` or `trader_genesis`. No
+///   `AttA` is carried and the authority resolver is never invoked, so an
+///   attacker needs no real identity — a fresh keypair and two arbitrary 32-byte
+///   strings satisfy every check here.
+/// - Nothing establishes that the units debited existed or were legitimately
+///   issued.
+///
+/// Against a trader running this software the receipt is still the witness the
+/// composer wants, because an honest client produces one only after its advance
+/// commits. Against a trader who does not, it establishes nothing. Callers must
+/// not treat a pass as evidence that value moved.
+///
+/// Stateless and fail-closed. It also does not establish that `post_root` is the
+/// trader's *current* root — that one is by design, since a committed settlement
+/// stays committed.
 pub fn verify_trader_settlement_receipt(
     receipt: &SignedTraderSettlementReceipt,
 ) -> Result<(), ReceiptError> {
