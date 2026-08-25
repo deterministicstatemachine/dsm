@@ -1586,7 +1586,13 @@ impl CoreSDK {
     /// exercised without one, and constructing a funded head through real
     /// advances would mean minting and funding through several routes before
     /// reaching the behaviour under test.
-    #[cfg(test)]
+    // Also reachable under the non-default `test-utils` feature so this crate's
+    // own integration tests (external consumers, for which `cfg(test)` is false)
+    // can build a funded fixture head. Still `pub(crate)`: the only way a test
+    // outside the crate seeds state is the narrow
+    // `install_balance_for_testing`, which installs ONE balance rather than
+    // replacing the whole head.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn set_device_head_for_testing(&self, head: dsm::types::device_state::DeviceState) {
         self.state_machine.lock().set_device_head(head);
     }

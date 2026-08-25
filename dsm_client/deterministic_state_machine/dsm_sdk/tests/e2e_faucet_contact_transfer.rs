@@ -139,29 +139,25 @@ async fn e2e_flow_faucet_contact_transfer() {
     assert_eq!(stored_pk, pk, "Stored PK mismatch");
 
     // 6. Faucet Claim
-    let claim_req = proto::FaucetClaimRequest {
-        device_id: device_id.clone(),
-        // proof_of_work_nonce: 0, // Removed
-    };
 
-    let res = router
-        .invoke(AppInvoke {
-            method: "faucet.claim".to_string(),
-            args: pack_proto(&claim_req),
-        })
-        .await;
-
-    if !res.success {
-        panic!("Faucet claim failed: {:?}", res.error_message);
-    }
-    println!("✅ Faucet claim success");
+    // Seed the fixture ERA balance directly. This used to call `faucet.claim`,
+    // which minted builtin ERA on a caller-supplied device_id — the unauthorized
+    // issuance the accepting-layer gate now refuses in tests exactly as in
+    // production. Fixtures seed state; they do not mint.
+    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
+        &router,
+        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
+        100,
+    )
+    .expect("seed the fixture ERA balance");
+    println!("✅ Fixture ERA seeded");
 
     // 6b. Verify faucet updated ERA balance
     let balances = fetch_balances(&router).await;
     let era_after_faucet = get_era_balance(&balances).unwrap_or(0);
     assert!(
         era_after_faucet > 0,
-        "Expected ERA balance > 0 after faucet claim"
+        "Expected ERA balance > 0 after seeding the fixture"
     );
 
     // 7. Add Contact (Alice -> Bob) using real protocol inputs

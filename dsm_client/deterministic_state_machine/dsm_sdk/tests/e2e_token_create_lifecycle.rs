@@ -102,21 +102,21 @@ async fn e2e_token_create_lifecycle() {
     ensure_b0x_tokens(&router, &storage_nodes).await;
 
     // --- Faucet claim (prerequisite for active identity) ---
-    let claim_req = proto::FaucetClaimRequest {
-        device_id: device_id.clone(),
-    };
-    let res = router
-        .invoke(AppInvoke {
-            method: "faucet.claim".to_string(),
-            args: pack_proto(&claim_req),
-        })
-        .await;
-    assert!(res.success, "Faucet claim failed: {:?}", res.error_message);
+    // Seed the fixture ERA balance directly. This used to call `faucet.claim`,
+    // which minted builtin ERA on a caller-supplied device_id — the unauthorized
+    // issuance the accepting-layer gate now refuses in tests exactly as in
+    // production. Fixtures seed state; they do not mint.
+    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
+        &router,
+        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
+        100,
+    )
+    .expect("seed the fixture ERA balance");
 
     let balances = fetch_balances(&router).await;
     let era = get_era_balance(&balances).unwrap_or(0);
-    assert!(era > 0, "Expected ERA > 0 after faucet");
-    println!("✅ Faucet claim: ERA = {}", era);
+    assert!(era > 0, "Expected ERA > 0 after seeding the fixture");
+    println!("✅ Fixture ERA = {}", era);
 
     // ========== TEST 1: Create token "BETA" ==========
     let beta_max_supply = {

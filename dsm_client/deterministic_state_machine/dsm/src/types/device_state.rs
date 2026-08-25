@@ -1214,6 +1214,35 @@ impl DeviceState {
     }
 
     /// Snapshot of all device-level balances (read-only view).
+    /// Install a fixture balance. TEST-ONLY: compiled under `cfg(test)` or the
+    /// non-default `testing` feature; a production build never sees it.
+    ///
+    /// This is FIXTURE CONSTRUCTION, not issuance. Builtin issuance is refused at
+    /// `advance`, and that refusal is total — it applies in tests exactly as in
+    /// production, which is what makes it worth anything. A fixture therefore
+    /// cannot obtain ERA by minting and MUST NOT try: not via `faucet.claim`, not
+    /// via `wallet.mint_for_self`, not via `Operation::Mint`. Those are issuance
+    /// ROUTES, and re-opening one for tests re-opens it for everyone.
+    ///
+    /// What this does instead is install the state a device would already be in —
+    /// the same thing `restore` does for a reloaded device — asserting nothing
+    /// about whether any issuance was authorized. Balances live outside the SMT,
+    /// so `root()` is unchanged, exactly as in `restore`.
+    ///
+    /// The amount installed has NO provenance and must never be read as though it
+    /// had. This is for tests whose subject is something else and that merely need
+    /// a funded starting point.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_balance_for_testing(&self, policy_commit: [u8; 32], amount: u64) -> Self {
+        let mut next = self.clone();
+        if amount == 0 {
+            next.balances.remove(&policy_commit);
+        } else {
+            next.balances.insert(policy_commit, amount);
+        }
+        next
+    }
+
     pub fn balances_snapshot(&self) -> &BTreeMap<[u8; 32], u64> {
         &self.balances
     }

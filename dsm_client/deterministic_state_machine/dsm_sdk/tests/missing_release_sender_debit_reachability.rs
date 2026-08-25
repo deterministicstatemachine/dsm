@@ -81,33 +81,12 @@ fn install_identity(device_id: [u8; 32], public_key: Vec<u8>) {
 fn seed_sender_head_with_era() -> DeviceState {
     let kp = keypair(0xA1);
     let base = DeviceState::new(GENESIS, SENDER, kp.public_key.clone(), 1024);
-    let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&SENDER, &SENDER);
-    let head = base
-        .advance(
-            rel,
-            SENDER,
-            Operation::Mint {
-                amount: Balance::from_state(SEED_ERA, [0u8; 32]),
-                token_id: b"ERA".to_vec(),
-                policy_commit: era_policy(),
-                authorized_by: b"self".to_vec(),
-                proof_of_authorization: Vec::new(),
-                message: "seed".to_string(),
-            },
-            vec![0x11; 32],
-            None,
-            &[BalanceDelta {
-                policy_commit: era_policy(),
-                direction: BalanceDirection::Credit,
-                amount: SEED_ERA,
-            }],
-            Some(initial_chain_tip_from_device_ids(&SENDER, &SENDER)),
-            None,
-            None,
-            None,
-        )
-        .expect("seed mint advance")
-        .new_device_state;
+    // Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
+    // `advance` — in tests exactly as in production, which is the property that makes
+    // the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
+    // `with_balance_for_testing` installs the state a device would already be in;
+    // balances live outside the SMT, so `root()` is unaffected, as with `restore`.
+    let head = base.with_balance_for_testing(era_policy(), SEED_ERA);
     client_db::update_bcr_device_head(&head).expect("persist seeded head");
     head
 }
@@ -378,25 +357,38 @@ async fn the_durable_probes_detect_a_real_commit() {
     let before = snapshot_sender();
     assert_eq!(before.era_balance, SEED_ERA, "control precondition");
 
-    // A second self-mint, persisted exactly as a committed advance persists.
+    // A real committed advance, persisted exactly as a committed advance persists.
+    //
+    // This was a second self-mint of ERA, which `advance` now refuses — builtin
+    // issuance is not self-authorizable. The probes do not care WHICH advance moved
+    // the state, only that a committed one moves all three: head root, ERA balance,
+    // chain-state row. A debiting transfer does that without minting, so the test
+    // keeps its subject and loses only its illegal vehicle.
     let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&SENDER, &SENDER);
     let outcome = head
         .advance(
             rel,
             SENDER,
-            Operation::Mint {
+            Operation::Transfer {
+                to_device_id: [0xBBu8; 32].to_vec(),
                 amount: Balance::from_state(7, [0u8; 32]),
                 token_id: b"ERA".to_vec(),
                 policy_commit: era_policy(),
-                authorized_by: b"self".to_vec(),
-                proof_of_authorization: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+                nonce: vec![],
+                verification: dsm::types::operations::VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
                 message: "control".to_string(),
+                signature: vec![],
+                authority_policy: None,
             },
             vec![0x22; 32],
             None,
             &[BalanceDelta {
                 policy_commit: era_policy(),
-                direction: BalanceDirection::Credit,
+                direction: BalanceDirection::Debit,
                 amount: 7,
             }],
             Some(initial_chain_tip_from_device_ids(&SENDER, &SENDER)),
@@ -416,7 +408,7 @@ async fn the_durable_probes_detect_a_real_commit() {
     );
     assert_eq!(
         after.era_balance,
-        before.era_balance + 7,
+        before.era_balance - 7,
         "probe 2 is dead: a committed advance did not move the balance"
     );
     assert_eq!(

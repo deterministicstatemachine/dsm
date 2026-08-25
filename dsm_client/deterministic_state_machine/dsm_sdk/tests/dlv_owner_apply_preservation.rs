@@ -18,7 +18,7 @@
 
 use dsm::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
 use dsm::core::state_machine::transition::enforce_operation_authorization;
-use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState, VaultReserveMutation};
+use dsm::types::device_state::{DeviceState, VaultReserveMutation};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm_sdk::storage::client_db::{decode_device_state, encode_device_state};
 
@@ -65,34 +65,14 @@ fn vault_pair() -> dsm::types::device_state::VaultStatePair {
     dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
 }
 
-fn mint(head: &DeviceState, policy: [u8; 32], token: &[u8], amount: u64) -> DeviceState {
-    let rel = compute_smt_key(&OWNER, &OWNER);
-    let init = initial_chain_tip_from_device_ids(&OWNER, &OWNER);
-    head.advance(
-        rel,
-        OWNER,
-        Operation::Mint {
-            amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
-            token_id: token.to_vec(),
-            policy_commit: policy,
-            authorized_by: b"self".to_vec(),
-            proof_of_authorization: Vec::new(),
-            message: "seed".to_string(),
-        },
-        vec![0x11; 32],
-        None,
-        &[BalanceDelta {
-            policy_commit: policy,
-            direction: BalanceDirection::Credit,
-            amount,
-        }],
-        Some(init),
-        None,
-        None,
-        None,
-    )
-    .expect("mint advance")
-    .new_device_state
+// Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
+// `advance` — in tests exactly as in production, which is the property that makes
+// the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
+// `with_balance_for_testing` installs the state a device would already be in;
+// balances live outside the SMT, so `root()` is unaffected, as with `restore`.
+fn mint(head: &DeviceState, policy: [u8; 32], _token: &[u8], amount: u64) -> DeviceState {
+    // Accumulates, matching the mint it replaces.
+    head.with_balance_for_testing(policy, head.balance(&policy) + amount)
 }
 
 /// An owner head carrying non-trivial material in every field a settlement does NOT

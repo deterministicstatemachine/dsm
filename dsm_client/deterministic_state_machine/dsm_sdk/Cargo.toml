@@ -190,6 +190,14 @@ quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.5.0"
 dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, features = ["testing"] }
+# SELF dev-dependency, enabling `test-utils` for THIS crate's own integration
+# tests (`tests/*.rs`) only. Integration tests are external consumers, so a
+# `cfg(test)` gate is invisible to them and the feature would otherwise never be
+# on. A normal `cargo build`/`cargo install` does not resolve dev-dependencies,
+# so the test-only seams stay out of every production artifact — which is the
+# point: builtin issuance is refused everywhere, including in tests, and fixtures
+# seed state directly instead of minting.
+dsm_sdk = { path = ".", features = ["test-utils"] }
 
 
  
