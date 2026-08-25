@@ -323,7 +323,15 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
 ///
 /// Returns the decoded state and the stored `smt_root` sanity-check value;
 /// the caller asserts `decoded.root() == stored_smt_root`.
-pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
+pub fn decode_device_state(
+    bytes: &[u8],
+    // The admission in flight, read from `economic_pending_admissions`. A
+    // REQUIRED argument rather than a defaulted `None`: the fence state is not
+    // in `head_bytes`, so if this could be omitted, every decode path that
+    // forgot would silently produce an unfenced head. Making it explicit means
+    // the compiler names every rebuild path.
+    pending_economic_admission: Option<dsm::economic::admission::PendingEconomicAdmission>,
+) -> Result<(DeviceState, [u8; 32])> {
     let mut cursor = bytes;
 
     let version = read_u8(&mut cursor).map_err(|e| anyhow!("device_state version: {e}"))?;
@@ -436,6 +444,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         extra_leaves,
         offline_allocations,
         vault_reserves,
+        pending_economic_admission,
         1024,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
@@ -703,7 +712,16 @@ pub fn load_bcr_device_head(device_id: &[u8; 32]) -> Result<Option<DeviceState>>
     match row {
         None => Ok(None),
         Some(bytes) => {
-            let (head, _root) = decode_device_state(&bytes)?;
+            // Read the fence state under the SAME lock as the head. Two reads
+            // could straddle a concurrent writer and hand back a head whose
+            // fence belongs to a different moment — and the direction that
+            // matters is the unsafe one: a head from after an admission
+            // started, paired with a fence read from before it.
+            let pending =
+                crate::storage::client_db::economic_admission::load_pending_admission_with_conn(
+                    &conn, device_id,
+                )?;
+            let (head, _root) = decode_device_state(&bytes, pending)?;
             Ok(Some(head))
         }
     }
@@ -716,6 +734,86 @@ mod tests {
     use dsm::types::operations::{Operation, TransactionMode, VerificationType};
     use dsm::types::token_types::Balance as TokenBalance;
     use serial_test::serial;
+
+    /// THE RESTART TEST for the pending-admission fence.
+    ///
+    /// The fence lives on the head but is NOT in `head_bytes`. That is only
+    /// safe if the loader re-attaches it, so this stores a head, writes a
+    /// pending row, and reloads through the real production path
+    /// (`load_bcr_device_head`) to confirm the reloaded head is still fenced.
+    ///
+    /// Without this the fence would be session-local: a crash or restart
+    /// between local acceptance and registration would silently unfence a
+    /// device that is holding value with no registered economic ancestry —
+    /// exactly the window the fence exists for.
+    #[test]
+    #[serial]
+    fn the_fence_survives_a_reload_through_the_production_loader() {
+        use dsm::economic::admission::{
+            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
+        };
+
+        init_test_db();
+        let devid = [0xC3u8; 32];
+        let head = DeviceState::new([0xB2u8; 32], devid, vec![0xAAu8; 32], 64);
+        update_bcr_device_head(&head).expect("store head");
+
+        // A head with no pending row reloads unfenced.
+        let plain = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert!(plain.pending_economic_admission().is_none());
+
+        let pending = PendingEconomicAdmission {
+            kind: PendingAdmissionKind::OfflineLoad {
+                asset_policy_commit: [0xE5u8; 32],
+            },
+            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
+            economic_position: 3,
+            pre_economic_root: [1u8; 32],
+            post_economic_root: [2u8; 32],
+            operation_digest: [3u8; 32],
+            accepted_substrate_addr: [4u8; 32],
+            admission_manifest_addr: [5u8; 32],
+        };
+        {
+            let binding = get_connection().expect("conn");
+            let mut conn = binding.lock().unwrap();
+            let tx = conn.transaction().expect("tx");
+            crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+                &tx, &devid, &pending, 2,
+            )
+            .expect("write pending");
+            tx.commit().expect("commit");
+        }
+
+        let reloaded = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            reloaded.pending_economic_admission(),
+            Some(&pending),
+            "a reloaded head must still be fenced — the fence is not in head_bytes, so the \
+             loader re-attaching it is the ONLY thing making it survive a restart"
+        );
+
+        // And clearing it unfences the reloaded head, so the round trip
+        // carries the real value rather than always reporting Some.
+        {
+            let binding = get_connection().expect("conn");
+            let mut conn = binding.lock().unwrap();
+            let tx = conn.transaction().expect("tx");
+            crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
+                &tx, &devid,
+            )
+            .expect("clear pending");
+            tx.commit().expect("commit");
+        }
+        let cleared = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert!(cleared.pending_economic_admission().is_none());
+    }
 
     fn init_test_db() {
         unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
@@ -802,6 +900,7 @@ mod tests {
                 .offline_allocations_snapshot()
                 .clone(),
             outcome.new_device_state.vault_reserves_snapshot().clone(),
+            None, // no admission pending in this fixture
             1024,
         )
         .expect("restore head with signed rel state");
@@ -832,6 +931,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::new(),
             BTreeMap::new(),
+            None, // no admission pending in this fixture
             1024,
         )
         .expect("restore head with state-less tip");
@@ -877,7 +977,7 @@ mod tests {
     fn device_head_codec_roundtrip_preserves_tip_and_root() {
         let (_, _, rel_key, rel, head) = sample_device_and_rel();
         let bytes = encode_device_state(&head);
-        let (decoded, stored_root) = decode_device_state(&bytes).expect("decode device head");
+        let (decoded, stored_root) = decode_device_state(&bytes, None).expect("decode device head");
 
         assert_eq!(stored_root, head.root());
         assert_eq!(decoded.root(), head.root());
@@ -925,7 +1025,7 @@ mod tests {
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with anchor-state leaf");
+            decode_device_state(&bytes, None).expect("decode device head with anchor-state leaf");
 
         // The load-time sanity check (encoded root == recomputed root) is exactly what bricked
         // before the fix; it must now pass.
@@ -960,7 +1060,7 @@ mod tests {
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with vault reserves");
+            decode_device_state(&bytes, None).expect("decode device head with vault reserves");
 
         assert_eq!(stored_root, head.root());
         assert_eq!(
@@ -1000,7 +1100,7 @@ mod tests {
             .new_device_state;
 
         let bytes = encode_device_state(&head);
-        let (decoded, _) = decode_device_state(&bytes).expect("decode");
+        let (decoded, _) = decode_device_state(&bytes, None).expect("decode");
         assert_eq!(decoded.vault_reserve(&v1, &token), 3);
         assert_eq!(decoded.vault_reserve(&v2, &token), 2);
         assert_eq!(decoded.root(), head.root());
@@ -1018,7 +1118,7 @@ mod tests {
         assert_eq!(bytes[0], 0x06, "current device-head version");
 
         bytes[0] = 0x05;
-        let err = decode_device_state(&bytes)
+        let err = decode_device_state(&bytes, None)
             .expect_err("an older device-head version must not be readable");
         let msg = format!("{err}");
         assert!(
@@ -1045,7 +1145,7 @@ mod tests {
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with offline allocation");
+            decode_device_state(&bytes, None).expect("decode device head with offline allocation");
         assert_eq!(stored_root, head.root());
         assert_eq!(
             decoded.root(),
@@ -1072,7 +1172,7 @@ mod tests {
     fn device_head_codec_preserves_state_less_tip_counterparty() {
         let (_, rel_key, head) = head_with_state_less_tip();
         let bytes = encode_device_state(&head);
-        let (decoded, _) = decode_device_state(&bytes).expect("decode device head");
+        let (decoded, _) = decode_device_state(&bytes, None).expect("decode device head");
 
         let original_tip = head.rel_chain_tip(&rel_key).expect("original rel tip");
         let decoded_tip = decoded.rel_chain_tip(&rel_key).expect("decoded rel tip");
@@ -1118,13 +1218,13 @@ mod tests {
         let mut zeroed = bytes.clone();
         zeroed[vc] = 0;
         assert!(
-            decode_device_state(&zeroed).is_err(),
+            decode_device_state(&zeroed, None).is_err(),
             "UNSPECIFIED value_capability must be rejected, never read as No"
         );
         // Out-of-range value is also rejected.
         let mut oob = bytes;
         oob[vc] = 9;
-        assert!(decode_device_state(&oob).is_err());
+        assert!(decode_device_state(&oob, None).is_err());
     }
 
     #[test]

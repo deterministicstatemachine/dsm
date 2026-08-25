@@ -332,7 +332,7 @@ fn a_signed_advance_round_trips_through_persistence() {
         .expect("signed advance");
 
     let bytes = encode_device_state(&after);
-    let (decoded, stored_root) = decode_device_state(&bytes).expect("decode");
+    let (decoded, stored_root) = decode_device_state(&bytes, None).expect("decode");
     assert_eq!(
         decoded.root(),
         stored_root,

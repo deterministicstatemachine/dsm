@@ -392,7 +392,7 @@ fn owner_apply_head_round_trips_through_persistence() {
     );
 
     let bytes = encode_device_state(&after);
-    let (decoded, stored_root) = decode_device_state(&bytes).expect("decode");
+    let (decoded, stored_root) = decode_device_state(&bytes, None).expect("decode");
 
     assert_eq!(
         decoded.root(),

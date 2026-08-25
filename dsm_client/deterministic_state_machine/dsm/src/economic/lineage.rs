@@ -34,31 +34,38 @@
 //! So a device holding value cannot activate. A migration protocol for
 //! existing holdings is future work; it must never be an implicit snapshot.
 //!
-//! ## What is missing, and why it is missing rather than approximated
+//! ## Advancing a validated root
 //!
-//! Advancing a validated root requires, conjunctively:
+//! Conjunctive, and every clause is checked:
 //!
 //! ```text
 //! ValidatedEconomicRoot(k) == witness.pre_economic_root
-//! register[k+1] uniquely identifies { post_economic_root, admission_manifest_addr }
-//! verify_economic_transition(pre, witness) == post_economic_root
-//! the local acceptance substrate verifies                        <-- NOT YET
-//! it and the witness bind THE SAME operation_digest              <-- NOT YET
+//! the registration is for position k+1
 //! registered post_economic_root == witness.post_economic_root
+//! verify_mutation_sequence(pre, mutations) == witness.post_economic_root
+//! the accepted substrate and the witness bind THE SAME operation_digest
+//! registered admission_manifest_addr == the manifest's own address
+//! the manifest's provenance index equals what the credit sources reference
 //! ```
 //!
-//! The two marked conditions need the admission lifecycle: an accepted DSM
-//! successor or an accepted offline boundary attestation, and the digest that
-//! binds it to this witness. Without the shared `operation_digest`, a trader
-//! presents a valid successor and a valid economic transition **describing
-//! different operations** — so a successor constructor that skipped it would
-//! be strictly worse than none.
+//! The shared `operation_digest` is the clause that is easiest to omit and
+//! most costly to omit. Without it a trader presents a perfectly valid
+//! successor and a perfectly valid economic transition **describing different
+//! operations** — each verifies alone, and the pair means nothing.
 //!
-//! There is therefore **no successor constructor here at all**. Nothing in
-//! this module can produce `ValidatedEconomicRoot(k+1)`, which means nothing
-//! can accidentally claim validation it has not performed.
+//! ## What this still does not establish
+//!
+//! Credit provenance. A closed write set proves *what changed*, never *why a
+//! credit may appear*, so a lineage validated only by this function would
+//! accept a trader crediting itself from nothing. Provenance is a separate and
+//! conjunctive obligation.
 
+use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
+use crate::economic::register::RegisteredEconomicRoot;
 use crate::economic::tree::empty_economic_root;
+use crate::economic::witness::{
+    verify_mutation_sequence, EconomicTransitionWitness, EconomicWitnessError,
+};
 
 /// A root this verifier has established is the result of a valid transition
 /// from a validated predecessor.
@@ -151,5 +158,183 @@ pub fn activate(
     Ok(ValidatedEconomicRoot {
         economic_position: 0,
         economic_root: empty_economic_root(),
+    })
+}
+
+/// A substrate acceptance the caller has **verified**, carrying the digest
+/// that binds it to one operation.
+///
+/// The private field means this cannot be conjured from a literal; the named
+/// constructors state what the caller must have established first. Verifying
+/// the substrate evidence itself — the exact `C_dsm+` / `sigma_dsm`, or the
+/// exact `OfflineBoundaryAttestationV1` — happens at the acceptance layer, and
+/// is not repeated here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedSubstrate {
+    operation_digest: [u8; 32],
+    evidence_addr: [u8; 32],
+}
+
+impl AcceptedSubstrate {
+    /// Call only after the exact `C_dsm+` / `sigma_dsm` at `evidence_addr` has
+    /// been verified and found to commit `operation_digest`.
+    pub fn from_verified_dsm_successor(
+        operation_digest: [u8; 32],
+        evidence_addr: [u8; 32],
+    ) -> Self {
+        Self {
+            operation_digest,
+            evidence_addr,
+        }
+    }
+
+    /// Call only after the exact `OfflineBoundaryAttestationV1` at
+    /// `evidence_addr` has been verified and found to commit
+    /// `operation_digest`.
+    pub fn from_verified_offline_boundary(
+        operation_digest: [u8; 32],
+        evidence_addr: [u8; 32],
+    ) -> Self {
+        Self {
+            operation_digest,
+            evidence_addr,
+        }
+    }
+
+    pub fn operation_digest(&self) -> [u8; 32] {
+        self.operation_digest
+    }
+
+    pub fn evidence_addr(&self) -> [u8; 32] {
+        self.evidence_addr
+    }
+}
+
+/// Why a registered root is not a validated successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EconomicValidationError {
+    /// The witness does not start from the validated predecessor.
+    PreRootIsNotThePredecessor {
+        predecessor: [u8; 32],
+        witness_pre: [u8; 32],
+    },
+    /// The registration is not for the next position.
+    PositionIsNotSuccessor { previous: u64, registered: u64 },
+    /// The registered root and the witness disagree about the result.
+    RegisteredRootDiffersFromWitness {
+        registered: [u8; 32],
+        witness: [u8; 32],
+    },
+    /// The mutations do not produce the claimed post-root.
+    Transition(EconomicWitnessError),
+    /// The accepted substrate and the witness describe DIFFERENT operations.
+    OperationDigestMismatch {
+        substrate: [u8; 32],
+        witness: [u8; 32],
+    },
+    /// The registration names a manifest other than the one supplied.
+    ManifestAddrMismatch {
+        registered: [u8; 32],
+        computed: [u8; 32],
+    },
+    /// The manifest or its provenance index is malformed.
+    Manifest(crate::ccb::CcbError),
+}
+
+impl core::fmt::Display for EconomicValidationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PreRootIsNotThePredecessor { .. } => write!(
+                f,
+                "economic validation: the witness does not start from the validated predecessor"
+            ),
+            Self::PositionIsNotSuccessor {
+                previous,
+                registered,
+            } => write!(
+                f,
+                "economic validation: registration is at position {registered}, which is not the \
+                 successor of {previous}"
+            ),
+            Self::RegisteredRootDiffersFromWitness { .. } => write!(
+                f,
+                "economic validation: the registered root and the witness disagree about the \
+                 result of the transition"
+            ),
+            Self::Transition(e) => write!(f, "economic validation: {e}"),
+            Self::OperationDigestMismatch { .. } => write!(
+                f,
+                "economic validation: the accepted substrate and the economic transition bind \
+                 DIFFERENT operation digests — each is individually valid and the pair describes \
+                 two different operations"
+            ),
+            Self::ManifestAddrMismatch { .. } => write!(
+                f,
+                "economic validation: the registration names a different admission manifest than \
+                 the one supplied"
+            ),
+            Self::Manifest(e) => write!(f, "economic validation: manifest: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EconomicValidationError {}
+
+/// Advance a validated root by one position.
+///
+/// `genesis` and `device_id` must be the **authenticated** identity whose tree
+/// this is, from authority resolution — never taken from the objects being
+/// validated, since every leaf key binds them.
+pub fn advance_validated(
+    previous: &ValidatedEconomicRoot,
+    registered: &RegisteredEconomicRoot,
+    manifest: &EconomicAdmissionManifest,
+    witness: &EconomicTransitionWitness,
+    accepted: &AcceptedSubstrate,
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+) -> Result<ValidatedEconomicRoot, EconomicValidationError> {
+    if previous.economic_root != witness.pre_economic_root {
+        return Err(EconomicValidationError::PreRootIsNotThePredecessor {
+            predecessor: previous.economic_root,
+            witness_pre: witness.pre_economic_root,
+        });
+    }
+    if registered.economic_position != previous.economic_position.saturating_add(1) {
+        return Err(EconomicValidationError::PositionIsNotSuccessor {
+            previous: previous.economic_position,
+            registered: registered.economic_position,
+        });
+    }
+    if registered.post_economic_root != witness.post_economic_root {
+        return Err(EconomicValidationError::RegisteredRootDiffersFromWitness {
+            registered: registered.post_economic_root,
+            witness: witness.post_economic_root,
+        });
+    }
+    // The clause that stops a valid successor being paired with a valid
+    // transition for a DIFFERENT operation.
+    if accepted.operation_digest != witness.operation_digest {
+        return Err(EconomicValidationError::OperationDigestMismatch {
+            substrate: accepted.operation_digest,
+            witness: witness.operation_digest,
+        });
+    }
+    let computed = manifest.addr().map_err(EconomicValidationError::Manifest)?;
+    if registered.admission_manifest_addr != computed {
+        return Err(EconomicValidationError::ManifestAddrMismatch {
+            registered: registered.admission_manifest_addr,
+            computed,
+        });
+    }
+    verify_manifest_provenance_index(manifest, witness)
+        .map_err(EconomicValidationError::Manifest)?;
+
+    let derived = verify_mutation_sequence(&witness.mutation_sequence(), genesis, device_id)
+        .map_err(EconomicValidationError::Transition)?;
+
+    Ok(ValidatedEconomicRoot {
+        economic_position: registered.economic_position,
+        economic_root: derived,
     })
 }

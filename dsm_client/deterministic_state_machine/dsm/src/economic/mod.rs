@@ -55,6 +55,7 @@
 //! encoder; see [`witness`] for why, and `reserved_classes_have_no_encoder`
 //! for the test that keeps allocation from drifting into serialization.
 
+pub mod admission;
 pub mod claim;
 pub mod claim_envelope;
 pub mod classifier;
