@@ -81,3 +81,24 @@ pub const TAG_DSM_ECONOMIC_ADMISSION_MANIFEST: TaggedHashDomain<'static> =
 /// properties are separate and both are required.
 pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/trader-economic-root-register-key/v1");
+
+/// `SourceId` for an intra-transition move:
+/// `H(tag ‖ 0x00 ‖ economic_operation_id ‖ u32_be(debit_mutation_index))`.
+///
+/// Scoped to the operation that contains it, because the move exists only
+/// inside that transition. Two transitions moving value at the same mutation
+/// index are different sources, and must not collide in the consumed-source
+/// space.
+pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
+
+/// `SourceId` for a peer's validated debit:
+/// `H(tag ‖ 0x00 ‖ peer_genesis ‖ peer_devid ‖ u64_be(peer_economic_position)
+/// ‖ u32_be(peer_debit_mutation_index))`.
+///
+/// Derived from the peer's authenticated coordinates, never supplied. Those
+/// four fields name exactly one debit in exactly one validated transition, so
+/// the same debit can fund a credit only once no matter how many times it is
+/// presented.
+pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/validated-peer-debit/v1");
