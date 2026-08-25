@@ -300,6 +300,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
+            None, // no admission pending in this fixture
             1024,
         )
         .expect("device head")
@@ -343,7 +344,7 @@ mod tests {
         put_amm_vault_record(record).expect("persist record");
         let bytes = crate::storage::client_db::bcr::encode_device_state(head);
         let (reloaded, _) =
-            crate::storage::client_db::bcr::decode_device_state(&bytes).expect("decode head");
+            crate::storage::client_db::bcr::decode_device_state(&bytes, None).expect("decode head");
         let rec = get_amm_vault_record(&record.vault_id)
             .expect("read")
             .expect("record survived");

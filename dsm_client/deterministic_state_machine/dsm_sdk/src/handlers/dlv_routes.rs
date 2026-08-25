@@ -3385,7 +3385,7 @@ mod funded_creation_tests {
         // This is what makes the identity authoritative rather than a decoration
         // on the create response.
         let encoded = crate::storage::client_db::bcr::encode_device_state(&head);
-        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded, None)
             .expect("the head must survive the codec");
         let rebuilt = crate::sdk::vault_rehydration::rehydrate_all_amm_vaults(&reloaded);
 
@@ -4423,7 +4423,7 @@ mod funded_creation_tests {
 
         // (8) RESTART: the post-trade state survives the codec.
         let encoded = crate::storage::client_db::bcr::encode_device_state(&after);
-        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded, None)
             .expect("head survives the codec");
         assert_eq!(reloaded.root(), after.root());
         assert_eq!(reloaded.balance(&pc_a), after.balance(&pc_a));
@@ -6432,7 +6432,7 @@ mod funded_creation_tests {
 
         // (5) RESTART.
         let encoded = crate::storage::client_db::bcr::encode_device_state(&head);
-        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded)
+        let (reloaded, _) = crate::storage::client_db::bcr::decode_device_state(&encoded, None)
             .expect("head survives the codec");
         assert_eq!(
             reloaded.root(),
