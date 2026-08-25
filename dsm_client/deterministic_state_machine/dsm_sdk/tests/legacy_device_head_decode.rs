@@ -49,7 +49,7 @@ fn legacy_device_heads_decode_under_the_current_build() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let bytes = std::fs::read(path).expect("read blob");
 
-        match decode_device_state(&bytes) {
+        match decode_device_state(&bytes, None) {
             Ok((state, root)) => {
                 // Report enough to tell a real decode from a lucky one.
                 println!(

@@ -193,6 +193,7 @@ pub(crate) fn device_holding(devid_seed: u8, a: u64, b: u64) -> DeviceState {
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
+        None, // no admission pending in this fixture
         1024,
     )
     .expect("fixture device state")
@@ -217,6 +218,7 @@ pub(crate) fn owner_holding(a: u64, b: u64) -> DeviceState {
         BTreeMap::new(),
         BTreeMap::new(),
         BTreeMap::new(),
+        None, // no admission pending in this fixture
         1024,
     )
     .expect("fixture owner state")

@@ -110,6 +110,21 @@ pub struct DeviceState {
     /// `BalanceDelta` can only reach `balances`, so no transfer, mint or burn can spend a
     /// reserve — only the vault chokepoints can. `BTreeMap` for deterministic iteration.
     vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
+    /// The economic admission in flight, if any — the authoritative fence
+    /// state for [`Self::advance`].
+    ///
+    /// Deliberately **not** a parameter of `advance`. A caller-supplied
+    /// `pending: bool` would move the bypass one argument inward: any caller
+    /// wanting to spend fenced value would simply pass `false`. It rides on
+    /// the head instead, so the gate reads state the persistence layer put
+    /// there and no call site can choose otherwise.
+    ///
+    /// Also deliberately **not** part of `encode_device_state`. Serializing it
+    /// would require a `DEVICE_STATE_VERSION` bump, which under the beta
+    /// no-legacy rule means wiping every existing head. It is durably held in
+    /// its own table and re-attached on load; [`Self::restore`] requires it as
+    /// an argument so every rebuild path must supply it or fail to compile.
+    pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
 }
 
 /// Extractable state of one vault reserve leg (see [`DeviceState::vault_reserves`]).
@@ -1026,6 +1041,7 @@ impl DeviceState {
             extra_leaves: BTreeMap::new(),
             offline_allocations: BTreeMap::new(),
             vault_reserves: BTreeMap::new(),
+            pending_economic_admission: None,
         }
     }
 
@@ -1047,6 +1063,27 @@ impl DeviceState {
     /// # Errors
     ///
     /// Returns `Err` on any SMT replace failure.
+    /// The admission in flight, if any. Read by [`Self::advance`]'s fence.
+    pub fn pending_economic_admission(
+        &self,
+    ) -> Option<&crate::economic::admission::PendingEconomicAdmission> {
+        self.pending_economic_admission.as_ref()
+    }
+
+    /// Attach or clear the pending admission, returning the updated head.
+    ///
+    /// The persistence layer calls this inside the same transaction that
+    /// writes the pending row, so the head and the fence state can never
+    /// disagree about whether an admission is in flight.
+    pub fn with_pending_economic_admission(
+        &self,
+        pending: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) -> Self {
+        let mut next = self.clone();
+        next.pending_economic_admission = pending;
+        next
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
@@ -1058,6 +1095,11 @@ impl DeviceState {
         extra_leaves: BTreeMap<[u8; 32], [u8; 32]>,
         offline_allocations: BTreeMap<[u8; 32], OfflineAllocation>,
         vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
+        // The admission in flight, from its own durable table. REQUIRED, not
+        // defaulted: every rebuild path must state it or fail to compile. A
+        // defaulted `None` here would be a silent fence-open on any path that
+        // forgot — a gate precondition with no mandatory producer.
+        pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
         max_relationships: usize,
     ) -> Result<Self, DsmError> {
         let mut state = Self::new(genesis, devid, public_key, max_relationships);
@@ -1069,6 +1111,7 @@ impl DeviceState {
         // leaf hash cannot yield. A funded vault that reloaded without it would
         // recompute a root that does not match the stored one.
         state.vault_reserves = vault_reserves;
+        state.pending_economic_admission = pending_economic_admission;
 
         for (rel_key, tip) in tips_in_order.into_iter() {
             state
@@ -1444,6 +1487,25 @@ impl DeviceState {
         // with a non-builtin commit credits that non-builtin asset and can never
         // project as ERA, so rejecting on the string would refuse honest mints
         // without closing anything.
+        // THE PENDING-ADMISSION FENCE.
+        //
+        // Reads `self`, not an argument. A caller-supplied `pending: bool`
+        // would move the bypass one argument inward — anyone wanting to spend
+        // fenced value would pass `false`. The state rides on the head, so
+        // every route AND every direct internal caller crosses this same gate,
+        // which is the invariant that matters (the builtin-mint incident found
+        // three suites calling `advance` directly, bypassing the route).
+        //
+        // The predicate is the exhaustive economic classifier, NOT
+        // `Operation::is_value_bearing`: that gate exists for recovery and is
+        // too coarse here — `DlvUnlock` is value-egress by its measure while
+        // producing no `R_econ` mutation at all.
+        if let Some(pending) = &self.pending_economic_admission {
+            let effect = crate::economic::classifier::classify(&operation);
+            crate::economic::admission::fence_allows(pending, effect, &operation)
+                .map_err(|blocked| DsmError::invalid_operation(format!("advance: {blocked}")))?;
+        }
+
         if let Operation::Mint { policy_commit, .. } = &operation {
             if let Some(name) =
                 crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
@@ -2268,6 +2330,7 @@ impl DeviceState {
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
             vault_reserves: new_vault_reserves,
+            pending_economic_admission: self.pending_economic_admission.clone(),
         };
 
         Ok(AdvanceOutcome {
@@ -2308,6 +2371,7 @@ impl DeviceState {
             extra_leaves: new_extra_leaves,
             offline_allocations: self.offline_allocations.clone(),
             vault_reserves: self.vault_reserves.clone(),
+            pending_economic_admission: self.pending_economic_admission.clone(),
         })
     }
 
@@ -2381,6 +2445,7 @@ impl DeviceState {
             extra_leaves: new_extra_leaves,
             offline_allocations: new_offline_allocations,
             vault_reserves: self.vault_reserves.clone(),
+            pending_economic_admission: self.pending_economic_admission.clone(),
         };
         Ok(OfflineAllocationOutcome {
             new_device_state,
@@ -2520,6 +2585,7 @@ impl DeviceState {
                 extra_leaves: new_extra_leaves,
                 offline_allocations: self.offline_allocations.clone(),
                 vault_reserves: new_vault_reserves,
+                pending_economic_admission: self.pending_economic_admission.clone(),
             },
             new_root,
             proofs,
@@ -2638,6 +2704,7 @@ impl DeviceState {
                 extra_leaves: new_extra_leaves,
                 offline_allocations: self.offline_allocations.clone(),
                 vault_reserves: new_vault_reserves,
+                pending_economic_admission: self.pending_economic_admission.clone(),
             },
             new_root,
             proofs,
@@ -5610,6 +5677,7 @@ mod tests {
             live.extra_leaves.clone(),
             live.offline_allocations.clone(),
             live.vault_reserves.clone(),
+            None, // no admission pending in this fixture
             1024,
         )
         .expect("restore");
@@ -6277,6 +6345,123 @@ mod tests {
         assert_eq!(funded.vault_reserve(&vault, &rigb), 5_000);
     }
 
+    /// THE WIRING TEST for the pending-admission fence.
+    ///
+    /// The fence predicate has its own suite, but a correct predicate that
+    /// `advance` never calls protects nothing. This drives the real
+    /// `advance()` on a head carrying a pending admission and asserts the
+    /// refusal comes from the gate — and that the SAME head advances fine once
+    /// the admission is cleared, so the refusal is the fence and not some
+    /// unrelated precondition.
+    #[test]
+    fn advance_refuses_an_economic_write_while_an_admission_is_pending() {
+        use crate::economic::admission::{
+            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
+        };
+
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD5, era, rigb, 7_000, 3_000);
+
+        let pending = PendingEconomicAdmission {
+            kind: PendingAdmissionKind::DsmBacked,
+            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
+            economic_position: 9,
+            pre_economic_root: [1u8; 32],
+            post_economic_root: [2u8; 32],
+            operation_digest: [3u8; 32],
+            accepted_substrate_addr: [4u8; 32],
+            admission_manifest_addr: [5u8; 32],
+        };
+        let fenced = funded.with_pending_economic_admission(Some(pending));
+
+        // DlvClose is a ClosedWriteSet operation: it moves reserves back to
+        // balances, which is exactly the kind of economic write that must not
+        // happen while the ancestry of earlier value is unregistered.
+        let err = fenced
+            .advance(
+                rk,
+                fenced.devid,
+                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
+            )
+            .expect_err("the fence must refuse an economic write while pending");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("economic admission at position 9 is pending"),
+            "refusal must come from the FENCE, not an unrelated precondition: {msg}"
+        );
+
+        // Same head, same operation, no pending admission: it succeeds. This
+        // is what makes the assertion above about the fence specifically.
+        funded
+            .advance(
+                rk,
+                funded.devid,
+                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
+            )
+            .expect("the identical advance succeeds once nothing is pending");
+    }
+
+    /// The fence SURVIVES a state derivation. If `advance` dropped it while
+    /// building the successor head, the very next operation would be unfenced
+    /// — a one-transition escape hatch.
+    #[test]
+    fn the_fence_is_carried_forward_by_advance() {
+        use crate::economic::admission::{
+            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
+        };
+
+        let (era, rigb) = (pc(0xE1), pc(0xF1));
+        let (funded, _vault, rk, tip) = funded_for_close(0xD6, era, rigb, 7_000, 3_000);
+        let pending = PendingEconomicAdmission {
+            kind: PendingAdmissionKind::DsmBacked,
+            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
+            economic_position: 11,
+            pre_economic_root: [1u8; 32],
+            post_economic_root: [2u8; 32],
+            operation_digest: [3u8; 32],
+            accepted_substrate_addr: [4u8; 32],
+            admission_manifest_addr: [5u8; 32],
+        };
+        let fenced = funded.with_pending_economic_admission(Some(pending.clone()));
+
+        // A Noop classifies as EconomicEffect::None, so the fence allows it.
+        let next = fenced
+            .advance(
+                rk,
+                fenced.devid,
+                Operation::Noop,
+                entropy(3),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("non-economic activity continues during the fence")
+            .new_device_state;
+
+        assert_eq!(
+            next.pending_economic_admission(),
+            Some(&pending),
+            "the successor head must still be fenced"
+        );
+    }
+
     /// The close's terminal state SURVIVES a reload: `restore` replays the zero
     /// leaves and the terminal vault-state leaf and recomputes the same root.
     #[test]
@@ -6308,6 +6493,7 @@ mod tests {
             closed.extra_leaves.clone(),
             closed.offline_allocations.clone(),
             closed.vault_reserves.clone(),
+            None, // no admission pending in this fixture
             1024,
         )
         .expect("restore");
