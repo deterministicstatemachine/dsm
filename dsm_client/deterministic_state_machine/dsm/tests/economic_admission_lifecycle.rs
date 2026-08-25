@@ -22,7 +22,8 @@ use dsm::economic::lineage::{
 };
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::register::RegisteredEconomicRoot;
-use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
+use dsm::economic::provenance::{ProvenanceError, ProvenanceResolver, ValidatedPeerTransition};
+use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
@@ -31,6 +32,21 @@ use dsm::types::token_types::Balance;
 const G: [u8; 32] = [0x11; 32];
 const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
+
+/// Knows no peer transitions. Correct for every fixture here: none of them
+/// funds a credit from another identity, so a resolver that answered would be
+/// answering a question nobody asked.
+struct NoPeers;
+impl ProvenanceResolver for NoPeers {
+    fn validated_peer_transition(
+        &self,
+        _g: &[u8; 32],
+        _d: &[u8; 32],
+        _p: u64,
+    ) -> Option<ValidatedPeerTransition> {
+        None
+    }
+}
 const SOFI: [u8; 32] = [0xBB; 32];
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
@@ -202,6 +218,41 @@ fn bal(pc: [u8; 32], amount: u64) -> EconomicLeafState {
 /// wrong reason.
 const ISSUANCE_ADDR: [u8; 32] = [0xC7; 32];
 
+/// A transition from the empty root that moves NO value: it inserts a
+/// consumed-source record.
+///
+/// This is the only kind of first transition that can validate today, and the
+/// reason is worth stating: position 0 is the empty root, so every mutation
+/// from it is an insertion; an insertion of a balance or reserve IS a positive
+/// credit and needs a funding source; and the only source that can CREATE
+/// units is AuthorizedIssuance, whose predicate does not exist. A record
+/// insertion is not a credit, so it needs no source.
+fn build_valueless_transition(operation_digest: [u8; 32]) -> (EconomicTransitionWitness, [u8; 32]) {
+    let mut tree = EconomicSmt::new();
+    let pre_root = tree.root();
+    let record = EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
+        source_id: [0x5C; 32],
+        consumer_economic_operation_id: [0x0E; 32],
+    });
+    let key = record.leaf_key(&G, &DEV);
+    let siblings = tree.siblings(&key).to_vec();
+    let mutation =
+        EconomicLeafMutation::new(None, Some(record.clone()), siblings).expect("well-formed");
+    assert!(!mutation.is_positive_credit(), "a record is not a credit");
+    tree.insert(key, record.leaf_value().expect("encodable"));
+    let post_root = tree.root();
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        post_root,
+        [0x0E; 32],
+        operation_digest,
+        vec![mutation],
+        Vec::new(),
+    )
+    .expect("valid witness");
+    (witness, post_root)
+}
+
 fn build_transition(operation_digest: [u8; 32]) -> (EconomicTransitionWitness, [u8; 32]) {
     let mut tree = EconomicSmt::new();
     let pre_root = tree.root();
@@ -261,7 +312,48 @@ fn registered_for(
 }
 
 #[test]
-fn a_complete_admission_advances_the_validated_lineage() {
+fn a_valueless_transition_advances_the_validated_lineage() {
+    let digest = [0x77; 32];
+    let (witness, post_root) = build_valueless_transition(digest);
+    let manifest = manifest_for(&witness);
+    let registered = registered_for(&manifest, 1, post_root);
+    let accepted = AcceptedSubstrate::from_verified_dsm_successor(digest, [0xA4; 32]);
+
+    let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
+    let (one, funded) = advance_validated(
+        &zero,
+        &registered,
+        &manifest,
+        &witness,
+        &accepted,
+        &NoPeers,
+        &G,
+        &DEV,
+    )
+    .expect("a valueless transition validates");
+    assert_eq!(one.economic_position(), 1);
+    assert_eq!(
+        one.economic_root(),
+        post_root,
+        "the validated root is RECOMPUTED from the mutations, not copied from the registration"
+    );
+    assert!(funded.is_empty(), "no credits, so nothing to fund");
+}
+
+/// THE BOOTSTRAP FINDING, as a test.
+///
+/// No VALUE can enter a validated lineage today. Position 0 is the empty root,
+/// so a first transition's only way to hold value is a credit; every credit
+/// needs a funding source; and the only source that can CREATE units is
+/// `AuthorizedIssuance`, whose predicate does not exist — the same absence
+/// that makes the accepting layer refuse builtin ERA/dBTC issuance.
+///
+/// This is the system correctly refusing to create value from nothing, not a
+/// defect. It does mean the economic root is unusable for value until an
+/// authenticated issuance predicate is defined, and that should be visible
+/// here rather than discovered later.
+#[test]
+fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
     let digest = [0x77; 32];
     let (witness, post_root) = build_transition(digest);
     let manifest = manifest_for(&witness);
@@ -269,16 +361,19 @@ fn a_complete_admission_advances_the_validated_lineage() {
     let accepted = AcceptedSubstrate::from_verified_dsm_successor(digest, [0xA4; 32]);
 
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    assert_eq!(zero.economic_position(), 0);
-
-    let one = advance_validated(&zero, &registered, &manifest, &witness, &accepted, &G, &DEV)
-        .expect("a complete admission validates");
-    assert_eq!(one.economic_position(), 1);
-    assert_eq!(
-        one.economic_root(),
-        post_root,
-        "the validated root is RECOMPUTED from the mutations, not copied from the registration"
-    );
+    match advance_validated(
+        &zero,
+        &registered,
+        &manifest,
+        &witness,
+        &accepted,
+        &NoPeers,
+        &G,
+        &DEV,
+    ) {
+        Err(EconomicValidationError::Provenance(ProvenanceError::IssuancePredicateUndefined)) => {}
+        other => panic!("a credit from undefined issuance must be refused, got {other:?}"),
+    }
 }
 
 #[test]
@@ -291,7 +386,16 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
     let wrong = AcceptedSubstrate::from_verified_dsm_successor([0x88; 32], [0xA4; 32]);
 
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    match advance_validated(&zero, &registered, &manifest, &witness, &wrong, &G, &DEV) {
+    match advance_validated(
+        &zero,
+        &registered,
+        &manifest,
+        &witness,
+        &wrong,
+        &NoPeers,
+        &G,
+        &DEV,
+    ) {
         Err(EconomicValidationError::OperationDigestMismatch { substrate, witness }) => {
             assert_eq!(substrate, [0x88; 32]);
             assert_eq!(witness, [0x77; 32]);
@@ -310,7 +414,16 @@ fn a_registration_at_the_wrong_position_is_refused() {
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
 
     assert!(matches!(
-        advance_validated(&zero, &registered, &manifest, &witness, &accepted, &G, &DEV),
+        advance_validated(
+            &zero,
+            &registered,
+            &manifest,
+            &witness,
+            &accepted,
+            &NoPeers,
+            &G,
+            &DEV,
+        ),
         Err(EconomicValidationError::PositionIsNotSuccessor {
             previous: 0,
             registered: 5
@@ -329,7 +442,16 @@ fn a_registration_naming_another_manifest_is_refused() {
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
 
     assert!(matches!(
-        advance_validated(&zero, &registered, &manifest, &witness, &accepted, &G, &DEV),
+        advance_validated(
+            &zero,
+            &registered,
+            &manifest,
+            &witness,
+            &accepted,
+            &NoPeers,
+            &G,
+            &DEV,
+        ),
         Err(EconomicValidationError::ManifestAddrMismatch { .. })
     ));
 }
@@ -344,7 +466,16 @@ fn a_registered_root_disagreeing_with_the_witness_is_refused() {
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
 
     assert!(matches!(
-        advance_validated(&zero, &registered, &manifest, &witness, &accepted, &G, &DEV),
+        advance_validated(
+            &zero,
+            &registered,
+            &manifest,
+            &witness,
+            &accepted,
+            &NoPeers,
+            &G,
+            &DEV,
+        ),
         Err(EconomicValidationError::RegisteredRootDiffersFromWitness { .. })
     ));
 }

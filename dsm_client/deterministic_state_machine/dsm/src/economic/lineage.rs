@@ -53,14 +53,23 @@
 //! successor and a perfectly valid economic transition **describing different
 //! operations** — each verifies alone, and the pair means nothing.
 //!
-//! ## What this still does not establish
+//! ## Provenance is checked here too
 //!
-//! Credit provenance. A closed write set proves *what changed*, never *why a
-//! credit may appear*, so a lineage validated only by this function would
-//! accept a trader crediting itself from nothing. Provenance is a separate and
-//! conjunctive obligation.
+//! A closed write set proves *what changed*, never *why a credit may appear*.
+//! A lineage validated without provenance would accept a trader crediting
+//! itself from nothing, because every mutation in a self-crediting write set
+//! is individually well-formed. [`advance_validated`] therefore requires a
+//! [`ProvenanceResolver`] and refuses unless every positive credit is funded
+//! by exactly one verified source of the right asset and amount.
+//!
+//! The resolver returns already-validated objects, which is what makes the
+//! acyclicity rule structural: an external source resolves from a root this
+//! verifier has itself validated, never from the transition being validated.
 
 use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
+use crate::economic::provenance::{
+    verify_transition_provenance, FundedCredit, ProvenanceError, ProvenanceResolver,
+};
 use crate::economic::register::RegisteredEconomicRoot;
 use crate::economic::tree::empty_economic_root;
 use crate::economic::witness::{
@@ -239,6 +248,8 @@ pub enum EconomicValidationError {
     },
     /// The manifest or its provenance index is malformed.
     Manifest(crate::ccb::CcbError),
+    /// A credit in this transition is not funded.
+    Provenance(ProvenanceError),
 }
 
 impl core::fmt::Display for EconomicValidationError {
@@ -274,6 +285,7 @@ impl core::fmt::Display for EconomicValidationError {
                  the one supplied"
             ),
             Self::Manifest(e) => write!(f, "economic validation: manifest: {e}"),
+            Self::Provenance(e) => write!(f, "economic validation: {e}"),
         }
     }
 }
@@ -285,15 +297,22 @@ impl std::error::Error for EconomicValidationError {}
 /// `genesis` and `device_id` must be the **authenticated** identity whose tree
 /// this is, from authority resolution — never taken from the objects being
 /// validated, since every leaf key binds them.
+// Each argument is a SEPARATE authenticated input to the conjunctive predicate
+// — predecessor, registration, manifest, witness, substrate acceptance,
+// provenance resolver, and the two identity components. Bundling any of them
+// to satisfy the arity lint would hide which facts the caller must establish
+// independently.
+#[allow(clippy::too_many_arguments)]
 pub fn advance_validated(
     previous: &ValidatedEconomicRoot,
     registered: &RegisteredEconomicRoot,
     manifest: &EconomicAdmissionManifest,
     witness: &EconomicTransitionWitness,
     accepted: &AcceptedSubstrate,
+    resolver: &dyn ProvenanceResolver,
     genesis: &[u8; 32],
     device_id: &[u8; 32],
-) -> Result<ValidatedEconomicRoot, EconomicValidationError> {
+) -> Result<(ValidatedEconomicRoot, Vec<FundedCredit>), EconomicValidationError> {
     if previous.economic_root != witness.pre_economic_root {
         return Err(EconomicValidationError::PreRootIsNotThePredecessor {
             predecessor: previous.economic_root,
@@ -333,8 +352,17 @@ pub fn advance_validated(
     let derived = verify_mutation_sequence(&witness.mutation_sequence(), genesis, device_id)
         .map_err(EconomicValidationError::Transition)?;
 
-    Ok(ValidatedEconomicRoot {
-        economic_position: registered.economic_position,
-        economic_root: derived,
-    })
+    // Conjunctive with everything above: the write set is closed AND every
+    // credit in it is funded. Checked last because it is the most expensive
+    // and the cheap structural clauses should reject first.
+    let funded = verify_transition_provenance(witness, resolver)
+        .map_err(EconomicValidationError::Provenance)?;
+
+    Ok((
+        ValidatedEconomicRoot {
+            economic_position: registered.economic_position,
+            economic_root: derived,
+        },
+        funded,
+    ))
 }
