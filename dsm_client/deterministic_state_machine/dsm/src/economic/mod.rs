@@ -56,11 +56,14 @@
 //! for the test that keeps allocation from drifting into serialization.
 
 pub mod claim;
+pub mod claim_envelope;
 pub mod classifier;
 pub mod credit;
 pub mod decode;
 pub mod keys;
+pub mod lineage;
 pub mod mutation;
+pub mod register;
 pub mod state;
 pub mod tree;
 pub mod witness;
