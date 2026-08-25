@@ -77,6 +77,86 @@ pub mod class {
     pub const ROOT_PROGRESSION_DELEGATION: u16 = 0x0019;
     /// Substrate class — delegate-signed Device Tree root transition (§5.17).
     pub const DEVICE_TREE_ROOT_TRANSITION: u16 = 0x001A;
+
+    // ── Online economic root `R_econ` ───────────────────────────────────
+    //
+    // Encoders live in `crate::economic`, not in this module: `ccb` is the
+    // transitive encoding closure of `c_n`, and none of these are reachable
+    // from a `VaultStateV2`. The DISCRIMINANTS live here because §3 is a
+    // single namespace — a class number allocated in a second place is a
+    // class number allocated twice.
+
+    /// The signed body of an economic root claim.
+    pub const ECONOMIC_ROOT_CLAIM_BODY: u16 = 0x001B;
+    /// The manifest an economic root claim names, and the only edge from a
+    /// claim into its evidence DAG.
+    pub const ECONOMIC_ADMISSION_MANIFEST: u16 = 0x001C;
+    /// One leaf's pre-state, post-state and 256 siblings.
+    pub const ECONOMIC_LEAF_MUTATION: u16 = 0x001E;
+
+    // Leaf-state classes. The class is what says which key derivation
+    // applies, so a mutation cannot claim a balance state at a reserve key.
+    pub const ECONOMIC_BALANCE_STATE: u16 = 0x001F;
+    pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
+    pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
+    pub const ECONOMIC_CONSUMED_SOURCE_STATE: u16 = 0x0022;
+}
+
+/// Discriminants **allocated but not encodable** — see [`class`] for the ones
+/// that are.
+///
+/// Allocation buys exactly one thing: the number cannot be handed out twice.
+/// It confers no wire format. These classes have no field table, therefore no
+/// canonical bytes, therefore nothing to hash-address, nest or sign. A
+/// `0x001D` "witness" assembled by a caller today would be that caller's
+/// struct layout, not the protocol's — and once something hash-addresses it,
+/// the layout is burned by accident rather than by decision. That inversion is
+/// what this module's header refuses, and reservation is how the refusal is
+/// made structural instead of advisory.
+///
+/// They live in a **separate module from [`class`] on purpose**. A
+/// [`CcbObject`] impl needs a `CLASS` constant, so writing an encoder for one
+/// of these requires physically moving the constant into `class` — a
+/// deliberate, reviewable diff that arrives with the field table that earns
+/// it. Reaching into `reserved` from a `CcbObject` impl is caught by
+/// `reserved_classes_have_no_encoder`.
+pub mod reserved {
+    /// A complete pre-root → post-root economic transition. Blocked on the
+    /// provenance field tables below: the witness names its credit sources,
+    /// so its own encoding cannot be fixed before theirs.
+    pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
+
+    // Credit-provenance classes. Six arms, closed: a credit that names none
+    // of them is unfunded, and there is deliberately no `Custom`. The plan
+    // fixes their semantic ROLES; it does not yet give field tables exact
+    // enough to burn as protocol.
+    pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
+    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
+    pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
+    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
+    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
+    pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
+    /// The authorization an `AuthorizedIssuance` credit resolves against.
+    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
+
+    /// Every reserved discriminant, so the set can be asserted against rather
+    /// than restated.
+    pub const ALL: &[u16] = &[
+        ECONOMIC_TRANSITION_WITNESS,
+        CREDIT_SOURCE_AUTHORIZED_ISSUANCE,
+        CREDIT_SOURCE_SAME_TRANSITION_MOVE,
+        CREDIT_SOURCE_VALIDATED_PEER_DEBIT,
+        CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION,
+        CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
+        CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY,
+        ISSUANCE_AUTHORIZATION_BODY,
+    ];
+
+    /// Whether a discriminant is allocated with no encoder. Never true for a
+    /// live object's own `CLASS`, which [`super::CcbObject`] supplies.
+    pub fn is_reserved(object_class: u16) -> bool {
+        ALL.contains(&object_class)
+    }
 }
 
 /// Live schema versions, and the ones the state-identity cut burned.
@@ -171,6 +251,33 @@ pub enum CcbError {
         expected: usize,
         got: usize,
     },
+    /// A balance leaf state carried `amount = 0`. Zero balance is the ABSENCE
+    /// of the leaf, so a zero-valued balance object has no canonical bytes.
+    /// Reserves are the opposite and deliberately so — see
+    /// `EconomicVaultReserveState`.
+    ZeroBalanceLeafMustBeAbsent,
+    /// A settlement-receipt leaf whose `new_sequence` is not
+    /// `parent_sequence + 1`.
+    ReceiptSequenceNotSuccessor { parent: u64, new: u64 },
+    /// A settlement-receipt leaf with a zero amount on either leg.
+    ReceiptZeroAmount,
+    /// A settlement-receipt leaf whose input and output name the same asset.
+    ReceiptAssetsNotDistinct,
+    /// A leaf mutation with neither a pre-state nor a post-state. "Absent to
+    /// absent" is not a mutation; it is a mutation that should not have been
+    /// emitted, and admitting it would let a witness pad its list.
+    MutationBothStatesAbsent,
+    /// A leaf mutation whose pre-state and post-state are different leaf
+    /// classes. The class selects the key derivation, so this would be one
+    /// mutation claiming two positions.
+    MutationClassMismatch { pre: u16, post: u16 },
+    /// A leaf mutation whose sibling count is not exactly the tree height. A
+    /// short path is a shallower tree, and a verifier that accepts one is
+    /// accepting a different tree than the one it thinks it is checking.
+    MutationSiblingCount { expected: usize, got: usize },
+    /// An admission manifest naming both substrates, or neither. The object
+    /// shape is what states the substrate; exactly one is present.
+    ManifestSubstrateNotExactlyOne,
 }
 
 impl core::fmt::Display for CcbError {
@@ -207,6 +314,47 @@ impl core::fmt::Display for CcbError {
             CcbError::KeyLengthMismatch { alg, expected, got } => write!(
                 f,
                 "public key for signature_alg {alg:#06x} must be {expected} bytes, got {got}"
+            ),
+            CcbError::ZeroBalanceLeafMustBeAbsent => write!(
+                f,
+                "economic balance leaf: amount 0 is the ABSENCE of the leaf, not a leaf \
+                 holding zero — a zero-valued balance state has no canonical bytes"
+            ),
+            CcbError::ReceiptSequenceNotSuccessor { parent, new } => write!(
+                f,
+                "economic settlement receipt: new_sequence {new} must be parent_sequence \
+                 {parent} + 1"
+            ),
+            CcbError::ReceiptZeroAmount => write!(
+                f,
+                "economic settlement receipt: neither leg may be zero — a zero leg is a \
+                 settlement that moved nothing and cannot fund a credit"
+            ),
+            CcbError::ReceiptAssetsNotDistinct => write!(
+                f,
+                "economic settlement receipt: input and output must name distinct assets"
+            ),
+            CcbError::MutationBothStatesAbsent => write!(
+                f,
+                "economic leaf mutation: absent-to-absent is not a mutation; emitting one \
+                 would let a witness pad its mutation list with no-ops"
+            ),
+            CcbError::MutationClassMismatch { pre, post } => write!(
+                f,
+                "economic leaf mutation: pre-state class {pre:#06x} and post-state class \
+                 {post:#06x} differ — the class selects the key derivation, so this is one \
+                 mutation claiming two positions"
+            ),
+            CcbError::MutationSiblingCount { expected, got } => write!(
+                f,
+                "economic leaf mutation: expected exactly {expected} siblings, got {got} — \
+                 a short path proves a shallower tree than the one being verified"
+            ),
+            CcbError::ManifestSubstrateNotExactlyOne => write!(
+                f,
+                "economic admission manifest: exactly one of dsm_successor_evidence_addr \
+                 and offline_boundary_evidence_addr must be present — the object shape is \
+                 what states the substrate"
             ),
         }
     }

@@ -83,6 +83,7 @@ pub mod crypto;
 // source inspection); the audit findings were all on a never-
 // executed path. Module removed entirely.
 pub mod dlv;
+pub mod economic; // the online economic root R_econ
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
