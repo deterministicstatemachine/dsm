@@ -317,9 +317,15 @@ pub(crate) enum PublishPointerError {
     /// parent generation — which comes ONLY from that authenticated state —
     /// cannot be derived. No pointer is published.
     HopParentNotResolvable { hop_index: usize, msg: String },
-    /// The hop's `parent_binding` is not the c_n of the vault's CURRENT
-    /// composed frontier: the vault moved between quote and publication, or
-    /// the route was bound to a state that never existed. Either way the
+    /// The hop's `parent_binding` is not the c_n of the state this composer
+    /// reached: the vault moved between quote and publication, or the route was
+    /// bound to a state that never existed.
+    ///
+    /// NOT a frontier claim. The fold terminates when the pointer listing this
+    /// composer read is exhausted, and that listing came from ONE member, so
+    /// "no successor" and "no successor I was shown" are indistinguishable here.
+    /// The composed state is a valid PREFIX; calling it current would assert
+    /// maximality nothing establishes. Either way the
     /// settle would be refused at the byte-equality gate, so a pointer would
     /// advertise a trade that can never be witnessed.
     HopParentNotCurrent { hop_index: usize },
@@ -362,7 +368,7 @@ impl std::fmt::Display for PublishPointerError {
             PublishPointerError::HopParentNotCurrent { hop_index } => {
                 write!(
                     f,
-                    "hop {hop_index}: parent_binding is not the current composed frontier — \
+                    "hop {hop_index}: parent_binding is not the c_n this composer reached — \
                      no pointer published for an unsettleable hop"
                 )
             }
@@ -449,8 +455,8 @@ pub(crate) async fn publish_route_anchor_with_pointers(
         // nowhere else. The hop names its parent by `parent_binding` (c_n)
         // alone; this publisher resolves the vault through the same verified
         // discovery path every composer uses and takes the generation from
-        // the state it composed. A hop whose binding is not the CURRENT
-        // composed frontier gets no pointer: either the vault moved between
+        // the state it composed. A hop whose binding is not the c_n this
+        // composer reached gets no pointer: either the vault moved between
         // quote and publication (the settle will be refused at the
         // byte-equality gate anyway, so a pointer would advertise a trade
         // that can never be witnessed) or the route was bound to a state

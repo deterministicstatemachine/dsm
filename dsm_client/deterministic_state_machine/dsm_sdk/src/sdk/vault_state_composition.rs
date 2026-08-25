@@ -75,8 +75,14 @@ pub(crate) struct ComposedVaultState {
     /// needs (generation, reserves, pair, fee, storage set, encumbrances,
     /// authority position) is a field of this one object.
     pub state: VaultStateV2,
-    /// `c_n` of `state` — the canonical identity of the composed frontier,
+    /// `c_n` of `state` — the canonical identity of the state this fold reached,
     /// and the exact value a new trade's hop must carry as `parent_binding`.
+    ///
+    /// This is a valid PREFIX, not a proven frontier: the fold stops when the
+    /// pointer listing it read is exhausted, and that listing came from a single
+    /// member, so absence and omission are the same observation. Do not read this
+    /// as "the latest state" — establishing that needs a live quorum read the
+    /// composer does not perform.
     pub c_n: [u8; 32],
     /// `state.generation`, broken out for callers that only order by it.
     pub sequence: u64,
