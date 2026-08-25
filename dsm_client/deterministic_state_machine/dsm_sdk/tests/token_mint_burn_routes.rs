@@ -67,17 +67,21 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
 }
 
 fn fund_era(router: &AppRouterImpl) {
-    let res = invoke(
+    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
+    // minted builtin ERA on nothing more than a caller-supplied device_id — the
+    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
+    // refusal is total: it applies in tests exactly as in production, so a fixture
+    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
+    // no `Operation::Mint`).
+    //
+    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
+    // balance assertions downstream are unchanged.
+    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
         router,
-        "faucet.claim",
-        pack(
-            generated::FaucetClaimRequest {
-                device_id: vec![0u8; 32],
-            }
-            .encode_to_vec(),
-        ),
-    );
-    assert!(res.success, "faucet claim failed: {:?}", res.error_message);
+        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
+        100,
+    )
+    .expect("seed the fixture ERA balance");
 }
 
 /// Create a token with a known cap and allocation, returning its token_id.

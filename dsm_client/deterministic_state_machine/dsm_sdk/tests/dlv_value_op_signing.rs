@@ -99,40 +99,15 @@ fn both() -> Vec<(&'static str, Operation)> {
 /// exactly the production relationship between a device head and its signing key.
 fn actor_head() -> DeviceState {
     let base = DeviceState::new(ACTOR, ACTOR, actor_keypair().public_key.clone(), 64);
-    let rel = compute_smt_key(&ACTOR, &ACTOR);
-    let init = initial_chain_tip_from_device_ids(&ACTOR, &ACTOR);
 
+    // Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
+    // `advance` — in tests exactly as in production, which is the property that makes
+    // the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
+    // `with_balance_for_testing` installs the state a device would already be in;
+    // balances live outside the SMT, so `root()` is unaffected, as with `restore`.
     let mut head = base;
-    for (pc, tok, amt) in [
-        (era(), &b"ERA"[..], 10_000u64),
-        (dbtc(), &b"dBTC"[..], 10_000),
-    ] {
-        head = head
-            .advance(
-                rel,
-                ACTOR,
-                Operation::Mint {
-                    amount: dsm::types::token_types::Balance::from_state(amt, [0u8; 32]),
-                    token_id: tok.to_vec(),
-                    policy_commit: pc,
-                    authorized_by: b"self".to_vec(),
-                    proof_of_authorization: Vec::new(),
-                    message: "seed".to_string(),
-                },
-                vec![0x11; 32],
-                None,
-                &[BalanceDelta {
-                    policy_commit: pc,
-                    direction: BalanceDirection::Credit,
-                    amount: amt,
-                }],
-                Some(init),
-                None,
-                None,
-                None,
-            )
-            .expect("mint")
-            .new_device_state;
+    for (pc, amt) in [(era(), 10_000u64), (dbtc(), 10_000)] {
+        head = head.with_balance_for_testing(pc, amt);
     }
     head.fund_vault_reserves(&VAULT, &[(era(), 5_000), (dbtc(), 4_000)], 0)
         .expect("fund")
