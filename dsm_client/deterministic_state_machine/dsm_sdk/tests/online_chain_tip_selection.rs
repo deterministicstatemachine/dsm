@@ -1,4 +1,12 @@
 #![cfg(all(test, feature = "test-utils"))]
+// Matches the convention in this crate's other integration tests: `.expect()` in a
+// test is a deliberate crash-on-violated-precondition, which is what the
+// disallowed-methods lint exists to prevent in PRODUCTION paths.
+//
+// NOTE: this file was dormant until `test-utils` began being enabled for this
+// crate's integration tests. It compiled to an empty crate because nothing turned
+// the feature on, so its lint violations were never surfaced.
+#![allow(clippy::disallowed_methods)]
 
 use dsm_sdk::handlers::app_router_impl::test_online_chain_tip_from_sdk_context_b32;
 use dsm_sdk::{get_sdk_context, initialize_sdk_context, reset_sdk_context_for_testing};
