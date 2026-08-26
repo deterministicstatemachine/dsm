@@ -148,3 +148,14 @@ pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
 /// register's `-envelope` tag, for this register.
 pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-root-claim-envelope/v1");
+
+/// Immutable-store namespace for the exact `EconomicTransitionWitness` bytes.
+/// `immutable_inner(tag, bytes)` under this tag IS the manifest's
+/// `transition_witness_addr`, so the DAG address and the fetch address are one
+/// computation.
+pub const TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-transition-witness/v1");
+/// Immutable-store namespace for the exact canonical DSM-substrate operation
+/// bytes an admission accepted (`C_dsm+` evidence for the beta claim flow).
+pub const TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-dsm-substrate/v1");

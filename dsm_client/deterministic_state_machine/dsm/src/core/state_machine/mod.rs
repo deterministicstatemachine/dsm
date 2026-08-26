@@ -248,6 +248,21 @@ impl StateMachine {
     ///
     /// Pairs with `prepare_advance_relationship`. After this returns the
     /// in-memory head reflects the outcome.
+    /// Attach or clear the pending economic admission on the CURRENT head, so
+    /// the next `advance` sees it. The faucet-claim accepting gate REQUIRES a
+    /// matching `Prepared` admission on the head — this is the one sanctioned
+    /// way the orchestration layer puts it there. The commit seam's
+    /// head-carries check then keeps the durable head and the durable pending
+    /// row in agreement.
+    pub fn attach_pending_economic_admission(
+        &mut self,
+        pending: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) {
+        if let Some(head) = self.device_state.take() {
+            self.device_state = Some(head.with_pending_economic_admission(pending));
+        }
+    }
+
     pub fn commit_advance(&mut self, outcome: &crate::types::device_state::AdvanceOutcome) {
         self.device_state = Some(outcome.new_device_state.clone());
         self.compat_shim_state = None;

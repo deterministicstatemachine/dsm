@@ -55,7 +55,7 @@ fn each_position_of_each_identity_is_its_own_cell() {
 
 #[test]
 fn the_beta_register_resolves_to_the_three_member_fleet_at_q_two() {
-    let p = resolve_root_register_profile(b"mainnet").expect("known network");
+    let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
     assert_eq!(p.members.len(), 3);
     assert_eq!(p.quorum, 2);
     // The set id is a re-derivation over the members, not a constant somebody
@@ -82,14 +82,14 @@ fn a_trader_cannot_settle_under_a_network_it_did_not_commit_to() {
     // The substitution this exists to stop: mint a genesis under some other
     // network whose profile names a different register, then present roots
     // from that register as though they came from this one.
-    match resolve_for_trader(b"othernet", b"mainnet") {
+    match resolve_for_trader(b"othernet", b"dsm-testnet") {
         Err(RegisterResolutionError::NetworkMismatch { claimed, expected }) => {
             assert_eq!(claimed, b"othernet".to_vec());
-            assert_eq!(expected, b"mainnet".to_vec());
+            assert_eq!(expected, b"dsm-testnet".to_vec());
         }
         other => panic!("a network mismatch must be refused, got {other:?}"),
     }
-    assert!(resolve_for_trader(b"mainnet", b"mainnet").is_ok());
+    assert!(resolve_for_trader(b"dsm-testnet", b"dsm-testnet").is_ok());
 }
 
 // ── The claim envelope ─────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ fn body(pk: &[u8], set_id: [u8; 32]) -> EconomicRootClaimBody {
 #[test]
 fn a_signed_claim_round_trips_and_a_tampered_one_does_not() {
     let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"mainnet")
+    let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
         .storage_set_id;
     let b = body(&pk, set);
@@ -151,7 +151,7 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
     // The signed body commits the position, so a claim cannot be replayed into
     // a neighbouring cell to burn it.
     let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"mainnet")
+    let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
         .storage_set_id;
     let at7 = body(&pk, set);
@@ -170,7 +170,7 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
 #[test]
 fn a_member_refuses_a_claim_that_is_not_the_callers() {
     let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"mainnet")
+    let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
         .storage_set_id;
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
@@ -261,7 +261,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
         economic_position: 1,
         post_economic_root: [0xEE; 32], // invented
         admission_manifest_addr: [0xDD; 32],
-        storage_set_id: resolve_root_register_profile(b"mainnet")
+        storage_set_id: resolve_root_register_profile(b"dsm-testnet")
             .unwrap()
             .storage_set_id,
     };
@@ -292,7 +292,7 @@ fn a_decodable_but_noncanonical_envelope_is_refused() {
     // so a member accepting a padded one would store bytes that can never win
     // a quorum against the canonical form.
     let (pk, sk) = keypair();
-    let set = resolve_root_register_profile(b"mainnet")
+    let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
         .storage_set_id;
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");

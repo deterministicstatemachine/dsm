@@ -334,7 +334,7 @@ fn a_valueless_transition_advances_the_validated_lineage() {
         &NoPeers,
         &G,
         &DEV,
-        b"mainnet",
+        b"dsm-testnet",
         &[0xAB; 64],
     )
     .expect("a valueless transition validates");
@@ -377,7 +377,7 @@ fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
         &NoPeers,
         &G,
         &DEV,
-        b"mainnet",
+        b"dsm-testnet",
         &[0xAB; 64],
     ) {
         Err(EconomicValidationError::Provenance(ProvenanceError::IssuancePredicateUndefined)) => {}
@@ -404,7 +404,7 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
         &NoPeers,
         &G,
         &DEV,
-        b"mainnet",
+        b"dsm-testnet",
         &[0xAB; 64],
     ) {
         Err(EconomicValidationError::OperationDigestMismatch { substrate, witness }) => {
@@ -434,7 +434,7 @@ fn a_registration_at_the_wrong_position_is_refused() {
             &NoPeers,
             &G,
             &DEV,
-            b"mainnet",
+            b"dsm-testnet",
             &[0xAB; 64],
         ),
         Err(EconomicValidationError::PositionIsNotSuccessor {
@@ -464,7 +464,7 @@ fn a_registration_naming_another_manifest_is_refused() {
             &NoPeers,
             &G,
             &DEV,
-            b"mainnet",
+            b"dsm-testnet",
             &[0xAB; 64],
         ),
         Err(EconomicValidationError::ManifestAddrMismatch { .. })
@@ -490,7 +490,7 @@ fn a_registered_root_disagreeing_with_the_witness_is_refused() {
             &NoPeers,
             &G,
             &DEV,
-            b"mainnet",
+            b"dsm-testnet",
             &[0xAB; 64],
         ),
         Err(EconomicValidationError::RegisteredRootDiffersFromWitness { .. })
