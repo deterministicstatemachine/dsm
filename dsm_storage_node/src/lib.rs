@@ -29,6 +29,13 @@ pub struct AppState {
     /// it). `None` = not configured: the settlement-slot register refuses every
     /// claim (fail closed) rather than accepting claims for an unknown set.
     pub storage_set: Option<Arc<NodeStorageSet>>,
+    /// The DSM network this node serves (`node.network_id` in config). Gates
+    /// the ERA faucet-ticket register: the canonical faucet identity is
+    /// NETWORK-SCOPED (`era_faucet_id(network_id)`), so a node that does not
+    /// know its network cannot tell the canonical faucet from an invented
+    /// one and refuses every ticket claim (fail closed) rather than
+    /// defaulting. `None` = faucet register inactive.
+    pub network_id: Option<Arc<Vec<u8>>>,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -81,10 +88,16 @@ impl AppState {
             replication_manager,
             current_tick: Arc::new(AtomicI64::new(0)),
             storage_set: None,
+            network_id: None,
         }
     }
 
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
+    pub fn with_network_id(mut self, network_id: Vec<u8>) -> Self {
+        self.network_id = Some(Arc::new(network_id));
+        self
+    }
+
     pub fn with_storage_set(mut self, set: NodeStorageSet) -> Self {
         self.storage_set = Some(Arc::new(set));
         self
