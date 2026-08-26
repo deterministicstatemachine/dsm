@@ -15,6 +15,7 @@
 //! - [`registry`]   — node registry, scaling, discovery, drain-proof
 //! - [`transport`]  — message delivery (b0x, gossip)
 
+pub mod economic;
 pub mod identity;
 pub mod infra;
 pub mod objects;

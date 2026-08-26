@@ -354,6 +354,38 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
                     PRIMARY KEY (vault_id, parent_sequence)
                 );
 
+        -- ERA faucet ticket register: one row per CONSUMED ticket of the
+        -- network's finite bootstrap allocation (800M tickets x 100 ERA).
+        -- Unused tickets are implicit — no rows exist for them, which is what
+        -- makes 800M tickets storable at all. First-write-wins per
+        -- (faucet_id, ticket_index); a contested or poisoned ticket affects
+        -- only itself, so there is no shared faucet head to brick. The PK is
+        -- the ONLY access path and must stay that way: at ticket scale any
+        -- secondary index is a liability. Never UPDATEd, never DELETEd.
+        CREATE TABLE IF NOT EXISTS faucet_ticket_claims (
+            faucet_id            BLOB NOT NULL,
+            ticket_index         INTEGER NOT NULL,
+            claim_bytes          BLOB NOT NULL,
+            claim_digest         BLOB NOT NULL,
+            claimant_public_key  BLOB NOT NULL,
+            storage_set_id       BLOB NOT NULL,
+            PRIMARY KEY (faucet_id, ticket_index)
+        );
+
+        -- Economic root register: the write-once cell one identity's economic
+        -- root occupies at one position. Keyed by K_root = H(tag || G ||
+        -- DevID || u64_be(position)) — RECOMPUTED by the handler from the
+        -- decoded claim body, never caller-supplied. Registered establishes
+        -- NON-EQUIVOCATION only; nodes never judge whether the root is valid.
+        -- Never UPDATEd, never DELETEd: a burned cell stays burned.
+        CREATE TABLE IF NOT EXISTS economic_root_claims (
+            k_root               BLOB PRIMARY KEY,
+            claim_bytes          BLOB NOT NULL,
+            claim_digest         BLOB NOT NULL,
+            claimant_public_key  BLOB NOT NULL,
+            storage_set_id       BLOB NOT NULL
+        );
+
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
                 -- layer 1). One row per (device, head_number); a new head is
                 -- accepted only if it links the current tip (parent_head_hash ==
@@ -781,6 +813,164 @@ pub async fn claim_settlement_slot(
         };
         tx.commit()?;
         Ok(outcome)
+    })
+    .await
+}
+
+/// Outcome of one write-once attempt on a one-shot register cell. Shared by
+/// the faucet-ticket and economic-root registers; the settlement register
+/// keeps its own historical enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OneShotOutcome {
+    Accepted,
+    AlreadyHeldIdentical,
+    Refused { held_digest: Vec<u8> },
+}
+
+/// Write-once acceptance for one faucet ticket, same discipline as the
+/// settlement register: INSERT OR IGNORE + same-tx read-back, committed with
+/// `synchronous=FULL` so an acknowledged consumption survives restart.
+pub async fn claim_faucet_ticket(
+    pool: &DBPool,
+    faucet_id: &[u8],
+    ticket_index: u64,
+    claim_bytes: &[u8],
+    claim_digest: &[u8],
+    claimant_public_key: &[u8],
+    storage_set_id: &[u8],
+) -> Result<OneShotOutcome> {
+    let faucet_id = faucet_id.to_vec();
+    let claim_bytes = claim_bytes.to_vec();
+    let claim_digest = claim_digest.to_vec();
+    let claimant_public_key = claimant_public_key.to_vec();
+    let storage_set_id = storage_set_id.to_vec();
+    let idx_i64 = i64::try_from(ticket_index)
+        .map_err(|_| anyhow!("ticket_index {ticket_index} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO faucet_ticket_claims
+               (faucet_id, ticket_index, claim_bytes, claim_digest, claimant_public_key,
+                storage_set_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                faucet_id,
+                idx_i64,
+                claim_bytes,
+                claim_digest,
+                claimant_public_key,
+                storage_set_id
+            ],
+        )?;
+        let outcome = if inserted == 1 {
+            OneShotOutcome::Accepted
+        } else {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT claim_digest FROM faucet_ticket_claims
+                  WHERE faucet_id = ?1 AND ticket_index = ?2",
+                params![faucet_id, idx_i64],
+                |row| row.get(0),
+            )?;
+            if held == claim_digest {
+                OneShotOutcome::AlreadyHeldIdentical
+            } else {
+                OneShotOutcome::Refused { held_digest: held }
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// The winning claim this node holds for one ticket.
+pub async fn get_faucet_ticket_claim(
+    pool: &DBPool,
+    faucet_id: &[u8],
+    ticket_index: u64,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let faucet_id = faucet_id.to_vec();
+    let idx_i64 = i64::try_from(ticket_index)
+        .map_err(|_| anyhow!("ticket_index {ticket_index} does not fit in i64"))?;
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT claim_bytes, claim_digest FROM faucet_ticket_claims
+                  WHERE faucet_id = ?1 AND ticket_index = ?2",
+                params![faucet_id, idx_i64],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Write-once acceptance for one economic-root cell.
+pub async fn claim_economic_root(
+    pool: &DBPool,
+    k_root: &[u8],
+    claim_bytes: &[u8],
+    claim_digest: &[u8],
+    claimant_public_key: &[u8],
+    storage_set_id: &[u8],
+) -> Result<OneShotOutcome> {
+    let k_root = k_root.to_vec();
+    let claim_bytes = claim_bytes.to_vec();
+    let claim_digest = claim_digest.to_vec();
+    let claimant_public_key = claimant_public_key.to_vec();
+    let storage_set_id = storage_set_id.to_vec();
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO economic_root_claims
+               (k_root, claim_bytes, claim_digest, claimant_public_key, storage_set_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                k_root,
+                claim_bytes,
+                claim_digest,
+                claimant_public_key,
+                storage_set_id
+            ],
+        )?;
+        let outcome = if inserted == 1 {
+            OneShotOutcome::Accepted
+        } else {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT claim_digest FROM economic_root_claims WHERE k_root = ?1",
+                params![k_root],
+                |row| row.get(0),
+            )?;
+            if held == claim_digest {
+                OneShotOutcome::AlreadyHeldIdentical
+            } else {
+                OneShotOutcome::Refused { held_digest: held }
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// The claim this node holds for one economic-root cell.
+pub async fn get_economic_root_claim(
+    pool: &DBPool,
+    k_root: &[u8],
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let k_root = k_root.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT claim_bytes, claim_digest FROM economic_root_claims WHERE k_root = ?1",
+                params![k_root],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
     })
     .await
 }
