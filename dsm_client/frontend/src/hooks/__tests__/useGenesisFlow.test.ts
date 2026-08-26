@@ -108,7 +108,7 @@ describe('useGenesisFlow', () => {
     expect(mockCreateGenesisViaRouter).toHaveBeenCalledWith(
       TEST_MNEMONIC,
       expect.any(String),
-      'mainnet',
+      'dsm-testnet',
     );
     expect(mockedDecode).toHaveBeenCalledWith(fakeEnvelope);
     // No error set on success

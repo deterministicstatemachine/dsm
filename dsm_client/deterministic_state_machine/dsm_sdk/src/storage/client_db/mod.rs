@@ -481,7 +481,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- derivation is seeded by (wallet_seed, network_id, index,
             -- version), and the seed alone cannot recover a value the
             -- user chose at creation time.
-            network_id        TEXT NOT NULL DEFAULT 'mainnet'
+            network_id        TEXT NOT NULL DEFAULT 'dsm-testnet'
         );
 
         -- Identity publication lifecycle (§ "local genesis durable != identity ready").

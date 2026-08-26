@@ -146,8 +146,10 @@ impl std::error::Error for RegisterResolutionError {}
 const BETA_MEMBERS: [&[u8]; 3] = [b"dsm-node-1", b"dsm-node-2", b"dsm-node-3"];
 
 /// The network the beta fleet serves. Matches the client database's
-/// `network_id` default.
-const BETA_NETWORK_ID: &[u8] = b"mainnet";
+/// `network_id` default. The real mainnet gets its OWN id (and with it a
+/// fresh, untouched faucet allocation) as a new profile at launch — nothing
+/// claimed under this network can validate there.
+const BETA_NETWORK_ID: &[u8] = b"dsm-testnet";
 
 /// Resolve the register for a network. Unknown network ⇒ fail closed.
 pub fn resolve_root_register_profile(

@@ -46,7 +46,7 @@ impl ProvenanceResolver for NoPeers {
     }
 }
 
-const NETWORK: &[u8] = b"mainnet";
+const NETWORK: &[u8] = b"dsm-testnet";
 
 /// The context every provenance call in this suite verifies under. The AK is
 /// per-test where a signed claim exists; these fixtures use a placeholder.

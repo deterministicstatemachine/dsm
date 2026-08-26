@@ -107,7 +107,7 @@ export function useGenesisFlow({
       }
       onMnemonicGenerated?.(mnemonic);
       const locale = navigator.language || 'en-US';
-      const networkId = 'mainnet';
+      const networkId = 'dsm-testnet';
 
       const envelopeBytes = await createGenesisViaRouter(mnemonic, locale, networkId);
       logger.debug('FRONTEND: createGenesisViaRouter returned bytes', envelopeBytes?.length);

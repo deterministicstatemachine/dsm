@@ -323,10 +323,10 @@ mod tests {
 
     #[test]
     fn the_faucet_id_is_network_scoped_and_deterministic() {
-        let mainnet = era_faucet_id(b"mainnet");
-        assert_eq!(mainnet, era_faucet_id(b"mainnet"), "recomputable");
+        let testnet = era_faucet_id(b"dsm-testnet");
+        assert_eq!(testnet, era_faucet_id(b"dsm-testnet"), "recomputable");
         assert_ne!(
-            mainnet,
+            testnet,
             era_faucet_id(b"othernet"),
             "a different network is a DIFFERENT 80B allocation — an asset-only id would \
              multiply the cap by the number of networks"
@@ -335,15 +335,15 @@ mod tests {
 
     #[test]
     fn source_ids_inherit_the_network_scope_and_distinguish_tickets() {
-        let f_main = era_faucet_id(b"mainnet");
+        let f_ours = era_faucet_id(b"dsm-testnet");
         let f_other = era_faucet_id(b"othernet");
         assert_ne!(
-            faucet_ticket_source_id(&f_main, 7),
+            faucet_ticket_source_id(&f_ours, 7),
             faucet_ticket_source_id(&f_other, 7)
         );
         assert_ne!(
-            faucet_ticket_source_id(&f_main, 7),
-            faucet_ticket_source_id(&f_main, 8)
+            faucet_ticket_source_id(&f_ours, 7),
+            faucet_ticket_source_id(&f_ours, 8)
         );
     }
 }

@@ -29,7 +29,7 @@ use dsm::types::operations::Operation;
 
 const G: [u8; 32] = [0x11; 32];
 const DEV: [u8; 32] = [0x22; 32];
-const NETWORK: &[u8] = b"mainnet";
+const NETWORK: &[u8] = b"dsm-testnet";
 const SET_ID: [u8; 32] = [0xB1; 32];
 
 fn era_commit() -> [u8; 32] {
