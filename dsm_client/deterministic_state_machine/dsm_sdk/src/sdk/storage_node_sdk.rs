@@ -648,7 +648,7 @@ impl StorageNodeClient {
         namespace: &str,
         payload: &[u8],
         expected_addr_b32: &str,
-    ) -> Result<String, StorageNodeError> {
+    ) -> Result<(String, Option<String>), StorageNodeError> {
         let url = format!("{base}/api/v2/immutable/put", base = self.node_info.url);
         let mut req = self
             .client
@@ -676,14 +676,22 @@ impl StorageNodeClient {
             .await
             .map_err(|e| StorageNodeError::network(format!("immutable put: {e}")))?;
         let status = resp.status();
+        // The member-id echo, for Req 15.8 attribution at the fan-out layer.
+        let echoed = resp
+            .headers()
+            .get("x-dsm-node-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         if !(status.is_success()) {
             return Err(StorageNodeError::network(format!(
                 "immutable put: HTTP {status}"
             )));
         }
-        resp.text()
+        let body = resp
+            .text()
             .await
-            .map_err(|e| StorageNodeError::network(format!("immutable put body: {e}")))
+            .map_err(|e| StorageNodeError::network(format!("immutable put body: {e}")))?;
+        Ok((body, echoed))
     }
 
     /// GET one immutable object by content address. Returns the raw
@@ -794,6 +802,91 @@ impl StorageNodeClient {
     /// register (`POST /api/v2/settlement-slot/claim`, device-authenticated).
     /// Returns the member's outcome and its echoed node id. Never retries: the
     /// caller owns idempotent replay of the same bytes.
+    /// POST one-shot register claim to an economic register endpoint
+    /// (`faucet-ticket` or `economic-root`). Same contract as the settlement
+    /// register: outcome/held-digest headers with the given prefix, register
+    /// idempotency by BYTES, fresh message id per attempt (transport replay
+    /// guard only).
+    pub async fn post_one_shot_claim(
+        &self,
+        path: &str,
+        header_prefix: &str,
+        envelope: &[u8],
+    ) -> (MemberClaimResult, Option<String>) {
+        let url = format!("{base}{path}", base = self.node_info.url);
+        let mut req_builder = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/octet-stream");
+        if let Some(auth) = &self.auth {
+            let msg_id = Self::generate_message_id("one-shot-claim");
+            req_builder = req_builder
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
+                .header("x-dsm-message-id", msg_id);
+        }
+        let response = match req_builder.body(envelope.to_vec()).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
+                    None,
+                )
+            }
+        };
+        let echoed = response
+            .headers()
+            .get("x-dsm-node-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let outcome_hdr = response
+            .headers()
+            .get(format!("{header_prefix}-outcome").as_str())
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let held_digest = response
+            .headers()
+            .get(format!("{header_prefix}-held-digest").as_str())
+            .and_then(|v| v.to_str().ok())
+            .and_then(crate::util::text_id::decode_base32_crockford);
+        let status = response.status();
+        let result = match (status.as_u16(), outcome_hdr.as_str()) {
+            (200, "accepted") => MemberClaimResult::Accepted,
+            (200, "held-identical") => MemberClaimResult::HeldIdentical,
+            (409, "refused") => MemberClaimResult::Refused { held_digest },
+            (code, other) => {
+                MemberClaimResult::Unavailable(format!("status {code} outcome {other:?}"))
+            }
+        };
+        (result, echoed)
+    }
+
+    /// GET a register cell's winner bytes. Returns `(bytes, echoed node id)` —
+    /// the echo is NORMATIVE for quorum reads: a response without it, or with
+    /// an id other than this member's, is uncountable.
+    pub async fn get_register_cell(&self, path: &str) -> (Option<Vec<u8>>, Option<String>) {
+        let url = format!("{base}{path}", base = self.node_info.url);
+        let response = match self.client.get(&url).send().await {
+            Ok(r) => r,
+            Err(_) => return (None, None),
+        };
+        let echoed = response
+            .headers()
+            .get("x-dsm-node-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if response.status().as_u16() != 200 {
+            return (None, echoed);
+        }
+        match response.bytes().await {
+            Ok(b) => (Some(b.to_vec()), echoed),
+            Err(_) => (None, echoed),
+        }
+    }
+
     pub async fn post_settlement_slot_claim(
         &self,
         envelope: &[u8],
@@ -1270,6 +1363,64 @@ impl StorageNodeSDK {
     /// Submit one frozen settlement-slot claim envelope to EVERY member of the
     /// canonical set. Never short-circuits; the caller counts acceptances whose
     /// echoed node id equals the member id and decides quorum.
+    /// Fan a one-shot register claim out to every member of `set` — the
+    /// generic sibling of `submit_settlement_slot_claim`, for the economic
+    /// registers. Never short-circuits; `total` is the SET size.
+    pub async fn submit_one_shot_claim(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        path: &str,
+        header_prefix: &str,
+        envelope: &[u8],
+    ) -> ClaimFanout {
+        let mut outcomes = Vec::with_capacity(set.len());
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let (result, echoed_node_id) = match client {
+                None => (
+                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
+                    None,
+                ),
+                Some(c) => c.post_one_shot_claim(path, header_prefix, envelope).await,
+            };
+            outcomes.push(MemberClaimOutcome {
+                member_id: member.member_id.clone(),
+                endpoint: member.endpoint.clone(),
+                result,
+                echoed_node_id,
+            });
+        }
+        ClaimFanout {
+            outcomes,
+            total: set.len() as u32,
+        }
+    }
+
+    /// Fan a register-cell GET out to every member. Returns one row per
+    /// member: `(member_id, echoed node id, winner bytes if any)`.
+    pub async fn read_register_cell(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        path: &str,
+    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+        let mut rows = Vec::with_capacity(set.len());
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let (bytes, echoed) = match client {
+                None => (None, None),
+                Some(c) => c.get_register_cell(path).await,
+            };
+            rows.push((member.member_id.clone(), echoed, bytes));
+        }
+        rows
+    }
+
     pub async fn submit_settlement_slot_claim(
         &self,
         set: &crate::sdk::storage_set::StorageSet,
@@ -1497,14 +1648,24 @@ impl StorageNodeSDK {
                     error: Some("no client for this member's endpoint".to_string()),
                 },
                 Some(c) => match c.put_immutable(namespace, payload, expected_addr_b32).await {
-                    Ok(_) => {
+                    Ok((_, echoed)) => {
                         let _ = crate::network::report_storage_success(&member.endpoint);
+                        // Req 15.8: a 2xx counts ONLY when the member echoes
+                        // its own configured id. Before this fix, immutable
+                        // quorum was the one channel counted WITHOUT
+                        // attribution — evidence durability for economic
+                        // admission runs through here, so the gap mattered.
+                        let attributed = echoed.as_deref() == Some(member.member_id.as_str());
                         MemberPutOutcome {
                             member_id: member.member_id.clone(),
                             endpoint: member.endpoint.clone(),
-                            accepted: true,
-                            echoed_node_id: None,
-                            error: None,
+                            accepted: attributed,
+                            echoed_node_id: echoed,
+                            error: if attributed {
+                                None
+                            } else {
+                                Some("acceptance not attributed (member-id echo mismatch)".into())
+                            },
                         }
                     }
                     Err(e) => {

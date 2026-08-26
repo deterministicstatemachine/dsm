@@ -226,10 +226,179 @@ impl CoreSDK {
     /// with `DeviceState::with_pending_economic_admission`), so the durable
     /// head and the durable row agree by construction rather than by the
     /// caller remembering to set both.
+    /// The device-tree root, or the genesis digest when none is published —
+    /// the authority-position digest the beta admission manifest binds.
+    pub(crate) fn device_tree_root_or_genesis(&self) -> [u8; 32] {
+        crate::sdk::app_state::AppState::get_device_tree_root().unwrap_or_else(|| {
+            self.device_head()
+                .map(|h| h.genesis_digest())
+                .unwrap_or([0u8; 32])
+        })
+    }
+
+    /// The fence-coupled faucet-claim advance: attach the `Prepared` admission
+    /// to the head, run the self-loop advance (whose accepting gate REQUIRES
+    /// that admission), and commit head + pending row + frozen evidence in ONE
+    /// transaction. On any failure the pending attachment is rolled off the
+    /// in-memory head so the device is not left fenced by a claim that never
+    /// happened.
+    pub(crate) fn faucet_claim_advance(
+        &self,
+        operation: dsm::types::operations::Operation,
+        delta: &dsm::types::device_state::BalanceDelta,
+        pending: dsm::economic::admission::PendingEconomicAdmission,
+        artifacts: Vec<(String, Vec<u8>, &'static str)>,
+        storage_set_id: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        let dev_id = self.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
+        );
+        let mut sm = self.state_machine.lock();
+        sm.attach_pending_economic_admission(Some(pending.clone()));
+        let outcome = match sm.prepare_advance_relationship(
+            rel_key,
+            dev_id,
+            operation,
+            std::slice::from_ref(delta),
+            Some(init_tip),
+            None,
+            None,
+            None,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                sm.attach_pending_economic_admission(None);
+                return Err(e);
+            }
+        };
+        // Flip Prepared -> LocalAcceptedPendingEcon for the DURABLE record and
+        // the committed head: from here the fence is live and recovery must
+        // finish THIS admission.
+        let mut accepted = pending.clone();
+        accepted.state = dsm::economic::admission::EconomicAdmissionState::LocalAcceptedPendingEcon;
+        let outcome = dsm::types::device_state::AdvanceOutcome {
+            new_device_state: outcome
+                .new_device_state
+                .with_pending_economic_admission(Some(accepted.clone())),
+            ..outcome
+        };
+        if let Err(e) = Self::commit_advance_with_pending_admission_and_artifacts(
+            &outcome,
+            true,
+            &accepted,
+            &artifacts,
+            storage_set_id,
+        ) {
+            sm.attach_pending_economic_admission(None);
+            return Err(e);
+        }
+        sm.commit_advance(&outcome);
+        Ok(())
+    }
+
+    /// Persist a pending-admission lifecycle transition (EvidencePublished /
+    /// Registered). Forward-only; the head's fence semantics are unchanged by
+    /// these states (all three fence), so only the durable row moves.
+    pub(crate) fn update_pending_admission_state(
+        &self,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::get_connection;
+        let devid = self.device_info.device_id;
+        let now = crate::util::deterministic_time::tick() as i64;
+        let binding = get_connection().map_err(|e| {
+            DsmError::storage(format!("pending update: {e}"), None::<std::io::Error>)
+        })?;
+        let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction().map_err(|e| {
+            DsmError::storage(format!("pending update tx: {e}"), None::<std::io::Error>)
+        })?;
+        crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+            &tx, &devid, pending, now,
+        )
+        .map_err(|e| DsmError::storage(format!("pending update: {e}"), None::<std::io::Error>))?;
+        tx.commit()
+            .map_err(|e| DsmError::storage(format!("pending commit: {e}"), None::<std::io::Error>))
+    }
+
+    /// The terminal admission transaction: admitted coordinate + leaf cache +
+    /// clear the pending row + persist the UNFENCED head — all or nothing, so
+    /// "admitted" and "no longer pending" cannot disagree.
+    pub(crate) fn admit_economic_position(
+        &self,
+        economic_position: u64,
+        economic_root: &[u8; 32],
+        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let devid = self.device_info.device_id;
+        let now = crate::util::deterministic_time::tick() as i64;
+        let mut sm = self.state_machine.lock();
+        let head = sm
+            .device_head()
+            .cloned()
+            .ok_or_else(|| DsmError::storage("no head".to_string(), None::<std::io::Error>))?;
+        let unfenced = head.with_pending_economic_admission(None);
+        {
+            let binding = get_connection()
+                .map_err(|e| DsmError::storage(format!("admit: {e}"), None::<std::io::Error>))?;
+            let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let tx = conn
+                .transaction()
+                .map_err(|e| DsmError::storage(format!("admit tx: {e}"), None::<std::io::Error>))?;
+            crate::storage::client_db::economic_faucet::record_admitted_with_conn(
+                &tx,
+                economic_position,
+                economic_root,
+                leaves,
+                now,
+            )
+            .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
+            crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
+                &tx, &devid,
+            )
+            .map_err(|e| DsmError::storage(format!("admit clear: {e}"), None::<std::io::Error>))?;
+            update_bcr_device_head_with_conn(&tx, &unfenced, now as u64).map_err(|e| {
+                DsmError::storage(format!("admit head: {e}"), None::<std::io::Error>)
+            })?;
+            tx.commit().map_err(|e| {
+                DsmError::storage(format!("admit commit: {e}"), None::<std::io::Error>)
+            })?;
+        }
+        sm.attach_pending_economic_admission(None);
+        Ok(())
+    }
+
     pub(crate) fn commit_advance_with_pending_admission(
         outcome: &dsm::types::device_state::AdvanceOutcome,
         bump_capsule: bool,
         pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> Result<(), DsmError> {
+        Self::commit_advance_with_pending_admission_and_artifacts(
+            outcome,
+            bump_capsule,
+            pending,
+            &[],
+            &[0u8; 32],
+        )
+    }
+
+    /// The full seam: head + pending row + FROZEN EVIDENCE, one transaction.
+    ///
+    /// `artifacts` are `(object_key, exact payload bytes, purpose)` — every
+    /// canonical input recovery needs to reproduce the admission evidence
+    /// byte-identically. Freezing them here, in the same transaction as the
+    /// value-bearing acceptance, is the durability invariant: a crash leaves
+    /// either nothing, or a head + pending row + complete frozen evidence.
+    /// Recovery re-signs NOTHING and asks the user for nothing.
+    pub(crate) fn commit_advance_with_pending_admission_and_artifacts(
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+        bump_capsule: bool,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+        artifacts: &[(String, Vec<u8>, &'static str)],
+        storage_set_id: &[u8; 32],
     ) -> Result<(), DsmError> {
         let devid = outcome.new_device_state.devid();
         if !dsm::economic::admission::head_carries_admission(
@@ -242,6 +411,9 @@ impl CoreSDK {
         }
         let now = crate::util::deterministic_time::tick() as i64;
         let pending = pending.clone();
+        let bound_root = outcome.new_device_state.root();
+        let set_id = *storage_set_id;
+        let artifacts: Vec<(String, Vec<u8>, &'static str)> = artifacts.to_vec();
         Self::dual_write_advance_outcome_with_extra(
             outcome,
             bump_capsule,
@@ -255,7 +427,18 @@ impl CoreSDK {
                         format!("commit pending economic admission: {e}"),
                         None::<std::io::Error>,
                     )
-                })
+                })?;
+                for (key, payload, purpose) in &artifacts {
+                    crate::storage::client_db::frozen_publication_artifact::
+                        freeze_artifact_with_conn(tx, &set_id, key, payload, &bound_root, purpose)
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("freeze admission evidence {key}: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                }
+                Ok(())
             }),
         )
     }

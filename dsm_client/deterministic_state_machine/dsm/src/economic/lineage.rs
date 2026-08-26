@@ -89,6 +89,27 @@ pub struct ValidatedEconomicRoot {
 }
 
 impl ValidatedEconomicRoot {
+    /// Rehydrate THIS DEVICE'S OWN admitted coordinate from its local durable
+    /// store.
+    ///
+    /// This deliberately punctures the no-constructor property for exactly one
+    /// case: a coordinate that `advance_validated` produced ON THIS DEVICE and
+    /// that was durably recorded in the same transaction that cleared the
+    /// pending admission. Without it, a restarted producer could never resume.
+    ///
+    /// It is NOT for peers, NOT for registered roots, NOT for anything read
+    /// from a network. Feeding it any of those is fabrication — the exact
+    /// forgery the private constructor exists to prevent — and a resolver or
+    /// verifier calling it has a bug by definition. The alternative
+    /// (re-verifying the whole lineage on every restart) remains the recovery
+    /// truth when the local store is questionable.
+    pub fn rehydrate_from_admitted_store(economic_position: u64, economic_root: [u8; 32]) -> Self {
+        Self {
+            economic_position,
+            economic_root,
+        }
+    }
+
     pub fn economic_position(&self) -> u64 {
         self.economic_position
     }

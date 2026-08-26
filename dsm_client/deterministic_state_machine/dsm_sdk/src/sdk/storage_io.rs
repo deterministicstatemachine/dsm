@@ -251,6 +251,258 @@ pub(crate) async fn fetch_immutable_payload(
 /// each authenticated with its OWN per-node token (lazily back-filled like
 /// [`put_bytes`]). Never decides quorum; never retries — the caller replays the
 /// same bytes if it must.
+/// Economic-register seams. Same cfg discipline as the settlement claim:
+/// tests drive the fake fleet; production fans out over the set's members
+/// with per-member auth.
+pub(crate) async fn submit_faucet_ticket_claim(
+    set: &crate::sdk::storage_set::StorageSet,
+    envelope: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
+    #[cfg(test)]
+    {
+        Ok(fake_registers::claim(set, "faucet-ticket", envelope))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        Ok(sdk
+            .submit_one_shot_claim(
+                set,
+                "/api/v2/faucet-ticket/claim",
+                "x-dsm-faucet-ticket",
+                envelope,
+            )
+            .await)
+    }
+}
+
+pub(crate) async fn submit_economic_root_claim(
+    set: &crate::sdk::storage_set::StorageSet,
+    envelope: &[u8],
+) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
+    #[cfg(test)]
+    {
+        Ok(fake_registers::claim(set, "economic-root", envelope))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        Ok(sdk
+            .submit_one_shot_claim(
+                set,
+                "/api/v2/economic-root/claim",
+                "x-dsm-economic-root",
+                envelope,
+            )
+            .await)
+    }
+}
+
+pub(crate) async fn read_faucet_ticket_cell(
+    set: &crate::sdk::storage_set::StorageSet,
+    faucet_id: &[u8; 32],
+    ticket_index: u64,
+) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+    #[cfg(test)]
+    {
+        Ok(fake_registers::read(
+            set,
+            "faucet-ticket",
+            &fake_registers::ticket_key(faucet_id, ticket_index),
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let path = crate::sdk::economic_registers::faucet_ticket_path(faucet_id, ticket_index);
+        Ok(sdk.read_register_cell(set, &path).await)
+    }
+}
+
+pub(crate) async fn read_economic_root_cell_rows(
+    set: &crate::sdk::storage_set::StorageSet,
+    k_root: &[u8; 32],
+) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+    #[cfg(test)]
+    {
+        Ok(fake_registers::read(
+            set,
+            "economic-root",
+            &fake_registers::root_key(k_root),
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let path = crate::sdk::economic_registers::economic_root_path(k_root);
+        Ok(sdk.read_register_cell(set, &path).await)
+    }
+}
+
+/// TEST-ONLY in-process economic registers: one write-once cell map per
+/// member per register kind, with the same injectable echo/failure seams the
+/// settlement fake fleet has. Envelope digests use the REAL protocol digests,
+/// so the counting logic under test sees production shapes.
+#[cfg(test)]
+pub(crate) mod fake_registers {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimOutcome, MemberClaimResult};
+    use crate::sdk::storage_set::StorageSet;
+
+    #[derive(Default)]
+    struct State {
+        /// (member_id, register kind) -> (cell key -> (bytes, digest))
+        cells: HashMap<(String, String), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
+        failing: HashSet<String>,
+        echo_override: HashMap<String, Option<String>>,
+    }
+
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
+        let mut guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        f(guard.get_or_insert_with(State::default))
+    }
+
+    pub fn reset() {
+        let mut guard = STATE.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some(State::default());
+    }
+
+    pub fn fail_member(member_id: &str, failing: bool) {
+        with_state(|s| {
+            if failing {
+                s.failing.insert(member_id.to_string());
+            } else {
+                s.failing.remove(member_id);
+            }
+        })
+    }
+
+    pub fn set_echo(member_id: &str, echo: Option<String>) {
+        with_state(|s| {
+            s.echo_override.insert(member_id.to_string(), echo);
+        })
+    }
+
+    pub fn ticket_key(faucet_id: &[u8; 32], ticket_index: u64) -> Vec<u8> {
+        let mut k = faucet_id.to_vec();
+        k.extend_from_slice(&ticket_index.to_be_bytes());
+        k
+    }
+
+    pub fn root_key(k_root: &[u8; 32]) -> Vec<u8> {
+        k_root.to_vec()
+    }
+
+    fn digest_for(kind: &str, envelope: &[u8]) -> [u8; 32] {
+        match kind {
+            "faucet-ticket" => dsm::economic::faucet::faucet_claim_evidence_addr(envelope),
+            _ => dsm::economic::claim_envelope::economic_root_claim_envelope_digest(envelope),
+        }
+    }
+
+    fn cell_key_for(kind: &str, envelope: &[u8]) -> Vec<u8> {
+        match kind {
+            "faucet-ticket" => {
+                let v = dsm::economic::faucet::decode_and_verify_faucet_ticket_claim(envelope)
+                    .expect("fake register given an invalid ticket envelope");
+                ticket_key(&v.body.faucet_id, v.body.ticket_index)
+            }
+            _ => {
+                let v =
+                    dsm::economic::claim_envelope::decode_and_verify_economic_root_claim(envelope)
+                        .expect("fake register given an invalid root envelope");
+                dsm::economic::register::economic_root_register_key(
+                    &v.body.trader_genesis,
+                    &v.body.trader_devid,
+                    v.body.economic_position,
+                )
+                .to_vec()
+            }
+        }
+    }
+
+    /// First-write-wins per member, exactly like the node.
+    pub fn claim(set: &StorageSet, kind: &str, envelope: &[u8]) -> ClaimFanout {
+        let digest = digest_for(kind, envelope);
+        let key = cell_key_for(kind, envelope);
+        let mut outcomes = Vec::new();
+        with_state(|s| {
+            for member in set.members() {
+                let echoed = s
+                    .echo_override
+                    .get(&member.member_id)
+                    .cloned()
+                    .unwrap_or_else(|| Some(member.member_id.clone()));
+                if s.failing.contains(&member.member_id) {
+                    outcomes.push(MemberClaimOutcome {
+                        member_id: member.member_id.clone(),
+                        endpoint: member.endpoint.clone(),
+                        result: MemberClaimResult::Unavailable("injected".into()),
+                        echoed_node_id: None,
+                    });
+                    continue;
+                }
+                let cells = s
+                    .cells
+                    .entry((member.member_id.clone(), kind.to_string()))
+                    .or_default();
+                let result = match cells.get(&key) {
+                    None => {
+                        cells.insert(key.clone(), (envelope.to_vec(), digest));
+                        MemberClaimResult::Accepted
+                    }
+                    Some((_, held)) if *held == digest => MemberClaimResult::HeldIdentical,
+                    Some((_, held)) => MemberClaimResult::Refused {
+                        held_digest: Some(held.to_vec()),
+                    },
+                };
+                outcomes.push(MemberClaimOutcome {
+                    member_id: member.member_id.clone(),
+                    endpoint: member.endpoint.clone(),
+                    result,
+                    echoed_node_id: echoed,
+                });
+            }
+        });
+        ClaimFanout {
+            outcomes,
+            total: set.len() as u32,
+        }
+    }
+
+    pub fn read(
+        set: &StorageSet,
+        kind: &str,
+        key: &[u8],
+    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+        with_state(|s| {
+            set.members()
+                .iter()
+                .map(|member| {
+                    let echoed = s
+                        .echo_override
+                        .get(&member.member_id)
+                        .cloned()
+                        .unwrap_or_else(|| Some(member.member_id.clone()));
+                    let bytes = if s.failing.contains(&member.member_id) {
+                        None
+                    } else {
+                        s.cells
+                            .get(&(member.member_id.clone(), kind.to_string()))
+                            .and_then(|cells| cells.get(key))
+                            .map(|(b, _)| b.clone())
+                    };
+                    (member.member_id.clone(), echoed, bytes)
+                })
+                .collect()
+        })
+    }
+}
+
 pub(crate) async fn submit_settlement_slot_claim(
     set: &crate::sdk::storage_set::StorageSet,
     envelope: &[u8],
