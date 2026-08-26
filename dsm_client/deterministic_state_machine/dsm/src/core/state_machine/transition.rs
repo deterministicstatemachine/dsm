@@ -401,6 +401,14 @@ pub fn generate_position_sequence(
 /// `Receive`) pass unconditionally.
 pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmError> {
     match operation {
+        // A faucet claim carries no operation-level signature: authorization
+        // is the claim ENVELOPE (SPHINCS+ over the ticket body, verified by
+        // register members and by the economic provenance verifier) plus the
+        // accepting transition's requirement that a matching economic
+        // admission is already pending. An operation-level signature here
+        // would be a second signature over the same facts with nothing new
+        // to bind.
+        Operation::FaucetClaim { .. } => {}
         // Bilateral / paired operations carry both proof and signature.
         Operation::Transfer { signature, .. } => {
             // Transfer's get_proof_of_authorization returns the signature

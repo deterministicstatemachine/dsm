@@ -1471,6 +1471,50 @@ message EconomicRootClaimV1 {
   bytes claimant_signature = 2 [(dsm_max_len)=65535];
 }
 
+// A claim on ONE single-use ERA faucet ticket — the unit of the network's
+// finite bootstrap allocation (800,000,000 tickets x 100 ERA = 80B ERA per
+// DSM network; era_faucet_id is network-scoped).
+//
+// Consuming the ticket IS the source depletion: there is no faucet reserve
+// leaf, no mutable `remaining`, no global faucet successor chain. Each ticket
+// is an independent write-once cell keyed (faucet_id, ticket_index), so a
+// contested or poisoned ticket affects only itself and the faucet cannot be
+// bricked at a shared head.
+//
+// The body binds the claimant identity (genesis/devid/AK), the TARGET
+// economic position, and the recipient operation digest. Position + digest
+// binding is the non-reuse mechanism: the envelope commits ONE target
+// position (whose root-register cell is itself write-once) and ONE exact
+// operation, so a winning ticket funds at most one validated credit.
+//
+// Signature covers the BODY only:
+// SPHINCS+(sk, BLAKE3("DSM/era-faucet-ticket-claim-sign/v1" || 0x00 ||
+// canonical_body_bytes)). Members verify claimant ATTRIBUTION (public key and
+// devid == authenticated caller) plus COORDINATE VALIDITY (canonical
+// faucet_id, ticket_index < 800M) — rejecting a coordinate that does not
+// exist in the protocol is not judging economics; it denies an invented
+// faucet universe any place to write. Everything beyond that (balances,
+// provenance, admission) is judged by verifiers, never by nodes.
+//
+// Strict: decode -> re-encode equality; the client signs ONCE and replays the
+// exact bytes on every retry (a byte-different re-encode is a different value
+// at a write-once cell).
+message FaucetTicketClaimBodyV1 {
+  bytes  faucet_id                  = 1 [(dsm_fixed_len)=32];
+  uint64 ticket_index               = 2;
+  bytes  claimant_genesis           = 3 [(dsm_fixed_len)=32];
+  bytes  claimant_devid             = 4 [(dsm_fixed_len)=32];
+  uint64 claimant_economic_position = 5;
+  bytes  recipient_operation_digest = 6 [(dsm_fixed_len)=32];
+  bytes  claimant_public_key        = 7 [(dsm_max_len)=65535];
+  bytes  storage_set_id             = 8 [(dsm_fixed_len)=32];
+}
+
+message FaucetTicketClaimV1 {
+  FaucetTicketClaimBodyV1 body = 1;
+  bytes claimant_signature     = 2 [(dsm_max_len)=65535];
+}
+
 // Proof that a trader's own DlvSettle advance COMMITTED — the witness a
 // pending pointer needs before it may consume anyone's liquidity.
 //

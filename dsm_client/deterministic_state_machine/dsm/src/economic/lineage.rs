@@ -68,7 +68,8 @@
 
 use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
 use crate::economic::provenance::{
-    verify_transition_provenance, FundedCredit, ProvenanceError, ProvenanceResolver,
+    verify_transition_provenance, FundedCredit, ProvenanceContext, ProvenanceError,
+    ProvenanceResolver,
 };
 use crate::economic::register::RegisteredEconomicRoot;
 use crate::economic::tree::empty_economic_root;
@@ -312,6 +313,13 @@ pub fn advance_validated(
     resolver: &dyn ProvenanceResolver,
     genesis: &[u8; 32],
     device_id: &[u8; 32],
+    // From the AUTHENTICATED Genesis v3 — recovered by recomputation, never
+    // taken from the claimant beside the claim.
+    network_id: &[u8],
+    // The P0–P6-proven authority key. Provenance arms that verify signed
+    // claims bind against THIS, because storage-node bearer attribution is
+    // not the cryptographic identity binding.
+    proven_ak: &[u8],
 ) -> Result<(ValidatedEconomicRoot, Vec<FundedCredit>), EconomicValidationError> {
     if previous.economic_root != witness.pre_economic_root {
         return Err(EconomicValidationError::PreRootIsNotThePredecessor {
@@ -355,7 +363,28 @@ pub fn advance_validated(
     // Conjunctive with everything above: the write set is closed AND every
     // credit in it is funded. Checked last because it is the most expensive
     // and the cheap structural clauses should reject first.
-    let funded = verify_transition_provenance(witness, resolver)
+    // The canonical register set for the claimant's network, resolved
+    // FAIL-CLOSED: an unknown network refuses rather than defaulting, and a
+    // winning claim naming any other set is foreign whatever its bytes say.
+    let canonical_set = crate::economic::register::resolve_root_register_profile(network_id)
+        .map_err(|e| {
+            EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(match e {
+                crate::economic::register::RegisterResolutionError::UnknownNetwork { .. } => {
+                    "no register profile for the claimant's network"
+                }
+                _ => "register profile not derivable",
+            }))
+        })?
+        .storage_set_id;
+    let ctx = ProvenanceContext {
+        genesis,
+        device_id,
+        economic_position: registered.economic_position,
+        network_id,
+        proven_ak,
+        canonical_storage_set_id: canonical_set,
+    };
+    let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
     Ok((
