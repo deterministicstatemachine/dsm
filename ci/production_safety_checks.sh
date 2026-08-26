@@ -7,10 +7,24 @@ set -euo pipefail
 echo "=== DSM Production Safety Checks ==="
 echo ""
 
-# Run clippy with production safety lints
-# NOTE: Use stable explicitly to avoid a known nightly Clippy ICE on repr attributes.
+# ONE normative Rust version, mechanically proven — floating selection, drifted
+# workflow mirror, or running under an undeclared toolchain all fail here.
+bash ci/check_toolchain_consistency.sh
+echo ""
+
+# Run clippy with production safety lints.
+#
+# NO `+toolchain` OVERRIDE. This deliberately runs whatever rust-toolchain.toml
+# declares, so this gate and `make lint` and ordinary CI are the same version.
+#
+# This line previously read `cargo +stable clippy`. The comment said it was to
+# dodge a nightly Clippy ICE, but `+stable` also escaped the repository's pin:
+# CI installed 1.96.0 and then this script asked for whatever `stable` happened
+# to be that day. A clippy release could therefore fail CI on untouched code,
+# and it did. The ICE it was avoiding is a NIGHTLY problem; the pin is not
+# nightly, so plain `cargo` is both safe and correct here.
 echo "Running clippy with production safety lints..."
-cargo +stable clippy --workspace --all-features -- \
+cargo clippy --workspace --all-features -- \
   -W clippy::unwrap_used \
   -W clippy::expect_used \
   -W clippy::panic \
