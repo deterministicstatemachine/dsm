@@ -347,9 +347,28 @@ typecheck: ## Run frontend TypeScript type-check
 # ---------------------------------------------------------------------------
 
 .PHONY: lint
-lint: ## Run all linters (cargo fmt, clippy, frontend)
-	cargo fmt --all -- --check
-	cargo clippy --all-targets -- -D warnings
+# THE canonical toolchain, read from rust-toolchain.toml — never hardcoded here.
+# A second copy of the version in this file would be exactly the drift that made
+# `make lint` and CI disagree in the first place.
+RUST_PIN := $(shell awk -F'"' '/^channel/{print $$2}' rust-toolchain.toml)
+# The pinned toolchain's bin directory, resolved through rustup.
+#
+# `rustup run $(RUST_PIN) bash ...` is NOT sufficient: the nested shell
+# re-sources profile files, which can put another cargo (e.g. Homebrew's) back
+# ahead of the toolchain on PATH. Prepending the real bin directory is what
+# actually guarantees the pinned cargo wins.
+RUST_PIN_BIN := $(shell rustup which --toolchain $(RUST_PIN) cargo 2>/dev/null | xargs dirname 2>/dev/null)
+
+lint: ## Run all linters (cargo fmt, clippy, frontend) on the PINNED toolchain
+	@if ! rustup toolchain list 2>/dev/null | grep -q '^$(RUST_PIN)'; then \
+		echo "ERROR: pinned toolchain $(RUST_PIN) is not installed."; \
+		echo "  rustup toolchain install $(RUST_PIN) --profile minimal --component rustfmt --component clippy"; \
+		exit 1; \
+	fi
+	@echo "==> Linting with pinned toolchain $(RUST_PIN)"
+	@PATH="$(RUST_PIN_BIN):$$PATH" bash ci/check_toolchain_consistency.sh
+	rustup run $(RUST_PIN) cargo fmt --all -- --check
+	rustup run $(RUST_PIN) cargo clippy --all-targets -- -D warnings
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
 		nvm use --silent 2>/dev/null || true; \
