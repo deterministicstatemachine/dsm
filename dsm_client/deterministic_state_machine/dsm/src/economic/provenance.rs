@@ -76,6 +76,33 @@ pub struct ValidatedPeerTransition {
     pub witness: EconomicTransitionWitness,
 }
 
+/// The authenticated facts about the identity whose transition is being
+/// validated. Every field comes from authority resolution or canonical
+/// derivation — never from the objects under validation.
+#[derive(Debug, Clone)]
+pub struct ProvenanceContext<'a> {
+    pub genesis: &'a [u8; 32],
+    pub device_id: &'a [u8; 32],
+    /// The economic position the registration under validation occupies.
+    pub economic_position: u64,
+    /// From the AUTHENTICATED Genesis v3 (field 2 of `GenesisParamsV3`,
+    /// recovered by recomputation) — the claimant never chooses it.
+    pub network_id: &'a [u8],
+    /// The P0–P6-proven authority key. Bearer-token attribution at a storage
+    /// node is NOT this binding.
+    pub proven_ak: &'a [u8],
+    /// The canonical register set for `network_id`, resolved FAIL-CLOSED —
+    /// a claim naming any other set is foreign, whatever its bytes say.
+    pub canonical_storage_set_id: [u8; 32],
+}
+
+/// The live-quorum answer for one faucet ticket cell: the exact envelope
+/// bytes a quorum of the canonical set holds as the winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaucetTicketWin {
+    pub envelope_bytes: Vec<u8>,
+}
+
 /// Supplies the already-validated facts an external source resolves against.
 ///
 /// Deliberately returns validated objects rather than raw bytes: a resolver
@@ -90,6 +117,17 @@ pub trait ProvenanceResolver {
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
     ) -> Option<ValidatedPeerTransition>;
+
+    /// The winning claim for one faucet ticket, from a LIVE quorum read
+    /// against the CANONICAL set — q members returning byte-identical winner
+    /// bytes. `None` when no quorum-agreed winner exists, and the verifier
+    /// fails closed on it: a credit is not funded by a ticket nobody can
+    /// show was won.
+    fn winning_faucet_ticket(
+        &self,
+        faucet_id: &[u8; 32],
+        ticket_index: u64,
+    ) -> Option<FaucetTicketWin>;
 }
 
 /// Why a credit is not funded.
@@ -131,6 +169,32 @@ pub enum ProvenanceError {
     ConsumedByAnotherOperation,
     /// The source is defined but its semantics land in a later cut.
     NotYetImplemented { class: u16 },
+    /// The descriptor names a faucet other than THE canonical one for the
+    /// claimant's authenticated network. The stop-the-line check: without it,
+    /// an invented faucet id is a fresh 800M-ticket universe.
+    NotTheCanonicalFaucet {
+        named: [u8; 32],
+        canonical: [u8; 32],
+    },
+    /// A ticket coordinate that does not exist in the protocol.
+    TicketIndexOutOfRange { index: u64 },
+    /// No quorum-agreed winner for this ticket. Fails closed.
+    FaucetTicketNotEstablished { ticket_index: u64 },
+    /// The winning envelope is not a valid claim, or names different
+    /// coordinates than the descriptor.
+    FaucetWinnerInvalid(&'static str),
+    /// The winner's claimant is not the identity under validation, or its
+    /// key is not the P0–P6-proven AK.
+    FaucetClaimantMismatch,
+    /// The winner binds a different economic position or operation digest
+    /// than the transition under validation. Position + digest binding IS the
+    /// non-reuse mechanism.
+    FaucetBindingMismatch,
+    /// The winner names a storage set other than the canonical one for the
+    /// claimant's network — a claim from a foreign register masquerading.
+    FaucetForeignSet,
+    /// The winner's bytes do not hash to the descriptor's evidence address.
+    FaucetEvidenceAddrMismatch,
 }
 
 impl core::fmt::Display for ProvenanceError {
@@ -195,6 +259,46 @@ impl core::fmt::Display for ProvenanceError {
             Self::NotYetImplemented { class } => write!(
                 f,
                 "credit provenance: source class {class:#06x} has no acceptance semantics yet"
+            ),
+            Self::NotTheCanonicalFaucet { .. } => write!(
+                f,
+                "credit provenance: not THE canonical ERA faucet for the claimant's \
+                 authenticated network — an invented faucet id would be a fresh 800M-ticket \
+                 universe, and the descriptor agreeing with the winner proves nothing"
+            ),
+            Self::TicketIndexOutOfRange { index } => write!(
+                f,
+                "credit provenance: ticket {index} is not a coordinate that exists"
+            ),
+            Self::FaucetTicketNotEstablished { ticket_index } => write!(
+                f,
+                "credit provenance: no quorum-agreed winner for ticket {ticket_index} — fail \
+                 closed; a credit is not funded by a ticket nobody can show was won"
+            ),
+            Self::FaucetWinnerInvalid(why) => {
+                write!(f, "credit provenance: faucet winner invalid: {why}")
+            }
+            Self::FaucetClaimantMismatch => write!(
+                f,
+                "credit provenance: the winning claim's claimant is not the identity under \
+                 validation (or its key is not the P0–P6-proven AK — storage-node bearer \
+                 attribution is not this binding)"
+            ),
+            Self::FaucetBindingMismatch => write!(
+                f,
+                "credit provenance: the winning claim binds a different economic position or \
+                 operation digest than this transition — position + digest binding is the \
+                 non-reuse mechanism, so a mismatch is a reuse attempt or a stale claim"
+            ),
+            Self::FaucetForeignSet => write!(
+                f,
+                "credit provenance: the winning claim names a storage set other than the \
+                 canonical one for the claimant's network"
+            ),
+            Self::FaucetEvidenceAddrMismatch => write!(
+                f,
+                "credit provenance: the winner's bytes do not hash to the descriptor's \
+                 evidence address"
             ),
         }
     }
@@ -276,6 +380,7 @@ pub fn verify_credit_source(
     source: &CreditSource,
     witness: &EconomicTransitionWitness,
     resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
 ) -> Result<FundedCredit, ProvenanceError> {
     let credit_index = source.credit_mutation_index();
     let credit =
@@ -369,6 +474,81 @@ pub fn verify_credit_source(
         CreditSource::VerifiedOfflineReentry(_) => {
             return Err(ProvenanceError::NotYetImplemented { class: 0x0028 })
         }
+
+        CreditSource::ValidatedFaucetDistribution(d) => {
+            use crate::economic::faucet;
+
+            // 1. THE CANONICAL-ID RULE, first and unconditionally. The
+            //    canonical id is DERIVED from the claimant's authenticated
+            //    network; comparing descriptor to winner proves nothing.
+            let canonical = faucet::era_faucet_id(ctx.network_id);
+            if d.faucet_id != canonical {
+                return Err(ProvenanceError::NotTheCanonicalFaucet {
+                    named: d.faucet_id,
+                    canonical,
+                });
+            }
+            // 2. The coordinate must exist.
+            if d.ticket_index >= faucet::ERA_FAUCET_TICKET_COUNT {
+                return Err(ProvenanceError::TicketIndexOutOfRange {
+                    index: d.ticket_index,
+                });
+            }
+            // 3. A quorum-agreed winner, live, from the canonical set.
+            let win = resolver
+                .winning_faucet_ticket(&d.faucet_id, d.ticket_index)
+                .ok_or(ProvenanceError::FaucetTicketNotEstablished {
+                    ticket_index: d.ticket_index,
+                })?;
+            // 4. The winner is a strictly valid claim for THESE coordinates.
+            let claim = faucet::decode_and_verify_faucet_ticket_claim(&win.envelope_bytes)
+                .map_err(|_| ProvenanceError::FaucetWinnerInvalid("does not verify"))?;
+            if claim.body.faucet_id != d.faucet_id || claim.body.ticket_index != d.ticket_index {
+                return Err(ProvenanceError::FaucetWinnerInvalid(
+                    "winner names different coordinates than the descriptor",
+                ));
+            }
+            // 5. The winner's claimant IS the identity under validation, and
+            //    its key IS the P0–P6-proven AK.
+            if claim.body.claimant_genesis != *ctx.genesis
+                || claim.body.claimant_devid != *ctx.device_id
+                || claim.body.claimant_public_key != ctx.proven_ak
+            {
+                return Err(ProvenanceError::FaucetClaimantMismatch);
+            }
+            // 6. NON-REUSE: the envelope commits ONE target position (whose
+            //    register cell is itself write-once) and ONE exact operation.
+            //    Digest alone would be circular for a minimal no-nonce
+            //    operation — two claims' bytes can be identical — so the
+            //    position is what makes it sound; the digest pins WHICH
+            //    transition.
+            if claim.body.claimant_economic_position != ctx.economic_position
+                || claim.body.recipient_operation_digest != witness.operation_digest
+            {
+                return Err(ProvenanceError::FaucetBindingMismatch);
+            }
+            // 7. The claim was won in the CANONICAL set for this network —
+            //    accepting whatever set the winner names would let a foreign
+            //    register masquerade.
+            if claim.body.storage_set_id != ctx.canonical_storage_set_id {
+                return Err(ProvenanceError::FaucetForeignSet);
+            }
+            // 8. The bytes the quorum holds are the bytes the DAG addresses.
+            if faucet::faucet_claim_evidence_addr(&win.envelope_bytes)
+                != d.faucet_claim_evidence_addr
+            {
+                return Err(ProvenanceError::FaucetEvidenceAddrMismatch);
+            }
+            // The derived funding: exactly the fixed payout of builtin ERA.
+            // The generic asset/amount equality below then forces the credit
+            // mutation to be exactly +100 ERA.
+            let era = crate::core::token::token_state_manager::era_policy_commit();
+            FundedCredit {
+                source_id: faucet::faucet_ticket_source_id(&d.faucet_id, d.ticket_index),
+                policy_commit: era,
+                amount: faucet::ERA_FAUCET_PAYOUT,
+            }
+        }
     };
 
     // Establishing that A source exists is not enough: it must fund THIS
@@ -394,6 +574,11 @@ pub fn verify_credit_source(
 /// it is consumed by construction and could never be presented again. The
 /// external arms can, so their consumption has to be written down.
 fn requires_consumed_source_record(source: &CreditSource) -> bool {
+    // ValidatedFaucetDistribution deliberately does NOT require one: non-reuse
+    // is the envelope's position + digest binding (the ticket commits ONE
+    // target position, itself a write-once register cell, and ONE exact
+    // operation), so a consumed-source leaf would be bookkeeping for an
+    // impossibility.
     matches!(
         source,
         CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_)
@@ -409,12 +594,13 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
 pub fn verify_transition_provenance(
     witness: &EconomicTransitionWitness,
     resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
 ) -> Result<Vec<FundedCredit>, ProvenanceError> {
     let mut funded = Vec::with_capacity(witness.credit_sources.len());
     let mut seen: Vec<[u8; 32]> = Vec::with_capacity(witness.credit_sources.len());
 
     for source in &witness.credit_sources {
-        let f = verify_credit_source(source, witness, resolver)?;
+        let f = verify_credit_source(source, witness, resolver, ctx)?;
         if seen.contains(&f.source_id) {
             return Err(ProvenanceError::DuplicateSourceId);
         }

@@ -22,7 +22,9 @@ use dsm::economic::lineage::{
 };
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::register::RegisteredEconomicRoot;
-use dsm::economic::provenance::{ProvenanceError, ProvenanceResolver, ValidatedPeerTransition};
+use dsm::economic::provenance::{
+    FaucetTicketWin, ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
+};
 use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
@@ -44,6 +46,9 @@ impl ProvenanceResolver for NoPeers {
         _d: &[u8; 32],
         _p: u64,
     ) -> Option<ValidatedPeerTransition> {
+        None
+    }
+    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
         None
     }
 }
@@ -329,6 +334,8 @@ fn a_valueless_transition_advances_the_validated_lineage() {
         &NoPeers,
         &G,
         &DEV,
+        b"mainnet",
+        &[0xAB; 64],
     )
     .expect("a valueless transition validates");
     assert_eq!(one.economic_position(), 1);
@@ -370,6 +377,8 @@ fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
         &NoPeers,
         &G,
         &DEV,
+        b"mainnet",
+        &[0xAB; 64],
     ) {
         Err(EconomicValidationError::Provenance(ProvenanceError::IssuancePredicateUndefined)) => {}
         other => panic!("a credit from undefined issuance must be refused, got {other:?}"),
@@ -395,6 +404,8 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
         &NoPeers,
         &G,
         &DEV,
+        b"mainnet",
+        &[0xAB; 64],
     ) {
         Err(EconomicValidationError::OperationDigestMismatch { substrate, witness }) => {
             assert_eq!(substrate, [0x88; 32]);
@@ -423,6 +434,8 @@ fn a_registration_at_the_wrong_position_is_refused() {
             &NoPeers,
             &G,
             &DEV,
+            b"mainnet",
+            &[0xAB; 64],
         ),
         Err(EconomicValidationError::PositionIsNotSuccessor {
             previous: 0,
@@ -451,6 +464,8 @@ fn a_registration_naming_another_manifest_is_refused() {
             &NoPeers,
             &G,
             &DEV,
+            b"mainnet",
+            &[0xAB; 64],
         ),
         Err(EconomicValidationError::ManifestAddrMismatch { .. })
     ));
@@ -475,6 +490,8 @@ fn a_registered_root_disagreeing_with_the_witness_is_refused() {
             &NoPeers,
             &G,
             &DEV,
+            b"mainnet",
+            &[0xAB; 64],
         ),
         Err(EconomicValidationError::RegisteredRootDiffersFromWitness { .. })
     ));

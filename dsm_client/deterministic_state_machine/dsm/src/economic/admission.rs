@@ -208,6 +208,12 @@ pub fn fence_allows(
     if !pending.state.is_fencing() {
         return Ok(());
     }
+    // Deliberately NO "matching operation" exception here. The operation an
+    // admission authorizes is accepted while the admission is still
+    // `Prepared` — which does not fence — so it never needs a doorway; and a
+    // doorway would let the SAME operation re-advance after acceptance
+    // (states that DO fence), double-crediting locally. While fencing, every
+    // economic write is blocked, including a replay of the admitted one.
     let position = pending.economic_position;
     match effect {
         EconomicEffect::None => Ok(()),

@@ -15,7 +15,8 @@ use dsm::economic::credit::{
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
     same_transition_move_source_id, validated_peer_debit_source_id, verify_credit_source,
-    verify_transition_provenance, ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
+    verify_transition_provenance, FaucetTicketWin, ProvenanceContext, ProvenanceError,
+    ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{
     EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState, EconomicVaultReserveState,
@@ -39,6 +40,24 @@ impl ProvenanceResolver for NoPeers {
         _p: u64,
     ) -> Option<ValidatedPeerTransition> {
         None
+    }
+    fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+        None
+    }
+}
+
+const NETWORK: &[u8] = b"mainnet";
+
+/// The context every provenance call in this suite verifies under. The AK is
+/// per-test where a signed claim exists; these fixtures use a placeholder.
+fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
+    ProvenanceContext {
+        genesis: &G,
+        device_id: &DEV,
+        economic_position: position,
+        network_id: NETWORK,
+        proven_ak: ak,
+        canonical_storage_set_id: [0xB1; 32],
     }
 }
 
@@ -139,8 +158,8 @@ fn source_ids_are_derived_and_distinguish_what_they_should() {
 #[test]
 fn an_intra_transition_move_is_funded_by_its_own_debit() {
     let w = move_witness(30);
-    let funded =
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers).expect("the debit funds it");
+    let funded = verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64]))
+        .expect("the debit funds it");
     assert_eq!(funded.amount, 30);
     assert_eq!(funded.policy_commit, ERA);
     assert_eq!(
@@ -156,7 +175,7 @@ fn a_source_must_fund_this_credit_not_merely_exist() {
     // plausible-looking provenance object stops being sufficient.
     let w = move_witness(500);
     assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers).unwrap_err(),
+        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
         ProvenanceError::AmountMismatch {
             source: 30,
             credit: 500
@@ -167,7 +186,9 @@ fn a_source_must_fund_this_credit_not_merely_exist() {
     // it must succeed. Without this the AmountMismatch assertion could be
     // passing for some unrelated reason.
     let ok = move_witness(30);
-    assert!(verify_credit_source(&ok.credit_sources[0], &ok, &NoPeers).is_ok());
+    assert!(
+        verify_credit_source(&ok.credit_sources[0], &ok, &NoPeers, &ctx(1, &[0xAB; 64])).is_ok()
+    );
 }
 
 #[test]
@@ -186,7 +207,7 @@ fn an_asset_mismatch_is_refused() {
         )],
     );
     assert!(matches!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers),
+        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])),
         Err(ProvenanceError::AssetMismatch { .. })
     ));
 }
@@ -207,7 +228,7 @@ fn authorized_issuance_cannot_be_resolved_by_anyone() {
         )],
     );
     assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers).unwrap_err(),
+        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
         ProvenanceError::IssuancePredicateUndefined
     );
 }
@@ -242,7 +263,7 @@ fn an_unvalidated_peer_debit_fails_closed() {
         )],
     );
     assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers).unwrap_err(),
+        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
         ProvenanceError::PeerTransitionNotValidated {
             peer_economic_position: 4
         }
@@ -257,7 +278,7 @@ fn an_intra_transition_move_needs_no_consumed_source_record() {
     // construction and could never be presented again. Demanding a record
     // would be bookkeeping for an impossibility.
     let w = move_witness(30);
-    let funded = verify_transition_provenance(&w, &NoPeers).expect("funded");
+    let funded = verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64])).expect("funded");
     assert_eq!(funded.len(), 1);
 }
 
@@ -284,7 +305,7 @@ fn duplicate_source_ids_are_refused() {
         ],
     );
     assert_eq!(
-        verify_transition_provenance(&w, &NoPeers).unwrap_err(),
+        verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
         ProvenanceError::DuplicateSourceId
     );
 }
@@ -295,7 +316,9 @@ fn a_transition_with_no_credits_needs_no_provenance() {
         vec![mutation(Some(bal(ERA, 100)), Some(bal(ERA, 70)))],
         Vec::new(),
     );
-    assert!(verify_transition_provenance(&w, &NoPeers)
-        .expect("a pure debit is funded by nothing")
-        .is_empty());
+    assert!(
+        verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64]))
+            .expect("a pure debit is funded by nothing")
+            .is_empty()
+    );
 }
