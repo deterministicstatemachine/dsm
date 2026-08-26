@@ -33,7 +33,7 @@
 //!
 //! ## No `Custom` arm
 //!
-//! The algebra is closed. A credit that names none of these six is unfunded,
+//! The algebra is closed. A credit that names none of these seven is unfunded,
 //! and there is deliberately no escape hatch — an open arm would be where
 //! every future "just this once" credit went.
 //!
@@ -156,7 +156,29 @@ impl CcbObject for CreditSourceVerifiedOfflineReentry {
     const SCHEMA: u16 = 1;
 }
 
-/// One funding statement for one credit. Closed: six arms, no `Custom`.
+/// `0x0030` schema 1 — the recipient credit of a consumed ERA faucet ticket.
+///
+/// Deliberately carries NO asset and NO amount: both are protocol-derived
+/// (builtin ERA, the fixed payout) and already established by the credit
+/// mutation and the addressed evidence — a copy here would be a second place
+/// for one fact to disagree with itself. `faucet_id` is compared against the
+/// CANONICAL `era_faucet_id(network_id)` by the verifier; the descriptor and
+/// the winner agreeing with each other proves nothing about the cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditSourceValidatedFaucetDistribution {
+    pub credit_mutation_index: u32,
+    pub faucet_id: [u8; 32],
+    pub ticket_index: u64,
+    /// Content address of the EXACT signed `FaucetTicketClaimV1` bytes.
+    pub faucet_claim_evidence_addr: [u8; 32],
+}
+
+impl CcbObject for CreditSourceValidatedFaucetDistribution {
+    const CLASS: u16 = class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION;
+    const SCHEMA: u16 = 1;
+}
+
+/// One funding statement for one credit. Closed: seven arms, no `Custom`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditSource {
     AuthorizedIssuance(CreditSourceAuthorizedIssuance),
@@ -165,6 +187,7 @@ pub enum CreditSource {
     DlvReserveConsumption(CreditSourceDlvReserveConsumption),
     ValidatedDlvSettlementPayment(CreditSourceValidatedDlvSettlementPayment),
     VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry),
+    ValidatedFaucetDistribution(CreditSourceValidatedFaucetDistribution),
 }
 
 impl CreditSource {
@@ -181,6 +204,7 @@ impl CreditSource {
                 CreditSourceValidatedDlvSettlementPayment::CLASS
             }
             Self::VerifiedOfflineReentry(_) => CreditSourceVerifiedOfflineReentry::CLASS,
+            Self::ValidatedFaucetDistribution(_) => CreditSourceValidatedFaucetDistribution::CLASS,
         }
     }
 
@@ -194,6 +218,7 @@ impl CreditSource {
             Self::DlvReserveConsumption(s) => s.credit_mutation_index,
             Self::ValidatedDlvSettlementPayment(s) => s.credit_mutation_index,
             Self::VerifiedOfflineReentry(s) => s.credit_mutation_index,
+            Self::ValidatedFaucetDistribution(s) => s.credit_mutation_index,
         }
     }
 
@@ -211,6 +236,7 @@ impl CreditSource {
             Self::DlvReserveConsumption(s) => Some(s.reserve_consumption_evidence_addr),
             Self::ValidatedDlvSettlementPayment(s) => Some(s.payment_evidence_addr),
             Self::VerifiedOfflineReentry(s) => Some(s.branch_evidence_addr),
+            Self::ValidatedFaucetDistribution(s) => Some(s.faucet_claim_evidence_addr),
         }
     }
 
@@ -259,6 +285,13 @@ impl CreditSource {
                 push_digest32(&mut out, &s.trader_genesis); // 5
                 push_digest32(&mut out, &s.trader_devid); // 6
                 push_digest32(&mut out, &s.payment_evidence_addr); // 7
+            }
+            Self::ValidatedFaucetDistribution(s) => {
+                push_envelope::<CreditSourceValidatedFaucetDistribution>(&mut out);
+                push_u32(&mut out, s.credit_mutation_index); // 1
+                push_digest32(&mut out, &s.faucet_id); // 2
+                push_u64(&mut out, s.ticket_index); // 3
+                push_digest32(&mut out, &s.faucet_claim_evidence_addr); // 4
             }
             Self::VerifiedOfflineReentry(s) => {
                 if s.prior_boundary_id == s.unload_boundary_id {

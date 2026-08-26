@@ -113,6 +113,10 @@ pub mod class {
     pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
     pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
     pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
+
+    /// The recipient credit of a consumed ERA faucet ticket — the seventh
+    /// provenance arm. Scoped to one network through its `faucet_id`.
+    pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
@@ -149,9 +153,28 @@ pub mod reserved {
     /// predicate it encodes does.
     pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
 
+    // The offline-account boundary and portable-anchor objects, held for the
+    // Step-5 offline integration cut. Pre-assigned by the frozen plan; made
+    // STRUCTURAL here so a later PR cannot allocate one of these numbers
+    // because "the plan said it was reserved" while the code said nothing.
+    pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
+    pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
+    pub const OFFLINE_SPEND_STEP_EVIDENCE: u16 = 0x002C;
+    pub const OFFLINE_BRANCH_EVIDENCE: u16 = 0x002D;
+    pub const PORTABLE_ANCHOR_ENROLLMENT_BODY: u16 = 0x002E;
+    pub const PORTABLE_HARDWARE_ENROLLMENT_BODY: u16 = 0x002F;
+
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
-    pub const ALL: &[u16] = &[ISSUANCE_AUTHORIZATION_BODY];
+    pub const ALL: &[u16] = &[
+        ISSUANCE_AUTHORIZATION_BODY,
+        OFFLINE_LOAD_BOUNDARY_BODY,
+        OFFLINE_UNLOAD_BOUNDARY_BODY,
+        OFFLINE_SPEND_STEP_EVIDENCE,
+        OFFLINE_BRANCH_EVIDENCE,
+        PORTABLE_ANCHOR_ENROLLMENT_BODY,
+        PORTABLE_HARDWARE_ENROLLMENT_BODY,
+    ];
 
     /// Whether a discriminant is allocated with no encoder. Never true for a
     /// live object's own `CLASS`, which [`super::CcbObject`] supplies.

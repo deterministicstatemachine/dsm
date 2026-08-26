@@ -261,6 +261,7 @@ impl RelationshipStatePair {
                 if key.as_str() == "operation_type" {
                     let op_type = match operation {
                         Operation::Genesis => b"genesis_",
+                        Operation::FaucetClaim { .. } => b"faucetcl",
                         Operation::Generic { .. } => b"generic_",
                         Operation::Transfer { .. } => b"transfer",
                         Operation::Mint { .. } => b"mint____",
