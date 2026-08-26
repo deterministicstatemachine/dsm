@@ -29,7 +29,6 @@ perf = []                         # Performance utilities and benchmarks
 testing = []
 sphincs-trace = []                # Enable verbose SPHINCS+ tracing (debug only)
  formal = []
-faucet = [] # Enable faucet functionality
 # Issue #181 Finding 2: NON_PAPER_MODE testnet/signet bypass is OFF by default.
 # Without this feature, all Bitcoin networks (including Testnet/Signet) require
 # checkpoint-rooted header chains and entry-anchor verification — i.e. the

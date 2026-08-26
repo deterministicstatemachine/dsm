@@ -232,7 +232,7 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         return err("system.createGenesisV2: mnemonic is required".into());
     }
     let network_id = if req.network_id.is_empty() {
-        "mainnet".to_string()
+        "dsm-testnet".to_string()
     } else {
         req.network_id.clone()
     };

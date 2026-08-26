@@ -114,3 +114,9 @@ pub(crate) fn set_binding_key_for_testing(wallet_seed: Vec<u8>) {
 pub(crate) fn clear_binding_key_for_testing() {
     crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
 }
+
+/// Both halves of the device signing keypair, for callers that sign and embed
+/// the public key in one object.
+pub fn current_keypair() -> Result<(Vec<u8>, Vec<u8>), dsm::types::error::DsmError> {
+    Ok((current_public_key()?, current_secret_key()?))
+}
