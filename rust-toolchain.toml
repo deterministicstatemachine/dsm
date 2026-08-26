@@ -1,4 +1,40 @@
+# THE canonical Rust/Clippy version for this repository.
+#
+# This file is the SOLE NORMATIVE declaration:
+#
+#     rust-toolchain.toml          = sole normative Rust version
+#     ci.yml / release.yml         = MIRRORS, proven equal by
+#                                    ci/check_toolchain_consistency.sh
+#     codeql.yml's 1.94 sysroot    = explicit extractor-only exception
+#
+# GitHub Actions cannot read this file to select `uses:`, so the workflow pins
+# must be written out. They are mirrors, NOT independent pins — and an
+# unchecked mirror is only a second declaration that has not drifted yet.
+# The consistency gate is what makes that distinction real; it runs in
+# `make lint` and in ci/production_safety_checks.sh.
+#
+# Consumers:
+#     developer `make lint`            routed via `rustup run $(RUST_PIN)`
+#     ordinary CI                      .github/workflows/ci.yml
+#     RELEASE builds                   .github/workflows/release.yml — test-gate,
+#                                      build-storage-node, build-sbom. These
+#                                      produce the SHIPPED binary and its SBOM;
+#                                      floating them would mean the artifact you
+#                                      release was never built under the version
+#                                      you verified.
+#     ci/production_safety_checks.sh   plain `cargo`, no +override
+#
+# Why this is spelled out: the repository previously carried FOUR different
+# answers to "the CI Rust toolchain" — this file at 1.96.0, ci.yml pinned to
+# 1.96.0, release.yml floating on `stable`, and production_safety_checks.sh
+# escaping to `cargo +stable`. That last one silently defeated the pin, so a
+# clippy release could fail CI on code nobody had touched, and whether a
+# mandatory lint gate examined a crate at all could vary with cache warmth.
+#
+# A `+toolchain` override in a verification command re-creates that defect.
+# Do not add one. If a lint genuinely needs a different version, change THIS
+# file so every consumer moves together.
 [toolchain]
-channel = "1.96.0"
+channel = "1.98.0"
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 profile = "minimal"

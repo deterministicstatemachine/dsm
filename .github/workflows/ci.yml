@@ -41,7 +41,7 @@ jobs:
       # Pinned: rustfmt/clippy output is version-specific. `@stable` drifts on
       # every release and then fails unchanged code on `cargo fmt --check`.
       # Bump this pin deliberately and reformat in the same PR.
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt, clippy
 
@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: actions/setup-java@v5
         with:
@@ -232,7 +232,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: llvm-tools-preview
 
@@ -325,7 +325,7 @@ jobs:
       - uses: actions/checkout@v7
 
       # Same pin as the `rust` job: clippy output is version-specific.
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: thumbv8m.main-none-eabihf
           components: clippy, rustfmt
@@ -482,7 +482,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
 
