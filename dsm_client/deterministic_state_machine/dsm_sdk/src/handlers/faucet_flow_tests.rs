@@ -17,14 +17,14 @@ use crate::sdk::faucet_claim_flow::claim_era_faucet;
 use crate::sdk::storage_set::{StorageSet, StorageSetCatalog};
 use crate::storage::client_db;
 
-const NETWORK: &[u8] = b"mainnet";
+const NETWORK: &[u8] = b"dsm-testnet";
 
-/// Full v3 identity on the MAINNET network (the only one the register profile
+/// Full v3 identity on the beta network (the only one the register profile
 /// resolves — fail-closed by design), with the genesis record persisted so
 /// the flow can read the committed network back. Mirrors
 /// `funded_vault_fixture::install_v3_identity`, which is pinned to
 /// `dsm-test` and therefore cannot be reused here.
-fn install_mainnet_identity(seed: u8) -> (Vec<u8>, [u8; 32], [u8; 32]) {
+fn install_testnet_identity(seed: u8) -> (Vec<u8>, [u8; 32], [u8; 32]) {
     let wallet_seed = vec![seed; 64];
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
     let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
@@ -63,7 +63,7 @@ fn install_mainnet_identity(seed: u8) -> (Vec<u8>, [u8; 32], [u8; 32]) {
         verification_step: None,
         genesis_nonce: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
         genesis_profile: "MnemonicV3".to_string(),
-        network_id: "mainnet".to_string(),
+        network_id: "dsm-testnet".to_string(),
     })
     .expect("store genesis record");
     crate::sdk::app_state::AppState::set_identity_info(
@@ -113,7 +113,7 @@ fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     client_db::reset_database_for_tests();
     client_db::init_database().expect("init db");
     crate::sdk::storage_io::fake_registers::reset();
-    let (public_key, devid, genesis) = install_mainnet_identity(seed);
+    let (public_key, devid, genesis) = install_testnet_identity(seed);
     let core =
         CoreSDK::new_with_device(DeviceInfo::new(devid, public_key.clone())).expect("core sdk");
     core.set_device_head_for_testing(DeviceState::new(genesis, devid, public_key, 1024));

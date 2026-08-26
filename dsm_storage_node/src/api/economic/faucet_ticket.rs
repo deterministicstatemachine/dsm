@@ -198,7 +198,7 @@ mod tests {
     use crate::replication::{ReplicationConfig, ReplicationManager};
     use dsm::economic::faucet::{sign_faucet_ticket_claim, FaucetTicketClaimBody};
 
-    const NETWORK: &[u8] = b"mainnet";
+    const NETWORK: &[u8] = b"dsm-testnet";
 
     fn state_with(
         pool: Arc<db::DBPool>,
