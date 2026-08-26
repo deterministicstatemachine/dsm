@@ -749,9 +749,7 @@ mod tests {
     #[test]
     #[serial]
     fn the_fence_survives_a_reload_through_the_production_loader() {
-        use dsm::economic::admission::{
-            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
-        };
+        use dsm::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
 
         init_test_db();
         let devid = [0xC3u8; 32];
@@ -764,18 +762,21 @@ mod tests {
             .expect("present");
         assert!(plain.pending_economic_admission().is_none());
 
-        let pending = PendingEconomicAdmission {
-            kind: PendingAdmissionKind::OfflineLoad {
+        let pending = PendingEconomicAdmission::prepared(
+            PendingAdmissionKind::OfflineLoad {
                 asset_policy_commit: [0xE5u8; 32],
             },
-            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
-            economic_position: 3,
-            pre_economic_root: [1u8; 32],
+            3,
+            [1u8; 32],
+            [3u8; 32],
+        )
+        .into_locally_accepted(dsm::economic::admission::AcceptedAdmissionCoords {
             post_economic_root: [2u8; 32],
-            operation_digest: [3u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
-        };
+            c_dsm_plus: [6u8; 32],
+        })
+        .expect("prepared -> accepted");
         {
             let binding = get_connection().expect("conn");
             let mut conn = binding.lock().unwrap();

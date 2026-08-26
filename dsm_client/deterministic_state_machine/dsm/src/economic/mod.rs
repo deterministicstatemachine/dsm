@@ -70,6 +70,7 @@ pub mod register;
 pub mod state;
 pub mod tree;
 pub mod witness;
+pub mod write_set;
 
 pub use claim::{
     verify_manifest_provenance_index, AdmissionSubstrate, EconomicAdmissionManifest,

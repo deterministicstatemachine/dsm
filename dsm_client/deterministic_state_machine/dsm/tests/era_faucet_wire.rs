@@ -361,9 +361,7 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
 
 #[test]
 fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
-    use dsm::economic::admission::{
-        EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
-    };
+    use dsm::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
     use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
 
     let devid = [0x33u8; 32];
@@ -402,16 +400,8 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
     // 2. Pending admission bound to THIS operation's digest (attached in
     //    Prepared, which does not fence): the SAME advance succeeds.
     let op_digest = dsm_operation_digest(&op.to_bytes());
-    let pending = PendingEconomicAdmission {
-        kind: PendingAdmissionKind::DsmBacked,
-        state: EconomicAdmissionState::Prepared,
-        economic_position: 1,
-        pre_economic_root: [1; 32],
-        post_economic_root: [2; 32],
-        operation_digest: op_digest,
-        accepted_substrate_addr: [4; 32],
-        admission_manifest_addr: [5; 32],
-    };
+    let pending =
+        PendingEconomicAdmission::prepared(PendingAdmissionKind::DsmBacked, 1, [1; 32], op_digest);
     let fenced = head.with_pending_economic_admission(Some(pending.clone()));
     let outcome = fenced
         .advance(

@@ -404,7 +404,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// (producer-side R_econ leaves, strategy A: a CACHE whose recomputed root
 /// must equal the admitted root on load, with witness replay as recovery
 /// truth — never an authority). Durable protocol state; same rule, no shim.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 8;
+///
+/// v9 (3.5b PR1): `economic_pending_admissions` gains `c_dsm_plus` — the v2
+/// economic operation id binds the accepted successor's chain-state
+/// commitment, and recovery cannot re-derive it from the head, so it is
+/// durable admission state. A stored admission is post-acceptance by
+/// construction (`Prepared` is never durable).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 9;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -1127,6 +1133,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             operation_digest        BLOB NOT NULL,      -- 32B
             accepted_substrate_addr BLOB NOT NULL,      -- 32B
             admission_manifest_addr BLOB NOT NULL,      -- 32B
+            c_dsm_plus              BLOB NOT NULL,      -- 32B, the accepted
+                                                        -- successor's chain-state
+                                                        -- commitment (v2 econ-op-id
+                                                        -- preimage) — recovery
+                                                        -- cannot re-derive it
             updated_at              INTEGER NOT NULL
         );
 

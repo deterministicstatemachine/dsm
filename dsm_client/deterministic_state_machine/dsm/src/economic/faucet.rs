@@ -106,17 +106,25 @@ pub fn dsm_operation_digest(operation_bytes: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// `EconomicOperationId_dsm = H_dom(DSM/economic-operation-id/dsm/v1,
-/// G ‖ DevID ‖ operation_digest_dsm)`.
+/// `EconomicOperationId_dsm = H_dom(DSM/economic-operation-id/dsm/v2,
+/// G ‖ DevID ‖ C_dsm+)`.
+///
+/// `c_dsm_plus` is the accepted DSM successor's chain-state commitment — the
+/// relationship chain tip the acceptance installed. The id names WHICH
+/// authenticated successor performed the operation; the operation digest
+/// names WHAT was performed. Two successors can carry byte-identical
+/// operation bytes, so an id derived from the digest (the burned `/v1`
+/// preimage) could not tell them apart — and
+/// `consumed_source.consumer_economic_operation_id` needs to.
 pub fn dsm_economic_operation_id(
     genesis: &[u8; 32],
     device_id: &[u8; 32],
-    operation_digest: &[u8; 32],
+    c_dsm_plus: &[u8; 32],
 ) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_OPERATION_ID_DSM);
     h.update(genesis);
     h.update(device_id);
-    h.update(operation_digest);
+    h.update(c_dsm_plus);
     *h.finalize().as_bytes()
 }
 
