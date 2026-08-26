@@ -32,6 +32,7 @@ pub mod counterparty_canonical_heads;
 pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
 mod dlv_receipts;
 pub mod economic_admission;
+pub mod economic_faucet;
 mod export;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
@@ -390,7 +391,20 @@ fn get_database_path() -> Result<PathBuf> {
 /// written before any external step so recovery resumes instead of re-signing).
 /// Also durable protocol state that decides what "published", "which set" and
 /// "which claim" mean; same rule as v4 — the version is the authority, no shim.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 7;
+/// 8: ERA faucet claim flow — `faucet_ticket_claim_local` (this device's
+/// frozen ticket-claim envelopes, keyed `(faucet_id, ticket_index)`, replayed
+/// byte-identically: the register compares exact bytes, and SPHINCS+ signing
+/// is deterministic, so a REGENERATED envelope is indistinguishable from a
+/// replayed one — the machinery to regenerate must be absent);
+/// `economic_root_claim_local` (the frozen economic-root claim envelope per
+/// position, signed ONCE and durably retained BEFORE the first
+/// register-member write); `economic_admitted` (the device's admitted
+/// economic position + root — the durable coordinate 3.4 deferred, written in
+/// the same tx that clears the pending admission); `economic_leaf_cache`
+/// (producer-side R_econ leaves, strategy A: a CACHE whose recomputed root
+/// must equal the admitted root on load, with witness replay as recovery
+/// truth — never an authority). Durable protocol state; same rule, no shim.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 8;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -560,6 +574,53 @@ fn create_schema(conn: &Connection) -> Result<()> {
             x               BLOB NOT NULL,
             envelope        BLOB NOT NULL,
             PRIMARY KEY (vault_id, parent_sequence, x)
+        );
+
+        -- v8: this device's frozen ERA faucet-ticket claim envelopes. Exact
+        -- bytes, written before the first register write, replayed verbatim
+        -- on every retry. Never regenerated: deterministic signing makes a
+        -- rebuilt envelope indistinguishable from a replayed one, so the only
+        -- safe design is for regeneration to be impossible.
+        CREATE TABLE IF NOT EXISTS faucet_ticket_claim_local(
+            faucet_id     BLOB NOT NULL,     -- 32B
+            ticket_index  INTEGER NOT NULL,
+            envelope      BLOB NOT NULL,     -- exact FaucetTicketClaimV1 bytes
+            created_at    INTEGER NOT NULL,
+            PRIMARY KEY (faucet_id, ticket_index)
+        );
+
+        -- v8: the frozen economic-root claim envelope for one position.
+        -- Signed ONCE, durably retained BEFORE the first register-member
+        -- write; a byte-different re-encode is a DIFFERENT value at a
+        -- write-once cell.
+        CREATE TABLE IF NOT EXISTS economic_root_claim_local(
+            economic_position INTEGER PRIMARY KEY,
+            k_root            BLOB NOT NULL, -- 32B, derived, stored for reads
+            envelope          BLOB NOT NULL, -- exact EconomicRootClaimV1 bytes
+            created_at        INTEGER NOT NULL
+        );
+
+        -- v8: the admitted economic coordinate — the durable state 3.4
+        -- deferred until it had a producer. Exactly one row (id=1); written
+        -- in the SAME transaction that clears the pending admission, so
+        -- "admitted" and "no longer pending" cannot disagree.
+        CREATE TABLE IF NOT EXISTS economic_admitted(
+            id                INTEGER PRIMARY KEY CHECK (id = 1),
+            economic_position INTEGER NOT NULL,
+            economic_root     BLOB NOT NULL, -- 32B
+            updated_at        INTEGER NOT NULL
+        );
+
+        -- v8: producer-side R_econ leaves (strategy A). A CACHE, never an
+        -- authority: on load its recomputed root MUST equal economic_admitted
+        -- root, else it is discarded and rebuilt by replaying admitted
+        -- witnesses (strategy B, the recovery truth). Written in the same tx
+        -- as economic_admitted.
+        CREATE TABLE IF NOT EXISTS economic_leaf_cache(
+            leaf_key   BLOB PRIMARY KEY,     -- 32B derived key
+            leaf_value BLOB NOT NULL,        -- 32B economic_leaf_value
+            state_ccb  BLOB NOT NULL,        -- exact leaf-state CCB bytes
+            updated_at INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS contacts(

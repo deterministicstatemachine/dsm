@@ -310,6 +310,41 @@ pub fn get_latest_artifact_for_key(object_key: &str) -> Result<Option<FrozenArti
 /// Every artifact still owed to its quorum, oldest first, bounded. Superseded
 /// and published rows are excluded — nothing here is ever a second copy of a
 /// fact, only bytes not yet delivered.
+/// The exact frozen payload for `object_key`'s CURRENT (non-superseded) row.
+/// Recovery reads THIS — never a regenerated object.
+pub fn get_current_artifact_payload(object_key: &str) -> Result<Option<Vec<u8>>> {
+    let binding = crate::storage::client_db::get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            "SELECT payload FROM frozen_publication_artifact
+              WHERE object_key = ?1 AND state != 'superseded'
+              ORDER BY insertion_ordinal DESC LIMIT 1",
+            rusqlite::params![object_key],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// The newest current payload whose object_key starts with `prefix` — used by
+/// admission recovery to find the frozen witness without re-deriving its
+/// address from bytes it does not yet have.
+pub fn find_current_payload_with_prefix(prefix: &str) -> Result<Option<Vec<u8>>> {
+    let binding = crate::storage::client_db::get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            "SELECT payload FROM frozen_publication_artifact
+              WHERE object_key LIKE ?1 || '%' AND state != 'superseded'
+              ORDER BY insertion_ordinal DESC LIMIT 1",
+            rusqlite::params![prefix],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());

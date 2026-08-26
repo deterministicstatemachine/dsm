@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #![allow(clippy::disallowed_methods)]
 
-//! The builtin faucet is UNAVAILABLE, and this file asserts that rather than
-//! testing a grant that must no longer happen.
+//! Route contract for the ticket-model ERA faucet.
 //!
-//! These tests used to assert that `faucet.claim` increased an ERA balance. That
-//! behaviour was the defect: the route minted builtin ERA on nothing more than a
-//! caller-supplied `device_id` plus a local cooldown — no independently verifiable
-//! right to issue. `DeviceState::advance` now refuses builtin issuance outright,
-//! so the grant cannot happen at any layer, and the route says so explicitly.
+//! `faucet.claim` is orchestration only: it derives the committed network from
+//! the STORED genesis record and drives the deterministic claim flow (ticket
+//! win → fence-coupled advance → evidence publication → root registration →
+//! foreign-verifier validation). The full lifecycle is exercised end to end in
+//! `handlers::faucet_flow_tests` over the fake registers; what this file pins
+//! is the route boundary itself:
 //!
-//! The companion test that used two faucet claims as a MECHANISM to check
-//! bilateral-tip isolation is retired with the grant: its premise was that a claim
-//! advances state, which is exactly what no longer occurs. Tip isolation is
-//! exercised by the transfer suites, which advance state through real transitions.
-//!
-//! Restoring a faucet means defining an authenticated issuance predicate whose
-//! evidence the accepting transition validates — at which point these assertions
-//! should be replaced by ones about that predicate, not by re-enabling a grant.
+//! - a device WITHOUT a stored genesis record cannot claim, and the refusal
+//!   names that — the committed network comes from the record, never from the
+//!   caller, so its absence must fail closed rather than default a network;
+//! - `faucet.check_nearby` advertises availability (the ticket model has no
+//!   cooldown and no "nearby"), naming the fixed per-claim payout.
 
 use prost::Message;
 
@@ -71,14 +68,15 @@ fn claim_request() -> Vec<u8> {
     )
 }
 
-/// `faucet.claim` refuses, and says why.
+/// `faucet.claim` with no stored genesis record fails closed, naming the record.
 ///
-/// Asserting on the SPECIFIC reason matters: a bare `!success` would pass just as
-/// happily if the route broke for an unrelated reason, which is how a refusal gets
-/// credited for work it is not doing.
+/// The committed network is read from the genesis record the identity flow
+/// persisted — the caller never chooses it. Asserting on the SPECIFIC reason
+/// matters: a bare `!success` would pass just as happily if the route broke for
+/// an unrelated reason.
 #[test]
 #[serial_test::serial]
-fn faucet_claim_is_refused_because_builtin_issuance_is_unauthenticated() {
+fn faucet_claim_without_a_stored_genesis_record_fails_closed_naming_it() {
     let r = router();
     let res = runtime::get_runtime().block_on(async {
         r.invoke(AppInvoke {
@@ -88,22 +86,25 @@ fn faucet_claim_is_refused_because_builtin_issuance_is_unauthenticated() {
         .await
     });
 
-    assert!(!res.success, "the builtin faucet must not grant ERA");
+    assert!(
+        !res.success,
+        "a claim must not proceed without the committed network"
+    );
     let msg = res.error_message.unwrap_or_default();
     assert!(
-        msg.contains("builtin faucet issuance unavailable"),
-        "the refusal must name the missing authenticated issuance predicate, got: {msg}"
+        msg.contains("no stored genesis record"),
+        "the refusal must name the missing genesis record, got: {msg}"
     );
 }
 
-/// `faucet.check_nearby` advertises the same thing the claim will do.
+/// `faucet.check_nearby` advertises availability and the fixed payout.
 ///
-/// A check that reported "available" while every claim refused would send callers
-/// into a guaranteed failure and read like a transient outage rather than a
-/// deliberate shutdown.
+/// The ticket model has no cooldown and no proximity: availability is "the
+/// flow is wired and the device has an identity". A check that reported
+/// unavailable while claims succeed would read like an outage.
 #[test]
 #[serial_test::serial]
-fn faucet_check_nearby_reports_unavailable_rather_than_advertising_a_grant() {
+fn faucet_check_nearby_advertises_the_fixed_payout() {
     let r = router();
     let res = runtime::get_runtime().block_on(async {
         r.query(AppQuery {
@@ -113,18 +114,15 @@ fn faucet_check_nearby_reports_unavailable_rather_than_advertising_a_grant() {
         .await
     });
 
-    assert!(
-        res.success,
-        "the check itself answers; it is the ANSWER that is negative"
-    );
+    assert!(res.success, "the check itself must answer");
     let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
     match env.payload {
         Some(generated::envelope::Payload::FaucetClaimResponse(f)) => {
-            assert!(!f.success, "must not advertise an available faucet");
-            assert_eq!(f.tokens_received, 0);
+            assert!(f.success, "the ticket faucet is available");
+            assert_eq!(f.tokens_received, 0, "the check grants nothing");
             assert!(
-                f.message.contains("builtin faucet issuance unavailable"),
-                "must name the reason, got: {}",
+                f.message.contains("100"),
+                "must name the fixed per-claim payout, got: {}",
                 f.message
             );
         }

@@ -31,6 +31,8 @@ pub mod bitcoin_invoke_routes;
 pub mod bitcoin_query_routes;
 pub mod contacts_routes;
 pub mod dlv_routes;
+#[cfg(test)]
+mod faucet_flow_tests;
 pub mod faucet_routes;
 pub mod identity_routes;
 pub mod inbox_routes;

@@ -10,8 +10,6 @@ pub mod token_registry;
 pub mod token_state_manager;
 
 // Optional modules (enable via Cargo features)
-#[cfg(feature = "faucet")]
-pub mod faucet;
 
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
@@ -31,7 +29,3 @@ pub use token_state_manager::{
     resolve_ticker_for_policy_commit, derive_canonical_balance_key, resolve_policy_commit,
     PolicyCommitResolver, TokenStateManager, TokenTransfer,
 };
-
-// Re-export faucet only when enabled and implemented
-#[cfg(feature = "faucet")]
-pub use faucet::{EraFaucet, FaucetClaim, FaucetClaimResult, FaucetConfig};
