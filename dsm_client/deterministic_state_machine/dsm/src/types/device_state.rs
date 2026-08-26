@@ -455,6 +455,24 @@ fn validate_conservation(
         ));
     }
     match operation {
+        Operation::FaucetClaim { .. } => {
+            // The economics are DERIVED, never carried: exactly one credit of
+            // exactly the fixed payout of exactly builtin ERA. The operation
+            // has no amount/asset fields to lie with, and this arm is what
+            // stops a delta smuggling a different quantity in beside it.
+            let era = crate::core::token::token_state_manager::era_policy_commit();
+            if deltas.len() != 1
+                || deltas[0].direction != BalanceDirection::Credit
+                || deltas[0].amount != crate::economic::faucet::ERA_FAUCET_PAYOUT
+                || deltas[0].policy_commit != era
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: a faucet claim applies exactly one credit of exactly the \
+                     derived payout of builtin ERA — nothing about it is caller-chosen",
+                ));
+            }
+            Ok(())
+        }
         Operation::Transfer {
             to_device_id,
             amount,
@@ -1504,6 +1522,49 @@ impl DeviceState {
             let effect = crate::economic::classifier::classify(&operation);
             crate::economic::admission::fence_allows(pending, effect, &operation)
                 .map_err(|blocked| DsmError::invalid_operation(format!("advance: {blocked}")))?;
+        }
+
+        // THE FAUCET-CLAIM ACCEPTING GATE. A faucet claim must not be a raw
+        // local-balance mint: it is refused unless a matching economic
+        // admission is ALREADY attached to this head (attached in `Prepared`,
+        // which does not fence), binding this exact operation's digest. The
+        // only way core installs the +100 is with the fence already riding
+        // the head, and the commit seam makes head+row atomic. A modified
+        // client that skips the attach gets this refusal; one that fakes and
+        // locally clears it holds value NO FOREIGN VERIFIER accepts — which
+        // is the economic-root guarantee doing its job.
+        //
+        // Range is enforced here too; the CANONICAL faucet_id is enforced
+        // where the authenticated network_id exists (the provenance verifier,
+        // and the register node) — this layer has only the genesis DIGEST and
+        // cannot recompute era_faucet_id(network_id) without un-hashing it.
+        if let Operation::FaucetClaim { ticket_index, .. } = &operation {
+            if *ticket_index >= crate::economic::faucet::ERA_FAUCET_TICKET_COUNT {
+                return Err(DsmError::invalid_operation(format!(
+                    "advance: faucet ticket_index {ticket_index} is not a coordinate that \
+                     exists — the allocation is exactly {} tickets",
+                    crate::economic::faucet::ERA_FAUCET_TICKET_COUNT
+                )));
+            }
+            let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+            match &self.pending_economic_admission {
+                Some(pending) if pending.operation_digest == op_digest => {}
+                Some(_) => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: refusing a faucet claim whose digest does not match the \
+                         pending economic admission — the admission authorizes exactly one \
+                         operation",
+                    ));
+                }
+                None => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: refusing a faucet claim with no pending economic admission \
+                         — a claim that installed balance without the admission fence would \
+                         be a raw local mint, spendable before any foreign verifier could \
+                         refuse it",
+                    ));
+                }
+            }
         }
 
         if let Operation::Mint { policy_commit, .. } = &operation {

@@ -22,7 +22,8 @@ use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
     CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
     CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
+    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
+    CreditSourceVerifiedOfflineReentry,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::{
@@ -293,6 +294,20 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     trader_genesis: c.digest32()?,
                     trader_devid: c.digest32()?,
                     payment_evidence_addr: c.digest32()?,
+                },
+            ))
+        }
+        class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION => {
+            c.envelope(
+                CreditSourceValidatedFaucetDistribution::CLASS,
+                CreditSourceValidatedFaucetDistribution::SCHEMA,
+            )?;
+            Ok(CreditSource::ValidatedFaucetDistribution(
+                CreditSourceValidatedFaucetDistribution {
+                    credit_mutation_index: c.u32()?,
+                    faucet_id: c.digest32()?,
+                    ticket_index: c.u64()?,
+                    faucet_claim_evidence_addr: c.digest32()?,
                 },
             ))
         }

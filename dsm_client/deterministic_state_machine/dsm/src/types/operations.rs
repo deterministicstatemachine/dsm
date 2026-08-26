@@ -296,6 +296,28 @@ pub enum Operation {
         /// [`AuthorityPolicy`].
         authority_policy: Option<AuthorityPolicy>,
     },
+    /// Consume ONE single-use ERA faucet ticket, crediting the fixed payout.
+    ///
+    /// MINIMAL by design: no token id, no policy commit, no amount, no nonce.
+    /// The economics are DERIVED in Rust (builtin ERA, `ERA_FAUCET_PAYOUT`),
+    /// so "no caller-supplied amount anywhere" is literally true, and the
+    /// operation is completely reconstructible from the retained claim
+    /// envelope — which closes the crash window between winning the ticket
+    /// and committing the advance. Canonical tag 31, mode Unilateral (there
+    /// is no counterparty; the ticket register is the other party).
+    ///
+    /// This is NOT a mint. The units come from the network's finite bootstrap
+    /// allocation (800M tickets × 100 ERA); consuming the ticket is the
+    /// source depletion, and the accepting transition refuses this operation
+    /// unless a matching economic admission is already pending — see
+    /// `DeviceState::advance`.
+    FaucetClaim {
+        /// The canonical network-scoped faucet identity,
+        /// `era_faucet_id(network_id)`.
+        faucet_id: [u8; 32],
+        /// Which ticket. Must be `< ERA_FAUCET_TICKET_COUNT`.
+        ticket_index: u64,
+    },
     /// Mint new tokens into existence (requires authorization proof).
     Mint {
         /// Quantity of tokens to mint (must be > 0).
@@ -781,6 +803,8 @@ impl Operation {
     pub fn is_value_egress(&self) -> bool {
         use Operation::*;
         match self {
+            // Ingress: a faucet claim only credits; nothing leaves.
+            FaucetClaim { .. } => false,
             // Owner value egress / value-state movement of the owner's funds.
             Transfer { .. }
             | Burn { .. }
@@ -852,7 +876,10 @@ impl Operation {
         // Value ingress: receiving, minting, and token creation bring value INTO the
         // relationship without being egress. Everything else (identity, relationship,
         // recovery, links, invalidation, generic, no-op) is non-value.
-        matches!(self, Mint { .. } | Receive { .. } | CreateToken { .. })
+        matches!(
+            self,
+            Mint { .. } | Receive { .. } | CreateToken { .. } | FaucetClaim { .. }
+        )
     }
 
     /// The bearer asset this operation egresses (spec §0.4 P5 per-asset spend-gate).
@@ -865,6 +892,8 @@ impl Operation {
     pub fn egress_asset(&self) -> EgressAsset {
         use Operation::*;
         match self {
+            // Ingress-only; the invariant is_value_egress() == !NotEgress holds.
+            FaucetClaim { .. } => EgressAsset::NotEgress,
             Transfer {
                 token_id, amount, ..
             } => EgressAsset::Asset {
@@ -1049,6 +1078,17 @@ impl Operation {
         match self {
             Genesis => {
                 put_u8(&mut out, 0);
+            }
+            FaucetClaim {
+                faucet_id,
+                ticket_index,
+            } => {
+                // Canonical tag 31. Tags 29/30 are RESERVED for
+                // DlvCreateFundedV2 / DlvOwnerApplyV2 by the frozen economic
+                // plan — landing first does not confer the right to take them.
+                put_u8(&mut out, 31);
+                put_bytes(&mut out, faucet_id.as_slice());
+                put_u64(&mut out, *ticket_index);
             }
             Create {
                 message,
@@ -2471,6 +2511,7 @@ impl Operation {
     pub fn get_operation_type(&self) -> &'static str {
         match self {
             Operation::Genesis => "genesis",
+            Operation::FaucetClaim { .. } => "faucet_claim",
             Operation::Create { .. } => "create",
             Operation::Update { .. } => "update",
             Operation::Transfer { .. } => "transfer",
@@ -2627,6 +2668,7 @@ impl Ops for Operation {
     fn get_id(&self) -> &str {
         match self {
             Operation::Genesis => "genesis",
+            Operation::FaucetClaim { .. } => "faucet_claim",
             Operation::Generic { .. } => "generic",
             Operation::Transfer { .. } => "transfer",
             Operation::Mint { .. } => "mint",

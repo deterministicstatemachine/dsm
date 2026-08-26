@@ -131,6 +131,16 @@ pub fn derive_canonical_balance_key(
 
 /// Deterministic policy_commit lookup for builtin token types.
 /// Used by state machine core to apply token operations deterministically.
+/// The builtin ERA policy commit, infallibly.
+///
+/// `builtin_policy_commit_for_token("ERA")` returns `Option` only because it
+/// is a string-keyed lookup; the "ERA" arm is a constant that cannot miss.
+/// Callers that mean ERA specifically should use this and carry no
+/// panic-or-error path for an impossibility.
+pub fn era_policy_commit() -> [u8; 32] {
+    ERA_POLICY_COMMIT
+}
+
 pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
     // These values must match the SDK's policy/builtins.rs for consistency.
     // Era/dBTC are the canonical builtin tokens for DSM.

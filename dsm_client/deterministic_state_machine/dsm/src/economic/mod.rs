@@ -61,6 +61,7 @@ pub mod claim_envelope;
 pub mod classifier;
 pub mod credit;
 pub mod decode;
+pub mod faucet;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;

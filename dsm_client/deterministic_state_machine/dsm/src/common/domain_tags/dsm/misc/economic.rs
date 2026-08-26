@@ -102,3 +102,43 @@ pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
 /// presented.
 pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/validated-peer-debit/v1");
+
+/// The canonical, NETWORK-SCOPED ERA faucet identity:
+/// `era_faucet_id(network_id) = H(tag ‖ 0x00 ‖ network_id ‖ ERA_POLICY_COMMIT)`.
+///
+/// Network-scoped because claims are won in the register set the claimant's
+/// `network_id` resolves: an asset-only id would let two networks each consume
+/// ticket `i` and each validate +100 ERA — the 80B cap silently multiplied by
+/// the number of networks. One finite allocation PER DSM network; the verifier
+/// derives `network_id` from the AUTHENTICATED Genesis v3, never from the
+/// claimant.
+pub const TAG_DSM_ERA_FAUCET_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/era-faucet-id/v1");
+/// The signed preimage of a faucet ticket claim:
+/// `m = H(tag ‖ 0x00 ‖ canonical FaucetTicketClaimBodyV1 bytes)`.
+pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim-sign/v1");
+/// Immutable-store namespace for the EXACT signed `FaucetTicketClaimV1`
+/// envelope bytes — what `faucet_claim_evidence_addr` addresses.
+pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim/v1");
+/// Client-side ticket SEARCH seed (strategy, not validity — any in-range
+/// ticket is valid; this only decides where a claimant looks first):
+/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64_be(target_economic_position) ‖ u64_be(attempt))`.
+/// The position is in the seed so each admitted position gets its own
+/// deterministic sequence rather than re-walking every consumed ticket.
+pub const TAG_DSM_ERA_FAUCET_TICKET_SELECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/era-faucet-ticket-select/v1");
+/// `SourceId` for a consumed faucet ticket:
+/// `H(tag ‖ 0x00 ‖ faucet_id ‖ u64_be(ticket_index))`. Inherits the network
+/// scope through `faucet_id`.
+pub const TAG_DSM_ECON_SOURCE_ERA_FAUCET_TICKET: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/era-faucet-ticket/v1");
+/// Digest of an ordinary DSM operation for economic binding:
+/// `operation_digest_dsm = H(tag ‖ 0x00 ‖ exact Operation::to_bytes())`.
+pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-digest/dsm/v1");
+/// Identity of an economic operation on the DSM substrate:
+/// `EconomicOperationId_dsm = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ operation_digest_dsm)`.
+pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v1");

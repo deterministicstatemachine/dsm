@@ -127,6 +127,19 @@ pub fn extract_operation_parameters(
     operation: &Operation,
 ) -> Result<HashMap<String, Vec<u8>>, DsmError> {
     match operation {
+        Operation::FaucetClaim {
+            faucet_id,
+            ticket_index,
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"faucet_claim".to_vec());
+            params.insert("faucet_id".to_string(), faucet_id.to_vec());
+            params.insert(
+                "ticket_index".to_string(),
+                ticket_index.to_be_bytes().to_vec(),
+            );
+            Ok(params)
+        }
         Operation::Genesis => {
             let mut params = HashMap::new();
             params.insert("operation_type".to_string(), b"genesis".to_vec());

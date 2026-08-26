@@ -616,14 +616,16 @@ fn a_reserved_class_is_unusable_on_the_wire_until_its_schema_is_installed() {
     // so there are no canonical bytes to produce, hash-address, nest or sign.
     // The witness verifier consequently takes EconomicMutationSequence, which
     // has no class and is explicitly not a wire object.
-    // 0x001D and 0x0023-0x0028 were promoted by the provenance wire freeze,
-    // and having to edit this line is the point: promotion is a deliberate
-    // diff, arriving with the field tables that make those classes encodable.
-    // 0x0029 stays reserved because its field table would encode an issuance
-    // predicate this protocol does not have.
+    // Editing this assertion is the point: reserving or promoting a class is
+    // a deliberate diff. 0x0029 stays reserved (its field table would encode
+    // an issuance predicate this protocol does not have); 0x002A-0x002F are
+    // STRUCTURALLY held for the Step-5 offline/portable objects, so a later
+    // PR cannot allocate one because "the plan said it was reserved" while
+    // the code said nothing; 0x0030 was allocated PAST them for the faucet
+    // credit source.
     assert_eq!(
         reserved::ALL,
-        &[0x0029],
+        &[0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F],
         "the reserved set is exact — promoting a class must be a deliberate diff here"
     );
     for c in reserved::ALL {
@@ -631,7 +633,7 @@ fn a_reserved_class_is_unusable_on_the_wire_until_its_schema_is_installed() {
     }
     assert!(
         !reserved::is_reserved(0x0030),
-        "0x0030 is the next FREE class"
+        "0x0030 is LIVE (faucet distribution); 0x0031 is the next free class"
     );
 }
 
@@ -660,6 +662,7 @@ fn reserved_classes_have_no_encoder() {
         dsm::economic::credit::CreditSourceDlvReserveConsumption::CLASS,
         dsm::economic::credit::CreditSourceValidatedDlvSettlementPayment::CLASS,
         dsm::economic::credit::CreditSourceVerifiedOfflineReentry::CLASS,
+        dsm::economic::credit::CreditSourceValidatedFaucetDistribution::CLASS,
     ];
     for class in encodable {
         assert!(
@@ -673,7 +676,7 @@ fn reserved_classes_have_no_encoder() {
         encodable,
         [
             0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025,
-            0x0026, 0x0027, 0x0028
+            0x0026, 0x0027, 0x0028, 0x0030
         ]
     );
 }
