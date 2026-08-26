@@ -142,3 +142,9 @@ pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =
 /// `EconomicOperationId_dsm = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ operation_digest_dsm)`.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v1");
+
+/// Digest of the exact `EconomicRootClaimV1` envelope bytes a register member
+/// stores and compares: `H(tag ‖ 0x00 ‖ envelope_bytes)`. The settlement
+/// register's `-envelope` tag, for this register.
+pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-root-claim-envelope/v1");

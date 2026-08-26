@@ -189,6 +189,18 @@ pub fn decode_and_verify_economic_root_claim(
     })
 }
 
+/// `H_dom(DSM/economic-root-claim-envelope/v1, exact envelope bytes)` — the
+/// digest a register member stores beside the bytes and returns in a refused
+/// response, so a loser can tell "someone else holds this cell" from "someone
+/// holds MY exact bytes" without fetching them.
+pub fn economic_root_claim_envelope_digest(envelope_bytes: &[u8]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE,
+    );
+    h.update(envelope_bytes);
+    *h.finalize().as_bytes()
+}
+
 /// The member-side attribution check. Storage-layer only.
 ///
 /// Deliberately takes a decoded-and-signature-verified claim: a member that
