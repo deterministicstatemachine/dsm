@@ -192,31 +192,62 @@ pub fn activate(
     })
 }
 
-/// A substrate acceptance the caller has **verified**, carrying the digest
-/// that binds it to one operation.
+/// A verified DSM-successor acceptance: the exact operation the successor
+/// carried and the successor's chain-state commitment.
 ///
-/// The private field means this cannot be conjured from a literal; the named
-/// constructors state what the caller must have established first. Verifying
-/// the substrate evidence itself — the exact `C_dsm+` / `sigma_dsm`, or the
-/// exact `OfflineBoundaryAttestationV1` — happens at the acceptance layer, and
-/// is not repeated here.
+/// Private fields: this cannot be conjured from a literal. The constructor's
+/// contract is that the exact `C_dsm+` / `sigma_dsm` evidence at
+/// `evidence_addr` has been verified and found to carry `verified_operation`
+/// and commit `c_dsm_plus`. The operation DIGEST is derived here, never
+/// supplied — a caller cannot claim a digest its own operation bytes do not
+/// produce — and `c_dsm_plus` is what the v2 economic operation id binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedDsmSuccessor {
+    verified_operation: crate::types::operations::Operation,
+    operation_digest: [u8; 32],
+    c_dsm_plus: [u8; 32],
+    evidence_addr: [u8; 32],
+}
+
+/// A verified offline-boundary acceptance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AcceptedSubstrate {
+pub struct AcceptedOfflineBoundary {
     operation_digest: [u8; 32],
     evidence_addr: [u8; 32],
 }
 
+/// A substrate acceptance the caller has **verified** — TYPED, because the
+/// two substrates prove different things and the manifest states which one an
+/// admission used. `advance_validated` requires SAME-KIND equality with the
+/// manifest's substrate slot; erasing the kind here would let a DSM successor
+/// validate against a manifest naming an offline boundary (or vice versa)
+/// whenever the digests happened to agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptedSubstrate {
+    // Boxed: the successor arm carries the verified operation (~500B) while
+    // the boundary arm is two digests; an unboxed enum would make every
+    // substrate the size of the largest.
+    DsmSuccessor(Box<AcceptedDsmSuccessor>),
+    OfflineBoundary(AcceptedOfflineBoundary),
+}
+
 impl AcceptedSubstrate {
-    /// Call only after the exact `C_dsm+` / `sigma_dsm` at `evidence_addr` has
-    /// been verified and found to commit `operation_digest`.
+    /// Call only after the exact `C_dsm+` / `sigma_dsm` at `evidence_addr`
+    /// has been verified and found to carry exactly `verified_operation` and
+    /// commit `c_dsm_plus` (the accepted successor's chain-state commitment).
     pub fn from_verified_dsm_successor(
-        operation_digest: [u8; 32],
+        verified_operation: crate::types::operations::Operation,
+        c_dsm_plus: [u8; 32],
         evidence_addr: [u8; 32],
     ) -> Self {
-        Self {
+        let operation_digest =
+            crate::economic::faucet::dsm_operation_digest(&verified_operation.to_bytes());
+        Self::DsmSuccessor(Box::new(AcceptedDsmSuccessor {
+            verified_operation,
             operation_digest,
+            c_dsm_plus,
             evidence_addr,
-        }
+        }))
     }
 
     /// Call only after the exact `OfflineBoundaryAttestationV1` at
@@ -226,18 +257,24 @@ impl AcceptedSubstrate {
         operation_digest: [u8; 32],
         evidence_addr: [u8; 32],
     ) -> Self {
-        Self {
+        Self::OfflineBoundary(AcceptedOfflineBoundary {
             operation_digest,
             evidence_addr,
-        }
+        })
     }
 
     pub fn operation_digest(&self) -> [u8; 32] {
-        self.operation_digest
+        match self {
+            Self::DsmSuccessor(s) => s.operation_digest,
+            Self::OfflineBoundary(b) => b.operation_digest,
+        }
     }
 
     pub fn evidence_addr(&self) -> [u8; 32] {
-        self.evidence_addr
+        match self {
+            Self::DsmSuccessor(s) => s.evidence_addr,
+            Self::OfflineBoundary(b) => b.evidence_addr,
+        }
     }
 }
 
@@ -263,6 +300,27 @@ pub enum EconomicValidationError {
         substrate: [u8; 32],
         witness: [u8; 32],
     },
+    /// The witness names an economic operation id that is not the v2 identity
+    /// of the accepted successor (`H(G ‖ DevID ‖ C_dsm+)`).
+    EconomicOperationIdMismatch {
+        expected: [u8; 32],
+        witness: [u8; 32],
+    },
+    /// The accepted substrate and the manifest's substrate slot are different
+    /// KINDS (DSM successor vs offline boundary).
+    SubstrateKindMismatch,
+    /// Same kind, but the manifest names different substrate evidence than
+    /// the acceptance actually used.
+    SubstrateEvidenceMismatch {
+        manifest: [u8; 32],
+        accepted: [u8; 32],
+    },
+    /// Offline-boundary admissions have no specified write-set semantics yet
+    /// (Step 5); fail closed rather than validate an unchecked boundary.
+    OfflineBoundaryWriteSetNotYetSpecified,
+    /// The witness is not the exact economic effect of the accepted
+    /// operation.
+    WriteSet(crate::economic::write_set::WriteSetError),
     /// The registration names a manifest other than the one supplied.
     ManifestAddrMismatch {
         registered: [u8; 32],
@@ -301,6 +359,28 @@ impl core::fmt::Display for EconomicValidationError {
                  DIFFERENT operation digests — each is individually valid and the pair describes \
                  two different operations"
             ),
+            Self::EconomicOperationIdMismatch { .. } => write!(
+                f,
+                "economic validation: the witness's economic operation id is not the v2 \
+                 identity of the accepted successor — it names WHICH successor performed the \
+                 operation, and this witness names a different one"
+            ),
+            Self::SubstrateKindMismatch => write!(
+                f,
+                "economic validation: the accepted substrate and the manifest's substrate slot \
+                 are different kinds"
+            ),
+            Self::SubstrateEvidenceMismatch { .. } => write!(
+                f,
+                "economic validation: the manifest names different substrate evidence than the \
+                 acceptance actually used — the evidence DAG would no longer be the evidence"
+            ),
+            Self::OfflineBoundaryWriteSetNotYetSpecified => write!(
+                f,
+                "economic validation: offline-boundary write-set semantics are not yet \
+                 specified; failing closed"
+            ),
+            Self::WriteSet(e) => write!(f, "economic validation: {e}"),
             Self::ManifestAddrMismatch { .. } => write!(
                 f,
                 "economic validation: the registration names a different admission manifest than \
@@ -361,12 +441,77 @@ pub fn advance_validated(
         });
     }
     // The clause that stops a valid successor being paired with a valid
-    // transition for a DIFFERENT operation.
-    if accepted.operation_digest != witness.operation_digest {
+    // transition for a DIFFERENT operation. For a DSM successor the digest is
+    // DERIVED from the verified operation bytes inside the constructor, so
+    // this equality reaches back to the operation itself.
+    if accepted.operation_digest() != witness.operation_digest {
         return Err(EconomicValidationError::OperationDigestMismatch {
-            substrate: accepted.operation_digest,
+            substrate: accepted.operation_digest(),
             witness: witness.operation_digest,
         });
+    }
+    // SAME-KIND substrate binding: the manifest's substrate slot must name
+    // the kind AND the exact evidence the acceptance used. Without this, a
+    // caller validates one authenticated successor while the registered
+    // manifest names a different evidence object — the transition might pass
+    // on coinciding digests, but the evidence DAG would no longer be the
+    // evidence actually used.
+    match (accepted, &manifest.substrate) {
+        (
+            AcceptedSubstrate::DsmSuccessor(s),
+            crate::economic::claim::AdmissionSubstrate::DsmSuccessor { evidence_addr },
+        ) => {
+            if *evidence_addr != s.evidence_addr {
+                return Err(EconomicValidationError::SubstrateEvidenceMismatch {
+                    manifest: *evidence_addr,
+                    accepted: s.evidence_addr,
+                });
+            }
+            // v2 operation identity: the witness must name THIS successor,
+            // not merely this operation. Two successors can carry
+            // byte-identical operations; `C_dsm+` is what tells them apart,
+            // and `consumed_source.consumer_economic_operation_id` depends
+            // on it being told apart.
+            let expected = crate::economic::faucet::dsm_economic_operation_id(
+                genesis,
+                device_id,
+                &s.c_dsm_plus,
+            );
+            if expected != witness.economic_operation_id {
+                return Err(EconomicValidationError::EconomicOperationIdMismatch {
+                    expected,
+                    witness: witness.economic_operation_id,
+                });
+            }
+            // The operation ↔ write-set binding: the mutations must be the
+            // EXACT semantic effect of the verified operation — no missing
+            // mutation, no extra mutation, exact asset, exact amount, exact
+            // role, exact source kind. Everything else here proves the write
+            // set internally consistent and funded; THIS proves it is the
+            // write set of this operation.
+            crate::economic::write_set::verify_operation_write_set(
+                &s.verified_operation,
+                genesis,
+                device_id,
+                witness,
+            )
+            .map_err(EconomicValidationError::WriteSet)?;
+        }
+        (
+            AcceptedSubstrate::OfflineBoundary(b),
+            crate::economic::claim::AdmissionSubstrate::OfflineBoundary { evidence_addr },
+        ) => {
+            if *evidence_addr != b.evidence_addr {
+                return Err(EconomicValidationError::SubstrateEvidenceMismatch {
+                    manifest: *evidence_addr,
+                    accepted: b.evidence_addr,
+                });
+            }
+            // Step 5 owes the boundary write-set semantics; an unchecked
+            // boundary admission must not validate meanwhile.
+            return Err(EconomicValidationError::OfflineBoundaryWriteSetNotYetSpecified);
+        }
+        _ => return Err(EconomicValidationError::SubstrateKindMismatch),
     }
     let computed = manifest.addr().map_err(EconomicValidationError::Manifest)?;
     if registered.admission_manifest_addr != computed {

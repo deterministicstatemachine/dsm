@@ -31,6 +31,7 @@ use crate::economic::state::{
     EconomicSettlementReceiptState, EconomicVaultReserveState,
 };
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
+use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use crate::economic::witness::EconomicTransitionWitness;
 
 /// Decode an `EconomicTransitionWitness` — class `0x001D`, schema 1, strict.
@@ -67,6 +68,92 @@ pub fn decode_credit_source(bytes: &[u8]) -> Result<CreditSource, DecodeError> {
         });
     }
     Ok(s)
+}
+
+/// Decode an `EconomicAdmissionManifest` — class `0x001C`, schema 1, strict.
+///
+/// Canonicality is part of validity: the provenance index must arrive sorted
+/// strictly ascending (the encoder's order), and exactly one substrate slot
+/// must be present. Rebuilding through `new` would silently CANONICALIZE
+/// unsorted bytes — a decoder must refuse them instead, or two byte strings
+/// would decode to one object and the address would stop being exact.
+pub fn decode_admission_manifest(bytes: &[u8]) -> Result<EconomicAdmissionManifest, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(
+        EconomicAdmissionManifest::CLASS,
+        EconomicAdmissionManifest::SCHEMA,
+    )?;
+    let authority_position = c.digest32()?;
+    let transition_witness_addr = c.digest32()?;
+    let authority_evidence_addr = c.digest32()?;
+    let dsm_marker = c.u8()?;
+    let substrate = match dsm_marker {
+        0x01 => {
+            let evidence_addr = c.digest32()?;
+            match c.u8()? {
+                0x00 => AdmissionSubstrate::DsmSuccessor { evidence_addr },
+                0x01 => {
+                    return Err(DecodeError::Invalid(
+                        "manifest: both substrate slots present — exactly one substrate"
+                            .to_string(),
+                    ))
+                }
+                other => {
+                    return Err(DecodeError::Invalid(format!(
+                        "manifest: substrate marker must be 0x00 or 0x01, got {other:#04x}"
+                    )))
+                }
+            }
+        }
+        0x00 => match c.u8()? {
+            0x01 => AdmissionSubstrate::OfflineBoundary {
+                evidence_addr: c.digest32()?,
+            },
+            0x00 => {
+                return Err(DecodeError::Invalid(
+                    "manifest: no substrate slot present — exactly one substrate".to_string(),
+                ))
+            }
+            other => {
+                return Err(DecodeError::Invalid(format!(
+                    "manifest: substrate marker must be 0x00 or 0x01, got {other:#04x}"
+                )))
+            }
+        },
+        other => {
+            return Err(DecodeError::Invalid(format!(
+                "manifest: substrate marker must be 0x00 or 0x01, got {other:#04x}"
+            )))
+        }
+    };
+    let count = c.u32()? as usize;
+    let mut addrs: Vec<[u8; 32]> = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let addr = c.digest32()?;
+        if let Some(last) = addrs.last() {
+            if *last >= addr {
+                return Err(DecodeError::Invalid(
+                    "manifest: provenance index must be sorted strictly ascending — \
+                     non-canonical bytes are refused, never canonicalized"
+                        .to_string(),
+                ));
+            }
+        }
+        addrs.push(addr);
+    }
+    if c.i != bytes.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        });
+    }
+    EconomicAdmissionManifest::new(
+        authority_position,
+        transition_witness_addr,
+        authority_evidence_addr,
+        substrate,
+        addrs,
+    )
+    .map_err(invalid)
 }
 
 /// Decode a standalone `EconomicLeafState` — one of classes `0x001F`–`0x0022`.
