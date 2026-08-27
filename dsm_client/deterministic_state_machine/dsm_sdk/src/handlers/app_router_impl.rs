@@ -1177,6 +1177,82 @@ impl AppRouterImpl {
             }
         }
 
+        // ── 3.5b SENDER ECONOMIC ADMISSION (register at send) ──────────────
+        // A pending admission is RESUMED first — never abandoned, never raced
+        // (the authoritative serialization is inside the advance seam; this
+        // early pass keeps the deep-fence refusal from being the first line
+        // of defense). Then the prerequisites for THIS send's admission are
+        // assembled: the debit registers before anything is deliverable.
+        let econ_network = match crate::sdk::economic_admission_flow::committed_network_id() {
+            Ok(n) => n,
+            Err(e) => return err(format!("wallet.send: committed network: {e}")),
+        };
+        {
+            let pending = self
+                .core_sdk
+                .device_head()
+                .and_then(|h| h.pending_economic_admission().cloned());
+            if let Some(pending) = pending {
+                if let Err(e) = crate::sdk::economic_admission_flow::resume_pending_admission(
+                    &self.core_sdk,
+                    &econ_network,
+                    pending,
+                )
+                .await
+                {
+                    return err(format!(
+                        "wallet.send: a pending economic admission could not be finished — \
+                         retry once storage is reachable: {e}"
+                    ));
+                }
+            }
+        }
+        let econ_set = match crate::sdk::economic_admission_flow::canonical_set(&econ_network) {
+            Ok(s) => s,
+            Err(e) => return err(format!("wallet.send: canonical register set: {e}")),
+        };
+        let econ_validated =
+            match crate::sdk::economic_admission_flow::validated_root_or_activate(&self.core_sdk) {
+                Ok(v) => v,
+                Err(e) => return err(format!("wallet.send: economic root: {e}")),
+            };
+        let (econ_genesis, econ_devid) = match self.core_sdk.device_head() {
+            Some(h) => (h.genesis_digest(), h.devid()),
+            None => return err("wallet.send: no device head".to_string()),
+        };
+        // Pre-balances come from R_econ ITSELF, never the head snapshot: the
+        // head can hold credits no admission backs yet (a received transfer
+        // awaiting recipient admission), and a debit built on those would
+        // pair a pre-state the validated pre-root cannot prove.
+        let (econ_tree, econ_pre_balances) =
+            match crate::sdk::economic_admission_flow::producer_tree_and_balances(&econ_validated) {
+                Ok((t, b)) => (std::cell::RefCell::new(t), b),
+                Err(e) => return err(format!("wallet.send: economic tree: {e}")),
+            };
+        let econ_authority = match crate::sdk::economic_admission_flow::authority_material(
+            &econ_network,
+            &econ_genesis,
+        ) {
+            Ok(a) => a,
+            Err(e) => return err(format!("wallet.send: authority evidence: {e}")),
+        };
+        let econ_target_position = econ_validated.economic_position() + 1;
+        let admission_op = signed_op.clone();
+        let admission_op_digest =
+            dsm::economic::faucet::dsm_operation_digest(&admission_op.to_bytes());
+        let econ_pre_root = econ_tree.borrow().root();
+        let econ_prepared = dsm::economic::admission::PendingEconomicAdmission::prepared(
+            dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+            econ_target_position,
+            econ_pre_root,
+            admission_op_digest,
+        );
+        let admission_parts: std::cell::RefCell<
+            Option<crate::sdk::economic_admission_flow::DsmAdmissionParts>,
+        > = std::cell::RefCell::new(None);
+        let mut accepted_admission: Option<dsm::economic::admission::PendingEconomicAdmission> =
+            None;
+
         // §16.6 CRITICAL: Use UNSIGNED canonical bytes for tip computation.
         // signed_op.to_bytes() includes the SPHINCS+ signature, which the receiver cannot
         // know at σ-derivation time. signing_bytes was built from signing_op with
@@ -1238,6 +1314,27 @@ impl AppRouterImpl {
         // =====================================================================
         let build_online_send_artifacts = |advance_outcome: &dsm::types::device_state::AdvanceOutcome|
          -> Result<OnlineSendArtifacts, dsm::types::error::DsmError> {
+            // The economic admission is built FIRST, from the exact prepared
+            // successor — the wire locators below are OUTPUTS of this build
+            // (correction C), never predictions beside it.
+            let econ_parts = crate::sdk::economic_admission_flow::build_dsm_admission(
+                &econ_genesis,
+                &econ_devid,
+                &advance_outcome.new_chain_state,
+                &admission_op,
+                &econ_pre_balances,
+                &mut econ_tree.borrow_mut(),
+                &dsm::economic::write_set::CreditSourceFacts::None,
+                &econ_authority,
+                Vec::new(),
+            )?;
+            let econ_debit_index = econ_parts.debit_mutation_index.ok_or_else(|| {
+                dsm::types::error::DsmError::invalid_operation(
+                    "wallet.send: the sender write set has no debit mutation — refusing to \
+                     freeze locators that name nothing",
+                )
+            })?;
+            *admission_parts.borrow_mut() = Some(econ_parts);
             #[allow(unused_assignments)]
             let mut pending_ek_material: Option<PendingEkMaterial> = None;
             let (receipt_commit_bytes, receipt_canonical_bytes) = {
@@ -1559,7 +1656,11 @@ impl AppRouterImpl {
                 envelope_bytes: Vec::new(), // bound below, before submission
                 local_expected_prev: ek_material.expected_prev.clone(),
                 is_first_ek_step: ek_material.is_first_ek_step,
-                status: crate::storage::client_db::OUTBOX_PENDING_SUBMIT.to_string(),
+                // HELD: the row is not deliverable until the admission
+                // reaches ECON_ADMITTED, which promotes it atomically
+                // (correction A). Neither the foreground path nor the sweep
+                // can emit bytes for a held row.
+                status: crate::storage::client_db::OUTBOX_ECONOMIC_ADMISSION_PENDING.to_string(),
                 message_ids: None,
                 created_at: 0,
             };
@@ -1715,6 +1816,9 @@ impl AppRouterImpl {
                 receipt_evidence_digest: evidence_digest.to_vec(),
                 routing_address: routing_address.clone(),
                 canonical_operation_bytes: signing_bytes.clone(),
+                // OUTPUTS of the built admission (correction C).
+                sender_economic_position: econ_target_position,
+                sender_debit_mutation_index: econ_debit_index,
             };
 
             // ============================================================
@@ -1820,43 +1924,60 @@ impl AppRouterImpl {
         // Every helper here MUST take the transaction: the global connection
         // mutex is already held, so anything that opens its own would deadlock.
         // =====================================================================
-        let (new_state, advance_outcome, artifacts) = match self.wallet.send_transfer_op_staged(
-            signed_op,
-            &signed_tx,
-            build_online_send_artifacts,
-            |tx, _outcome, artifacts: &OnlineSendArtifacts| {
-                // ONE implementation, shared with the non-transactional wrapper the
-                // tests use — so the tests exercise production's actual writes.
-                crate::storage::client_db::commit_send_prerequisites_with_conn(
-                    tx,
-                    &artifacts.sender_proposal,
-                    &artifacts.outbox_record,
-                    &artifacts.submission_id,
-                    &artifacts.ek_material.ek_pk,
-                    &artifacts.ek_material.ek_sk,
-                    &artifacts.ek_material.at_rest_key,
-                    artifacts.ek_material.is_init,
-                    &artifacts.extra_artifacts,
-                )
-                .map_err(|e| {
+        let admission_plan = crate::sdk::core_sdk::AdmissionPlan {
+            prepared: econ_prepared,
+            storage_set_id: econ_set.id(),
+            build: Box::new(|_o| {
+                let parts = admission_parts.borrow();
+                let parts = parts.as_ref().ok_or_else(|| {
                     dsm::types::error::DsmError::internal(
-                        format!("durable send bundle write failed: {e}"),
-                        None::<std::io::Error>,
+                        "admission parts missing at commit",
+                        None::<std::convert::Infallible>,
                     )
                 })?;
-                Ok(())
-            },
-        ) {
-            Ok(triple) => triple,
-            Err(e) => {
-                // Nothing was committed — the transaction rolled the advance back
-                // with the bundle, and the builder runs before the write. There is
-                // no durable state to unwind and nothing became deliverable.
-                let failure_class = self.classify_local_state_update_failure(&e);
-                log::error!("[wallet.send] staged send FAILED class={failure_class}: {e}");
-                return err(format!("wallet.send: local state update failed: {e}"));
-            }
+                Ok((parts.coords, parts.artifacts.clone()))
+            }),
+            accepted_out: &mut accepted_admission,
         };
+        let (new_state, advance_outcome, artifacts) =
+            match self.wallet.send_transfer_op_staged_with_admission(
+                signed_op,
+                &signed_tx,
+                build_online_send_artifacts,
+                |tx, _outcome, artifacts: &OnlineSendArtifacts| {
+                    // ONE implementation, shared with the non-transactional wrapper the
+                    // tests use — so the tests exercise production's actual writes.
+                    crate::storage::client_db::commit_send_prerequisites_with_conn(
+                        tx,
+                        &artifacts.sender_proposal,
+                        &artifacts.outbox_record,
+                        &artifacts.submission_id,
+                        &artifacts.ek_material.ek_pk,
+                        &artifacts.ek_material.ek_sk,
+                        &artifacts.ek_material.at_rest_key,
+                        artifacts.ek_material.is_init,
+                        &artifacts.extra_artifacts,
+                    )
+                    .map_err(|e| {
+                        dsm::types::error::DsmError::internal(
+                            format!("durable send bundle write failed: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                    Ok(())
+                },
+                Some(admission_plan),
+            ) {
+                Ok(triple) => triple,
+                Err(e) => {
+                    // Nothing was committed — the transaction rolled the advance back
+                    // with the bundle, and the builder runs before the write. There is
+                    // no durable state to unwind and nothing became deliverable.
+                    let failure_class = self.classify_local_state_update_failure(&e);
+                    log::error!("[wallet.send] staged send FAILED class={failure_class}: {e}");
+                    return err(format!("wallet.send: local state update failed: {e}"));
+                }
+            };
 
         let OnlineSendArtifacts {
             sender_proposal,
@@ -1868,6 +1989,42 @@ impl AppRouterImpl {
             receipt_canonical_bytes,
             extra_artifacts,
         } = artifacts;
+        // ── The debit is committed but HELD (correction A): finish the
+        // admission — publish, register, validate, admit — and only the
+        // terminal admission transaction promotes the outbox row to
+        // deliverable. A failure here leaves everything resumable and
+        // NOTHING delivered.
+        let pending_admission = match accepted_admission {
+            Some(p) => p,
+            None => {
+                return err(
+                    "wallet.send: advance committed without an accepted admission".to_string(),
+                )
+            }
+        };
+        let econ_parts_final = match admission_parts.into_inner() {
+            Some(p) => p,
+            None => return err("wallet.send: admission parts missing".to_string()),
+        };
+        if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
+            &self.core_sdk,
+            &econ_network,
+            &econ_set,
+            &econ_validated,
+            econ_tree.into_inner(),
+            econ_parts_final.witness,
+            econ_parts_final.manifest,
+            admission_op,
+            pending_admission,
+        )
+        .await
+        {
+            return err(format!(
+                "wallet.send: debit committed; economic admission is HELD for resume and \
+                 nothing was delivered: {e}"
+            ));
+        }
+
         // The primitive reads route and bytes from `outbox_record` itself; these
         // locals stay only for the log lines below.
         let _ = (
@@ -2266,6 +2423,8 @@ impl AppRouterImpl {
             routing_address,
             canonical_operation_bytes: Vec::new(),
             receipt_evidence_digest: Vec::new(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
 
         let sender_device_id_b32 = crate::util::text_id::encode_base32_crockford(&from_device_id);

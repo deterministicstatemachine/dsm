@@ -246,6 +246,12 @@ pub struct B0xSubmissionParams {
     /// `None` keeps the legacy random derivation for callers with no durable
     /// identity to key on (non-transfer submissions).
     pub submission_id: Option<String>,
+    /// Sender economic locators (3.5b): OUTPUTS of the sender's built
+    /// admission — the admitted position and THE debit mutation index of the
+    /// exact write set. Untrusted locators on the wire, never authority.
+    /// Zero/absent only for non-economic submissions.
+    pub sender_economic_position: u64,
+    pub sender_debit_mutation_index: u32,
 }
 
 fn anchor_tick_from_tip(tip: &[u8]) -> u64 {
@@ -2148,6 +2154,8 @@ impl B0xSDK {
                     seq: params.seq,
                     canonical_operation_bytes: params.canonical_operation_bytes.clone(),
                     receipt_evidence_digest: params.receipt_evidence_digest.clone(),
+                    sender_economic_position: params.sender_economic_position,
+                    sender_debit_mutation_index: params.sender_debit_mutation_index,
                 };
                 info!(
                     "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
@@ -3956,6 +3964,8 @@ impl B0xSDK {
                 routing_address,
                 canonical_operation_bytes: Vec::new(),
                 receipt_evidence_digest: Vec::new(),
+                sender_economic_position: 0,
+                sender_debit_mutation_index: 0,
             };
 
             match sdk.submit_to_b0x(params).await {
@@ -4374,6 +4384,8 @@ mod tests {
             seq: 1,
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4452,6 +4464,8 @@ mod tests {
             seq: 2,
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4634,6 +4648,8 @@ mod tests {
             seq: 9,
             canonical_operation_bytes: vec![],
             receipt_evidence_digest: Vec::new(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -4815,6 +4831,8 @@ mod tests {
             canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
             receipt_evidence_digest: Vec::new(),
             submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         }
     }
 

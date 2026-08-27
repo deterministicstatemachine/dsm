@@ -152,6 +152,41 @@ fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
 
 /* ------------------------------- Impl ----------------------------------- */
 
+/// One economic admission riding one relationship advance — the SINGLE
+/// generalized producer seam every admitted operation (faucet claim, transfer
+/// debit, burn, create-token fee) goes through inside
+/// `execute_on_relationship_inner`. There is deliberately no second producer
+/// path.
+///
+/// The admitted predecessor this admission extends is DERIVED from
+/// `prepared` (`position - 1` at `pre_economic_root`; position 1 extends the
+/// canonical empty activation root) and is checked twice: under the
+/// state-machine lock before the prepare, and re-asserted CAS-style inside
+/// the commit transaction before local acceptance becomes durable.
+pub struct AdmissionPlan<'a> {
+    /// The Prepared admission (digest-only — acceptance coordinates are
+    /// built against the REAL prepared successor).
+    pub prepared: dsm::economic::admission::PendingEconomicAdmission,
+    pub storage_set_id: [u8; 32],
+    /// Build the acceptance coordinates + frozen artifacts from the exact
+    /// prepared outcome. Runs at the staged seam: after the pure prepare,
+    /// before anything durable.
+    #[allow(clippy::type_complexity)]
+    pub build: Box<
+        dyn FnOnce(
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<
+                (
+                    dsm::economic::admission::AcceptedAdmissionCoords,
+                    Vec<(String, Vec<u8>, &'static str)>,
+                ),
+                DsmError,
+            > + 'a,
+    >,
+    /// Receives the accepted (post-`Prepared`) admission on success.
+    pub accepted_out: &'a mut Option<dsm::economic::admission::PendingEconomicAdmission>,
+}
+
 impl CoreSDK {
     fn restore_latest_archived_state(
         state_machine: &Mutex<StateMachine>,
@@ -250,14 +285,16 @@ impl CoreSDK {
     /// so the device is not left fenced by a claim that never happened.
     /// Returns the accepted admission (post-`Prepared`, coordinates
     /// installed) that is now riding the durable head.
+    /// The fence-coupled faucet-claim advance — now a THIN wrapper over the
+    /// generalized admission seam (self-loop relationship, single credit
+    /// delta). The bespoke body this replaced was the only other producer
+    /// path; deleting it is the point.
     pub(crate) fn faucet_claim_advance(
         &self,
         operation: dsm::types::operations::Operation,
         delta: &dsm::types::device_state::BalanceDelta,
         prepared: dsm::economic::admission::PendingEconomicAdmission,
         build: impl FnOnce(
-            // The PREPARED successor chain state — the evidence producer
-            // signs its exact preimage fields, so it gets the whole thing.
             &dsm::types::device_state::RelationshipChainState,
         ) -> Result<
             (
@@ -267,15 +304,36 @@ impl CoreSDK {
             DsmError,
         >,
         storage_set_id: &[u8; 32],
-    ) -> Result<dsm::economic::admission::PendingEconomicAdmission, DsmError> {
+        // Additional same-transaction writer (e.g. the token-registry row),
+        // composed AFTER the admission's pending row + artifact freeze.
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<
+        (
+            dsm::types::device_state::AdvanceOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
         let dev_id = self.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &dev_id, &dev_id,
         );
-        let mut sm = self.state_machine.lock();
-        sm.attach_pending_economic_admission(Some(prepared.clone()));
-        let outcome = match sm.prepare_advance_relationship(
+        let mut accepted_out = None;
+        let plan = AdmissionPlan {
+            prepared,
+            storage_set_id: *storage_set_id,
+            build: Box::new(move |o: &dsm::types::device_state::AdvanceOutcome| {
+                build(&o.new_chain_state)
+            }),
+            accepted_out: &mut accepted_out,
+        };
+        let (_state, outcome) = self.execute_on_relationship_inner(
             rel_key,
             dev_id,
             operation,
@@ -283,51 +341,18 @@ impl CoreSDK {
             Some(init_tip),
             None,
             None,
+            in_tx_extra,
             None,
-        ) {
-            Ok(o) => o,
-            Err(e) => {
-                sm.attach_pending_economic_admission(None);
-                return Err(e);
-            }
-        };
-        // The successor now exists in memory; the builder derives everything
-        // from ITS exact fields (C_dsm+, the successor evidence preimage).
-        let (coords, artifacts) = match build(&outcome.new_chain_state) {
-            Ok(v) => v,
-            Err(e) => {
-                sm.attach_pending_economic_admission(None);
-                return Err(e);
-            }
-        };
-        // Install the coordinates: Prepared -> LocalAcceptedPendingEcon for
-        // the DURABLE record and the committed head. From here the fence is
-        // live and recovery must finish THIS admission.
-        let accepted = match prepared.into_locally_accepted(coords) {
-            Ok(a) => a,
-            Err(e) => {
-                sm.attach_pending_economic_admission(None);
-                return Err(DsmError::invalid_operation(e.to_string()));
-            }
-        };
-        let outcome = dsm::types::device_state::AdvanceOutcome {
-            new_device_state: outcome
-                .new_device_state
-                .with_pending_economic_admission(Some(accepted.clone())),
-            ..outcome
-        };
-        if let Err(e) = Self::commit_advance_with_pending_admission_and_artifacts(
-            &outcome,
-            true,
-            &accepted,
-            &artifacts,
-            storage_set_id,
-        ) {
-            sm.attach_pending_economic_admission(None);
-            return Err(e);
-        }
-        sm.commit_advance(&outcome);
-        Ok(accepted)
+            None,
+            Some(plan),
+        )?;
+        let accepted = accepted_out.ok_or_else(|| {
+            DsmError::internal(
+                "admission advance committed without an accepted admission",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok((outcome, accepted))
     }
 
     /// Persist a pending-admission lifecycle transition (EvidencePublished /
@@ -395,6 +420,12 @@ impl CoreSDK {
             update_bcr_device_head_with_conn(&tx, &unfenced, now as u64).map_err(|e| {
                 DsmError::storage(format!("admit head: {e}"), None::<std::io::Error>)
             })?;
+            // A held sender-outbox row becomes deliverable in THIS transaction
+            // and no earlier: ECON_ADMITTED atomically releases the outbox.
+            crate::storage::client_db::sender_outbox::promote_held_outbox_rows_with_conn(&tx)
+                .map_err(|e| {
+                    DsmError::storage(format!("admit promote: {e}"), None::<std::io::Error>)
+                })?;
             tx.commit().map_err(|e| {
                 DsmError::storage(format!("admit commit: {e}"), None::<std::io::Error>)
             })?;
@@ -414,6 +445,7 @@ impl CoreSDK {
             pending,
             &[],
             &[0u8; 32],
+            None,
         )
     }
 
@@ -431,6 +463,15 @@ impl CoreSDK {
         pending: &dsm::economic::admission::PendingEconomicAdmission,
         artifacts: &[(String, Vec<u8>, &'static str)],
         storage_set_id: &[u8; 32],
+        // Additional same-transaction writer (send prerequisites, token
+        // registry, ...) — chained AFTER the pending row + artifact freeze so
+        // callers COMPOSE with the admission commit rather than replace it.
+        also: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
     ) -> Result<(), DsmError> {
         let devid = outcome.new_device_state.devid();
         if !dsm::economic::admission::head_carries_admission(
@@ -450,7 +491,32 @@ impl CoreSDK {
             outcome,
             bump_capsule,
             Some(&move |tx: &rusqlite::Transaction<'_>,
-                        _o: &dsm::types::device_state::AdvanceOutcome| {
+                        o: &dsm::types::device_state::AdvanceOutcome| {
+                // CAS re-assert of the admitted predecessor INSIDE the
+                // transaction that makes local acceptance durable: the
+                // pre-lock check can go stale only through this same
+                // serialized path, but the invariant is cheap to restate and
+                // a violated restatement is corruption, not a race.
+                let admitted =
+                    crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
+                        .map_err(|e| {
+                            DsmError::storage(
+                                format!("admission predecessor CAS: {e}"),
+                                None::<std::io::Error>,
+                            )
+                        })?;
+                let (expect_pos, expect_root) = match admitted {
+                    Some((p, r)) => (p + 1, r),
+                    None => (1, dsm::economic::tree::empty_economic_root()),
+                };
+                if pending.economic_position != expect_pos
+                    || pending.pre_economic_root != expect_root
+                {
+                    return Err(DsmError::invalid_operation(
+                        "admission commit: the admitted predecessor changed under the \
+                         admission — refusing to make a stale acceptance durable",
+                    ));
+                }
                 crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
                     tx, &devid, &pending, now,
                 )
@@ -469,6 +535,9 @@ impl CoreSDK {
                             None::<std::io::Error>,
                         )
                     })?;
+                }
+                if let Some(also) = also {
+                    also(tx, o)?;
                 }
                 Ok(())
             }),
@@ -1410,6 +1479,7 @@ impl CoreSDK {
             in_tx_extra,
             None,
             reserve_funding,
+            None,
         )
     }
 
@@ -1435,6 +1505,7 @@ impl CoreSDK {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1446,9 +1517,9 @@ impl CoreSDK {
     /// This layer performs NO comparison against the sender's signed tips. A
     /// relationship chain tip is a **per-device (side-specific) lineage value**:
     /// [`RelationshipChainState::compute_chain_tip`] hashes `counterparty_devid`
-    /// (each side stores the OTHER party), `entropy` (derived from the device's
-    /// own SMT root / own prior tip), and `balance_witness` (the device's own
-    /// `B^T`). Two honest devices therefore NEVER produce equal chain tips for
+    /// (each side stores the OTHER party) and `entropy` (derived from the
+    /// device's own SMT root / own prior tip). Two honest devices therefore
+    /// NEVER produce equal chain tips for
     /// the same transfer, and they coincide at `embedded_parent` only on the
     /// first-ever advance, where both seed from the shared spec-canonical
     /// `initial_chain_tip`. Constraining this local advance by the sender's
@@ -1495,7 +1566,37 @@ impl CoreSDK {
             &A,
         ) -> Result<(), DsmError>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
-        self.execute_on_relationship_staged_with_reserve_mutation(
+        self.execute_on_relationship_staged_with_admission(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            build_artifacts,
+            write_extra,
+            None,
+        )
+    }
+
+    /// [`Self::execute_on_relationship_staged`] with an economic admission
+    /// riding the SAME advance (see [`AdmissionPlan`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged_with_admission<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        self.execute_on_relationship_staged_with_reserve_mutation_and_admission(
             rel_key,
             counterparty_devid,
             operation,
@@ -1504,6 +1605,7 @@ impl CoreSDK {
             None,
             build_artifacts,
             write_extra,
+            admission,
         )
     }
 
@@ -1532,6 +1634,36 @@ impl CoreSDK {
             &dsm::types::device_state::AdvanceOutcome,
             &A,
         ) -> Result<(), DsmError>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        self.execute_on_relationship_staged_with_reserve_mutation_and_admission(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+            reserve_mutation,
+            build_artifacts,
+            write_extra,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged_with_reserve_mutation_and_admission<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        reserve_mutation: Option<dsm::types::device_state::VaultReserveMutation>,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         // Artifacts are built once in `pre_write` (outside the transaction, so
         // signing may read the DB) and shared with the in-tx writer through a
@@ -1575,6 +1707,7 @@ impl CoreSDK {
             Some(&write),
             Some(&pre),
             reserve_mutation,
+            admission,
         )?;
 
         let artifacts = built.borrow_mut().take().ok_or_else(|| {
@@ -1600,6 +1733,7 @@ impl CoreSDK {
                 &dsm::types::device_state::AdvanceOutcome,
             ) -> Result<(), DsmError>,
         >,
+        admission: Option<AdmissionPlan<'_>>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         self.execute_on_relationship_inner(
             rel_key,
@@ -1612,6 +1746,7 @@ impl CoreSDK {
             in_tx_extra,
             None,
             None,
+            admission,
         )
     }
 
@@ -1644,6 +1779,9 @@ impl CoreSDK {
         // for `DlvCreate`; the encumbrance rides the SAME prepare/write/commit as
         // the transition, so either both land or neither does.
         reserve_funding: Option<dsm::types::device_state::VaultReserveMutation>,
+        // The economic admission riding this advance, if the operation is an
+        // admitted economic write. See [`AdmissionPlan`].
+        admission: Option<AdmissionPlan<'_>>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
@@ -1694,6 +1832,63 @@ impl CoreSDK {
         let current_state_hash = sm.device_head().map(|ds| ds.root()).unwrap_or([0u8; 32]);
         self.enforce_policy_for_operation(&operation, current_state_hash)?;
 
+        // ── Admission serialization, UNDER the state-machine lock ──────────
+        // A new admission atomically refuses an existing pending one and
+        // CAS-checks the admitted predecessor it extends. A route-level
+        // "resume first" cannot be the guard: two relationships can race
+        // before either takes this lock; THIS is the serialization boundary.
+        let admission = match admission {
+            Some(plan) => {
+                if sm
+                    .device_head()
+                    .and_then(|h| h.pending_economic_admission().cloned())
+                    .is_some()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "advance: an economic admission is already pending — finish or resume \
+                         it before starting another; positions are write-once and never \
+                         overwritten",
+                    ));
+                }
+                let admitted = crate::storage::client_db::economic_lineage::get_admitted()
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("admission predecessor read: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                let (expected_position, expected_root) = match admitted {
+                    Some((p, r)) => (p + 1, r),
+                    None => (1, dsm::economic::tree::empty_economic_root()),
+                };
+                if plan.prepared.economic_position != expected_position
+                    || plan.prepared.pre_economic_root != expected_root
+                {
+                    return Err(DsmError::invalid_operation(format!(
+                        "advance: admission does not extend the admitted coordinate (expected \
+                         position {expected_position}) — rebuild from the current admitted \
+                         state rather than a stale snapshot",
+                    )));
+                }
+                Some(plan)
+            }
+            None => None,
+        };
+        if let Some(plan) = &admission {
+            sm.attach_pending_economic_admission(Some(plan.prepared.clone()));
+        }
+        // From here to commit, every error path must roll the attach off —
+        // one restore point via the closure below, not scattered clears.
+        let admission_result = (|| -> Result<
+            (
+                dsm::types::device_state::AdvanceOutcome,
+                Option<dsm::economic::admission::PendingEconomicAdmission>,
+                Vec<(String, Vec<u8>, &'static str)>,
+                [u8; 32],
+            ),
+            DsmError,
+        > {
+
         // Phase 4.1 fail-closed pattern (§4.3 acceptance, §6.1 single-writer):
         //   1. PREPARE — derive the AdvanceOutcome (pure; no head mutation).
         //   2. WRITE  — persist `bcr_chain_states` + `bcr_device_heads` in one
@@ -1729,7 +1924,55 @@ impl CoreSDK {
         if let Some(pre) = pre_write {
             pre(&outcome)?;
         }
-        Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)?;
+            match admission {
+                Some(plan) => {
+                    let (coords, artifacts) = (plan.build)(&outcome)?;
+                    let accepted = plan
+                        .prepared
+                        .into_locally_accepted(coords)
+                        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
+                    let outcome = dsm::types::device_state::AdvanceOutcome {
+                        new_device_state: outcome
+                            .new_device_state
+                            .with_pending_economic_admission(Some(accepted.clone())),
+                        ..outcome
+                    };
+                    *plan.accepted_out = Some(accepted.clone());
+                    Ok((outcome, Some(accepted), artifacts, plan.storage_set_id))
+                }
+                None => Ok((outcome, None, Vec::new(), [0u8; 32])),
+            }
+        })();
+        let (outcome, accepted, artifacts, set_id) = match admission_result {
+            Ok(v) => v,
+            Err(e) => {
+                // Restore the exact prior in-memory admission (None — the
+                // pre-attach check proved nothing was pending).
+                sm.attach_pending_economic_admission(None);
+                return Err(e);
+            }
+        };
+        let commit_result = match &accepted {
+            // The caller's in-tx writer (send prerequisites / token registry /
+            // canonical apply) COMPOSES with the admission commit via `also`.
+            Some(accepted) => Self::commit_advance_with_pending_admission_and_artifacts(
+                &outcome,
+                frontier_changed,
+                accepted,
+                &artifacts,
+                &set_id,
+                in_tx_extra,
+            ),
+            None => {
+                Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)
+            }
+        };
+        if let Err(e) = commit_result {
+            if accepted.is_some() {
+                sm.attach_pending_economic_admission(None);
+            }
+            return Err(e);
+        }
         sm.commit_advance(&outcome);
 
         // Build a compatibility State view from the outcome for callers that

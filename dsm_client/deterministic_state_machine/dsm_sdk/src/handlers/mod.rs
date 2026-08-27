@@ -32,7 +32,9 @@ pub mod bitcoin_query_routes;
 pub mod contacts_routes;
 pub mod dlv_routes;
 #[cfg(test)]
-mod faucet_flow_tests;
+pub(crate) mod faucet_flow_tests;
+#[cfg(test)]
+pub(crate) mod faucet_flow_tests_support;
 pub mod faucet_routes;
 pub mod identity_routes;
 pub mod inbox_routes;
@@ -50,6 +52,8 @@ pub mod relationship_finalized;
 pub mod relationship_status;
 pub mod response_helpers;
 pub mod route_routes;
+#[cfg(test)]
+mod sender_admission_tests;
 pub mod session_routes;
 pub mod sofi_routes;
 pub mod storage_routes;

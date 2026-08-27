@@ -207,6 +207,8 @@ impl UnilateralOpsSDK {
             )?,
             canonical_operation_bytes: Vec::new(),
             receipt_evidence_digest: Vec::new(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
 
         // 1. Pre-flight balance check: prevent submitting if insufficient funds logic is needed.

@@ -33,6 +33,7 @@
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
 pub mod bootstrap;
+pub mod economic_admission_flow;
 pub mod economic_registers;
 pub mod faucet_claim_flow;
 #[cfg(test)]

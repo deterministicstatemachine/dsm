@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! `token.mint` / `token.burn` end to end.
+//! `token.mint` / `token.burn` / `token.create` refusal contracts.
 //!
-//! Neither route existed at any layer before — the only mint was the one-shot
-//! allocation inside creation — so none of the mint/burn policy could be
-//! exercised, let alone proven. This is the acceptance matrix:
+//! 3.5b made every value debit an ADMITTED economic transition, and integration
+//! tests have no fake fleet (the `fake_registers`/`fake_fleet` seams are
+//! `cfg(test)`-only), so no admitted operation can run here. What this suite
+//! pins is therefore the REFUSAL surface:
 //!
-//!   * an authorized mint succeeds and credits the token's OWN asset;
-//!   * a mint that would exceed max supply is refused, and one landing exactly
-//!     on the cap is allowed;
-//!   * a burn succeeds and debits;
-//!   * a burn larger than the balance is refused by the conservation guard;
-//!   * an unknown token fails closed rather than minting something unnamed.
+//!   * creation with `initial_supply > 0` gets the named issuance-predicate
+//!     refusal (owner ruling — creator supply waits for `0x0029`);
+//!   * a fee-bearing creation with no economic ancestry fails closed;
+//!   * minting an unknown token fails closed;
+//!   * a burn that cannot be admitted is refused, never performed locally.
+//!
+//! Admitted happy paths (faucet-funded burn, foreign walk) live in the lib
+//! tests: `handlers::sender_admission_tests`.
 
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
+use serial_test::serial;
 use std::path::PathBuf;
 
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
@@ -22,7 +26,7 @@ use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::reset_database_for_tests;
 
 fn init_test_storage() {
     std::env::set_var("DSM_SDK_TEST_MODE", "1");
@@ -84,8 +88,13 @@ fn fund_era(router: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-/// Create a token with a known cap and allocation, returning its token_id.
-fn create_token(router: &AppRouterImpl, ticker: &str, max_supply: u128, alloc: u128) -> String {
+/// Attempt a token creation, returning the raw route result.
+fn try_create_token(
+    router: &AppRouterImpl,
+    ticker: &str,
+    max_supply: u128,
+    alloc: u128,
+) -> dsm_sdk::bridge::AppResult {
     let req = generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
@@ -100,13 +109,7 @@ fn create_token(router: &AppRouterImpl, ticker: &str, max_supply: u128, alloc: u
         icon_url: String::new(),
         allowlist_device_ids: Vec::new(),
     };
-    let res = invoke(router, "token.create", pack(req.encode_to_vec()));
-    assert!(res.success, "create failed: {:?}", res.error_message);
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(r)) => r.token_id,
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    }
+    invoke(router, "token.create", pack(req.encode_to_vec()))
 }
 
 fn mint(router: &AppRouterImpl, token_id: &str, amount: u64) -> dsm_sdk::bridge::AppResult {
@@ -139,155 +142,74 @@ fn burn(router: &AppRouterImpl, token_id: &str, amount: u64) -> dsm_sdk::bridge:
     )
 }
 
-fn balance_of(router: &AppRouterImpl, token_id: &str) -> u64 {
-    let commit = token_registry::get_token(token_id)
-        .expect("registry read")
-        .expect("token exists")
-        .policy_commit;
-    router
-        .core_sdk
-        .device_head()
-        .map(|h| h.balance(&commit))
-        .unwrap_or(0)
-}
-
-fn era_balance(router: &AppRouterImpl) -> u64 {
-    let commit = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA builtin");
-    router
-        .core_sdk
-        .device_head()
-        .map(|h| h.balance(&commit))
-        .unwrap_or(0)
-}
-
-/// An authorized mint succeeds and credits the token's own asset — never ERA.
 #[test]
-#[serial_test::serial]
-fn authorized_mint_succeeds_and_credits_the_right_asset() {
-    runtime::dsm_init_runtime();
+#[serial]
+fn creation_with_initial_supply_gets_the_named_refusal() {
+    // 3.5b (owner ruling): the new asset's supply credit has no
+    // authenticated issuance/source predicate, so creator supply is REFUSED
+    // with the exact named error — token metadata + the ERA fee are the
+    // supported creation shape until 0x0029 exists.
     init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "MINTA", 1_000, 100);
-
-    let era_before = era_balance(&r);
-    let res = mint(&r, &token, 50);
-    assert!(res.success, "mint failed: {:?}", res.error_message);
-
-    assert_eq!(balance_of(&r, &token), 150, "mint must credit the token");
-    assert_eq!(
-        era_balance(&r),
-        era_before,
-        "a mint of another token must never move ERA"
-    );
-}
-
-/// The supply cap is enforced: a mint that would exceed it is refused, one
-/// landing exactly on it is allowed.
-#[test]
-#[serial_test::serial]
-fn mint_respects_the_supply_cap() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "CAPD", 1_000, 900);
-
-    let over = mint(&r, &token, 101);
-    assert!(!over.success, "a mint past the cap must be refused");
-    assert_eq!(
-        balance_of(&r, &token),
-        900,
-        "a refused mint credits nothing"
-    );
-
-    let exact = mint(&r, &token, 100);
+    let router = new_router();
+    fund_era(&router);
+    let res = try_create_token(&router, "TSTA", 1_000_000, 1_000);
+    assert!(!res.success, "creator supply must be refused");
+    let msg = res.error_message.unwrap_or_default();
     assert!(
-        exact.success,
-        "a mint landing exactly on the cap must be allowed: {:?}",
-        exact.error_message
-    );
-    assert_eq!(balance_of(&r, &token), 1_000);
-}
-
-/// A burn debits the caller's balance.
-#[test]
-#[serial_test::serial]
-fn authorized_burn_succeeds() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "BURNA", 1_000, 500);
-
-    let res = burn(&r, &token, 200);
-    assert!(res.success, "burn failed: {:?}", res.error_message);
-    assert_eq!(balance_of(&r, &token), 300);
-}
-
-/// Burn > balance is refused by the conservation guard's checked_sub, which
-/// runs before the durable write — so nothing is destroyed.
-#[test]
-#[serial_test::serial]
-fn burn_beyond_balance_is_refused() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "BURNB", 1_000, 100);
-
-    let res = burn(&r, &token, 101);
-    assert!(!res.success, "burning more than held must be refused");
-    assert_eq!(
-        balance_of(&r, &token),
-        100,
-        "a refused burn must destroy nothing"
+        msg.contains("initial_supply > 0 cannot enter a validated lineage"),
+        "the refusal must be the NAMED issuance-predicate error, got: {msg}"
     );
 }
 
-/// An unknown token fails closed rather than minting an unnamed asset.
 #[test]
-#[serial_test::serial]
+#[serial]
+fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
+    // The creation fee is an ADMITTED economic debit now. This fixture's ERA
+    // was installed directly (no lineage), so the admission cannot debit it
+    // — the route must fail CLOSED rather than create a token whose fee was
+    // never registered. The admitted-creation happy path lives in the lib
+    // tests over the fake fleet (sender_admission_tests).
+    init_test_storage();
+    let router = new_router();
+    fund_era(&router);
+    let res = try_create_token(&router, "TSTB", 1_000_000, 0);
+    assert!(
+        !res.success,
+        "a fee debit with no economic ancestry must not be admittable"
+    );
+}
+
+#[test]
+#[serial]
 fn mint_of_an_unknown_token_fails_closed() {
-    runtime::dsm_init_runtime();
     init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let res = mint(&r, "NOSUCHTOKEN", 10);
-    assert!(!res.success, "an unknown token must not be mintable");
+    let router = new_router();
+    fund_era(&router);
+    let res = mint(&router, "no-such-token", 10);
+    assert!(!res.success, "minting an unknown token must fail");
 }
 
-/// Zero-amount operations are rejected rather than producing an empty advance.
 #[test]
-#[serial_test::serial]
-fn zero_amount_is_rejected() {
-    runtime::dsm_init_runtime();
+#[serial]
+fn burn_requires_an_admitted_economic_lineage() {
+    // token.burn is an ADMITTED debit: ancestry-less fixture value cannot
+    // fund it, and the refusal is fail-closed rather than a silent local
+    // burn that would desynchronize R_econ. Admitted-burn coverage (with a
+    // real faucet-funded lineage and the foreign walk) lives in
+    // sender_admission_tests.
     init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "ZEROA", 1_000, 10);
-
-    assert!(!mint(&r, &token, 0).success);
-    assert!(!burn(&r, &token, 0).success);
-}
-
-/// Mint then burn round-trips exactly — supply accounting stays consistent.
-#[test]
-#[serial_test::serial]
-fn mint_then_burn_round_trips() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let token = create_token(&r, "RTRIP", 10_000, 1_000);
-
-    assert!(mint(&r, &token, 500).success);
-    assert_eq!(balance_of(&r, &token), 1_500);
-    assert!(burn(&r, &token, 500).success);
-    assert_eq!(
-        balance_of(&r, &token),
-        1_000,
-        "a mint followed by an equal burn must return to the starting balance"
+    let router = new_router();
+    fund_era(&router);
+    let res = burn(&router, "ERA", 10);
+    assert!(
+        !res.success,
+        "an unadmittable burn must be refused, not performed locally"
     );
 }
+
+// The pre-3.5b lifecycle tests (create-with-allocation, mint-to-cap,
+// mint-then-burn round trips) asserted a capability the owner has ruled OUT
+// until the issuance predicate (0x0029) exists: creator supply cannot enter a
+// validated lineage, so custom-token mint/burn currently has no economically
+// admissible path. Deleted rather than weakened — a green test for a removed
+// capability is how it silently returns.

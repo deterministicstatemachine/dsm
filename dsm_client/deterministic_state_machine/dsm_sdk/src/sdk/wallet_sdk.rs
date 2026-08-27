@@ -888,6 +888,29 @@ impl WalletSDK {
             &A,
         ) -> Result<(), DsmError>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        self.send_transfer_op_staged_with_admission(
+            op,
+            transaction,
+            build_artifacts,
+            write_extra,
+            None,
+        )
+    }
+
+    /// [`Self::send_transfer_op_staged`] with an economic admission riding
+    /// the same advance (3.5b sender debit).
+    pub fn send_transfer_op_staged_with_admission<A>(
+        &self,
+        op: dsm::types::operations::Operation,
+        transaction: &WalletTransaction,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<crate::sdk::core_sdk::AdmissionPlan<'_>>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
                 "Wallet is locked",
@@ -920,8 +943,12 @@ impl WalletSDK {
 
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
         let (new_state, outcome, artifacts) =
-            self.token_sdk
-                .execute_transfer_op_staged(op, build_artifacts, write_extra)?;
+            self.token_sdk.execute_transfer_op_staged_with_admission(
+                op,
+                build_artifacts,
+                write_extra,
+                admission,
+            )?;
         log::debug!("[WALLET] send_transfer_op: execute_transfer_op OK");
 
         // ==================================================================

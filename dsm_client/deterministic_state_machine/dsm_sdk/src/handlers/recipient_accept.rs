@@ -338,6 +338,8 @@ pub(crate) mod tests {
             seq: 1,
             canonical_operation_bytes: canonical,
             receipt_evidence_digest: evidence_digest.to_vec(),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
         };
         let mut out = Vec::with_capacity(req.encoded_len());
         req.encode(&mut out).expect("encode transfer");

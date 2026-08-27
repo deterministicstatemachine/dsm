@@ -229,6 +229,49 @@ async fn harness_carries_one_generation_a_to_b_through_production_code() {
         1,
         "B journaled its acceptance"
     );
+
+    // Locator honesty (3.5b correction C): the frozen envelope's economic
+    // locators are OUTPUTS of the sender's built admission — the wire must
+    // name exactly the position the sender's lineage admitted for this debit,
+    // and THE debit mutation index of a pure-debit write set.
+    p.a.enter();
+    let (admitted_pos, _) = cdb::economic_lineage::get_admitted()
+        .expect("admitted read")
+        .expect("the send admission is terminal before delivery");
+    let envelope_bytes: Vec<u8> = {
+        let binding = cdb::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            "SELECT envelope_bytes FROM sender_outbox \
+             WHERE relationship_key = ?1 ORDER BY rowid DESC LIMIT 1",
+            rusqlite::params![rel.as_slice()],
+            |r| r.get(0),
+        )
+        .expect("outbox envelope")
+    };
+    // The outbox holds the full b0x envelope: Envelope → UniversalTx →
+    // Invoke → ArgPack.body IS the OnlineTransferRequest.
+    let outer = dsm::types::proto::Envelope::decode(envelope_bytes.as_slice())
+        .expect("outbox envelope decodes");
+    let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = outer.payload else {
+        panic!("expected a UniversalTx payload");
+    };
+    let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) =
+        tx.ops.first().and_then(|op| op.kind.clone())
+    else {
+        panic!("expected an Invoke op");
+    };
+    let body = invoke.args.expect("arg pack").body;
+    let env = dsm::types::proto::OnlineTransferRequest::decode(body.as_slice())
+        .expect("transfer decodes");
+    assert_eq!(
+        env.sender_economic_position, admitted_pos,
+        "the wire locator names the admitted position of THIS debit"
+    );
+    assert_eq!(
+        env.sender_debit_mutation_index, 0,
+        "a pure-debit write set has exactly one mutation — index 0 is a builder fact"
+    );
 }
 
 // =====================================================================
@@ -274,11 +317,15 @@ fn last_applied_pair(rel: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
-    let p = Pair::boot(1_000, 0).await;
+    // B originates on the reverse leg, and under 3.5b a send debits the
+    // sender's ADMITTED economic balance — received-but-unadmitted credits
+    // cannot fund it until PR4 lands recipient admission. So B boots with its
+    // own faucet-funded 100 to send from; the received 20 rides on the head.
+    let p = Pair::boot(1_000, 100).await;
     let rel = p.a.rel_key_with(&p.b);
     generation(&p.a, &p.b, 10).await;
     generation(&p.a, &p.b, 10).await;
-    assert_eq!(p.b.era_balance(), 20);
+    assert_eq!(p.b.era_balance(), 120);
 
     // A pins B's head at exactly the child B journaled on its second apply —
     // learned from B's delta, authenticated by sig_b — and that is the parent
@@ -311,7 +358,7 @@ async fn r1_role_reversal_applies_once_on_a_and_finalizes_on_b() {
     generation(&p.b, &p.a, 5).await;
 
     assert_eq!(p.a.era_balance(), 985, "A credited exactly once");
-    assert_eq!(p.b.era_balance(), 15);
+    assert_eq!(p.b.era_balance(), 115);
     p.a.enter();
     assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
     assert_eq!(staging_states(), vec!["accepted".to_string()]);
@@ -387,7 +434,8 @@ async fn r2a_recipient_cannot_originate_before_the_peer_finalized() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn r2b_the_certificate_releases_the_recipient() {
-    let p = Pair::boot(1_000, 0).await;
+    // B's reverse send needs its own admitted funding (see r1).
+    let p = Pair::boot(1_000, 100).await;
     generation(&p.a, &p.b, 10).await;
     // A's finalize sync above also ships the checkpoint; B absorbs it here.
     let b_sync = p.b.sync().await;

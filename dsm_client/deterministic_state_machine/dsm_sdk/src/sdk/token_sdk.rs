@@ -1177,6 +1177,29 @@ impl<I: Send + Sync> TokenSDK<I> {
             TokenOperation::Burn {
                 token_id, amount, ..
             } => {
+                // 3.5b HARD REFUSAL (owner correction D): once an economic
+                // lineage exists, an UNADMITTED local burn on this path
+                // (reachable from the Bitcoin/dBTC withdrawal routes) would
+                // leave the validated R_econ value intact for an adversarial
+                // producer while the external side effect proceeds. The
+                // admitted burn path is `token.burn`; this surface's
+                // admission integration lands with the DLV economic cut.
+                // Never a documented stranding note — a refusal.
+                if crate::storage::client_db::economic_lineage::get_admitted()
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("admitted coordinate read: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?
+                    .is_some()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "burn: this identity has an active economic lineage; an unadmitted \
+                         burn would desynchronize the validated economic root from local \
+                         state — use the admitted burn path (token.burn)",
+                    ));
+                }
                 let owner_id = self.core_sdk.get_current_state()?.device_info.device_id;
                 let policy_commit = self.resolve_policy_commit_strict(token_id)?;
                 let signer_pk = current_state.device_info.public_key.clone();
@@ -2673,6 +2696,22 @@ impl<I: Send + Sync> TokenSDK<I> {
             &A,
         ) -> Result<(), DsmError>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
+        self.execute_transfer_op_staged_with_admission(op, build_artifacts, write_extra, None)
+    }
+
+    /// [`Self::execute_transfer_op_staged`] with an economic admission riding
+    /// the same advance (3.5b sender debit).
+    pub fn execute_transfer_op_staged_with_admission<A>(
+        &self,
+        op: Operation,
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<crate::sdk::core_sdk::AdmissionPlan<'_>>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
         // Extract fields for balance cache updates before consuming the operation
         let (token_id, amount_val, recipient_device_id, memo) = match &op {
             Operation::Transfer {
@@ -2719,15 +2758,18 @@ impl<I: Send + Sync> TokenSDK<I> {
                 &recipient_devid,
             );
         log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
-        let (new_state, outcome, artifacts) = self.core_sdk.execute_on_relationship_staged(
-            rel_key,
-            recipient_devid,
-            op,
-            &deltas,
-            Some(initial_tip),
-            build_artifacts,
-            write_extra,
-        )?;
+        let (new_state, outcome, artifacts) = self
+            .core_sdk
+            .execute_on_relationship_staged_with_admission(
+                rel_key,
+                recipient_devid,
+                op,
+                &deltas,
+                Some(initial_tip),
+                build_artifacts,
+                write_extra,
+                admission,
+            )?;
         log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 
         // Post-commit: in-memory cache projection only. The advance and the durable

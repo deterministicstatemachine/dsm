@@ -415,7 +415,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// v10 (3.5b PR2): `peer_economic_lineage` — the device-local memo of peer
 /// economic coordinates THIS verifier validated (its own conclusions, never
 /// authority over a live register read).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 10;
+///
+/// v11 (3.5b PR3): `sender_outbox` gains the HELD status
+/// `economic_admission_pending` — committed but non-deliverable until the
+/// terminal admission transaction promotes it (ECON_ADMITTED atomically
+/// releases the outbox to delivery).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 11;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -941,6 +946,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             UNIQUE (commitment),
             UNIQUE (submission_id),
             CHECK (status IN (
+                'economic_admission_pending',
                 'pending_submit', 'submitting', 'submitted',
                 'submission_uncertain', 'finalization_checkpoint_pending',
                 'gc_pending', 'complete'

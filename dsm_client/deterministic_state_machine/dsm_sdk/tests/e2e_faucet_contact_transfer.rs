@@ -261,6 +261,8 @@ async fn e2e_flow_faucet_contact_transfer() {
         seq: 1,
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
+        sender_economic_position: 0,
+        sender_debit_mutation_index: 0,
     };
 
     println!("[TEST] Calling router.invoke for transfer...");

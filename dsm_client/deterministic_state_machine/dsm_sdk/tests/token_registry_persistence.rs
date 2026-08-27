@@ -60,30 +60,6 @@ fn new_router() -> AppRouterImpl {
 const DECIMALS: u32 = 8;
 const SCALE: u64 = 100_000_000; // 10^DECIMALS
 const DISPLAY_MAX_SUPPLY: u128 = 1_000_000;
-const DISPLAY_ALLOC: u128 = 1_000;
-
-fn create_request(ticker: &str) -> Vec<u8> {
-    let req = generated::TokenCreateRequest {
-        ticker: ticker.to_string(),
-        alias: format!("{ticker} Token"),
-        decimals: DECIMALS,
-        max_supply_u128: DISPLAY_MAX_SUPPLY.to_be_bytes().to_vec(),
-        initial_alloc_u128: DISPLAY_ALLOC.to_be_bytes().to_vec(),
-        mint_burn_enabled: true,
-        transferable: true,
-        unlimited_supply: false,
-        mint_burn_threshold: 1,
-        description: "persisted".into(),
-        icon_url: String::new(),
-        allowlist_device_ids: Vec::new(),
-    };
-    generated::ArgPack {
-        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-        codec: generated::Codec::Proto as i32,
-        body: req.encode_to_vec(),
-    }
-    .encode_to_vec()
-}
 
 fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::AppResult {
     runtime::get_runtime().block_on(async {
@@ -115,48 +91,38 @@ fn fund_era(router: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-fn create_token(router: &AppRouterImpl, ticker: &str) -> generated::TokenCreateResponse {
-    let res = invoke(router, "token.create", create_request(ticker));
-    assert!(res.success, "create failed: {:?}", res.error_message);
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(r)) => r,
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    }
-}
-
-/// The token and its anchored policy must be in the durable tables the moment
-/// creation returns — not merely in memory.
-#[test]
-#[serial_test::serial]
-fn create_writes_durable_registry_and_policy_rows() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-    let resp = create_token(&r, "PERSA");
-
-    let row = token_registry::get_token(&resp.token_id)
-        .expect("registry read")
-        .expect("token must be recorded durably at creation");
-    assert_eq!(row.ticker, "PERSA");
-    assert_eq!(row.decimals, DECIMALS);
-    // The BASE-UNIT cap, derived rather than written out, so this states the
-    // rule instead of restating one arithmetic result.
-    assert_eq!(
-        row.max_supply,
-        DISPLAY_MAX_SUPPLY * SCALE as u128,
-        "the registry records the scaled cap, not the declared display number"
+/// Install a token in the durable shape a committed creation leaves — the
+/// registry row plus the content-addressed policy bytes. Under 3.5b the
+/// route cannot commit here (the fee is an ADMITTED economic debit and
+/// integration tests have no fake register fleet); the create route's own
+/// durable-write and reconciliation properties are pinned live in the lib
+/// e2e `handlers::sender_admission_tests::token_routes_admit_fee_only_create_and_burn_end_to_end`.
+/// These tests are about the READ side: restart survival and naming.
+fn install_created(ticker: &str) -> (String, [u8; 32]) {
+    let policy_bytes = format!("{ticker} policy bytes").into_bytes();
+    let anchor = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        &policy_bytes,
     );
-    assert_eq!(row.policy_commit.to_vec(), resp.policy_anchor);
-
-    let policy = token_registry::load_policy_verified(&row.policy_commit)
-        .expect("policy read")
-        .expect("anchored policy bytes must be stored");
-    // Self-verifying: the stored bytes hash to the key they live under.
-    let derived =
-        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &policy);
-    assert_eq!(derived.to_vec(), resp.policy_anchor);
+    token_registry::upsert_policy(&anchor, &policy_bytes).expect("store policy");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_TOKEN_ID);
+    h.update(&anchor);
+    h.update(ticker.as_bytes());
+    let token_id = dsm_sdk::util::text_id::encode_base32_crockford(h.finalize().as_bytes());
+    token_registry::insert_token(&token_registry::TokenRegistryRow {
+        token_id: token_id.clone(),
+        policy_commit: anchor,
+        ticker: ticker.to_string(),
+        alias: format!("{ticker} Token"),
+        decimals: DECIMALS,
+        max_supply: DISPLAY_MAX_SUPPLY * SCALE as u128,
+        owner_device_id: [0xAAu8; 32],
+    })
+    .expect("registry row");
+    // What the SDK does whenever it loads or creates a token: hand core the
+    // display mapping (authoritative for nothing; naming only).
+    dsm::core::token::token_state_manager::register_policy_commit_ticker(anchor, ticker);
+    (token_id, anchor)
 }
 
 /// THE RESTART PROOF. A fresh router — empty caches, same database — must
@@ -167,23 +133,20 @@ fn token_survives_restart_and_resolves_from_the_database() {
     runtime::dsm_init_runtime();
     init_test_storage();
 
-    let token_id;
-    let anchor;
-    {
+    let (token_id, anchor32) = {
         let first = new_router();
         fund_era(&first);
-        let resp = create_token(&first, "PERSB");
-        token_id = resp.token_id.clone();
-        anchor = resp.policy_anchor.clone();
-    } // first router dropped — its in-memory caches go with it
+        let out = install_created("PERSB");
+        drop(first); // in-memory caches go with it
+        out
+    };
+    let anchor = anchor32.to_vec();
 
     // "Restart": a brand-new router over the same database.
     let second = new_router();
     runtime::get_runtime().block_on(second.rehydrate_token_registry());
 
     // The policy is served again...
-    let mut anchor32 = [0u8; 32];
-    anchor32.copy_from_slice(&anchor);
     let q = invoke(
         &second,
         "tokens.listCachedPolicies",
@@ -210,67 +173,6 @@ fn token_survives_restart_and_resolves_from_the_database() {
     );
 }
 
-/// ONE IDENTITY, ONE ROW. Resubmitting the identical creation must not produce
-/// a second registration — and, because the token id is the creation
-/// commitment, must not be refused either. The same commitment names the same
-/// token, so it is answered from what is already recorded.
-///
-/// This is the registry's half of the property; the canonical half — one fee,
-/// one advance — is pinned in `token_create_fee_atomicity.rs`.
-#[test]
-#[serial_test::serial]
-fn an_identical_resubmission_leaves_one_registry_row() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let first = create_token(&r, "PERSC");
-    assert!(!first.token_id.is_empty());
-
-    let again = invoke(&r, "token.create", create_request("PERSC"));
-    assert!(
-        again.success,
-        "an identical resubmission must reconcile: {:?}",
-        again.error_message
-    );
-    let again_id = match generated::Envelope::decode(&again.data[1..])
-        .expect("envelope")
-        .payload
-    {
-        Some(generated::envelope::Payload::TokenCreateResponse(t)) => t.token_id,
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    };
-    assert_eq!(
-        again_id, first.token_id,
-        "the same commitment must resolve to the same token id"
-    );
-    assert_eq!(
-        token_registry::all_tokens().expect("read").len(),
-        1,
-        "exactly one row must exist for one token identity"
-    );
-    assert_eq!(
-        token_registry::all_policies().expect("read").len(),
-        1,
-        "and exactly one anchored policy"
-    );
-
-    // Balances are DeviceState's, not the registry's: the allocation must have
-    // been credited once, in base units.
-    let row = token_registry::get_token(&first.token_id)
-        .expect("registry read")
-        .expect("token recorded");
-    assert_eq!(
-        r.core_sdk
-            .device_head()
-            .map(|h| h.balance(&row.policy_commit))
-            .unwrap_or(0),
-        u64::try_from(DISPLAY_ALLOC).expect("fits") * SCALE,
-        "one allocation, in base units"
-    );
-}
-
 /// READ-BACK PROOF. A created token must surface in the canonical projection
 /// under its REAL ticker, never the old `{prefix}|?` placeholder, and with the
 /// decimals it was created with rather than a hardcoded 0.
@@ -281,9 +183,10 @@ fn created_token_projects_under_its_real_ticker() {
     init_test_storage();
     let r = new_router();
     fund_era(&r);
-    let resp = create_token(&r, "READBK");
+    let (token_id, _anchor) = install_created("READBK");
+    let _ = &r;
 
-    let row = token_registry::get_token(&resp.token_id)
+    let row = token_registry::get_token(&token_id)
         .expect("registry read")
         .expect("token recorded");
 
@@ -305,7 +208,7 @@ fn created_token_projects_under_its_real_ticker() {
     );
 
     // Decimals come from the registry, not a hardcoded default.
-    assert_eq!(row.decimals, 8, "created token keeps its decimals");
+    assert_eq!(row.decimals, DECIMALS, "created token keeps its decimals");
 }
 
 /// An unknown policy commit must yield NO key at all. Absent is the honest

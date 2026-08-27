@@ -18,7 +18,7 @@
 use prost::Message;
 use std::path::PathBuf;
 
-use dsm_sdk::bridge::{AppInvoke, AppRouter};
+use dsm_sdk::bridge::AppRouter;
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
@@ -45,25 +45,6 @@ fn new_router() -> AppRouterImpl {
         enable_offline: false,
     })
     .expect("router")
-}
-
-fn pack(body: Vec<u8>) -> Vec<u8> {
-    generated::ArgPack {
-        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-        codec: generated::Codec::Proto as i32,
-        body,
-    }
-    .encode_to_vec()
-}
-
-fn invoke(r: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::AppResult {
-    runtime::get_runtime().block_on(async {
-        r.invoke(AppInvoke {
-            method: method.to_string(),
-            args,
-        })
-        .await
-    })
 }
 
 /// Adopt from the TEXT a user supplied — a bare Base32 anchor or a scanned
@@ -113,32 +94,42 @@ fn era(r: &AppRouterImpl) -> u64 {
     r.core_sdk.device_head().map(|h| h.balance(&c)).unwrap_or(0)
 }
 
-/// Create a token so there is a real published policy to adopt, returning its
-/// anchor.
-fn create_token(r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
-    let req = generated::TokenCreateRequest {
-        ticker: ticker.to_string(),
-        alias: format!("{ticker} Token"),
-        decimals: 2,
-        max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: 1_000u128.to_be_bytes().to_vec(),
-        mint_burn_enabled: true,
-        transferable: true,
-        unlimited_supply: false,
-        mint_burn_threshold: 1,
-        description: String::new(),
-        icon_url: String::new(),
-        allowlist_device_ids: Vec::new(),
-    };
-    let res = invoke(r, "token.create", pack(req.encode_to_vec()));
-    assert!(res.success, "create: {:?}", res.error_message);
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(t)) => {
-            <[u8; 32]>::try_from(t.policy_anchor.as_slice()).expect("32-byte anchor")
-        }
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    }
+/// PUBLISH a real policy to adopt, returning its anchor — the durable shape
+/// `token.create` persists, built directly: under 3.5b the creation fee is an
+/// ADMITTED economic debit integration tests cannot run (no fake register
+/// fleet; the admitted create e2e lives in `handlers::sender_admission_tests`),
+/// and adoption only needs the published policy bytes, which is truer to the
+/// "another device created it" story anyway: no registry row exists locally
+/// until adoption writes one.
+fn create_token(_r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
+    let signer = vec![0xBBu8; 32];
+    let alias = format!("{ticker} Token");
+    let mut pb: Vec<u8> = vec![
+        3,           // TOKEN_POLICY_VERSION
+        0,           // TOKEN_KIND_FUNGIBLE
+        0x01 | 0x02, // mint_burn + transferable
+        1,           // mint_burn_threshold
+        1,           // signer count
+    ];
+    pb.extend_from_slice(&(signer.len() as u16).to_be_bytes());
+    pb.extend_from_slice(&signer);
+    pb.push(ticker.len() as u8);
+    pb.extend_from_slice(ticker.as_bytes());
+    pb.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+    pb.extend_from_slice(alias.as_bytes());
+    pb.push(2); // decimals
+    pb.extend_from_slice(&1_000_000u128.to_be_bytes());
+    pb.extend_from_slice(&1_000u128.to_be_bytes());
+    pb.extend_from_slice(&0u16.to_be_bytes()); // description
+    pb.extend_from_slice(&0u16.to_be_bytes()); // icon
+    pb.push(0); // ALLOWLIST_KIND_NONE
+    pb.extend_from_slice(&0u16.to_be_bytes());
+
+    let proto = generated::TokenPolicyV3 { policy_bytes: pb }.encode_to_vec();
+    let anchor =
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
+    token_registry::upsert_policy(&anchor, &proto).expect("publish policy bytes");
+    anchor
 }
 
 /// EVERY token query route must be reachable through the production dispatcher.
