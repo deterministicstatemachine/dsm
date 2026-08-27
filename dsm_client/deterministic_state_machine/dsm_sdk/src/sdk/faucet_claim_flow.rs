@@ -233,142 +233,167 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         ));
     };
 
-    // ── Build the witness FROM the accepted core transition ────────────────
+    // ── Prepare-first: the successor exists before the witness ─────────────
+    //
+    // The v2 economic operation id binds the PREPARED successor's C_dsm+, so
+    // the witness (and everything addressed from it) is built inside the
+    // advance's build phase, against the real successor. The Prepared
+    // admission needs only the digest — acceptance coordinates do not exist
+    // yet, and its type no longer pretends they do.
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let mut tree = producer_tree(&validated)?;
     let pre_root = tree.root();
     let prior = head.balance(&era);
-    let credit_state = EconomicLeafState::Balance(
-        EconomicBalanceState::new(era, prior + ERA_FAUCET_PAYOUT)
-            .map_err(|e| storage_err("credit state", e))?,
-    );
-    let pre_state = if prior > 0 {
-        Some(EconomicLeafState::Balance(
-            EconomicBalanceState::new(era, prior).map_err(|e| storage_err("pre state", e))?,
-        ))
-    } else {
-        None
-    };
-    let key = credit_state.leaf_key(&genesis, &devid);
-    let siblings = tree.siblings(&key).to_vec();
-    let mutation = EconomicLeafMutation::new(pre_state, Some(credit_state.clone()), siblings)
-        .map_err(|e| storage_err("mutation", e))?;
-    tree.insert(
-        key,
-        credit_state
-            .leaf_value()
-            .map_err(|e| storage_err("leaf value", e))?,
-    );
-    let post_root = tree.root();
-
-    let evidence_addr = faucet_claim_evidence_addr(&envelope);
-    let witness = EconomicTransitionWitness::new(
-        pre_root,
-        post_root,
-        dsm_economic_operation_id(&genesis, &devid, &op_digest),
-        op_digest,
-        vec![mutation],
-        vec![CreditSource::ValidatedFaucetDistribution(
-            CreditSourceValidatedFaucetDistribution {
-                credit_mutation_index: 0,
-                faucet_id,
-                ticket_index,
-                faucet_claim_evidence_addr: evidence_addr,
-            },
-        )],
-    )
-    .map_err(|e| storage_err("witness", e))?;
-    let witness_bytes = witness
-        .encode()
-        .map_err(|e| storage_err("witness encode", e))?;
-    let witness_addr = immutable_inner(
-        dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
-        &witness_bytes,
-    );
-
     let op = Operation::FaucetClaim {
         faucet_id,
         ticket_index,
     };
     let op_bytes = op.to_bytes();
-    let substrate_addr = immutable_inner(
-        dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
-        &op_bytes,
+    let prepared = PendingEconomicAdmission::prepared(
+        PendingAdmissionKind::DsmBacked,
+        target_position,
+        pre_root,
+        op_digest,
     );
-
-    let manifest = EconomicAdmissionManifest::new(
-        core.device_tree_root_or_genesis(),
-        witness_addr,
-        genesis, // authority evidence: the authenticated genesis digest (beta)
-        AdmissionSubstrate::DsmSuccessor {
-            evidence_addr: substrate_addr,
-        },
-        witness.derived_provenance_index(),
-    )
-    .map_err(|e| storage_err("manifest", e))?;
-    let manifest_bytes = manifest
-        .encode()
-        .map_err(|e| storage_err("manifest encode", e))?;
-    let manifest_addr = manifest
-        .addr()
-        .map_err(|e| storage_err("manifest addr", e))?;
-
-    let pending = PendingEconomicAdmission {
-        kind: PendingAdmissionKind::DsmBacked,
-        state: EconomicAdmissionState::Prepared,
-        economic_position: target_position,
-        pre_economic_root: pre_root,
-        post_economic_root: post_root,
-        operation_digest: op_digest,
-        accepted_substrate_addr: substrate_addr,
-        admission_manifest_addr: manifest_addr,
-    };
-
-    // ── ONE TX: fence-coupled advance + pending row + frozen evidence ──────
-    let artifacts = vec![
-        (
-            crate::sdk::economic_registers::immutable_object_key(
-                dsm::common::domain_tags::TAG_DSM_ERA_FAUCET_TICKET_CLAIM,
-                &envelope,
-            ),
-            envelope.clone(),
-            "faucet-ticket-claim",
-        ),
-        (
-            crate::sdk::economic_registers::immutable_object_key(
-                dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
-                &witness_bytes,
-            ),
-            witness_bytes.clone(),
-            "economic-transition-witness",
-        ),
-        (
-            crate::sdk::economic_registers::immutable_object_key(
-                dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
-                &manifest_bytes,
-            ),
-            manifest_bytes.clone(),
-            "economic-admission-manifest",
-        ),
-        (
-            crate::sdk::economic_registers::immutable_object_key(
-                dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
-                &op_bytes,
-            ),
-            op_bytes.clone(),
-            "economic-dsm-substrate",
-        ),
-    ];
     let delta = BalanceDelta {
         policy_commit: era,
         direction: BalanceDirection::Credit,
         amount: ERA_FAUCET_PAYOUT,
     };
-    core.faucet_claim_advance(op, &delta, pending.clone(), artifacts, &set.id())?;
+
+    let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
+    let evidence_addr = faucet_claim_evidence_addr(&envelope);
+    let authority_position = core.device_tree_root_or_genesis();
+    // ── ONE TX: fence-coupled advance + pending row + frozen evidence ──────
+    let pending = core.faucet_claim_advance(
+        op.clone(),
+        &delta,
+        prepared,
+        |c_dsm_plus| {
+            let credit_state = EconomicLeafState::Balance(
+                EconomicBalanceState::new(era, prior + ERA_FAUCET_PAYOUT)
+                    .map_err(|e| storage_err("credit state", e))?,
+            );
+            let pre_state = if prior > 0 {
+                Some(EconomicLeafState::Balance(
+                    EconomicBalanceState::new(era, prior)
+                        .map_err(|e| storage_err("pre state", e))?,
+                ))
+            } else {
+                None
+            };
+            let key = credit_state.leaf_key(&genesis, &devid);
+            let siblings = tree.siblings(&key).to_vec();
+            let mutation =
+                EconomicLeafMutation::new(pre_state, Some(credit_state.clone()), siblings)
+                    .map_err(|e| storage_err("mutation", e))?;
+            tree.insert(
+                key,
+                credit_state
+                    .leaf_value()
+                    .map_err(|e| storage_err("leaf value", e))?,
+            );
+            let post_root = tree.root();
+
+            let witness = EconomicTransitionWitness::new(
+                pre_root,
+                post_root,
+                dsm_economic_operation_id(&genesis, &devid, c_dsm_plus),
+                op_digest,
+                vec![mutation],
+                vec![CreditSource::ValidatedFaucetDistribution(
+                    CreditSourceValidatedFaucetDistribution {
+                        credit_mutation_index: 0,
+                        faucet_id,
+                        ticket_index,
+                        faucet_claim_evidence_addr: evidence_addr,
+                    },
+                )],
+            )
+            .map_err(|e| storage_err("witness", e))?;
+            let witness_bytes = witness
+                .encode()
+                .map_err(|e| storage_err("witness encode", e))?;
+            let witness_addr = immutable_inner(
+                dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                &witness_bytes,
+            );
+            let substrate_addr = immutable_inner(
+                dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
+                &op_bytes,
+            );
+            let manifest = EconomicAdmissionManifest::new(
+                authority_position,
+                witness_addr,
+                genesis, // authority evidence: the authenticated genesis digest (beta)
+                AdmissionSubstrate::DsmSuccessor {
+                    evidence_addr: substrate_addr,
+                },
+                witness.derived_provenance_index(),
+            )
+            .map_err(|e| storage_err("manifest", e))?;
+            let manifest_bytes = manifest
+                .encode()
+                .map_err(|e| storage_err("manifest encode", e))?;
+            let manifest_addr = manifest
+                .addr()
+                .map_err(|e| storage_err("manifest addr", e))?;
+
+            let coords = dsm::economic::admission::AcceptedAdmissionCoords {
+                post_economic_root: post_root,
+                accepted_substrate_addr: substrate_addr,
+                admission_manifest_addr: manifest_addr,
+                c_dsm_plus: *c_dsm_plus,
+            };
+            let artifacts = vec![
+                (
+                    crate::sdk::economic_registers::immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ERA_FAUCET_TICKET_CLAIM,
+                        &envelope,
+                    ),
+                    envelope.clone(),
+                    "faucet-ticket-claim",
+                ),
+                (
+                    crate::sdk::economic_registers::immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                        &witness_bytes,
+                    ),
+                    witness_bytes.clone(),
+                    "economic-transition-witness",
+                ),
+                (
+                    crate::sdk::economic_registers::immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+                        &manifest_bytes,
+                    ),
+                    manifest_bytes.clone(),
+                    "economic-admission-manifest",
+                ),
+                (
+                    crate::sdk::economic_registers::immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
+                        &op_bytes,
+                    ),
+                    op_bytes.clone(),
+                    "economic-dsm-substrate",
+                ),
+            ];
+            built = Some((witness, manifest));
+            Ok((coords, artifacts))
+        },
+        &set.id(),
+    )?;
+    let (witness, manifest) = built.ok_or_else(|| {
+        DsmError::storage(
+            "advance committed without building the witness".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
 
     // ── Publish evidence, register the root, verify, admit ────────────────
     finish_admission(
-        core, network_id, &set, &validated, tree, witness, manifest, pending,
+        core, network_id, &set, &validated, tree, witness, manifest, op, pending,
     )
     .await
 }
@@ -383,6 +408,7 @@ async fn finish_admission(
     tree: EconomicSmt,
     witness: EconomicTransitionWitness,
     manifest: EconomicAdmissionManifest,
+    operation: Operation,
     mut pending: PendingEconomicAdmission,
 ) -> Result<ClaimOutcome, DsmError> {
     let head = core
@@ -393,6 +419,9 @@ async fn finish_admission(
     let (public_key, secret_key) = crate::sdk::signing_authority::current_keypair()
         .map_err(|e| storage_err("signing authority", e))?;
 
+    let coords = *pending
+        .accepted_coords()
+        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
     // Evidence to q members, attributed. The republish sweep carries the
     // EXACT frozen bytes.
     crate::handlers::artifact_republish::republish_unpublished_artifacts()
@@ -402,7 +431,7 @@ async fn finish_admission(
     core.update_pending_admission_state(&pending)?;
 
     // The root claim: frozen-or-sign-once BEFORE the first member write.
-    let manifest_addr = pending.admission_manifest_addr;
+    let manifest_addr = coords.admission_manifest_addr;
     let k_root = dsm::economic::register::economic_root_register_key(
         &genesis,
         &devid,
@@ -417,7 +446,7 @@ async fn finish_admission(
                 genesis,
                 devid,
                 pending.economic_position,
-                pending.post_economic_root,
+                coords.post_economic_root,
                 manifest_addr,
                 set.id(),
                 dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
@@ -455,13 +484,14 @@ async fn finish_admission(
         trader_genesis: genesis,
         trader_devid: devid,
         economic_position: pending.economic_position,
-        post_economic_root: pending.post_economic_root,
+        post_economic_root: coords.post_economic_root,
         admission_manifest_addr: manifest_addr,
         storage_set_id: set.id(),
     };
     let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        pending.operation_digest,
-        pending.accepted_substrate_addr,
+        operation,
+        coords.c_dsm_plus,
+        coords.accepted_substrate_addr,
     );
     let resolver = LiveRegisterResolver {
         set,
@@ -577,8 +607,11 @@ pub async fn resume_pending_claim(
         })?;
     let witness = dsm::economic::decode::decode_transition_witness(&witness_bytes)
         .map_err(|e| storage_err("decode frozen witness", e))?;
+    let coords = *pending
+        .accepted_coords()
+        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
     if witness.operation_digest != pending.operation_digest
-        || witness.post_economic_root != pending.post_economic_root
+        || witness.post_economic_root != coords.post_economic_root
     {
         return Err(DsmError::storage(
             "frozen witness does not match the pending admission".to_string(),
@@ -598,7 +631,7 @@ pub async fn resume_pending_claim(
         witness_addr,
         genesis,
         AdmissionSubstrate::DsmSuccessor {
-            evidence_addr: pending.accepted_substrate_addr,
+            evidence_addr: coords.accepted_substrate_addr,
         },
         witness.derived_provenance_index(),
     )
@@ -606,7 +639,7 @@ pub async fn resume_pending_claim(
     if manifest
         .addr()
         .map_err(|e| storage_err("manifest addr", e))?
-        != pending.admission_manifest_addr
+        != coords.admission_manifest_addr
     {
         return Err(DsmError::storage(
             "reconstructed manifest does not address-match the pending admission".to_string(),
@@ -632,8 +665,38 @@ pub async fn resume_pending_claim(
         }
     }
 
+    // The EXACT operation, from the frozen substrate artifact — recovery
+    // re-derives nothing. Its digest must be the one the admission binds.
+    let substrate_key_prefix = format!(
+        "immutable::{}::",
+        String::from_utf8_lossy(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ.source_bytes()
+        )
+    );
+    let op_bytes =
+        crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix(
+            &substrate_key_prefix,
+        )
+        .map_err(|e| storage_err("load frozen substrate", e))?
+        .ok_or_else(|| {
+            DsmError::storage(
+                "no frozen substrate operation for the pending admission".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let operation =
+        Operation::from_bytes(&op_bytes).map_err(|e| storage_err("decode frozen operation", e))?;
+    if dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes())
+        != pending.operation_digest
+    {
+        return Err(DsmError::storage(
+            "frozen substrate operation does not match the pending admission".to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+
     finish_admission(
-        core, network_id, &set, &validated, tree, witness, manifest, pending,
+        core, network_id, &set, &validated, tree, witness, manifest, operation, pending,
     )
     .await
 }

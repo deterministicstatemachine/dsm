@@ -139,9 +139,18 @@ pub const TAG_DSM_ECON_SOURCE_ERA_FAUCET_TICKET: TaggedHashDomain<'static> =
 pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-digest/dsm/v1");
 /// Identity of an economic operation on the DSM substrate:
-/// `EconomicOperationId_dsm = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ operation_digest_dsm)`.
+/// `EconomicOperationId_dsm = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ C_dsm+)`.
+///
+/// `/v1` is **burned**: its shipped preimage was `G ‖ DevID ‖
+/// operation_digest_dsm`, which identifies WHAT operation was performed but
+/// not WHICH authenticated accepted successor performed it. Once
+/// `consumed_source.consumer_economic_operation_id` is live that distinction
+/// is load-bearing (two successors can carry byte-identical operations), so
+/// the corrected preimage binds the successor's chain-state commitment
+/// `C_dsm+`. Changing the preimage under the same domain would give one
+/// domain two meanings; hence `/v2`, and `/v1` is never reused.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v1");
+    crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v2");
 
 /// Digest of the exact `EconomicRootClaimV1` envelope bytes a register member
 /// stores and compares: `H(tag ‖ 0x00 ‖ envelope_bytes)`. The settlement

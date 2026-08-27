@@ -6416,23 +6416,24 @@ mod tests {
     /// unrelated precondition.
     #[test]
     fn advance_refuses_an_economic_write_while_an_admission_is_pending() {
-        use crate::economic::admission::{
-            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
-        };
+        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
 
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let (funded, vault, rk, tip) = funded_for_close(0xD5, era, rigb, 7_000, 3_000);
 
-        let pending = PendingEconomicAdmission {
-            kind: PendingAdmissionKind::DsmBacked,
-            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
-            economic_position: 9,
-            pre_economic_root: [1u8; 32],
+        let pending = PendingEconomicAdmission::prepared(
+            PendingAdmissionKind::DsmBacked,
+            9,
+            [1u8; 32],
+            [3u8; 32],
+        )
+        .into_locally_accepted(crate::economic::admission::AcceptedAdmissionCoords {
             post_economic_root: [2u8; 32],
-            operation_digest: [3u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
-        };
+            c_dsm_plus: [6u8; 32],
+        })
+        .expect("prepared -> accepted");
         let fenced = funded.with_pending_economic_admission(Some(pending));
 
         // DlvClose is a ClosedWriteSet operation: it moves reserves back to
@@ -6481,22 +6482,23 @@ mod tests {
     /// — a one-transition escape hatch.
     #[test]
     fn the_fence_is_carried_forward_by_advance() {
-        use crate::economic::admission::{
-            EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
-        };
+        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
 
         let (era, rigb) = (pc(0xE1), pc(0xF1));
         let (funded, _vault, rk, tip) = funded_for_close(0xD6, era, rigb, 7_000, 3_000);
-        let pending = PendingEconomicAdmission {
-            kind: PendingAdmissionKind::DsmBacked,
-            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
-            economic_position: 11,
-            pre_economic_root: [1u8; 32],
+        let pending = PendingEconomicAdmission::prepared(
+            PendingAdmissionKind::DsmBacked,
+            11,
+            [1u8; 32],
+            [3u8; 32],
+        )
+        .into_locally_accepted(crate::economic::admission::AcceptedAdmissionCoords {
             post_economic_root: [2u8; 32],
-            operation_digest: [3u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
-        };
+            c_dsm_plus: [6u8; 32],
+        })
+        .expect("prepared -> accepted");
         let fenced = funded.with_pending_economic_admission(Some(pending.clone()));
 
         // A Noop classifies as EconomicEffect::None, so the fence allows it.

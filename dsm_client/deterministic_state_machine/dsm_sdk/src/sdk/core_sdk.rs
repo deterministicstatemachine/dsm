@@ -236,27 +236,43 @@ impl CoreSDK {
         })
     }
 
-    /// The fence-coupled faucet-claim advance: attach the `Prepared` admission
-    /// to the head, run the self-loop advance (whose accepting gate REQUIRES
-    /// that admission), and commit head + pending row + frozen evidence in ONE
-    /// transaction. On any failure the pending attachment is rolled off the
-    /// in-memory head so the device is not left fenced by a claim that never
-    /// happened.
+    /// The fence-coupled faucet-claim advance, PREPARE-FIRST: attach the
+    /// `Prepared` admission (digest only — acceptance coordinates do not
+    /// exist yet), run the self-loop advance (whose accepting gate REQUIRES
+    /// that admission), hand the prepared successor's `C_dsm+` to `build` —
+    /// which constructs the witness, manifest, coordinates and frozen
+    /// artifacts against the REAL successor — and commit head + pending row +
+    /// frozen evidence in ONE transaction. This ordering is forced by the v2
+    /// operation identity: the witness names WHICH successor performed the
+    /// operation, so it cannot be built before the successor exists.
+    ///
+    /// On any failure the pending attachment is rolled off the in-memory head
+    /// so the device is not left fenced by a claim that never happened.
+    /// Returns the accepted admission (post-`Prepared`, coordinates
+    /// installed) that is now riding the durable head.
     pub(crate) fn faucet_claim_advance(
         &self,
         operation: dsm::types::operations::Operation,
         delta: &dsm::types::device_state::BalanceDelta,
-        pending: dsm::economic::admission::PendingEconomicAdmission,
-        artifacts: Vec<(String, Vec<u8>, &'static str)>,
+        prepared: dsm::economic::admission::PendingEconomicAdmission,
+        build: impl FnOnce(
+            &[u8; 32], // C_dsm+ of the prepared successor
+        ) -> Result<
+            (
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
         storage_set_id: &[u8; 32],
-    ) -> Result<(), DsmError> {
+    ) -> Result<dsm::economic::admission::PendingEconomicAdmission, DsmError> {
         let dev_id = self.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &dev_id, &dev_id,
         );
         let mut sm = self.state_machine.lock();
-        sm.attach_pending_economic_admission(Some(pending.clone()));
+        sm.attach_pending_economic_admission(Some(prepared.clone()));
         let outcome = match sm.prepare_advance_relationship(
             rel_key,
             dev_id,
@@ -273,11 +289,26 @@ impl CoreSDK {
                 return Err(e);
             }
         };
-        // Flip Prepared -> LocalAcceptedPendingEcon for the DURABLE record and
-        // the committed head: from here the fence is live and recovery must
-        // finish THIS admission.
-        let mut accepted = pending.clone();
-        accepted.state = dsm::economic::admission::EconomicAdmissionState::LocalAcceptedPendingEcon;
+        // The successor now exists in memory; its chain-state commitment is
+        // what the v2 economic operation id binds.
+        let c_dsm_plus = outcome.new_chain_state.compute_chain_tip();
+        let (coords, artifacts) = match build(&c_dsm_plus) {
+            Ok(v) => v,
+            Err(e) => {
+                sm.attach_pending_economic_admission(None);
+                return Err(e);
+            }
+        };
+        // Install the coordinates: Prepared -> LocalAcceptedPendingEcon for
+        // the DURABLE record and the committed head. From here the fence is
+        // live and recovery must finish THIS admission.
+        let accepted = match prepared.into_locally_accepted(coords) {
+            Ok(a) => a,
+            Err(e) => {
+                sm.attach_pending_economic_admission(None);
+                return Err(DsmError::invalid_operation(e.to_string()));
+            }
+        };
         let outcome = dsm::types::device_state::AdvanceOutcome {
             new_device_state: outcome
                 .new_device_state
@@ -295,7 +326,7 @@ impl CoreSDK {
             return Err(e);
         }
         sm.commit_advance(&outcome);
-        Ok(())
+        Ok(accepted)
     }
 
     /// Persist a pending-admission lifecycle transition (EvidencePublished /
