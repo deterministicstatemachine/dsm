@@ -17,7 +17,7 @@ use crate::sdk::faucet_claim_flow::claim_era_faucet;
 use crate::sdk::storage_set::{StorageSet, StorageSetCatalog};
 use crate::storage::client_db;
 
-const NETWORK: &[u8] = b"dsm-testnet";
+pub(crate) const NETWORK: &[u8] = b"dsm-testnet";
 
 /// Full v3 identity on the beta network (the only one the register profile
 /// resolves — fail-closed by design), with the genesis record persisted so
@@ -78,7 +78,7 @@ fn install_testnet_identity(seed: u8) -> (Vec<u8>, [u8; 32], [u8; 32]) {
 
 /// Removes the fleet override on drop so tests outside this module keep the
 /// hermetic default fleet.
-struct FleetGuard;
+pub(crate) struct FleetGuard;
 impl Drop for FleetGuard {
     fn drop(&mut self) {
         std::env::remove_var("DSM_ENV_CONFIG_PATH");
@@ -107,7 +107,7 @@ fn install_canonical_fleet() -> FleetGuard {
     FleetGuard
 }
 
-fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
+pub(crate) fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     std::env::set_var("DSM_SDK_TEST_MODE", "1");
     let guard = install_canonical_fleet();
     client_db::reset_database_for_tests();

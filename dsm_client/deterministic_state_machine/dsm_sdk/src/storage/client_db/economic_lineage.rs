@@ -78,6 +78,25 @@ pub fn get_admitted() -> Result<Option<(u64, [u8; 32])>> {
     .transpose()
 }
 
+/// The admitted coordinate, read INSIDE a caller's transaction — the CAS
+/// re-assert the admission commit runs before making acceptance durable.
+pub fn get_admitted_with_conn(conn: &rusqlite::Connection) -> Result<Option<(u64, [u8; 32])>> {
+    let row = conn
+        .query_row(
+            "SELECT economic_position, economic_root FROM economic_admitted WHERE id = 1",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()?;
+    row.map(|(p, root)| {
+        Ok((
+            u64::try_from(p).map_err(|_| anyhow!("position negative"))?,
+            digest32(root, "economic_root")?,
+        ))
+    })
+    .transpose()
+}
+
 /// Record admission + install the leaf cache, INSIDE the caller's transaction
 /// — the same one that clears the pending admission, so "admitted" and "no
 /// longer pending" cannot disagree.

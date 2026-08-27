@@ -129,59 +129,10 @@ fn publish_returns_the_local_content_hash() {
     );
 }
 
-/// End-to-end: a created token's anchor is the content hash of the policy Rust
-/// packed. This is the whole derive-locally chain exercised through the real
-/// route — the client supplied only intent, never bytes and never an anchor.
-#[test]
-#[serial_test::serial]
-fn create_derives_its_own_anchor_from_the_policy_it_packs() {
-    let r = router();
-    fund_era(&r);
-    let res = invoke(&r, "token.create", create_request("MINE", 1_000_000, 1_000));
-    assert!(
-        res.success,
-        "create should succeed: {:?}",
-        res.error_message
-    );
-
-    // Envelope v3 responses carry a 0x03 framing byte before the proto.
-    assert_eq!(res.data.first(), Some(&0x03u8), "expected v3 framing byte");
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope decodes");
-    let resp = match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(resp)) => resp,
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    };
-    assert!(resp.success, "token create should report success");
-    assert!(!resp.token_id.is_empty(), "token id must be returned");
-    assert_eq!(resp.policy_anchor.len(), 32, "anchor must be 32 bytes");
-
-    // Fetch the policy the route stored under that anchor and re-derive the
-    // hash: the anchor must be exactly the content hash of those bytes.
-    let anchor_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&resp.policy_anchor);
-    let q = invoke(
-        &r,
-        "tokens.getPolicy",
-        generated::ArgPack {
-            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-            codec: generated::Codec::Proto as i32,
-            body: anchor_b32.clone().into_bytes(),
-        }
-        .encode_to_vec(),
-    );
-    // getPolicy is a query route; if it is not reachable as an invoke the
-    // anchor contract is still asserted below from the create response.
-    if q.success && !q.data.is_empty() {
-        let derived = dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_POLICY,
-            &q.data,
-        );
-        assert_eq!(
-            derived.to_vec(),
-            resp.policy_anchor,
-            "stored policy must hash to the anchor the route returned"
-        );
-    }
-}
+// The end-to-end "create derives its own anchor" test moved to the lib e2e
+// `handlers::sender_admission_tests::token_routes_admit_fee_only_create_and_burn_end_to_end`:
+// under 3.5b a creation's fee is an ADMITTED economic debit, and integration
+// tests have no fake register fleet, so no creation can commit here.
 
 /// A token whose allocation exceeds its cap must be rejected by Rust, not just
 /// by the wizard — the old code checked this only in TypeScript.

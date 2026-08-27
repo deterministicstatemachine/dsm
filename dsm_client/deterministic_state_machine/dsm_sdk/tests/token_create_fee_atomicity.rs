@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The 10 ERA creation fee, burned atomically with the token.
+//! The 10 ERA creation fee — refusal contracts.
 //!
-//! Creation destroys ERA and issues the new asset in ONE canonical advance —
-//! one SMT root, one CAS. Either the token exists and the fee was paid, or
-//! neither happened. There is no compensating step to get wrong.
+//! 3.5b made the creation fee an ADMITTED economic debit, and integration
+//! tests have no fake register fleet (`cfg(test)`-only), so no creation can
+//! COMMIT here any more. What this suite pins is the fail-closed half of fee
+//! atomicity: a creation that cannot be admitted burns nothing, advances
+//! nothing, and leaves no registry row. The commit-side properties (fee
+//! burned once, reconciliation, anchor contract) moved to the lib e2e
+//! `handlers::sender_admission_tests::token_routes_admit_fee_only_create_and_burn_end_to_end`.
 //!
 //! Two properties of the surrounding design shape what these tests assert.
 //!
@@ -77,7 +81,6 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
 /// A creation request in DISPLAY units, exactly as the wizard sends them.
 /// `DECIMALS` is what turns those into the base units canonical state holds.
 const DECIMALS: u32 = 2;
-const SCALE: u64 = 100; // 10^DECIMALS
 
 fn create_request(ticker: &str, display_alloc: u128) -> Vec<u8> {
     let req = generated::TokenCreateRequest {
@@ -121,16 +124,6 @@ fn fund_era(router: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-/// The token id from a successful `token.create` reply — the creation
-/// commitment the caller is told it committed to.
-fn token_id_of(res: &dsm_sdk::bridge::AppResult) -> String {
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(t)) => t.token_id,
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    }
-}
-
 fn era_balance(router: &AppRouterImpl) -> u64 {
     let commit = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA builtin");
     router
@@ -148,46 +141,39 @@ fn head_root(router: &AppRouterImpl) -> [u8; 32] {
         .unwrap_or([0u8; 32])
 }
 
-/// The fee is charged and BURNED — ERA drops by exactly the fee, and the new
-/// token is credited its allocation, from one advance.
+/// A creation whose fee debit cannot be ADMITTED (no reachable register
+/// fleet here) must fail closed: no fee burned, no head advance, no row.
 #[test]
 #[serial_test::serial]
-fn creation_burns_exactly_the_fee_and_credits_the_allocation() {
+fn an_unadmittable_creation_fails_closed_and_burns_nothing() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
     fund_era(&r);
 
-    let before = era_balance(&r);
-    assert!(before >= FEE, "fixture must fund at least the fee");
-
-    let res = invoke(&r, "token.create", create_request("FEEA", 250));
-    assert!(res.success, "create failed: {:?}", res.error_message);
-
-    let after = era_balance(&r);
-    assert_eq!(
-        after,
-        before - FEE,
-        "ERA must drop by exactly the {FEE} ERA creation fee"
+    let before_era = era_balance(&r);
+    let before_root = head_root(&r);
+    assert!(
+        before_era >= FEE,
+        "fixture funds the fee — the refusal must not be affordability"
     );
 
-    // The new asset was credited its allocation in the same advance.
-    let row = token_registry::get_token_by_ticker("FEEA")
-        .expect("registry read")
-        .expect("token recorded");
-    let issued = r
-        .core_sdk
-        .device_head()
-        .map(|h| h.balance(&row.policy_commit))
-        .unwrap_or(0);
-    // In BASE UNITS: the request asked for 250 display at DECIMALS, and the
-    // boundary scaled it once. Asserting the display number here would pin the
-    // very disagreement that made a send fail with a balance underflow against
-    // a balance the wallet showed as sufficient.
+    let res = invoke(&r, "token.create", create_request("FEEA", 0));
+    assert!(
+        !res.success,
+        "a fee debit with no admittable economic lineage must be refused"
+    );
+    assert_eq!(era_balance(&r), before_era, "no ERA may be burned");
     assert_eq!(
-        issued,
-        250 * SCALE,
-        "the initial allocation must be credited in base units"
+        head_root(&r),
+        before_root,
+        "canonical head must not advance"
+    );
+    assert!(
+        token_registry::get_token_by_ticker("FEEA")
+            .expect("read")
+            .is_none(),
+        "no registry row may survive a refused creation"
     );
 }
 
@@ -224,104 +210,6 @@ fn insufficient_era_rejects_and_burns_nothing() {
             .expect("read")
             .is_none(),
         "no token row may survive a failed creation"
-    );
-}
-
-/// AN IDENTICAL RESUBMISSION RECONCILES. It is the retry a caller makes when
-/// the first attempt's reply was lost, and on hardware that is exactly what
-/// happened: the creation committed — fee burned, supply credited, registry
-/// written — while the wizard sat on "Publishing policy…" and then reported
-/// failure.
-///
-/// Because the token id is the creation commitment, the same request names the
-/// same token, so it is answered from canonical state rather than treated as a
-/// second creation. The fee, the advance and the row must each happen once.
-/// Refusing the resubmission instead (which this once asserted) presented one
-/// successful creation as two failures.
-///
-/// A DIFFERENT creation claiming a taken ticker is a hard conflict, not a
-/// reconciliation; that is pinned in `token_create_reconciliation.rs`.
-#[test]
-#[serial_test::serial]
-fn an_identical_resubmission_charges_one_fee_and_advances_once() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let before = era_balance(&r);
-    let first = invoke(&r, "token.create", create_request("DUPE", 5));
-    assert!(first.success, "create failed: {:?}", first.error_message);
-    let first_id = token_id_of(&first);
-    let after_first = era_balance(&r);
-    let root_after_first = head_root(&r);
-    assert_eq!(after_first, before - FEE, "the first creation pays the fee");
-
-    let second = invoke(&r, "token.create", create_request("DUPE", 5));
-    assert!(
-        second.success,
-        "an identical resubmission must reconcile, not fail: {:?}",
-        second.error_message
-    );
-    assert_eq!(
-        token_id_of(&second),
-        first_id,
-        "one commitment names one token"
-    );
-    assert_eq!(
-        era_balance(&r),
-        after_first,
-        "and must not pay a second fee"
-    );
-    // The stronger statement, and the one that actually rules out a duplicate
-    // issuance: canonical state did not move at all. A second advance that
-    // happened to net to the same balances would still be a second creation.
-    assert_eq!(
-        head_root(&r),
-        root_after_first,
-        "a reconciled resubmission must not advance canonical state"
-    );
-    assert_eq!(
-        token_registry::all_tokens().expect("registry read").len(),
-        1,
-        "exactly one registry row for one identity"
-    );
-    assert_eq!(
-        r.core_sdk
-            .device_head()
-            .map(|h| h.balance(
-                &token_registry::get_token_by_ticker("DUPE")
-                    .expect("registry read")
-                    .expect("token recorded")
-                    .policy_commit
-            ))
-            .unwrap_or(0),
-        5 * SCALE,
-        "and the allocation is credited exactly once, in base units"
-    );
-}
-
-/// Creation is a canonical event even with no initial allocation — the fee is
-/// still burned and the chain still advances, so the token is recoverable.
-#[test]
-#[serial_test::serial]
-fn zero_allocation_still_advances_and_charges() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let before_era = era_balance(&r);
-    let before_root = head_root(&r);
-
-    let res = invoke(&r, "token.create", create_request("ZERO", 0));
-    assert!(res.success, "create failed: {:?}", res.error_message);
-
-    assert_eq!(era_balance(&r), before_era - FEE, "fee still charged");
-    assert_ne!(
-        head_root(&r),
-        before_root,
-        "creation must advance canonical state even at zero allocation"
     );
 }
 

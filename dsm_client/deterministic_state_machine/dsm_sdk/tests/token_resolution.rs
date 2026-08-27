@@ -28,11 +28,8 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use prost::Message;
 use std::path::PathBuf;
 
-use dsm_sdk::bridge::{AppInvoke, AppRouter};
-use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
@@ -60,25 +57,6 @@ fn new_router() -> AppRouterImpl {
     .expect("router")
 }
 
-fn pack(body: Vec<u8>) -> Vec<u8> {
-    generated::ArgPack {
-        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-        codec: generated::Codec::Proto as i32,
-        body,
-    }
-    .encode_to_vec()
-}
-
-fn invoke(r: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::AppResult {
-    runtime::get_runtime().block_on(async {
-        r.invoke(AppInvoke {
-            method: method.to_string(),
-            args,
-        })
-        .await
-    })
-}
-
 fn fund_era(r: &AppRouterImpl) {
     // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
     // minted builtin ERA on nothing more than a caller-supplied device_id — the
@@ -97,32 +75,35 @@ fn fund_era(r: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-/// Create RIGB exactly as the wizard does, returning (token_id, anchor).
-fn create_rigb(r: &AppRouterImpl) -> (String, [u8; 32]) {
-    let req = generated::TokenCreateRequest {
+/// Install RIGB in the durable shape a committed creation leaves (registry
+/// row + anchored policy + display mapping), returning (token_id, anchor).
+/// Resolution is a READ-path concern; under 3.5b the route cannot commit a
+/// creation here (the fee is an ADMITTED debit and integration tests have no
+/// fake register fleet — the admitted create e2e lives in
+/// `handlers::sender_admission_tests`).
+fn create_rigb(_r: &AppRouterImpl) -> (String, [u8; 32]) {
+    let policy_bytes = b"RIGB policy bytes".to_vec();
+    let anchor = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        &policy_bytes,
+    );
+    token_registry::upsert_policy(&anchor, &policy_bytes).expect("store policy");
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_TOKEN_ID);
+    h.update(&anchor);
+    h.update(b"RIGB");
+    let token_id = dsm_sdk::util::text_id::encode_base32_crockford(h.finalize().as_bytes());
+    token_registry::insert_token(&token_registry::TokenRegistryRow {
+        token_id: token_id.clone(),
+        policy_commit: anchor,
         ticker: "RIGB".to_string(),
         alias: "RigBravo".to_string(),
         decimals: 2,
-        max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: 1_000u128.to_be_bytes().to_vec(),
-        mint_burn_enabled: true,
-        transferable: true,
-        unlimited_supply: false,
-        mint_burn_threshold: 1,
-        description: String::new(),
-        icon_url: String::new(),
-        allowlist_device_ids: Vec::new(),
-    };
-    let res = invoke(r, "token.create", pack(req.encode_to_vec()));
-    assert!(res.success, "create: {:?}", res.error_message);
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(t)) => (
-            t.token_id,
-            <[u8; 32]>::try_from(t.policy_anchor.as_slice()).expect("32-byte anchor"),
-        ),
-        other => panic!("expected TokenCreateResponse, got {other:?}"),
-    }
+        max_supply: 100_000_000,
+        owner_device_id: [0xAAu8; 32],
+    })
+    .expect("registry row");
+    dsm::core::token::token_state_manager::register_policy_commit_ticker(anchor, "RIGB");
+    (token_id, anchor)
 }
 
 /// THE REPRODUCTION. The UI hands the send path a ticker; it must resolve to
