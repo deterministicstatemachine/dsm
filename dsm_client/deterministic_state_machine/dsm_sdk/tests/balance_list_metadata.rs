@@ -20,7 +20,7 @@
 use prost::Message;
 use std::path::PathBuf;
 
-use dsm_sdk::bridge::{AppInvoke, AppQuery, AppRouter};
+use dsm_sdk::bridge::{AppQuery, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::init::SdkConfig;
@@ -49,25 +49,6 @@ fn new_router() -> AppRouterImpl {
     .expect("router")
 }
 
-fn pack(body: Vec<u8>) -> Vec<u8> {
-    generated::ArgPack {
-        schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
-        codec: generated::Codec::Proto as i32,
-        body,
-    }
-    .encode_to_vec()
-}
-
-fn invoke(r: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::AppResult {
-    runtime::get_runtime().block_on(async {
-        r.invoke(AppInvoke {
-            method: method.to_string(),
-            args,
-        })
-        .await
-    })
-}
-
 fn fund_era(r: &AppRouterImpl) {
     // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
     // minted builtin ERA on nothing more than a caller-supplied device_id — the
@@ -86,28 +67,44 @@ fn fund_era(r: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-fn create(r: &AppRouterImpl, ticker: &str, decimals: u32, alloc: u128) -> String {
-    let req = generated::TokenCreateRequest {
+/// Install a HELD custom token directly: a registry row plus a fixture
+/// balance in base units. `token.create` can no longer produce one here —
+/// creator supply is refused pending the issuance predicate (0x0029), and
+/// the creation fee is an ADMITTED economic debit integration tests cannot
+/// run (no fake register fleet) — and these are READ-path tests: the
+/// balance list is indifferent to how the units arrived.
+fn install_held(r: &AppRouterImpl, ticker: &str, decimals: u32, display_alloc: u128) {
+    let commit = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        ticker.as_bytes(),
+    );
+    token_registry::insert_token(&token_registry::TokenRegistryRow {
+        token_id: format!("{ticker}TOKENID"),
+        policy_commit: commit,
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
         decimals,
-        max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: alloc.to_be_bytes().to_vec(),
-        mint_burn_enabled: true,
-        transferable: true,
-        unlimited_supply: false,
-        mint_burn_threshold: 1,
-        description: String::new(),
-        icon_url: String::new(),
-        allowlist_device_ids: Vec::new(),
-    };
-    let res = invoke(r, "token.create", pack(req.encode_to_vec()));
-    assert!(res.success, "create: {:?}", res.error_message);
-    let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
-    match env.payload {
-        Some(generated::envelope::Payload::TokenCreateResponse(t)) => t.token_id,
-        other => panic!("unexpected {other:?}"),
-    }
+        max_supply: 1_000_000,
+        owner_device_id: [0xAAu8; 32],
+    })
+    .expect("register held token");
+    let base = u64::try_from(display_alloc * 10u128.pow(decimals)).expect("base units fit u64");
+    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(r, commit, base)
+        .expect("install held balance");
+    // `balance.list` reads the PERSISTED balance projections (the advance
+    // used to write one); mirror the installed head balance there.
+    let head = r.core_sdk.device_head().expect("head");
+    let device_txt = dsm_sdk::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
+    let rec = dsm_sdk::storage::client_db::build_balance_projection_from_device_head(
+        &device_txt,
+        ticker,
+        &commit,
+        &head,
+        base,
+        0,
+    )
+    .expect("projection row");
+    dsm_sdk::storage::client_db::upsert_balance_projection(&rec).expect("persist projection");
 }
 
 /// The ACTUAL wire records, decoded from the encoded response.
@@ -145,7 +142,7 @@ fn a_held_custom_token_carries_its_decimals_on_the_wire() {
     let r = new_router();
     r.install_policy_resolver();
     fund_era(&r);
-    create(&r, "RIGB", 2, 1_000);
+    install_held(&r, "RIGB", 2, 1_000);
 
     let rows = wire_rows(&r);
     let rigb = row(&rows, "RIGB");
@@ -233,7 +230,7 @@ fn decimals_survive_a_restart_for_a_held_token() {
     let r = new_router();
     r.install_policy_resolver();
     fund_era(&r);
-    create(&r, "PERSIS", 2, 500);
+    install_held(&r, "PERSIS", 2, 500);
     drop(r);
 
     let r2 = new_router();
@@ -292,7 +289,7 @@ fn a_zero_decimal_custom_token_is_unchanged() {
     let r = new_router();
     r.install_policy_resolver();
     fund_era(&r);
-    create(&r, "WHOLE", 0, 750);
+    install_held(&r, "WHOLE", 0, 750);
 
     let rows = wire_rows(&r);
     let w = row(&rows, "WHOLE");

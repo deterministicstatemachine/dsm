@@ -174,29 +174,19 @@ fn a_token_with_a_balance_cannot_be_forgotten() {
     r.install_policy_resolver();
     fund_era(&r);
 
-    // Create a token so this device actually holds it.
-    let create = invoke(
-        &r,
-        "token.create",
-        pack(
-            generated::TokenCreateRequest {
-                ticker: "HELD".into(),
-                alias: "Held".into(),
-                decimals: 2,
-                max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-                initial_alloc_u128: 1_000u128.to_be_bytes().to_vec(),
-                mint_burn_enabled: true,
-                transferable: true,
-                unlimited_supply: false,
-                mint_burn_threshold: 1,
-                description: String::new(),
-                icon_url: String::new(),
-                allowlist_device_ids: Vec::new(),
-            }
-            .encode_to_vec(),
-        ),
-    );
-    assert!(create.success, "create: {:?}", create.error_message);
+    // Hold the token: an adopted identity plus an installed balance. The
+    // route can no longer CREATE a held token here — under 3.5b creator
+    // supply is refused pending the issuance predicate (0x0029) and the fee
+    // is an admitted debit integration tests cannot run — and this test is
+    // about the FORGET rule, which reads canonical holdings however they
+    // arrived.
+    let token_id = adopt("HELD", b"held-token-policy");
+    let commit = token_registry::get_token(&token_id)
+        .expect("registry")
+        .expect("row")
+        .policy_commit;
+    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(&r, commit, 100_000)
+        .expect("install held balance");
 
     let res = forget(&r, "HELD");
     assert!(!res.success, "a held token must not be forgettable");

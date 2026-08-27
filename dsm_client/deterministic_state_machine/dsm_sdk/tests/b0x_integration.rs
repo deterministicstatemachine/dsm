@@ -129,6 +129,8 @@ async fn test_b0x_integration_full_flow() {
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
+        sender_economic_position: 0,
+        sender_debit_mutation_index: 0,
     };
 
     // 5. Submit
@@ -323,6 +325,8 @@ async fn test_b0x_live_recipient_roundtrip() {
         routing_address: routing_address.clone(),
         canonical_operation_bytes: vec![],
         receipt_evidence_digest: Vec::new(),
+        sender_economic_position: 0,
+        sender_debit_mutation_index: 0,
     };
 
     let tx_id = sender_b0x

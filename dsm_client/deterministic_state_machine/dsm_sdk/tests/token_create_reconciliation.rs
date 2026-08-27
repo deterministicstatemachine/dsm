@@ -132,20 +132,16 @@ fn era(r: &AppRouterImpl) -> u64 {
     r.core_sdk.device_head().map(|h| h.balance(&c)).unwrap_or(0)
 }
 
-fn balance_of(r: &AppRouterImpl, token_id: &str) -> u64 {
-    let c = token_registry::get_token(token_id)
-        .expect("registry")
-        .expect("token")
-        .policy_commit;
-    r.core_sdk.device_head().map(|h| h.balance(&c)).unwrap_or(0)
-}
-
-/// THE HARDWARE CASE. The commit lands, the reply is lost, the caller retries
-/// the identical request. It must be told the truth — that the token exists —
-/// and it must not pay again.
+/// 3.5b: creator supply gets the NAMED refusal, and — the reconciliation
+/// property inverted — a refused creation leaves no reconcilable trace: no
+/// fee, no row, and the identical retry is refused again rather than
+/// "reconciled" into a phantom success. (Commit-side reconciliation of the
+/// fee-only shape lives in the lib e2e
+/// `token_routes_admit_fee_only_create_and_burn_end_to_end`; integration
+/// tests have no fake fleet, so nothing can commit here.)
 #[test]
 #[serial_test::serial]
-fn a_repeated_identical_creation_reports_success_and_charges_one_fee() {
+fn a_refused_creator_supply_leaves_no_reconcilable_trace() {
     runtime::dsm_init_runtime();
     init_test_storage();
     let r = new_router();
@@ -154,105 +150,25 @@ fn a_repeated_identical_creation_reports_success_and_charges_one_fee() {
     let req = request("RECON", 1_000_000, 1_000);
     let before = era(&r);
 
-    let (ok1, id1, _) = create(&r, &req);
-    assert!(ok1, "first creation must succeed");
-    let after_first = era(&r);
-    assert_eq!(
-        before - after_first,
-        10,
-        "creation must burn exactly 10 ERA"
-    );
-
-    // The retry a user makes when the first attempt appears to have failed.
-    let (ok2, id2, msg2) = create(&r, &req);
+    let (ok1, _, msg1) = create(&r, &req);
+    assert!(!ok1, "creator supply must be refused");
     assert!(
-        ok2,
-        "an identical resubmission must report success, not failure"
+        msg1.contains("initial_supply > 0 cannot enter a validated lineage"),
+        "the refusal must be the NAMED issuance-predicate error, got: {msg1}"
     );
-    assert_eq!(id1, id2, "the same commitment must yield the same token id");
-    assert_eq!(
-        era(&r),
-        after_first,
-        "a resubmission must not burn a second fee: {msg2}"
-    );
-    // Base units: the request carries display units and Rust scales once at
-    // the boundary, so 1,000 at decimals=2 is 100,000 canonical.
-    assert_eq!(
-        balance_of(&r, &id1),
-        100_000,
-        "supply must be credited exactly once, in base units"
-    );
-}
-
-/// However many times it is submitted, canonical state holds one of everything.
-#[test]
-#[serial_test::serial]
-fn one_token_one_policy_one_fee_across_repeated_attempts() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let req = request("MANYX", 500_000, 250);
-    let before = era(&r);
-
-    let mut ids = Vec::new();
-    for _ in 0..4 {
-        let (ok, id, msg) = create(&r, &req);
-        assert!(ok, "every identical attempt must report success: {msg}");
-        ids.push(id);
-    }
-
-    assert!(
-        ids.windows(2).all(|w| w[0] == w[1]),
-        "one identity throughout"
-    );
-    assert_eq!(before - era(&r), 10, "exactly one fee across four attempts");
-    assert_eq!(
-        balance_of(&r, &ids[0]),
-        25_000,
-        "one allocation, in base units (250 display at 2 decimals)"
-    );
+    assert_eq!(era(&r), before, "a refused creation burns nothing");
     assert_eq!(
         token_registry::all_tokens().expect("registry").len(),
-        1,
-        "exactly one registry row"
+        0,
+        "no registry row"
     );
-    assert_eq!(
-        token_registry::all_policies().expect("policies").len(),
-        1,
-        "exactly one policy"
-    );
-}
 
-/// A DIFFERENT creation that wants a taken ticker is a conflict. Merging it
-/// into the existing token would silently give the caller something other than
-/// what they committed to.
-#[test]
-#[serial_test::serial]
-fn a_conflicting_creation_on_a_taken_ticker_is_refused() {
-    runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
-    let (ok, _, _) = create(&r, &request("CLASH", 1_000, 100));
-    assert!(ok);
-    let after_first = era(&r);
-
-    // Same ticker, different supply — a different commitment entirely.
-    let (ok2, _, msg) = create(&r, &request("CLASH", 999_999, 100));
-    assert!(!ok2, "a different creation must not take a claimed ticker");
+    let (ok2, _, _) = create(&r, &req);
     assert!(
-        msg.to_lowercase().contains("ticker") || msg.to_lowercase().contains("conflict"),
-        "the refusal should say the ticker is taken, got: {msg}"
+        !ok2,
+        "the identical retry is refused again, never reconciled"
     );
-    assert_eq!(era(&r), after_first, "a refused creation burns nothing");
-    assert_eq!(
-        token_registry::all_tokens().expect("registry").len(),
-        1,
-        "the conflicting attempt must not add a row"
-    );
+    assert_eq!(era(&r), before, "still nothing burned");
 }
 
 /// An unaffordable creation still leaves nothing behind — including no registry

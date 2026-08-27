@@ -67,11 +67,24 @@ impl TestDevice {
         use dsm::core::identity::genesis_session::genesis_authority_policy_hash;
         use dsm::core::identity::genesis_v2::{derive_s0, derive_smaster};
 
-        let device_id = [tag; 32];
-        let genesis = [tag ^ 0xF0; 32];
+        // REAL v3 identities on the beta network: economic admissions rebuild
+        // the authority evidence from the wallet seed and require the
+        // re-derived G to match, so an arbitrary [tag; 32] genesis cannot
+        // send anymore — every send registers its debit.
         let wallet_seed = vec![tag ^ 0x9C; 64];
-        let ak = crate::init::derive_device_signing_keypair(&wallet_seed, &genesis).expect("ak");
         let aph = genesis_authority_policy_hash();
+        let v3 = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
+            &wallet_seed,
+            b"dsm-testnet",
+            0,
+            0,
+            3,
+            &aph,
+        )
+        .expect("v3 genesis");
+        let device_id = v3.devid;
+        let genesis = v3.g;
+        let ak = crate::init::derive_device_signing_keypair(&wallet_seed, &genesis).expect("ak");
         let s0 = derive_s0(&wallet_seed, &genesis, 0, &aph);
         let smaster = derive_smaster(&s0, &genesis, &device_id, &aph);
         let (kyber_pk, _kyber_sk) =
@@ -146,7 +159,7 @@ impl TestDevice {
             verification_step: None,
             genesis_nonce: String::new(),
             genesis_profile: "MnemonicV2".to_string(),
-            network_id: "dsm-test".into(),
+            network_id: "dsm-testnet".into(),
         })
         .expect("seed genesis record");
         let router = AppRouterImpl::new(crate::init::SdkConfig {
@@ -155,6 +168,17 @@ impl TestDevice {
             enable_offline: false,
         })
         .expect("router");
+        // The head must carry the REAL identity: economic admissions derive
+        // and re-verify everything from (G, DevID), so a lazily-bootstrapped
+        // zero-genesis head cannot admit anything.
+        router
+            .core_sdk
+            .set_device_head_for_testing(dsm::types::device_state::DeviceState::new(
+                self.genesis,
+                self.device_id,
+                self.ak_pk.clone(),
+                1024,
+            ));
         self.router = Some(Arc::new(router));
     }
 
@@ -233,7 +257,29 @@ impl TestDevice {
     /// Credit `amount` ERA to this device through the ONE production canonical
     /// apply, as an inbound transfer from [`FAUCET_DEVICE_ID`]. Chains on the
     /// faucet relationship's pinned head so it can be called repeatedly.
-    pub fn fund(&self, amount: u64) {
+    /// Fund with REAL economic ancestry: `amount / 100` live faucet claims
+    /// (the fixed payout). Amounts must be multiples of 100 — a fixture
+    /// asking for anything else is asking for value the protocol cannot
+    /// issue. Sends debit the economic tree, so ancestry-less value cannot
+    /// fund a send anymore.
+    pub async fn fund_admitted(&self, amount: u64) {
+        assert!(
+            amount.is_multiple_of(100),
+            "fund_admitted: amounts are multiples of the 100-ERA faucet payout"
+        );
+        self.enter();
+        let core = self.router().core_sdk.clone();
+        for _ in 0..(amount / 100) {
+            crate::sdk::faucet_claim_flow::claim_era_faucet(&core, b"dsm-testnet")
+                .await
+                .expect("funding claim");
+        }
+    }
+
+    /// Inject ancestry-LESS value as an inbound transfer (the pre-3.5b
+    /// funding shape). Still used by ingress-focused fixtures; a device
+    /// funded this way cannot originate an admitted send.
+    pub fn fund_unadmitted(&self, amount: u64) {
         self.enter();
         let core = self.router().core_sdk.clone();
         let faucet_b32 = crate::util::text_id::encode_base32_crockford(&FAUCET_DEVICE_ID);
@@ -313,6 +359,8 @@ impl TestDevice {
                 seq,
                 canonical_operation_bytes: Vec::new(),
                 receipt_evidence_digest: Vec::new(),
+                sender_economic_position: 0,
+                sender_debit_mutation_index: 0,
             })
             .await
     }
@@ -398,6 +446,12 @@ impl Pair {
     /// fund them.
     pub async fn boot(a_funding: u64, b_funding: u64) -> Self {
         client_db::reset_database_for_tests();
+        // The fake registers are PROCESS-GLOBAL and the harness identities are
+        // deterministic, so a previous test's root claims sit at exactly the
+        // positions this test will re-register — without a reset the second
+        // suite-ordered test dies on a register CONFLICT (different bytes,
+        // same K_root) that no single-test run can reproduce.
+        crate::sdk::storage_io::fake_registers::reset();
         let nodes: Vec<FakeB0xNode> = (0..3).map(|_| FakeB0xNode::spawn()).collect();
         let endpoints: Vec<String> = nodes.iter().map(|n| n.endpoint.clone()).collect();
         crate::test_support::fake_node::point_env_config_at(&endpoints);
@@ -415,10 +469,10 @@ impl Pair {
         a.sync().await;
         b.sync().await;
         if a_funding > 0 {
-            a.fund(a_funding);
+            a.fund_admitted(a_funding).await;
         }
         if b_funding > 0 {
-            b.fund(b_funding);
+            b.fund_admitted(b_funding).await;
         }
         Self { nodes, a, b }
     }
