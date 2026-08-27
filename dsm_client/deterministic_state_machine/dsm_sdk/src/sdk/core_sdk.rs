@@ -256,7 +256,9 @@ impl CoreSDK {
         delta: &dsm::types::device_state::BalanceDelta,
         prepared: dsm::economic::admission::PendingEconomicAdmission,
         build: impl FnOnce(
-            &[u8; 32], // C_dsm+ of the prepared successor
+            // The PREPARED successor chain state — the evidence producer
+            // signs its exact preimage fields, so it gets the whole thing.
+            &dsm::types::device_state::RelationshipChainState,
         ) -> Result<
             (
                 dsm::economic::admission::AcceptedAdmissionCoords,
@@ -289,10 +291,9 @@ impl CoreSDK {
                 return Err(e);
             }
         };
-        // The successor now exists in memory; its chain-state commitment is
-        // what the v2 economic operation id binds.
-        let c_dsm_plus = outcome.new_chain_state.compute_chain_tip();
-        let (coords, artifacts) = match build(&c_dsm_plus) {
+        // The successor now exists in memory; the builder derives everything
+        // from ITS exact fields (C_dsm+, the successor evidence preimage).
+        let (coords, artifacts) = match build(&outcome.new_chain_state) {
             Ok(v) => v,
             Err(e) => {
                 sm.attach_pending_economic_admission(None);
@@ -379,7 +380,7 @@ impl CoreSDK {
             let tx = conn
                 .transaction()
                 .map_err(|e| DsmError::storage(format!("admit tx: {e}"), None::<std::io::Error>))?;
-            crate::storage::client_db::economic_faucet::record_admitted_with_conn(
+            crate::storage::client_db::economic_lineage::record_admitted_with_conn(
                 &tx,
                 economic_position,
                 economic_root,

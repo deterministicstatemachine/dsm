@@ -64,6 +64,7 @@ use crate::sdk::economic_registers::{
 };
 use crate::sdk::storage_set::{StorageSet, StorageSetCatalog};
 use crate::storage::client_db::economic_faucet;
+use crate::storage::client_db::economic_lineage;
 use crate::util::deterministic_time::tick;
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
@@ -102,7 +103,7 @@ fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
 /// value-holding device surfaces `UnsupportedLegacyEconomicState` here.
 fn validated_root_or_activate(core: &CoreSDK) -> Result<ValidatedEconomicRoot, DsmError> {
     if let Some((position, root)) =
-        economic_faucet::get_admitted().map_err(|e| storage_err("load admitted", e))?
+        economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))?
     {
         return Ok(ValidatedEconomicRoot::rehydrate_from_admitted_store(
             position, root,
@@ -132,7 +133,7 @@ fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<EconomicSmt, DsmEr
         return Ok(tree);
     }
     let leaves =
-        economic_faucet::load_leaf_cache().map_err(|e| storage_err("load leaf cache", e))?;
+        economic_lineage::load_leaf_cache().map_err(|e| storage_err("load leaf cache", e))?;
     for (key, value, _ccb) in &leaves {
         tree.insert(*key, *value);
     }
@@ -263,13 +264,37 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
 
     let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
     let evidence_addr = faucet_claim_evidence_addr(&envelope);
-    let authority_position = core.device_tree_root_or_genesis();
+    // Portable P0–P6 authority evidence: what a FOREIGN walker verifies to
+    // recover this identity's AK and committed network. `authority_position`
+    // is the TRANSITION digest t_0 — P3 matches transition digests, so a
+    // tree root here would make the whole lineage unwalkable.
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::storage(
+                "no cached wallet seed — cannot build authority evidence".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let (authority_bytes, authority_position) =
+        crate::sdk::identity_presentation::build_authority_evidence(
+            &wallet_seed,
+            crate::sdk::identity_presentation::OwnerIdentityInputs {
+                network_id,
+                wallet_index: 0,
+                device_slot: 0,
+                genesis_version: 3,
+            },
+            &genesis,
+        )?;
+    let authority_addr =
+        dsm::economic::authority_evidence::authority_evidence_addr(&authority_bytes);
     // ── ONE TX: fence-coupled advance + pending row + frozen evidence ──────
     let pending = core.faucet_claim_advance(
         op.clone(),
         &delta,
         prepared,
-        |c_dsm_plus| {
+        |chain_state| {
+            let c_dsm_plus = chain_state.compute_chain_tip();
             let credit_state = EconomicLeafState::Balance(
                 EconomicBalanceState::new(era, prior + ERA_FAUCET_PAYOUT)
                     .map_err(|e| storage_err("credit state", e))?,
@@ -298,7 +323,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             let witness = EconomicTransitionWitness::new(
                 pre_root,
                 post_root,
-                dsm_economic_operation_id(&genesis, &devid, c_dsm_plus),
+                dsm_economic_operation_id(&genesis, &devid, &c_dsm_plus),
                 op_digest,
                 vec![mutation],
                 vec![CreditSource::ValidatedFaucetDistribution(
@@ -318,14 +343,30 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
                 &witness_bytes,
             );
-            let substrate_addr = immutable_inner(
-                dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
+            // The REPLAYABLE successor evidence: sigma_dsm under the AK over
+            // (G ‖ DevID ‖ C_dsm+ ‖ op_digest), with the exact balance-free
+            // preimage fields — what makes "this identity accepted this
+            // successor" foreign-checkable instead of asserted.
+            let (_pk_ss, sk_ss) = crate::sdk::signing_authority::current_keypair()
+                .map_err(|e| storage_err("signing authority", e))?;
+            let successor_bytes = dsm::economic::successor_evidence::sign_dsm_successor_evidence(
+                &chain_state.rel_key,
+                &chain_state.embedded_parent,
+                &chain_state.counterparty_devid,
                 &op_bytes,
-            );
+                &chain_state.entropy,
+                chain_state.encapsulated_entropy.as_deref(),
+                &genesis,
+                &devid,
+                &sk_ss,
+            )
+            .map_err(|e| storage_err("successor evidence", e))?;
+            let substrate_addr =
+                dsm::economic::successor_evidence::successor_evidence_addr(&successor_bytes);
             let manifest = EconomicAdmissionManifest::new(
                 authority_position,
                 witness_addr,
-                genesis, // authority evidence: the authenticated genesis digest (beta)
+                authority_addr,
                 AdmissionSubstrate::DsmSuccessor {
                     evidence_addr: substrate_addr,
                 },
@@ -343,7 +384,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 post_economic_root: post_root,
                 accepted_substrate_addr: substrate_addr,
                 admission_manifest_addr: manifest_addr,
-                c_dsm_plus: *c_dsm_plus,
+                c_dsm_plus,
             };
             let artifacts = vec![
                 (
@@ -372,11 +413,19 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 ),
                 (
                     crate::sdk::economic_registers::immutable_object_key(
-                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
-                        &op_bytes,
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+                        &successor_bytes,
                     ),
-                    op_bytes.clone(),
-                    "economic-dsm-substrate",
+                    successor_bytes.clone(),
+                    "economic-dsm-successor-evidence",
+                ),
+                (
+                    crate::sdk::economic_registers::immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+                        &authority_bytes,
+                    ),
+                    authority_bytes.clone(),
+                    "economic-authority-evidence",
                 ),
             ];
             built = Some((witness, manifest));
@@ -437,7 +486,7 @@ async fn finish_admission(
         &devid,
         pending.economic_position,
     );
-    let frozen_root = match economic_faucet::get_frozen_root_claim(pending.economic_position)
+    let frozen_root = match economic_lineage::get_frozen_root_claim(pending.economic_position)
         .map_err(|e| storage_err("load frozen root claim", e))?
     {
         Some((_, bytes)) => bytes,
@@ -455,14 +504,14 @@ async fn finish_admission(
             .map_err(|e| storage_err("root claim body", e))?;
             let bytes = sign_economic_root_claim(&body, &secret_key)
                 .map_err(|e| storage_err("sign root claim", e))?;
-            economic_faucet::put_frozen_root_claim(
+            economic_lineage::put_frozen_root_claim(
                 pending.economic_position,
                 &k_root,
                 &bytes,
                 tick() as i64,
             )
             .map_err(|e| storage_err("freeze root claim", e))?;
-            economic_faucet::get_frozen_root_claim(pending.economic_position)
+            economic_lineage::get_frozen_root_claim(pending.economic_position)
                 .map_err(|e| storage_err("re-read frozen root claim", e))?
                 .map(|(_, b)| b)
                 .ok_or_else(|| {
@@ -496,6 +545,7 @@ async fn finish_admission(
     let resolver = LiveRegisterResolver {
         set,
         runtime: tokio::runtime::Handle::current(),
+        expected_network_id: network_id.to_vec(),
     };
     let (new_validated, _funded) = advance_validated(
         validated,
@@ -567,7 +617,7 @@ pub async fn resume_pending_claim(
     // mismatch means the local store is incoherent, which is a stop, not a
     // guess.
     let validated =
-        match economic_faucet::get_admitted().map_err(|e| storage_err("load admitted", e))? {
+        match economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))? {
             Some((position, root)) => {
                 ValidatedEconomicRoot::rehydrate_from_admitted_store(position, root)
             }
@@ -619,17 +669,55 @@ pub async fn resume_pending_claim(
         ));
     }
 
-    // Reconstruct the manifest from recomputable inputs and REQUIRE its
-    // address to equal the one the pending admission bound. The manifest has
-    // no decoder yet; addr-equality is what makes reconstruction honest.
+    // Reconstruct the manifest from FROZEN artifacts and derivation-only
+    // inputs, and REQUIRE its address to equal the one the pending admission
+    // bound — addr-equality is what makes reconstruction honest. Nothing is
+    // re-signed: the authority evidence is read back frozen, and t_0 is a
+    // pure derivation from the cached seed.
     let witness_addr = immutable_inner(
         dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
         &witness_bytes,
     );
+    let authority_key_prefix = format!(
+        "immutable::{}::",
+        String::from_utf8_lossy(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE.source_bytes()
+        )
+    );
+    let authority_bytes =
+        crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix(
+            &authority_key_prefix,
+        )
+        .map_err(|e| storage_err("load frozen authority evidence", e))?
+        .ok_or_else(|| {
+            DsmError::storage(
+                "no frozen authority evidence for the pending admission".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let authority_addr =
+        dsm::economic::authority_evidence::authority_evidence_addr(&authority_bytes);
+    let wallet_seed =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::storage(
+                "no cached wallet seed — cannot re-derive t_0".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let authority_position = crate::sdk::identity_presentation::derive_own_authority_context(
+        &wallet_seed,
+        crate::sdk::identity_presentation::OwnerIdentityInputs {
+            network_id,
+            wallet_index: 0,
+            device_slot: 0,
+            genesis_version: 3,
+        },
+    )?
+    .position;
     let manifest = EconomicAdmissionManifest::new(
-        core.device_tree_root_or_genesis(),
+        authority_position,
         witness_addr,
-        genesis,
+        authority_addr,
         AdmissionSubstrate::DsmSuccessor {
             evidence_addr: coords.accepted_substrate_addr,
         },
@@ -665,32 +753,50 @@ pub async fn resume_pending_claim(
         }
     }
 
-    // The EXACT operation, from the frozen substrate artifact — recovery
-    // re-derives nothing. Its digest must be the one the admission binds.
+    // The EXACT operation, from the frozen SUCCESSOR EVIDENCE — recovery
+    // re-derives nothing and re-signs nothing. The evidence is verified the
+    // same way a foreign walker verifies it, and its address must be the one
+    // the admission bound.
     let substrate_key_prefix = format!(
         "immutable::{}::",
         String::from_utf8_lossy(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ.source_bytes()
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE.source_bytes()
         )
     );
-    let op_bytes =
+    let successor_bytes =
         crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix(
             &substrate_key_prefix,
         )
-        .map_err(|e| storage_err("load frozen substrate", e))?
+        .map_err(|e| storage_err("load frozen successor evidence", e))?
         .ok_or_else(|| {
             DsmError::storage(
-                "no frozen substrate operation for the pending admission".to_string(),
+                "no frozen successor evidence for the pending admission".to_string(),
                 None::<std::io::Error>,
             )
         })?;
-    let operation =
-        Operation::from_bytes(&op_bytes).map_err(|e| storage_err("decode frozen operation", e))?;
-    if dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes())
-        != pending.operation_digest
+    if dsm::economic::successor_evidence::successor_evidence_addr(&successor_bytes)
+        != coords.accepted_substrate_addr
     {
         return Err(DsmError::storage(
-            "frozen substrate operation does not match the pending admission".to_string(),
+            "frozen successor evidence does not address-match the pending admission".to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+    let (own_pk, _own_sk) = crate::sdk::signing_authority::current_keypair()
+        .map_err(|e| storage_err("signing authority", e))?;
+    let verified_successor = dsm::economic::successor_evidence::verify_dsm_successor_evidence(
+        &successor_bytes,
+        &genesis,
+        &devid,
+        &own_pk,
+    )
+    .map_err(|e| storage_err("verify frozen successor evidence", e))?;
+    let operation = verified_successor.operation;
+    if verified_successor.operation_digest != pending.operation_digest
+        || verified_successor.c_dsm_plus != coords.c_dsm_plus
+    {
+        return Err(DsmError::storage(
+            "frozen successor evidence does not match the pending admission".to_string(),
             None::<std::io::Error>,
         ));
     }

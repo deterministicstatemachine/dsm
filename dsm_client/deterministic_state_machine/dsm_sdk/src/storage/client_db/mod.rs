@@ -33,6 +33,7 @@ pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
 mod dlv_receipts;
 pub mod economic_admission;
 pub mod economic_faucet;
+pub mod economic_lineage;
 mod export;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
@@ -410,7 +411,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// commitment, and recovery cannot re-derive it from the head, so it is
 /// durable admission state. A stored admission is post-acceptance by
 /// construction (`Prepared` is never durable).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 9;
+///
+/// v10 (3.5b PR2): `peer_economic_lineage` — the device-local memo of peer
+/// economic coordinates THIS verifier validated (its own conclusions, never
+/// authority over a live register read).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 10;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -627,6 +632,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
             leaf_value BLOB NOT NULL,        -- 32B economic_leaf_value
             state_ccb  BLOB NOT NULL,        -- exact leaf-state CCB bytes
             updated_at INTEGER NOT NULL
+        );
+
+        -- Device-local memo of peer economic coordinates THIS verifier
+        -- validated (5H validated caching). A cache of the verifier's OWN
+        -- conclusions: never authority over a live register read, and an
+        -- Invalid verdict from a cached start deletes the peer's rows and
+        -- re-walks from the activation root.
+        CREATE TABLE IF NOT EXISTS peer_economic_lineage(
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            validated_position  INTEGER NOT NULL,
+            validated_root      BLOB NOT NULL,      -- 32B
+            PRIMARY KEY(peer_genesis, peer_devid, validated_position)
         );
 
         CREATE TABLE IF NOT EXISTS contacts(

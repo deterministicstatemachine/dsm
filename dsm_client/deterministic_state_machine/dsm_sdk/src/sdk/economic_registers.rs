@@ -35,7 +35,9 @@
 use dsm::common::domain_tags::TAG_DSM_ERA_FAUCET_TICKET_SELECT;
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::economic::faucet::{faucet_claim_evidence_addr, ERA_FAUCET_TICKET_COUNT};
-use dsm::economic::provenance::{FaucetTicketWin, ProvenanceResolver, ValidatedPeerTransition};
+use dsm::economic::provenance::{
+    FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+};
 use dsm::types::error::DsmError;
 
 use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimResult};
@@ -270,25 +272,131 @@ pub async fn read_economic_root_cell(
     read_cell_quorum(set, rows).await
 }
 
-/// The LIVE provenance resolver: answers the verifier's questions from quorum
-/// reads against the canonical set. Holds no state and asserts nothing — a
-/// question it cannot answer at quorum returns `None`, and the verifier fails
-/// closed on it.
+/// The LIVE provenance resolver: register cells at quorum, immutable objects
+/// re-hash-verified, peer lineages resolved through the core walker with the
+/// device-local validated-start cache (never authority — an `Invalid` from a
+/// cached start discards the row and re-walks from position 0).
 pub struct LiveRegisterResolver<'a> {
     pub set: &'a StorageSet,
     pub runtime: tokio::runtime::Handle,
+    /// The network THIS verifier is validating against — the peer's
+    /// committed network must match it (`resolve_for_trader`).
+    pub expected_network_id: Vec<u8>,
+}
+
+impl LiveRegisterResolver<'_> {
+    fn fetch_bytes(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        let a = *addr;
+        let fetched = tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(crate::sdk::storage_io::fetch_immutable_payload(
+                    namespace, &a,
+                ))
+        })
+        .map_err(|e| PeerLineageFailure::Incomplete(format!("immutable fetch: {e}")))?;
+        fetched.ok_or_else(|| {
+            PeerLineageFailure::Incomplete(format!(
+                "immutable object not found on any member: {}::{}",
+                String::from_utf8_lossy(namespace.source_bytes()),
+                crate::util::text_id::encode_base32_crockford(addr)
+            ))
+        })
+    }
+}
+
+impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'_> {
+    fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let k = *k_root;
+        tokio::task::block_in_place(|| self.runtime.block_on(read_economic_root_cell(self.set, &k)))
+            .map_err(|e| match e {
+                RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
+                other => PeerLineageFailure::Incomplete(other.to_string()),
+            })
+    }
+
+    fn faucet_ticket_cell(
+        &self,
+        faucet_id: &[u8; 32],
+        ticket_index: u64,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let fid = *faucet_id;
+        tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_winning_faucet_ticket(self.set, &fid, ticket_index))
+        })
+        .map_err(|e| match e {
+            RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
+            other => PeerLineageFailure::Incomplete(other.to_string()),
+        })
+    }
+
+    fn immutable(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.fetch_bytes(namespace, addr)
+    }
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
     fn validated_peer_transition(
         &self,
-        _peer_genesis: &[u8; 32],
-        _peer_devid: &[u8; 32],
-        _peer_economic_position: u64,
-    ) -> Option<ValidatedPeerTransition> {
-        // No peer-transition store exists yet (3.5b); a faucet claim needs
-        // none. Fail closed.
-        None
+        peer_genesis: &[u8; 32],
+        peer_devid: &[u8; 32],
+        peer_economic_position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        use dsm::economic::peer_lineage::{validate_peer_lineage, ValidatedStart};
+        // The device-local memo of THIS verifier's own earlier conclusions.
+        let cached = crate::storage::client_db::economic_lineage::best_peer_start(
+            peer_genesis,
+            peer_devid,
+            peer_economic_position,
+        )
+        .ok()
+        .flatten()
+        .map(|(economic_position, economic_root)| ValidatedStart {
+            economic_position,
+            economic_root,
+        });
+        let first = validate_peer_lineage(
+            self,
+            &self.expected_network_id,
+            peer_genesis,
+            peer_devid,
+            peer_economic_position,
+            cached,
+        );
+        let result = match (first, cached) {
+            // A cached start is never authority: an INVALID verdict from it
+            // discards the memo and re-walks from the activation root.
+            (Err(PeerLineageFailure::Invalid(_)), Some(_)) => {
+                let _ = crate::storage::client_db::economic_lineage::clear_peer_lineage(
+                    peer_genesis,
+                    peer_devid,
+                );
+                validate_peer_lineage(
+                    self,
+                    &self.expected_network_id,
+                    peer_genesis,
+                    peer_devid,
+                    peer_economic_position,
+                    None,
+                )
+            }
+            (other, _) => other,
+        }?;
+        let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
+            peer_genesis,
+            peer_devid,
+            result.validated_root.economic_position(),
+            &result.validated_root.economic_root(),
+        );
+        Ok(result)
     }
 
     fn winning_faucet_ticket(
@@ -307,6 +415,14 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         Some(FaucetTicketWin {
             envelope_bytes: bytes,
         })
+    }
+
+    fn immutable_evidence(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.fetch_bytes(namespace, addr)
     }
 }
 

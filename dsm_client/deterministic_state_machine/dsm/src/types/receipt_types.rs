@@ -446,6 +446,42 @@ impl CountersignB {
     }
 }
 
+/// The session-bound receipt response target (§4.2.1):
+/// `BLAKE3(DSM/receipt-bind-session, commitment ‖ session_binding)`.
+/// Online paths bind `session_binding == commitment`.
+pub fn compute_receipt_challenge_response_target(
+    receipt_commitment: &[u8; 32],
+    session_binding: &[u8; 32],
+) -> [u8; 32] {
+    let mut input = Vec::with_capacity(64);
+    input.extend_from_slice(receipt_commitment);
+    input.extend_from_slice(session_binding);
+    crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_RECEIPT_BIND_SESSION,
+        &input,
+    )
+}
+
+/// The ONLINE recipient's B-side response target:
+/// `BLAKE3(DSM/receipt-b-canonical/v1, standard ‖ b_parent ‖ b_child)` —
+/// `sig_b` over this authenticates the recipient's own canonical pair.
+pub fn compute_receipt_b_canonical_target(
+    receipt_commitment: &[u8; 32],
+    session_binding: &[u8; 32],
+    b_parent_tip: &[u8; 32],
+    b_child_tip: &[u8; 32],
+) -> [u8; 32] {
+    let standard = compute_receipt_challenge_response_target(receipt_commitment, session_binding);
+    let mut input = Vec::with_capacity(96);
+    input.extend_from_slice(&standard);
+    input.extend_from_slice(b_parent_tip);
+    input.extend_from_slice(b_child_tip);
+    crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_RECEIPT_B_CANONICAL,
+        &input,
+    )
+}
+
 impl StitchedReceiptV2 {
     /// Create a new receipt with all required fields
     #[allow(clippy::too_many_arguments)]

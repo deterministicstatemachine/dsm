@@ -16,7 +16,7 @@ use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
     same_transition_move_source_id, validated_peer_debit_source_id, verify_credit_source,
     verify_transition_provenance, FaucetTicketWin, ProvenanceContext, ProvenanceError,
-    ProvenanceResolver, ValidatedPeerTransition,
+    PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{
     EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState, EconomicVaultReserveState,
@@ -38,11 +38,23 @@ impl ProvenanceResolver for NoPeers {
         _g: &[u8; 32],
         _d: &[u8; 32],
         _p: u64,
-    ) -> Option<ValidatedPeerTransition> {
-        None
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no peer store in this fixture".into(),
+        ))
     }
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
         None
+    }
+
+    fn immutable_evidence(
+        &self,
+        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        _addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no evidence store in this fixture".into(),
+        ))
     }
 }
 
@@ -262,12 +274,15 @@ fn an_unvalidated_peer_debit_fails_closed() {
             },
         )],
     );
-    assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
+    match verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64]))
+        .unwrap_err()
+    {
         ProvenanceError::PeerTransitionNotValidated {
-            peer_economic_position: 4
-        }
-    );
+            peer_economic_position: 4,
+            failure: PeerLineageFailure::Incomplete(_),
+        } => {}
+        other => panic!("expected unresolved peer transition, got {other:?}"),
+    }
 }
 
 // ── Consumed-source records ────────────────────────────────────────────────
