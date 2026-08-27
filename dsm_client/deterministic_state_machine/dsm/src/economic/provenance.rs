@@ -74,6 +74,17 @@ pub struct ValidatedPeerTransition {
     pub peer_devid: [u8; 32],
     pub validated_root: ValidatedEconomicRoot,
     pub witness: EconomicTransitionWitness,
+    /// The peer's P0–P6-proven AK, recovered during the walk — what the
+    /// acceptance evidence's sender side must chain to.
+    pub proven_ak: Vec<u8>,
+    /// The peer's verified successor commitment — what the acceptance
+    /// evidence's receipt `child_tip` must equal ("same bilateral step").
+    pub c_dsm_plus: [u8; 32],
+    /// The exact operation the peer's VERIFIED successor evidence carried.
+    /// The peer-debit predicate reasons about it directly (Transfer-only,
+    /// online mode, addressed to the consumer) instead of trusting the
+    /// descriptor's story about what the peer did.
+    pub verified_operation: crate::types::operations::Operation,
 }
 
 /// The authenticated facts about the identity whose transition is being
@@ -103,20 +114,47 @@ pub struct FaucetTicketWin {
     pub envelope_bytes: Vec<u8>,
 }
 
+/// Why a peer's lineage could not be resolved to a validated transition.
+///
+/// The taxonomy is load-bearing: a retry-able outage and an authenticated
+/// forgery are different EVENTS, and an `Option` would erase the difference.
+/// `Incomplete` covers unavailability, missing material, and local resource
+/// budgets exhausting (an adversarially deep — but acyclic — lineage must
+/// exhaust a budget into `Incomplete`, never into `Invalid`); `Invalid` is
+/// evidence that verified as wrong; `Quarantined` is a divergent write-once
+/// register cell — never retried, never hash-ordered, never overwritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerLineageFailure {
+    Incomplete(String),
+    Invalid(String),
+    Quarantined(String),
+}
+
+impl core::fmt::Display for PeerLineageFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Incomplete(m) => write!(f, "peer lineage incomplete: {m}"),
+            Self::Invalid(m) => write!(f, "peer lineage INVALID: {m}"),
+            Self::Quarantined(m) => write!(f, "peer lineage QUARANTINED: {m}"),
+        }
+    }
+}
+
 /// Supplies the already-validated facts an external source resolves against.
 ///
 /// Deliberately returns validated objects rather than raw bytes: a resolver
 /// that could return "here is a peer root, trust me" would put the acyclicity
 /// guarantee back in the hands of whoever wrote the resolver.
 pub trait ProvenanceResolver {
-    /// The peer's validated transition at the named position, if this verifier
-    /// has one.
+    /// The peer's validated transition at the named position, or WHY it
+    /// could not be resolved — the taxonomy survives to the caller so a
+    /// network outage is retried and a forgery is not.
     fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
-    ) -> Option<ValidatedPeerTransition>;
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
 
     /// The winning claim for one faucet ticket, from a LIVE quorum read
     /// against the CANONICAL set — q members returning byte-identical winner
@@ -128,6 +166,15 @@ pub trait ProvenanceResolver {
         faucet_id: &[u8; 32],
         ticket_index: u64,
     ) -> Option<FaucetTicketWin>;
+
+    /// Exact immutable bytes at `addr` under `namespace` — evidence the
+    /// verifier itself checks (the resolver supplies bytes, never verdicts,
+    /// so the acyclicity and verification stay in the verifier's hands).
+    fn immutable_evidence(
+        &self,
+        namespace: crate::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
 /// Why a credit is not funded.
@@ -144,7 +191,21 @@ pub enum ProvenanceError {
     /// The verifier holds no validated transition for the named peer position.
     /// NOT a failure of the peer — a failure of *this* verifier to have
     /// established the prerequisite, and it fails closed.
-    PeerTransitionNotValidated { peer_economic_position: u64 },
+    PeerTransitionNotValidated {
+        peer_economic_position: u64,
+        failure: PeerLineageFailure,
+    },
+    /// The peer's verified operation is not an ONLINE `Transfer` — a Burn,
+    /// a fee debit, or an offline-tier transfer cannot fund a peer credit.
+    PeerDebitIsNotAnOnlineTransfer,
+    /// The peer's transfer is addressed to a different identity than the one
+    /// consuming the credit.
+    PeerDebitNotAddressedToConsumer,
+    /// The named debit mutation is not THE balance debit the peer's
+    /// operation performed.
+    PeerDebitIndexIsNotTheOperationDebit,
+    /// The acceptance evidence failed to resolve or verify.
+    AcceptanceEvidence(PeerLineageFailure),
     /// The supplied peer transition's witness does not belong to the validated
     /// root it was handed with.
     PeerWitnessDoesNotMatchValidatedRoot,
@@ -208,12 +269,26 @@ impl core::fmt::Display for ProvenanceError {
             ),
             Self::PeerTransitionNotValidated {
                 peer_economic_position,
+                failure,
             } => write!(
                 f,
-                "credit provenance: this verifier has not validated the peer's transition at \
-                 position {peer_economic_position} — fail closed; a credit is not funded by a \
-                 debit nobody has checked"
+                "peer transition at position {peer_economic_position} is not resolvable as \
+                 validated: {failure}"
             ),
+            Self::PeerDebitIsNotAnOnlineTransfer => write!(
+                f,
+                "peer debit is not an online Transfer — only the online transfer debit \
+                 funds a peer credit"
+            ),
+            Self::PeerDebitNotAddressedToConsumer => write!(
+                f,
+                "peer transfer is addressed to a different identity than the consumer"
+            ),
+            Self::PeerDebitIndexIsNotTheOperationDebit => write!(
+                f,
+                "named debit mutation is not THE balance debit the peer's operation performed"
+            ),
+            Self::AcceptanceEvidence(e) => write!(f, "acceptance evidence: {e}"),
             Self::PeerWitnessDoesNotMatchValidatedRoot => write!(
                 f,
                 "credit provenance: the peer witness does not produce the validated root it was \
@@ -431,8 +506,9 @@ pub fn verify_credit_source(
             // construct a ValidatedEconomicRoot to do so.
             let peer = resolver
                 .validated_peer_transition(&p.peer_genesis, &p.peer_devid, p.peer_economic_position)
-                .ok_or(ProvenanceError::PeerTransitionNotValidated {
+                .map_err(|failure| ProvenanceError::PeerTransitionNotValidated {
                     peer_economic_position: p.peer_economic_position,
+                    failure,
                 })?;
             // A genuine validated root paired with an unrelated witness is the
             // one forgery the type system cannot prevent on its own.
@@ -453,6 +529,66 @@ pub fn verify_credit_source(
                 debit_delta(debit).ok_or(ProvenanceError::PeerMutationIsNotADebit {
                     index: p.peer_debit_mutation_index,
                 })?;
+            // ── THE exact peer-debit predicate ─────────────────────────────
+            // "Some peer had a validated debit" is not the semantics. The
+            // debit must be the sender's ONLINE Transfer, addressed to THIS
+            // consumer, and the named mutation must be THE debit that
+            // operation performed — reasoned from the peer's VERIFIED
+            // operation, never from the descriptor's story about it.
+            let (op_recipient, op_amount, op_asset) = match &peer.verified_operation {
+                crate::types::operations::Operation::Transfer {
+                    to_device_id,
+                    amount,
+                    policy_commit,
+                    authority_policy: Option::None,
+                    ..
+                } => (to_device_id.clone(), amount.value(), *policy_commit),
+                _ => return Err(ProvenanceError::PeerDebitIsNotAnOnlineTransfer),
+            };
+            if op_recipient.as_slice() != ctx.device_id.as_slice() {
+                return Err(ProvenanceError::PeerDebitNotAddressedToConsumer);
+            }
+            if op_asset != debit_asset || op_amount != debit_amount {
+                return Err(ProvenanceError::PeerDebitIndexIsNotTheOperationDebit);
+            }
+            // ── The acceptance — recipient-produced, never the proposal ────
+            // The bundle's bytes are fetched by content address and verified
+            // HERE: sender chain to the peer's proven AK, recipient chain to
+            // the consumer's proven AK, and the receipt bound to the exact
+            // validated debit successor.
+            let bundle_bytes = resolver
+                .immutable_evidence(
+                    crate::common::domain_tags::TAG_DSM_PEER_TRANSFER_ACCEPTANCE,
+                    &p.acceptance_evidence_addr,
+                )
+                .map_err(ProvenanceError::AcceptanceEvidence)?;
+            if crate::economic::peer_acceptance::acceptance_evidence_addr(&bundle_bytes)
+                != p.acceptance_evidence_addr
+            {
+                return Err(ProvenanceError::AcceptanceEvidence(
+                    PeerLineageFailure::Invalid(
+                        "acceptance bytes do not hash to the descriptor's address".to_string(),
+                    ),
+                ));
+            }
+            let mut fetch_step = |addr: &[u8; 32]| {
+                resolver.immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
+            };
+            crate::economic::peer_acceptance::verify_peer_transfer_acceptance(
+                &bundle_bytes,
+                &crate::economic::peer_acceptance::AcceptanceParty {
+                    devid: p.peer_devid,
+                    proven_ak: &peer.proven_ak,
+                },
+                &crate::economic::peer_acceptance::AcceptanceParty {
+                    devid: *ctx.device_id,
+                    proven_ak: ctx.proven_ak,
+                },
+                &peer.verified_operation.to_bytes(),
+                &peer.c_dsm_plus,
+                &mut fetch_step,
+            )
+            .map_err(ProvenanceError::AcceptanceEvidence)?;
             FundedCredit {
                 source_id: validated_peer_debit_source_id(
                     &p.peer_genesis,

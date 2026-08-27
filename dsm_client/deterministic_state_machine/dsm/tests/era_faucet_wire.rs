@@ -19,8 +19,8 @@ use dsm::economic::faucet::{
 };
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
-    verify_credit_source, FaucetTicketWin, ProvenanceContext, ProvenanceError, ProvenanceResolver,
-    ValidatedPeerTransition,
+    verify_credit_source, FaucetTicketWin, ProvenanceContext, ProvenanceError, PeerLineageFailure,
+    ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
@@ -127,13 +127,25 @@ impl ProvenanceResolver for OneTicket {
         _g: &[u8; 32],
         _d: &[u8; 32],
         _p: u64,
-    ) -> Option<ValidatedPeerTransition> {
-        None
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no peer store in this fixture".into(),
+        ))
     }
     fn winning_faucet_ticket(&self, f: &[u8; 32], i: u64) -> Option<FaucetTicketWin> {
         (*f == self.faucet_id && i == self.ticket_index).then(|| FaucetTicketWin {
             envelope_bytes: self.envelope.clone(),
         })
+    }
+
+    fn immutable_evidence(
+        &self,
+        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        _addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no evidence store in this fixture".into(),
+        ))
     }
 }
 
@@ -330,11 +342,23 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
             _g: &[u8; 32],
             _d: &[u8; 32],
             _p: u64,
-        ) -> Option<ValidatedPeerTransition> {
-            None
+        ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(
+                "no peer store in this fixture".into(),
+            ))
         }
         fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
             None
+        }
+
+        fn immutable_evidence(
+            &self,
+            _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+            _addr: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(
+                "no evidence store in this fixture".into(),
+            ))
         }
     }
     assert!(matches!(

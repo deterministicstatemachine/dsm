@@ -219,6 +219,98 @@ pub fn build_own_anchor_presentation(
     })
 }
 
+/// Build the portable ECONOMIC authority evidence for this device — the
+/// exact bytes the admission manifest's `authority_evidence_addr` names.
+///
+/// `AnchorPresentationV3` minus the vault-anchor fields: no state
+/// commitment, no candidate key, no anchor signature — economic lineage
+/// binds identity through the register claim and `sigma_dsm`, not through a
+/// vault anchor. Returns `(evidence_bytes, t0_digest)` — the second value is
+/// the manifest's `authority_position`: the TRANSITION digest `t_0`, which
+/// P3 matches against, never a device-tree root.
+pub fn build_authority_evidence(
+    wallet_seed: &[u8],
+    inputs: OwnerIdentityInputs<'_>,
+    expected_g: &[u8; 32],
+) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+    use prost::Message;
+    let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+    let genesis = derive_genesis_v3_self_attested(
+        wallet_seed,
+        inputs.network_id,
+        inputs.wallet_index,
+        inputs.device_slot,
+        inputs.genesis_version,
+        &aph,
+    )?;
+    if genesis.g != *expected_g {
+        return Err(DsmError::verification(
+            "authority evidence: re-derived G does not match this device's stored genesis id \
+             — the inputs describe a different identity (fail closed)",
+        ));
+    }
+    let params = dsm::ccb::GenesisParamsV3::new(
+        genesis.genesis_nonce,
+        inputs.network_id,
+        inputs.genesis_version,
+        sigalg::SPHINCS_PLUS_SPX256F,
+        &genesis.grk_public,
+    )
+    .map_err(|e| DsmError::invalid_parameter(format!("authority evidence: params: {e}")))?;
+    let d0 = RootProgressionDelegation {
+        genesis_id: genesis.g,
+        role: role::DEVICE_TREE_ROOT_PROGRESSION,
+        role_version: role::BETA_ROLE_VERSION,
+        delegated_alg_id: sigalg::SPHINCS_PLUS_SPX256F,
+        delegated_pk: genesis.ak_public.clone(),
+        delegation_number: 0,
+        parent_delegation_digest: delegation_genesis_sentinel(),
+        activation_transition_digest: transition_genesis_sentinel(),
+    };
+    let d0_signing = d0
+        .signing_digest()
+        .map_err(|e| DsmError::invalid_parameter(format!("authority evidence: D_0: {e}")))?;
+    let d0_sig = sphincs_sign(&genesis.grk_secret, &d0_signing)?;
+    let d0_digest = d0
+        .digest()
+        .map_err(|e| DsmError::invalid_parameter(format!("authority evidence: D_0: {e}")))?;
+    let tree = DeviceTree::single(genesis.devid);
+    let t0 = DeviceTreeRootTransition {
+        genesis_id: genesis.g,
+        predecessor_transition_digest: transition_genesis_sentinel(),
+        new_root: tree.root(),
+        version_number: 0,
+        delegation_digest: d0_digest,
+    };
+    let t0_sig = sphincs_sign(&genesis.ak_secret, &t0.signing_digest())?;
+    let t0_digest = t0.digest();
+    let proof = tree.proof(&genesis.devid).ok_or_else(|| {
+        DsmError::verification(
+            "authority evidence: single-device tree has no proof for its own leaf",
+        )
+    })?;
+    let atta = derive_atta(wallet_seed, &genesis.g, inputs.device_slot);
+    let evidence = generated::AuthorityEvidenceV1 {
+        genesis_params_ccb: params
+            .encode()
+            .map_err(|e| DsmError::invalid_parameter(format!("authority evidence: params: {e}")))?,
+        delegations: vec![generated::SignedAuthorityObjectV1 {
+            ccb: d0.encode().map_err(|e| {
+                DsmError::invalid_parameter(format!("authority evidence: D_0: {e}"))
+            })?,
+            signature: d0_sig,
+        }],
+        transitions: vec![generated::SignedAuthorityObjectV1 {
+            ccb: t0.encode(),
+            signature: t0_sig,
+        }],
+        inclusion_proof: proof.to_bytes(),
+        ak_public_key: genesis.ak_public.clone(),
+        atta: atta.to_vec(),
+    };
+    Ok((evidence.encode_to_vec(), t0_digest))
+}
+
 /// The verified join of a presentation and the `CCB(V_n)` bytes it anchors:
 /// the decoded state and the owner authority proven at the state's own
 /// committed position.

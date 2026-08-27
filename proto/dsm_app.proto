@@ -1203,6 +1203,73 @@ message SignedAuthorityObjectV1 {
 // transition, re-derives d_o from ak_pk + atta, and enforces
 // K_cand == K_proven against candidate_public_key. Published as an immutable
 // object; discovery paths carry its 32-byte content address, never bytes.
+// Portable P0-P6 authority evidence for ECONOMIC lineage validation — the
+// manifest's `authority_evidence_addr` points at the exact bytes of this
+// object in the immutable store (namespace DSM/economic-authority-evidence/v1).
+// It is AnchorPresentationV3 minus the vault-anchor fields: everything a
+// FOREIGN verifier needs to run resolve_owner_authority_at_position for the
+// lineage owner — recovering the proven AK, DevID, and (via P0's genesis
+// recomputation) the committed network_id — from public material alone.
+message AuthorityEvidenceV1 {
+  bytes  genesis_params_ccb   = 1 [(dsm_max_len)=4096];   // class 0x0018
+  repeated SignedAuthorityObjectV1 delegations = 2;        // class 0x0019 + GRK sig
+  repeated SignedAuthorityObjectV1 transitions = 3;        // class 0x001A + delegate sig
+  bytes  inclusion_proof      = 4 [(dsm_max_len)=16384];   // DevTreeProof::to_bytes
+  bytes  ak_public_key        = 5 [(dsm_max_len)=65535];
+  bytes  atta                 = 6 [(dsm_fixed_len)=32];
+}
+
+// Replayable accepted-successor evidence for ECONOMIC lineage validation —
+// the manifest's `dsm_successor_evidence_addr` points at the exact bytes of
+// this object (namespace DSM/economic-dsm-successor-evidence/v1). Carries the
+// BALANCE-FREE v2 chain-tip preimage fields (succession facts only — R_econ
+// is the sole authenticated balance representation), the resulting C_dsm+,
+// and sigma_dsm: the owner-AK signature over
+// H(DSM/economic-substrate-sign/v1, G ‖ DevID ‖ C_dsm+ ‖ operation_digest).
+// A foreign verifier recomputes C_dsm+ from the preimage, recomputes the
+// operation digest from the embedded operation bytes, and checks sigma_dsm
+// under the P0-P6-proven AK — "this identity accepted this successor
+// carrying this operation" becomes checkable, not asserted.
+// One per-device per-step EK certificate step, content-addressed by its
+// PREDECESSOR (namespace DSM/ek-cert-step/v1). Certificate ancestry follows
+// the SIGNER (the device, within a relationship), not the A/B role of any
+// one receipt: role reversal and BLE steps both advance the same device
+// chain, so the acceptance bundle references each side's predecessor by
+// signer identity through these objects. `prior_step_addr` absent means
+// relationship genesis: the expected certifying key is the signer's
+// P0-P6-proven AK.
+message EkCertStepV1 {
+  bytes  ek_pk           = 1 [(dsm_max_len)=65535];
+  bytes  ek_cert         = 2 [(dsm_max_len)=65535]; // Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+  bytes  h_n             = 3 [(dsm_fixed_len)=32];
+  optional bytes prior_step_addr = 4 [(dsm_fixed_len)=32];
+}
+
+// Portable bilateral-acceptance evidence for a peer-funded economic credit —
+// what `CreditSourceValidatedPeerDebit.acceptance_evidence_addr` names
+// (namespace DSM/peer-transfer-acceptance/v1). The recipient-produced
+// countersignature is the acceptance FACT; the A-side material alone is a
+// proposal. Each side's EK certificate ancestry is referenced through
+// EkCertStepV1 predecessors (by signer, see above).
+message PeerTransferAcceptanceEvidenceV1 {
+  bytes transfer_request_bytes      = 1 [(dsm_max_len)=262144]; // exact OnlineTransferRequest
+  bytes receipt_evidence_a_bytes    = 2 [(dsm_max_len)=262144]; // exact full ReceiptCommit wire
+  bytes receipt_countersign_b_bytes = 3 [(dsm_max_len)=262144]; // exact ReceiptCountersignB wire
+  optional bytes a_prior_step_addr  = 4 [(dsm_fixed_len)=32];   // sender EK ancestry
+  optional bytes b_prior_step_addr  = 5 [(dsm_fixed_len)=32];   // recipient EK ancestry
+}
+
+message DsmSuccessorEvidenceV1 {
+  bytes  rel_key              = 1 [(dsm_fixed_len)=32];
+  bytes  embedded_parent      = 2 [(dsm_fixed_len)=32];
+  bytes  counterparty_devid   = 3 [(dsm_fixed_len)=32];
+  bytes  operation_bytes      = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
+  bytes  entropy              = 5 [(dsm_max_len)=65535];
+  optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535];
+  bytes  c_dsm_plus           = 7 [(dsm_fixed_len)=32];
+  bytes  sigma_dsm            = 8 [(dsm_max_len)=65535];   // SPX256f under the owner AK
+}
+
 message AnchorPresentationV3 {
   bytes  state_commitment       = 1 [(dsm_fixed_len)=32];  // c_n
   bytes  candidate_public_key   = 2 [(dsm_max_len)=65535];
@@ -3384,16 +3451,9 @@ message RecoveryBundleV1 {
 // commitment). These objects are AVAILABILITY-ONLY and CONTENT-ADDRESSED; the client
 // recomputes every state's chain tip and the ancestry walk locally. Storage never attests.
 
-// One device-level balance-witness entry (CPTA policy_commit -> u64 balance). Encoded
-// sorted by policy_commit to match the canonical chain-tip hash (BTreeMap order).
-message BalanceWitnessEntryProto {
-  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
-  uint64 value         = 2;
-}
-
 // Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
-// EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
-// canonical operation bytes, entropy, optional encapsulated_entropy, sorted balance witness)
+// EVERY field that feeds the v2 chain-tip preimage (rel_key, embedded_parent,
+// counterparty_devid, canonical operation bytes, entropy, optional encapsulated_entropy)
 // plus the two optional signatures (NOT hashed — they sign the digest). proto3 `optional`
 // distinguishes None from an empty Some, which the chain-tip hash treats differently; a
 // faithful round-trip is REQUIRED so a decoder can recompute the tip and assert equality.
@@ -3404,7 +3464,9 @@ message RelationshipChainStateProto {
   bytes  operation           = 4 [(dsm_max_len)=1048576]; // Operation::to_bytes (canonical)
   bytes  entropy             = 5 [(dsm_max_len)=65535];
   optional bytes encapsulated_entropy = 6 [(dsm_max_len)=65535]; // None vs Some(empty) preserved
-  repeated BalanceWitnessEntryProto balance_witness = 8;
+  reserved 8; // removed: balance_witness — the relationship chain-tip commitment is
+              // balance-free (DSM/relationship-chain-tip/v2); R_econ is the sole
+              // authenticated online balance representation
   optional bytes entity_sig       = 9  [(dsm_max_len)=65535]; // SPX256f
   optional bytes counterparty_sig = 10 [(dsm_max_len)=65535]; // SPX256f
   reserved 11; // removed: legacy Safe-7 island_attestation (no longer folded into compute_chain_tip)

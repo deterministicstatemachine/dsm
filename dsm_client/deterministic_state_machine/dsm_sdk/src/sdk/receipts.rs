@@ -41,12 +41,11 @@ pub fn compute_receipt_challenge_response_target(
     receipt_commitment: &[u8; 32],
     session_binding: &[u8; 32],
 ) -> [u8; 32] {
-    let mut input = Vec::with_capacity(64);
-    input.extend_from_slice(receipt_commitment);
-    input.extend_from_slice(session_binding);
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RECEIPT_BIND_SESSION,
-        &input,
+    // ONE preimage, ONE home: the construction lives in core beside the
+    // receipt type, where the foreign acceptance verifier also uses it.
+    dsm::types::receipt_types::compute_receipt_challenge_response_target(
+        receipt_commitment,
+        session_binding,
     )
 }
 
@@ -65,14 +64,11 @@ pub fn compute_receipt_b_canonical_target(
     b_parent_tip: &[u8; 32],
     b_child_tip: &[u8; 32],
 ) -> [u8; 32] {
-    let standard = compute_receipt_challenge_response_target(receipt_commitment, session_binding);
-    let mut input = Vec::with_capacity(96);
-    input.extend_from_slice(&standard);
-    input.extend_from_slice(b_parent_tip);
-    input.extend_from_slice(b_child_tip);
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RECEIPT_B_CANONICAL,
-        &input,
+    dsm::types::receipt_types::compute_receipt_b_canonical_target(
+        receipt_commitment,
+        session_binding,
+        b_parent_tip,
+        b_child_tip,
     )
 }
 

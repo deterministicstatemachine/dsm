@@ -438,6 +438,12 @@ pub struct OwnerAuthorityAtPosition {
     pub device_id: [u8; 32],
     /// The exact transition digest the proof is bound to.
     pub position: [u8; 32],
+    /// The committed network, from field 2 of the `GenesisParamsV3` whose
+    /// recomputation IS `g_o` — authenticated the instant P0's equality
+    /// holds, and populated only there, so the recomputed value is the ONLY
+    /// one reachable. Never sourced from a claimant beside a claim, transfer
+    /// metadata, or a contact book.
+    pub network_id: Vec<u8>,
 }
 
 /// P0–P6 at a caller-bound position.
@@ -496,6 +502,7 @@ pub fn resolve_owner_authority_at_position(
         ak_pk: presented.ak_pk.to_vec(),
         device_id: d_o,
         position: *position,
+        network_id: presented.genesis_params.network_id.clone(),
     })
 }
 

@@ -491,7 +491,6 @@ mod tests {
     use crate::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
     use crate::recovery::tombstone::{create_succession, create_tombstone};
     use crate::types::operations::Operation;
-    use std::collections::BTreeMap;
 
     const A_OLD: [u8; 32] = [0xA0; 32];
     const A_NEW: [u8; 32] = [0xA1; 32];
@@ -510,7 +509,6 @@ mod tests {
             operation: Operation::Noop,
             entropy: vec![e],
             encapsulated_entropy: None,
-            balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
         }
@@ -557,7 +555,6 @@ mod tests {
             operation: build_recovery_establishment_op(&C, &carry, &h_cap),
             entropy: vec![9],
             encapsulated_entropy: None,
-            balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
         };
