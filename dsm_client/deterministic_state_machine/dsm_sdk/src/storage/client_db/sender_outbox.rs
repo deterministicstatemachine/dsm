@@ -36,6 +36,14 @@ use crate::util::deterministic_time::tick;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Committed locally but HELD: the sender debit's economic admission has not
+/// reached `ECON_ADMITTED`. NEVER returned by [`unsettled_sender_outbox`] and
+/// never deliverable by any path — the resubmit sweep must not be able to
+/// race a transfer onto the network whose economic ancestry is unregistered.
+/// Promoted to `pending_submit` in the SAME transaction that records the
+/// admitted coordinate, clears the pending admission and persists the
+/// unfenced head, so a crash cannot produce "deliverable but not admitted".
+pub const OUTBOX_ECONOMIC_ADMISSION_PENDING: &str = "economic_admission_pending";
 /// Committed locally, nothing sent yet.
 pub const OUTBOX_PENDING_SUBMIT: &str = "pending_submit";
 /// Durably marked immediately BEFORE entering the network call.
@@ -1075,6 +1083,35 @@ pub fn unsettled_sender_outbox() -> Result<Vec<SenderOutboxRecord>> {
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Promote HELD rows to deliverable, inside the caller's transaction — the
+/// terminal admission transaction. Admission is device-global and at most one
+/// is pending, so this promotes every held row (there is at most one).
+pub fn promote_held_outbox_rows_with_conn(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE sender_outbox SET status = ?1 WHERE status = ?2",
+        params![OUTBOX_PENDING_SUBMIT, OUTBOX_ECONOMIC_ADMISSION_PENDING],
+    )?;
+    Ok(n)
+}
+
+/// Recovery sweep: a held row with NO pending admission means the admission
+/// reached its terminal state but the same-transaction promotion did not run
+/// (possible only across schema evolution or a defensive re-check) — promote.
+/// Never promotes while an admission is actually pending.
+pub fn promote_held_outbox_rows_if_admitted() -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|e| e.into_inner());
+    let pending: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM economic_pending_admissions",
+        [],
+        |r| r.get(0),
+    )?;
+    if pending > 0 {
+        return Ok(0);
+    }
+    promote_held_outbox_rows_with_conn(&conn)
 }
 
 /// Finalized rows whose spool copies still need collecting.

@@ -3600,6 +3600,17 @@ message OnlineTransferRequest {
   // types (a 32-byte address vs a full object), and encoding both in one field
   // would make "which form is this?" a runtime guess.
   bytes receipt_evidence_digest = 12 [(dsm_fixed_len)=32];
+  // ── Sender economic locators (3.5b) ──────────────────────────────────────
+  // Sender economic coordinates on OnlineTransferRequest are untrusted
+  // locators, never authority; the verifier accepts them only after the
+  // resolved ValidatedEconomicRoot proves that the named debit belongs to the
+  // exact signed online Transfer addressed to this consuming identity.
+  // The values are OUTPUTS of the sender's built admission (the admitted
+  // position and THE debit mutation index of the exact write set), populated
+  // in the same staged build phase that freezes this envelope — never
+  // predicted beside it.
+  uint64 sender_economic_position = 13;
+  uint32 sender_debit_mutation_index = 14;
 }
 
 // ADR 0003: the A-side receipt evidence, carried as its OWN b0x artifact

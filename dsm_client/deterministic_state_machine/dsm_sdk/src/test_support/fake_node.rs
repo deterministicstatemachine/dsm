@@ -371,8 +371,13 @@ pub fn point_env_config_at(endpoints: &[String]) {
          bitcoin_network = \"signet\"\ndbtc_min_confirmations = 1\n",
     );
     for (i, ep) in endpoints.iter().enumerate() {
+        // Canonical register member names: the root-register profile resolves
+        // its set by re-hashing member ids, so a fleet named anything else can
+        // never satisfy `resolve_root_register_profile` (economic admissions
+        // fail closed on it).
+        let n = i + 1;
         cfg_toml.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{i}\"\nendpoint = \"{ep}\"\n"
+            "\n[[nodes]]\nname = \"dsm-node-{n}\"\nendpoint = \"{ep}\"\n"
         ));
     }
     std::fs::write(&cfg_path, cfg_toml).expect("write env config");

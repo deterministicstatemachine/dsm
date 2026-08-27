@@ -1574,8 +1574,20 @@ impl AppRouterImpl {
                     signature: authorization,
                 };
 
+                // 3.5b (owner ruling): initial creator supply is REFUSED —
+                // the new asset's credit has no authenticated issuance/source
+                // predicate yet, and an operation that cannot be admitted
+                // must not strand an active economic lineage. Token creation
+                // metadata + its ERA fee are supported now; creator supply
+                // waits for the issuance predicate (0x0029).
+                if initial_alloc_u64 > 0 {
+                    return err(format!(
+                        "token.create: {}",
+                        dsm::economic::write_set::WriteSetError::CreateTokenInitialSupplyRequiresIssuancePredicate
+                    ));
+                }
                 // Positional, exactly as the conservation guard requires:
-                // [0] the ERA fee debit, [1] the issuance credit (if any).
+                // [0] the ERA fee debit (the only economic delta).
                 let mut deltas: Vec<dsm::types::device_state::BalanceDelta> = Vec::new();
                 if fee_amount > 0 {
                     let era_commit = match dsm::core::token::builtin_policy_commit_for_token("ERA")
@@ -1587,13 +1599,6 @@ impl AppRouterImpl {
                         policy_commit: era_commit,
                         direction: dsm::types::device_state::BalanceDirection::Debit,
                         amount: fee_amount,
-                    });
-                }
-                if initial_alloc_u64 > 0 {
-                    deltas.push(dsm::types::device_state::BalanceDelta {
-                        policy_commit,
-                        direction: dsm::types::device_state::BalanceDirection::Credit,
-                        amount: initial_alloc_u64,
                     });
                 }
 
@@ -1627,20 +1632,41 @@ impl AppRouterImpl {
                     })
                 };
 
-                let outcome = match self.core_sdk.execute_on_relationship_guarded(
-                    rel_key,
-                    dev_id,
-                    create_op,
-                    &deltas,
-                    Some(init_tip),
-                    Some(&insert_registry),
-                ) {
-                    Ok((_state, outcome)) => outcome,
-                    Err(e) => {
-                        // Nothing was committed: the guard and the balance
-                        // arithmetic both run before the durable write, so a
-                        // failed creation burns nothing.
-                        return err(format!("token.create: canonical creation failed: {e}"));
+                // Fee-bearing creation is an ADMITTED economic debit; the
+                // registry row rides the SAME transaction via the composed
+                // in-tx writer. A zero-fee creation writes no economic leaf
+                // and needs no admission.
+                let outcome = if fee_amount > 0 {
+                    match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
+                        &self.core_sdk,
+                        create_op,
+                        deltas[0].clone(),
+                        Some(&insert_registry),
+                    )
+                    .await
+                    {
+                        Ok((o, _admitted)) => o,
+                        Err(e) => {
+                            return err(format!("token.create: {e}"));
+                        }
+                    }
+                } else {
+                    match self.core_sdk.execute_on_relationship_guarded(
+                        rel_key,
+                        dev_id,
+                        create_op,
+                        &deltas,
+                        Some(init_tip),
+                        Some(&insert_registry),
+                        None,
+                    ) {
+                        Ok((_state, outcome)) => outcome,
+                        Err(e) => {
+                            // Nothing was committed: the guard and the balance
+                            // arithmetic both run before the durable write, so a
+                            // failed creation burns nothing.
+                            return err(format!("token.create: canonical creation failed: {e}"));
+                        }
                     }
                 };
 
@@ -2003,14 +2029,22 @@ impl AppRouterImpl {
         // Burn > balance is refused by the conservation guard's checked_sub,
         // which runs before the durable write — no pre-check can be more
         // authoritative than that, so the error is surfaced verbatim.
-        let outcome = match self.core_sdk.execute_on_relationship(
-            rel_key,
-            dev_id,
+        //
+        // 3.5b: the burn is an ADMITTED economic debit — the fence-coupled
+        // advance, evidence publication, registration and validation all run
+        // before this route reports success. An unadmitted local burn would
+        // leave the validated R_econ value intact for an adversarial
+        // producer while the units disappear locally.
+        let _ = (rel_key, init_tip);
+        let outcome = match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
+            &self.core_sdk,
             op,
-            &deltas,
-            Some(init_tip),
-        ) {
-            Ok((_s, o)) => o,
+            deltas[0].clone(),
+            None,
+        )
+        .await
+        {
+            Ok((o, _admitted)) => o,
             Err(e) => return err(format!("token.burn: {e}")),
         };
 
