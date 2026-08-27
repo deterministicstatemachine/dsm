@@ -20,6 +20,21 @@ pub const TAG_BILATERAL_SESSION: TaggedHashDomain<'static> =
 pub const TAG_SMT_KEY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/smt-key");
 pub const TAG_TIP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tip");
 pub const TAG_STATE_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/state-hash");
+/// The relationship successor commitment `h_n = C_dsm+`:
+/// `H(tag ‖ rel_key ‖ embedded_parent ‖ counterparty_devid ‖ len(op) ‖ op ‖
+/// len(entropy) ‖ entropy ‖ encap_marker[‖ len ‖ encap])`.
+///
+/// `/v2` because the RELATIONSHIP use of `DSM/state-hash` is **burned**: that
+/// preimage folded the device's whole `balance_witness` map into every chain
+/// tip, making the ordinary DSM commitment a second authenticated balance
+/// representation beside `R_econ` — the dual-authority coupling the economic
+/// root exists to remove (and it exposed the balance portfolio to any
+/// counterparty). The successor commitment now commits succession facts only;
+/// `R_econ` is the SOLE authenticated online balance representation.
+/// `DSM/state-hash` itself is untouched for `State::compute_hash()` — one
+/// domain, one meaning, per protocol.
+pub const TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-chain-tip/v2");
 /// SMT key of the single per-device anchor-state leaf: `H(tag ‖ B)`. One stable key per
 /// device (the fused anchor is device-level: one appliance, one counter); its VALUE is the
 /// anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`, replaced old→successor on every
@@ -40,8 +55,8 @@ pub const TAG_OFFLINE_ALLOCATION_STATE: TaggedHashDomain<'static> =
 /// SMT key of the per-(vault, asset) reserve leaf:
 /// `H(tag ‖ genesis_id ‖ device_id ‖ vault_id ‖ policy_commit)`. Accounts for value the
 /// owner has ENCUMBERED into a specific vault. Deliberately not a `balances` entry: a
-/// vault-scoped key in that map would be folded into `balance_witness` and change the chain
-/// tip a counterparty derives on every unrelated transfer.
+/// vault-scoped key in that map would have been folded into the (since-burned)
+/// chain-tip balance witness on every unrelated transfer.
 pub const TAG_VAULT_RESERVE_LEAF: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/vault-reserve/v1");
 /// Value of a vault reserve leaf: `H(tag ‖ amount_be ‖ vault_sequence_be)`. The sequence is
@@ -111,6 +126,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_SMT_KEY,
     TAG_TIP,
     TAG_STATE_HASH,
+    TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2,
     TAG_FUSED_ANCHOR_STATE_LEAF,
     TAG_OFFLINE_ALLOCATION_LEAF,
     TAG_OFFLINE_ALLOCATION_STATE,

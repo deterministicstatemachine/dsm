@@ -27,8 +27,6 @@
 
 use crate::crypto::domain::TaggedHashDomain;
 
-use std::collections::BTreeMap;
-
 use crate::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::recovery::succession_binding::verify_forward_ancestry;
@@ -36,8 +34,8 @@ use crate::types::device_state::RelationshipChainState;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::proto::{
-    BalanceWitnessEntryProto, Message as _, RecoveryEstablishmentReceiptV1,
-    RelationshipChainSegmentV1, RelationshipChainStateProto,
+    Message as _, RecoveryEstablishmentReceiptV1, RelationshipChainSegmentV1,
+    RelationshipChainStateProto,
 };
 
 const REL_SEGMENT_DOMAIN: TaggedHashDomain<'static> =
@@ -73,15 +71,6 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
         operation: s.operation.to_bytes(),
         entropy: s.entropy.clone(),
         encapsulated_entropy: s.encapsulated_entropy.clone(),
-        // BTreeMap iterates sorted by 32B policy_commit → canonical order on the wire.
-        balance_witness: s
-            .balance_witness
-            .iter()
-            .map(|(pc, v)| BalanceWitnessEntryProto {
-                policy_commit: pc.to_vec(),
-                value: *v,
-            })
-            .collect(),
         entity_sig: s.entity_sig.clone(),
         counterparty_sig: s.counterparty_sig.clone(),
     }
@@ -91,17 +80,6 @@ pub fn rel_chain_state_to_proto(s: &RelationshipChainState) -> RelationshipChain
 pub fn rel_chain_state_from_proto(
     p: &RelationshipChainStateProto,
 ) -> Result<RelationshipChainState, DsmError> {
-    let mut balance_witness: BTreeMap<[u8; 32], u64> = BTreeMap::new();
-    for (i, e) in p.balance_witness.iter().enumerate() {
-        let pc = fixed32("balance_witness.policy_commit", &e.policy_commit)?;
-        // BTreeMap dedups silently; a duplicate key on the wire is a malformed object.
-        if balance_witness.insert(pc, e.value).is_some() {
-            return Err(DsmError::verification(format!(
-                "chain_segment: duplicate balance_witness policy_commit at index {i}"
-            )));
-        }
-    }
-
     Ok(RelationshipChainState {
         rel_key: fixed32("rel_key", &p.rel_key)?,
         embedded_parent: fixed32("embedded_parent", &p.embedded_parent)?,
@@ -110,7 +88,6 @@ pub fn rel_chain_state_from_proto(
             .map_err(|e| DsmError::verification(format!("chain_segment: operation: {e}")))?,
         entropy: p.entropy.clone(),
         encapsulated_entropy: p.encapsulated_entropy.clone(),
-        balance_witness,
         entity_sig: p.entity_sig.clone(),
         counterparty_sig: p.counterparty_sig.clone(),
     })
@@ -332,8 +309,6 @@ mod tests {
         c: [u8; 32],
         tag: u8,
     ) -> RelationshipChainState {
-        let mut bw = BTreeMap::new();
-        bw.insert([tag; 32], tag as u64);
         RelationshipChainState {
             rel_key,
             embedded_parent: parent,
@@ -351,7 +326,6 @@ mod tests {
             } else {
                 None
             },
-            balance_witness: bw,
             entity_sig: Some(vec![0x11; 8]),
             counterparty_sig: None,
         }
@@ -463,7 +437,6 @@ mod tests {
             operation: build_recovery_establishment_op(&C, &carry, &[0x33; 32]),
             entropy: vec![0x01],
             encapsulated_entropy: None,
-            balance_witness: BTreeMap::new(),
             entity_sig: Some(vec![0x22; 8]),
             counterparty_sig: Some(vec![0x33; 8]),
         };

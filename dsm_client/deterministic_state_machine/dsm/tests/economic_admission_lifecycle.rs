@@ -22,7 +22,9 @@ use dsm::economic::lineage::{
 };
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::register::RegisteredEconomicRoot;
-use dsm::economic::provenance::{FaucetTicketWin, ProvenanceResolver, ValidatedPeerTransition};
+use dsm::economic::provenance::{
+    FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+};
 use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
@@ -299,13 +301,25 @@ impl ProvenanceResolver for OneTicket {
         _g: &[u8; 32],
         _d: &[u8; 32],
         _p: u64,
-    ) -> Option<ValidatedPeerTransition> {
-        None
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no peer store in this fixture".into(),
+        ))
     }
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
         Some(FaucetTicketWin {
             envelope_bytes: self.envelope.clone(),
         })
+    }
+
+    fn immutable_evidence(
+        &self,
+        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        _addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "no evidence store in this fixture".into(),
+        ))
     }
 }
 

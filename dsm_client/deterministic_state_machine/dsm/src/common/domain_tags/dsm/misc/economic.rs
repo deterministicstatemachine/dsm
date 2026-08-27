@@ -155,6 +155,32 @@ pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
 /// Digest of the exact `EconomicRootClaimV1` envelope bytes a register member
 /// stores and compares: `H(tag ‖ 0x00 ‖ envelope_bytes)`. The settlement
 /// register's `-envelope` tag, for this register.
+/// Immutable-store namespace of the exact `AuthorityEvidenceV1` bytes the
+/// manifest's `authority_evidence_addr` names — the portable P0–P6 bundle a
+/// foreign lineage walker verifies to recover the owner's AK and committed
+/// network.
+pub const TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-authority-evidence/v1");
+/// Immutable-store namespace of the exact `DsmSuccessorEvidenceV1` bytes the
+/// manifest's `dsm_successor_evidence_addr` names — the replayable accepted
+/// successor: the balance-free chain-tip preimage fields, `C_dsm+`, and
+/// `sigma_dsm` under the owner AK.
+pub const TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-dsm-successor-evidence/v1");
+/// Signing domain of `sigma_dsm`:
+/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ C_dsm+ ‖ operation_digest)` — the signature
+/// that makes "this identity ACCEPTED this successor carrying this
+/// operation" a foreign-checkable fact rather than a local assertion.
+/// Immutable-store namespace of one `EkCertStepV1` — a signer-identity EK
+/// certificate step, content-addressed by predecessor.
+pub const TAG_DSM_EK_CERT_STEP: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ek-cert-step/v1");
+/// Immutable-store namespace of the exact `PeerTransferAcceptanceEvidenceV1`
+/// bytes a peer-debit descriptor's `acceptance_evidence_addr` names.
+pub const TAG_DSM_PEER_TRANSFER_ACCEPTANCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/peer-transfer-acceptance/v1");
+pub const TAG_DSM_ECONOMIC_SUBSTRATE_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-substrate-sign/v1");
 pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-root-claim-envelope/v1");
 

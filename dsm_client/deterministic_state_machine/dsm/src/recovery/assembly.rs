@@ -395,7 +395,6 @@ mod tests {
             },
             entropy: vec![tag],
             encapsulated_entropy: None,
-            balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
         }
@@ -449,7 +448,6 @@ mod tests {
             operation: build_recovery_establishment_op(&c, &carry, &h_cap),
             entropy: vec![9],
             encapsulated_entropy: None,
-            balance_witness: BTreeMap::new(),
             entity_sig: None,
             counterparty_sig: None,
         };

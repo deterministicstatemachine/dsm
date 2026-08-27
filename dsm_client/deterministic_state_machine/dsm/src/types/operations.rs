@@ -2421,6 +2421,23 @@ impl Operation {
                     mode,
                 }
             }
+            31 => {
+                // FaucetClaim mirrors its encoder exactly: length-prefixed
+                // 32-byte faucet_id, then the u64 ticket index. This arm was
+                // MISSING from B1 — `to_bytes` existed without its inverse,
+                // and nothing crossed the decode until the successor-evidence
+                // replay path did. Recovery and foreign replay both decode
+                // the exact frozen operation bytes through here.
+                let faucet_id_bytes = get_len_bytes(&mut input)?;
+                let faucet_id: [u8; 32] = faucet_id_bytes.try_into().map_err(|_| {
+                    DsmError::invalid_operation("faucet claim: faucet_id is not 32 bytes")
+                })?;
+                let ticket_index = get_u64(&mut input)?;
+                FaucetClaim {
+                    faucet_id,
+                    ticket_index,
+                }
+            }
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must

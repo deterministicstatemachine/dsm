@@ -216,22 +216,18 @@ fn deltas_for_transition(
                 amount: amount.value(),
             }]
         }
-        // `Mint` carries no `policy_commit`, and conservation does not check one
-        // for mints. Take it from the transition's OWN balance witness, and only
-        // when that is unambiguous. If it is not, emit no delta: conservation
-        // then rejects the transition and replay STOPS. Guessing a policy here
-        // would credit value under a commitment no artifact attests to.
-        Operation::Mint { amount, .. } => {
-            let mut keys = state.balance_witness.keys();
-            match (keys.next(), keys.next()) {
-                (Some(policy_commit), None) => vec![BalanceDelta {
-                    policy_commit: *policy_commit,
-                    direction: BalanceDirection::Credit,
-                    amount: amount.value(),
-                }],
-                _ => Vec::new(),
-            }
-        }
+        // `Mint` carries its own `policy_commit` (the mint-repair work made it
+        // mandatory), and the chain state no longer carries a balance witness
+        // to second-guess it from — the commitment is balance-free by design.
+        Operation::Mint {
+            amount,
+            policy_commit,
+            ..
+        } => vec![BalanceDelta {
+            policy_commit: *policy_commit,
+            direction: BalanceDirection::Credit,
+            amount: amount.value(),
+        }],
         // Non-value operations carry no delta; conservation rejects anything else.
         _ => Vec::new(),
     }
@@ -288,7 +284,6 @@ mod tests {
                 },
                 entropy: vec![0x11u8; 32],
                 encapsulated_entropy: None,
-                balance_witness: bw,
                 entity_sig: None,
                 counterparty_sig: None,
             },
@@ -377,7 +372,6 @@ mod tests {
                     },
                     entropy: vec![0x11u8; 32],
                     encapsulated_entropy: None,
-                    balance_witness: bw,
                     entity_sig: None,
                     counterparty_sig: None,
                 },
