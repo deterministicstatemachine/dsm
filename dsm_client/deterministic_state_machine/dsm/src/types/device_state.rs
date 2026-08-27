@@ -25,7 +25,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::common::domain_tags::TAG_STATE_HASH;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::sparse_merkle_tree::{SmtReplaceResult, SparseMerkleTree};
 use crate::types::error::DsmError;
@@ -103,10 +102,8 @@ pub struct DeviceState {
     /// in [`Self::extra_leaves`]). The leaf hash is not reversible to the amount, so this map
     /// is the enumerable, persisted record.
     ///
-    /// Deliberately NOT an entry in [`Self::balances`]. That map is folded whole into
-    /// `balance_witness` by [`RelationshipChainState::compute_chain_tip`], so a vault-scoped
-    /// key there would change the chain tip a counterparty derives on every unrelated
-    /// transfer. Keeping reserves out of it is also what makes the encumbrance real:
+    /// Deliberately NOT an entry in [`Self::balances`]. Keeping reserves out of the
+    /// balance map is what makes the encumbrance real:
     /// `BalanceDelta` can only reach `balances`, so no transfer, mint or burn can spend a
     /// reserve — only the vault chokepoints can. `BTreeMap` for deterministic iteration.
     vault_reserves: BTreeMap<[u8; 32], VaultReserve>,
@@ -316,13 +313,6 @@ pub struct RelationshipChainState {
     /// counterparty (§11 eq. 12).
     pub encapsulated_entropy: Option<Vec<u8>>,
 
-    /// Device-level `B^T` witness at the moment of this transition (§8).
-    ///
-    /// Keyed by 32-byte CPTA `policy_commit` (not token_id string) so the
-    /// canonical hash has no runtime policy-resolution dependency. Values
-    /// are raw `u64` balances. `BTreeMap` for deterministic order.
-    pub balance_witness: BTreeMap<[u8; 32], u64>,
-
     /// Entity (advancing party) SPHINCS+ signature.
     pub entity_sig: Option<Vec<u8>>,
 
@@ -330,52 +320,58 @@ pub struct RelationshipChainState {
     pub counterparty_sig: Option<Vec<u8>>,
 }
 
+/// THE canonical relationship-successor commitment — `h_n = C_dsm+` — as ONE
+/// preimage helper. `compute_chain_tip` and the foreign successor-evidence
+/// verifier both call this; there are never two encodings of the preimage.
+///
+/// `DSM/relationship-chain-tip/v2`: succession facts ONLY. The `/v1`-era
+/// relationship use of `DSM/state-hash` folded the whole balance map into
+/// every tip and is burned — `R_econ` is the sole authenticated online
+/// balance representation. The layout still EXCLUDES `state_number`,
+/// `sparse_index`, and any counter-like metadata per §4.3; signatures are
+/// not hashed — they sign this digest, not the other way around.
+pub fn relationship_chain_tip_v2(
+    rel_key: &[u8; 32],
+    embedded_parent: &[u8; 32],
+    counterparty_devid: &[u8; 32],
+    operation_bytes: &[u8],
+    entropy: &[u8],
+    encapsulated_entropy: Option<&[u8]>,
+) -> [u8; 32] {
+    let mut hasher =
+        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2);
+    hasher.update(rel_key);
+    hasher.update(embedded_parent);
+    hasher.update(counterparty_devid);
+    hasher.update(&(operation_bytes.len() as u32).to_le_bytes());
+    hasher.update(operation_bytes);
+    hasher.update(&(entropy.len() as u32).to_le_bytes());
+    hasher.update(entropy);
+    match encapsulated_entropy {
+        Some(enc) => {
+            hasher.update(&[1u8]);
+            hasher.update(&(enc.len() as u32).to_le_bytes());
+            hasher.update(enc);
+        }
+        None => {
+            hasher.update(&[0u8]);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
 impl RelationshipChainState {
-    /// Compute `h_n = H(canonical_bytes(self))` with the
-    /// `DSM/state-hash` domain tag.
-    ///
-    /// The canonical byte layout EXCLUDES `state_number`, `sparse_index`,
-    /// and any counter-like metadata per §4.3. Ordering of fields is:
-    ///
-    /// `rel_key ‖ embedded_parent ‖ counterparty_devid ‖ op ‖ entropy
-    /// ‖ encap_flag ‖ encap? ‖ witness_len
-    /// ‖ (policy_commit ‖ value)* sorted_by_policy_commit`
-    ///
-    /// Signatures are NOT hashed — they sign this digest, not the other
-    /// way around.
+    /// Compute `h_n` via [`relationship_chain_tip_v2`] — the one canonical
+    /// preimage.
     pub fn compute_chain_tip(&self) -> [u8; 32] {
-        let mut hasher = dsm_domain_hasher(TAG_STATE_HASH);
-
-        hasher.update(&self.rel_key);
-        hasher.update(&self.embedded_parent);
-        hasher.update(&self.counterparty_devid);
-
-        let op_bytes = self.operation.to_bytes();
-        hasher.update(&(op_bytes.len() as u32).to_le_bytes());
-        hasher.update(&op_bytes);
-
-        hasher.update(&(self.entropy.len() as u32).to_le_bytes());
-        hasher.update(&self.entropy);
-
-        match &self.encapsulated_entropy {
-            Some(enc) => {
-                hasher.update(&[1u8]);
-                hasher.update(&(enc.len() as u32).to_le_bytes());
-                hasher.update(enc);
-            }
-            None => {
-                hasher.update(&[0u8]);
-            }
-        }
-
-        // Balance witness: already sorted by 32B policy_commit (BTreeMap).
-        hasher.update(&(self.balance_witness.len() as u32).to_le_bytes());
-        for (policy_commit, value) in &self.balance_witness {
-            hasher.update(policy_commit);
-            hasher.update(&value.to_le_bytes());
-        }
-
-        *hasher.finalize().as_bytes()
+        relationship_chain_tip_v2(
+            &self.rel_key,
+            &self.embedded_parent,
+            &self.counterparty_devid,
+            &self.operation.to_bytes(),
+            &self.entropy,
+            self.encapsulated_entropy.as_deref(),
+        )
     }
 }
 
@@ -2140,7 +2136,6 @@ impl DeviceState {
             operation,
             entropy,
             encapsulated_entropy,
-            balance_witness: new_balances.clone(),
             entity_sig: None,
             counterparty_sig: None,
         };
@@ -5286,35 +5281,65 @@ mod tests {
         );
     }
 
-    /// Phase 6 test: balance witness reflects device-level total at commit time.
-    /// Two relationships, each debiting from the same device-level token balance.
-    /// Each chain's `balance_witness` must show the device total at the moment
-    /// of that advance (per §8 — "Each state binds B^T_{n+1}").
+    /// The burn control for the v2 chain-tip domain: the successor commitment
+    /// must be a pure function of succession facts. Two devices in DIFFERENT
+    /// balance states performing the identical advance (same parent, same
+    /// operation, same entropy) must derive the IDENTICAL chain tip — the
+    /// balance map is no longer an input, `R_econ` is the sole authenticated
+    /// online balance representation, and a counterparty learns nothing about
+    /// the balance portfolio from a tip.
     #[test]
-    fn balance_witness_reflects_device_total_across_relationships() {
-        let mut dev = fresh_device(0xAA);
-        // Seed the device with 100 of token T.
+    fn the_chain_tip_commits_succession_facts_and_no_balances() {
         let token = pc(0xCC);
-        dev.balances.insert(token, 100);
-
         let bob = devid(0xBB);
-        let charlie = devid(0xDD);
-        let rk_bob = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
-        let rk_chrl =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &charlie);
-        let init_bob =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &bob,
-            );
-        let init_chrl =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &charlie,
-            );
 
-        // Advance (A↔Bob): debit 30 → device total now 70
-        let out_bob = dev
+        let tip_with_balances = |seed: u64| {
+            let mut dev = fresh_device(0xAA);
+            dev.balances.insert(token, 100 + seed); // differing balance state
+            let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+            let init =
+                crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                    &dev.devid, &bob,
+                );
+            let out = dev
+                .advance(
+                    rk,
+                    bob,
+                    burn_op_for(30, token),
+                    entropy(1),
+                    None,
+                    &[BalanceDelta {
+                        policy_commit: token,
+                        direction: BalanceDirection::Debit,
+                        amount: 30,
+                    }],
+                    Some(init),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("advance");
+            out.new_chain_state.compute_chain_tip()
+        };
+
+        assert_eq!(
+            tip_with_balances(0),
+            tip_with_balances(7),
+            "identical succession facts must derive identical tips regardless of the \
+             device balance state — a difference means balances leaked back into the \
+             commitment"
+        );
+
+        // And the helper IS the commitment — one preimage, two entry points.
+        let mut dev = fresh_device(0xAA);
+        dev.balances.insert(token, 100);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &bob,
+        );
+        let out = dev
             .advance(
-                rk_bob,
+                rk,
                 bob,
                 burn_op_for(30, token),
                 entropy(1),
@@ -5324,50 +5349,24 @@ mod tests {
                     direction: BalanceDirection::Debit,
                     amount: 30,
                 }],
-                Some(init_bob),
+                Some(init),
                 None,
                 None,
                 None,
             )
-            .expect("advance Bob");
+            .expect("advance");
+        let cs = &out.new_chain_state;
         assert_eq!(
-            out_bob.new_chain_state.balance_witness.get(&token).copied(),
-            Some(70),
-            "after debit 30 from 100, witness on (A↔Bob) chain must = 70"
-        );
-
-        // Apply outcome to device, then advance (A↔Charlie) from updated device state.
-        let dev_after_bob = out_bob.new_device_state;
-        let out_chrl = dev_after_bob
-            .advance(
-                rk_chrl,
-                charlie,
-                burn_op_for(50, token),
-                entropy(2),
-                None,
-                &[BalanceDelta {
-                    policy_commit: token,
-                    direction: BalanceDirection::Debit,
-                    amount: 50,
-                }],
-                Some(init_chrl),
-                None,
-                None,
-                None,
+            cs.compute_chain_tip(),
+            relationship_chain_tip_v2(
+                &cs.rel_key,
+                &cs.embedded_parent,
+                &cs.counterparty_devid,
+                &cs.operation.to_bytes(),
+                &cs.entropy,
+                cs.encapsulated_entropy.as_deref(),
             )
-            .expect("advance Charlie");
-        assert_eq!(
-            out_chrl
-                .new_chain_state
-                .balance_witness
-                .get(&token)
-                .copied(),
-            Some(20),
-            "after debit 50 from 70, witness on (A↔Charlie) chain must = 20"
         );
-
-        // Device-level balance is the canonical source of truth.
-        assert_eq!(out_chrl.new_device_state.balance(&token), 20);
     }
 
     /// Phase 6 test: stale-snapshot CAS detection.

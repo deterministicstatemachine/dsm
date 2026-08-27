@@ -149,7 +149,7 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
         head.pending_economic_admission().is_none(),
         "admitted ⇒ unfenced"
     );
-    let (position, _root) = client_db::economic_faucet::get_admitted()
+    let (position, _root) = client_db::economic_lineage::get_admitted()
         .expect("read admitted")
         .expect("admitted recorded");
     assert_eq!(position, 1);
@@ -274,8 +274,68 @@ async fn admissions_are_never_double_finished_and_positions_stay_monotonic() {
     let third = claim_era_faucet(&core, NETWORK).await.expect("claim 3");
     assert_eq!(third.economic_position, 3);
     assert_eq!(core.device_head().unwrap().balance(&era()), 300);
-    let (position, _root) = client_db::economic_faucet::get_admitted()
+    let (position, _root) = client_db::economic_lineage::get_admitted()
         .unwrap()
         .expect("admitted");
     assert_eq!(position, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
+    // THE point of the evidence migration: after a live claim, the SAME
+    // resolver a FOREIGN device would use must be able to walk this lineage
+    // from the registers and immutable store alone — register winner,
+    // manifest, P0–P6 authority evidence (recovering AK + network),
+    // sigma_dsm successor evidence, and the full advance_validated conjuncts.
+    let (core, _fleet) = setup(0xB7);
+    let outcome = claim_era_faucet(&core, NETWORK).await.expect("claim");
+    assert_eq!(outcome.economic_position, 1);
+    let head = core.device_head().expect("head");
+    let (genesis, devid) = (head.genesis_digest(), head.devid());
+    let (_, admitted_root) = client_db::economic_lineage::get_admitted()
+        .unwrap()
+        .expect("admitted");
+
+    // A "foreign" walk: nothing below reads local admission state — the
+    // resolver's cache is cleared first so the walk is from position 0.
+    client_db::economic_lineage::clear_peer_lineage(&genesis, &devid).unwrap();
+    let handle = tokio::runtime::Handle::current();
+    let peer = tokio::task::spawn_blocking(move || {
+        // block_in_place needs a worker thread; the resolver methods bridge
+        // to async internally. The set is built inside the closure so the
+        // resolver borrows nothing across the spawn.
+        let set = canonical_set();
+        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+            set: &set,
+            runtime: handle,
+            expected_network_id: NETWORK.to_vec(),
+        };
+        resolver_walk(&resolver, &genesis, &devid)
+    })
+    .await
+    .expect("join");
+    let peer = peer.expect("a faucet lineage MUST be foreign-walkable");
+    assert_eq!(peer.validated_root.economic_position(), 1);
+    assert_eq!(
+        peer.validated_root.economic_root(),
+        admitted_root,
+        "the foreign walk and the local admission agree byte-for-byte"
+    );
+    assert!(matches!(
+        peer.verified_operation,
+        dsm::types::operations::Operation::FaucetClaim { .. }
+    ));
+}
+
+fn resolver_walk(
+    resolver: &crate::sdk::economic_registers::LiveRegisterResolver<'_>,
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+) -> Result<
+    dsm::economic::provenance::ValidatedPeerTransition,
+    dsm::economic::provenance::PeerLineageFailure,
+> {
+    use dsm::economic::provenance::ProvenanceResolver;
+    resolver.validated_peer_transition(genesis, devid, 1)
 }

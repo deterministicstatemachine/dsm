@@ -56,6 +56,7 @@
 //! for the test that keeps allocation from drifting into serialization.
 
 pub mod admission;
+pub mod authority_evidence;
 pub mod claim;
 pub mod claim_envelope;
 pub mod classifier;
@@ -65,9 +66,12 @@ pub mod faucet;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;
+pub mod peer_acceptance;
+pub mod peer_lineage;
 pub mod provenance;
 pub mod register;
 pub mod state;
+pub mod successor_evidence;
 pub mod tree;
 pub mod witness;
 pub mod write_set;

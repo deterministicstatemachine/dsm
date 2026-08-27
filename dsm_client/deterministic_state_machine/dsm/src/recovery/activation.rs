@@ -261,7 +261,6 @@ mod tests {
                 operation: crate::types::operations::Operation::Noop,
                 entropy: vec![0],
                 encapsulated_entropy: None,
-                balance_witness: BTreeMap::new(),
                 entity_sig: None,
                 counterparty_sig: None,
             },
