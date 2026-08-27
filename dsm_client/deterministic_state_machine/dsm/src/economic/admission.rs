@@ -125,12 +125,46 @@ impl EconomicAdmissionState {
     }
 }
 
+/// The coordinates that exist only once the substrate acceptance exists.
+///
+/// Under the v2 operation identity (`EconOpId_v2 = H(G ‖ DevID ‖ C_dsm+)`)
+/// none of these are computable before the DSM successor is prepared: the
+/// witness commits the economic operation id (and, for operations that
+/// consume sources, the id enters leaf VALUES and therefore the post-root),
+/// and the manifest addresses the witness. A `Prepared` admission that
+/// claimed to know them would be carrying placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedAdmissionCoords {
+    pub post_economic_root: [u8; 32],
+    /// The exact accepted substrate artifact: the successor evidence for a
+    /// DSM admission, or the `OfflineBoundaryAttestationV1` for a boundary.
+    pub accepted_substrate_addr: [u8; 32],
+    pub admission_manifest_addr: [u8; 32],
+    /// The accepted successor's chain-state commitment — the `C_dsm+` the v2
+    /// economic operation id binds. Recovery cannot re-derive it from the
+    /// head (unrelated non-economic activity may advance other tips), so it
+    /// is durable admission state like everything else here. For an offline
+    /// boundary this is the boundary attestation's commitment (Step 5).
+    pub c_dsm_plus: [u8; 32],
+}
+
 /// The durable record of an admission in flight.
 ///
 /// Every field is something recovery needs to reconstruct the **exact,
 /// byte-identical** evidence without new private or user-supplied material.
 /// That is the durability invariant: a value-bearing local acceptance must not
 /// become durable unless this record is too, in the same transaction.
+///
+/// ## The `Prepared` ⇔ no-coordinates invariant
+///
+/// `acceptance` is `Some` exactly when `state != Prepared`, enforced by the
+/// constructors — the field is private so a literal cannot break it. A
+/// `Prepared` admission authorizes exactly one operation (its digest) and
+/// nothing more; the acceptance coordinates come into existence together with
+/// the prepared successor and are installed by [`Self::into_locally_accepted`]
+/// in the same atomic commit that makes the acceptance durable. `Prepared`
+/// is therefore never a durable row: recovery has nothing to finish before
+/// acceptance, so a stored `Prepared` record would be a contradiction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingEconomicAdmission {
     pub kind: PendingAdmissionKind,
@@ -139,15 +173,104 @@ pub struct PendingEconomicAdmission {
     /// pending, and it may not be reused for a different admission.
     pub economic_position: u64,
     pub pre_economic_root: [u8; 32],
-    pub post_economic_root: [u8; 32],
     /// Binds this admission to the operation the witness describes. Without
     /// it, a valid successor and a valid economic transition could describe
     /// **different operations**.
     pub operation_digest: [u8; 32],
-    /// The exact accepted substrate artifact: `C_dsm+` / `sigma_dsm` for a DSM
-    /// successor, or the `OfflineBoundaryAttestationV1` for a boundary.
-    pub accepted_substrate_addr: [u8; 32],
-    pub admission_manifest_addr: [u8; 32],
+    acceptance: Option<AcceptedAdmissionCoords>,
+}
+
+impl PendingEconomicAdmission {
+    /// A new admission, before anything durable exists. Knows WHAT it
+    /// authorizes (the digest) but not yet the coordinates of an acceptance
+    /// that has not happened.
+    pub fn prepared(
+        kind: PendingAdmissionKind,
+        economic_position: u64,
+        pre_economic_root: [u8; 32],
+        operation_digest: [u8; 32],
+    ) -> Self {
+        Self {
+            kind,
+            state: EconomicAdmissionState::Prepared,
+            economic_position,
+            pre_economic_root,
+            operation_digest,
+            acceptance: None,
+        }
+    }
+
+    /// Install the acceptance coordinates, moving `Prepared` →
+    /// `LocalAcceptedPendingEcon`. The only way an admission starts fencing.
+    pub fn into_locally_accepted(
+        self,
+        coords: AcceptedAdmissionCoords,
+    ) -> Result<Self, &'static str> {
+        if self.state != EconomicAdmissionState::Prepared {
+            return Err(
+                "admission: acceptance coordinates can be installed exactly once, from Prepared",
+            );
+        }
+        Ok(Self {
+            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
+            acceptance: Some(coords),
+            ..self
+        })
+    }
+
+    /// Move forward through the post-acceptance lifecycle. Refuses `Prepared`
+    /// (that transition installs coordinates and has its own constructor) and
+    /// refuses going backward.
+    pub fn advanced_to(self, state: EconomicAdmissionState) -> Result<Self, &'static str> {
+        if state == EconomicAdmissionState::Prepared {
+            return Err("admission: cannot return to Prepared");
+        }
+        if self.acceptance.is_none() {
+            return Err("admission: cannot advance past Prepared without acceptance coordinates");
+        }
+        if state < self.state {
+            return Err("admission: lifecycle only advances forward");
+        }
+        Ok(Self { state, ..self })
+    }
+
+    /// Rebuild from durable parts. A stored admission is post-acceptance by
+    /// construction — `Prepared` is never durable — so the coordinates are
+    /// REQUIRED here, and a caller holding a fencing state without them has
+    /// corrupt storage, not a default.
+    pub fn from_durable_parts(
+        kind: PendingAdmissionKind,
+        state: EconomicAdmissionState,
+        economic_position: u64,
+        pre_economic_root: [u8; 32],
+        operation_digest: [u8; 32],
+        coords: AcceptedAdmissionCoords,
+    ) -> Result<Self, &'static str> {
+        if state == EconomicAdmissionState::Prepared {
+            return Err("admission: a Prepared admission is never durable");
+        }
+        Ok(Self {
+            kind,
+            state,
+            economic_position,
+            pre_economic_root,
+            operation_digest,
+            acceptance: Some(coords),
+        })
+    }
+
+    /// The acceptance coordinates, present exactly when `state != Prepared`.
+    pub fn acceptance(&self) -> Option<&AcceptedAdmissionCoords> {
+        self.acceptance.as_ref()
+    }
+
+    /// The acceptance coordinates of a post-`Prepared` admission. The error
+    /// is a state machine violation, not an expected branch.
+    pub fn accepted_coords(&self) -> Result<&AcceptedAdmissionCoords, &'static str> {
+        self.acceptance
+            .as_ref()
+            .ok_or("admission: no acceptance coordinates while Prepared")
+    }
 }
 
 /// Why the fence refused an operation.
@@ -276,16 +399,14 @@ mod tests {
     use super::*;
 
     fn sample() -> PendingEconomicAdmission {
-        PendingEconomicAdmission {
-            kind: PendingAdmissionKind::DsmBacked,
-            state: EconomicAdmissionState::LocalAcceptedPendingEcon,
-            economic_position: 2,
-            pre_economic_root: [1; 32],
-            post_economic_root: [2; 32],
-            operation_digest: [3; 32],
-            accepted_substrate_addr: [4; 32],
-            admission_manifest_addr: [5; 32],
-        }
+        PendingEconomicAdmission::prepared(PendingAdmissionKind::DsmBacked, 2, [1; 32], [3; 32])
+            .into_locally_accepted(AcceptedAdmissionCoords {
+                post_economic_root: [2; 32],
+                accepted_substrate_addr: [4; 32],
+                admission_manifest_addr: [5; 32],
+                c_dsm_plus: [6; 32],
+            })
+            .expect("prepared -> accepted")
     }
 
     #[test]

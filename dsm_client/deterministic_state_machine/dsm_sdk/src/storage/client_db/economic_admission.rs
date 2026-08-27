@@ -26,7 +26,9 @@
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
-use dsm::economic::admission::{EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission};
+use dsm::economic::admission::{
+    AcceptedAdmissionCoords, EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
+};
 
 fn kind_code(kind: &PendingAdmissionKind) -> i64 {
     match kind {
@@ -68,13 +70,20 @@ pub fn put_pending_admission_with_conn(
     pending: &PendingEconomicAdmission,
     now: i64,
 ) -> Result<()> {
+    // `Prepared` is never durable: before acceptance nothing changed, so
+    // recovery has nothing to finish — and a Prepared record has no
+    // acceptance coordinates to store. Refusing here keeps the invariant
+    // structural rather than conventional.
+    let coords = pending
+        .accepted_coords()
+        .map_err(|e| anyhow!("refusing to persist a pre-acceptance admission: {e}"))?;
     let fenced: Option<Vec<u8>> = pending.kind.fenced_asset().map(|a| a.to_vec());
     tx.execute(
         "INSERT INTO economic_pending_admissions(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
              pre_economic_root, post_economic_root, operation_digest,
-             accepted_substrate_addr, admission_manifest_addr, updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             accepted_substrate_addr, admission_manifest_addr, c_dsm_plus, updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(device_id) DO UPDATE SET
              kind=excluded.kind,
              fenced_asset=excluded.fenced_asset,
@@ -85,6 +94,7 @@ pub fn put_pending_admission_with_conn(
              operation_digest=excluded.operation_digest,
              accepted_substrate_addr=excluded.accepted_substrate_addr,
              admission_manifest_addr=excluded.admission_manifest_addr,
+             c_dsm_plus=excluded.c_dsm_plus,
              updated_at=excluded.updated_at",
         params![
             device_id.as_slice(),
@@ -93,10 +103,11 @@ pub fn put_pending_admission_with_conn(
             state_code(&pending.state),
             pending.economic_position as i64,
             pending.pre_economic_root.as_slice(),
-            pending.post_economic_root.as_slice(),
+            coords.post_economic_root.as_slice(),
             pending.operation_digest.as_slice(),
-            pending.accepted_substrate_addr.as_slice(),
-            pending.admission_manifest_addr.as_slice(),
+            coords.accepted_substrate_addr.as_slice(),
+            coords.admission_manifest_addr.as_slice(),
+            coords.c_dsm_plus.as_slice(),
             now,
         ],
     )?;
@@ -131,7 +142,7 @@ pub fn load_pending_admission_with_conn(
         .query_row(
             "SELECT kind, fenced_asset, lifecycle_state, economic_position,
                     pre_economic_root, post_economic_root, operation_digest,
-                    accepted_substrate_addr, admission_manifest_addr
+                    accepted_substrate_addr, admission_manifest_addr, c_dsm_plus
              FROM economic_pending_admissions WHERE device_id = ?1",
             params![device_id.as_slice()],
             |r| {
@@ -145,12 +156,14 @@ pub fn load_pending_admission_with_conn(
                     r.get::<_, Vec<u8>>(6)?,
                     r.get::<_, Vec<u8>>(7)?,
                     r.get::<_, Vec<u8>>(8)?,
+                    r.get::<_, Vec<u8>>(9)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((kind_c, fenced, state_c, position, pre, post, digest, substrate, manifest)) = row
+    let Some((kind_c, fenced, state_c, position, pre, post, digest, substrate, manifest, c_plus)) =
+        row
     else {
         return Ok(None);
     };
@@ -180,15 +193,19 @@ pub fn load_pending_admission_with_conn(
         other => return Err(anyhow!("unknown pending admission kind {other}")),
     };
 
-    Ok(Some(PendingEconomicAdmission {
+    PendingEconomicAdmission::from_durable_parts(
         kind,
-        state: state_from_code(state_c)?,
-        economic_position: u64::try_from(position)
-            .map_err(|_| anyhow!("economic_position is negative"))?,
-        pre_economic_root: digest32(pre, "pre_economic_root")?,
-        post_economic_root: digest32(post, "post_economic_root")?,
-        operation_digest: digest32(digest, "operation_digest")?,
-        accepted_substrate_addr: digest32(substrate, "accepted_substrate_addr")?,
-        admission_manifest_addr: digest32(manifest, "admission_manifest_addr")?,
-    }))
+        state_from_code(state_c)?,
+        u64::try_from(position).map_err(|_| anyhow!("economic_position is negative"))?,
+        digest32(pre, "pre_economic_root")?,
+        digest32(digest, "operation_digest")?,
+        AcceptedAdmissionCoords {
+            post_economic_root: digest32(post, "post_economic_root")?,
+            accepted_substrate_addr: digest32(substrate, "accepted_substrate_addr")?,
+            admission_manifest_addr: digest32(manifest, "admission_manifest_addr")?,
+            c_dsm_plus: digest32(c_plus, "c_dsm_plus")?,
+        },
+    )
+    .map(Some)
+    .map_err(|e| anyhow!("stored admission is not reconstructible: {e}"))
 }
