@@ -420,7 +420,20 @@ fn get_database_path() -> Result<PathBuf> {
 /// `economic_admission_pending` — committed but non-deliverable until the
 /// terminal admission transaction promotes it (ECON_ADMITTED atomically
 /// releases the outbox to delivery).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 11;
+///
+/// v12 (3.5b PR4): recipient-side admission. `economic_pending_admissions`
+/// gains `embedded_parent` (with `c_dsm_plus` it is the accepted successor's
+/// `(parent, tip)` pair, which acceptance evidence binds its B-side pair to);
+/// new `ek_cert_step_chain` (the device's per-relationship per-SIGNER
+/// content-addressed EK step ancestry — what makes acceptance bundles
+/// foreign-walkable); new `immutable_q_durable_memo` (exact immutable
+/// addresses proven q-durable on the canonical set — EK/evidence closure
+/// durability is per exact address, NEVER inferred from an economic-position
+/// watermark); `peer_economic_lineage` gains `closure_q_durable` (economic
+/// DAG only); `recipient_outbound_reply` gains `held` (the B→A release is
+/// frozen at accept and promoted to deliverable in the terminal admission
+/// transaction — ECON_ADMITTED releases it atomically).
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 12;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -649,7 +662,39 @@ fn create_schema(conn: &Connection) -> Result<()> {
             peer_devid          BLOB NOT NULL,      -- 32B
             validated_position  INTEGER NOT NULL,
             validated_root      BLOB NOT NULL,      -- 32B
+            -- ECONOMIC-DAG durability watermark ONLY: 1 means the exact
+            -- evidence closure this validation consumed was verified/pushed
+            -- to q members. It says NOTHING about EK-step ancestry, which
+            -- advances independently through relationship steps (including
+            -- BLE steps that never touch R_econ) — EK durability is memoized
+            -- per exact address in immutable_q_durable_memo, never inferred
+            -- from an economic position.
+            closure_q_durable   INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(peer_genesis, peer_devid, validated_position)
+        );
+
+        -- The device's per-relationship per-SIGNER content-addressed EK step
+        -- ancestry (3.5b PR4). Keyed by SIGNER identity, never receipt role:
+        -- role reversal and BLE steps advance the same signer chain. This is
+        -- what makes acceptance bundles foreign-walkable — the bundle
+        -- references each side's predecessor step object by address.
+        CREATE TABLE IF NOT EXISTS ek_cert_step_chain(
+            rel_key      BLOB NOT NULL,             -- 32B
+            signer_devid BLOB NOT NULL,             -- 32B
+            step_ordinal INTEGER NOT NULL,
+            step_addr    BLOB NOT NULL,             -- 32B EkCertStepV1 inner addr
+            ek_pk        BLOB NOT NULL,             -- the pk this step certified
+            PRIMARY KEY(rel_key, signer_devid, step_ordinal)
+        );
+
+        -- Exact immutable addresses PROVEN q-durable on the canonical set
+        -- (verified-on-q or republished-by-this-verifier, member-attributed).
+        -- Durability is per exact address: a later admission may skip the
+        -- quorum fanout ONLY for objects listed here.
+        CREATE TABLE IF NOT EXISTS immutable_q_durable_memo(
+            namespace TEXT NOT NULL,
+            addr      BLOB NOT NULL,                -- 32B inner digest
+            PRIMARY KEY(namespace, addr)
         );
 
         CREATE TABLE IF NOT EXISTS contacts(
@@ -746,6 +791,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- it (B-canonical target); the sender pins the child as B's head.
             applied_parent_tip_b         BLOB NOT NULL,
             applied_child_tip_b          BLOB NOT NULL,
+            -- The exact signed RecipientEconomicReleaseV1 wire bytes, frozen
+            -- in the SAME accept transaction (3.5b PR4). The B->A reply
+            -- carries THIS; bare sig_b cannot finalize the sender.
+            release_bytes                BLOB,
             -- Finality barrier (recipient gate): 1 once the SENDER's verified
             -- RelationshipFinalizedV1 for this transition landed. Only the
             -- certificate handler flips it. While any non-rejected row on a
@@ -1037,6 +1086,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_device_id BLOB NOT NULL,
             child_tip              BLOB NOT NULL,
             receipt_bytes          BLOB NOT NULL,
+            -- The signed RecipientEconomicReleaseV1 wire bytes, frozen in
+            -- the accept transaction. The sender finalizes on the RELEASE,
+            -- not on bare sig_b.
+            release_bytes          BLOB,
+            -- HELD (1) until ECON_ADMITTED: the terminal admission
+            -- transaction promotes held rows to deliverable atomically.
+            held                   INTEGER NOT NULL DEFAULT 0,
             submitted              INTEGER NOT NULL DEFAULT 0,
             created_at             INTEGER NOT NULL
         );
@@ -1162,6 +1218,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
                                                         -- commitment (v2 econ-op-id
                                                         -- preimage) — recovery
                                                         -- cannot re-derive it
+            embedded_parent         BLOB NOT NULL,      -- 32B, the successor's own
+                                                        -- parent tip: with c_dsm_plus
+                                                        -- the (parent, tip) pair the
+                                                        -- acceptance B-side binds to
             updated_at              INTEGER NOT NULL
         );
 

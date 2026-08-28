@@ -146,6 +146,12 @@ pub struct AcceptedAdmissionCoords {
     /// is durable admission state like everything else here. For an offline
     /// boundary this is the boundary attestation's commitment (Step 5).
     pub c_dsm_plus: [u8; 32],
+    /// The accepted successor's own parent tip — with `c_dsm_plus` this is
+    /// the successor's `(embedded_parent, tip)` pair, which acceptance
+    /// evidence binds its countersigned B-side pair to. Durable for the same
+    /// reason as `c_dsm_plus`: recovery cannot re-derive it from the head.
+    /// Zero for an offline boundary (Step 5).
+    pub embedded_parent: [u8; 32],
 }
 
 /// The durable record of an admission in flight.
@@ -405,6 +411,7 @@ mod tests {
                 accepted_substrate_addr: [4; 32],
                 admission_manifest_addr: [5; 32],
                 c_dsm_plus: [6; 32],
+                embedded_parent: [7; 32],
             })
             .expect("prepared -> accepted")
     }

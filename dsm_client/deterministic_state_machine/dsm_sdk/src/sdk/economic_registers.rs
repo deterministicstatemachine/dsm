@@ -343,6 +343,175 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 }
 
+/// The cache-aware walk shared by every fetcher-shaped resolver: cached
+/// start, Invalid-from-cache re-walk, and the validated memo write — over
+/// WHATEVER `PeerEvidenceFetcher` the caller supplies, so a recording
+/// fetcher observes exactly the closure the walk consumed (correction 2:
+/// the recorder must BE the fetch boundary, never an outer decorator).
+pub(crate) fn resolve_peer_with_cache<F: dsm::economic::peer_lineage::PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    peer_economic_position: u64,
+) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+    use dsm::economic::peer_lineage::{validate_peer_lineage, ValidatedStart};
+    // The device-local memo of THIS verifier's own earlier conclusions.
+    let cached = crate::storage::client_db::economic_lineage::best_peer_start(
+        peer_genesis,
+        peer_devid,
+        peer_economic_position,
+    )
+    .ok()
+    .flatten()
+    .map(|(economic_position, economic_root)| ValidatedStart {
+        economic_position,
+        economic_root,
+    });
+    let first = validate_peer_lineage(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        peer_economic_position,
+        cached,
+    );
+    let result = match (first, cached) {
+        // A cached start is never authority: an INVALID verdict from it
+        // discards the memo and re-walks from the activation root.
+        (Err(PeerLineageFailure::Invalid(_)), Some(_)) => {
+            let _ = crate::storage::client_db::economic_lineage::clear_peer_lineage(
+                peer_genesis,
+                peer_devid,
+            );
+            validate_peer_lineage(
+                fetcher,
+                expected_network_id,
+                peer_genesis,
+                peer_devid,
+                peer_economic_position,
+                None,
+            )
+        }
+        (other, _) => other,
+    }?;
+    let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
+        peer_genesis,
+        peer_devid,
+        result.validated_root.economic_position(),
+        &result.validated_root.economic_root(),
+    );
+    Ok(result)
+}
+
+/// The walk with the cached fast path DISABLED: when the recorded closure
+/// has not yet been proven q-durable, a cached start would let the walk skip
+/// fetches the durability push then never sees (correction 4) — so walk from
+/// the activation root and let the recorder observe the FULL closure.
+pub(crate) fn resolve_peer_with_cache_disabled<
+    F: dsm::economic::peer_lineage::PeerEvidenceFetcher,
+>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    peer_economic_position: u64,
+) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+    let result = dsm::economic::peer_lineage::validate_peer_lineage(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        peer_economic_position,
+        None,
+    )?;
+    let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
+        peer_genesis,
+        peer_devid,
+        result.validated_root.economic_position(),
+        &result.validated_root.economic_root(),
+    );
+    Ok(result)
+}
+
+/// The RECORDING fetch boundary for recipient prevalidation (3.5b PR4,
+/// correction 2). It is not a decorator around `LiveRegisterResolver`'s
+/// resolver face — it IS the `PeerEvidenceFetcher` the walker consumes, so
+/// every immutable object any nested verification fetched (manifests,
+/// witnesses, authority/successor evidence, acceptance bundles, EK steps)
+/// lands in `recorded`, exact bytes by exact address. q-durable closure ==
+/// this list, nothing less.
+pub struct RecordingResolver<'a> {
+    pub inner: &'a LiveRegisterResolver<'a>,
+    /// `(namespace, inner addr, exact verified bytes)` for every immutable
+    /// fetch the walk consumed. Register cells are quorum reads of
+    /// write-once registers — q-held by definition — and are not recorded.
+    pub recorded: std::cell::RefCell<
+        Vec<(
+            dsm::crypto::domain::TaggedHashDomain<'static>,
+            [u8; 32],
+            Vec<u8>,
+        )>,
+    >,
+}
+
+impl<'a> RecordingResolver<'a> {
+    pub fn new(inner: &'a LiveRegisterResolver<'a>) -> Self {
+        Self {
+            inner,
+            recorded: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The cache-aware peer walk, recorded at the fetch boundary.
+    pub fn validated_peer_transition(
+        &self,
+        peer_genesis: &[u8; 32],
+        peer_devid: &[u8; 32],
+        peer_economic_position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        resolve_peer_with_cache(
+            self,
+            &self.inner.expected_network_id,
+            peer_genesis,
+            peer_devid,
+            peer_economic_position,
+        )
+    }
+}
+
+impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> {
+    fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, k_root)
+    }
+
+    fn faucet_ticket_cell(
+        &self,
+        faucet_id: &[u8; 32],
+        ticket_index: u64,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::faucet_ticket_cell(
+            self.inner,
+            faucet_id,
+            ticket_index,
+        )
+    }
+
+    fn immutable(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        let bytes = dsm::economic::peer_lineage::PeerEvidenceFetcher::immutable(
+            self.inner, namespace, addr,
+        )?;
+        self.recorded
+            .borrow_mut()
+            .push((namespace, *addr, bytes.clone()));
+        Ok(bytes)
+    }
+}
+
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
     fn validated_peer_transition(
         &self,
@@ -350,53 +519,13 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        use dsm::economic::peer_lineage::{validate_peer_lineage, ValidatedStart};
-        // The device-local memo of THIS verifier's own earlier conclusions.
-        let cached = crate::storage::client_db::economic_lineage::best_peer_start(
-            peer_genesis,
-            peer_devid,
-            peer_economic_position,
-        )
-        .ok()
-        .flatten()
-        .map(|(economic_position, economic_root)| ValidatedStart {
-            economic_position,
-            economic_root,
-        });
-        let first = validate_peer_lineage(
+        resolve_peer_with_cache(
             self,
             &self.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
-            cached,
-        );
-        let result = match (first, cached) {
-            // A cached start is never authority: an INVALID verdict from it
-            // discards the memo and re-walks from the activation root.
-            (Err(PeerLineageFailure::Invalid(_)), Some(_)) => {
-                let _ = crate::storage::client_db::economic_lineage::clear_peer_lineage(
-                    peer_genesis,
-                    peer_devid,
-                );
-                validate_peer_lineage(
-                    self,
-                    &self.expected_network_id,
-                    peer_genesis,
-                    peer_devid,
-                    peer_economic_position,
-                    None,
-                )
-            }
-            (other, _) => other,
-        }?;
-        let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
-            peer_genesis,
-            peer_devid,
-            result.validated_root.economic_position(),
-            &result.validated_root.economic_root(),
-        );
-        Ok(result)
+        )
     }
 
     fn winning_faucet_ticket(

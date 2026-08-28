@@ -143,6 +143,33 @@ pub fn rebuild_head_from_checkpoint(
         // resulting tip must reproduce the stored one exactly.
         let deltas = deltas_for_transition(state, &head.devid());
 
+        // REPLAY of an already-committed recipient credit (3.5b PR4): the
+        // accepting gate requires a Prepared/DsmBacked admission bound to the
+        // exact operation. This is reconstruction of locally-durable,
+        // previously-accepted state — attach a synthetic Prepared with the
+        // recorded operation's digest so the gate's digest binding still
+        // holds, and strip it from the successor before continuing. The gate
+        // stays total: a transition that was never accepted has no preserved
+        // chain state to replay.
+        let is_gated_credit = matches!(
+            &state.operation,
+            Operation::Transfer {
+                to_device_id,
+                authority_policy: Option::None,
+                ..
+            } if to_device_id.as_slice() == head.devid().as_slice()
+        ) || matches!(&state.operation, Operation::FaucetClaim { .. });
+        if is_gated_credit {
+            head = head.with_pending_economic_admission(Some(
+                dsm::economic::admission::PendingEconomicAdmission::prepared(
+                    dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                    1,
+                    [0u8; 32],
+                    dsm::economic::faucet::dsm_operation_digest(&state.operation.to_bytes()),
+                ),
+            ));
+        }
+
         let outcome = match head.advance(
             state.rel_key,
             state.counterparty_devid,
@@ -181,7 +208,14 @@ pub fn rebuild_head_from_checkpoint(
             });
         }
 
-        head = outcome.new_device_state;
+        head = if is_gated_credit {
+            // The synthetic replay admission must not survive the step.
+            outcome
+                .new_device_state
+                .with_pending_economic_admission(None)
+        } else {
+            outcome.new_device_state
+        };
         applied.push(*stored_tip);
         consumed.push(*stored_tip);
     }

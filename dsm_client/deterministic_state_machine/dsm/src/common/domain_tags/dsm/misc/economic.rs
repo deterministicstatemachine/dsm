@@ -179,6 +179,22 @@ pub const TAG_DSM_EK_CERT_STEP: TaggedHashDomain<'static> =
 /// bytes a peer-debit descriptor's `acceptance_evidence_addr` names.
 pub const TAG_DSM_PEER_TRANSFER_ACCEPTANCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/peer-transfer-acceptance/v1");
+/// Signing domain of the recipient economic RELEASE — the transport-only
+/// post-admission finalization authority (3.5b PR4). `sig_b` inside the
+/// published acceptance bundle is acceptance PROVENANCE and is discoverable
+/// before `ECON_ADMITTED`; the release is what a sender may FINALIZE on, and
+/// it exists only after the recipient's credit is admitted into validated
+/// `R_econ`.
+pub const TAG_DSM_RECIPIENT_ECONOMIC_RELEASE_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recipient-economic-release-sign/v1");
+/// Immutable-store namespace of the exact `RecipientEconomicReleaseV1`
+/// bytes. The countersign delta carries only the 32-byte content address (a
+/// SPHINCS+ release inline would exceed the reply-envelope cap); the sender
+/// fetches the exact bytes re-hash-verified. The object is frozen in the
+/// ADMIT transaction — never earlier — so it cannot reach the network
+/// before ECON_ADMITTED.
+pub const TAG_DSM_RECIPIENT_ECONOMIC_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/recipient-economic-release/v1");
 pub const TAG_DSM_ECONOMIC_SUBSTRATE_SIGN: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-substrate-sign/v1");
 pub const TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE: TaggedHashDomain<'static> =

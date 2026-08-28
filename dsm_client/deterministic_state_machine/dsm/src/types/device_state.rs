@@ -1352,6 +1352,46 @@ impl DeviceState {
         self.tips.len()
     }
 
+    /// The FULL accepting-gate discipline (3.5b, owner correction 11b): an
+    /// economically-gated operation requires an admission ALREADY attached to
+    /// this head that is (1) `DsmBacked`, (2) still `Prepared` (attached for
+    /// exactly this advance — a fencing state means it belongs to an earlier
+    /// acceptance), and (3) bound to exactly this operation's digest. Never
+    /// "some pending record": each miss is its own named refusal.
+    fn require_attached_dsm_admission(
+        &self,
+        operation: &Operation,
+        what: &str,
+    ) -> Result<(), DsmError> {
+        let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "advance: refusing {what} with no pending economic admission — installing \
+                 balance without the admission fence would be a raw local credit, spendable \
+                 before any foreign verifier could refuse it",
+            ))
+        })?;
+        if pending.kind != crate::economic::admission::PendingAdmissionKind::DsmBacked {
+            return Err(DsmError::invalid_operation(format!(
+                "advance: refusing {what} — the pending admission is not DSM-backed",
+            )));
+        }
+        if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
+            return Err(DsmError::invalid_operation(format!(
+                "advance: refusing {what} — the pending admission is not Prepared; a \
+                 fencing admission belongs to an earlier acceptance and authorizes nothing \
+                 new",
+            )));
+        }
+        let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+        if pending.operation_digest != op_digest {
+            return Err(DsmError::invalid_operation(format!(
+                "advance: refusing {what} whose digest does not match the pending economic \
+                 admission — the admission authorizes exactly one operation",
+            )));
+        }
+        Ok(())
+    }
+
     /// Attempt to build an advance by one transition on `rel_key`.
     ///
     /// Takes the current state by reference and returns an
@@ -1542,24 +1582,33 @@ impl DeviceState {
                     crate::economic::faucet::ERA_FAUCET_TICKET_COUNT
                 )));
             }
-            let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
-            match &self.pending_economic_admission {
-                Some(pending) if pending.operation_digest == op_digest => {}
-                Some(_) => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: refusing a faucet claim whose digest does not match the \
-                         pending economic admission — the admission authorizes exactly one \
-                         operation",
-                    ));
-                }
-                None => {
-                    return Err(DsmError::invalid_operation(
-                        "advance: refusing a faucet claim with no pending economic admission \
-                         — a claim that installed balance without the admission fence would \
-                         be a raw local mint, spendable before any foreign verifier could \
-                         refuse it",
-                    ));
-                }
+            self.require_attached_dsm_admission(&operation, "a faucet claim")?;
+        }
+
+        // THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4). An online
+        // credit-direction Transfer — `authority_policy: None`, addressed to
+        // THIS device — installs a positive balance the recipient never held;
+        // without an attached economic admission it would be a raw local
+        // credit, spendable before any foreign verifier could refuse it. Same
+        // discipline as the faucet gate, same reason, TOTAL: the BLE/USB
+        // bilateral receiver crosses this exact seam with an
+        // indistinguishable operation and is refused fail-closed until its
+        // own admission wiring lands (owner ruling 2026-08-27 — no transport
+        // exemption; bearer-tier transfers carry `authority_policy: Some` and
+        // are untouched). Debit-direction stays un-gated in core: a raw local
+        // debit is self-harm, and a skipped debit admission strands only the
+        // skipper's own lineage.
+        if let Operation::Transfer {
+            to_device_id,
+            authority_policy: Option::None,
+            ..
+        } = &operation
+        {
+            if to_device_id.len() == 32 && to_device_id.as_slice() == self.devid.as_slice() {
+                self.require_attached_dsm_admission(
+                    &operation,
+                    "an online credit-direction transfer",
+                )?;
             }
         }
 
@@ -6430,6 +6479,7 @@ mod tests {
             post_economic_root: [2u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
+            embedded_parent: [0x5E; 32],
             c_dsm_plus: [6u8; 32],
         })
         .expect("prepared -> accepted");
@@ -6476,6 +6526,193 @@ mod tests {
             .expect("the identical advance succeeds once nothing is pending");
     }
 
+    /// A credit-direction online Transfer addressed to self, exactly the
+    /// shape both the online recipient apply AND the BLE/USB bilateral
+    /// receiver hand to `advance`.
+    fn incoming_online_transfer(to: [u8; 32], amount: u64, asset: [u8; 32]) -> Operation {
+        Operation::Transfer {
+            to_device_id: to.to_vec(),
+            amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
+            token_id: b"ERA".to_vec(),
+            policy_commit: asset,
+            mode: crate::types::operations::TransactionMode::Bilateral,
+            nonce: vec![0x4E; 32],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: to.to_vec(),
+            to: Vec::new(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+    }
+
+    /// THE CREDIT-DIRECTION TRANSFER ACCEPTING GATE (3.5b PR4), full
+    /// discipline: `None`, wrong kind, wrong state, and digest mismatch each
+    /// get their own named refusal, and the SAME advance succeeds with a
+    /// matching `Prepared`/`DsmBacked` admission attached. MUTATION CONTROL:
+    /// delete the gate block in `advance` and the first arm here credits a
+    /// transfer with no admission — this test goes red.
+    #[test]
+    fn a_credit_transfer_requires_the_full_admission_discipline() {
+        use crate::economic::admission::{
+            AcceptedAdmissionCoords, PendingAdmissionKind, PendingEconomicAdmission,
+        };
+
+        let era = pc(0xE7);
+        let devid = [0xB7u8; 32];
+        let head = DeviceState::new([0xA7; 32], devid, vec![0xC7; 32], 64);
+        let sender = [0x99u8; 32];
+        let rk = [0x33u8; 32];
+        let tip = [0x11u8; 32];
+        let op = incoming_online_transfer(devid, 10, era);
+        let credit = [BalanceDelta {
+            policy_commit: era,
+            direction: BalanceDirection::Credit,
+            amount: 10,
+        }];
+        let run = |h: &DeviceState| {
+            h.advance(
+                rk,
+                sender,
+                op.clone(),
+                entropy(4),
+                None,
+                &credit,
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+        };
+
+        // 1. No admission at all.
+        let msg = run(&head)
+            .expect_err("no admission must refuse")
+            .to_string();
+        assert!(
+            msg.contains("no pending economic admission"),
+            "named refusal for the absent admission, got: {msg}"
+        );
+
+        // 2. Wrong operation digest.
+        let wrong_digest =
+            head.clone()
+                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                    PendingAdmissionKind::DsmBacked,
+                    1,
+                    [0u8; 32],
+                    [0xDD; 32],
+                )));
+        let msg = run(&wrong_digest)
+            .expect_err("wrong digest must refuse")
+            .to_string();
+        assert!(
+            msg.contains("does not match the pending"),
+            "named refusal for the digest mismatch, got: {msg}"
+        );
+
+        // 3. Wrong kind: an offline-boundary admission authorizes no online
+        // credit.
+        let op_digest = crate::economic::faucet::dsm_operation_digest(&op.to_bytes());
+        let wrong_kind =
+            head.clone()
+                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                    PendingAdmissionKind::OfflineLoad {
+                        asset_policy_commit: era,
+                    },
+                    1,
+                    [0u8; 32],
+                    op_digest,
+                )));
+        let msg = run(&wrong_kind)
+            .expect_err("wrong kind must refuse")
+            .to_string();
+        assert!(
+            msg.contains("not DSM-backed"),
+            "named refusal for the wrong kind, got: {msg}"
+        );
+
+        // 4. Wrong state: a post-acceptance admission belongs to an EARLIER
+        // acceptance and authorizes nothing new. (`Admitted` does not fence,
+        // so this reaches the gate rather than the fence.)
+        let mut stale = PendingEconomicAdmission::prepared(
+            PendingAdmissionKind::DsmBacked,
+            1,
+            [0u8; 32],
+            op_digest,
+        )
+        .into_locally_accepted(AcceptedAdmissionCoords {
+            post_economic_root: [2u8; 32],
+            accepted_substrate_addr: [4u8; 32],
+            admission_manifest_addr: [5u8; 32],
+            c_dsm_plus: [6u8; 32],
+            embedded_parent: [7u8; 32],
+        })
+        .expect("prepared -> accepted");
+        stale.state = crate::economic::admission::EconomicAdmissionState::Admitted;
+        let wrong_state = head.clone().with_pending_economic_admission(Some(stale));
+        let msg = run(&wrong_state)
+            .expect_err("wrong state must refuse")
+            .to_string();
+        assert!(
+            msg.contains("not Prepared"),
+            "named refusal for the wrong state, got: {msg}"
+        );
+
+        // 5. Full discipline satisfied: the SAME advance succeeds — the
+        // refusals above are the gate, not an unrelated precondition.
+        let ok =
+            head.clone()
+                .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                    PendingAdmissionKind::DsmBacked,
+                    1,
+                    [0u8; 32],
+                    op_digest,
+                )));
+        let outcome = run(&ok).expect("a matching Prepared DsmBacked admission admits the credit");
+        assert_eq!(outcome.new_device_state.balance(&era), 10);
+    }
+
+    /// Owner ruling (2026-08-27): NO transport exemption. The BLE/USB
+    /// bilateral receiver's online-credit op is byte-indistinguishable at
+    /// this seam and is refused fail-closed until its own admission wiring
+    /// lands; the bearer tier (`authority_policy: Some`) never crosses this
+    /// gate. MUTATION CONTROL: exempting the BLE shape (e.g. keying the gate
+    /// on anything transport-flavored) turns this red.
+    #[test]
+    fn a_ble_shaped_online_credit_is_refused_without_an_admission() {
+        let era = pc(0xE8);
+        let devid = [0xB8u8; 32];
+        let head = DeviceState::new([0xA8; 32], devid, vec![0xC8; 32], 64);
+        // Exactly what bilateral_ble_handler builds for the receiver commit:
+        // Bilateral mode, authority_policy None, one credit delta.
+        let op = incoming_online_transfer(devid, 5, era);
+        let msg = head
+            .advance(
+                [0x34u8; 32],
+                [0x9Au8; 32],
+                op,
+                entropy(5),
+                None,
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Credit,
+                    amount: 5,
+                }],
+                Some([0x12u8; 32]),
+                None,
+                None,
+                None,
+            )
+            .expect_err("the gate is total across transports")
+            .to_string();
+        assert!(
+            msg.contains("online credit-direction transfer"),
+            "the refusal names the gated shape, got: {msg}"
+        );
+    }
+
     /// The fence SURVIVES a state derivation. If `advance` dropped it while
     /// building the successor head, the very next operation would be unfenced
     /// — a one-transition escape hatch.
@@ -6495,6 +6732,7 @@ mod tests {
             post_economic_root: [2u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
+            embedded_parent: [0x5E; 32],
             c_dsm_plus: [6u8; 32],
         })
         .expect("prepared -> accepted");
