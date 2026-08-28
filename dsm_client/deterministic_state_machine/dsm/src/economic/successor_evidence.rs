@@ -61,6 +61,11 @@ pub struct VerifiedDsmSuccessor {
     pub operation: Operation,
     pub operation_digest: [u8; 32],
     pub c_dsm_plus: [u8; 32],
+    /// The successor's own parent tip from the verified preimage — with
+    /// `c_dsm_plus` this is the successor's `(embedded_parent, tip)` pair,
+    /// which acceptance-evidence verification binds the countersigned
+    /// B-side pair to (a bundle must never self-select its pair).
+    pub embedded_parent: [u8; 32],
 }
 
 /// The `sigma_dsm` signing digest.
@@ -189,5 +194,6 @@ pub fn verify_dsm_successor_evidence(
         operation,
         operation_digest,
         c_dsm_plus: carried,
+        embedded_parent,
     })
 }

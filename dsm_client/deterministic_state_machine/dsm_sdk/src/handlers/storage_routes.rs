@@ -614,6 +614,102 @@ async fn finalize_from_countersign_delta(
     }
 
     // ====================================================================
+    // THE RELEASE GATE (3.5b PR4). `sig_b` above is acceptance PROVENANCE —
+    // it is published inside the recipient's admission evidence before
+    // ECON_ADMITTED and proves acceptance, not admission. Finalization
+    // authority is the recipient-signed RecipientEconomicReleaseV1, bound to
+    // this exact commitment and recipient identity, and then checked
+    // INDEPENDENTLY against the recipient's registered economic root — a
+    // hostile recipient's private "admitted" flag is never trusted.
+    // ====================================================================
+    if wire.recipient_economic_release_addr.is_empty() {
+        let reason = "countersign delta carries no recipient economic release — bare sig_b \
+                      cannot finalize the sender"
+            .to_string();
+        park_awaiting_valid_reply(&proposal, &short, &reason);
+        return CountersignOutcome::Rejected(reason);
+    }
+    let Ok(release_addr) = <[u8; 32]>::try_from(wire.recipient_economic_release_addr.as_slice())
+    else {
+        let reason = "recipient economic release addr is not 32 bytes".to_string();
+        park_awaiting_valid_reply(&proposal, &short, &reason);
+        return CountersignOutcome::Rejected(reason);
+    };
+    // Fetch the exact release bytes by content address (re-hash verified by
+    // the fetch boundary). Not-yet-published is an outage shape, not an
+    // attack: the recipient's post-admit publish may still be in flight.
+    let release_bytes = match crate::sdk::storage_io::fetch_immutable_payload(
+        dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+        &release_addr,
+    )
+    .await
+    {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: release object not yet \
+                 fetchable — finalize deferred"
+            );
+            return CountersignOutcome::Unverifiable("release object not yet fetchable".into());
+        }
+        Err(e) => {
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: release fetch failed \
+                 ({e}) — finalize deferred"
+            );
+            return CountersignOutcome::Unverifiable(format!("release fetch: {e}"));
+        }
+    };
+    let release = match dsm::economic::release::verify_recipient_economic_release(
+        &release_bytes,
+        &recipient_ak_pk,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            let reason = format!("recipient economic release refused: {e}");
+            park_awaiting_valid_reply(&proposal, &short, &reason);
+            return CountersignOutcome::Rejected(reason);
+        }
+    };
+    if release.receipt_commitment != commitment
+        || release.recipient_devid != proposal.counterparty_device_id
+    {
+        let reason = "recipient economic release is bound to a different transition or recipient"
+            .to_string();
+        park_awaiting_valid_reply(&proposal, &short, &reason);
+        return CountersignOutcome::Rejected(reason);
+    }
+    // The release's genesis must be the PINNED contact identity — otherwise a
+    // hostile recipient could point the register check at an accomplice's
+    // cell under a different genesis.
+    match crate::storage::client_db::get_contact_by_device_id(&proposal.counterparty_device_id) {
+        Ok(Some(c)) if c.genesis_hash.as_slice() == release.recipient_genesis.as_slice() => {}
+        _ => {
+            let reason =
+                "recipient economic release names a genesis that is not the pinned contact's"
+                    .to_string();
+            park_awaiting_valid_reply(&proposal, &short, &reason);
+            return CountersignOutcome::Rejected(reason);
+        }
+    }
+    match crate::sdk::economic_admission_flow::verify_release_against_register(&release).await {
+        Ok(()) => {}
+        Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Unavailable(m)) => {
+            // An outage is never an attack: gate retained, retried next poll.
+            log::warn!(
+                "[storage.sync] ADR 0003 countersign delta {short}..: release register read \
+                 unavailable ({m}) — finalize deferred"
+            );
+            return CountersignOutcome::Unverifiable(format!("release register read: {m}"));
+        }
+        Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Mismatch(m)) => {
+            let reason = format!("release does not match the registered economic root: {m}");
+            park_awaiting_valid_reply(&proposal, &short, &reason);
+            return CountersignOutcome::Rejected(reason);
+        }
+    }
+
+    // ====================================================================
     // §16.6 DEFECT 1 — ONE ATOMIC FINALIZATION.
     //
     // Verified. Everything this acceptance proof authorises now commits in a
@@ -714,6 +810,61 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    // Both signers' EK step objects for THIS step (3.5b PR4) — byte-identical
+    // to the recipient's derivation (same deterministic inputs), so both
+    // devices' tracking tables converge on the same content addresses. The
+    // recipient freezes and publishes the objects with its admission; the
+    // sender only needs the rows.
+    let ek_steps = {
+        use prost::Message as _;
+        let a_prior = match crate::storage::client_db::economic_lineage::latest_ek_step(
+            &proposal.relationship_key,
+            &self_device_id,
+        ) {
+            Ok(v) => v.map(|(_, addr, _)| addr),
+            Err(e) => {
+                return CountersignOutcome::FinalizeFailed(format!("ek step chain (A): {e}"));
+            }
+        };
+        let b_prior = match crate::storage::client_db::economic_lineage::latest_ek_step(
+            &proposal.relationship_key,
+            &proposal.counterparty_device_id,
+        ) {
+            Ok(v) => v.map(|(_, addr, _)| addr),
+            Err(e) => {
+                return CountersignOutcome::FinalizeFailed(format!("ek step chain (B): {e}"));
+            }
+        };
+        let a_step_bytes = dsm::types::proto::EkCertStepV1 {
+            ek_pk: receipt.ek_pk_a.clone(),
+            ek_cert: receipt.ek_cert_a.clone(),
+            h_n: receipt.parent_tip.to_vec(),
+            prior_step_addr: a_prior.map(|a| a.to_vec()),
+        }
+        .encode_to_vec();
+        let b_step_bytes = dsm::types::proto::EkCertStepV1 {
+            ek_pk: receipt.ek_pk_b.clone(),
+            ek_cert: receipt.ek_cert_b.clone(),
+            h_n: receipt.parent_tip.to_vec(),
+            prior_step_addr: b_prior.map(|a| a.to_vec()),
+        }
+        .encode_to_vec();
+        vec![
+            (
+                self_device_id,
+                dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes),
+                receipt.ek_pk_a.clone(),
+                a_step_bytes,
+            ),
+            (
+                proposal.counterparty_device_id,
+                dsm::economic::peer_acceptance::ek_cert_step_addr(&b_step_bytes),
+                receipt.ek_pk_b.clone(),
+                b_step_bytes,
+            ),
+        ]
+    };
+
     match crate::storage::client_db::finalize_on_acceptance_atomically(
         &crate::storage::client_db::AcceptanceFinalization {
             relationship_key: &proposal.relationship_key,
@@ -729,6 +880,7 @@ async fn finalize_from_countersign_delta(
             genesis_seed,
             countersign_b: &countersign_artifact,
             finalized: &finalized_artifact,
+            ek_steps: &ek_steps,
         },
     ) {
         Ok(()) => {
@@ -1073,6 +1225,11 @@ async fn deliver_pending_acceptance_replies(
                 &reply.commitment,
                 &reply.receipt_bytes,
                 (reply.applied_parent_tip_b, reply.applied_child_tip_b),
+                // The post-admission RELEASE (3.5b PR4): the sweep only sees
+                // promoted rows, so a Some here is admission-terminal by
+                // construction. Rows from before the release existed carry
+                // none and the sender refuses them — beta clean cut.
+                reply.release_bytes.as_deref().unwrap_or_default(),
             )
             .await
         {
@@ -1350,6 +1507,34 @@ impl AppRouterImpl {
         };
         let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
 
+        // ── Step 0 (3.5b PR4): a pending economic admission is DEVICE-global
+        // — resume it before any row. Still pending afterwards means our own
+        // quorum is unreachable; every apply would be fenced, so hold the
+        // whole pass (rows stay ready_to_verify, retried next poll).
+        if let Some(pending) = self
+            .core_sdk
+            .device_head()
+            .and_then(|h| h.pending_economic_admission().cloned())
+        {
+            let resumed = match crate::sdk::economic_admission_flow::committed_network_id() {
+                Ok(net) => crate::sdk::economic_admission_flow::resume_pending_admission(
+                    &self.core_sdk,
+                    &net,
+                    pending,
+                )
+                .await
+                .map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = resumed {
+                log::warn!(
+                    "[storage.sync] ADR 0003 completion: pending economic admission could not \
+                     be finished ({e}) — all pairs held for resume"
+                );
+                return (acks, release_after_ack);
+            }
+        }
+
         for row in rows {
             let key = row.correlation_key.clone();
 
@@ -1431,27 +1616,82 @@ impl AppRouterImpl {
                         continue;
                     }
                 };
-                let sender_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(
-                    &sender_device,
-                ) {
-                    Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-                    Ok(Some(c)) => {
-                        match hydrate_missing_sender_kyber_capability(
-                            storage_endpoints,
-                            sender_device,
-                            &c,
-                        )
-                        .await
-                        {
-                            Ok(k) => k,
-                            Err(e) => {
-                                log::error!("[storage.sync] ADR 0003 completion: {key}: sender Kyber capability missing and hydration failed: {e} — fail closed");
-                                continue;
+                let (sender_kyber_pk, sender_genesis) =
+                    match crate::storage::client_db::get_contact_by_device_id(&sender_device) {
+                        Ok(Some(c)) => {
+                            let genesis: [u8; 32] = match c.genesis_hash.as_slice().try_into() {
+                                Ok(g) => g,
+                                Err(_) => {
+                                    log::error!("[storage.sync] ADR 0003 completion: {key}: contact genesis is not 32 bytes — fail closed");
+                                    continue;
+                                }
+                            };
+                            if !c.kyber_public_key.is_empty() {
+                                (c.kyber_public_key.clone(), genesis)
+                            } else {
+                                match hydrate_missing_sender_kyber_capability(
+                                    storage_endpoints,
+                                    sender_device,
+                                    &c,
+                                )
+                                .await
+                                {
+                                    Ok(k) => (k, genesis),
+                                    Err(e) => {
+                                        log::error!("[storage.sync] ADR 0003 completion: {key}: sender Kyber capability missing and hydration failed: {e} — fail closed");
+                                        continue;
+                                    }
+                                }
                             }
                         }
-                    }
-                    _ => {
-                        log::error!("[storage.sync] ADR 0003 completion: {key}: no contact for sender — fail closed");
+                        _ => {
+                            log::error!("[storage.sync] ADR 0003 completion: {key}: no contact for sender — fail closed");
+                            continue;
+                        }
+                    };
+
+                // ── PREVALIDATION (3.5b PR4, corrections 3+5+8): every foreign
+                // dependency that CAN be established before local acceptance IS
+                // established here — the sender's validated debit, the wire
+                // binding, EK portability, and the q-durable evidence closure —
+                // async, BEFORE the relationship lock, before any durable econ
+                // state. A hostile sender is refused terminally; an outage
+                // holds the row.
+                let Some(transfer_wire) = row.transfer_bytes.as_deref() else {
+                    continue;
+                };
+                let prereqs = match crate::sdk::economic_admission_flow::
+                    prevalidate_incoming_transfer_admission(
+                        &self.core_sdk,
+                        &sender_genesis,
+                        &sender_device,
+                        &sender_ak,
+                        transfer_wire,
+                        evidence_bytes,
+                        &rel_key,
+                    )
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(refusal) => {
+                        use crate::sdk::economic_admission_flow::PrevalidationRefusal as PR;
+                        match &refusal {
+                            PR::Terminal(m) | PR::Quarantined(m) => {
+                                log::warn!(
+                                    "[storage.sync] ADR 0003 completion: {key} REFUSED before \
+                                     any durable state — {refusal}"
+                                );
+                                let _ = crate::storage::client_db::recipient_staging::mark_rejected(
+                                    &key,
+                                    &format!("economic prevalidation: {m}"),
+                                );
+                            }
+                            PR::Incomplete(m) => {
+                                log::info!(
+                                    "[storage.sync] ADR 0003 completion: {key} held — {m}"
+                                );
+                            }
+                        }
                         continue;
                     }
                 };
@@ -1463,6 +1703,26 @@ impl AppRouterImpl {
                     }
                 };
                 let core_sdk = self.core_sdk.clone();
+                let (econ_genesis, econ_devid) = match core_sdk.device_head() {
+                    Some(h) => (h.genesis_digest(), h.devid()),
+                    None => {
+                        log::error!("[storage.sync] ADR 0003 completion: {key}: no device head");
+                        continue;
+                    }
+                };
+                let mut prereqs = prereqs;
+                let econ_tree = std::cell::RefCell::new(std::mem::replace(
+                    &mut prereqs.tree,
+                    dsm::economic::tree::EconomicSmt::new(),
+                ));
+                let admission_build: std::cell::RefCell<
+                    Option<crate::sdk::economic_admission_flow::RecipientAdmissionBuild>,
+                > = std::cell::RefCell::new(None);
+                let signed_op_stash: std::cell::RefCell<Option<dsm::types::operations::Operation>> =
+                    std::cell::RefCell::new(None);
+                let mut accepted_admission: Option<
+                    dsm::economic::admission::PendingEconomicAdmission,
+                > = None;
 
                 // Relationship exclusion across prepare → apply → converge.
                 let rel_lock = rr::relationship_lock(&rel_key);
@@ -1471,6 +1731,13 @@ impl AppRouterImpl {
                 let sender_b32_for_apply = sender_b32.clone();
                 let key_for_apply = key.clone();
                 let decision = decide_ack(&key, &sender_ak, |v| {
+                    // The closure's verified transfer must be byte-identical
+                    // to what prevalidation validated — a redelivery that
+                    // substituted bytes aborts before anything durable.
+                    if v.canonical_operation_bytes != prereqs.pinned_canonical_bytes {
+                        return Err("verified transfer differs from the prevalidated wire bytes"
+                            .to_string());
+                    }
                     // Everything derives from the VERIFIED transfer, exactly as
                     // the legacy path derives it from the verified entry.
                     let signed_parent = v.receipt.parent_tip;
@@ -1522,8 +1789,8 @@ impl AppRouterImpl {
                             &v.canonical_operation_bytes,
                             signed_parent,
                             signed_child,
-                            |_outcome, b_pair| {
-                                rr::generate_b_artifacts_from_inbound(
+                            |outcome, b_pair| {
+                                let b_art = rr::generate_b_artifacts_from_inbound(
                                     receipt,
                                     &signed_sigma,
                                     &sender_kyber_pk,
@@ -1536,9 +1803,38 @@ impl AppRouterImpl {
                                     dsm::types::error::DsmError::invalid_operation(format!(
                                         "B-side acceptance artifacts: {e}"
                                     ))
-                                })
+                                })?;
+                                // The recipient's admission, from the EXACT
+                                // prepared successor: countersign wire bytes →
+                                // EK steps → acceptance bundle → PeerDebit
+                                // facts (the addr an OUTPUT) → witness/manifest
+                                // → the signed release. All frozen with the
+                                // accept transaction below.
+                                let built =
+                                    crate::sdk::economic_admission_flow::build_recipient_admission(
+                                        &prereqs,
+                                        &mut econ_tree.borrow_mut(),
+                                        &econ_genesis,
+                                        &econ_devid,
+                                        &outcome.new_chain_state,
+                                        &v.signed_op,
+                                        &b_art,
+                                        row.transfer_bytes.as_deref().unwrap_or_default(),
+                                        evidence_bytes,
+                                        &rel_key,
+                                    )?;
+                                *admission_build.borrow_mut() = Some(built);
+                                *signed_op_stash.borrow_mut() = Some(v.signed_op.clone());
+                                Ok(b_art)
                             },
                             |tx, _outcome, artifacts| {
+                                let build_ref = admission_build.borrow();
+                                let built = build_ref.as_ref().ok_or_else(|| {
+                                    dsm::types::error::DsmError::internal(
+                                        "recipient admission missing at write",
+                                        None::<std::convert::Infallible>,
+                                    )
+                                })?;
                                 crate::storage::client_db::insert_prepared_acceptance_journal_with_conn(
                                     tx,
                                     &rr::journal_row(
@@ -1546,6 +1842,7 @@ impl AppRouterImpl {
                                         rel_key,
                                         signed_parent,
                                         (projection_parent, projection_target),
+                                        Some(built.release_bytes.clone()),
                                     ),
                                 )
                                 .map_err(|e| {
@@ -1553,8 +1850,38 @@ impl AppRouterImpl {
                                         format!("in-tx acceptance journal insert failed: {e}"),
                                         None::<std::convert::Infallible>,
                                     )
-                                })
+                                })?;
+                                // The signer-chain steps become part of the SAME
+                                // atomic acceptance — without them the NEXT
+                                // acceptance bundle's ancestry is unwalkable.
+                                for (signer, addr, pk) in &built.ek_step_rows {
+                                    crate::storage::client_db::economic_lineage::append_ek_step_with_conn(
+                                        tx, &rel_key, signer, addr, pk,
+                                    )
+                                    .map_err(|e| {
+                                        dsm::types::error::DsmError::internal(
+                                            format!("in-tx EK step append failed: {e}"),
+                                            None::<std::convert::Infallible>,
+                                        )
+                                    })?;
+                                }
+                                Ok(())
                             },
+                            Some(crate::sdk::core_sdk::AdmissionPlan {
+                                prepared: prereqs.prepared.clone(),
+                                storage_set_id: prereqs.set.id(),
+                                build: Box::new(|_o| {
+                                    let built = admission_build.borrow();
+                                    let built = built.as_ref().ok_or_else(|| {
+                                        dsm::types::error::DsmError::internal(
+                                            "admission parts missing at commit",
+                                            None::<std::convert::Infallible>,
+                                        )
+                                    })?;
+                                    Ok((built.parts.coords, built.parts.artifacts.clone()))
+                                }),
+                                accepted_out: &mut accepted_admission,
+                            }),
                         )
                         .map_err(|e| format!("apply failed for {key_for_apply}: {e}"))
                 });
@@ -1590,6 +1917,56 @@ impl AppRouterImpl {
                             mark_contact_needs_online_reconcile_and_refresh(&sender_device);
                             // Do NOT ACK yet — the reply is not enqueued.
                             continue;
+                        }
+                        // ── FINISH the admission (3.5b PR4): publish →
+                        // register → validate → admit. Runs with the
+                        // relationship lock still held but needs no lock
+                        // semantics of its own; the terminal admission
+                        // transaction promotes the HELD reply (the release)
+                        // to deliverable. On failure: accepted-but-held — no
+                        // ACK, no history; the poll-level resume finishes the
+                        // SAME admission next pass.
+                        if let Some(pending) = accepted_admission.take() {
+                            let built = admission_build.borrow_mut().take();
+                            let signed_op = signed_op_stash.borrow_mut().take();
+                            let (Some(built), Some(signed_op)) = (built, signed_op) else {
+                                log::error!(
+                                    "[storage.sync] ADR 0003 completion: {key}: admission \
+                                     accepted with no build — invariant violated; held for resume"
+                                );
+                                continue;
+                            };
+                            if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
+                                &self.core_sdk,
+                                &prereqs.network_id,
+                                &prereqs.set,
+                                &prereqs.validated,
+                                econ_tree.into_inner(),
+                                built.parts.witness,
+                                built.parts.manifest,
+                                signed_op,
+                                pending,
+                                // The RELEASE object: frozen only in the
+                                // admit transaction, published right after.
+                                vec![(
+                                    crate::sdk::economic_registers::immutable_object_key(
+                                        dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+                                        &built.release_bytes,
+                                    ),
+                                    built.release_bytes.clone(),
+                                    "recipient-economic-release",
+                                )],
+                            )
+                            .await
+                            {
+                                log::warn!(
+                                    "[storage.sync] ADR 0003 completion: {key} accepted; \
+                                     economic admission HELD for resume ({e}) — release \
+                                     undelivered, no ACK"
+                                );
+                                mark_contact_needs_online_reconcile_and_refresh(&sender_device);
+                                continue;
+                            }
                         }
                         // Amount/token from the FROZEN transfer half (SIG A already verified
                         // over its canonical bytes by `verify_staged_transfer`).
@@ -3381,6 +3758,15 @@ mod tests {
         commitment: [u8; 32],
         digest_a: [u8; 32],
     ) -> crate::sdk::b0x_sdk::CountersignDelta {
+        delta_for_with_release(receipt_with_b, commitment, digest_a, None)
+    }
+
+    fn delta_for_with_release(
+        receipt_with_b: &dsm::types::receipt_types::StitchedReceiptV2,
+        commitment: [u8; 32],
+        digest_a: [u8; 32],
+        release_addr: Option<[u8; 32]>,
+    ) -> crate::sdk::b0x_sdk::CountersignDelta {
         use prost::Message;
         let (_, b) = receipt_with_b
             .split_countersign_b()
@@ -3394,6 +3780,7 @@ mod tests {
             kyber_ct_b: b.kyber_ct_b,
             b_parent_tip: test_b_pair().0.to_vec(),
             b_child_tip: test_b_pair().1.to_vec(),
+            recipient_economic_release_addr: release_addr.map(|a| a.to_vec()).unwrap_or_default(),
         }
         .encode_to_vec();
         crate::sdk::b0x_sdk::CountersignDelta {
@@ -3520,6 +3907,127 @@ mod tests {
         }
     }
 
+    const RELEASE_POSITION: u64 = 1;
+    const RELEASE_POST_ROOT: [u8; 32] = [0x5Au8; 32];
+    const RELEASE_MANIFEST_ADDR: [u8; 32] = [0x5Bu8; 32];
+
+    /// The recipient-signed release for one step — pure (no I/O), so a
+    /// fixture that must insert the reply row before any backing exists can
+    /// still carry the exact bytes the sweep will address.
+    fn release_bytes_for(
+        commitment: [u8; 32],
+        recipient_devid: [u8; 32],
+        b_ak_sk: &[u8],
+    ) -> Vec<u8> {
+        dsm::economic::release::sign_recipient_economic_release(
+            &dsm::economic::release::ReleaseFacts {
+                receipt_commitment: commitment,
+                acceptance_evidence_addr: [0xACu8; 32],
+                recipient_genesis: [0xAAu8; 32], // the pinned contact genesis
+                recipient_devid,
+                recipient_economic_position: RELEASE_POSITION,
+                post_economic_root: RELEASE_POST_ROOT,
+                admission_manifest_addr: RELEASE_MANIFEST_ADDR,
+            },
+            b_ak_sk,
+        )
+        .expect("sign release")
+    }
+
+    /// The network backing the sender's release verification reads: the
+    /// committed network + canonical fleet, the PUBLISHED release object, and
+    /// the recipient's REGISTERED economic root.
+    async fn seed_release_backing(
+        release_bytes: &[u8],
+        sender_devid: [u8; 32],
+        recipient_devid: [u8; 32],
+        b_ak_pk: &[u8],
+        b_ak_sk: &[u8],
+    ) -> ([u8; 32], crate::handlers::faucet_flow_tests::FleetGuard) {
+        let guard = crate::handlers::faucet_flow_tests::install_canonical_fleet();
+        crate::sdk::storage_io::fake_registers::reset();
+        // The sender's committed network — verify_release_against_register
+        // resolves the canonical set from the STORED genesis record.
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32,
+                device_id: crate::util::text_id::encode_base32_crockford(&sender_devid),
+                mpc_proof: "test".into(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 1,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: vec![],
+                entropy_hash: String::new(),
+                protocol_version: "v1".into(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".into(),
+                network_id: "dsm-testnet".into(),
+            },
+        )
+        .expect("genesis record");
+        let network =
+            crate::sdk::economic_admission_flow::committed_network_id().expect("committed network");
+        let set =
+            crate::sdk::economic_admission_flow::canonical_set(&network).expect("canonical set");
+
+        let recipient_genesis = [0xAAu8; 32]; // the pinned contact genesis
+        let inner = dsm::economic::release::recipient_economic_release_addr(release_bytes);
+        // Publish the object exactly as the post-admit sweep does.
+        let outer = dsm::storage_object::immutable_addr_from_inner(
+            dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+            &inner,
+        );
+        crate::sdk::storage_io::put_immutable_to_all_members(
+            &set,
+            core::str::from_utf8(
+                dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE.source_bytes(),
+            )
+            .unwrap(),
+            release_bytes,
+            &crate::util::text_id::encode_base32_crockford(&outer),
+        )
+        .await
+        .expect("publish release");
+        // The recipient's REGISTERED root the sender independently checks.
+        let body = dsm::economic::claim::EconomicRootClaimBody::new(
+            recipient_genesis,
+            recipient_devid,
+            RELEASE_POSITION,
+            RELEASE_POST_ROOT,
+            RELEASE_MANIFEST_ADDR,
+            set.id(),
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            b_ak_pk,
+        )
+        .expect("claim body");
+        let claim = dsm::economic::claim_envelope::sign_economic_root_claim(&body, b_ak_sk)
+            .expect("sign claim");
+        crate::sdk::economic_registers::register_economic_root(&set, &claim)
+            .await
+            .expect("register recipient root");
+        (inner, guard)
+    }
+
+    /// [`seed_release_backing`] for a seeded sender step.
+    async fn seed_release_for(
+        st: &SeededStep,
+    ) -> (
+        Vec<u8>,
+        [u8; 32],
+        crate::handlers::faucet_flow_tests::FleetGuard,
+    ) {
+        let release_bytes = release_bytes_for(st.commitment, st.b, &st.b_ak_sk);
+        let (inner, guard) =
+            seed_release_backing(&release_bytes, st.a, st.b, &st.b_ak_pk, &st.b_ak_sk).await;
+        (release_bytes, inner, guard)
+    }
+
     fn proposal_status(commitment: &[u8; 32]) -> String {
         crate::storage::client_db::sender_proposal::get_sender_proposal_by_commitment(commitment)
             .expect("load")
@@ -3536,6 +4044,7 @@ mod tests {
             PROPOSAL_ROLLED_BACK,
         };
         let st = seed_submitted_step();
+        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
 
         // ---- 1. A poisoned delta arrives, addressed at the real proposal ----
         // B material minted over a receipt with a FORGED canonical child, then
@@ -3597,7 +4106,8 @@ mod tests {
             }
         }
 
-        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
         assert_eq!(
             super::finalize_from_countersign_delta(&good).await,
             CountersignOutcome::Finalized
@@ -3724,6 +4234,7 @@ mod tests {
             PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
         };
         let st = seed_submitted_step();
+        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
 
         let mut wrong_digest = st.digest_a;
         wrong_digest[0] ^= 0x01;
@@ -3739,7 +4250,8 @@ mod tests {
             PROPOSAL_AWAITING_VALID_REPLY
         );
 
-        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
         assert_eq!(
             super::finalize_from_countersign_delta(&good).await,
             CountersignOutcome::Finalized
@@ -3762,7 +4274,9 @@ mod tests {
         };
         use prost::Message;
         let st = seed_submitted_step();
-        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
 
         for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
             let mut body =
@@ -3820,6 +4334,7 @@ mod tests {
         use super::CountersignOutcome;
         use crate::storage::client_db::sender_proposal::{PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED};
         let st = seed_submitted_step();
+        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
 
         let full_receipt = crate::sdk::b0x_sdk::CountersignDelta {
             message_id: "TESTFULL0000000000000000000".to_string(),
@@ -3837,12 +4352,103 @@ mod tests {
         }
         assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
 
-        let good = delta_for(&st.honest, st.commitment, st.digest_a);
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
         assert_eq!(
             super::finalize_from_countersign_delta(&good).await,
             CountersignOutcome::Finalized
         );
         assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// THE RELEASE GATE (3.5b PR4): bare `sig_b` cannot finalize the sender.
+    /// The delta is fully honest — countersignature verifies — but carries no
+    /// release; the step parks awaiting a valid replacement. MUTATION
+    /// CONTROL: delete the gate in `finalize_from_countersign_delta` and this
+    /// finalizes on provenance alone — red.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_delta_without_a_release_cannot_finalize_the_sender() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::PROPOSAL_AWAITING_VALID_REPLY;
+        let st = seed_submitted_step();
+        let (_rb, _addr, _fleet) = seed_release_for(&st).await;
+
+        let bare = delta_for(&st.honest, st.commitment, st.digest_a);
+        match super::finalize_from_countersign_delta(&bare).await {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("bare sig_b"),
+                "the refusal names the missing release, got: {reason}"
+            ),
+            other => panic!("bare sig_b must be Rejected, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY,
+            "parked, not finalized"
+        );
+    }
+
+    /// The sender's INDEPENDENT half: a release whose named root is not (yet)
+    /// registered DEFERS (an outage is never an attack); a release whose
+    /// named root DISAGREES with the registered claim is REJECTED — a hostile
+    /// recipient's private "admitted" flag is never trusted.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_release_must_match_the_recipient_registered_root() {
+        use super::CountersignOutcome;
+        let st = seed_submitted_step();
+        let (release_bytes, release_addr, _fleet) = seed_release_for(&st).await;
+
+        // Overwrite the register with a DIFFERENT root at the released
+        // position: same coordinates, different post-root — the claim the
+        // quorum holds disagrees with the release.
+        crate::sdk::storage_io::fake_registers::reset();
+        let set = crate::sdk::economic_admission_flow::canonical_set(
+            &crate::sdk::economic_admission_flow::committed_network_id().unwrap(),
+        )
+        .unwrap();
+        let body = dsm::economic::claim::EconomicRootClaimBody::new(
+            [0xAAu8; 32],
+            st.b,
+            RELEASE_POSITION,
+            [0x66u8; 32], // NOT the released root
+            RELEASE_MANIFEST_ADDR,
+            set.id(),
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &st.b_ak_pk,
+        )
+        .unwrap();
+        let claim =
+            dsm::economic::claim_envelope::sign_economic_root_claim(&body, &st.b_ak_sk).unwrap();
+        crate::sdk::economic_registers::register_economic_root(&set, &claim)
+            .await
+            .unwrap();
+
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+        match super::finalize_from_countersign_delta(&good).await {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("does not match the registered economic root"),
+                "got: {reason}"
+            ),
+            other => panic!("a register mismatch must be Rejected, got {other:?}"),
+        }
+
+        // And with NO registered root at all: deferred, never rejected.
+        crate::sdk::storage_io::fake_registers::reset();
+        // Re-publish the release object (the reset wiped registers only, but
+        // keep the fixture self-contained).
+        let _ = release_bytes;
+        let again =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+        match super::finalize_from_countersign_delta(&again).await {
+            CountersignOutcome::Unverifiable(reason) => assert!(
+                reason.contains("release register read"),
+                "an unregistered root defers, got: {reason}"
+            ),
+            other => panic!("an unregistered root must defer, got {other:?}"),
+        }
     }
 
     /// Producer -> consumer with REAL per-step EK material: the recipient's
@@ -3857,6 +4463,7 @@ mod tests {
         use prost::Message;
         use std::sync::Arc;
         let st = seed_submitted_step();
+        let (release_bytes, _release_addr, _fleet) = seed_release_for(&st).await;
 
         // Recipient side: identity b, its stored full countersigned receipt.
         let full_bytes = st.honest.to_full_protobuf().expect("full receipt");
@@ -3874,6 +4481,7 @@ mod tests {
                 &st.commitment,
                 &full_bytes,
                 test_b_pair(),
+                &release_bytes,
             )
             .expect("real delta");
         assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
@@ -3929,6 +4537,8 @@ mod tests {
         commitment: [u8; 32],
         projection_parent: [u8; 32],
         full_bytes: Vec<u8>,
+        /// The signed post-admission release the reply row carries.
+        release_bytes: Vec<u8>,
     }
 
     fn seed_recipient_half(endpoint: &str) -> RecipientHalf {
@@ -3993,6 +4603,9 @@ mod tests {
         let commitment = full.compute_commitment().expect("commitment");
         let rel = dsm::verification::smt_replace_witness::compute_smt_key(&a, &b);
         let projection_parent = [0u8; 32];
+        // The post-admission release the reply carries (3.5b PR4) — signed
+        // now (pure); its network backing is seeded by the sender-half test.
+        let release_bytes = release_bytes_for(commitment, b, &b_ak_sk);
         let rec = RecipientAcceptanceJournal {
             relationship_key: rel,
             parent_tip: parent,
@@ -4013,6 +4626,7 @@ mod tests {
             projection_target_tip: [0xBBu8; 32],
             applied_parent_tip_b: test_b_pair().0,
             applied_child_tip_b: test_b_pair().1,
+            release_bytes: Some(release_bytes.clone()),
             peer_finalized: false,
             status: "prepared".to_string(),
             created_at: 0,
@@ -4029,7 +4643,16 @@ mod tests {
             )
             .expect("complete");
         }
-        insert_outbound_reply(&commitment, &rel, &a, &child, &full_bytes).expect("reply row");
+        insert_outbound_reply(
+            &commitment,
+            &rel,
+            &a,
+            &child,
+            &full_bytes,
+            Some(&release_bytes),
+            false,
+        )
+        .expect("reply row");
         assert_eq!(
             crate::storage::client_db::pending_outbound_replies()
                 .expect("pending")
@@ -4048,6 +4671,7 @@ mod tests {
             commitment,
             projection_parent,
             full_bytes,
+            release_bytes,
         }
     }
 
@@ -4131,6 +4755,8 @@ mod tests {
             "both halves describe the same step"
         );
         assert_eq!((st.a, st.b), (rh.a, rh.b));
+        let (_inner, _fleet) =
+            seed_release_backing(&rh.release_bytes, st.a, st.b, &rh.b_ak_pk, &rh.b_ak_sk).await;
 
         let env = dsm::types::proto::Envelope::decode(&*post.body).expect("Envelope");
         let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)

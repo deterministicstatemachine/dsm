@@ -758,6 +758,7 @@ mod tests {
             post_economic_root: [2u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
+            embedded_parent: [0x5E; 32],
             c_dsm_plus: [6u8; 32],
         })
         .expect("prepared -> accepted");
@@ -826,6 +827,20 @@ mod tests {
         }
     }
 
+    /// Attach the honest gate precondition for one credit-direction advance
+    /// (PR4): a matching Prepared DsmBacked admission. `Prepared` is never
+    /// durable, so callers strip it from the produced head before persisting.
+    fn with_credit_admission(head: DeviceState, op: &Operation) -> DeviceState {
+        head.with_pending_economic_admission(Some(
+            dsm::economic::admission::PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            ),
+        ))
+    }
+
     fn sample_device_and_rel() -> (
         [u8; 32],
         [u8; 32],
@@ -838,11 +853,24 @@ mod tests {
         let rel_key = [0xC3; 32];
         let policy_commit = [0xD4; 32];
         let device = DeviceState::new([0x11; 32], device_id, vec![0x22; 64], 1024);
+        // The PR4 credit gate: a credit-direction Transfer advances only
+        // with a matching Prepared DsmBacked admission attached — the honest
+        // fixture precondition, exactly what production attaches. Stripped
+        // below (`Prepared` is never durable).
+        let op = sample_operation(b"rel-1", 7);
+        let device = device.with_pending_economic_admission(Some(
+            dsm::economic::admission::PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            ),
+        ));
         let outcome = device
             .advance(
                 rel_key,
                 counterparty,
-                sample_operation(b"rel-1", 7),
+                op,
                 vec![0x33; 32],
                 Some(vec![0x44; 48]),
                 &[BalanceDelta {
@@ -861,13 +889,17 @@ mod tests {
         rel.entity_sig = Some(vec![0x77; 64]);
         rel.counterparty_sig = Some(vec![0x88; 64]);
 
-        let tips = outcome.new_device_state.relationship_keys();
+        let new_device_state = outcome
+            .new_device_state
+            .clone()
+            .with_pending_economic_admission(None);
+        let tips = new_device_state.relationship_keys();
         assert_eq!(tips, vec![rel_key]);
 
         let head = DeviceState::restore(
-            outcome.new_device_state.genesis_digest(),
-            outcome.new_device_state.devid(),
-            outcome.new_device_state.public_key().to_vec(),
+            new_device_state.genesis_digest(),
+            new_device_state.devid(),
+            new_device_state.public_key().to_vec(),
             Some([0x99; 32]),
             outcome.new_device_state.balances_snapshot().clone(),
             vec![(
@@ -1219,11 +1251,12 @@ mod tests {
 
         store_bcr_chain_state(&device_id, &rel0, true).expect("store published rel state");
 
-        let outcome1 = head0
+        let op2 = sample_operation(b"rel-2", 9);
+        let outcome1 = with_credit_admission(head0, &op2)
             .advance(
                 rel_key,
                 counterparty,
-                sample_operation(b"rel-2", 9),
+                op2,
                 vec![0x45; 32],
                 None,
                 &[BalanceDelta {
@@ -1237,6 +1270,11 @@ mod tests {
                 None,
             )
             .expect("second advance");
+        let outcome1_head = outcome1
+            .new_device_state
+            .clone()
+            .with_pending_economic_admission(None);
+        let _ = &outcome1_head;
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
             .expect("store unpublished rel state");
 
@@ -1267,11 +1305,12 @@ mod tests {
         assert_eq!(cached0.root(), head0.root());
         assert_eq!(cached0.chain_tip(&rel_key), Some(rel0.compute_chain_tip()));
 
-        let outcome1 = head0
+        let op3 = sample_operation(b"rel-3", 11);
+        let outcome1 = with_credit_admission(head0, &op3)
             .advance(
                 rel_key,
                 rel0.counterparty_devid,
-                sample_operation(b"rel-3", 11),
+                op3,
                 vec![0x56; 32],
                 None,
                 &[BalanceDelta {
@@ -1285,7 +1324,13 @@ mod tests {
                 None,
             )
             .expect("third advance");
-        update_bcr_device_head(&outcome1.new_device_state).expect("upsert head1");
+        update_bcr_device_head(
+            &outcome1
+                .new_device_state
+                .clone()
+                .with_pending_economic_admission(None),
+        )
+        .expect("upsert head1");
 
         let cached1 = load_bcr_device_head(&device_id)
             .expect("load head1")

@@ -148,17 +148,28 @@ fn resolve_expected_prev_pk(
 
 /// Verify a portable acceptance bundle.
 ///
-/// `expected_transfer_bytes` is the exact canonical `Operation::Transfer`
-/// bytes of the peer's VALIDATED debit (from its verified successor
-/// evidence); `expected_sender_child_tip` is that debit successor's
-/// `C_dsm+`. Binding both is what makes this acceptance be FOR that debit —
-/// same sender, same recipient, same exact Transfer, same bilateral step.
+/// `expected_transfer_bytes` is the exact canonical UNSIGNED
+/// `Operation::Transfer` bytes of the peer's VALIDATED debit (the wire's
+/// `canonical_operation_bytes` preimage — the signature is cleared before
+/// hashing/signing, so the signed operation the walker verifies must be
+/// cleared before comparison); `expected_sender_child_tip` is that debit
+/// successor's `C_dsm+`. Binding both is what makes this acceptance be FOR
+/// that debit — same sender, same recipient, same exact Transfer, same
+/// bilateral step.
+///
+/// `expected_recipient_b_pair` is the `(embedded_parent, C_dsm+)` pair of
+/// the exact RECIPIENT successor this acceptance is being consumed for —
+/// derived by the caller from the verified recipient substrate, never from
+/// the bundle. The countersign's self-declared `b_parent_tip`/`b_child_tip`
+/// must equal it: a bundle must not self-select the pair it claims to
+/// authenticate.
 pub fn verify_peer_transfer_acceptance(
     bundle_bytes: &[u8],
     sender: &AcceptanceParty<'_>,
     recipient: &AcceptanceParty<'_>,
     expected_transfer_bytes: &[u8],
     expected_sender_child_tip: &[u8; 32],
+    expected_recipient_b_pair: &([u8; 32], [u8; 32]),
     fetch_step: &mut EkStepFetch<'_>,
 ) -> Result<VerifiedAcceptance, PeerLineageFailure> {
     let bundle = generated::PeerTransferAcceptanceEvidenceV1::decode(bundle_bytes)
@@ -260,6 +271,11 @@ pub fn verify_peer_transfer_acceptance(
         .as_slice()
         .try_into()
         .map_err(|_| invalid("b_child_tip is not 32 bytes"))?;
+    if (b_parent_tip, b_child_tip) != *expected_recipient_b_pair {
+        return Err(invalid(
+            "acceptance b-side pair is not the accepted recipient successor's pair",
+        ));
+    }
     let b_prior: Option<[u8; 32]> = match &bundle.b_prior_step_addr {
         Some(p) => Some(
             p.as_slice()

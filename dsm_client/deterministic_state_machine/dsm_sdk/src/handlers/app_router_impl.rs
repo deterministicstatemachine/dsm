@@ -2016,6 +2016,7 @@ impl AppRouterImpl {
             econ_parts_final.manifest,
             admission_op,
             pending_admission,
+            Vec::new(),
         )
         .await
         {

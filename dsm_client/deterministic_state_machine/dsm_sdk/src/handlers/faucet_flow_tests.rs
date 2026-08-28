@@ -89,7 +89,7 @@ impl Drop for FleetGuard {
 /// members (`dsm-node-1..3`) — the profile resolves its set by re-hashing
 /// member ids, so the default `test-1..3` fleet can never satisfy it. The
 /// endpoints are irrelevant: all register I/O is faked in `cfg(test)`.
-fn install_canonical_fleet() -> FleetGuard {
+pub(crate) fn install_canonical_fleet() -> FleetGuard {
     let cfg_path = std::env::temp_dir().join(format!(
         "dsm_sdk_faucet_flow_env_{}.toml",
         std::process::id()

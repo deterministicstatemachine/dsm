@@ -1417,6 +1417,7 @@ impl B0xSDK {
         expected_commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
         b_pair: ([u8; 32], [u8; 32]),
+        release_bytes: &[u8],
     ) -> Result<BuiltEnvelope, DsmError> {
         use prost::Message as _;
 
@@ -1463,6 +1464,16 @@ impl B0xSDK {
             kyber_ct_b: b.kyber_ct_b,
             b_parent_tip: b_pair.0.to_vec(),
             b_child_tip: b_pair.1.to_vec(),
+            // 3.5b PR4: the post-admission RELEASE's content address — the
+            // sender fetches the exact bytes re-hash-verified and finalizes
+            // only on them. The reply is only deliverable once ECON_ADMITTED
+            // promoted it, so a delta without a release is not an acceptance
+            // the sender may act on.
+            recipient_economic_release_addr: if release_bytes.is_empty() {
+                Vec::new()
+            } else {
+                dsm::economic::release::recipient_economic_release_addr(release_bytes).to_vec()
+            },
         }
         .encode_to_vec();
         // Content address of the delta itself, role-separated (op_id, as the
@@ -1575,6 +1586,7 @@ impl B0xSDK {
     /// lost delta strands both sides — the sender's gate and, under the
     /// finality barrier, the recipient's own next origination — so one replica
     /// taking it is not delivery.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_acceptance_reply(
         &mut self,
         sender_genesis: &[u8; 32],
@@ -1583,6 +1595,7 @@ impl B0xSDK {
         commitment: &[u8; 32],
         full_countersigned_receipt_bytes: &[u8],
         b_pair: ([u8; 32], [u8; 32]),
+        release_bytes: &[u8],
     ) -> Result<String, DsmError> {
         let routing_key =
             Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
@@ -1593,6 +1606,7 @@ impl B0xSDK {
             commitment,
             full_countersigned_receipt_bytes,
             b_pair,
+            release_bytes,
         )?;
         self.post_reply_envelope(&routing_key, &built).await
     }
@@ -5139,6 +5153,7 @@ mod tests {
                 &commitment_of(&full),
                 &full,
                 TEST_B_PAIR,
+                &[],
             )
             .expect("real delta builder");
         report_budget("ADR0003 B-side countersign", built.bytes.len());
@@ -5201,6 +5216,7 @@ mod tests {
                 &commitment_of(&full),
                 &full,
                 TEST_B_PAIR,
+                &[],
             )
             .expect("build");
         let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
@@ -5226,10 +5242,10 @@ mod tests {
         let sdk = test_reply_sdk();
         let c = commitment_of(&full);
         let one = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
             .expect("one");
         let two = sdk
-            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
             .expect("two");
         assert_eq!(one.bytes, two.bytes);
         assert_eq!(one.message_id_b32, two.message_id_b32);
@@ -5250,6 +5266,7 @@ mod tests {
                 &commitment_of(&a_only),
                 &a_only,
                 TEST_B_PAIR,
+                &[],
             )
             .expect_err("A-only");
         assert!(
@@ -5266,6 +5283,7 @@ mod tests {
                 &[0x99; 32],
                 &full,
                 TEST_B_PAIR,
+                &[],
             )
             .expect_err("wrong commitment");
         assert!(
@@ -5294,12 +5312,13 @@ mod tests {
                 &commitment_of(&fat),
                 &fat,
                 TEST_B_PAIR,
+                &[],
             )
             .expect_err("over cap");
         assert!(err.to_string().contains("envelope cap"), "{err}");
 
         // Positive control in the same shape.
-        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR)
+        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
             .expect("the production shape builds");
     }
 

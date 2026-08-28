@@ -198,6 +198,7 @@ mod tests {
             projection_target_tip: [0xE2u8; 32],
             applied_parent_tip_b: B_PAIR.0,
             applied_child_tip_b: B_PAIR.1,
+            release_bytes: None,
             peer_finalized: false,
             status: STATUS_PREPARED.to_string(),
             created_at: 0,

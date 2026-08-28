@@ -45,6 +45,8 @@ pub mod offline_cash_routes;
 pub mod online_finalize;
 pub mod posted_dlv_routes;
 pub mod prefs_routes;
+#[cfg(test)]
+mod recipient_admission_tests;
 pub mod recipient_receipt;
 pub mod recovery_impl;
 pub mod recovery_routes;

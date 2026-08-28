@@ -204,6 +204,57 @@ pub(crate) fn spawn_frozen_artifact_republish(origin: &'static str) {
     });
 }
 
+/// Push an already-VERIFIED foreign evidence closure to quorum durability
+/// (3.5b PR4, correction 5's "republished-by-the-verifier" arm): for each
+/// exact `(namespace, inner addr, exact bytes)` the recording fetch boundary
+/// captured, an idempotent member-attributed immutable PUT to every member
+/// of `set`, requiring ≥ quorum accepting members per object. Content
+/// addressing makes re-pushing bytes a member already holds a no-op accept.
+///
+/// Objects whose exact address is already memoized q-durable are skipped;
+/// each object that reaches quorum is memoized. The foreign bytes are NOT
+/// frozen locally — the frozen-artifact backlog stays reserved for this
+/// device's OWN admission evidence (the resume path's namespace-prefix
+/// lookups depend on that).
+///
+/// Returns `Err` naming the first object that could not reach quorum — the
+/// caller treats it as Incomplete (retry next poll), never as an attack.
+pub(crate) async fn ensure_immutable_closure_on_quorum(
+    set: &crate::sdk::storage_set::StorageSet,
+    closure: &[(
+        dsm::crypto::domain::TaggedHashDomain<'static>,
+        [u8; 32],
+        Vec<u8>,
+    )],
+) -> Result<(), String> {
+    for (namespace, addr, bytes) in closure {
+        let ns = core::str::from_utf8(namespace.source_bytes())
+            .map_err(|_| "non-utf8 immutable namespace".to_string())?;
+        if crate::storage::client_db::economic_lineage::is_addr_q_durable(ns, addr)
+            .map_err(|e| format!("q-durable memo read: {e}"))?
+        {
+            continue;
+        }
+        let addr_b32 = crate::util::text_id::encode_base32_crockford(addr);
+        let fanout =
+            crate::sdk::storage_io::put_immutable_to_all_members(set, ns, bytes, &addr_b32)
+                .await
+                .map_err(|e| format!("closure fan-out {ns}::{addr_b32}: {e}"))?;
+        if fanout.accepted < set.quorum() {
+            return Err(format!(
+                "evidence closure object {ns}::{addr_b32} reached {}/{} members (quorum {}) — \
+                 below quorum, retry later",
+                fanout.accepted,
+                fanout.total,
+                set.quorum()
+            ));
+        }
+        crate::storage::client_db::economic_lineage::record_addr_q_durable(ns, addr)
+            .map_err(|e| format!("q-durable memo write: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

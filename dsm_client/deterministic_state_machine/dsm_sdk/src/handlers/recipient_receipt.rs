@@ -99,6 +99,7 @@ pub fn journal_row(
     relationship_key: [u8; 32],
     parent_tip: [u8; 32],
     projection_pair: ([u8; 32], [u8; 32]),
+    release_bytes: Option<Vec<u8>>,
 ) -> RecipientAcceptanceJournal {
     RecipientAcceptanceJournal {
         relationship_key,
@@ -120,6 +121,7 @@ pub fn journal_row(
         projection_target_tip: projection_pair.1,
         applied_parent_tip_b: artifacts.applied_parent_tip_b,
         applied_child_tip_b: artifacts.applied_child_tip_b,
+        release_bytes,
         peer_finalized: false,
         status: STATUS_PREPARED.to_string(),
         created_at: 0,
@@ -520,6 +522,7 @@ mod tests {
             rel,
             parent,
             (parent, child),
+            None,
         ))
         .unwrap();
     }

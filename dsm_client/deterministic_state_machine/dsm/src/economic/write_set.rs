@@ -50,6 +50,12 @@ use crate::types::operations::Operation;
 /// is not the exact effect of its operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteSetError {
+    /// The consumed-source leaf for this funding source already exists in the
+    /// pre-state tree — the source has ALREADY funded a credit. The verifier
+    /// refuses this independently (a `pre: None` mutation cannot prove
+    /// against a tree whose leaf is non-zero); refusing at build gives an
+    /// honest producer a named error instead of an unverifiable witness.
+    SourceAlreadyConsumed,
     /// `CreateToken` with `initial_supply > 0`: the new asset's supply credit
     /// has no fundable source until the issuance predicate (`0x0029`) exists.
     /// Funding it from the ERA fee debit would turn a fee payment into
@@ -94,6 +100,11 @@ pub enum WriteSetError {
 impl core::fmt::Display for WriteSetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::SourceAlreadyConsumed => write!(
+                f,
+                "this funding source has already been consumed — a source funds exactly one \
+                 credit, and V1 defines no splits"
+            ),
             Self::CreateTokenInitialSupplyRequiresIssuancePredicate => write!(
                 f,
                 "CreateToken with initial_supply > 0 cannot enter a validated lineage: the new \
@@ -398,6 +409,9 @@ pub fn build_write_set(
                     consumer_economic_operation_id: *economic_operation_id,
                 });
                 let key = consumed.leaf_key(genesis, device_id);
+                if tree.get(&key).is_some() {
+                    return Err(WriteSetError::SourceAlreadyConsumed);
+                }
                 planned.push(PlannedLeaf {
                     key,
                     pre: None,

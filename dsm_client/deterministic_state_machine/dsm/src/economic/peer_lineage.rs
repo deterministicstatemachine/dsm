@@ -364,6 +364,7 @@ fn walk_positions(
         let accepted = AcceptedSubstrate::from_verified_dsm_successor(
             verified.operation.clone(),
             verified.c_dsm_plus,
+            verified.embedded_parent,
             successor_addr,
         );
 
