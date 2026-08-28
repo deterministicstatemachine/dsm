@@ -363,6 +363,7 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     vault_id: c.digest32()?,
                     parent_sequence: c.u64()?,
                     x: c.digest32()?,
+                    owner_economic_position: c.u64()?,
                     reserve_consumption_evidence_addr: c.digest32()?,
                 },
             ))
@@ -380,6 +381,7 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     parent_sequence: c.u64()?,
                     trader_genesis: c.digest32()?,
                     trader_devid: c.digest32()?,
+                    trader_economic_position: c.u64()?,
                     payment_evidence_addr: c.digest32()?,
                 },
             ))

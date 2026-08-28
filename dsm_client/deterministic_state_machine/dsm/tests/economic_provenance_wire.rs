@@ -231,6 +231,7 @@ fn all_six_sources() -> Vec<CreditSource> {
             vault_id: VAULT,
             parent_sequence: 12,
             x: [0x55; 32],
+            owner_economic_position: 6,
             reserve_consumption_evidence_addr: [0x66; 32],
         }),
         CreditSource::ValidatedDlvSettlementPayment(CreditSourceValidatedDlvSettlementPayment {
@@ -240,6 +241,7 @@ fn all_six_sources() -> Vec<CreditSource> {
             parent_sequence: 12,
             trader_genesis: [0x88; 32],
             trader_devid: [0x99; 32],
+            trader_economic_position: 7,
             payment_evidence_addr: [0xAB; 32],
         }),
         CreditSource::VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry {
@@ -472,4 +474,46 @@ fn a_witness_that_survived_the_wire_still_verifies_against_a_real_tree() {
         post_root,
         "a witness must still recompute its post-root after a wire round trip"
     );
+}
+
+// ── 3.6: the 0x0026/0x0027 schema burn ─────────────────────────────────────
+
+/// Schema 1 of both DLV credit-source classes is BURNED (owner ruling
+/// 2026-08-28): it carried no locator for the peer's validated economic
+/// ancestry, and zero producers ever shipped it. The strict decoder must
+/// refuse schema-1 bytes outright — one (class, schema), one meaning.
+#[test]
+fn the_burned_dlv_source_schemas_are_refused() {
+    let consumption = CreditSource::DlvReserveConsumption(CreditSourceDlvReserveConsumption {
+        credit_mutation_index: 1,
+        vault_id: VAULT,
+        parent_sequence: 12,
+        x: [0x55; 32],
+        owner_economic_position: 6,
+        reserve_consumption_evidence_addr: [0x66; 32],
+    });
+    let payment =
+        CreditSource::ValidatedDlvSettlementPayment(CreditSourceValidatedDlvSettlementPayment {
+            credit_mutation_index: 2,
+            vault_id: VAULT,
+            settlement_receipt_id: [0x77; 32],
+            parent_sequence: 12,
+            trader_genesis: [0x88; 32],
+            trader_devid: [0x99; 32],
+            trader_economic_position: 7,
+            payment_evidence_addr: [0xAB; 32],
+        });
+    for source in [consumption, payment] {
+        let bytes = source.encode().expect("schema 2 encodes");
+        // The envelope is class u16 BE ‖ schema u16 BE; verify schema 2 is
+        // what shipped, then stamp the burned schema 1 over it.
+        assert_eq!(&bytes[2..4], &2u16.to_be_bytes(), "schema 2 is canonical");
+        assert_eq!(decode_credit_source(&bytes).expect("round trip"), source);
+        let mut burned = bytes.clone();
+        burned[2..4].copy_from_slice(&1u16.to_be_bytes());
+        assert!(
+            decode_credit_source(&burned).is_err(),
+            "burned schema-1 bytes must be refused"
+        );
+    }
 }
