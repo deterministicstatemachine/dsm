@@ -753,8 +753,9 @@ impl CoreSDK {
             | DsmOperation::DlvClaim { signature, .. }
             | DsmOperation::DlvInvalidate { signature, .. }
             | DsmOperation::DlvSettle { signature, .. }
-            | DsmOperation::DlvOwnerApply { signature, .. }
-            | DsmOperation::DlvClose { signature, .. } => {
+            | DsmOperation::DlvClose { signature, .. }
+            | DsmOperation::DlvCreateFundedV2 { signature, .. }
+            | DsmOperation::DlvOwnerApplyV2 { signature, .. } => {
                 *signature = sig;
             }
             // FAIL, never return unsigned. This arm used to `log::warn!` and hand back

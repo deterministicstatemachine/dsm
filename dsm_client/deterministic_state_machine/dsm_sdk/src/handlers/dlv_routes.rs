@@ -612,31 +612,41 @@ impl AppRouterImpl {
             }
         }
 
-        // Kept for the posted-mode advertisement further down, which describes
-        // a single locked asset. Display only.
-        let token_id_str_opt: Option<String> = funding.first().map(|(pc, _)| display_name_for(pc));
-        let locked_u64: u64 = funding.first().map(|(_, a)| *a).unwrap_or(0);
         let policy_commit_opt: Option<[u8; 32]> = funding.first().map(|(pc, _)| *pc);
 
-        // Build Operation::DlvCreate.
-        let locked_balance_opt = if locked_u64 > 0 {
-            Some(dsm::types::token_types::Balance::from_state(
-                locked_u64,
-                reference_state.hash,
-            ))
+        // Build the creation operation. A funded (AMM) vault is a
+        // DlvCreateFundedV2 — both legs + fee in the SIGNED operation, signed
+        // LOCALLY by this device (the legacy caller-supplied signature died
+        // with the legacy value-bearing DlvCreate, owner directive
+        // 2026-08-28). A tokenless vault stays the state-only DlvCreate.
+        let op = if amm_pair.is_some() {
+            let unsigned = dsm::types::operations::Operation::DlvCreateFundedV2 {
+                vault_id: vault_id.to_vec(),
+                creator_public_key: req.creator_public_key.clone(),
+                parameters_hash: draft.parameters_hash.clone(),
+                fulfillment_condition: spec.fulfillment_bytes.clone(),
+                leg_a_policy_commit: funding[0].0,
+                leg_a_amount: funding[0].1,
+                leg_b_policy_commit: funding[1].0,
+                leg_b_amount: funding[1].1,
+                fee_bps: amm_fee_bps,
+                signature: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            };
+            match self.core_sdk.sign_operation_sphincs(unsigned) {
+                Ok(signed) => signed,
+                Err(e) => return err(format!("dlv.create: sign funded create: {e}")),
+            }
         } else {
-            None
-        };
-        let op = dsm::types::operations::Operation::DlvCreate {
-            vault_id: vault_id.to_vec(),
-            creator_public_key: req.creator_public_key.clone(),
-            parameters_hash: draft.parameters_hash.clone(),
-            fulfillment_condition: spec.fulfillment_bytes.clone(),
-            intended_recipient: intended_recipient_opt.clone(),
-            token_id: token_id_str_opt.as_ref().map(|s| s.as_bytes().to_vec()),
-            locked_amount: locked_balance_opt,
-            signature: req.signature.clone(),
-            mode: dsm::types::operations::TransactionMode::Unilateral,
+            dsm::types::operations::Operation::DlvCreate {
+                vault_id: vault_id.to_vec(),
+                creator_public_key: req.creator_public_key.clone(),
+                parameters_hash: draft.parameters_hash.clone(),
+                fulfillment_condition: spec.fulfillment_bytes.clone(),
+                intended_recipient: intended_recipient_opt.clone(),
+                signature: req.signature.clone(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            }
         };
 
         // Actor self-loop routing.
@@ -934,19 +944,7 @@ impl AppRouterImpl {
         }
 
         // Persist vault state in the DLV manager.
-        if let Err(e) = dlv_manager
-            .finalize_vault(
-                draft,
-                &req.signature,
-                token_id_str_opt.as_deref(),
-                if locked_u64 > 0 {
-                    Some(locked_u64)
-                } else {
-                    None
-                },
-            )
-            .await
-        {
+        if let Err(e) = dlv_manager.finalize_vault(draft, &req.signature).await {
             return err(format!("dlv.create: finalize_vault failed: {e}"));
         }
 
@@ -1487,19 +1485,67 @@ impl AppRouterImpl {
             Err(e) => return err(format!("dlv.reconcile: consumption lookup failed: {e}")),
         }
 
-        let op = dsm::types::operations::Operation::DlvOwnerApply {
+        // v2: the signed operation binds the exact PARENT vault state this
+        // settlement consumed. The composition chain already holds it: before
+        // the settlement folds locally the composed head IS the parent
+        // (`composed.c_n`); after it folds, the successor names its parent as
+        // `parent_state_commitment`. Any other composed generation means this
+        // device's view cannot name the consumed parent — refuse rather than
+        // guess.
+        let parent_binding: [u8; 32] = {
+            let composed = match compose_own_vault(&vault_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.reconcile: cannot compose the vault to name the consumed parent                          state: {e}"
+                    ))
+                }
+            };
+            if composed.sequence == receipt.trade.parent_sequence {
+                composed.c_n
+            } else if let Some((_, c_n)) = composed
+                .folded_parent_bindings
+                .iter()
+                .find(|(seq, _)| *seq == receipt.trade.parent_sequence)
+            {
+                // The fold consumed this exact historical parent on the way
+                // to the frontier — an LP reconciling N generations back
+                // names it from the chain the composition itself verified.
+                *c_n
+            } else {
+                return err(format!(
+                    "dlv.reconcile: the composed chain (frontier {}) never consumed \
+                     generation {} — this device's view cannot name the parent this \
+                     settlement consumed; refusing",
+                    composed.sequence, receipt.trade.parent_sequence,
+                ));
+            }
+        };
+        let op = dsm::types::operations::Operation::DlvOwnerApplyV2 {
             vault_id: vault_id.to_vec(),
             settlement_receipt_id: receipt.receipt_id,
             pending_pointer_x: x,
             parent_sequence: receipt.trade.parent_sequence,
             new_sequence: receipt.trade.new_sequence,
+            parent_binding,
             input_policy_commit: receipt.trade.input_policy_commit,
             output_policy_commit: receipt.trade.output_policy_commit,
             input_amount: receipt.trade.input_amount,
             output_amount: receipt.trade.output_amount,
-            // Signed below. Empty here was previously the ONLY value this field could
-            // hold — `with_signature` silently ignored the variant — so the owner's root
-            // committed an unauthorized record of an authorized settlement.
+            fee_bps: {
+                // The vault's fee comes from the owner's OWN record — never
+                // the receipt.
+                match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
+                    Ok(Some(rec)) => rec.fee_bps,
+                    Ok(None) => {
+                        return err(
+                            "dlv.reconcile: no local record of this vault — this device did                              not create it"
+                                .into(),
+                        )
+                    }
+                    Err(e) => return err(format!("dlv.reconcile: record lookup failed: {e}")),
+                }
+            },
             signature: Vec::new(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
@@ -1508,7 +1554,11 @@ impl AppRouterImpl {
         // inside the committed operation bytes and therefore inside the chain tip.
         let op = match self.core_sdk.sign_operation_sphincs(op) {
             Ok(signed) => signed,
-            Err(e) => return err(format!("dlv.reconcile: failed to sign DlvOwnerApply: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: failed to sign DlvOwnerApplyV2: {e}"
+                ))
+            }
         };
         // The vault's pair + fee come from the owner's OWN record of the vault it
         // created — never from the receipt — so `advance` can derive the

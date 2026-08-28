@@ -244,7 +244,7 @@ impl DlvSdk {
         // Create the vault (manager owns CEK/KEK & proof commitments)
         let (vault_id, _op) = self
             .manager
-            .finalize_vault(draft, &creator_signature, None, None)
+            .finalize_vault(draft, &creator_signature)
             .await?; // Produce a shareable post
         let vault_post_data = self
             .manager
