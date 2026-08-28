@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! REACHABILITY PROOF for the `MissingRelease` sender-debit path (issue #639).
+//! FAIL-CLOSED PROOF for bearer staging failure (supersedes the issue-#639
+//! `MissingRelease` reachability proof).
 //!
-//! When offline-bearer staging fails, `bilateral_ble_handler.rs:3613-3620` logs and sets
-//! `staged_bearer = None`. `offline_spend` then stays `None`, so the branch at `:3656`
-//! does NOT clear `sender_deltas` — the sender proceeds carrying an ordinary online
-//! `Debit`. The receiver, for a bearer-required operation, then rejects with
-//! `OfflineRecover::MissingRelease` (`anchor_accept.rs:262-264`).
-//!
-//! The question this test answers is NOT whether that `Debit` exists on the in-flight
-//! object — it does, and that is fine. It is whether the `Debit` can cross into
-//! AUTHORITATIVE state while the receiver credits nothing. So every assertion reads
-//! DURABLE state back out of the database, never the prepared object.
+//! Historically, when offline-bearer staging failed the sender FELL OPEN: it proceeded
+//! carrying an ordinary online `Debit` with an empty release, and only the receiver's
+//! `OfflineRecover::MissingRelease` refusal (`anchor_accept.rs`, unit-tested there)
+//! stranded it. The 2026-08-28 bearer-only cut deleted that fallback: staging failure is
+//! now a NAMED sender-side refusal inside the confirm build, and the unsafe confirm is
+//! unconstructible. This test drives the same live no-appliance path and proves BOTH
+//! halves: the refusal fires (reachability), and nothing the sender owns crosses into
+//! AUTHORITATIVE state. Every assertion reads DURABLE state back out of the database,
+//! never the prepared object.
 //!
 //! WHY THIS IS AN INTEGRATION TEST, NOT A UNIT TEST. `tests/` compiles the crate WITHOUT
 //! `cfg(test)`, so `core_sdk.rs:2528`'s `#[cfg(not(test))] hardware_appliance_or_fail`
@@ -203,11 +203,12 @@ fn snapshot_sender() -> DurableSenderState {
 
 /// THE PROOF.
 ///
-/// Staging fails, the receiver rejects `MissingRelease`, and NOTHING the sender owns
-/// moves: same head root, same balance, no new chain-state row, session never committed.
+/// Staging fails, the SENDER refuses to build the confirm (the deleted fail-open path
+/// used to proceed here), and NOTHING the sender owns moves: same head root, same
+/// balance, no new chain-state row, session never committed.
 #[tokio::test]
 #[serial]
-async fn missing_release_leaves_no_sender_debit_in_authoritative_state() {
+async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
     let sender_kp = keypair(0xA1);
     let receiver_kp = keypair(0xB2);
 
@@ -277,33 +278,19 @@ async fn missing_release_leaves_no_sender_debit_in_authoritative_state() {
     );
     // Absorbing the accept IS what builds the confirm (it drives send_bilateral_confirm
     // internally). Staging fails inside it — no anchor appliance, and `tests/` compiles the
-    // crate without cfg(test) — so the ordinary online Debit survives onto the prepared
-    // object and the offline release rides EMPTY.
-    let (confirm_bytes, _) = sender
+    // crate without cfg(test) — and the 2026-08-28 bearer-only cut makes that a NAMED
+    // sender-side refusal: the confirm is never built, no online Debit survives anywhere,
+    // and no bytes reach the receiver. (The receiver-side MissingRelease refusal that used
+    // to strand the fail-open confirm remains unit-tested in `anchor_accept.rs`.)
+    let err = sender
         .handle_prepare_response(&accept_bytes)
         .await
-        .expect("confirm builds even though staging failed");
-
-    // --- the receiver refuses ---
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        RECEIVER.to_vec(),
-        receiver_kp.public_key.clone(),
-        GENESIS.to_vec(),
-        vec![0u8; 32],
-    );
-    let verdict = receiver.handle_confirm_request(&confirm_bytes).await;
-    let err = verdict.expect_err("a bearer-required op with an empty release MUST be refused");
+        .expect_err("a bearer send whose staging failed MUST refuse at the sender");
     let msg = format!("{err}");
-    // EXACT denial, not a family of them. `OfflineRecover::into_dsm_error` renders
-    // "offline transfer rejected (recover online): {variant:?}", so this pins the variant
-    // to MissingRelease specifically. A loose match here would let the test pass on
-    // AnchorNotEnrolled, Malformed, or a Predicate rejection — none of which exercise the
-    // path where a Debit was built and then stranded.
     assert!(
-        msg.contains("MissingRelease"),
-        "the refusal must be MissingRelease specifically — the release rode EMPTY because \
-         staging failed. Any other variant means the test never reached the stranded-debit \
-         path. Got: {msg}"
+        msg.contains("offline-bearer staging failed"),
+        "the refusal must be the named staging error — any other failure means the test \
+         never reached the fail-closed seam. Got: {msg}"
     );
 
     // --- THE FOUR ASSERTIONS, all on durable state ---
