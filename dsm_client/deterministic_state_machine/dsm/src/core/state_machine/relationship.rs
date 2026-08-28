@@ -289,6 +289,8 @@ impl RelationshipStatePair {
                         Operation::DlvInvalidate { .. } => b"dlv_inv_",
                         Operation::DlvSettle { .. } => b"dlv_set_",
                         Operation::DlvOwnerApply { .. } => b"dlv_app_",
+                        Operation::DlvCreateFundedV2 { .. } => b"dlv_cf2_",
+                        Operation::DlvOwnerApplyV2 { .. } => b"dlv_ap2_",
                         Operation::DlvClose { .. } => b"dlv_cls_",
                     };
 

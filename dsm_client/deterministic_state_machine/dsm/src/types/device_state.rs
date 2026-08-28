@@ -695,10 +695,10 @@ fn validate_conservation(
         // trader's advance, and the fee accrues inside the reserves as LP yield,
         // so the owner's spendable balance is untouched. Only reserve leaves
         // move, and those are checked by `validate_vault_reserve_conservation`.
-        Operation::DlvOwnerApply { .. } => {
+        Operation::DlvOwnerApply { .. } | Operation::DlvOwnerApplyV2 { .. } => {
             if !deltas.is_empty() {
                 return Err(DsmError::invalid_operation(
-                    "conservation: DlvOwnerApply records a verified receipt and must not move balances",
+                    "conservation: an owner apply records a verified receipt and must not move balances",
                 ));
             }
             Ok(())
@@ -731,6 +731,18 @@ fn validate_conservation(
             if !deltas.is_empty() {
                 return Err(DsmError::invalid_operation(
                     "conservation: DlvCreate funds a vault through reserve leaves, not balance deltas",
+                ));
+            }
+            Ok(())
+        }
+        // The funded v2 create states BOTH legs in the signed operation; the
+        // value still moves through the `Fund` reserve mutation (balances
+        // debited inside that arm), never through deltas.
+        Operation::DlvCreateFundedV2 { .. } => {
+            if !deltas.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvCreateFundedV2 funds a vault through reserve leaves, not \
+                     balance deltas",
                 ));
             }
             Ok(())
@@ -1500,6 +1512,8 @@ impl DeviceState {
             Operation::DlvSettle { .. }
                 | Operation::DlvOwnerApply { .. }
                 | Operation::DlvClose { .. }
+                | Operation::DlvCreateFundedV2 { .. }
+                | Operation::DlvOwnerApplyV2 { .. }
         ) {
             let op_name = operation.get_operation_type();
             crate::core::state_machine::transition::verify_operation_signature(
@@ -1713,10 +1727,52 @@ impl DeviceState {
                 legs: funding_legs_in,
                 vault_sequence: *vault_sequence,
             };
-            if !matches!(operation, Operation::DlvCreate { .. }) {
-                return Err(DsmError::invalid_operation(
-                    "advance: only DlvCreate may encumber reserves",
-                ));
+            // Only a value-bearing create may encumber reserves. The exact
+            // tokenless legacy shape classifies `EconomicEffect::None` (owner
+            // ruling 2026-08-28), and `None` must be IMPOSSIBLE for any
+            // transition that moves reserve state — so a tokenless DlvCreate
+            // carrying a Fund mutation is refused here, structurally.
+            match &operation {
+                Operation::DlvCreate {
+                    token_id: Some(_), ..
+                } => {}
+                Operation::DlvCreate { .. } => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: a tokenless DlvCreate is state-only and may not encumber \
+                         reserves",
+                    ));
+                }
+                Operation::DlvCreateFundedV2 {
+                    vault_id: op_vault,
+                    leg_a_policy_commit,
+                    leg_a_amount,
+                    leg_b_policy_commit,
+                    leg_b_amount,
+                    ..
+                } => {
+                    // The SIGNED operation states the complete funding; the
+                    // mutation must equal it field-for-field (the Withdraw
+                    // discipline) — unsigned mutation metadata never decides
+                    // what moves.
+                    let op_legs = [
+                        (*leg_a_policy_commit, *leg_a_amount),
+                        (*leg_b_policy_commit, *leg_b_amount),
+                    ];
+                    if op_vault.as_slice() != funding.vault_id.as_slice()
+                        || funding.legs != op_legs
+                        || funding.vault_sequence != 0
+                    {
+                        return Err(DsmError::invalid_operation(
+                            "advance: the Fund mutation does not equal the signed \
+                             DlvCreateFundedV2 (vault, legs or sequence) — refusing",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: only a value-bearing vault creation may encumber reserves",
+                    ));
+                }
             }
             // PAIR COMPLETENESS. An AMM vault's legs ARE its pair — exactly the
             // two assets the vault-state digest is derived over. A third asset,
@@ -1814,10 +1870,43 @@ impl DeviceState {
             pair,
         }) = &reserve_mutation
         {
-            if !matches!(operation, Operation::DlvOwnerApply { .. }) {
-                return Err(DsmError::invalid_operation(
-                    "advance: only DlvOwnerApply may apply a settlement to reserves",
-                ));
+            match &operation {
+                Operation::DlvOwnerApply { .. } => {}
+                Operation::DlvOwnerApplyV2 {
+                    vault_id: op_vault,
+                    parent_sequence: op_parent,
+                    new_sequence: op_new,
+                    input_policy_commit: op_in_pc,
+                    output_policy_commit: op_out_pc,
+                    input_amount: op_in_amt,
+                    output_amount: op_out_amt,
+                    ..
+                } => {
+                    // The SIGNED v2 operation states the complete reserve
+                    // effect; the mutation must equal it field-for-field (the
+                    // Withdraw discipline) — the legacy arm has no such check
+                    // because the legacy op lacks the fields, which is exactly
+                    // why it is UnsupportedValueTransition in the economic
+                    // profile.
+                    if op_vault.as_slice() != apply_vault.as_slice()
+                        || op_parent != parent_sequence
+                        || op_new != new_sequence
+                        || op_in_pc != input_policy_commit
+                        || op_out_pc != output_policy_commit
+                        || op_in_amt != input_amount
+                        || op_out_amt != output_amount
+                    {
+                        return Err(DsmError::invalid_operation(
+                            "advance: the ApplySettlement mutation does not equal the signed \
+                             DlvOwnerApplyV2 (vault, legs, amounts or generation) — refusing",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(DsmError::invalid_operation(
+                        "advance: only an owner apply may apply a settlement to reserves",
+                    ));
+                }
             }
             if input_policy_commit == output_policy_commit {
                 return Err(DsmError::invalid_operation(
@@ -3344,6 +3433,44 @@ mod tests {
         })
     }
 
+    /// A signed `DlvCreateFundedV2` for `vault` with the exact legs the `Fund`
+    /// mutation will carry — the 3.6 funded-creation shape, cross-checked
+    /// field-for-field by `advance`.
+    fn dlv_create_funded(vault: [u8; 32], a: [u8; 32], ra: u64, b: [u8; 32], rb: u64) -> Operation {
+        sign_op(Operation::DlvCreateFundedV2 {
+            vault_id: vault.to_vec(),
+            creator_public_key: pubkey(),
+            parameters_hash: vec![0u8; 32],
+            fulfillment_condition: vec![],
+            leg_a_policy_commit: a,
+            leg_a_amount: ra,
+            leg_b_policy_commit: b,
+            leg_b_amount: rb,
+            fee_bps: 30,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        })
+    }
+
+    /// A signed VALUE-BEARING legacy `DlvCreate` (`token_id: Some`). Still
+    /// accepted by the `Fund` arm until the PR5 cutover deletes the legacy
+    /// AMM construction — and the shape that keeps the mutation-only refusal
+    /// paths (pair completeness etc.) independently testable, since the v2 op
+    /// cross-check would fire first.
+    fn dlv_create_valuebearing_legacy(vault: [u8; 32]) -> Operation {
+        sign_op(Operation::DlvCreate {
+            vault_id: vault.to_vec(),
+            creator_public_key: pubkey(),
+            parameters_hash: vec![0u8; 32],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
+            token_id: Some(b"ERA".to_vec()),
+            locked_amount: Some(crate::types::token_types::Balance::from_state(1, [0u8; 32])),
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        })
+    }
+
     /// The vault's canonical pair + a 30 bps fee, the way production builds it
     /// from `CanonicalPair`. `a` must be lex-lower than `b`.
     fn vault_pair(a: [u8; 32], b: [u8; 32]) -> VaultStatePair {
@@ -3393,7 +3520,7 @@ mod tests {
             .advance(
                 rk,
                 dev.devid,
-                dlv_create(vault),
+                dlv_create_funded(vault, era, 60, rigb, 10),
                 entropy(1),
                 None,
                 &[],
@@ -3509,7 +3636,7 @@ mod tests {
         let err = spent.advance(
             rk,
             spent.devid,
-            dlv_create(vault),
+            dlv_create_funded(vault, era, 60, rigb, 10),
             entropy(2),
             None,
             &[],
@@ -3563,7 +3690,7 @@ mod tests {
             .advance(
                 rk,
                 dev.devid,
-                dlv_create(vault),
+                dlv_create_funded(vault, era, 60, rigb, 10),
                 entropy(1),
                 None,
                 &[],
@@ -3585,7 +3712,7 @@ mod tests {
         let err = funded.advance(
             rk,
             funded.devid,
-            dlv_create(vault),
+            dlv_create_funded(vault, era, 10, rigb, 5),
             entropy(2),
             None,
             &[],
@@ -3595,7 +3722,7 @@ mod tests {
             Some(VaultReserveMutation::Fund {
                 vault_id: vault,
                 legs: vec![(era, 10), (rigb, 5)],
-                vault_sequence: 1,
+                vault_sequence: 0,
                 pair: vault_pair(era, rigb),
             }),
         );
@@ -5721,7 +5848,7 @@ mod tests {
             .advance(
                 rk,
                 dev.devid,
-                dlv_create(vault),
+                dlv_create_funded(vault, era, 10_000, rigb, 5_000),
                 entropy(1),
                 None,
                 &[],
@@ -5846,7 +5973,7 @@ mod tests {
             let err = dev.advance(
                 rk,
                 dev.devid,
-                dlv_create(vault),
+                dlv_create_valuebearing_legacy(vault),
                 entropy(1),
                 None,
                 &[],
@@ -5890,7 +6017,7 @@ mod tests {
             .advance(
                 rk,
                 owner.devid,
-                dlv_create(vault),
+                dlv_create_funded(vault, era, 10_000, rigb, 5_000),
                 entropy(1),
                 None,
                 &[],
@@ -6027,7 +6154,7 @@ mod tests {
             .advance(
                 rk,
                 dev.devid,
-                dlv_create(vault),
+                dlv_create_funded(vault, era, ra, rigb, rb),
                 entropy(1),
                 None,
                 &[],
@@ -6086,6 +6213,226 @@ mod tests {
             new_sequence: new,
             pair: vault_pair(a, b),
         }
+    }
+
+    /// 3.6: the v2 vault operations are SIGNED value operations — an unsigned
+    /// one is refused by the advance signature gate, exactly like
+    /// `DlvSettle`/`DlvClose`.
+    #[test]
+    fn an_unsigned_v2_vault_operation_is_refused_by_advance() {
+        let mut dev = fresh_device(0xC9);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 1_000);
+        dev.balances.insert(rigb, 1_000);
+        let vault = [0x79u8; 32];
+        let (rk, tip) = self_loop(&dev);
+        let unsigned = Operation::DlvCreateFundedV2 {
+            vault_id: vault.to_vec(),
+            creator_public_key: pubkey(),
+            parameters_hash: vec![0u8; 32],
+            fulfillment_condition: vec![],
+            leg_a_policy_commit: era,
+            leg_a_amount: 60,
+            leg_b_policy_commit: rigb,
+            leg_b_amount: 10,
+            fee_bps: 30,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        };
+        let err = dev.advance(
+            rk,
+            dev.devid,
+            unsigned,
+            entropy(1),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                legs: vec![(era, 60), (rigb, 10)],
+                vault_sequence: 0,
+                pair: vault_pair(era, rigb),
+            }),
+        );
+        let err = format!("{}", err.expect_err("unsigned v2 create must be refused"));
+        assert!(
+            err.contains("signature"),
+            "the refusal must be the signature gate, got: {err}"
+        );
+    }
+
+    /// Owner ruling (2026-08-28): the exact tokenless legacy shape classifies
+    /// `EconomicEffect::None`, and `None` must be impossible for a transition
+    /// that moves reserve state — so a tokenless `DlvCreate` carrying a Fund
+    /// mutation is refused structurally.
+    #[test]
+    fn a_tokenless_legacy_create_cannot_encumber_reserves() {
+        let mut dev = fresh_device(0xCA);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 1_000);
+        dev.balances.insert(rigb, 1_000);
+        let vault = [0x7Au8; 32];
+        let (rk, tip) = self_loop(&dev);
+        let err = dev.advance(
+            rk,
+            dev.devid,
+            dlv_create(vault),
+            entropy(1),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                legs: vec![(era, 60), (rigb, 10)],
+                vault_sequence: 0,
+                pair: vault_pair(era, rigb),
+            }),
+        );
+        let err = format!("{}", err.expect_err("tokenless create must not encumber"));
+        assert!(
+            err.contains("state-only"),
+            "the refusal must name the tokenless rule, got: {err}"
+        );
+    }
+
+    /// MUTATION-VS-OPERATION: the Fund mutation must equal the signed
+    /// `DlvCreateFundedV2` field-for-field — unsigned mutation metadata never
+    /// decides what moves.
+    #[test]
+    fn a_fund_mutation_that_disagrees_with_the_signed_v2_create_is_refused() {
+        let mut dev = fresh_device(0xCB);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        dev.balances.insert(era, 1_000);
+        dev.balances.insert(rigb, 1_000);
+        let vault = [0x7Bu8; 32];
+        let (rk, tip) = self_loop(&dev);
+        let err = dev.advance(
+            rk,
+            dev.devid,
+            dlv_create_funded(vault, era, 60, rigb, 10),
+            entropy(1),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id: vault,
+                // One unit more than the SIGNED leg.
+                legs: vec![(era, 61), (rigb, 10)],
+                vault_sequence: 0,
+                pair: vault_pair(era, rigb),
+            }),
+        );
+        let err = format!("{}", err.expect_err("mutation/op mismatch must be refused"));
+        assert!(
+            err.contains("does not equal the signed DlvCreateFundedV2"),
+            "the refusal must be the cross-check, got: {err}"
+        );
+    }
+
+    /// Same discipline for the v2 owner apply: `ApplySettlement` is DERIVED
+    /// from the signed operation, and any disagreement is refused before any
+    /// reserve state is consulted.
+    #[test]
+    fn an_apply_mutation_that_disagrees_with_the_signed_v2_apply_is_refused() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xCE, era, rigb, 10_000, 5_000);
+        let op = sign_op(Operation::DlvOwnerApplyV2 {
+            vault_id: vault.to_vec(),
+            settlement_receipt_id: [0x21; 32],
+            pending_pointer_x: [0x22; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_binding: [0x23; 32],
+            input_policy_commit: era,
+            output_policy_commit: rigb,
+            input_amount: 100,
+            output_amount: 90,
+            fee_bps: 30,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        });
+        let err = funded.advance(
+            rk,
+            funded.devid,
+            op,
+            entropy(2),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(VaultReserveMutation::ApplySettlement {
+                vault_id: vault,
+                input_policy_commit: era,
+                // One unit more than the SIGNED input.
+                input_amount: 101,
+                output_policy_commit: rigb,
+                output_amount: 90,
+                parent_sequence: 0,
+                new_sequence: 1,
+                pair: vault_pair(era, rigb),
+            }),
+        );
+        let err = format!("{}", err.expect_err("mutation/op mismatch must be refused"));
+        assert!(
+            err.contains("does not equal the signed DlvOwnerApplyV2"),
+            "the refusal must be the cross-check, got: {err}"
+        );
+    }
+
+    /// And the v2 apply ADVANCES when the mutation equals the signed
+    /// operation — the positive control for the two refusals above.
+    #[test]
+    fn a_v2_owner_apply_advances_when_mutation_equals_the_signed_operation() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xCF, era, rigb, 10_000, 5_000);
+        let op = sign_op(Operation::DlvOwnerApplyV2 {
+            vault_id: vault.to_vec(),
+            settlement_receipt_id: [0x21; 32],
+            pending_pointer_x: [0x22; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_binding: [0x23; 32],
+            input_policy_commit: era,
+            output_policy_commit: rigb,
+            input_amount: 100,
+            output_amount: 90,
+            fee_bps: 30,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        });
+        let out = funded
+            .advance(
+                rk,
+                funded.devid,
+                op,
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::ApplySettlement {
+                    vault_id: vault,
+                    input_policy_commit: era,
+                    input_amount: 100,
+                    output_policy_commit: rigb,
+                    output_amount: 90,
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair: vault_pair(era, rigb),
+                }),
+            )
+            .expect("a matching v2 apply advances")
+            .new_device_state;
+        assert_eq!(out.vault_reserve(&vault, &era), 10_100);
+        assert_eq!(out.vault_reserve(&vault, &rigb), 4_910);
     }
 
     /// THE CLOSE: the complete remaining reserve set returns to spendable
@@ -6155,7 +6502,7 @@ mod tests {
         let refund = after.advance(
             rk,
             after.devid,
-            dlv_create(vault),
+            dlv_create_funded(vault, era, 10, rigb, 5),
             entropy(4),
             None,
             &[],
@@ -6165,7 +6512,7 @@ mod tests {
             Some(VaultReserveMutation::Fund {
                 vault_id: vault,
                 legs: vec![(era, 10), (rigb, 5)],
-                vault_sequence: 2,
+                vault_sequence: 0,
                 pair,
             }),
         );

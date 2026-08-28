@@ -235,7 +235,7 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
         &p.b.genesis,
         &p.b.device_id,
         &econ_op_id,
-        &pre_balances,
+        &dsm::economic::write_set::EconomicPreState::balances_only(&pre_balances),
         &mut tree,
         &dsm::economic::write_set::CreditSourceFacts::PeerDebit {
             peer_genesis: p.a.genesis,
