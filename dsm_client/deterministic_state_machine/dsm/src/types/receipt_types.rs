@@ -163,15 +163,19 @@ fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
 
 /// `ReceiptCountersignB` (ADR 0003 return leg): the four B-side receipt
 /// fields, two 32-byte references, and the recipient's authenticated
-/// canonical pair (`b_parent_tip`, `b_child_tip`). Every field is required.
-const RECEIPT_COUNTERSIGN_B_TAGS: u32 = 8;
+/// canonical pair (`b_parent_tip`, `b_child_tip`). Fields 1-8 are required;
+/// field 9 (3.5b PR4: the recipient economic RELEASE content address) is
+/// OPTIONAL at the wire layer — an acceptance BUNDLE's countersign carries
+/// none (provenance never carries finalization authority), while the sender
+/// separately REFUSES a finalize delta without it.
+const RECEIPT_COUNTERSIGN_B_TAGS: u32 = 9;
 
 fn receipt_countersign_b_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
         1..=2 => Some(FieldLimit::Fixed(32)),
         3..=5 => Some(FieldLimit::Max(65_535)),
         6 => Some(FieldLimit::Max(2_048)),
-        7..=8 => Some(FieldLimit::Fixed(32)),
+        7..=9 => Some(FieldLimit::Fixed(32)),
         _ => None,
     }
 }
@@ -335,7 +339,7 @@ fn validate_receipt_countersign_b_wire(bytes: &[u8]) -> Result<(), DsmError> {
         "countersign wire",
         RECEIPT_COUNTERSIGN_B_TAGS,
         receipt_countersign_b_field_limit,
-        |_| true,
+        |tag| tag != 9,
     )
 }
 
@@ -1682,6 +1686,7 @@ mod tests {
             kyber_ct_b: b.kyber_ct_b.clone(),
             b_parent_tip: vec![0x77; 32],
             b_child_tip: vec![0x78; 32],
+            recipient_economic_release_addr: Vec::new(),
         }
         .encode_to_vec()
     }

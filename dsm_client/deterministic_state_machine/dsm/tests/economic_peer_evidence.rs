@@ -117,6 +117,7 @@ struct AcceptanceFixture {
     recipient_ak_pk: Vec<u8>,
     transfer_bytes: Vec<u8>,
     child_tip: [u8; 32],
+    b_pair: ([u8; 32], [u8; 32]),
     steps: std::collections::HashMap<[u8; 32], Vec<u8>>,
 }
 
@@ -175,6 +176,7 @@ fn acceptance_fixture() -> AcceptanceFixture {
         kyber_ct_b: vec![0x0B; 32],
         b_parent_tip: b_parent.to_vec(),
         b_child_tip: b_child.to_vec(),
+        recipient_economic_release_addr: Vec::new(),
     };
 
     let bundle = generated::PeerTransferAcceptanceEvidenceV1 {
@@ -190,6 +192,7 @@ fn acceptance_fixture() -> AcceptanceFixture {
         recipient_ak_pk,
         transfer_bytes,
         child_tip,
+        b_pair: (b_parent, b_child),
         steps: std::collections::HashMap::new(),
     }
 }
@@ -219,6 +222,7 @@ fn verify_fixture(
         },
         expected_transfer,
         expected_child,
+        &fx.b_pair,
         &mut fetch,
     )
 }
@@ -255,6 +259,26 @@ fn a_valid_acceptance_bundle_verifies_and_every_binding_is_load_bearing() {
     assert!(verify_fixture(&tampered, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip).is_err());
 }
 
+#[test]
+fn the_bundle_cannot_self_select_its_b_side_pair() {
+    // Correction 5: the expected B pair comes from the exact recipient
+    // successor under validation — a bundle whose countersigned pair is
+    // anything else is refused, even though sig_b verifies over the pair the
+    // bundle itself declares.
+    let fx = acceptance_fixture();
+    let wrong = AcceptanceFixture {
+        b_pair: ([0x7E; 32], fx.b_pair.1),
+        ..acceptance_clone(&fx)
+    };
+    let err = verify_fixture(&wrong, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip)
+        .expect_err("a self-selected pair must be refused");
+    assert!(
+        matches!(&err, PeerLineageFailure::Invalid(m)
+            if m.contains("not the accepted recipient successor's pair")),
+        "got: {err:?}"
+    );
+}
+
 fn acceptance_clone(fx: &AcceptanceFixture) -> AcceptanceFixture {
     AcceptanceFixture {
         bundle_bytes: fx.bundle_bytes.clone(),
@@ -262,6 +286,7 @@ fn acceptance_clone(fx: &AcceptanceFixture) -> AcceptanceFixture {
         recipient_ak_pk: fx.recipient_ak_pk.clone(),
         transfer_bytes: fx.transfer_bytes.clone(),
         child_tip: fx.child_tip,
+        b_pair: fx.b_pair,
         steps: fx.steps.clone(),
     }
 }
@@ -307,6 +332,7 @@ fn ek_ancestry_walks_one_step_and_refuses_unhashed_substitution() {
         kyber_ct_b: vec![0x0B; 32],
         b_parent_tip: b_parent.to_vec(),
         b_child_tip: b_child.to_vec(),
+        recipient_economic_release_addr: Vec::new(),
     };
     bundle.receipt_countersign_b_bytes = countersign.encode_to_vec();
     bundle.b_prior_step_addr = Some(prior_addr.to_vec());
@@ -430,6 +456,9 @@ fn recip_ctx<'a>(ak: &'a [u8], set_id: &'a [u8; 32]) -> ProvenanceContext<'a> {
         network_id: b"dsm-testnet",
         proven_ak: ak,
         canonical_storage_set_id: *set_id,
+        // The consuming substrate's own pair; these fixtures refuse before
+        // the pair is compared, so a placeholder pair is inert here.
+        substrate_b_pair: Some(([0x7A; 32], [0x7B; 32])),
     }
 }
 

@@ -199,8 +199,11 @@ pub fn record_peer_validated(
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    // OR IGNORE, not REPLACE: re-validating the same coordinate must not
+    // reset `closure_q_durable` (correction 4 — durability is a separate,
+    // per-coordinate fact the walk itself never establishes).
     conn.execute(
-        "INSERT OR REPLACE INTO peer_economic_lineage(
+        "INSERT OR IGNORE INTO peer_economic_lineage(
              peer_genesis, peer_devid, validated_position, validated_root)
          VALUES(?1, ?2, ?3, ?4)",
         params![
@@ -223,4 +226,155 @@ pub fn clear_peer_lineage(peer_genesis: &[u8; 32], peer_devid: &[u8; 32]) -> Res
         params![peer_genesis.as_slice(), peer_devid.as_slice()],
     )?;
     Ok(())
+}
+
+// ── q-durability memos (3.5b PR4) ──────────────────────────────────────────
+
+/// Whether the ECONOMIC evidence closure behind this validated coordinate is
+/// q-durable. Economic DAG ONLY — says nothing about EK-step ancestry.
+pub fn peer_closure_q_durable(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    validated_position: u64,
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let flag: Option<i64> = conn
+        .query_row(
+            "SELECT closure_q_durable FROM peer_economic_lineage
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position = ?3",
+            params![
+                peer_genesis.as_slice(),
+                peer_devid.as_slice(),
+                validated_position as i64
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(flag == Some(1))
+}
+
+/// Mark the economic closure behind a validated coordinate q-durable — and
+/// everything below it (a validation at N consumed the closure of N's whole
+/// ancestry).
+pub fn mark_peer_closure_q_durable(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    validated_position: u64,
+) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.execute(
+        "UPDATE peer_economic_lineage SET closure_q_durable = 1
+         WHERE peer_genesis = ?1 AND peer_devid = ?2 AND validated_position <= ?3",
+        params![
+            peer_genesis.as_slice(),
+            peer_devid.as_slice(),
+            validated_position as i64
+        ],
+    )?;
+    Ok(())
+}
+
+/// Whether ONE exact immutable object is known q-durable on the canonical
+/// set. Per exact address, NEVER inferred from an economic-position
+/// watermark: EK ancestry advances independently of `R_econ`.
+pub fn is_addr_q_durable(namespace: &str, addr: &[u8; 32]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let hit: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM immutable_q_durable_memo WHERE namespace = ?1 AND addr = ?2",
+            params![namespace, addr.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(hit.is_some())
+}
+
+/// Record one exact immutable object as q-durable (verified on q members or
+/// republished to q by this verifier, member-attributed).
+pub fn record_addr_q_durable(namespace: &str, addr: &[u8; 32]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.execute(
+        "INSERT OR IGNORE INTO immutable_q_durable_memo(namespace, addr) VALUES(?1, ?2)",
+        params![namespace, addr.as_slice()],
+    )?;
+    Ok(())
+}
+
+// ── EK step chain (3.5b PR4) ───────────────────────────────────────────────
+
+/// The latest EK step for `(rel_key, signer)`: `(ordinal, step_addr, ek_pk)`.
+/// `None` means relationship genesis — the signer's chain head is its AK.
+pub fn latest_ek_step(
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+) -> Result<Option<(u64, [u8; 32], Vec<u8>)>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    latest_ek_step_with_conn(&conn, rel_key, signer_devid)
+}
+
+pub fn latest_ek_step_with_conn(
+    conn: &rusqlite::Connection,
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+) -> Result<Option<(u64, [u8; 32], Vec<u8>)>> {
+    let row = conn
+        .query_row(
+            "SELECT step_ordinal, step_addr, ek_pk FROM ek_cert_step_chain
+             WHERE rel_key = ?1 AND signer_devid = ?2
+             ORDER BY step_ordinal DESC LIMIT 1",
+            params![rel_key.as_slice(), signer_devid.as_slice()],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(match row {
+        Some((ord, addr, pk)) => Some((
+            u64::try_from(ord).map_err(|_| anyhow!("negative step ordinal"))?,
+            <[u8; 32]>::try_from(addr.as_slice())
+                .map_err(|_| anyhow!("step addr is not 32 bytes"))?,
+            pk,
+        )),
+        None => None,
+    })
+}
+
+/// Append one signer-chain step inside the caller's transaction. Idempotent
+/// on exact re-append of the same head (crash replay); a DIFFERENT addr at
+/// the same next ordinal is refused by the primary key.
+pub fn append_ek_step_with_conn(
+    conn: &rusqlite::Connection,
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+    step_addr: &[u8; 32],
+    ek_pk: &[u8],
+) -> Result<u64> {
+    let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
+    if let Some((ord, addr, _)) = &latest {
+        if addr == step_addr {
+            return Ok(*ord);
+        }
+    }
+    let next = latest.map(|(o, _, _)| o + 1).unwrap_or(0);
+    conn.execute(
+        "INSERT INTO ek_cert_step_chain(rel_key, signer_devid, step_ordinal, step_addr, ek_pk)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![
+            rel_key.as_slice(),
+            signer_devid.as_slice(),
+            next as i64,
+            step_addr.as_slice(),
+            ek_pk
+        ],
+    )?;
+    Ok(next)
 }

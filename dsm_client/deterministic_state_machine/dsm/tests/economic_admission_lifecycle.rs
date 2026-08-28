@@ -48,6 +48,7 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
             post_economic_root: [2; 32],
             accepted_substrate_addr: [4; 32],
             admission_manifest_addr: [5; 32],
+            embedded_parent: [0x5E; 32],
             c_dsm_plus: [6; 32],
         })
         .expect("prepared -> accepted")
@@ -210,6 +211,7 @@ fn bal(pc: [u8; 32], amount: u64) -> EconomicLeafState {
 // faucet claim, so it is the base fixture for every structural clause here.
 
 const C_DSM_PLUS: [u8; 32] = [0xCD; 32];
+const EMBEDDED_PARENT: [u8; 32] = [0xCE; 32];
 const SUBSTRATE_ADDR: [u8; 32] = [0xA4; 32];
 
 fn canonical_set_id() -> [u8; 32] {
@@ -324,7 +326,12 @@ impl ProvenanceResolver for OneTicket {
 }
 
 fn accepted_for(op: &Operation) -> AcceptedSubstrate {
-    AcceptedSubstrate::from_verified_dsm_successor(op.clone(), C_DSM_PLUS, SUBSTRATE_ADDR)
+    AcceptedSubstrate::from_verified_dsm_successor(
+        op.clone(),
+        C_DSM_PLUS,
+        EMBEDDED_PARENT,
+        SUBSTRATE_ADDR,
+    )
 }
 
 fn manifest_for(witness: &EconomicTransitionWitness) -> EconomicAdmissionManifest {
@@ -450,8 +457,12 @@ fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
         proof_of_authorization: Vec::new(),
         message: String::new(),
     };
-    let accepted =
-        AcceptedSubstrate::from_verified_dsm_successor(mint.clone(), C_DSM_PLUS, SUBSTRATE_ADDR);
+    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
+        mint.clone(),
+        C_DSM_PLUS,
+        EMBEDDED_PARENT,
+        SUBSTRATE_ADDR,
+    );
     // Rebind the witness digest to the mint operation so the refusal comes
     // from the ISSUANCE clause, not a digest mismatch.
     let witness = EconomicTransitionWitness::new(
@@ -503,6 +514,7 @@ fn a_witness_naming_a_different_successor_is_refused() {
     let accepted = AcceptedSubstrate::from_verified_dsm_successor(
         fx.op.clone(),
         [0xDD; 32], // a different accepted successor
+        EMBEDDED_PARENT,
         SUBSTRATE_ADDR,
     );
     match run(&fx, &registered, &manifest, &fx.witness, &accepted) {

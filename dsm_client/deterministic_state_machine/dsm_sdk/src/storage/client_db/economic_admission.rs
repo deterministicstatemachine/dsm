@@ -82,8 +82,9 @@ pub fn put_pending_admission_with_conn(
         "INSERT INTO economic_pending_admissions(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
              pre_economic_root, post_economic_root, operation_digest,
-             accepted_substrate_addr, admission_manifest_addr, c_dsm_plus, updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             accepted_substrate_addr, admission_manifest_addr, c_dsm_plus,
+             embedded_parent, updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
          ON CONFLICT(device_id) DO UPDATE SET
              kind=excluded.kind,
              fenced_asset=excluded.fenced_asset,
@@ -95,6 +96,7 @@ pub fn put_pending_admission_with_conn(
              accepted_substrate_addr=excluded.accepted_substrate_addr,
              admission_manifest_addr=excluded.admission_manifest_addr,
              c_dsm_plus=excluded.c_dsm_plus,
+             embedded_parent=excluded.embedded_parent,
              updated_at=excluded.updated_at",
         params![
             device_id.as_slice(),
@@ -108,6 +110,7 @@ pub fn put_pending_admission_with_conn(
             coords.accepted_substrate_addr.as_slice(),
             coords.admission_manifest_addr.as_slice(),
             coords.c_dsm_plus.as_slice(),
+            coords.embedded_parent.as_slice(),
             now,
         ],
     )?;
@@ -142,7 +145,8 @@ pub fn load_pending_admission_with_conn(
         .query_row(
             "SELECT kind, fenced_asset, lifecycle_state, economic_position,
                     pre_economic_root, post_economic_root, operation_digest,
-                    accepted_substrate_addr, admission_manifest_addr, c_dsm_plus
+                    accepted_substrate_addr, admission_manifest_addr, c_dsm_plus,
+                    embedded_parent
              FROM economic_pending_admissions WHERE device_id = ?1",
             params![device_id.as_slice()],
             |r| {
@@ -157,13 +161,25 @@ pub fn load_pending_admission_with_conn(
                     r.get::<_, Vec<u8>>(7)?,
                     r.get::<_, Vec<u8>>(8)?,
                     r.get::<_, Vec<u8>>(9)?,
+                    r.get::<_, Vec<u8>>(10)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((kind_c, fenced, state_c, position, pre, post, digest, substrate, manifest, c_plus)) =
-        row
+    let Some((
+        kind_c,
+        fenced,
+        state_c,
+        position,
+        pre,
+        post,
+        digest,
+        substrate,
+        manifest,
+        c_plus,
+        parent,
+    )) = row
     else {
         return Ok(None);
     };
@@ -204,6 +220,7 @@ pub fn load_pending_admission_with_conn(
             accepted_substrate_addr: digest32(substrate, "accepted_substrate_addr")?,
             admission_manifest_addr: digest32(manifest, "admission_manifest_addr")?,
             c_dsm_plus: digest32(c_plus, "c_dsm_plus")?,
+            embedded_parent: digest32(parent, "embedded_parent")?,
         },
     )
     .map(Some)

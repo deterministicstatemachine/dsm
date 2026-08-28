@@ -206,6 +206,11 @@ pub struct AcceptedDsmSuccessor {
     verified_operation: crate::types::operations::Operation,
     operation_digest: [u8; 32],
     c_dsm_plus: [u8; 32],
+    /// The successor's parent tip from the verified evidence preimage —
+    /// with `c_dsm_plus` this is the successor's own `(parent, tip)` pair,
+    /// the value acceptance-evidence verification binds the countersigned
+    /// B-side pair to.
+    embedded_parent: [u8; 32],
     evidence_addr: [u8; 32],
 }
 
@@ -238,6 +243,7 @@ impl AcceptedSubstrate {
     pub fn from_verified_dsm_successor(
         verified_operation: crate::types::operations::Operation,
         c_dsm_plus: [u8; 32],
+        embedded_parent: [u8; 32],
         evidence_addr: [u8; 32],
     ) -> Self {
         let operation_digest =
@@ -246,6 +252,7 @@ impl AcceptedSubstrate {
             verified_operation,
             operation_digest,
             c_dsm_plus,
+            embedded_parent,
             evidence_addr,
         }))
     }
@@ -274,6 +281,16 @@ impl AcceptedSubstrate {
         match self {
             Self::DsmSuccessor(s) => s.evidence_addr,
             Self::OfflineBoundary(b) => b.evidence_addr,
+        }
+    }
+
+    /// The accepted DSM successor's own `(embedded_parent, C_dsm+)` pair —
+    /// what an acceptance bundle's countersigned B-side pair must equal.
+    /// `None` for an offline boundary (which can consume no peer debit).
+    pub fn dsm_successor_pair(&self) -> Option<([u8; 32], [u8; 32])> {
+        match self {
+            Self::DsmSuccessor(s) => Some((s.embedded_parent, s.c_dsm_plus)),
+            Self::OfflineBoundary(_) => None,
         }
     }
 }
@@ -549,6 +566,7 @@ pub fn advance_validated(
         network_id,
         proven_ak,
         canonical_storage_set_id: canonical_set,
+        substrate_b_pair: accepted.dsm_successor_pair(),
     };
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;

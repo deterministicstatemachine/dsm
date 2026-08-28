@@ -585,6 +585,12 @@ pub struct AcceptanceFinalization<'a> {
     /// transaction with the pending A EK, frozen here with its own route. The
     /// checkpoint sweep replays these exact bytes until quorum.
     pub finalized: &'a SenderOutboxArtifact,
+    /// Both signers' `EkCertStepV1` objects for THIS step (3.5b PR4), byte-
+    /// identical to the recipient's derivation: `(signer_devid, step_addr,
+    /// ek_pk, exact step bytes)`. Appended to `ek_cert_step_chain` in this
+    /// transaction — without them, the NEXT acceptance bundle either side
+    /// builds on this relationship is not foreign-walkable.
+    pub ek_steps: &'a [([u8; 32], [u8; 32], Vec<u8>, Vec<u8>)],
 }
 
 /// The verified countersigned acceptance artifact is the SOLE protocol
@@ -631,6 +637,7 @@ pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Resu
         genesis_seed,
         countersign_b,
         finalized,
+        ek_steps,
     } = *f;
     if countersign_b.role != ArtifactRole::CountersignB {
         return Err(anyhow!(
@@ -750,6 +757,12 @@ pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Resu
     // IS its record of the countersignature.
     insert_sender_outbox_artifact_with_conn(&tx, finalized)?;
     insert_sender_outbox_artifact_with_conn(&tx, countersign_b)?;
+
+    // (5b) The signer-chain steps (3.5b PR4) — idempotent on the exact same
+    // head, so a re-finalization of the same step is a no-op.
+    for (signer, addr, pk, _bytes) in ek_steps {
+        super::economic_lineage::append_ek_step_with_conn(&tx, relationship_key, signer, addr, pk)?;
+    }
 
     // (6) Outbox → checkpoint pending, from an UNSETTLED status only. The
     // gate stays; the sweep releases it.
@@ -1337,6 +1350,7 @@ mod tests {
             genesis_seed: SEED,
             countersign_b: &countersign_b_for(&r),
             finalized: &finalized_for(&r),
+            ek_steps: &[],
         })
         .expect("finalization");
         assert_eq!(
@@ -1449,6 +1463,7 @@ mod tests {
             genesis_seed: SEED,
             countersign_b: &countersign_b_for(&r),
             finalized: &finalized_for(&r),
+            ek_steps: &[],
         })
         .expect("finalization");
         // Simulate a foreign deletion of the gate row.
@@ -1510,6 +1525,7 @@ mod tests {
             genesis_seed: SEED,
             countersign_b: &countersign_b_for(&r),
             finalized: &finalized_for(&r),
+            ek_steps: &[],
         });
         assert!(err.is_err(), "a conflicting head must abort finalization");
         assert_eq!(
@@ -1590,6 +1606,7 @@ mod tests {
                 genesis_seed: SEED,
                 countersign_b: &countersign_b_for(&r),
                 finalized: &finalized_for(&r),
+                ek_steps: &[],
             })
         };
         call().expect("first finalization");

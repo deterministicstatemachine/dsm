@@ -105,6 +105,12 @@ pub struct ProvenanceContext<'a> {
     /// The canonical register set for `network_id`, resolved FAIL-CLOSED —
     /// a claim naming any other set is foreign, whatever its bytes say.
     pub canonical_storage_set_id: [u8; 32],
+    /// The accepted DSM successor's own `(embedded_parent, C_dsm+)` pair,
+    /// from the VERIFIED substrate — `None` on an offline-boundary
+    /// substrate. A `ValidatedPeerDebit` credit requires it: the acceptance
+    /// bundle's countersigned B-side pair must equal the exact recipient
+    /// successor being validated, never a pair the bundle self-selects.
+    pub substrate_b_pair: Option<([u8; 32], [u8; 32])>,
 }
 
 /// The live-quorum answer for one faucet ticket cell: the exact envelope
@@ -407,6 +413,77 @@ pub fn validated_peer_debit_source_id(
     *h.finalize().as_bytes()
 }
 
+/// What sender-side prevalidation establishes: the peer's validated debit is
+/// THE debit of an online Transfer addressed to the consumer, with these
+/// exact coordinates. Everything here comes from the peer's VERIFIED
+/// operation and witness — never from a descriptor's story about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderDebitPrevalidated {
+    pub debit_asset: [u8; 32],
+    pub debit_amount: u64,
+}
+
+/// The sender-side conjuncts of the `ValidatedPeerDebit` predicate — ONE
+/// implementation shared by the verifier's credit arm (post-accept) and the
+/// recipient's pre-accept prevalidation, so the two can never drift
+/// (correction 8's split). Establishes, from the validated transition:
+/// witness↔root pairing at the claimed identity; the named mutation exists
+/// and IS a debit; the verified operation is an ONLINE `Transfer`
+/// (`authority_policy: None`) addressed to `consumer_devid`; and the debit
+/// is exactly that operation's asset and amount. What it does NOT establish
+/// is the recipient-produced half — the acceptance bundle — which only
+/// exists after acceptance.
+pub fn prevalidate_sender_debit(
+    peer: &ValidatedPeerTransition,
+    expected_peer_genesis: &[u8; 32],
+    expected_peer_devid: &[u8; 32],
+    peer_debit_mutation_index: u32,
+    consumer_devid: &[u8; 32],
+) -> Result<SenderDebitPrevalidated, ProvenanceError> {
+    // A genuine validated root paired with an unrelated witness is the one
+    // forgery the type system cannot prevent on its own.
+    if peer.witness.post_economic_root != peer.validated_root.economic_root()
+        || peer.peer_genesis != *expected_peer_genesis
+        || peer.peer_devid != *expected_peer_devid
+    {
+        return Err(ProvenanceError::PeerWitnessDoesNotMatchValidatedRoot);
+    }
+    let debit = peer
+        .witness
+        .mutations
+        .get(peer_debit_mutation_index as usize)
+        .ok_or(ProvenanceError::IndexOutOfRange {
+            index: peer_debit_mutation_index,
+        })?;
+    let (debit_asset, debit_amount) =
+        debit_delta(debit).ok_or(ProvenanceError::PeerMutationIsNotADebit {
+            index: peer_debit_mutation_index,
+        })?;
+    // "Some peer had a validated debit" is not the semantics. The debit must
+    // be the sender's ONLINE Transfer, addressed to THIS consumer, and the
+    // named mutation must be THE debit that operation performed.
+    let (op_recipient, op_amount, op_asset) = match &peer.verified_operation {
+        crate::types::operations::Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            authority_policy: Option::None,
+            ..
+        } => (to_device_id.clone(), amount.value(), *policy_commit),
+        _ => return Err(ProvenanceError::PeerDebitIsNotAnOnlineTransfer),
+    };
+    if op_recipient.as_slice() != consumer_devid.as_slice() {
+        return Err(ProvenanceError::PeerDebitNotAddressedToConsumer);
+    }
+    if op_asset != debit_asset || op_amount != debit_amount {
+        return Err(ProvenanceError::PeerDebitIndexIsNotTheOperationDebit);
+    }
+    Ok(SenderDebitPrevalidated {
+        debit_asset,
+        debit_amount,
+    })
+}
+
 /// The asset and quantity a mutation adds, if it adds any.
 fn credit_delta(m: &EconomicLeafMutation) -> Option<([u8; 32], u64)> {
     if !m.is_positive_credit() {
@@ -510,47 +587,17 @@ pub fn verify_credit_source(
                     peer_economic_position: p.peer_economic_position,
                     failure,
                 })?;
-            // A genuine validated root paired with an unrelated witness is the
-            // one forgery the type system cannot prevent on its own.
-            if peer.witness.post_economic_root != peer.validated_root.economic_root()
-                || peer.peer_genesis != p.peer_genesis
-                || peer.peer_devid != p.peer_devid
-            {
-                return Err(ProvenanceError::PeerWitnessDoesNotMatchValidatedRoot);
-            }
-            let debit = peer
-                .witness
-                .mutations
-                .get(p.peer_debit_mutation_index as usize)
-                .ok_or(ProvenanceError::IndexOutOfRange {
-                    index: p.peer_debit_mutation_index,
-                })?;
-            let (debit_asset, debit_amount) =
-                debit_delta(debit).ok_or(ProvenanceError::PeerMutationIsNotADebit {
-                    index: p.peer_debit_mutation_index,
-                })?;
-            // ── THE exact peer-debit predicate ─────────────────────────────
-            // "Some peer had a validated debit" is not the semantics. The
-            // debit must be the sender's ONLINE Transfer, addressed to THIS
-            // consumer, and the named mutation must be THE debit that
-            // operation performed — reasoned from the peer's VERIFIED
-            // operation, never from the descriptor's story about it.
-            let (op_recipient, op_amount, op_asset) = match &peer.verified_operation {
-                crate::types::operations::Operation::Transfer {
-                    to_device_id,
-                    amount,
-                    policy_commit,
-                    authority_policy: Option::None,
-                    ..
-                } => (to_device_id.clone(), amount.value(), *policy_commit),
-                _ => return Err(ProvenanceError::PeerDebitIsNotAnOnlineTransfer),
-            };
-            if op_recipient.as_slice() != ctx.device_id.as_slice() {
-                return Err(ProvenanceError::PeerDebitNotAddressedToConsumer);
-            }
-            if op_asset != debit_asset || op_amount != debit_amount {
-                return Err(ProvenanceError::PeerDebitIndexIsNotTheOperationDebit);
-            }
+            // The sender-side conjuncts — ONE implementation shared with the
+            // recipient's pre-accept prevalidation, so the two can never
+            // drift (correction 8's split).
+            let prevalidated = prevalidate_sender_debit(
+                &peer,
+                &p.peer_genesis,
+                &p.peer_devid,
+                p.peer_debit_mutation_index,
+                ctx.device_id,
+            )?;
+            let (debit_asset, debit_amount) = (prevalidated.debit_asset, prevalidated.debit_amount);
             // ── The acceptance — recipient-produced, never the proposal ────
             // The bundle's bytes are fetched by content address and verified
             // HERE: sender chain to the peer's proven AK, recipient chain to
@@ -574,6 +621,14 @@ pub fn verify_credit_source(
             let mut fetch_step = |addr: &[u8; 32]| {
                 resolver.immutable_evidence(crate::common::domain_tags::TAG_DSM_EK_CERT_STEP, addr)
             };
+            // The consuming transition's OWN successor pair — a peer-debit
+            // credit can only ride a DSM successor, and the bundle's B-side
+            // pair must be exactly that successor's, never self-selected.
+            let expected_b_pair = ctx.substrate_b_pair.ok_or_else(|| {
+                ProvenanceError::AcceptanceEvidence(PeerLineageFailure::Invalid(
+                    "a peer-debit credit requires a DSM-successor substrate".to_string(),
+                ))
+            })?;
             crate::economic::peer_acceptance::verify_peer_transfer_acceptance(
                 &bundle_bytes,
                 &crate::economic::peer_acceptance::AcceptanceParty {
@@ -584,8 +639,12 @@ pub fn verify_credit_source(
                     devid: *ctx.device_id,
                     proven_ak: ctx.proven_ak,
                 },
-                &peer.verified_operation.to_bytes(),
+                // The wire carries the UNSIGNED canonical preimage; the
+                // walker verified the SIGNED operation — clear before
+                // comparing or the equality can never hold.
+                &peer.verified_operation.with_cleared_signature().to_bytes(),
                 &peer.c_dsm_plus,
+                &expected_b_pair,
                 &mut fetch_step,
             )
             .map_err(ProvenanceError::AcceptanceEvidence)?;

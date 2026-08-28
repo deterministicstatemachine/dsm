@@ -345,6 +345,30 @@ pub fn find_current_payload_with_prefix(prefix: &str) -> Result<Option<Vec<u8>>>
     Ok(row)
 }
 
+/// [`find_current_payload_with_prefix`] narrowed by `purpose` (3.5b PR4):
+/// the admission-resume path reconstructs the ONE live admission's objects
+/// by namespace prefix, and PR4 added artifact kinds (acceptance bundles,
+/// EK steps) that share the frozen backlog — the purpose column keeps each
+/// lookup a singleton. The caller's addr-equality check remains the honesty
+/// backstop.
+pub fn find_current_payload_with_prefix_and_purpose(
+    prefix: &str,
+    purpose: &str,
+) -> Result<Option<Vec<u8>>> {
+    let binding = crate::storage::client_db::get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            "SELECT payload FROM frozen_publication_artifact
+              WHERE object_key LIKE ?1 || '%' AND purpose = ?2 AND state != 'superseded'
+              ORDER BY insertion_ordinal DESC LIMIT 1",
+            rusqlite::params![prefix, purpose],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
