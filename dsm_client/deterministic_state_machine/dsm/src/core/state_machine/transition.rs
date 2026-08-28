@@ -510,6 +510,20 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                 return Err(DsmError::invalid_operation("DlvClose missing signature"));
             }
         }
+        Operation::DlvCreateFundedV2 { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "DlvCreateFundedV2 missing signature",
+                ));
+            }
+        }
+        Operation::DlvOwnerApplyV2 { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "DlvOwnerApplyV2 missing signature",
+                ));
+            }
+        }
         // Identity / structural operations carry a `proof` field.
         Operation::Create { proof, .. }
         | Operation::Update { proof, .. }

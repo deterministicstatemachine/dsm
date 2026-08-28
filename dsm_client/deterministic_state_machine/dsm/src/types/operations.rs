@@ -605,6 +605,39 @@ pub enum Operation {
         /// Execution mode (typically Unilateral for vault creation).
         mode: TransactionMode,
     },
+    /// FUNDED vault creation, v2 (3.6): the ONLY supported value-bearing
+    /// vault-creation path. Commits BOTH exact funding legs — canonical order
+    /// (`leg_a < leg_b`), both non-zero — so the signed operation states the
+    /// complete economic effect and the `Fund` reserve mutation that rides the
+    /// same advance can be checked against it field-for-field. The legacy
+    /// `DlvCreate` (tag 22) carries a singular display token/amount and stays
+    /// `UnsupportedValueTransition` for any value-bearing shape; its exact
+    /// tokenless shape (no token, no amount, no reserve mutation) classifies
+    /// `EconomicEffect::None` (owner ruling 2026-08-28).
+    DlvCreateFundedV2 {
+        /// 32-byte deterministic vault identifier.
+        vault_id: Vec<u8>,
+        /// SPHINCS+ public key of the vault creator (the owner device's AK).
+        creator_public_key: Vec<u8>,
+        /// BLAKE3("DSM/dlv-params\0" || ...) commitment to vault parameters.
+        parameters_hash: Vec<u8>,
+        /// Serialized FulfillmentMechanism (protobuf bytes).
+        fulfillment_condition: Vec<u8>,
+        /// The lex-lower and lex-higher legs of the pair, as canonical policy
+        /// commits with the exact amounts being encumbered at generation 0.
+        leg_a_policy_commit: [u8; 32],
+        leg_a_amount: u64,
+        leg_b_policy_commit: [u8; 32],
+        leg_b_amount: u64,
+        /// The vault's market fee in basis points — part of the birth state
+        /// the reserves digest derives from.
+        fee_bps: u32,
+        /// SPHINCS+ signature by the creator over the canonical operation
+        /// bytes — signed locally by the owner device, never caller-supplied.
+        signature: Vec<u8>,
+        /// Execution mode (Unilateral: the owner's self-loop).
+        mode: TransactionMode,
+    },
     /// A trader settling a routed swap against a funded vault.
     ///
     /// The two balance deltas this operation carries are the ONLY value movement
@@ -682,6 +715,39 @@ pub enum Operation {
         output_policy_commit: [u8; 32],
         input_amount: u64,
         output_amount: u64,
+        /// SPHINCS+ signature by the owner over the canonical operation bytes.
+        signature: Vec<u8>,
+        mode: TransactionMode,
+    },
+    /// An owner recording a settlement, v2 (3.6): the economic-root profile's
+    /// replacement for `DlvOwnerApply` (tag 27), which carries neither
+    /// `fee_bps` nor the parent vault-state binding and therefore cannot be
+    /// equality-checked against the reserve mutation riding the same advance.
+    /// This operation states the COMPLETE reserve effect — the pair legs, the
+    /// exact amounts, the one-step generation advance, the fee, and the exact
+    /// parent vault state `c_n` it consumes — so `ApplySettlement` is DERIVED
+    /// from it (never a trusted sidecar) and cross-checked field-for-field.
+    /// Authorizes NO balance movement.
+    DlvOwnerApplyV2 {
+        /// 32-byte vault whose reserves are being reconciled.
+        vault_id: Vec<u8>,
+        /// The receipt being recorded, and the pointer that committed to it.
+        settlement_receipt_id: [u8; 32],
+        pending_pointer_x: [u8; 32],
+        /// The sequence this advances from, and to. Exactly one step.
+        parent_sequence: u64,
+        new_sequence: u64,
+        /// The exact parent vault state consumed:
+        /// `c_n = H(DSM/vault-state, CCB(V_n))` at `parent_sequence`.
+        parent_binding: [u8; 32],
+        /// The pair whose leaves move, and by how much: reserve[input] gains
+        /// `input_amount`, reserve[output] loses `output_amount`.
+        input_policy_commit: [u8; 32],
+        output_policy_commit: [u8; 32],
+        input_amount: u64,
+        output_amount: u64,
+        /// The vault's market fee in basis points.
+        fee_bps: u32,
         /// SPHINCS+ signature by the owner over the canonical operation bytes.
         signature: Vec<u8>,
         mode: TransactionMode,
@@ -826,6 +892,11 @@ impl Operation {
             // A close moves the vault's reserves OUT of the encumbrance and
             // back to the owner's spendable balance: value-bearing.
             | DlvClose { .. }
+            // The funded v2 create encumbers both legs out of spendable
+            // balance; the v2 apply moves the OUTPUT leg out of the vault
+            // reserves — egress for the same reasons as their predecessors.
+            | DlvCreateFundedV2 { .. }
+            | DlvOwnerApplyV2 { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -960,9 +1031,24 @@ impl Operation {
                 output_policy_commit,
                 output_amount,
                 ..
+            }
+            | DlvOwnerApplyV2 {
+                output_policy_commit,
+                output_amount,
+                ..
             } => EgressAsset::Asset {
                 token_id: output_policy_commit.to_vec(),
                 amount: *output_amount,
+            },
+            // The funded v2 create encumbers both legs; name the lex-lower
+            // leg, the same convention as DlvClose below.
+            DlvCreateFundedV2 {
+                leg_a_policy_commit,
+                leg_a_amount,
+                ..
+            } => EgressAsset::Asset {
+                token_id: leg_a_policy_commit.to_vec(),
+                amount: *leg_a_amount,
             },
             // A close releases BOTH legs from the vault's reserves back to the
             // owner's own spendable balance. Nothing leaves the device's
@@ -1083,7 +1169,7 @@ impl Operation {
                 faucet_id,
                 ticket_index,
             } => {
-                // Canonical tag 31. Tags 29/30 are RESERVED for
+                // Canonical tag 31. Tags 29/30 belong to
                 // DlvCreateFundedV2 / DlvOwnerApplyV2 by the frozen economic
                 // plan — landing first does not confer the right to take them.
                 put_u8(&mut out, 31);
@@ -1636,6 +1722,62 @@ impl Operation {
                 put_u64(&mut out, *leg_b_amount);
                 put_u64(&mut out, *parent_sequence);
                 put_u64(&mut out, *new_sequence);
+                put_u32(&mut out, *fee_bps);
+                put_bytes(&mut out, signature);
+                put_mode(&mut out, mode);
+            }
+            DlvCreateFundedV2 {
+                vault_id,
+                creator_public_key,
+                parameters_hash,
+                fulfillment_condition,
+                leg_a_policy_commit,
+                leg_a_amount,
+                leg_b_policy_commit,
+                leg_b_amount,
+                fee_bps,
+                signature,
+                mode,
+            } => {
+                put_u8(&mut out, 29);
+                put_bytes(&mut out, vault_id);
+                put_bytes(&mut out, creator_public_key);
+                put_bytes(&mut out, parameters_hash);
+                put_bytes(&mut out, fulfillment_condition);
+                put_bytes(&mut out, leg_a_policy_commit);
+                put_u64(&mut out, *leg_a_amount);
+                put_bytes(&mut out, leg_b_policy_commit);
+                put_u64(&mut out, *leg_b_amount);
+                put_u32(&mut out, *fee_bps);
+                put_bytes(&mut out, signature);
+                put_mode(&mut out, mode);
+            }
+            DlvOwnerApplyV2 {
+                vault_id,
+                settlement_receipt_id,
+                pending_pointer_x,
+                parent_sequence,
+                new_sequence,
+                parent_binding,
+                input_policy_commit,
+                output_policy_commit,
+                input_amount,
+                output_amount,
+                fee_bps,
+                signature,
+                mode,
+            } => {
+                put_u8(&mut out, 30);
+                put_bytes(&mut out, vault_id);
+                put_bytes(&mut out, settlement_receipt_id);
+                put_bytes(&mut out, pending_pointer_x);
+                put_u64(&mut out, *parent_sequence);
+                put_u64(&mut out, *new_sequence);
+                put_bytes(&mut out, parent_binding);
+                put_bytes(&mut out, input_policy_commit);
+                put_bytes(&mut out, output_policy_commit);
+                put_u64(&mut out, *input_amount);
+                put_u64(&mut out, *output_amount);
                 put_u32(&mut out, *fee_bps);
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
@@ -2421,6 +2563,64 @@ impl Operation {
                     mode,
                 }
             }
+            // Mirrors the v2 encoders exactly — same one-field-drift hazard as
+            // tag 26 above.
+            29 => {
+                let vault_id = get_bytes(&mut input)?;
+                let creator_public_key = get_bytes(&mut input)?;
+                let parameters_hash = get_bytes(&mut input)?;
+                let fulfillment_condition = get_bytes(&mut input)?;
+                let leg_a_policy_commit = get_arr32(&mut input)?;
+                let leg_a_amount = get_u64(&mut input)?;
+                let leg_b_policy_commit = get_arr32(&mut input)?;
+                let leg_b_amount = get_u64(&mut input)?;
+                let fee_bps = get_u32(&mut input)?;
+                let signature = get_bytes(&mut input)?;
+                let mode = dec_mode(&mut input)?;
+                DlvCreateFundedV2 {
+                    vault_id,
+                    creator_public_key,
+                    parameters_hash,
+                    fulfillment_condition,
+                    leg_a_policy_commit,
+                    leg_a_amount,
+                    leg_b_policy_commit,
+                    leg_b_amount,
+                    fee_bps,
+                    signature,
+                    mode,
+                }
+            }
+            30 => {
+                let vault_id = get_bytes(&mut input)?;
+                let settlement_receipt_id = get_arr32(&mut input)?;
+                let pending_pointer_x = get_arr32(&mut input)?;
+                let parent_sequence = get_u64(&mut input)?;
+                let new_sequence = get_u64(&mut input)?;
+                let parent_binding = get_arr32(&mut input)?;
+                let input_policy_commit = get_arr32(&mut input)?;
+                let output_policy_commit = get_arr32(&mut input)?;
+                let input_amount = get_u64(&mut input)?;
+                let output_amount = get_u64(&mut input)?;
+                let fee_bps = get_u32(&mut input)?;
+                let signature = get_bytes(&mut input)?;
+                let mode = dec_mode(&mut input)?;
+                DlvOwnerApplyV2 {
+                    vault_id,
+                    settlement_receipt_id,
+                    pending_pointer_x,
+                    parent_sequence,
+                    new_sequence,
+                    parent_binding,
+                    input_policy_commit,
+                    output_policy_commit,
+                    input_amount,
+                    output_amount,
+                    fee_bps,
+                    signature,
+                    mode,
+                }
+            }
             31 => {
                 // FaucetClaim mirrors its encoder exactly: length-prefixed
                 // 32-byte faucet_id, then the u64 ticket index. This arm was
@@ -2516,6 +2716,8 @@ impl Operation {
             | Operation::DlvSettle { signature, .. }
             | Operation::DlvOwnerApply { signature, .. }
             | Operation::DlvClose { signature, .. }
+            | Operation::DlvCreateFundedV2 { signature, .. }
+            | Operation::DlvOwnerApplyV2 { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2556,6 +2758,8 @@ impl Operation {
             Operation::DlvSettle { .. } => "dlv_settle",
             Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvClose { .. } => "dlv_close",
+            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
+            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }
@@ -2579,7 +2783,9 @@ impl Operation {
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
             | Operation::DlvOwnerApply { signature, .. }
-            | Operation::DlvClose { signature, .. } => {
+            | Operation::DlvClose { signature, .. }
+            | Operation::DlvCreateFundedV2 { signature, .. }
+            | Operation::DlvOwnerApplyV2 { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -2607,7 +2813,9 @@ impl Operation {
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
             | Operation::DlvOwnerApply { signature, .. }
-            | Operation::DlvClose { signature, .. } => {
+            | Operation::DlvClose { signature, .. }
+            | Operation::DlvCreateFundedV2 { signature, .. }
+            | Operation::DlvOwnerApplyV2 { signature, .. } => {
                 *signature = sig;
             }
             _ => {}
@@ -2713,6 +2921,8 @@ impl Ops for Operation {
             Operation::DlvSettle { .. } => "dlv_settle",
             Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvClose { .. } => "dlv_close",
+            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
+            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
         }
     }
@@ -3515,6 +3725,42 @@ mod tests {
                 locked_amount: None,
                 signature: vec![0x06; 48],
                 mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_create_funded_v2() {
+            roundtrip(&Operation::DlvCreateFundedV2 {
+                vault_id: vec![0x01; 32],
+                creator_public_key: vec![0x02; 64],
+                parameters_hash: vec![0x03; 32],
+                fulfillment_condition: vec![0x04; 16],
+                leg_a_policy_commit: [0x0A; 32],
+                leg_a_amount: 10_000,
+                leg_b_policy_commit: [0x0B; 32],
+                leg_b_amount: 5_000,
+                fee_bps: 30,
+                signature: vec![0x06; 48],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_owner_apply_v2() {
+            roundtrip(&Operation::DlvOwnerApplyV2 {
+                vault_id: vec![0x01; 32],
+                settlement_receipt_id: [0x11; 32],
+                pending_pointer_x: [0x12; 32],
+                parent_sequence: 7,
+                new_sequence: 8,
+                parent_binding: [0x13; 32],
+                input_policy_commit: [0x0A; 32],
+                output_policy_commit: [0x0B; 32],
+                input_amount: 100,
+                output_amount: 90,
+                fee_bps: 30,
+                signature: vec![0x06; 48],
+                mode: TransactionMode::Unilateral,
             });
         }
 
