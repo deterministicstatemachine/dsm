@@ -157,6 +157,7 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
         network_id: NETWORK,
         proven_ak: ak,
         canonical_storage_set_id: SET_ID,
+        substrate_b_pair: None,
     }
 }
 

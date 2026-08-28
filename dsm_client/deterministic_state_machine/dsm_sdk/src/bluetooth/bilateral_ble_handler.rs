@@ -5042,6 +5042,39 @@ impl BilateralBleHandler {
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
 
+        // 3.5b PR4 (correction 3): record BOTH signers' EK step objects for
+        // this completed step — rows appended + exact bytes frozen as
+        // publication debt, fully offline; the sweep publishes on
+        // reconnection. Post-commit bookkeeping (the §11.1 precedent): a
+        // failure is logged, and prevalidation's per-address durability
+        // check fail-closes any later online bundle that would depend on a
+        // missing step.
+        {
+            let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                &self.device_id,
+                &session.counterparty_device_id,
+            );
+            if let Some(bytes) = receipt_bytes.as_deref() {
+                if let Ok(full) =
+                    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(bytes)
+                {
+                    if let Err(e) =
+                        crate::sdk::economic_admission_flow::record_ble_ek_steps_from_receipt(
+                            &rel_key,
+                            &session.counterparty_device_id,
+                            &self.device_id,
+                            &full,
+                        )
+                    {
+                        error!(
+                            "[BILATERAL] 3.5b EK step recording failed: {e} — later online \
+                             acceptance on this relationship will hold until reconciled"
+                        );
+                    }
+                }
+            }
+        }
+
         // Keep a clone of the counter-signed receipt bytes for the response
         // envelope below. The settlement context consumes its own copy.
         let counter_signed_receipt_for_response = receipt_bytes.clone();
@@ -5849,6 +5882,21 @@ impl BilateralBleHandler {
                         &self.device_id,
                         &counterparty_device_id,
                     );
+                    // 3.5b PR4 (correction 3): both signers' EK step objects
+                    // for this completed step — byte-identical to the
+                    // receiver's derivation, frozen as publication debt.
+                    if let Err(e) =
+                        crate::sdk::economic_admission_flow::record_ble_ek_steps_from_receipt(
+                            &rel_key,
+                            &counterparty_device_id,
+                            &self.device_id,
+                            &receipt,
+                        )
+                    {
+                        error!(
+                            "[BILATERAL] 3.5b EK step recording failed: {e} — later online                              acceptance on this relationship will hold until reconciled"
+                        );
+                    }
                     match crate::storage::client_db::advance_cert_chain_head(
                         &rel_key,
                         crate::storage::client_db::CertChainSide::Counterparty,

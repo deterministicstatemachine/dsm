@@ -388,6 +388,8 @@ impl CoreSDK {
         economic_position: u64,
         economic_root: &[u8; 32],
         leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        storage_set_id: &[u8; 32],
+        post_admit_artifacts: &[(String, Vec<u8>, &'static str)],
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
         let devid = self.device_info.device_id;
@@ -426,6 +428,33 @@ impl CoreSDK {
                 .map_err(|e| {
                     DsmError::storage(format!("admit promote: {e}"), None::<std::io::Error>)
                 })?;
+            // Likewise the recipient's HELD B→A reply (carrying the release
+            // address): the sender may only ever finalize on a release whose
+            // admission is terminal, so the reply becomes deliverable
+            // atomically with ECON_ADMITTED.
+            crate::storage::client_db::recipient_receipt_fold::promote_held_replies_with_conn(&tx)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("admit promote replies: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            // Post-admission artifacts (the RELEASE object): frozen in THIS
+            // transaction and no earlier — the sweep may only ever publish a
+            // release whose admission is terminal.
+            for (key, payload, purpose) in post_admit_artifacts {
+                crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                    &tx,
+                    storage_set_id,
+                    key,
+                    payload,
+                    economic_root,
+                    purpose,
+                )
+                .map_err(|e| {
+                    DsmError::storage(format!("admit freeze {key}: {e}"), None::<std::io::Error>)
+                })?;
+            }
             tx.commit().map_err(|e| {
                 DsmError::storage(format!("admit commit: {e}"), None::<std::io::Error>)
             })?;
@@ -3441,6 +3470,7 @@ impl CoreSDK {
             signed_child_tip,
             |_outcome, _pair| Ok(()),
             |_tx, _outcome, _artifacts: &()| Ok(()),
+            None,
         )
     }
 
@@ -3480,6 +3510,7 @@ impl CoreSDK {
             &dsm::types::device_state::AdvanceOutcome,
             &A,
         ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
     ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
         use crate::sdk::apply_outcome::ApplyOutcome;
         use crate::storage::client_db::{
@@ -3762,7 +3793,7 @@ impl CoreSDK {
             }
         };
 
-        let exec = self.execute_on_relationship_staged(
+        let exec = self.execute_on_relationship_staged_with_admission(
             rel_key,
             sender_arr,
             op,
@@ -3770,6 +3801,7 @@ impl CoreSDK {
             Some(init_tip),
             build,
             in_tx_extra,
+            admission,
         );
 
         match exec {
@@ -3888,6 +3920,23 @@ mod tests {
         sdk
     }
 
+    /// The PR4 credit gate's honest fixture precondition: attach a matching
+    /// Prepared DsmBacked admission before a credit-direction apply — exactly
+    /// what production attaches, without finishing (these tests exercise
+    /// apply MECHANICS, not economics). `Prepared` does not fence, so
+    /// subsequent operations continue normally.
+    fn attach_credit_admission(sdk: &CoreSDK, op: &DsmOperation) {
+        let head = sdk.device_head().expect("head for admission attach");
+        sdk.set_device_head_for_testing(head.with_pending_economic_admission(Some(
+            dsm::economic::admission::PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            ),
+        )));
+    }
+
     fn incoming_transfer_op(to: &[u8; 32], amount: u64, nonce: Vec<u8>) -> DsmOperation {
         DsmOperation::Transfer {
             policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
@@ -3932,6 +3981,7 @@ mod tests {
         let (sender, sender_b32) = sender_ids();
         let nonce = vec![0x77u8; 32];
         let op = incoming_transfer_op(&local, 50, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let op_bytes = b"canonical-op-bytes-1".to_vec();
         let (parent, child) = sdk
             .remote_signed_pair(&sender_b32, None, 1)
@@ -3996,6 +4046,7 @@ mod tests {
         let (_sender, sender_b32) = sender_ids();
         let nonce = vec![0x88u8; 32];
         let op = incoming_transfer_op(&local, 10, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let op_bytes = b"canonical-op-bytes-2".to_vec();
         let (parent, child) = sdk
             .remote_signed_pair(&sender_b32, None, 1)
@@ -4067,6 +4118,7 @@ mod tests {
         let (sender, sender_b32) = sender_ids();
         let nonce = vec![0xD1u8; 32];
         let op = incoming_transfer_op(&local, 15, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let op_bytes = b"awypcnk8-op-bytes".to_vec();
         // Honest REMOTE sender: parent is the pinned A-side head (genesis seed
         // on a fresh relationship); the child is the sender's own lineage value,
@@ -4124,6 +4176,7 @@ mod tests {
         let (_sender, sender_b32) = sender_ids();
         let nonce = vec![0xD2u8; 32];
         let op = incoming_transfer_op(&local, 20, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let (_pinned, signed_child) = sdk
             .remote_signed_pair(&sender_b32, None, 1)
             .expect("remote signed pair");
@@ -4173,6 +4226,7 @@ mod tests {
 
         let nonce1 = vec![0xE1u8; 32];
         let op1 = incoming_transfer_op(&local, 11, nonce1.clone());
+        attach_credit_admission(&sdk, &op1);
         let (parent1, child1) = sdk
             .remote_signed_pair(&sender_b32, None, 1)
             .expect("remote pair 1");
@@ -4197,6 +4251,7 @@ mod tests {
         // Transfer #2 starts exactly where the sender's signed lineage left off.
         let nonce2 = vec![0xE2u8; 32];
         let op2 = incoming_transfer_op(&local, 13, nonce2.clone());
+        attach_credit_admission(&sdk, &op2);
         let (parent2, child2) = sdk
             .remote_signed_pair(&sender_b32, Some(child1), 2)
             .expect("remote pair 2");
@@ -4235,6 +4290,7 @@ mod tests {
         let root_before = device_root(&sdk);
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let op = incoming_transfer_op(&local, 25, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let (parent, child) = sdk
             .remote_signed_pair(&sender_b32, None, 1)
             .expect("remote signed pair");
@@ -4325,6 +4381,7 @@ mod tests {
         let (sender, sender_b32) = sender_ids();
         let nonce = vec![0xC7u8; 32];
         let op = incoming_transfer_op(&local, 30, nonce.clone());
+        attach_credit_admission(&sdk, &op);
         let op_bytes = b"canonical-op-bytes-A".to_vec();
         // SYMMETRIC projection pair (contacts CAS space).
         let sym_parent =
@@ -4372,6 +4429,7 @@ mod tests {
                     None::<std::convert::Infallible>,
                 ))
             },
+            None,
         );
         assert!(failed.is_err(), "a failing writer aborts the apply");
         assert_eq!(device_root(&sdk), root_before, "no state advance");
@@ -4409,12 +4467,14 @@ mod tests {
                             rel,
                             parent,
                             (sym_parent, sym_target),
+                            None,
                         ),
                     )
                     .map_err(|e| {
                         DsmError::internal(e.to_string(), None::<std::convert::Infallible>)
                     })
                 },
+                None,
             )
             .expect("fresh apply");
         let record = match out {
@@ -4461,6 +4521,7 @@ mod tests {
                         panic!("second EK derivation is forbidden on redelivery")
                     },
                     |_tx, _o, _a| panic!("no write on redelivery"),
+                    None,
                 )
                 .expect("redelivery");
         let record2 = match redelivered {
@@ -5473,7 +5534,11 @@ mod tests {
             .execute_on_relationship_staged(
                 rel,
                 sender,
-                incoming_transfer_op(&sdk.device_info.device_id, 5, vec![0x31u8; 32]),
+                {
+                    let op = incoming_transfer_op(&sdk.device_info.device_id, 5, vec![0x31u8; 32]);
+                    attach_credit_admission(&sdk, &op);
+                    op
+                },
                 &[dsm::types::device_state::BalanceDelta {
                     policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
                     direction: dsm::types::device_state::BalanceDirection::Credit,
@@ -5546,7 +5611,11 @@ mod tests {
             .execute_on_relationship_staged(
                 rel,
                 sender,
-                incoming_transfer_op(&sdk.device_info.device_id, 7, vec![0x32u8; 32]),
+                {
+                    let op = incoming_transfer_op(&sdk.device_info.device_id, 7, vec![0x32u8; 32]);
+                    attach_credit_admission(&sdk, &op);
+                    op
+                },
                 &[dsm::types::device_state::BalanceDelta {
                     policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
                     direction: dsm::types::device_state::BalanceDirection::Credit,
@@ -5592,7 +5661,11 @@ mod tests {
             .execute_on_relationship_staged(
                 rel,
                 sender,
-                incoming_transfer_op(&sdk.device_info.device_id, 9, vec![0x41u8; 32]),
+                {
+                    let op = incoming_transfer_op(&sdk.device_info.device_id, 9, vec![0x41u8; 32]);
+                    attach_credit_admission(&sdk, &op);
+                    op
+                },
                 &[dsm::types::device_state::BalanceDelta {
                     policy_commit: crate::policy::builtin_policy_commit("ERA").unwrap(),
                     direction: dsm::types::device_state::BalanceDirection::Credit,

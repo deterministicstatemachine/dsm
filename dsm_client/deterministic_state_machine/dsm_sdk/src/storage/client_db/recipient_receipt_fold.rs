@@ -80,6 +80,10 @@ pub struct RecipientAcceptanceJournal {
     /// pins `applied_child_tip_b` as B's lineage head.
     pub applied_parent_tip_b: [u8; 32],
     pub applied_child_tip_b: [u8; 32],
+    /// The exact signed `RecipientEconomicReleaseV1` wire bytes, frozen in
+    /// the accept transaction (3.5b PR4) — the transport-only finalization
+    /// authority the B→A reply carries once ECON_ADMITTED promotes it.
+    pub release_bytes: Option<Vec<u8>>,
     /// Finality barrier: whether the SENDER's `RelationshipFinalizedV1` for
     /// this transition has been verified here. `false` from insertion; set to
     /// `true` ONLY by `mark_peer_finalized_with_conn` after verification. While
@@ -131,7 +135,7 @@ const JOURNAL_COLS: &str = "relationship_key, parent_tip, child_tip, counterpart
      expected_local_b_head, new_local_b_head, new_local_b_sk_enc, \
      expected_counterparty_a_head, new_counterparty_a_head, receipt_bytes, \
      projection_parent_tip, projection_target_tip, applied_parent_tip_b, applied_child_tip_b, \
-     peer_finalized, status, created_at";
+     release_bytes, peer_finalized, status, created_at";
 
 /// Domain-separated hash binding the EXACT persisted full receipt bytes (signed EK
 /// artifact). Hash the precise stored/outbox bytes — never deserialize+reserialize.
@@ -174,9 +178,10 @@ fn row_to_journal(row: &rusqlite::Row) -> rusqlite::Result<RecipientAcceptanceJo
         projection_target_tip: to32(g(16)?),
         applied_parent_tip_b: to32(g(17)?),
         applied_child_tip_b: to32(g(18)?),
-        peer_finalized: row.get::<_, i64>(19)? != 0,
-        status: row.get::<_, String>(20)?,
-        created_at: row.get::<_, i64>(21)? as u64,
+        release_bytes: go(19)?,
+        peer_finalized: row.get::<_, i64>(20)? != 0,
+        status: row.get::<_, String>(21)?,
+        created_at: row.get::<_, i64>(22)? as u64,
     })
 }
 
@@ -218,7 +223,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
     conn.execute(
         &format!(
             "INSERT INTO acceptance_fold_journal ({JOURNAL_COLS}) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)"
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
         ),
         params![
             rec.relationship_key.as_slice(),
@@ -240,6 +245,7 @@ pub fn insert_prepared_acceptance_journal_with_conn(
             rec.projection_target_tip.as_slice(),
             rec.applied_parent_tip_b.as_slice(),
             rec.applied_child_tip_b.as_slice(),
+            rec.release_bytes.as_deref(),
             // Never set here: only the verified certificate flips it.
             0i64,
             STATUS_PREPARED,
@@ -641,30 +647,51 @@ fn mark_acceptance_journal_complete(
     Ok(())
 }
 
-/// Idempotent insert of the durable outbound-reply record (exact bytes to repost).
+/// Idempotent insert of the durable outbound-reply record (exact bytes to
+/// repost). `held` = 1 keeps the reply invisible to the delivery sweep until
+/// the terminal admission transaction promotes it (3.5b PR4: the sender
+/// finalizes on the RELEASE, and the release may not escape before
+/// ECON_ADMITTED); `release_bytes` are the exact frozen
+/// `RecipientEconomicReleaseV1` wire bytes.
 pub fn insert_outbound_reply(
     commitment: &[u8; 32],
     relationship_key: &[u8; 32],
     counterparty_device_id: &[u8; 32],
     child_tip: &[u8; 32],
     receipt_bytes: &[u8],
+    release_bytes: Option<&[u8]>,
+    held: bool,
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
         "INSERT OR IGNORE INTO recipient_outbound_reply
-            (commitment, relationship_key, counterparty_device_id, child_tip, receipt_bytes, submitted, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            (commitment, relationship_key, counterparty_device_id, child_tip, receipt_bytes,
+             release_bytes, held, submitted, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
         params![
             commitment.as_slice(),
             relationship_key.as_slice(),
             counterparty_device_id.as_slice(),
             child_tip.as_slice(),
             receipt_bytes,
+            release_bytes,
+            held as i64,
             tick() as i64,
         ],
     )?;
     Ok(())
+}
+
+/// Promote every HELD reply to deliverable, inside the caller's transaction —
+/// the terminal admission transaction. The admission is device-global and at
+/// most one is pending, so this promotes every held row.
+pub fn promote_held_replies_with_conn(conn: &rusqlite::Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE recipient_outbound_reply SET held = 0 WHERE held = 1",
+        [],
+    )?;
+    Ok(n)
 }
 
 /// One undelivered acceptance reply, joined with the routing material the
@@ -688,6 +715,9 @@ pub struct PendingOutboundReply {
     /// never from current state.
     pub applied_parent_tip_b: [u8; 32],
     pub applied_child_tip_b: [u8; 32],
+    /// The exact frozen `RecipientEconomicReleaseV1` wire bytes — what the
+    /// sender finalizes on.
+    pub release_bytes: Option<Vec<u8>>,
 }
 
 fn col32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]> {
@@ -716,11 +746,12 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
     let mut stmt = conn.prepare(
         "SELECT r.commitment, r.relationship_key, r.counterparty_device_id, r.child_tip,
                 r.receipt_bytes, j.projection_parent_tip,
-                j.applied_parent_tip_b, j.applied_child_tip_b
+                j.applied_parent_tip_b, j.applied_child_tip_b, r.release_bytes
          FROM recipient_outbound_reply r
          JOIN acceptance_fold_journal j
            ON j.commitment = r.commitment
          WHERE r.submitted = 0
+           AND r.held = 0
            AND j.status = 'complete'
            AND length(j.projection_parent_tip) = 32",
     )?;
@@ -735,6 +766,7 @@ pub fn pending_outbound_replies() -> Result<Vec<PendingOutboundReply>> {
                 projection_parent_tip: col32(row, 5)?,
                 applied_parent_tip_b: col32(row, 6)?,
                 applied_child_tip_b: col32(row, 7)?,
+                release_bytes: row.get::<_, Option<Vec<u8>>>(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -869,19 +901,68 @@ pub fn complete_applied_acceptance(
         }
     }
 
-    // Phase 3c: idempotent outbox insert. Phase 3d: mark complete + wipe secret.
+    // Phase 3c: idempotent outbox insert. HELD while an economic admission
+    // is still pending (3.5b PR4): the release may not escape before
+    // ECON_ADMITTED, whose terminal transaction promotes held rows. If the
+    // admission already admitted (recovery re-ordering), insert deliverable.
+    let held = {
+        let binding = get_connection()?;
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            "SELECT 1 FROM economic_pending_admissions LIMIT 1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some()
+    };
     insert_outbound_reply(
         &rec.commitment,
         &rec.relationship_key,
         &rec.counterparty_device_id,
         &rec.child_tip,
         &rec.receipt_bytes,
+        rec.release_bytes.as_deref(),
+        held,
     )?;
     mark_acceptance_journal_complete(&rec.relationship_key, &rec.parent_tip)?;
 
     Ok(AcceptancePhaseOutcome::Converged {
         receipt_bytes: rec.receipt_bytes.clone(),
     })
+}
+
+/// The exact frozen `RecipientEconomicReleaseV1` bytes whose body binds
+/// `admission_manifest_addr` (3.5b PR4 crash recovery): a resumed recipient
+/// admission recovers its release from the acceptance journal by the ONE
+/// address the admission itself binds — never "the newest release".
+pub fn find_release_bytes_for_manifest_addr(manifest_addr: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    use prost::Message;
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(
+        "SELECT release_bytes FROM acceptance_fold_journal
+         WHERE release_bytes IS NOT NULL AND status != 'rejected'
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for bytes in rows {
+        let Ok(outer) = dsm::types::proto::RecipientEconomicReleaseV1::decode(bytes.as_slice())
+        else {
+            continue;
+        };
+        let Ok(body) =
+            dsm::types::proto::RecipientEconomicReleaseBodyV1::decode(outer.body.as_slice())
+        else {
+            continue;
+        };
+        if body.admission_manifest_addr.as_slice() == manifest_addr.as_slice() {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -914,6 +995,7 @@ mod tests {
             projection_target_tip: [0xE2u8; 32],
             applied_parent_tip_b: [0xE3u8; 32],
             applied_child_tip_b: [0xE4u8; 32],
+            release_bytes: None,
             peer_finalized: false,
             relationship_key: rel,
             parent_tip: parent,

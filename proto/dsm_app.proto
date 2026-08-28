@@ -1259,6 +1259,32 @@ message PeerTransferAcceptanceEvidenceV1 {
   optional bytes b_prior_step_addr  = 5 [(dsm_fixed_len)=32];   // recipient EK ancestry
 }
 
+// The recipient's post-admission RELEASE — the TRANSPORT-ONLY finalization
+// authority (3.5b PR4; no CCB class). `sig_b` inside the published acceptance
+// bundle is acceptance PROVENANCE and becomes discoverable when the evidence
+// DAG publishes, BEFORE ECON_ADMITTED — so bare sig_b is insufficient to
+// finalize the sender. The release exists only once the recipient's credit is
+// admitted into validated R_econ: it is constructed and frozen in the accept
+// transaction (every field is an output of the build), HELD, and promoted to
+// deliverable in the SAME terminal transaction that records ECON_ADMITTED.
+// Sender finalization requires this release AND an independent quorum read of
+// the recipient's register cell at the named position (post-root + manifest
+// address must match) — never the recipient's private "admitted" flag.
+message RecipientEconomicReleaseBodyV1 {
+  bytes  receipt_commitment          = 1 [(dsm_fixed_len)=32];
+  bytes  acceptance_evidence_addr    = 2 [(dsm_fixed_len)=32];
+  bytes  recipient_genesis           = 3 [(dsm_fixed_len)=32];
+  bytes  recipient_devid             = 4 [(dsm_fixed_len)=32];
+  uint64 recipient_economic_position = 5;
+  bytes  post_economic_root          = 6 [(dsm_fixed_len)=32];
+  bytes  admission_manifest_addr     = 7 [(dsm_fixed_len)=32];
+}
+
+message RecipientEconomicReleaseV1 {
+  bytes body                = 1 [(dsm_max_len)=4096];  // exact encoded body (sign target)
+  bytes recipient_signature = 2 [(dsm_max_len)=65535]; // SPX256f over H(release-sign-tag, body)
+}
+
 message DsmSuccessorEvidenceV1 {
   bytes  rel_key              = 1 [(dsm_fixed_len)=32];
   bytes  embedded_parent      = 2 [(dsm_fixed_len)=32];
@@ -3669,6 +3695,16 @@ message ReceiptCountersignB {
   // sender CASes its counterparty-canonical-head record from parent to child.
   bytes b_parent_tip              = 7 [(dsm_fixed_len)=32];
   bytes b_child_tip               = 8 [(dsm_fixed_len)=32];
+  // 3.5b PR4: the CONTENT ADDRESS of the recipient's post-admission RELEASE
+  // (namespace DSM/recipient-economic-release/v1; the ~50KB SPHINCS+ release
+  // inline would exceed the reply-envelope cap). The countersign DELTA must
+  // carry it and the sender finalizes only after fetching + verifying the
+  // exact release bytes AND independently validating the registered root the
+  // release names — bare sig_b is acceptance provenance, insufficient to
+  // finalize. Left EMPTY inside acceptance bundles (the provenance object),
+  // which never carry finalization authority. The release object is frozen
+  // in the ADMIT transaction, never earlier.
+  bytes recipient_economic_release_addr = 9 [(dsm_fixed_len)=32];
 }
 
 // Bilateral finality certificate (finality barrier). The SENDER issues it after

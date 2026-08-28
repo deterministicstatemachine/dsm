@@ -30,12 +30,6 @@ use crate::test_support::fake_node::FakeB0xNode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// The device every fixture funds itself from: a fictitious third party whose
-/// signed lineage is opaque (see `CoreSDK::remote_signed_pair`). Funding is a
-/// real inbound canonical apply on the DEVICE's own relationship with this
-/// id, so it also serves as "a different relationship" in scope tests.
-pub const FAUCET_DEVICE_ID: [u8; 32] = [0xFAu8; 32];
-
 /// One test device: its DB slot, identity, authentication material and — once
 /// [`boot`](Self::boot)ed — its own `AppRouterImpl` (per-device `CoreSDK`
 /// state machine and wallet).
@@ -254,14 +248,13 @@ impl TestDevice {
         dsm::core::bilateral_transaction_manager::compute_smt_key(&self.device_id, &peer.device_id)
     }
 
-    /// Credit `amount` ERA to this device through the ONE production canonical
-    /// apply, as an inbound transfer from [`FAUCET_DEVICE_ID`]. Chains on the
-    /// faucet relationship's pinned head so it can be called repeatedly.
     /// Fund with REAL economic ancestry: `amount / 100` live faucet claims
     /// (the fixed payout). Amounts must be multiples of 100 — a fixture
     /// asking for anything else is asking for value the protocol cannot
     /// issue. Sends debit the economic tree, so ancestry-less value cannot
-    /// fund a send anymore.
+    /// fund a send. (`fund_unadmitted` is DELETED — under the PR4 credit
+    /// gate an ancestry-less inbound apply is refused in core, exactly as
+    /// in production.)
     pub async fn fund_admitted(&self, amount: u64) {
         assert!(
             amount.is_multiple_of(100),
@@ -274,60 +267,6 @@ impl TestDevice {
                 .await
                 .expect("funding claim");
         }
-    }
-
-    /// Inject ancestry-LESS value as an inbound transfer (the pre-3.5b
-    /// funding shape). Still used by ingress-focused fixtures; a device
-    /// funded this way cannot originate an admitted send.
-    pub fn fund_unadmitted(&self, amount: u64) {
-        self.enter();
-        let core = self.router().core_sdk.clone();
-        let faucet_b32 = crate::util::text_id::encode_base32_crockford(&FAUCET_DEVICE_ID);
-        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &FAUCET_DEVICE_ID,
-        );
-        let parent = client_db::pinned_counterparty_a_head(&rel).expect("pin");
-        let step = self.seq.fetch_add(1, Ordering::SeqCst) as u8;
-        let (parent, child) = core
-            .remote_signed_pair(&faucet_b32, parent, step)
-            .expect("faucet pair");
-        let nonce = {
-            let mut n = vec![0xF0u8; 32];
-            n[0] = step;
-            n
-        };
-        let op = dsm::types::operations::Operation::Transfer {
-            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA policy"),
-            to_device_id: self.device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::from_state(amount, [0u8; 32]),
-            token_id: b"ERA".to_vec(),
-            mode: dsm::types::operations::TransactionMode::Bilateral,
-            nonce,
-            verification: dsm::types::operations::VerificationType::Standard,
-            pre_commit: None,
-            recipient: self.device_id.to_vec(),
-            to: self.slot.as_bytes().to_vec(),
-            message: "faucet".to_string(),
-            signature: vec![0; 64],
-            authority_policy: None,
-        };
-        let tx_id =
-            crate::types::identifiers::TransactionId::new(format!("faucet-{}-{step}", self.slot));
-        let out = core
-            .apply_incoming_transfer_full_state(
-                op,
-                &tx_id,
-                &faucet_b32,
-                format!("faucet-op-{}-{step}", self.slot).as_bytes(),
-                parent,
-                child,
-            )
-            .expect("faucet apply");
-        assert!(
-            matches!(out, crate::sdk::apply_outcome::ApplyOutcome::Applied { .. }),
-            "faucet credit must apply: {out:?}"
-        );
     }
 
     /// The device's spendable ERA as the canonical state machine holds it.

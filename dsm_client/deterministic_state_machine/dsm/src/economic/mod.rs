@@ -70,6 +70,7 @@ pub mod peer_acceptance;
 pub mod peer_lineage;
 pub mod provenance;
 pub mod register;
+pub mod release;
 pub mod state;
 pub mod successor_evidence;
 pub mod tree;

@@ -70,6 +70,7 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
         network_id: NETWORK,
         proven_ak: ak,
         canonical_storage_set_id: [0xB1; 32],
+        substrate_b_pair: None,
     }
 }
 
