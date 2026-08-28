@@ -1903,6 +1903,13 @@ impl AppRouterImpl {
                 abandon("the composed state moved past this close's generation");
                 continue;
             }
+            // v2: the retained claim binds the exact parent state; a claim
+            // frozen against a different c_n (a burned v1 claim cannot even
+            // decode) must not be replayed against this frontier.
+            if claim.parent_binding_c_n() != composed.c_n {
+                abandon("the retained claim binds a different parent vault state");
+                continue;
+            }
             let Ok(catalog) = crate::sdk::storage_set::StorageSetCatalog::from_env_config() else {
                 continue;
             };
@@ -2249,6 +2256,9 @@ impl AppRouterImpl {
             parent_sequence,
             &x_close,
             &storage_set_id,
+            // v2: the close claim binds the composed parent state — the same
+            // c_n the canonical commit's artifacts bind.
+            &composed.c_n,
         ) {
             Ok(b) => b,
             Err(e) => return err(format!("dlv.close: build slot claim: {e}")),
@@ -2684,6 +2694,9 @@ impl AppRouterImpl {
             settle.parent_sequence,
             &x,
             &settle.storage_set_id,
+            // v2: the claim binds the exact parent vault state the quote and
+            // the re-simulation consumed.
+            &settle.parent_binding,
         ) {
             Ok(b) => b,
             Err(e) => return err(format!("dlv.unlockRouted: build slot claim: {e}")),
@@ -5774,6 +5787,7 @@ mod funded_creation_tests {
                 x: [0x99u8; 32],
                 claimant_public_key: rival_pk,
                 storage_set_id: record.storage_set_id,
+                parent_binding_c_n: [0x9A; 32],
             },
             &rival_sk,
         )

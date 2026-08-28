@@ -1506,7 +1506,7 @@ message VaultPendingPointerV1 {
 // makes trader-vs-close and trader-vs-trader exclusivity exact.
 //
 // The signature covers the BODY only (you cannot sign bytes that contain the
-// signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v1" || 0x00 ||
+// signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v2" || 0x00 ||
 // canonical_body_bytes))`. Nodes verify claimant ATTRIBUTION — the body's
 // `claimant_public_key` must be the authenticated caller's device key and the
 // signature must verify — so an authenticated caller cannot claim as someone
@@ -1514,7 +1514,13 @@ message VaultPendingPointerV1 {
 // fields, decode→re-encode equality; the client encodes ONCE and retains the
 // exact envelope bytes for every retry (a byte-different re-encode reads as a
 // different claimant at the node).
-message SettlementSlotClaimBodyV1 {
+// V2 (3.6): KEY BY NAME, BIND BY STATE — the register key stays
+// (vault_id, parent_sequence) so two contestants with divergent views of V_n
+// still contend for ONE cell, and the body binds the exact parent vault state
+// `c_n = H(DSM/vault-state, CCB(V_n))` so a divergence is a detectable
+// contradiction rather than two silent winners. V1 (no parent binding) is
+// deleted and its domains are burned; the beta wipe covers persisted cells.
+message SettlementSlotClaimBodyV2 {
   bytes  vault_id            = 1 [(dsm_fixed_len)=32];
   uint64 parent_sequence     = 2;
   // The trade's external commitment (trader) or the deterministic close
@@ -1524,10 +1530,12 @@ message SettlementSlotClaimBodyV1 {
   // The vault's birth-bound canonical storage set (from its signed anchor).
   // A member refuses a claim whose set is not its own.
   bytes  storage_set_id      = 5 [(dsm_fixed_len)=32];
+  // The exact parent vault state this claim consumes.
+  bytes  parent_binding_c_n  = 6 [(dsm_fixed_len)=32];
 }
 
-message SettlementSlotClaimV1 {
-  SettlementSlotClaimBodyV1 body = 1;
+message SettlementSlotClaimV2 {
+  SettlementSlotClaimBodyV2 body = 1;
   bytes  signature               = 2 [(dsm_max_len)=65535];
 }
 

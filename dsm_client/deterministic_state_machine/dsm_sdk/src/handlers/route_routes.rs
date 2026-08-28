@@ -1316,6 +1316,7 @@ mod stamping_tests {
             parent_sequence,
             &x,
             &set.id(),
+            &[0x5C; 32],
         )
         .expect("sign the slot claim");
         let claim = crate::runtime::get_runtime().block_on(
