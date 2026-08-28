@@ -1478,6 +1478,22 @@ impl BilateralBleHandler {
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
 
+        // BLE/USB is the OFFLINE transport: value over it is bearer-tier only,
+        // drawn from the offline-cash allocation. An online-tier Transfer uses
+        // the network transport — refused before any session state exists
+        // (owner ruling 2026-08-28; the receiver refuses the same shape in
+        // `handle_prepare_request`).
+        if matches!(operation, Operation::Transfer { .. })
+            && !dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &operation,
+            )
+        {
+            return Err(DsmError::invalid_operation(
+                "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
+                 online-tier transfer uses the network transport",
+            ));
+        }
+
         self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
             .await?;
 
@@ -2171,6 +2187,23 @@ impl BilateralBleHandler {
         // Deserialize operation
         let operation = Operation::from_bytes(&prepare_request.operation_data)
             .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
+
+        // BLE/USB is the OFFLINE transport: the only value it carries is the
+        // bearer tier, drawn from the device-bound offline-cash allocation. An
+        // online-tier Transfer has the network transport and no business here
+        // — refused at the door, before any session state exists, so the
+        // capability is unavailable rather than merely gated deeper in
+        // `advance` (owner ruling 2026-08-28).
+        if matches!(operation, Operation::Transfer { .. })
+            && !dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &operation,
+            )
+        {
+            return Err(DsmError::invalid_operation(
+                "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
+                 online-tier transfer uses the network transport",
+            ));
+        }
 
         // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
         // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
@@ -3520,30 +3553,14 @@ impl BilateralBleHandler {
         // `mark_sender_committed_with_post_state_hash`. Identical inputs
         // produce an identical outcome there, so the simulated receipt
         // proofs are byte-exact with the eventual advance.
-        let sender_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation {
-            dsm::types::operations::Operation::Transfer {
-                amount, token_id, ..
-            } => {
-                // §9.5: independently resolve the sender's installed policy_commit;
-                // unresolved -> empty deltas -> conservation guard rejects (fail closed).
-                match crate::bridge::app_router().map(|r| r.resolve_policy_commit_strict(token_id))
-                {
-                    Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
-                        policy_commit: pc,
-                        direction: dsm::types::device_state::BalanceDirection::Debit,
-                        amount: amount.value(),
-                    }],
-                    _ => {
-                        log::warn!(
-                            "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
-                            String::from_utf8_lossy(token_id)
-                        );
-                        Vec::new()
-                    }
-                }
-            }
-            _ => Vec::new(),
-        };
+        //
+        // Sender balance deltas are ALWAYS empty on this transport: a bearer
+        // Transfer draws from the offline-cash allocation (`offline_spend`
+        // below), never the online balance, and a non-Transfer operation
+        // moves no value. The online-tier debit arm that used to live here —
+        // and the fallback that let a failed appliance staging silently
+        // proceed as an online-balance debit — are deleted, not gated (owner
+        // ruling 2026-08-28: online transfers use the network transport).
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &self.device_id,
             &session.counterparty_device_id,
@@ -3559,9 +3576,10 @@ impl BilateralBleHandler {
         // with NO appliance mutation yet. The leaf is fed into the advance simulation below so the
         // real device roots R_i/R_{i+1} and inclusion proofs Π_i/Π_{i+1} exist BEFORE the appliance
         // signs anything (simulate-first: the release is born with the real roots, never stamped
-        // with placeholders and never re-stamped). Ordinary transfers (predicate false) and bearer
-        // transfers lacking a receiver challenge stage nothing, so the release rides empty and the
-        // receiver fails closed to online recovery.
+        // with placeholders and never re-stamped). A bearer transfer that cannot stage — no
+        // receiver challenge, or an appliance failure — is REFUSED here: value over this
+        // transport only ever moves allocation-backed, so there is no online-debit path to fall
+        // back to. Non-Transfer operations (predicate false) stage nothing and carry no value.
         let staged_bearer =
             if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 &session.operation,
@@ -3600,32 +3618,37 @@ impl BilateralBleHandler {
                             authority_policy_hash
                                 == dsm::types::operations::canonical_offline_bearer_policy().policy_id
                         );
-                        match router.stage_offline_bearer_transition(
-                            rel_key,
-                            session.counterparty_device_id,
-                            object_id,
-                            payload_hash,
-                            authority_policy_hash,
-                            0,
-                            // action_fields: EMPTY. The operation is already bound into the transition
-                            // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
-                            // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
-                            // once the OfflineBearerRequired policy tail is appended (~266 B). The
-                            // receiver recomputes the digest from the transition carried in the
-                            // release, so empty is consistent end-to-end.
-                            Vec::new(),
-                            r_r,
-                        ) {
-                            Ok(staged) => Some((staged, r_r)),
-                            Err(e) => {
-                                log::warn!(
-                                    "[bilateral_ble] offline-bearer staging failed (fail closed to online recovery): {e}"
-                                );
-                                None
-                            }
-                        }
+                        let staged = router
+                            .stage_offline_bearer_transition(
+                                rel_key,
+                                session.counterparty_device_id,
+                                object_id,
+                                payload_hash,
+                                authority_policy_hash,
+                                0,
+                                // action_fields: EMPTY. The operation is already bound into the transition
+                                // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
+                                // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
+                                // once the OfflineBearerRequired policy tail is appended (~266 B). The
+                                // receiver recomputes the digest from the transition carried in the
+                                // release, so empty is consistent end-to-end.
+                                Vec::new(),
+                                r_r,
+                            )
+                            .map_err(|e| {
+                                DsmError::invalid_operation(format!(
+                                    "offline-bearer staging failed — a bearer transfer cannot \
+                                     proceed without the appliance transition: {e}"
+                                ))
+                            })?;
+                        Some((staged, r_r))
                     }
-                    _ => None,
+                    _ => {
+                        return Err(DsmError::invalid_operation(
+                            "offline-bearer transfer without a receiver challenge — the prepare \
+                             exchange did not establish r_R; refusing to build the confirm",
+                        ));
+                    }
                 }
             } else {
                 None
@@ -3643,31 +3666,41 @@ impl BilateralBleHandler {
                     dsm::types::operations::Operation::Transfer {
                         amount, token_id, ..
                     },
-                ) => match crate::bridge::app_router()
-                    .map(|r| r.resolve_policy_commit_strict(token_id))
-                {
-                    Some(Ok(asset)) => Some(dsm::types::device_state::OfflineSpend {
+                ) => {
+                    // §9.5: independently resolve the sender's installed policy_commit.
+                    // Unresolved is a REFUSAL — the deleted online-debit fallback used to
+                    // stand in here, and empty deltas without a spend would only die
+                    // later in the conservation guard; fail at the seam instead.
+                    let asset = crate::bridge::app_router()
+                        .map(|r| r.resolve_policy_commit_strict(token_id))
+                        .ok_or_else(|| {
+                            DsmError::state_machine(
+                                "send_bilateral_confirm: app_router not installed; cannot \
+                                 resolve the bearer asset",
+                            )
+                        })?
+                        .map_err(|e| {
+                            DsmError::invalid_operation(format!(
+                                "bearer transfer refused: policy_commit unresolved for token {} \
+                                 — {e}",
+                                String::from_utf8_lossy(token_id)
+                            ))
+                        })?;
+                    Some(dsm::types::device_state::OfflineSpend {
                         anchor_bundle_b: staged.pin.bundle,
                         asset,
                         amount: amount.value(),
-                    }),
-                    // policy_commit unresolved: leave None so the online deltas stand (or, if they too
-                    // were empty on unresolved, the guard rejects) — never empty deltas without a spend.
-                    _ => None,
-                },
+                    })
+                }
                 _ => None,
             };
-        // Allocation-backed: the value moved via the allocation debit, so the online deltas MUST be empty.
-        let sender_deltas = if offline_spend.is_some() {
-            Vec::new()
-        } else {
-            sender_deltas
-        };
+        // Sender deltas are ALWAYS empty on this transport: bearer value moves via the
+        // allocation debit (`offline_spend`), and nothing else here moves value.
         let sim_outcome = router.simulate_advance_for_confirm(
             rel_key,
             session.counterparty_device_id,
             session.operation.clone(),
-            &sender_deltas,
+            &[],
             Some(h_n),
             staged_bearer.as_ref().map(|(s, _)| s.anchor_leaf.clone()),
             // Bearer→allocation: draw the value from the offline-cash allocation instead of the online balance.
@@ -3885,8 +3918,8 @@ impl BilateralBleHandler {
             sender_smt_root_before: pre_root.to_vec(),
             // Canonical v2 offline release, emitted by the appliance with the REAL device roots in
             // its signed transcript and Π_i/Π_{i+1} attached to the package — carried VERBATIM (no
-            // re-stamp; the roots were signed correct at birth). Non-bearer transfers leave it
-            // empty and the receiver fails closed to online recovery.
+            // re-stamp; the roots were signed correct at birth). Non-Transfer operations leave it
+            // empty; every Transfer on this transport is bearer and staged one above.
             offline_release: bearer_artifacts
                 .as_ref()
                 .map(|a| a.offline_release.clone())
@@ -4843,7 +4876,25 @@ impl BilateralBleHandler {
             );
         }
 
-        // Derive receiver-side credit deltas from the session operation.
+        // Every Transfer on this transport is bearer — `handle_prepare_request`
+        // refuses the online-tier shape before a session exists. Re-assert at
+        // the commit seam (defense in depth: a session is the only input here,
+        // and no session may smuggle the deleted capability back in).
+        if matches!(session.operation, Operation::Transfer { .. })
+            && !dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                &session.operation,
+            )
+        {
+            return Err(DsmError::invalid_operation(
+                "bilateral confirm refused: BLE/USB carries offline-bearer transfers only — an \
+                 online-tier transfer uses the network transport",
+            ));
+        }
+
+        // Derive receiver-side credit deltas from the session operation: the
+        // bearer value received, installed in the receiver's local balance
+        // representation (the sender side moved allocation, never online
+        // balance).
         let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation
         {
             Operation::Transfer {
@@ -4889,8 +4940,8 @@ impl BilateralBleHandler {
                 session.operation.clone(),
                 &receiver_deltas,
                 Some(h_n),
-                None, // receiver credits ordinary; the fused-anchor leaf is a sender-side concern
-                None, // offline_spend: never — the receiver credits online value, it does not spend a allocation
+                None, // the fused-anchor leaf is a sender-side concern
+                None, // offline_spend: never — the receiver credits received bearer value, it does not spend an allocation
             )
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
@@ -5482,45 +5533,23 @@ impl BilateralBleHandler {
                 );
             }
 
-            // Derive sender-side debit deltas from the session operation.
-            // The canonical advance applies these to DeviceState balances
-            // atomically with the SMT leaf update (§8 balance binding).
-            let sender_deltas: Vec<dsm::types::device_state::BalanceDelta> =
-                match &session_operation {
-                    Operation::Transfer {
-                        amount, token_id, ..
-                    } => {
-                        // §9.5: independently resolve the sender's installed
-                        // policy_commit; unresolved -> empty deltas -> conservation
-                        // guard rejects (fail closed).
-                        match crate::bridge::app_router()
-                            .map(|r| r.resolve_policy_commit_strict(token_id))
-                        {
-                            Some(Ok(pc)) => vec![dsm::types::device_state::BalanceDelta {
-                                policy_commit: pc,
-                                direction: dsm::types::device_state::BalanceDirection::Debit,
-                                amount: amount.value(),
-                            }],
-                            _ => {
-                                log::warn!(
-                                    "[bilateral_ble] sender delta: policy_commit unresolved (fail closed) token={}",
-                                    String::from_utf8_lossy(token_id)
-                                );
-                                Vec::new()
-                            }
-                        }
-                    }
-                    _ => Vec::new(),
-                };
-            // Bearer→allocation: if the confirm-build stashed a allocation-spend descriptor, the value is drawn
-            // from the offline-cash allocation, so the online deltas MUST be empty — the SAME decision the
-            // confirm-build sim made, so the committed root matches the sent sim root. Empty deltas
-            // and Some(offline_spend) are one atomic choice (never split).
-            let sender_deltas = if session_offline_spend.is_some() {
-                Vec::new()
-            } else {
-                sender_deltas
-            };
+            // Sender deltas are ALWAYS empty on this transport: a bearer
+            // Transfer draws from the offline-cash allocation via the
+            // allocation-spend descriptor the confirm-build stashed on the
+            // session, and nothing else here moves value. A Transfer session
+            // that reaches commit WITHOUT that descriptor is a broken
+            // invariant (the confirm-build refuses to construct one), not a
+            // cue to rebuild an online-balance debit — the deleted online-tier
+            // arm is not gated, it is gone (owner ruling 2026-08-28).
+            if matches!(session_operation, Operation::Transfer { .. })
+                && session_offline_spend.is_none()
+            {
+                error!(
+                    "[BILATERAL] commit refused: a Transfer session carries no allocation-spend \
+                     descriptor — bearer value never draws from the online balance"
+                );
+                return None;
+            }
 
             match manager
                 .prepare_bilateral_advance(
@@ -5528,7 +5557,7 @@ impl BilateralBleHandler {
                     commitment_hash,
                     &counterparty_sig,
                     pre_entropy,
-                    sender_deltas,
+                    Vec::new(),
                     session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
                     session_offline_spend, // bearer→allocation: the SAME allocation debit the confirm-build sim used
                 )
@@ -6752,6 +6781,152 @@ mod tests {
         let _ = reconciled; // allow either path
     }
 
+    /// Builds the online-tier Transfer shape (`authority_policy: None`) that
+    /// the network transport carries and BLE/USB must refuse.
+    fn online_tier_transfer(counterparty: [u8; 32]) -> Operation {
+        Operation::Transfer {
+            policy_commit: [0u8; 32],
+            to_device_id: counterparty.to_vec(),
+            amount: Balance::from_state(1, [1u8; 32]),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![9],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: counterparty.to_vec(),
+            to: counterparty.to_vec(),
+            message: "online".to_string(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+    }
+
+    /// Owner ruling (2026-08-28): BLE/USB is the OFFLINE transport — value
+    /// over it is bearer-tier only, and the online tier uses the network.
+    /// Sender door: `prepare_bilateral_transaction` refuses the online shape
+    /// before any session state exists. MUTATION CONTROL: deleting the sender
+    /// entry refusal lets this prepare proceed past the named error and turns
+    /// this red.
+    #[tokio::test]
+    #[serial]
+    async fn an_online_tier_transfer_cannot_enter_ble_at_the_sender_door() {
+        init_test_db();
+        let device_id = [0x51u8; 32];
+        let counterparty = [0x52u8; 32];
+        let (bilateral_manager, handler) =
+            make_test_handler(device_id, [0x53u8; 32], b"online-tier-sender-door");
+        {
+            let mut mgr = bilateral_manager.write().await;
+            mgr.add_verified_contact(dsm::types::contact_types::DsmVerifiedContact {
+                alias: "peer".to_string(),
+                device_id: counterparty,
+                genesis_hash: [0x54u8; 32],
+                public_key: vec![9u8; 32],
+                genesis_material: vec![8u8; 32],
+                chain_tip: Some([7u8; 32]),
+                chain_tip_smt_proof: None,
+                genesis_verified_online: true,
+                verified_at_commit_height: 1,
+                added_at_commit_height: 1,
+                last_updated_commit_height: 1,
+                verifying_storage_nodes: vec![],
+                ble_address: None,
+            })
+            .expect("add contact");
+            mgr.establish_relationship(&counterparty)
+                .await
+                .expect("establish relationship");
+        }
+
+        let msg = handler
+            .prepare_bilateral_transaction(counterparty, online_tier_transfer(counterparty), 120)
+            .await
+            .expect_err("the sender door must refuse the online tier")
+            .to_string();
+        assert!(
+            msg.contains("offline-bearer transfers only"),
+            "the refusal names the transport rule, got: {msg}"
+        );
+    }
+
+    /// The receiver door: `handle_prepare_request` refuses the same shape
+    /// before creating any session — a foreign sender does not get to open an
+    /// online-tier transfer over BLE no matter what it puts on the wire.
+    /// MUTATION CONTROL: deleting the receiver entry refusal moves the failure
+    /// past the named error and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn an_online_tier_transfer_cannot_enter_ble_at_the_receiver_door() {
+        init_test_db();
+        let device_id = [0x61u8; 32];
+        let sender = [0x62u8; 32];
+        let (_mgr, handler) =
+            make_test_handler(device_id, [0x63u8; 32], b"online-tier-receiver-door");
+
+        let req = generated::BilateralPrepareRequest {
+            counterparty_device_id: device_id.to_vec(),
+            operation_data: online_tier_transfer(device_id).to_bytes(),
+            validity_iterations: 100,
+            expected_genesis_hash: None,
+            expected_counterparty_state_hash: None,
+            ble_address: String::new(),
+            sender_signing_public_key: vec![0; 64],
+            sender_device_id: sender.to_vec(),
+            sender_genesis_hash: None,
+            sender_chain_tip: None,
+            transfer_amount: 0,
+            token_id_hint: String::new(),
+            memo_hint: String::new(),
+            transfer_amount_display: String::new(),
+            sender_kyber_public_key: vec![],
+            sender_kyber_binding_sig: vec![],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: Some(generated::Headers {
+                device_id: sender.to_vec(),
+                chain_tip: vec![0u8; 32],
+                genesis_hash: vec![0x64u8; 32],
+                seq: 1,
+            }),
+            message_id: vec![0x65u8; 16],
+            payload: Some(generated::envelope::Payload::UniversalTx(
+                generated::UniversalTx {
+                    ops: vec![generated::UniversalOp {
+                        op_id: None,
+                        actor: sender.to_vec(),
+                        genesis_hash: vec![0x64u8; 32],
+                        kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
+                            program: None,
+                            method: "bilateral.prepare".to_string(),
+                            args: Some(generated::ArgPack {
+                                schema_hash: None,
+                                codec: 0,
+                                body: prost::Message::encode_to_vec(&req),
+                            }),
+                            pre_state_hash: None,
+                            post_state_hash: None,
+                            cosigners: vec![],
+                            evidence: None,
+                            nonce: None,
+                        })),
+                    }],
+                    atomic: false,
+                },
+            )),
+        };
+
+        let msg = handler
+            .handle_prepare_request(&crate::envelope::to_canonical_bytes(&envelope), None)
+            .await
+            .expect_err("the receiver door must refuse the online tier")
+            .to_string();
+        assert!(
+            msg.contains("offline-bearer transfers only"),
+            "the refusal names the transport rule, got: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn test_stale_receiver_session_cleans_local_pending_commitment() {
         let device_id = [31u8; 32];
@@ -6807,7 +6982,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "stale".to_string(),
             signature: Vec::new(),
-            authority_policy: None,
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
         let next_op = Operation::Transfer {
             policy_commit: [0u8; 32],
@@ -6822,7 +6997,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "fresh".to_string(),
             signature: Vec::new(),
-            authority_policy: None,
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
 
         let local_pending_hash = {
@@ -6933,7 +7108,7 @@ mod tests {
             to: counterparty_device_id.to_vec(),
             message: "accepted".to_string(),
             signature: Vec::new(),
-            authority_policy: None,
+            authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
 
         let local_pending_hash = {
