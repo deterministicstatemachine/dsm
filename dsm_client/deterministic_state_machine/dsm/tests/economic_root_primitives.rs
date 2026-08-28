@@ -462,6 +462,88 @@ fn dlv_unlock_is_economically_inert_despite_being_value_bearing() {
     assert_eq!(classify(&op), EconomicEffect::None);
 }
 
+/// Owner ruling (2026-08-28): the classifier cares about ECONOMIC EFFECT,
+/// not the operation name. The EXACT tokenless legacy shape moves nothing
+/// and is `None`; anything value-bearing under the legacy tag never is.
+#[test]
+fn the_exact_tokenless_legacy_dlv_create_is_economically_none() {
+    let tokenless = dsm::types::operations::Operation::DlvCreate {
+        vault_id: vec![0xCC; 32],
+        creator_public_key: vec![0x02; 64],
+        parameters_hash: vec![0x03; 32],
+        fulfillment_condition: Vec::new(),
+        intended_recipient: None,
+        token_id: None,
+        locked_amount: None,
+        signature: Vec::new(),
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+    };
+    assert_eq!(classify(&tokenless), EconomicEffect::None);
+}
+
+#[test]
+fn a_value_bearing_legacy_dlv_create_is_never_none() {
+    let base = |token_id, locked_amount| dsm::types::operations::Operation::DlvCreate {
+        vault_id: vec![0xCC; 32],
+        creator_public_key: vec![0x02; 64],
+        parameters_hash: vec![0x03; 32],
+        fulfillment_condition: Vec::new(),
+        intended_recipient: None,
+        token_id,
+        locked_amount,
+        signature: Vec::new(),
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+    };
+    // token named, amount named, or both: value-bearing, unsupported.
+    for op in [
+        base(Some(b"ERA".to_vec()), None),
+        base(
+            None,
+            Some(dsm::types::token_types::Balance::from_state(5, [0u8; 32])),
+        ),
+        base(
+            Some(b"ERA".to_vec()),
+            Some(dsm::types::token_types::Balance::from_state(5, [0u8; 32])),
+        ),
+    ] {
+        assert_eq!(classify(&op), EconomicEffect::UnsupportedValueTransition);
+    }
+}
+
+#[test]
+fn the_v2_vault_operations_are_closed_write_sets() {
+    let create = dsm::types::operations::Operation::DlvCreateFundedV2 {
+        vault_id: vec![0xCC; 32],
+        creator_public_key: vec![0x02; 64],
+        parameters_hash: vec![0x03; 32],
+        fulfillment_condition: Vec::new(),
+        leg_a_policy_commit: [0x0A; 32],
+        leg_a_amount: 10,
+        leg_b_policy_commit: [0x0B; 32],
+        leg_b_amount: 5,
+        fee_bps: 30,
+        signature: Vec::new(),
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+    };
+    let apply = dsm::types::operations::Operation::DlvOwnerApplyV2 {
+        vault_id: vec![0xCC; 32],
+        settlement_receipt_id: [0x11; 32],
+        pending_pointer_x: [0x12; 32],
+        parent_sequence: 1,
+        new_sequence: 2,
+        parent_binding: [0x13; 32],
+        input_policy_commit: [0x0A; 32],
+        output_policy_commit: [0x0B; 32],
+        input_amount: 10,
+        output_amount: 9,
+        fee_bps: 30,
+        signature: Vec::new(),
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+    };
+    assert_eq!(classify(&create), EconomicEffect::ClosedWriteSet);
+    assert_eq!(classify(&apply), EconomicEffect::ClosedWriteSet);
+}
+
 #[test]
 fn the_tripwire_contradicts_a_no_write_classification_that_wrote() {
     let wrote = ObservedEconomicChange {

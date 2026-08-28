@@ -244,7 +244,7 @@ pub(crate) fn build_dsm_admission(
         genesis,
         devid,
         &econ_op_id,
-        pre_balances,
+        &dsm::economic::write_set::EconomicPreState::balances_only(pre_balances),
         tree,
         facts,
     )

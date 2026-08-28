@@ -77,6 +77,10 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // without a matching pending admission.
         FaucetClaim { .. } => ClosedWriteSet,
         DlvSettle { .. } | DlvClose { .. } => ClosedWriteSet,
+        // The 3.6 v2 vault operations state their complete economic effect
+        // in the signed operation: both funding legs (create), or the exact
+        // reserve movement with the parent vault-state binding (owner apply).
+        DlvCreateFundedV2 { .. } | DlvOwnerApplyV2 { .. } => ClosedWriteSet,
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether
         // `to_device_id` is the local device.
@@ -102,13 +106,26 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         Lock { .. } | Unlock { .. } | LockToken { .. } | UnlockToken { .. } => {
             UnsupportedValueTransition
         }
+        // Legacy DlvCreate classifies by ECONOMIC EFFECT, not operation name
+        // (owner ruling 2026-08-28): the exact tokenless shape — no token, no
+        // amount — moves nothing (the `Fund` reserve mutation refuses to ride
+        // it; only value-bearing creates may encumber), so it is `None`, and
+        // state-only vaults keep working. ANY value-bearing shape stays
+        // unsupported below. The structural tripwire remains load-bearing:
+        // if balance/reserve/receipt/consumed-source state changed, `None`
+        // is impossible.
+        DlvCreate {
+            token_id: Option::None,
+            locked_amount: Option::None,
+            ..
+        } => None,
         // The legacy DLV value operations. `DlvCreate` carries a SINGULAR
         // token_id and locked_amount while real funding is two-leg, and
         // `DlvOwnerApply` carries neither `fee_bps` nor `c_n` while its
         // sidecar carries the pair — one side holds an authenticated fact the
         // other lacks, so no equality check between them is even expressible.
-        // Their replacements are separate tags rather than mutations of
-        // these, so that a legacy operation cannot be reinterpreted.
+        // Their replacements are separate tags (29/30) rather than mutations
+        // of these, so that a legacy operation cannot be reinterpreted.
         DlvCreate { .. } | DlvOwnerApply { .. } => UnsupportedValueTransition,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
     }

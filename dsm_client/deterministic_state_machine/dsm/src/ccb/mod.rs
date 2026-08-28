@@ -105,8 +105,12 @@ pub mod class {
     /// mutations and its inline credit sources.
     pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
 
-    // Credit-provenance classes. Six arms, closed: a credit that names none
-    // of them is unfunded, and there is deliberately no `Custom`.
+    // Credit-provenance classes. Seven arms, closed: a credit that names none
+    // of them is unfunded, and there is deliberately no `Custom`. All are
+    // schema 1 EXCEPT `0x0026`/`0x0027`, whose schema 1 is BURNED (3.6, owner
+    // ruling 2026-08-28) — schema 2 adds the peer economic-position locator
+    // (`owner_economic_position` / `trader_economic_position`), untrusted,
+    // never authority.
     pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
     pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
     pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
