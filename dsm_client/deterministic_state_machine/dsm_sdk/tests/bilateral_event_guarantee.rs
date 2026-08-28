@@ -240,7 +240,9 @@ async fn verify_frontend_event_guarantees() {
         to: b"bob".to_vec(),
         message: "event check".to_string(),
         signature: Vec::new(),
-        authority_policy: None,
+        // BLE carries bearer-tier transfers only (owner ruling 2026-08-28);
+        // the online-tier shape is refused at the prepare door.
+        authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
     };
 
     println!("[EVENT-TEST] Alice initiating transfer...");
