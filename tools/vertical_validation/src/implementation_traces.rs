@@ -900,10 +900,7 @@ fn trace_dlv_manager_inventory_consistency(
             Ok(result) => result,
             Err(e) => return vec![format!("sign_vault alpha failed: {e}")],
         };
-        let (vault_a, op_a) = match manager
-            .finalize_vault(draft_a, &creator_signature_a, Some("ERA"), Some(5))
-            .await
-        {
+        let (vault_a, op_a) = match manager.finalize_vault(draft_a, &creator_signature_a).await {
             Ok(result) => result,
             Err(e) => return vec![format!("finalize_vault alpha failed: {e}")],
         };
@@ -927,10 +924,7 @@ fn trace_dlv_manager_inventory_consistency(
             Ok(result) => result,
             Err(e) => return vec![format!("sign_vault beta failed: {e}")],
         };
-        let (vault_b, op_b) = match manager
-            .finalize_vault(draft_b, &creator_signature_b, None, None)
-            .await
-        {
+        let (vault_b, op_b) = match manager.finalize_vault(draft_b, &creator_signature_b).await {
             Ok(result) => result,
             Err(e) => return vec![format!("finalize_vault beta failed: {e}")],
         };
@@ -967,21 +961,13 @@ fn trace_dlv_manager_inventory_consistency(
             Err(e) => failures.push(format!("create_vault_post failed: {e}")),
         }
 
+        // DlvCreate is structurally STATE-ONLY (owner directive 2026-08-28):
+        // the legacy locked-token fields are deleted; funded creation is
+        // DlvCreateFundedV2 through the route, never this manager.
         match op_a {
-            Operation::DlvCreate {
-                mode,
-                locked_amount,
-                token_id,
-                ..
-            } => {
+            Operation::DlvCreate { mode, .. } => {
                 if mode != TransactionMode::Unilateral {
                     failures.push("vault create operation did not use unilateral mode".into());
-                }
-                if token_id.as_deref() != Some(b"ERA".as_slice()) {
-                    failures.push("vault create operation lost the locked token id".into());
-                }
-                if locked_amount.as_ref().map(Balance::value) != Some(5) {
-                    failures.push("vault create operation lost the locked amount".into());
                 }
             }
             _ => failures.push("create_vault did not return a DlvCreate operation".into()),

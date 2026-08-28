@@ -119,7 +119,7 @@ fn rich_owner_head() -> DeviceState {
 /// The operation exactly as `dlv.reconcile` builds it today
 /// (dsm_sdk/src/handlers/dlv_routes.rs:1395).
 fn owner_apply_op_as_built_by_reconcile() -> Operation {
-    Operation::DlvOwnerApply {
+    Operation::DlvOwnerApplyV2 {
         vault_id: VAULT.to_vec(),
         settlement_receipt_id: [0x77; 32],
         pending_pointer_x: [0x88; 32],
@@ -129,6 +129,8 @@ fn owner_apply_op_as_built_by_reconcile() -> Operation {
         output_policy_commit: sofi(),
         input_amount: 100,
         output_amount: 60,
+        parent_binding: [0x23; 32],
+        fee_bps: 30,
         // dlv_routes.rs:1408.
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
@@ -176,7 +178,7 @@ fn try_apply_settlement(
 /// racing one vault parent produce. Same `parent_sequence: 0`, so it competes
 /// for the same generation the winner consumes.
 fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operation {
-    Operation::DlvOwnerApply {
+    Operation::DlvOwnerApplyV2 {
         vault_id: VAULT.to_vec(),
         settlement_receipt_id: receipt_id,
         pending_pointer_x: pointer_x,
@@ -186,6 +188,8 @@ fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operati
         output_policy_commit: sofi(),
         input_amount: 100,
         output_amount: 60,
+        parent_binding: [0x23; 32],
+        fee_bps: 30,
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
     }
@@ -416,7 +420,7 @@ fn owner_apply_head_round_trips_through_persistence() {
     );
 }
 
-/// `DlvSettle` and `DlvOwnerApply` are signed, and the real path verifies them.
+/// `DlvSettle` and `DlvOwnerApplyV2` are signed, and the real path verifies them.
 ///
 /// THIS WAS #634's RED-ON-PURPOSE ACCEPTANCE TEST. Its assertions are unchanged; only
 /// the `#[ignore]`, the fixture (which now holds a real key and signs), and this name
@@ -465,21 +469,21 @@ fn value_moving_dlv_operations_are_signed_and_verified_on_the_real_path() {
     // no-signature exemptions (Genesis, Noop, Receive) at transition.rs:399-400.
     assert!(
         enforce_operation_authorization(&op).is_err(),
-        "precondition: the canonical rule must reject an unsigned DlvOwnerApply"
+        "precondition: the canonical rule must reject an unsigned DlvOwnerApplyV2"
     );
 
     // Yet the signing preimage is self-referential: clearing does not clear.
     let cleared = op.with_cleared_signature();
-    let Operation::DlvOwnerApply { .. } = &cleared else {
+    let Operation::DlvOwnerApplyV2 { .. } = &cleared else {
         panic!("with_cleared_signature must preserve the variant");
     };
     let signed = op.clone().with_signature(vec![0xAB; 64]);
-    let Operation::DlvOwnerApply { signature, .. } = &signed else {
+    let Operation::DlvOwnerApplyV2 { signature, .. } = &signed else {
         panic!("with_signature must preserve the variant");
     };
     assert!(
         !signature.is_empty(),
-        "DEFECT: with_signature cannot install a signature on DlvOwnerApply — it falls \
+        "DEFECT: with_signature cannot install a signature on DlvOwnerApplyV2 — it falls \
          through operations.rs:2449-2467's `_ => {{}}` arm, so the field is unwritable \
          and `signature: Vec::new()` at dlv_routes.rs:1408 is the only value it admits"
     );
@@ -498,7 +502,7 @@ fn value_moving_dlv_operations_are_signed_and_verified_on_the_real_path() {
     // reach the root at all, rather than reaching it and being detectable afterwards.
     let unsigned = try_apply_settlement(&before, owner_apply_op_as_built_by_reconcile());
     let err = unsigned.expect_err(
-        "DEFECT: advance() committed an unsigned DlvOwnerApply into the canonical root",
+        "DEFECT: advance() committed an unsigned DlvOwnerApplyV2 into the canonical root",
     );
     assert!(
         format!("{err:?}").contains("signature"),

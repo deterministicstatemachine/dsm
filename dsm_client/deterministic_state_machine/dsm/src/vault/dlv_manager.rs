@@ -48,7 +48,6 @@
 
 use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, LimboVaultDraft, VaultState};
 use crate::types::operations::{Operation, TransactionMode};
-use crate::types::token_types::Balance;
 use crate::types::error::DsmError;
 use prost::Message; // for encode_to_vec()
 use std::{collections::HashMap, sync::Arc};
@@ -99,8 +98,6 @@ impl DLVManager {
         &self,
         draft: LimboVaultDraft,
         creator_signature: &[u8],
-        token_id: Option<&str>,
-        locked_amount: Option<u64>,
     ) -> Result<([u8; 32], Operation), DsmError> {
         let vault = draft.finalize(creator_signature)?;
 
@@ -111,18 +108,15 @@ impl DLVManager {
             (&vault.fulfillment_condition).into();
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
-        // Build the unsigned DlvCreate operation
-        let locked_balance =
-            locked_amount.map(|amt| Balance::from_state(amt, vault.reference_state_hash));
-
+        // Build the unsigned STATE-ONLY DlvCreate operation (the legacy
+        // value-bearing fields are deleted; funded vaults use
+        // DlvCreateFundedV2 through the route, never this manager).
         let operation = Operation::DlvCreate {
             vault_id: vault_id.to_vec(),
             creator_public_key: vault.creator_public_key.clone(),
             parameters_hash: vault.parameters_hash.clone(),
             fulfillment_condition: fulfillment_bytes,
             intended_recipient: vault.intended_recipient.clone(),
-            token_id: token_id.map(|s| s.as_bytes().to_vec()),
-            locked_amount: locked_balance,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };

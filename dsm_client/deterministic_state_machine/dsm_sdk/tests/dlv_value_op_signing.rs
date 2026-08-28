@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Acceptance suite for the `DlvSettle` / `DlvOwnerApply` signing repair.
+//! Acceptance suite for the `DlvSettle` / `DlvOwnerApplyV2` signing repair.
 //!
 //! Both are value-moving egress (`EgressAsset::Asset`, operations.rs:885-901) and both
 //! sit in the must-sign set of what transition.rs calls "the canonical rule", whose only
@@ -48,7 +48,7 @@ fn sign_with(kp: &SignatureKeyPair, op: &Operation) -> Vec<u8> {
 }
 
 fn owner_apply_op() -> Operation {
-    Operation::DlvOwnerApply {
+    Operation::DlvOwnerApplyV2 {
         vault_id: VAULT.to_vec(),
         settlement_receipt_id: [0x77; 32],
         pending_pointer_x: [0x88; 32],
@@ -58,6 +58,8 @@ fn owner_apply_op() -> Operation {
         output_policy_commit: dbtc(),
         input_amount: 100,
         output_amount: 60,
+        parent_binding: [0x23; 32],
+        fee_bps: 30,
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
     }
@@ -90,7 +92,7 @@ fn settle_op() -> Operation {
 /// Every variant under test, by name.
 fn both() -> Vec<(&'static str, Operation)> {
     vec![
-        ("DlvOwnerApply", owner_apply_op()),
+        ("DlvOwnerApplyV2", owner_apply_op()),
         ("DlvSettle", settle_op()),
     ]
 }
@@ -114,12 +116,12 @@ fn actor_head() -> DeviceState {
         .new_device_state
 }
 
-/// Advance the actor's self-loop with `op`. `DlvOwnerApply` also moves reserves.
+/// Advance the actor's self-loop with `op`. `DlvOwnerApplyV2` also moves reserves.
 fn advance_with(
     head: &DeviceState,
     op: Operation,
 ) -> Result<DeviceState, dsm::types::error::DsmError> {
-    let is_owner_apply = matches!(op, Operation::DlvOwnerApply { .. });
+    let is_owner_apply = matches!(op, Operation::DlvOwnerApplyV2 { .. });
     let deltas: Vec<BalanceDelta> = if is_owner_apply {
         Vec::new()
     } else {
@@ -224,21 +226,21 @@ fn the_real_advance_path_rejects_an_unsigned_operation() {
 fn mutating_a_signed_field_invalidates_the_signature() {
     let head = actor_head();
 
-    // DlvOwnerApply: change the output amount the settlement pays out.
+    // DlvOwnerApplyV2: change the output amount the settlement pays out.
     let op = owner_apply_op();
     let signed = op.with_signature(sign_with(actor_keypair(), &op));
-    let Operation::DlvOwnerApply { signature, .. } = &signed else {
+    let Operation::DlvOwnerApplyV2 { signature, .. } = &signed else {
         unreachable!()
     };
     let mut tampered = owner_apply_op();
-    if let Operation::DlvOwnerApply { output_amount, .. } = &mut tampered {
+    if let Operation::DlvOwnerApplyV2 { output_amount, .. } = &mut tampered {
         *output_amount = 61; // was 60
     }
     let tampered = tampered.with_signature(signature.clone());
     let err = advance_with(&head, tampered).expect_err("field mutation must reject");
     assert!(
         format!("{err}").contains("signature invalid"),
-        "DlvOwnerApply: mutating output_amount must invalidate the signature, got: {err}"
+        "DlvOwnerApplyV2: mutating output_amount must invalidate the signature, got: {err}"
     );
 
     // DlvSettle: change the input amount the trader pays.
