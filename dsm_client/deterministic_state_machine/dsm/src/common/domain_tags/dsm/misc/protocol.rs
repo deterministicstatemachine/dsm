@@ -42,12 +42,16 @@ pub const TAG_DSM_DLV_CLOSE_X: TaggedHashDomain<'static> =
 pub const TAG_DSM_DLV_CLOSE_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-close-commit");
 /// Settlement-slot claim: the signed preimage `H(tag ‖ 0x00 ‖ canonical
-/// SettlementSlotClaimBodyV1 bytes)`, and (with `-envelope`) the digest of the
+/// SettlementSlotClaimBodyV2 bytes)`, and (with `-envelope`) the digest of the
 /// frozen envelope bytes a register member stores and compares.
-pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/settlement-slot-claim/v1");
-pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v1");
+/// The `/v1` pair is **burned** (3.6, owner ruling 2026-08-28): its body
+/// carried no `parent_binding_c_n`, so two contestants holding divergent
+/// alleged vault states could win one slot without the divergence being
+/// expressible. Key by name, bind by state — one domain, one meaning.
+pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/settlement-slot-claim/v2");
+pub const TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/settlement-slot-claim-envelope/v2");
 /// History-bound vault state anchor, Rev 15 Definition 6.4:
 /// `p_v = H(tag ‖ 0x00 ‖ vault_id ‖ generation ‖ parent_state_commitment
 /// ‖ reserves_digest ‖ storage_set_id ‖ q)`. A distinct domain from the legacy

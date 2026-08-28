@@ -26,7 +26,7 @@
 //!   IS the caller's) is the storage node's check, layered on top.
 
 use crate::common::domain_tags::{
-    TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1, TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1,
+    TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V2, TAG_DSM_SETTLEMENT_SLOT_CLAIM_V2,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::proto as generated;
@@ -47,6 +47,14 @@ pub struct SettlementSlotClaimBody {
     pub claimant_public_key: Vec<u8>,
     /// The vault's birth-bound canonical storage set (from its signed anchor).
     pub storage_set_id: [u8; 32],
+    /// KEY BY NAME, BIND BY STATE (3.6): the exact parent vault state this
+    /// claim consumes, `c_n = H(DSM/vault-state, CCB(V_n))`. The register key
+    /// stays `(vault_id, parent_sequence)` — keying on `c_n` would let two
+    /// contestants holding different alleged `V_n` occupy different cells and
+    /// BOTH win exactly when views diverge; binding it in the signed body
+    /// turns a silent divergence into a detectable contradiction. Members do
+    /// not judge it; the 0x0026 provenance arm does.
+    pub parent_binding_c_n: [u8; 32],
 }
 
 /// A claim envelope that decoded strictly and whose signature verified under
@@ -86,13 +94,14 @@ impl core::fmt::Display for ClaimError {
 impl std::error::Error for ClaimError {}
 
 impl SettlementSlotClaimBody {
-    fn to_proto(&self) -> generated::SettlementSlotClaimBodyV1 {
-        generated::SettlementSlotClaimBodyV1 {
+    fn to_proto(&self) -> generated::SettlementSlotClaimBodyV2 {
+        generated::SettlementSlotClaimBodyV2 {
             vault_id: self.vault_id.to_vec(),
             parent_sequence: self.parent_sequence,
             x: self.x.to_vec(),
             claimant_public_key: self.claimant_public_key.clone(),
             storage_set_id: self.storage_set_id.to_vec(),
+            parent_binding_c_n: self.parent_binding_c_n.to_vec(),
         }
     }
 
@@ -102,7 +111,7 @@ impl SettlementSlotClaimBody {
         self.to_proto().encode_to_vec()
     }
 
-    fn from_proto(p: &generated::SettlementSlotClaimBodyV1) -> Result<Self, ClaimError> {
+    fn from_proto(p: &generated::SettlementSlotClaimBodyV2) -> Result<Self, ClaimError> {
         let fixed = |v: &[u8], what: &'static str| -> Result<[u8; 32], ClaimError> {
             <[u8; 32]>::try_from(v).map_err(|_| ClaimError::Malformed(what))
         };
@@ -115,14 +124,18 @@ impl SettlementSlotClaimBody {
             x: fixed(&p.x, "x must be 32 bytes")?,
             claimant_public_key: p.claimant_public_key.clone(),
             storage_set_id: fixed(&p.storage_set_id, "storage_set_id must be 32 bytes")?,
+            parent_binding_c_n: fixed(
+                &p.parent_binding_c_n,
+                "parent_binding_c_n must be 32 bytes (v1 claims are burned)",
+            )?,
         })
     }
 }
 
-/// The signed preimage: `H(TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1 ‖ 0x00 ‖ canonical
+/// The signed preimage: `H(TAG_DSM_SETTLEMENT_SLOT_CLAIM_V2 ‖ 0x00 ‖ canonical
 /// body bytes)`. Body only — never the envelope.
 pub fn claim_sign_payload(canonical_body_bytes: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_DSM_SETTLEMENT_SLOT_CLAIM_V1);
+    let mut h = dsm_domain_hasher(TAG_DSM_SETTLEMENT_SLOT_CLAIM_V2);
     h.update(canonical_body_bytes);
     *h.finalize().as_bytes()
 }
@@ -130,7 +143,7 @@ pub fn claim_sign_payload(canonical_body_bytes: &[u8]) -> [u8; 32] {
 /// The digest a register member stores and compares for a held claim:
 /// `H(envelope tag ‖ 0x00 ‖ exact envelope bytes)`.
 pub fn claim_envelope_digest(envelope_bytes: &[u8]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V1);
+    let mut h = dsm_domain_hasher(TAG_DSM_SETTLEMENT_SLOT_CLAIM_ENVELOPE_V2);
     h.update(envelope_bytes);
     *h.finalize().as_bytes()
 }
@@ -146,7 +159,7 @@ pub fn sign_settlement_slot_claim(
     let payload = claim_sign_payload(&body_bytes);
     let signature = crate::crypto::sphincs::sphincs_sign(claimant_secret_key, &payload)
         .map_err(|e| ClaimError::SignFailed(format!("{e:?}")))?;
-    let env = generated::SettlementSlotClaimV1 {
+    let env = generated::SettlementSlotClaimV2 {
         body: Some(body.to_proto()),
         signature,
     };
@@ -162,7 +175,7 @@ pub fn decode_and_verify_settlement_slot_claim(
     if envelope_bytes.is_empty() {
         return Err(ClaimError::Malformed("empty envelope"));
     }
-    let env = generated::SettlementSlotClaimV1::decode(envelope_bytes)
+    let env = generated::SettlementSlotClaimV2::decode(envelope_bytes)
         .map_err(|_| ClaimError::Malformed("envelope does not decode"))?;
     let body_proto = env
         .body
@@ -175,7 +188,7 @@ pub fn decode_and_verify_settlement_slot_claim(
     // Canonical-bytes discipline: the ONLY acceptable envelope is prost's
     // encoding of the well-formed message. Unknown fields, duplicates and
     // non-canonical encodings all fail this comparison.
-    let reencoded = generated::SettlementSlotClaimV1 {
+    let reencoded = generated::SettlementSlotClaimV2 {
         body: Some(body.to_proto()),
         signature: env.signature.clone(),
     }
@@ -211,6 +224,7 @@ mod tests {
             x: [0x22; 32],
             claimant_public_key: pk.to_vec(),
             storage_set_id: [0x6B; 32],
+            parent_binding_c_n: [0x77; 32],
         }
     }
 
@@ -236,7 +250,7 @@ mod tests {
         let (pk, sk) = kp();
         let b = body(&pk);
         let env = sign_settlement_slot_claim(&b, &sk).expect("sign");
-        let decoded = generated::SettlementSlotClaimV1::decode(env.as_slice()).unwrap();
+        let decoded = generated::SettlementSlotClaimV2::decode(env.as_slice()).unwrap();
         let mut tampered = decoded.clone();
         tampered.body.as_mut().unwrap().parent_sequence = 8;
         let bytes = tampered.encode_to_vec();
@@ -274,7 +288,7 @@ mod tests {
             Err(ClaimError::Malformed(_))
         ));
         // Wrong-width fixed field.
-        let mut short = generated::SettlementSlotClaimV1::decode(env.as_slice()).unwrap();
+        let mut short = generated::SettlementSlotClaimV2::decode(env.as_slice()).unwrap();
         short.body.as_mut().unwrap().vault_id = vec![0x11; 31];
         assert!(matches!(
             decode_and_verify_settlement_slot_claim(&short.encode_to_vec()),
@@ -290,7 +304,7 @@ mod tests {
             Err(ClaimError::Malformed(_))
         ));
         // Envelope without a body.
-        let no_body = generated::SettlementSlotClaimV1 {
+        let no_body = generated::SettlementSlotClaimV2 {
             body: None,
             signature: vec![1, 2, 3],
         }
@@ -299,6 +313,31 @@ mod tests {
             decode_and_verify_settlement_slot_claim(&no_body),
             Err(ClaimError::Malformed(_))
         ));
+    }
+
+    /// The v1 shape — no `parent_binding_c_n` — is BURNED: bytes without the
+    /// binding decode as an empty field 6 and fail the fixed-width check. A
+    /// tampered binding is caught by the signature (it is inside the body).
+    #[test]
+    fn a_burned_v1_shaped_claim_is_refused_and_the_binding_is_signed() {
+        let (pk, sk) = kp();
+        let b = body(&pk);
+        let env = sign_settlement_slot_claim(&b, &sk).expect("sign");
+        let mut decoded = generated::SettlementSlotClaimV2::decode(env.as_slice()).unwrap();
+        // The v1 shape: strip the parent binding entirely.
+        decoded.body.as_mut().unwrap().parent_binding_c_n = Vec::new();
+        assert!(matches!(
+            decode_and_verify_settlement_slot_claim(&decoded.encode_to_vec()),
+            Err(ClaimError::Malformed(_))
+        ));
+        // A different binding under the same signature: refused as unsigned.
+        let mut decoded = generated::SettlementSlotClaimV2::decode(env.as_slice()).unwrap();
+        decoded.body.as_mut().unwrap().parent_binding_c_n = vec![0x78; 32];
+        assert_eq!(
+            decode_and_verify_settlement_slot_claim(&decoded.encode_to_vec()),
+            Err(ClaimError::SignatureInvalid),
+            "the parent binding is inside the signed body"
+        );
     }
 
     #[test]

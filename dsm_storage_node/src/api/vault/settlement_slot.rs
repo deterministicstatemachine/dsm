@@ -40,7 +40,7 @@
 //! market.
 //!
 //! Wire: `POST /api/v2/settlement-slot/claim` (device-auth) with the exact
-//! `SettlementSlotClaimV1` envelope bytes as the body; `GET
+//! `SettlementSlotClaimV2` envelope bytes as the body; `GET
 //! /api/v2/settlement-slot/{vault_b32}/{parent_sequence}` (public) returns the
 //! held envelope bytes. Outcomes travel in `x-dsm-slot-outcome`.
 
@@ -203,6 +203,7 @@ mod tests {
             x: [x; 32],
             claimant_public_key: pk.to_vec(),
             storage_set_id: set,
+            parent_binding_c_n: [0x7D; 32],
         }
     }
 
