@@ -206,6 +206,12 @@ impl FrozenClaimEnvelope {
     pub(crate) fn storage_set_id(&self) -> [u8; 32] {
         self.verified.body.storage_set_id
     }
+
+    /// The exact parent vault state this claim binds (v2: key by name, bind
+    /// by state).
+    pub(crate) fn parent_binding_c_n(&self) -> [u8; 32] {
+        self.verified.body.parent_binding_c_n
+    }
 }
 
 /// The claim envelope for `(vault_id, parent_sequence, x)` under `storage_set_id`,
@@ -217,12 +223,18 @@ pub(crate) fn frozen_claim_envelope(
     parent_sequence: u64,
     x: &[u8; 32],
     storage_set_id: &[u8; 32],
+    parent_binding_c_n: &[u8; 32],
 ) -> Result<FrozenClaimEnvelope, dsm::types::error::DsmError> {
     use crate::storage::client_db::settlement_slot_claim_local as local;
     if let Some(retained) = FrozenClaimEnvelope::load(vault_id, parent_sequence, x)? {
         if retained.storage_set_id() != *storage_set_id {
             return Err(dsm::types::error::DsmError::invalid_operation(
                 "retained slot claim describes a different set — refusing",
+            ));
+        }
+        if retained.parent_binding_c_n() != *parent_binding_c_n {
+            return Err(dsm::types::error::DsmError::invalid_operation(
+                "retained slot claim binds a different parent vault state — refusing",
             ));
         }
         return Ok(retained);
@@ -240,6 +252,7 @@ pub(crate) fn frozen_claim_envelope(
         x: *x,
         claimant_public_key: pk,
         storage_set_id: *storage_set_id,
+        parent_binding_c_n: *parent_binding_c_n,
     };
     let bytes = sign_settlement_slot_claim(&body, &sk).map_err(|e| {
         dsm::types::error::DsmError::crypto(format!("sign slot claim: {e}"), None::<std::io::Error>)
@@ -428,6 +441,7 @@ mod tests {
                 x: [x; 32],
                 claimant_public_key: pk.to_vec(),
                 storage_set_id: set.id(),
+                parent_binding_c_n: [0x7C; 32],
             },
             sk,
         )
