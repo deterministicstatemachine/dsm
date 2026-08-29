@@ -123,7 +123,7 @@ impl DlvPreCommitmentSdk {
             // Create vault strictly with provided inputs
             let (vault_id_bytes, _op) = self
                 .dlv_manager
-                .finalize_vault(draft, &creator_signature, None, None)
+                .finalize_vault(draft, &creator_signature)
                 .await?;
             let vault_id = crate::util::text_id::encode_base32_crockford(&vault_id_bytes);
 

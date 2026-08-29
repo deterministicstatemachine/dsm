@@ -599,27 +599,6 @@ pub fn extract_operation_parameters(
             );
             Ok(params)
         }
-        Operation::DlvOwnerApply {
-            vault_id,
-            settlement_receipt_id,
-            pending_pointer_x,
-            new_sequence,
-            ..
-        } => {
-            let mut params = HashMap::new();
-            params.insert("operation_type".to_string(), b"dlv_owner_apply".to_vec());
-            params.insert("vault_id".to_string(), vault_id.clone());
-            params.insert(
-                "settlement_receipt_id".to_string(),
-                settlement_receipt_id.to_vec(),
-            );
-            params.insert("pending_pointer_x".to_string(), pending_pointer_x.to_vec());
-            params.insert(
-                "new_sequence".to_string(),
-                new_sequence.to_be_bytes().to_vec(),
-            );
-            Ok(params)
-        }
         Operation::DlvCreateFundedV2 {
             vault_id,
             leg_a_policy_commit,

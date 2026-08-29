@@ -498,13 +498,6 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                 return Err(DsmError::invalid_operation("DlvSettle missing signature"));
             }
         }
-        Operation::DlvOwnerApply { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "DlvOwnerApply missing signature",
-                ));
-            }
-        }
         Operation::DlvClose { signature, .. } => {
             if signature.is_empty() {
                 return Err(DsmError::invalid_operation("DlvClose missing signature"));

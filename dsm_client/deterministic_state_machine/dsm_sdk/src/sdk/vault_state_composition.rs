@@ -86,6 +86,12 @@ pub(crate) struct ComposedVaultState {
     pub c_n: [u8; 32],
     /// `state.generation`, broken out for callers that only order by it.
     pub sequence: u64,
+    /// The parent identity CONSUMED by each successful fold, oldest first:
+    /// `(parent_generation, parent c_n)`. This is how a caller reconciling a
+    /// settlement N generations back names the exact historical parent state
+    /// that settlement consumed — the fold computed every cursor identity on
+    /// the way here, so no re-derivation and no second source.
+    pub folded_parent_bindings: Vec<(u64, [u8; 32])>,
     /// `state.reserve_a` / `state.reserve_b`, broken out for AMM math.
     pub reserves_a: u64,
     pub reserves_b: u64,
@@ -309,6 +315,7 @@ pub(crate) async fn compose_vault_state(
     let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
     let mut chain_skipped: usize = 0;
+    let mut folded_parent_bindings: Vec<(u64, [u8; 32])> = Vec::new();
     for ptr in pointers.into_iter() {
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
             chain_skipped += 1;
@@ -512,6 +519,7 @@ pub(crate) async fn compose_vault_state(
                 continue;
             }
         };
+        folded_parent_bindings.push((cursor_state.generation, cursor_c_n));
         cursor_state = next_state;
         cursor_c_n = next_c_n;
         chain_len += 1;
@@ -528,6 +536,7 @@ pub(crate) async fn compose_vault_state(
         owner_public_key: owner.ak_pk,
         storage_set_id,
         c_n: cursor_c_n,
+        folded_parent_bindings,
         state: cursor_state,
     })
 }

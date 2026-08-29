@@ -584,7 +584,12 @@ pub enum Operation {
     },
     /// No-operation sentinel; produces no state change.
     Noop,
-    /// Create a new Deterministic Limbo Vault, binding it to the hash chain.
+    /// Create a new STATE-ONLY Deterministic Limbo Vault, binding it to the
+    /// hash chain. Structurally tokenless (owner directive 2026-08-28: the
+    /// legacy value-bearing fields `token_id`/`locked_amount` are DELETED, so
+    /// the value-bearing legacy shape can no longer be expressed — every
+    /// funded vault is a `DlvCreateFundedV2`). Moves no economic value and
+    /// may never carry a `Fund` reserve mutation.
     DlvCreate {
         /// 32-byte deterministic vault identifier.
         vault_id: Vec<u8>,
@@ -596,10 +601,6 @@ pub enum Operation {
         fulfillment_condition: Vec<u8>,
         /// Optional intended recipient public key.
         intended_recipient: Option<Vec<u8>>,
-        /// Binary token type to lock in the vault (if applicable).
-        token_id: Option<Vec<u8>>,
-        /// Amount of tokens to lock in the vault (if applicable).
-        locked_amount: Option<Balance>,
         /// SPHINCS+ signature by the creator over canonical bytes.
         signature: Vec<u8>,
         /// Execution mode (typically Unilateral for vault creation).
@@ -690,44 +691,18 @@ pub enum Operation {
         signature: Vec<u8>,
         mode: TransactionMode,
     },
-    /// An owner recording a settlement it has already verified.
+    /// An owner recording a settlement it has already verified (v2 — the
+    /// legacy tag-27 `DlvOwnerApply` is DELETED and its tag burned; it carried
+    /// neither `fee_bps` nor the parent vault-state binding, so it could not
+    /// be equality-checked against the reserve mutation riding the same
+    /// advance).
     ///
-    /// Authorizes NO value movement. The trader's credit was final at the trader's
-    /// own advance, authorized by the owner's pre-commitment rather than by owner
-    /// liveness; this operation is the owner learning what already happened and
-    /// folding it into its own composed state.
-    ///
-    /// Carries empty balance deltas by construction — the fee accrues inside the
-    /// reserves as LP yield, so the owner's spendable balance is untouched — and
-    /// moves only the vault's reserve leaves. Replaying the same receipt is a
-    /// no-op; a different receipt claiming the same pointer is a conflict.
-    DlvOwnerApply {
-        /// 32-byte vault whose reserves are being reconciled.
-        vault_id: Vec<u8>,
-        /// The receipt being recorded, and the pointer that committed to it.
-        settlement_receipt_id: [u8; 32],
-        pending_pointer_x: [u8; 32],
-        /// The sequence this advances from, and to. Exactly one step.
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The pair whose leaves move, and by how much.
-        input_policy_commit: [u8; 32],
-        output_policy_commit: [u8; 32],
-        input_amount: u64,
-        output_amount: u64,
-        /// SPHINCS+ signature by the owner over the canonical operation bytes.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// An owner recording a settlement, v2 (3.6): the economic-root profile's
-    /// replacement for `DlvOwnerApply` (tag 27), which carries neither
-    /// `fee_bps` nor the parent vault-state binding and therefore cannot be
-    /// equality-checked against the reserve mutation riding the same advance.
+    /// Authorizes NO balance movement — the trader's credit was final at the
+    /// trader's own advance; the fee accrues inside the reserves as LP yield.
     /// This operation states the COMPLETE reserve effect — the pair legs, the
     /// exact amounts, the one-step generation advance, the fee, and the exact
     /// parent vault state `c_n` it consumes — so `ApplySettlement` is DERIVED
     /// from it (never a trusted sidecar) and cross-checked field-for-field.
-    /// Authorizes NO balance movement.
     DlvOwnerApplyV2 {
         /// 32-byte vault whose reserves are being reconciled.
         vault_id: Vec<u8>,
@@ -878,17 +853,12 @@ impl Operation {
             | LockToken { .. }
             | Unlock { .. }
             | UnlockToken { .. }
-            | DlvCreate { .. }
             | DlvUnlock { .. }
             | DlvClaim { .. }
             | DlvInvalidate { .. }
             // A settling trader pays its input out. Egress despite also
             // receiving the output: value leaves this device's control.
             | DlvSettle { .. }
-            // The owner's apply moves the OUTPUT leg out of its vault reserves,
-            // so it is egress too — even though the owner's spendable balance
-            // is untouched and the operation authorizes no balance delta.
-            | DlvOwnerApply { .. }
             // A close moves the vault's reserves OUT of the encumbrance and
             // back to the owner's spendable balance: value-bearing.
             | DlvClose { .. }
@@ -920,6 +890,9 @@ impl Operation {
             | Invalidate { .. }
             | Generic { .. }
             | Receive { .. }
+            // Structurally state-only since the legacy value-bearing fields
+            // were deleted; funded creation is DlvCreateFundedV2 (egress).
+            | DlvCreate { .. }
             | Noop => false,
         }
     }
@@ -998,19 +971,9 @@ impl Operation {
                     amount: (*amount).max(0) as u64,
                 }
             }
-            // A token-bound DLV names its asset; a tokenless DLV cannot be sized → Unidentified.
-            DlvCreate {
-                token_id: Some(token_id),
-                locked_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: token_id.clone(),
-                amount: locked_amount
-                    .as_ref()
-                    .map(|b| b.value())
-                    .unwrap_or(u64::MAX),
-            },
-            DlvCreate { token_id: None, .. } => EgressAsset::Unidentified,
+            // A state-only create moves nothing — not egress (the funded
+            // path is DlvCreateFundedV2, which names its lex-lower leg).
+            DlvCreate { .. } => EgressAsset::NotEgress,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
             // Settlement names its asset exactly: the trader's INPUT leg is what
@@ -1027,12 +990,7 @@ impl Operation {
                 amount: *input_amount,
             },
             // The owner's OUTPUT leg leaves its reserves.
-            DlvOwnerApply {
-                output_policy_commit,
-                output_amount,
-                ..
-            }
-            | DlvOwnerApplyV2 {
+            DlvOwnerApplyV2 {
                 output_policy_commit,
                 output_amount,
                 ..
@@ -1548,14 +1506,15 @@ impl Operation {
             Noop => {
                 put_u8(&mut out, 21);
             }
+            // Tag 22 is state-only: the legacy value-bearing fields are
+            // DELETED (their wire slots die under the beta wipe, not behind
+            // option flags).
             DlvCreate {
                 vault_id,
                 creator_public_key,
                 parameters_hash,
                 fulfillment_condition,
                 intended_recipient,
-                token_id,
-                locked_amount,
                 signature,
                 mode,
             } => {
@@ -1568,21 +1527,6 @@ impl Operation {
                     Some(r) => {
                         put_u8(&mut out, 1);
                         put_bytes(&mut out, r);
-                    }
-                    None => put_u8(&mut out, 0),
-                }
-                match token_id {
-                    Some(t) => {
-                        put_u8(&mut out, 1);
-                        put_bytes(&mut out, t);
-                    }
-                    None => put_u8(&mut out, 0),
-                }
-                match locked_amount {
-                    Some(a) => {
-                        put_u8(&mut out, 1);
-                        let bal = a.to_le_bytes();
-                        put_bytes(&mut out, &bal);
                     }
                     None => put_u8(&mut out, 0),
                 }
@@ -1673,32 +1617,6 @@ impl Operation {
                 put_bytes(&mut out, settler_public_key);
                 put_bytes(&mut out, settler_devid);
                 put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvOwnerApply {
-                vault_id,
-                settlement_receipt_id,
-                pending_pointer_x,
-                parent_sequence,
-                new_sequence,
-                input_policy_commit,
-                output_policy_commit,
-                input_amount,
-                output_amount,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 27);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, pending_pointer_x);
-                put_u64(&mut out, *parent_sequence);
-                put_u64(&mut out, *new_sequence);
-                put_bytes(&mut out, input_policy_commit);
-                put_bytes(&mut out, output_policy_commit);
-                put_u64(&mut out, *input_amount);
-                put_u64(&mut out, *output_amount);
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -2402,16 +2320,6 @@ impl Operation {
                     1 => Some(get_bytes(&mut input)?),
                     _ => return Err(DsmError::invalid_operation("bad opt flag")),
                 };
-                let token_id = match get_u8(&mut input)? {
-                    0 => None,
-                    1 => Some(get_bytes(&mut input)?),
-                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
-                };
-                let locked_amount = match get_u8(&mut input)? {
-                    0 => None,
-                    1 => Some(dec_balance(&mut input)?),
-                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
-                };
                 let signature = get_bytes(&mut input)?;
                 let mode = dec_mode(&mut input)?;
                 DlvCreate {
@@ -2420,8 +2328,6 @@ impl Operation {
                     parameters_hash,
                     fulfillment_condition,
                     intended_recipient,
-                    token_id,
-                    locked_amount,
                     signature,
                     mode,
                 }
@@ -2513,32 +2419,9 @@ impl Operation {
                     mode,
                 }
             }
-            27 => {
-                let vault_id = get_bytes(&mut input)?;
-                let settlement_receipt_id = get_arr32(&mut input)?;
-                let pending_pointer_x = get_arr32(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let new_sequence = get_u64(&mut input)?;
-                let input_policy_commit = get_arr32(&mut input)?;
-                let output_policy_commit = get_arr32(&mut input)?;
-                let input_amount = get_u64(&mut input)?;
-                let output_amount = get_u64(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvOwnerApply {
-                    vault_id,
-                    settlement_receipt_id,
-                    pending_pointer_x,
-                    parent_sequence,
-                    new_sequence,
-                    input_policy_commit,
-                    output_policy_commit,
-                    input_amount,
-                    output_amount,
-                    signature,
-                    mode,
-                }
-            }
+            // Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
+            // 2026-08-28): the shape carried neither fee_bps nor c_n and is
+            // deleted, not deprecated. Its bytes decode as unknown-op-tag.
             28 => {
                 let vault_id = get_bytes(&mut input)?;
                 let leg_a_policy_commit = get_arr32(&mut input)?;
@@ -2714,7 +2597,6 @@ impl Operation {
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
-            | Operation::DlvOwnerApply { signature, .. }
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
             | Operation::DlvOwnerApplyV2 { signature, .. }
@@ -2756,7 +2638,6 @@ impl Operation {
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
             Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvClose { .. } => "dlv_close",
             Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
             Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
@@ -2782,7 +2663,6 @@ impl Operation {
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
-            | Operation::DlvOwnerApply { signature, .. }
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
             | Operation::DlvOwnerApplyV2 { signature, .. } => {
@@ -2812,7 +2692,6 @@ impl Operation {
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
             | Operation::DlvSettle { signature, .. }
-            | Operation::DlvOwnerApply { signature, .. }
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
             | Operation::DlvOwnerApplyV2 { signature, .. } => {
@@ -2919,7 +2798,6 @@ impl Ops for Operation {
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
             Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvOwnerApply { .. } => "dlv_owner_apply",
             Operation::DlvClose { .. } => "dlv_close",
             Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
             Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
@@ -3706,8 +3584,6 @@ mod tests {
                 parameters_hash: vec![0x03; 32],
                 fulfillment_condition: vec![0x04; 16],
                 intended_recipient: Some(vec![0x05; 64]),
-                token_id: Some(b"ERA".to_vec()),
-                locked_amount: Some(test_balance(999)),
                 signature: vec![0x06; 48],
                 mode: TransactionMode::Unilateral,
             });
@@ -3721,11 +3597,21 @@ mod tests {
                 parameters_hash: vec![0x03; 32],
                 fulfillment_condition: vec![],
                 intended_recipient: None,
-                token_id: None,
-                locked_amount: None,
                 signature: vec![0x06; 48],
                 mode: TransactionMode::Bilateral,
             });
+        }
+
+        /// Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
+        /// 2026-08-28): the byte no longer names an operation. A tag can be
+        /// retired but never reassigned with a different meaning.
+        #[test]
+        fn the_burned_tag_27_decodes_as_unknown() {
+            let mut bytes = vec![27u8];
+            bytes.extend_from_slice(&(32u32).to_le_bytes());
+            bytes.extend_from_slice(&[0x11; 32]);
+            let err = Operation::from_bytes(&bytes).expect_err("burned tag must not decode");
+            assert!(err.to_string().contains("unknown op tag"), "got: {err}");
         }
 
         #[test]
@@ -3944,8 +3830,6 @@ mod tests {
                         parameters_hash: vec![],
                         fulfillment_condition: vec![],
                         intended_recipient: None,
-                        token_id: None,
-                        locked_amount: None,
                         signature: vec![],
                         mode: TransactionMode::Unilateral,
                     },
@@ -4127,8 +4011,6 @@ mod tests {
                 parameters_hash: vec![],
                 fulfillment_condition: vec![],
                 intended_recipient: None,
-                token_id: None,
-                locked_amount: None,
                 signature: vec![0xCC; 48],
                 mode: TransactionMode::Unilateral,
             };
