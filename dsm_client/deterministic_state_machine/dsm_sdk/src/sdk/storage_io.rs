@@ -503,6 +503,25 @@ pub(crate) mod fake_registers {
     }
 }
 
+/// Member-attributed read of one settlement-slot cell — rows of
+/// `(member_id, echoed_node_id, winner_bytes)` for the quorum counter.
+pub(crate) async fn read_settlement_slot_cell(
+    set: &crate::sdk::storage_set::StorageSet,
+    vault_id: &[u8; 32],
+    parent_sequence: u64,
+) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+    #[cfg(test)]
+    {
+        Ok(fake_fleet::read_slot(set, vault_id, parent_sequence))
+    }
+    #[cfg(not(test))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let path = crate::sdk::economic_registers::settlement_slot_path(vault_id, parent_sequence);
+        Ok(sdk.read_register_cell(set, &path).await)
+    }
+}
+
 pub(crate) async fn submit_settlement_slot_claim(
     set: &crate::sdk::storage_set::StorageSet,
     envelope: &[u8],
@@ -555,6 +574,35 @@ pub(crate) mod fake_fleet {
 
     fn state() -> std::sync::MutexGuard<'static, FleetState> {
         STATE.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Member-attributed read of one slot cell, mirroring the register-read
+    /// row shape: `(member_id, echoed_node_id, winner_bytes)`.
+    pub(crate) fn read_slot(
+        set: &StorageSet,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+        let s = state();
+        set.members()
+            .iter()
+            .map(|member| {
+                let echoed = s
+                    .echo_override
+                    .get(&member.member_id)
+                    .cloned()
+                    .unwrap_or_else(|| Some(member.member_id.clone()));
+                let bytes = if s.failing.contains(&member.member_id) {
+                    None
+                } else {
+                    s.registers
+                        .get(&member.member_id)
+                        .and_then(|cells| cells.get(&(*vault_id, parent_sequence)))
+                        .map(|(b, _)| b.clone())
+                };
+                (member.member_id.clone(), echoed, bytes)
+            })
+            .collect()
     }
 
     pub(crate) fn reset() {

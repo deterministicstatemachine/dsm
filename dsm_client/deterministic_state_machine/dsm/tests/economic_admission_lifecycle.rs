@@ -314,6 +314,14 @@ impl ProvenanceResolver for OneTicket {
         })
     }
 
+    fn winning_settlement_slot_claim(
+        &self,
+        _vault_id: &[u8; 32],
+        _parent_sequence: u64,
+    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
+        None
+    }
+
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
