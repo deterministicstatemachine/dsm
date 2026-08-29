@@ -794,28 +794,31 @@ mod tests {
 
         let genesis = [0x6E; 32];
         let owner = [0xA0; 32];
-        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024);
+        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024)
+            .with_balance_for_testing([0xF1; 32], 1_000);
 
-        // A value relationship (Mint → Yes).
+        // A value relationship (Burn → Yes). A burn is value-bearing without
+        // being issuance, which the accepting layer refuses until class 0x0029
+        // exists; what this test needs is a relationship FLAGGED value-bearing,
+        // and either direction does that.
         let c_yes = [0xC1; 32];
         let rk_yes = compute_smt_key(&owner, &c_yes);
         let dev = dev
             .advance(
                 rk_yes,
                 c_yes,
-                Operation::Mint {
+                Operation::Burn {
                     amount: Balance::from_state(10, [0u8; 32]),
                     token_id: b"ERA".to_vec(),
                     policy_commit: [0xF1; 32],
-                    authorized_by: vec![],
-                    proof_of_authorization: vec![],
+                    proof_of_ownership: vec![],
                     message: String::new(),
                 },
                 vec![1; 32],
                 None,
                 &[BalanceDelta {
                     policy_commit: [0xF1; 32],
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
                 Some(initial_chain_tip_from_device_ids(&owner, &c_yes)),
