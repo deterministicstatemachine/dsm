@@ -215,8 +215,9 @@ pub(crate) struct DsmAdmissionParts {
     pub manifest: EconomicAdmissionManifest,
     pub coords: AcceptedAdmissionCoords,
     pub artifacts: Vec<(String, Vec<u8>, &'static str)>,
-    /// THE debit mutation's index in the built witness, when the write set
-    /// has one — the wire locator is THIS value, never a prediction.
+    /// THE debit mutation's index in the built witness, for the ONE shape that
+    /// has a wire locator — the online Transfer. This is the built value, never
+    /// a prediction.
     pub debit_mutation_index: Option<u32>,
 }
 
@@ -249,23 +250,35 @@ pub(crate) fn build_dsm_admission(
         facts,
     )
     .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
-    let debit_mutation_index = built
-        .mutations
-        .iter()
-        .position(|m| {
-            let pre = m
-                .pre_state
-                .as_ref()
-                .and_then(|s| s.credit_amount())
-                .unwrap_or(0);
-            let post = m
-                .post_state
-                .as_ref()
-                .and_then(|s| s.credit_amount())
-                .unwrap_or(0);
-            post < pre
-        })
-        .map(|i| i as u32);
+    // THE DEBIT LOCATOR IS A TRANSFER FACT, AND ONLY A TRANSFER FACT. Its one
+    // consumer is the online-transfer wire, where the recipient uses it to
+    // locate the sender's debit; a Transfer sender's write set has exactly one
+    // balance debit, so "the first mutation whose amount fell" is exact there.
+    // It is silently wrong for any multi-leg write set — a funded vault
+    // creation debits TWO balances, a close draws down TWO reserves — where
+    // that scan names one arbitrary leg. So it is structurally confined to the
+    // shape it is sound for: every other operation yields `None`, and a caller
+    // needing a locator for one of them gets no answer rather than a wrong one.
+    let debit_mutation_index = match operation {
+        Operation::Transfer { .. } => built
+            .mutations
+            .iter()
+            .position(|m| {
+                let pre = m
+                    .pre_state
+                    .as_ref()
+                    .and_then(|s| s.credit_amount())
+                    .unwrap_or(0);
+                let post = m
+                    .post_state
+                    .as_ref()
+                    .and_then(|s| s.credit_amount())
+                    .unwrap_or(0);
+                post < pre
+            })
+            .map(|i| i as u32),
+        _ => None,
+    };
 
     let witness = EconomicTransitionWitness::new(
         pre_root,
