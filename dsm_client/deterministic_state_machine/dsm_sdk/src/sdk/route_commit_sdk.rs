@@ -317,13 +317,19 @@ pub(crate) enum PublishPointerError {
     /// reached: the vault moved between quote and publication, or the route was
     /// bound to a state that never existed.
     ///
-    /// NOT a frontier claim. The fold terminates when the pointer listing this
-    /// composer read is exhausted, and that listing came from ONE member, so
-    /// "no successor" and "no successor I was shown" are indistinguishable here.
-    /// The composed state is a valid PREFIX; calling it current would assert
-    /// maximality nothing establishes. Either way the
-    /// settle would be refused at the byte-equality gate, so a pointer would
-    /// advertise a trade that can never be witnessed.
+    /// The state this composer reached IS a frontier for the read that
+    /// produced it: the walk terminated on a settlement-slot cell that q
+    /// attributed members of the vault's own committed set each reported
+    /// empty. "No successor" and "no successor I was shown" are no longer the
+    /// same observation — a composition that could not establish the
+    /// difference fails closed as `DLV_BINDING_EVIDENCE_UNAVAILABLE` and never
+    /// reaches this arm.
+    ///
+    /// So a hop bound elsewhere really was signed against a different state:
+    /// the vault moved between quote and publication, or the binding names a
+    /// state that never existed. Either way the settle would be refused at the
+    /// byte-equality gate, so a pointer would advertise a trade that can never
+    /// be witnessed.
     HopParentNotCurrent { hop_index: usize },
     /// Hop's tokens / reserves / amounts failed to round-trip the AMM
     /// re-simulation — i.e., the embedded RouteCommit is internally

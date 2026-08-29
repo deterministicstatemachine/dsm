@@ -559,6 +559,12 @@ pub(crate) mod fake_fleet {
         registers: HashMap<String, HashMap<([u8; 32], u64), (Vec<u8>, [u8; 32])>>,
         /// members whose next PUTs fail (persistent until cleared)
         failing: HashSet<String>,
+        /// members that SERVE READS but refuse register writes — a node that
+        /// is reachable and answering while unable to accept new state (a
+        /// read-only mount, a full disk). Distinct from `failing`, because a
+        /// composer can still count such a member's cell answer while a claim
+        /// cannot reach quorum through it.
+        claim_refusing: HashSet<String>,
         /// member_id -> the node id it echoes (default: its own member id)
         echo_override: HashMap<String, Option<String>>,
         /// members that phrase a re-ack as `Refused { held_digest: <ours> }`
@@ -587,19 +593,26 @@ pub(crate) mod fake_fleet {
         set.members()
             .iter()
             .map(|member| {
+                // A FAILING MEMBER DOES NOT ANSWER — it does not answer
+                // "empty". The live reader gets `(member_id, None, None)` from
+                // an unreachable node because there is no response to echo an
+                // id, and an attributed empty is a POSITIVE claim that the
+                // cell holds nothing. Modelling a failure as an attributed
+                // empty would let a fixture manufacture frontiers out of
+                // silence — the exact defect the cell walk removes.
+                if s.failing.contains(&member.member_id) {
+                    return (member.member_id.clone(), None, None);
+                }
                 let echoed = s
                     .echo_override
                     .get(&member.member_id)
                     .cloned()
                     .unwrap_or_else(|| Some(member.member_id.clone()));
-                let bytes = if s.failing.contains(&member.member_id) {
-                    None
-                } else {
-                    s.registers
-                        .get(&member.member_id)
-                        .and_then(|cells| cells.get(&(*vault_id, parent_sequence)))
-                        .map(|(b, _)| b.clone())
-                };
+                let bytes = s
+                    .registers
+                    .get(&member.member_id)
+                    .and_then(|cells| cells.get(&(*vault_id, parent_sequence)))
+                    .map(|(b, _)| b.clone());
                 (member.member_id.clone(), echoed, bytes)
             })
             .collect()
@@ -615,6 +628,15 @@ pub(crate) mod fake_fleet {
 
     pub(crate) fn heal_member(member_id: &str) {
         state().failing.remove(member_id);
+    }
+
+    /// `member_id` answers reads but refuses register writes.
+    pub(crate) fn refuse_claims(member_id: &str) {
+        state().claim_refusing.insert(member_id.to_string());
+    }
+
+    pub(crate) fn accept_claims(member_id: &str) {
+        state().claim_refusing.remove(member_id);
     }
 
     /// Make `member_id` answer a re-ack as `Refused` carrying our own digest.
@@ -688,7 +710,7 @@ pub(crate) mod fake_fleet {
             );
             st.put_log
                 .push((m.member_id.clone(), key, *blake3::hash(envelope).as_bytes()));
-            if st.failing.contains(&m.member_id) {
+            if st.failing.contains(&m.member_id) || st.claim_refusing.contains(&m.member_id) {
                 outcomes.push(MemberClaimOutcome {
                     member_id: m.member_id.clone(),
                     endpoint: m.endpoint.clone(),
