@@ -921,39 +921,35 @@ impl AppRouterImpl {
             .await
             {
                 Ok(composed) => {
-                    if composed.pending_chain_len > 0 || composed.pending_chain_skipped > 0 {
+                    if composed.pending_chain_len > 0 {
                         log::info!(
-                            "[route.findAndBindBestPath] vault {} composed: advertised=({},{}) proven+composed=({},{}) chain_len={} skipped={} seq={}",
+                            "[route.findAndBindBestPath] vault {} composed: advertised=({},{}) proven+composed=({},{}) chain_len={} seq={}",
                             crate::util::text_id::encode_base32_crockford(&vid),
                             advertised_reserve_a,
                             advertised_reserve_b,
                             composed.reserves_a,
                             composed.reserves_b,
                             composed.pending_chain_len,
-                            composed.pending_chain_skipped,
                             composed.sequence,
                         );
                     }
-                    // DELIBERATELY NO "parent in flight" drop here. A pending
-                    // pointer is SELF-signed: any keypair can publish one
-                    // naming this vault's current parent, with no RouteCommit,
-                    // no X and no settlement behind it, and the composer
-                    // cannot tell that from a genuine trade whose receipt is a
-                    // moment away. A quote decision keyed on an unwitnessed
-                    // pointer's bare presence would therefore hand liquidity
-                    // suppression to anyone for one storage write. Competing
-                    // quotes race instead, and the loser is refused at the
-                    // first-writer settlement-slot claim — where losing costs
-                    // nothing and winning requires actually holding the slot.
-                    if composed.pending_chain_len
-                        >= crate::sdk::vault_state_composition::MAX_PENDING_CHAIN_DEPTH
-                    {
-                        log::warn!(
-                            "[route.findAndBindBestPath] vault {} dropped from candidates: pending chain saturated",
-                            crate::util::text_id::encode_base32_crockford(&vid),
-                        );
-                        continue;
-                    }
+                    // A composed state that reaches this arm is a FRONTIER for
+                    // the read that produced it: the walk terminated on an
+                    // empty settlement-slot cell at the owner-committed
+                    // quorum. Every other terminal — short quorum, divergent
+                    // cell, a claimed successor whose settlement evidence is
+                    // missing, depth saturation — failed closed as
+                    // `BindingEvidenceUnavailable` and never got here, so this
+                    // arm no longer needs a saturation drop of its own.
+                    //
+                    // The old "no parent-in-flight drop" reasoning is likewise
+                    // retired with the pointer fold: a self-signed pointer used
+                    // to be the only evidence an edge existed, so acting on its
+                    // bare presence would have handed liquidity suppression to
+                    // anyone for one storage write. The edge source is now a
+                    // quorum-established slot winner, which nobody can forge
+                    // into existence.
+
                     // Replace the ad's reserves with the composed values
                     // so the downstream path search builds AMM edges
                     // against the canonical current state.

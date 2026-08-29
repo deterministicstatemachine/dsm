@@ -20,43 +20,57 @@
 //! state-identity cut removes the duplicate sources rather than
 //! cross-checking them.
 //!
-//! Pending fold
-//! ------------
-//! On top of the verified baseline the composer folds any published
-//! `VaultPendingPointerV1` records that chain forward by one sequence step,
-//! so concurrent traders quoting against the same vault while the owner is
-//! offline see each other's settled trades and serialize on top of them.
-//! Each fold step:
+//! The frontier walk
+//! -----------------
+//! On top of the verified baseline the composer walks FORWARD one generation
+//! at a time, and the edge source is the settlement-slot REGISTER CELL read
+//! live at the quorum the owner committed in `V_n` (field 15), against the
+//! storage set `V_n` names.
 //!
-//! - verifies the pointer's SPHINCS+ signature;
-//! - demands a verified settlement receipt matching the pointer's committed
-//!   receipt hash (the receipt gate — the only artifact that cannot exist
-//!   without a real settlement);
-//! - fetches the signed `RouteCommit` bound to the pointer's `X` and
-//!   re-derives `X` from its bytes;
-//! - requires the hop's `parent_binding` to equal the `c_n` of the CURRENT
-//!   cursor state — the one byte-equality that replaces the old
-//!   (sequence, reserves digest, anchor digest) triple;
-//! - re-simulates the AMM swap against the cursor's reserves and demands the
-//!   exact claimed output;
-//! - constructs the successor `V_{n+1}` — generation advanced, reserves
-//!   moved, `parent_state_commitment` set to the consumed state's `c_n`,
-//!   every other field copied byte-for-byte — and advances the cursor to its
-//!   commitment.
+//! That inversion is the point. A prefix listing's exhaustiveness is
+//! unfalsifiable: a member that omits a key produces an answer no signature
+//! can distinguish from a genuinely shorter chain, so a composer reading one
+//! could only ever report a valid PREFIX while sounding like it reported the
+//! latest state. A write-once cell cannot express omission — it either holds
+//! a claim or it does not — so `q` attributed members answering "nothing
+//! here" is a positive fact, and it is the only thing that ends the walk.
 //!
-//! The composed result is therefore a full `VaultStateV2` with a canonical
-//! identity of its own: the `c_n` a new trade's hop must bind as its parent.
+//! Each generation therefore has exactly three outcomes:
+//!
+//! ```text
+//! empty at quorum   -> the chain ends here; THIS is the frontier
+//! winner at quorum  -> validate the edge and fold, or fail closed
+//! anything else     -> DLV_BINDING_EVIDENCE_UNAVAILABLE
+//! ```
+//!
+//! Validating an edge means: the winner's claim verifies and binds this exact
+//! parent `c_n`; a settlement receipt witnesses this generation step; the
+//! signed `RouteCommit` recomputes the claimed `X`; the hop binds the cursor's
+//! `c_n`; and the AMM re-simulates to exactly the claimed output. A close
+//! consumes the same cell — close and settle contend for one slot per
+//! generation — and is recognised by its deterministic `x` claimed under the
+//! owner's proven authority key, folding to the terminal zero-reserve state.
+//!
+//! Nothing here is a portable proof of maximality, and nothing claims to be:
+//! the statement is "during this read, no successor beyond `c_n` was
+//! established". Frontier is inherently online.
+//!
+//! The pending-pointer records still exist as a DISCOVERY HINT for the owner's
+//! own reconcile (`unapplied_settlements_for_vault`), which understates rather
+//! than invents. They are not consulted here: a self-signed pointer never
+//! established that an edge exists, and the cell now does.
+//!
+//! The composed result is a full `VaultStateV2` with a canonical identity of
+//! its own: the `c_n` a new trade's hop must bind as its parent.
 
 use dsm::ccb::{vault_state_commitment, VaultStateV2};
-use dsm::dlv::vault_pending_pointer::{verify_vault_pending_pointer, SignedVaultPendingPointer};
 use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::sdk::identity_presentation::verify_anchor_presentation;
 use crate::sdk::route_commit_sdk::{
-    compute_external_commitment, external_commitment_rc_key,
-    verify_route_commit_unlock_eligibility, vault_pending_prefix,
+    compute_external_commitment, external_commitment_rc_key, verify_route_commit_unlock_eligibility,
 };
 use crate::sdk::routing_path_sdk::constant_product_output;
 
@@ -75,14 +89,21 @@ pub(crate) struct ComposedVaultState {
     /// needs (generation, reserves, pair, fee, storage set, encumbrances,
     /// authority position) is a field of this one object.
     pub state: VaultStateV2,
-    /// `c_n` of `state` — the canonical identity of the state this fold reached,
-    /// and the exact value a new trade's hop must carry as `parent_binding`.
+    /// `c_n` of `state` — the canonical identity of the state this walk
+    /// reached, and the exact value a new trade's hop must carry as
+    /// `parent_binding`.
     ///
-    /// This is a valid PREFIX, not a proven frontier: the fold stops when the
-    /// pointer listing it read is exhausted, and that listing came from a single
-    /// member, so absence and omission are the same observation. Do not read this
-    /// as "the latest state" — establishing that needs a live quorum read the
-    /// composer does not perform.
+    /// This IS a proven frontier for the live read that produced it: the walk
+    /// terminated because q attributed members of the vault's own committed
+    /// storage set each answered that the settlement-slot cell at this
+    /// generation holds nothing. A composition that could not establish that
+    /// is not returned at all — it fails closed as
+    /// [`CompositionError::BindingEvidenceUnavailable`] — so this value can
+    /// never be a silently-short prefix.
+    ///
+    /// It is NOT a portable proof of maximality, and nothing here claims one:
+    /// the statement is "during this read, no successor beyond `c_n` was
+    /// established", which is only true of the moment it was read.
     pub c_n: [u8; 32],
     /// `state.generation`, broken out for callers that only order by it.
     pub sequence: u64,
@@ -95,21 +116,18 @@ pub(crate) struct ComposedVaultState {
     /// `state.reserve_a` / `state.reserve_b`, broken out for AMM math.
     pub reserves_a: u64,
     pub reserves_b: u64,
-    /// Number of pending pointers successfully verified + chained.
-    pub pending_chain_len: usize,
-    /// Number of pending pointers skipped (signature invalid, X missing,
-    /// out-of-sequence, beyond MAX_PENDING_CHAIN_DEPTH).  Useful for
-    /// telemetry / regression tests.
+    /// How many successor edges this walk verified and folded to reach the
+    /// frontier.
     ///
-    /// DIAGNOSTIC AGGREGATION, never a safety predicate. It sums causes that
-    /// mean entirely different things, so a caller that refused on
-    /// `pending_chain_skipped > 0` would let anyone un-quotable a vault forever
-    /// by publishing one malformed pointer — the free-griefing property the
-    /// receipt gate exists to remove. There is deliberately NO narrower
-    /// "parent in flight" signal either: a pointer is self-signed, so its bare
-    /// presence proves nothing a quote decision may consume, and the
-    /// first-writer settlement-slot claim is where competing quotes serialize.
-    pub pending_chain_skipped: usize,
+    /// There is deliberately no companion "skipped" count any more. Under the
+    /// prefix-listing fold a skip was routine — anyone could publish a
+    /// self-signed pointer, so unfoldable ones had to be ignored rather than
+    /// allowed to suppress the vault. Under the cell walk there is no such
+    /// category: an edge either does not exist (empty at quorum), or exists
+    /// and validates (folded here), or exists and does not
+    /// (`BindingEvidenceUnavailable`). A count of quietly-ignored edges would
+    /// have nothing to hold.
+    pub pending_chain_len: usize,
     /// The vault owner, proven by the presentation's P0–P6 chain at the
     /// state's own committed authority position. Constant across generations
     /// — market successors copy the authority position byte-for-byte.
@@ -143,6 +161,19 @@ pub(crate) enum CompositionError {
     /// commits, so it cannot be matched against the signed state's market
     /// policy. FAILS CLOSED — a label is not an identity.
     PairIsNotPolicyCommits,
+    /// Req 6.25 `DLV_BINDING_EVIDENCE_UNAVAILABLE`: the walk could not
+    /// establish where this vault's chain ends, so no state is returned and
+    /// the vault is excluded from routing.
+    ///
+    /// This is the ONE outcome that must never be softened into a short
+    /// answer. It covers: fewer than the committed `q` members giving an
+    /// attributed answer for a slot cell; members holding divergent values for
+    /// one write-once cell; a quorum-established slot winner whose settlement
+    /// evidence cannot be fetched or verified; and depth saturation. An
+    /// adversary who wins a slot and never settles can hold a vault here
+    /// indefinitely — that is a liveness cost, and it is strictly preferable
+    /// to manufacturing a maximality claim the network did not support.
+    BindingEvidenceUnavailable(String),
 }
 
 impl std::fmt::Display for CompositionError {
@@ -168,6 +199,9 @@ impl std::fmt::Display for CompositionError {
                 "caller pair must be 32-byte policy commits so it can be matched to the signed \
                  state's market policy"
             ),
+            CompositionError::BindingEvidenceUnavailable(msg) => {
+                write!(f, "DLV_BINDING_EVIDENCE_UNAVAILABLE: {msg}")
+            }
         }
     }
 }
@@ -231,202 +265,207 @@ pub(crate) async fn compose_vault_state(
     let storage_set_id = dsm::ccb::storage_set_id(&baseline_state.storage_set)
         .map_err(|e| CompositionError::InvalidBaselinePresentation(format!("storage set: {e}")))?;
 
-    // ── Collect pending pointers. ────────────────────────────────────────
-    let prefix = vault_pending_prefix(vault_id);
-    let mut cursor: Option<String> = None;
-    const LIST_LIMIT: u32 = 256;
-
-    let mut pointers: Vec<SignedVaultPendingPointer> = Vec::new();
-    loop {
-        let resp = BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), LIST_LIMIT)
-            .await
-            .map_err(|e| CompositionError::StorageListFailed(format!("{e}")))?;
-        for item in &resp.items {
-            let bytes = match BitcoinTapSdk::storage_get_bytes(&item.key).await {
-                Ok(b) => b,
-                Err(e) => {
-                    log::debug!(
-                        "[compose_vault_state] skipping {}: fetch failed: {e}",
-                        item.key,
-                    );
-                    continue;
-                }
-            };
-            let proto = match generated::VaultPendingPointerV1::decode(bytes.as_slice()) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::debug!(
-                        "[compose_vault_state] skipping {}: decode failed: {e}",
-                        item.key,
-                    );
-                    continue;
-                }
-            };
-            if proto.vault_id.len() != 32
-                || proto.x.len() != 32
-                || proto.new_reserves_digest.len() != 32
-                || proto.expected_receipt_hash.len() != 32
-            {
-                // A pointer with no well-formed receipt commitment names no
-                // receipt, so nothing could ever activate it. Drop it here
-                // rather than carrying a zero-filled commitment forward, which
-                // would be a commitment some receipt might accidentally match.
-                continue;
-            }
-            let mut vid_arr = [0u8; 32];
-            vid_arr.copy_from_slice(&proto.vault_id);
-            let mut x_arr = [0u8; 32];
-            x_arr.copy_from_slice(&proto.x);
-            let mut digest_arr = [0u8; 32];
-            digest_arr.copy_from_slice(&proto.new_reserves_digest);
-            let mut receipt_commit_arr = [0u8; 32];
-            receipt_commit_arr.copy_from_slice(&proto.expected_receipt_hash);
-            // Confirm the pointer references the vault we're composing.
-            // (Storage prefix should already filter this, but defensive
-            // re-check costs nothing.)
-            if vid_arr != *vault_id {
-                continue;
-            }
-            pointers.push(SignedVaultPendingPointer {
-                vault_id: vid_arr,
-                parent_sequence: proto.parent_sequence,
-                new_sequence: proto.new_sequence,
-                x: x_arr,
-                new_reserves_digest: digest_arr,
-                expected_receipt_hash: receipt_commit_arr,
-                publisher_public_key: proto.publisher_public_key,
-                publisher_signature: proto.publisher_signature,
-            });
-        }
-        if (resp.items.len() as u32) < LIST_LIMIT {
-            break;
-        }
-        cursor = resp.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
+    // ── The vault's OWN set and quorum. ──────────────────────────────────
+    // Resolved by re-deriving the id from `V_n.storage_set` (already done
+    // above) and looking THAT up in the local catalog — never the catalog's
+    // sole set, and never this verifier's own majority rule. `q` is field 15
+    // of the owner-committed state: counting a vault's cells at a locally
+    // chosen threshold would substitute the verifier's opinion for the
+    // vault's rule.
+    let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config().map_err(|e| {
+        CompositionError::BindingEvidenceUnavailable(format!("storage catalog: {e}"))
+    })?;
+    let set = catalog.resolve(&storage_set_id).cloned().ok_or_else(|| {
+        CompositionError::BindingEvidenceUnavailable(
+            "the vault's committed storage set is not resolvable from the local catalog".into(),
+        )
+    })?;
+    let committed_quorum = baseline_state.quorum;
+    if committed_quorum == 0 || committed_quorum as usize > set.len() {
+        return Err(CompositionError::BindingEvidenceUnavailable(format!(
+            "the state commits q={committed_quorum} over a {}-member set",
+            set.len()
+        )));
     }
 
-    // Sort by new_sequence ascending so chain folding is deterministic.
-    pointers.sort_by(|a, b| a.new_sequence.cmp(&b.new_sequence).then(a.x.cmp(&b.x)));
-
-    // ── The fold. Cursor = a full state + its commitment. ────────────────
+    // ── THE WALK. Cursor = a full state + its commitment. ────────────────
+    //
+    // The edge source is the settlement-slot REGISTER CELL, read live at the
+    // owner-committed quorum — not a prefix listing. That inversion is the
+    // whole point: a set query's exhaustiveness is unfalsifiable, so a member
+    // that omits a key produces an answer indistinguishable from a shorter
+    // chain, and no signature repairs it. A write-once cell's answer is
+    // bounded, and omission is not expressible in it: the cell either holds a
+    // claim or it does not, and q attributed members saying "nothing here" is
+    // a positive fact.
+    //
+    // So each generation asks exactly one question — "is there a claimed
+    // successor to THIS state?" — and only three answers exist:
+    //
+    //   empty at quorum   -> the chain ends here; this is the frontier
+    //   winner at quorum  -> verify its settlement and fold, or fail closed
+    //   anything else     -> DLV_BINDING_EVIDENCE_UNAVAILABLE
     let mut cursor_state = baseline_state;
     let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
-    let mut chain_skipped: usize = 0;
     let mut folded_parent_bindings: Vec<(u64, [u8; 32])> = Vec::new();
-    for ptr in pointers.into_iter() {
+    loop {
+        // Saturation is NOT a frontier. A walk that stops because it ran out
+        // of budget has established nothing about maximality, and reporting
+        // "frontier at 64" would be the omission defect wearing a local name.
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
-            chain_skipped += 1;
+            return Err(CompositionError::BindingEvidenceUnavailable(format!(
+                "walk saturated at depth {MAX_PENDING_CHAIN_DEPTH} without reaching an empty slot                  cell"
+            )));
+        }
+        let observation = crate::sdk::economic_registers::observe_settlement_slot_cell(
+            &set,
+            vault_id,
+            cursor_state.generation,
+            committed_quorum,
+        )
+        .await
+        .map_err(|e| {
+            // A divergent write-once cell is a network fault, never something
+            // to pick a side of.
+            CompositionError::BindingEvidenceUnavailable(format!(
+                "settlement-slot cell at generation {}: {e}",
+                cursor_state.generation
+            ))
+        })?;
+        let winner_bytes = match observation {
+            // THE ONLY TERMINATION THAT ESTABLISHES A FRONTIER.
+            crate::sdk::economic_registers::CellObservation::EmptyAtQuorum => break,
+            crate::sdk::economic_registers::CellObservation::NoQuorum {
+                attributed,
+                required,
+            } => {
+                return Err(CompositionError::BindingEvidenceUnavailable(format!(
+                    "only {attributed} attributed member(s) answered the slot cell at generation {} ({required} required)",
+                    cursor_state.generation
+                )))
+            }
+            crate::sdk::economic_registers::CellObservation::Winner(b) => b,
+        };
+
+        // A claimed successor EXISTS. From here every failure is fail-closed:
+        // the network has told us this generation is not the end, so we may
+        // not report it as one because a second artifact is missing.
+        let unavailable = |what: &str| {
+            CompositionError::BindingEvidenceUnavailable(format!(
+                "generation {} has a quorum-established successor but {what}",
+                cursor_state.generation
+            ))
+        };
+        let claim =
+            dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(&winner_bytes)
+                .map_err(|e| unavailable(&format!("its slot claim does not verify: {e}")))?;
+        if claim.body.vault_id != *vault_id || claim.body.parent_sequence != cursor_state.generation
+        {
+            return Err(unavailable("its slot claim names a different cell"));
+        }
+        // The claim binds the exact parent STATE, not just the generation
+        // number — the v2 body's whole purpose. A winner bound to a different
+        // c_n means our baseline and the network disagree about what this
+        // generation IS, which is a divergence to report, never to fold past.
+        if claim.body.parent_binding_c_n != cursor_c_n {
+            return Err(unavailable("its slot claim binds a different parent state"));
+        }
+        let x = claim.body.x;
+
+        // A CLOSE CONSUMES THIS CELL TOO. Close and settle contend for one
+        // slot per generation by design, so "a winner exists" does not mean
+        // "a trade happened" — the owner may have retired the vault here.
+        //
+        // A close needs no receipt and no RouteCommit: its successor is fully
+        // determined (both reserves to zero at parent+1), so there is no
+        // amount to witness. What it does need is proof the OWNER did it. The
+        // close's `x` is a public derivation anyone can recompute, so the `x`
+        // alone proves nothing; the claim on it signed by the owner's
+        // P0–P6-proven authority key is what a stranger cannot forge. A
+        // stranger who claims this cell with the close `x` therefore does not
+        // produce a vault that looks closed — they produce a generation
+        // consumed by something unverifiable, which fails closed below.
+        if x == dsm::dlv::settlement_slot_claim::close_slot_commitment(
+            vault_id,
+            cursor_state.generation,
+        ) {
+            if claim.body.claimant_public_key != owner.ak_pk {
+                return Err(unavailable(
+                    "its close slot was claimed by someone other than the vault owner",
+                ));
+            }
+            let mut next_state = cursor_state.clone();
+            next_state.generation = cursor_state.generation.saturating_add(1);
+            next_state.reserve_a = 0;
+            next_state.reserve_b = 0;
+            next_state.parent_state_commitment = cursor_c_n;
+            let next_c_n = vault_state_commitment(&next_state)
+                .map_err(|e| unavailable(&format!("its terminal state does not encode: {e}")))?;
+            folded_parent_bindings.push((cursor_state.generation, cursor_c_n));
+            cursor_state = next_state;
+            cursor_c_n = next_c_n;
+            chain_len += 1;
             continue;
         }
-        if ptr.parent_sequence != cursor_state.generation {
-            chain_skipped += 1;
-            continue;
-        }
-        if verify_vault_pending_pointer(&ptr).is_err() {
-            chain_skipped += 1;
-            continue;
-        }
+
         // THE RECEIPT GATE. Everything below this line moves someone's
-        // liquidity, so nothing below it runs until the settlement is witnessed.
+        // liquidity, so nothing below it runs until the settlement is
+        // witnessed. The receipt is the only artifact here that cannot be
+        // produced without settling: it carries an inclusion path for a leaf
+        // the trader's own settling advance wrote into its own device root.
         //
-        // Every other check in this fold describes an INTENT: the pointer is
-        // signed, X is published, the RouteCommit is valid, the AMM math is
-        // exact. A trader who publishes all of that and then simply never
-        // advances has paid nothing and taken nothing — yet under the old rule
-        // the vault's quotable liquidity dropped for every other trader,
-        // indefinitely, for the price of one storage write. Free griefing.
-        //
-        // The receipt is the only artifact here that cannot be produced without
-        // settling: it carries an inclusion path for a leaf that the trader's
-        // own settling advance wrote into its own device root.
-        //
-        // Both halves are required. `fetch_verified_receipt` establishes that
-        // SOME settlement really committed; the commitment comparison
-        // establishes it is THIS pointer's settlement, so a pointer for a large
-        // trade cannot be activated by a receipt for a tiny one.
-        let receipt =
-            match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, &ptr.x)
-                .await
-            {
-                Some(r) => r,
-                None => {
-                    // INERT — for reserves AND for quote availability. The
-                    // pointer may be a perfectly well-formed trade whose
-                    // settlement lands a moment from now, or it may be one
-                    // storage write from an arbitrary keypair: the primitive
-                    // cannot tell them apart, because a pointer is
-                    // SELF-signed and establishes no vault authority and no
-                    // settlement. Anything a composer concluded from its bare
-                    // presence — "this parent is in flight", most temptingly —
-                    // would hand liquidity suppression to anyone for the
-                    // price of one write. Skipping leaves the composed state
-                    // exactly as if the pointer had never been published;
-                    // serialization safety lives where it always did, at the
-                    // first-writer settlement-slot claim, where a losing
-                    // quote costs its owner nothing.
-                    chain_skipped += 1;
-                    continue;
-                }
-            };
-        if dsm::dlv::settlement_receipt_leaf::receipt_commitment_of(&receipt)
-            != ptr.expected_receipt_hash
+        // Under the cell walk a missing receipt is no longer "inert". It was,
+        // when a self-signed pointer was the only evidence an edge existed —
+        // anyone could publish one, so concluding anything from its presence
+        // handed out free liquidity suppression. A quorum-established slot
+        // winner is a different fact: the network serialized this generation
+        // to this claimant. We cannot validate the edge without the receipt
+        // and we may not pretend the edge is absent, so the vault leaves
+        // routing until the evidence appears. A claimant who wins a slot and
+        // never settles can hold a vault here; that liveness cost is the
+        // honest price of not manufacturing maximality.
+        let receipt = match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(
+            vault_id, &x,
+        )
+        .await
         {
-            // A receipt exists but does not witness THIS trade, so this pointer
-            // is as unwitnessed as one with no receipt at all — and exactly as
-            // inert.
-            chain_skipped += 1;
-            continue;
-        }
-        // The receipt must also describe the step this pointer claims. The
-        // commitment already covers the sequence pair, so this cannot disagree
-        // silently — but checking it here means the fold reads as one rule
-        // rather than relying on a hash to have covered it.
-        if receipt.trade.parent_sequence != ptr.parent_sequence
-            || receipt.trade.new_sequence != ptr.new_sequence
+            Some(r) => r,
+            None => return Err(unavailable("its settlement receipt is not available")),
+        };
+        // The receipt must describe the step this cell claims. It is fetched
+        // by (vault, x) and x came from the authenticated winner, so it is
+        // already bound to this trade; this pins the generations it moves
+        // between.
+        if receipt.trade.parent_sequence != cursor_state.generation
+            || receipt.trade.new_sequence != cursor_state.generation.saturating_add(1)
         {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable(
+                "its receipt witnesses a different generation step",
+            ));
         }
+        let new_sequence = receipt.trade.new_sequence;
         // Fetch the full signed RouteCommit paired with X.
-        let rc_key = external_commitment_rc_key(&ptr.x);
-        let rc_bytes = match BitcoinTapSdk::storage_get_bytes(&rc_key).await {
-            Ok(b) => b,
-            Err(_) => {
-                // RC not yet published (publisher crashed between X and RC
-                // writes). Cannot fold reserves without the RC; skip.
-                chain_skipped += 1;
-                continue;
-            }
-        };
-        let rc = match generated::RouteCommitV1::decode(rc_bytes.as_slice()) {
-            Ok(r) => r,
-            Err(_) => {
-                chain_skipped += 1;
-                continue;
-            }
-        };
-        // Bind pointer.x to the canonical RouteCommit commitment.
-        // Storage keys are untrusted labels, so we MUST recompute X
-        // from RouteCommit bytes and require exact equality.
-        let computed_x = compute_external_commitment(&rc);
-        if computed_x != ptr.x {
-            chain_skipped += 1;
-            continue;
+        let rc_key = external_commitment_rc_key(&x);
+        let rc_bytes = BitcoinTapSdk::storage_get_bytes(&rc_key)
+            .await
+            .map_err(|_| unavailable("its RouteCommit is not published"))?;
+        let rc = generated::RouteCommitV1::decode(rc_bytes.as_slice())
+            .map_err(|_| unavailable("its RouteCommit does not decode"))?;
+        // Storage keys are untrusted labels, so X is RECOMPUTED from the
+        // RouteCommit bytes and required to equal the one the winner named.
+        if compute_external_commitment(&rc) != x {
+            return Err(unavailable(
+                "its RouteCommit does not recompute the claimed X",
+            ));
         }
         // Enforce routed-unlock eligibility gate:
         //   1) initiator SPHINCS+ signature valid over canonical RC bytes
         //   2) this vault is present in the route
         //   3) external commitment anchor for X is visible
-        let hop = match verify_route_commit_unlock_eligibility(&rc_bytes, vault_id).await {
-            Ok(h) => h,
-            Err(_) => {
-                chain_skipped += 1;
-                continue;
-            }
-        };
+        let hop = verify_route_commit_unlock_eligibility(&rc_bytes, vault_id)
+            .await
+            .map_err(|_| unavailable("its RouteCommit fails routed-unlock eligibility"))?;
         // THE PARENT BINDING. The hop must name the c_n of the exact cursor
         // state it consumes — one byte-equality that pins the generation, the
         // reserves, the pair, the fee and the authority position all at once,
@@ -436,13 +475,11 @@ pub(crate) async fn compose_vault_state(
         // chain. Mandatory: an unbound hop is skipped, never tolerated.
         if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice()
         {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable("its hop is bound to a different parent state"));
         }
         // Decode the hop's input/output amounts.
         if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable("its hop amounts are malformed"));
         }
         let mut in_buf = [0u8; 16];
         in_buf.copy_from_slice(&hop.input_amount_u128);
@@ -455,15 +492,13 @@ pub(crate) async fn compose_vault_state(
             u64::try_from(u128::from_be_bytes(in_buf)),
             u64::try_from(u128::from_be_bytes(out_buf)),
         ) else {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable("its hop amounts do not fit u64"));
         };
         // Determine trade direction against the state's own canonical pair.
         let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
         let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
         if !input_is_a && !input_is_b {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable("its hop trades a different pair"));
         }
         let (cursor_in, cursor_out) = if input_is_a {
             (cursor_state.reserve_a, cursor_state.reserve_b)
@@ -474,17 +509,12 @@ pub(crate) async fn compose_vault_state(
         // simulated output equals the trader's claimed expected_output
         // — anything else means the trade settled against a different
         // baseline and folding it is unsafe.
-        let simulated = match constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
-        {
-            Some(v) => v,
-            None => {
-                chain_skipped += 1;
-                continue;
-            }
-        };
+        let simulated = constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
+            .ok_or_else(|| unavailable("its trade does not re-simulate against this state"))?;
         if simulated != expected_output {
-            chain_skipped += 1;
-            continue;
+            return Err(unavailable(
+                "its claimed output is not what this state's curve yields",
+            ));
         }
         // Construct the successor state: generation advanced, reserves moved,
         // predecessor edge set to the consumed state's identity, and EVERY
@@ -504,7 +534,7 @@ pub(crate) async fn compose_vault_state(
             )
         };
         let mut next_state = cursor_state.clone();
-        next_state.generation = ptr.new_sequence;
+        next_state.generation = new_sequence;
         next_state.reserve_a = new_a;
         next_state.reserve_b = new_b;
         next_state.parent_state_commitment = cursor_c_n;
@@ -512,11 +542,9 @@ pub(crate) async fn compose_vault_state(
             Ok(c) => c,
             Err(e) => {
                 // A successor of a decoded-valid state re-encodes unless the
-                // fold produced something the constructors refuse; treat as a
-                // skip, never a partial advance.
-                log::warn!("[compose_vault_state] successor encode refused: {e}");
-                chain_skipped += 1;
-                continue;
+                // walk produced something the constructors refuse. Never a
+                // partial advance, and never a frontier.
+                return Err(unavailable(&format!("its successor does not encode: {e}")));
             }
         };
         folded_parent_bindings.push((cursor_state.generation, cursor_c_n));
@@ -530,7 +558,6 @@ pub(crate) async fn compose_vault_state(
         reserves_a: cursor_state.reserve_a,
         reserves_b: cursor_state.reserve_b,
         pending_chain_len: chain_len,
-        pending_chain_skipped: chain_skipped,
         owner_devid: owner.device_id,
         owner_genesis: cursor_state.owner_genesis_id,
         owner_public_key: owner.ak_pk,
@@ -654,6 +681,57 @@ mod tests {
         v
     }
 
+    /// Install the 3-node fleet these tests compose against and clear both
+    /// the flat object store and the per-member registers.
+    ///
+    /// Composition now reads a REGISTER, so a test that does not stand a fleet
+    /// up is not testing a weaker composition — it gets
+    /// `BindingEvidenceUnavailable`, because an unresolvable set is exactly
+    /// the fail-closed case.
+    fn fleet() -> crate::handlers::faucet_flow_tests::FleetGuard {
+        let guard = crate::handlers::faucet_flow_tests::install_canonical_fleet();
+        crate::sdk::storage_io::fake_fleet::reset();
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
+        guard
+    }
+
+    fn fleet_set() -> crate::sdk::storage_set::StorageSet {
+        crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .sole_set()
+            .expect("one set")
+            .clone()
+    }
+
+    /// Win the settlement slot at `(vault_id, parent_sequence)` for the trade
+    /// named by `x`, binding the exact parent state `parent_c_n`.
+    ///
+    /// This is what makes a successor edge EXIST for the walk. Publishing a
+    /// receipt and a RouteCommit no longer creates an edge on its own: the
+    /// network has to have serialized the generation to this claimant.
+    async fn win_slot(
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        x: &[u8; 32],
+        parent_c_n: &[u8; 32],
+        claimant_pk: &[u8],
+        claimant_sk: &[u8],
+    ) {
+        let set = fleet_set();
+        let body = dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
+            vault_id: *vault_id,
+            parent_sequence,
+            x: *x,
+            claimant_public_key: claimant_pk.to_vec(),
+            storage_set_id: set.id(),
+            parent_binding_c_n: *parent_c_n,
+        };
+        let envelope =
+            dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(&body, claimant_sk)
+                .expect("sign slot claim");
+        crate::sdk::storage_io::fake_fleet::claim(&set, &envelope);
+    }
+
     /// Build the owner's `V_0` for a fixture vault, its `CCB(V_0)` bytes, its
     /// `c_0`, and the presentation anchoring it — all through the production
     /// builders.
@@ -682,8 +760,13 @@ mod tests {
             iteration_budget: None,
             parent_state_commitment: genesis_parent_commitment(&vault_id),
             owner_authority_transition_digest: auth.position,
-            storage_set: StorageSetMembers::new(&[b"n1", b"n2", b"n3", b"n4", b"n5"]).expect("set"),
-            quorum: 4,
+            // THE VAULT'S OWN SET AND QUORUM. The walk resolves this set id
+            // through the local catalog and counts cells at THIS q — so the
+            // fixture must commit the fleet these tests actually run against,
+            // exactly as a real vault commits the fleet it was born under.
+            storage_set: StorageSetMembers::new(&[b"dsm-node-1", b"dsm-node-2", b"dsm-node-3"])
+                .expect("set"),
+            quorum: 2,
         };
         let ccb = state.encode().expect("encode");
         let c0 = vault_state_commitment(&state).expect("c_0");
@@ -925,23 +1008,18 @@ mod tests {
         };
         let trade = settled_trade(&x, parent_sequence, input_is_a, input_amount, output);
         publish_receipt(vault_id, &trade, &pk, &sk).await;
-        publish_pointer(
-            vault_id,
-            parent_sequence,
-            parent_sequence + 1,
-            &x,
-            &trade,
-            &pk,
-            &sk,
-        )
-        .await;
+        // THE EDGE. Publishing evidence no longer makes a successor exist —
+        // the network must have serialized this generation to this claimant.
+        win_slot(vault_id, parent_sequence, &x, parent_binding, &pk, &sk).await;
         (new_a, new_b)
     }
 
-    /// No pointers: the composed state IS the verified baseline, identity
-    /// included.
+    /// THE FRONTIER, and the only way to reach one: q attributed members of
+    /// the vault's own committed set each answer that the settlement-slot cell
+    /// at this generation holds nothing.
     #[tokio::test]
-    async fn composes_the_verified_baseline_when_no_pointers_exist() {
+    async fn an_empty_slot_cell_at_quorum_is_the_frontier() {
+        let _fleet = fleet();
         let vault_id = vid(0x01);
         let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let composed =
@@ -962,11 +1040,105 @@ mod tests {
         assert_eq!(composed.owner_genesis, state.owner_genesis_id);
     }
 
+    /// THE OMISSION MUTATION — the control this whole cut exists for.
+    ///
+    /// Under the old prefix-listing fold, a member that simply did not return
+    /// a key produced a SHORT CHAIN that was reported as the composed state,
+    /// indistinguishable from a genuinely shorter one. Here two of three
+    /// members go silent, so fewer than the committed `q = 2` give an
+    /// attributed answer, and the walk refuses instead of reporting the
+    /// baseline as a frontier.
+    #[tokio::test]
+    async fn a_short_quorum_on_the_cell_is_not_a_frontier() {
+        let _fleet = fleet();
+        let vault_id = vid(0x0D);
+        let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a short quorum establishes nothing");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("attributed member"),
+            "the refusal names the counting failure: {detail}"
+        );
+
+        // Positive control: heal the members and the SAME vault composes to a
+        // frontier, so the refusal above is the quorum rule and not a broken
+        // fixture.
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-3");
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composes once the members answer");
+        assert_eq!(composed.sequence, 0);
+    }
+
+    /// Req 15.8 counting: a member whose response echoes SOMEONE ELSE'S id is
+    /// uncountable. Two members answering, one of them impersonating the
+    /// other, is one attributed answer — below `q`.
+    #[tokio::test]
+    async fn a_member_echoing_another_id_is_uncountable() {
+        let _fleet = fleet();
+        let vault_id = vid(0x0E);
+        let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
+        crate::sdk::storage_io::fake_fleet::set_echo("dsm-node-2", Some("dsm-node-1"));
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("an impersonated echo cannot be counted");
+        assert!(matches!(
+            err,
+            CompositionError::BindingEvidenceUnavailable(_)
+        ));
+
+        // Positive control: the SAME two members, honestly attributed, reach q.
+        crate::sdk::storage_io::fake_fleet::set_echo("dsm-node-2", Some("dsm-node-2"));
+        compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect("composes when both answers are attributable");
+    }
+
+    /// Members holding DIFFERENT values for one write-once cell is a network
+    /// fault, never something to pick a side of.
+    #[tokio::test]
+    async fn a_divergent_write_once_cell_fails_closed() {
+        let _fleet = fleet();
+        let vault_id = vid(0x0F);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (pk1, sk1) = trader();
+        let (pk2, sk2) = trader();
+        // One claimant lands on node-1 only; a different one on node-2 only.
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
+        win_slot(&vault_id, 0, &x_seed(0x1A), &c0, &pk1, &sk1).await;
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
+        win_slot(&vault_id, 0, &x_seed(0x1B), &c0, &pk2, &sk2).await;
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-3");
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a divergent cell is not a frontier and not an edge");
+        assert!(matches!(
+            err,
+            CompositionError::BindingEvidenceUnavailable(_)
+        ));
+    }
+
     /// The presentation authenticates a state; handing the composer the bytes
     /// of a DIFFERENT state must refuse — the anchor's commitment does not
     /// match the bytes.
     #[tokio::test]
     async fn bytes_of_a_different_state_are_refused() {
+        let _fleet = fleet();
         let vault_id = vid(0x02);
         let (presentation, _ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (_p2, other_ccb, _s2, _c2) = baseline_fixture(vault_id, 999, 999);
@@ -990,6 +1162,7 @@ mod tests {
     /// baseline mismatch, not something to quote around.
     #[tokio::test]
     async fn a_caller_tuple_disagreeing_with_the_signed_state_is_refused() {
+        let _fleet = fleet();
         let vault_id = vid(0x03);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let err = compose_vault_state(
@@ -1020,6 +1193,7 @@ mod tests {
     /// Composing under a different vault id than the state names is refused.
     #[tokio::test]
     async fn a_presentation_for_another_vault_is_refused() {
+        let _fleet = fleet();
         let vault_id = vid(0x04);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let other = vid(0x05);
@@ -1029,11 +1203,12 @@ mod tests {
         assert!(matches!(err, CompositionError::BaselineMismatch(_)));
     }
 
-    /// One receipted trade folds: the generation advances by one, the
-    /// reserves move by exactly the simulated swap, and the successor's
+    /// A claimed AND settled generation folds: the generation advances by one,
+    /// the reserves move by exactly the simulated swap, and the successor's
     /// predecessor edge is the baseline's identity — the c_n chain is real.
     #[tokio::test]
-    async fn a_receipted_pointer_folds_and_advances_the_commitment_chain() {
+    async fn a_claimed_and_settled_generation_folds_and_advances_the_chain() {
+        let _fleet = fleet();
         let vault_id = vid(0x06);
         let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (new_a, new_b) = publish_settled_trade(
@@ -1072,15 +1247,20 @@ mod tests {
         assert_eq!(composed.state.quorum, state.quorum);
     }
 
-    /// An unreceipted pointer is INERT — for reserves and for quote
-    /// availability alike. Even a fully valid RouteCommit with a visible X is
-    /// producible without settling or claiming the slot, so nothing short of
-    /// the receipt may change what a composer reports: the composed state
-    /// must be byte-identical to the no-pointer case.
+    /// THE OWNER'S RULING (2026-08-29), pinned.
+    ///
+    /// A quorum-established slot winner whose settlement receipt is missing is
+    /// NOT a frontier. The network has already said this generation has a
+    /// claimed successor; reporting it as the end of the chain because a
+    /// second artifact is absent would make the cell walk decorative. It
+    /// fails closed, and an adversary who wins a slot and never settles holds
+    /// the vault here — an accepted liveness cost, never permission to
+    /// manufacture maximality.
     #[tokio::test]
-    async fn an_unreceipted_pointer_is_inert_even_with_a_valid_route_and_visible_x() {
+    async fn a_claimed_generation_without_its_receipt_fails_closed() {
+        let _fleet = fleet();
         let vault_id = vid(0x07);
-        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (pk, sk) = trader();
         let (_na, _nb, x) = publish_rc_for_swap(
             &x_seed(0x07),
@@ -1095,34 +1275,31 @@ mod tests {
         )
         .await;
         publish_extcommit(&x, &pk).await;
-        let out = 1_000_000u64; // any number; no receipt will exist
-        let trade = settled_trade(&x, 0, true, 10_000, out);
-        publish_pointer(&vault_id, 0, 1, &x, &trade, &pk, &sk).await;
+        // Slot won, RC published and valid — but NO receipt was ever written.
+        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
 
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composes");
-        assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.c_n, c0);
-        assert_eq!(
-            composed.state, state,
-            "an unwitnessed intent changes NOTHING a composer reports"
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a claimed successor without evidence is not a frontier");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("receipt"),
+            "the refusal names the missing evidence: {detail}"
         );
     }
 
-    /// The griefing case, pinned as refused: a pointer forged by an arbitrary
-    /// keypair — no RouteCommit, no X, arbitrary receipt commitment — at
-    /// exactly the current parent must leave the vault fully quotable. A
-    /// pointer is self-signed; its bare presence establishes no vault
-    /// authority and no settlement, so it may not suppress liquidity.
+    /// A pointer creates no edge. Under the cell walk a self-signed pointer
+    /// from an arbitrary keypair is not consulted at all, so the griefing case
+    /// the old fold had to reason about carefully cannot even be expressed:
+    /// the cell is empty, and the vault is fully quotable.
     #[tokio::test]
-    async fn a_forged_pointer_from_an_arbitrary_key_cannot_suppress_liquidity() {
+    async fn a_forged_pointer_creates_no_edge_and_cannot_suppress_liquidity() {
+        let _fleet = fleet();
         let vault_id = vid(0x0C);
         let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (attacker_pk, attacker_sk) = trader();
-        // No X anchor, no RouteCommit, no receipt — one storage write.
         let x = x_seed(0x0C);
         let fake_trade = settled_trade(&x, 0, true, 1, 1);
         publish_pointer(&vault_id, 0, 1, &x, &fake_trade, &attacker_pk, &attacker_sk).await;
@@ -1133,51 +1310,92 @@ mod tests {
                 .expect("composes");
         assert_eq!(composed.pending_chain_len, 0);
         assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.c_n, c0);
         assert_eq!(
             composed.state, state,
             "one arbitrary-keypair storage write must not change what any verifier composes"
         );
+        assert_eq!(composed.c_n, c0);
     }
 
-    /// A hop bound to a parent that is NOT the cursor's c_n is skipped: the
-    /// trade was signed against a different state and cannot be folded here.
+    /// A slot winner that binds a parent state OTHER than the cursor's `c_n`
+    /// means the network and this verifier disagree about what the generation
+    /// IS. Fail closed — never fold past it, never call it a frontier.
     #[tokio::test]
-    async fn a_hop_bound_to_a_stale_parent_is_skipped() {
+    async fn a_winner_binding_a_different_parent_state_fails_closed() {
+        let _fleet = fleet();
+        let vault_id = vid(0x10);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let stale = [0xEEu8; 32];
+        assert_ne!(stale, c0);
+        let (pk, sk) = trader();
+        win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk, &sk).await;
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a winner bound elsewhere is a divergence");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("different parent state"),
+            "the refusal names the binding: {detail}"
+        );
+    }
+
+    /// A hop bound to a parent that is NOT the cursor's `c_n` was signed
+    /// against a different state. The slot binds correctly, so the walk
+    /// reaches the RouteCommit — and refuses there rather than folding.
+    #[tokio::test]
+    async fn a_hop_bound_to_a_stale_parent_fails_closed() {
+        let _fleet = fleet();
         let vault_id = vid(0x08);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let stale_binding = [0xEEu8; 32];
         assert_ne!(stale_binding, c0);
-        let (_new_a, _new_b) = publish_settled_trade(
-            &vault_id,
+        let (pk, sk) = trader();
+        let (_na, _nb, x) = publish_rc_for_swap(
             &x_seed(0x08),
+            &vault_id,
             1_000_000,
             500_000,
-            0,
             &stale_binding,
             true,
             10_000,
+            &pk,
+            &sk,
         )
         .await;
+        publish_extcommit(&x, &pk).await;
+        let out = crate::sdk::routing_path_sdk::constant_product_output(
+            10_000, 1_000_000, 500_000, FEE_BPS,
+        )
+        .expect("sim");
+        let trade = settled_trade(&x, 0, true, 10_000, out);
+        publish_receipt(&vault_id, &trade, &pk, &sk).await;
+        // The SLOT binds the true parent; only the hop is stale.
+        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
 
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composes");
-        assert_eq!(composed.pending_chain_len, 0, "stale binding must not fold");
-        assert_eq!(composed.sequence, 0);
-        assert_eq!(composed.c_n, c0);
-        assert!(composed.pending_chain_skipped >= 1);
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a stale hop binding cannot fold");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("bound to a different parent state"),
+            "the refusal names the hop binding: {detail}"
+        );
     }
 
-    /// A receipt that witnesses a DIFFERENT trade than the pointer committed
-    /// to does not activate the pointer.
+    /// A receipt that witnesses a DIFFERENT trade than the claimed one cannot
+    /// activate the edge.
     #[tokio::test]
-    async fn a_receipt_for_a_different_trade_does_not_activate_the_pointer() {
+    async fn a_receipt_for_a_different_generation_fails_closed() {
+        let _fleet = fleet();
         let vault_id = vid(0x09);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (pk, sk) = trader();
-        let (new_a, _new_b, x) = publish_rc_for_swap(
+        let (_na, _nb, x) = publish_rc_for_swap(
             &x_seed(0x09),
             &vault_id,
             1_000_000,
@@ -1190,36 +1408,32 @@ mod tests {
         )
         .await;
         publish_extcommit(&x, &pk).await;
-        let _ = new_a;
-        // The pointer commits to the REAL trade …
-        let real_out = crate::sdk::routing_path_sdk::constant_product_output(
-            10_000, 1_000_000, 500_000, FEE_BPS,
-        )
-        .expect("sim");
-        let committed = settled_trade(&x, 0, true, 10_000, real_out);
-        publish_pointer(&vault_id, 0, 1, &x, &committed, &pk, &sk).await;
-        // … but the receipt witnesses a much smaller one.
-        let witnessed = settled_trade(&x, 0, true, 10, 3);
+        // The receipt witnesses a step from generation 5, not from 0.
+        let witnessed = settled_trade(&x, 5, true, 10, 3);
         publish_receipt(&vault_id, &witnessed, &pk, &sk).await;
+        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
 
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composes");
-        assert_eq!(composed.pending_chain_len, 0);
-        assert_eq!(composed.sequence, 0);
-        assert_eq!(
-            composed.c_n, c0,
-            "an unmatched receipt leaves the pointer unwitnessed — and inert"
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a receipt for another step cannot activate this edge");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("different generation step"),
+            "the refusal names the step: {detail}"
         );
     }
 
-    /// Two settled trades chain: c_0 → c_1 → c_2, each successor binding the
-    /// previous identity, with the second hop bound to c_1 (not c_0).
+    /// Two settled generations chain: c_0 → c_1 → c_2, each successor binding
+    /// the previous identity, the second slot claimed at generation 1 and its
+    /// hop bound to c_1 (not c_0), and the walk terminating on the empty cell
+    /// at generation 2.
     #[tokio::test]
-    async fn two_settled_trades_chain_by_commitment() {
+    async fn two_settled_generations_chain_by_commitment() {
+        let _fleet = fleet();
         let vault_id = vid(0x0A);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (presentation, ccb, state0, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (a1, b1) = publish_settled_trade(
             &vault_id,
             &x_seed(0x0A),
@@ -1231,8 +1445,7 @@ mod tests {
             10_000,
         )
         .await;
-        // Recompute c_1 exactly as the composer will.
-        let (_p, _ccb2, state0, _c0b) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        // Recompute c_1 exactly as the walk will.
         let mut s1 = state0.clone();
         s1.generation = 1;
         s1.reserve_a = a1;

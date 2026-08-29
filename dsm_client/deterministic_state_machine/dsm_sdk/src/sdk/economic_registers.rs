@@ -207,38 +207,88 @@ pub async fn register_economic_root(
     }
 }
 
-/// Read the quorum-agreed winner for one register cell: q attributed members
-/// returning byte-identical values. Divergent non-identical values are
-/// reported so a caller that owns the cell can quarantine.
-async fn read_cell_quorum(
-    set: &StorageSet,
+/// What a live quorum read established about ONE write-once register cell.
+///
+/// The three outcomes are genuinely different facts and must never collapse
+/// into one another. `EmptyAtQuorum` is a POSITIVE observation — q attributed
+/// members each answered "this cell holds nothing" — and it is the only thing
+/// that can establish a frontier. `NoQuorum` is the absence of an answer.
+/// Reporting the second as the first is precisely the omission defect the
+/// authenticated frontier exists to remove: a write-once cell cannot express
+/// omission, but a reader that treats silence as emptiness re-introduces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellObservation {
+    /// q attributed members returned byte-identical contents.
+    Winner(Vec<u8>),
+    /// q attributed members each returned NO value for this cell.
+    EmptyAtQuorum,
+    /// Fewer than q members gave an attributed answer either way — the read
+    /// establishes nothing, and the caller must fail closed.
+    NoQuorum { attributed: u32, required: u32 },
+}
+
+/// Observe one register cell under Req 15.8 counting: only members that echo
+/// their own id are counted, and only byte-identical values aggregate.
+/// Divergent non-identical values are reported so a caller that owns the cell
+/// can quarantine.
+///
+/// `quorum` is supplied by the caller rather than derived from the set,
+/// because the vault cells are counted at the quorum the OWNER committed in
+/// `V_n` (field 15) — a local majority-of-catalog rule is this verifier's
+/// opinion, not the vault's rule.
+async fn read_cell_quorum_at(
     rows: Vec<(String, Option<String>, Option<Vec<u8>>)>,
-) -> Result<Option<Vec<u8>>, RegisterError> {
+    quorum: u32,
+) -> Result<CellObservation, RegisterError> {
     use std::collections::HashMap;
     let mut counts: HashMap<Vec<u8>, u32> = HashMap::new();
     let mut distinct = 0usize;
+    let mut attributed_total = 0u32;
+    let mut attributed_empty = 0u32;
     for (member_id, echoed, bytes) in rows {
-        let attributed = echoed.as_deref() == Some(member_id.as_str());
-        if !attributed {
+        if echoed.as_deref() != Some(member_id.as_str()) {
             continue;
         }
-        if let Some(b) = bytes {
-            let c = counts.entry(b).or_insert(0);
-            if *c == 0 {
-                distinct += 1;
+        attributed_total += 1;
+        match bytes {
+            Some(b) => {
+                let c = counts.entry(b).or_insert(0);
+                if *c == 0 {
+                    distinct += 1;
+                }
+                *c += 1;
             }
-            *c += 1;
+            None => attributed_empty += 1,
         }
     }
-    if let Some((bytes, _)) = counts.iter().find(|(_, c)| **c >= set.quorum()) {
-        return Ok(Some(bytes.clone()));
+    if let Some((bytes, _)) = counts.iter().find(|(_, c)| **c >= quorum) {
+        return Ok(CellObservation::Winner(bytes.clone()));
     }
     if distinct > 1 {
         return Err(RegisterError::Conflict {
             detail: format!("{distinct} distinct values observed for one write-once cell"),
         });
     }
-    Ok(None)
+    if attributed_empty >= quorum {
+        return Ok(CellObservation::EmptyAtQuorum);
+    }
+    Ok(CellObservation::NoQuorum {
+        attributed: attributed_total,
+        required: quorum,
+    })
+}
+
+/// The quorum-agreed winner for one cell, or `None` when no winner is
+/// established. Callers that must distinguish "empty at quorum" from "no
+/// usable answer" use [`read_cell_quorum_at`] directly.
+async fn read_cell_quorum(
+    set: &StorageSet,
+    rows: Vec<(String, Option<String>, Option<Vec<u8>>)>,
+) -> Result<Option<Vec<u8>>, RegisterError> {
+    match read_cell_quorum_at(rows, set.quorum()).await? {
+        CellObservation::Winner(b) => Ok(Some(b)),
+        CellObservation::EmptyAtQuorum | CellObservation::NoQuorum { .. } => Ok(None),
+    }
 }
 
 /// The quorum winner for one faucet ticket, if established.
@@ -270,6 +320,28 @@ pub async fn read_winning_settlement_slot(
             total: set.len() as u32,
         })?;
     read_cell_quorum(set, rows).await
+}
+
+/// OBSERVE one settlement-slot cell at the quorum the vault's owner committed.
+///
+/// This is the frontier walk's edge source. A write-once cell is the only
+/// answer in this system whose omission is not expressible: a set listing can
+/// silently omit a key and no signature repairs that, but a cell either holds
+/// a value or does not, and q attributed members saying "nothing here" is a
+/// fact rather than an absence of one.
+pub async fn observe_settlement_slot_cell(
+    set: &StorageSet,
+    vault_id: &[u8; 32],
+    parent_sequence: u64,
+    quorum: u32,
+) -> Result<CellObservation, RegisterError> {
+    let rows = crate::sdk::storage_io::read_settlement_slot_cell(set, vault_id, parent_sequence)
+        .await
+        .map_err(|_| RegisterError::StorageUnavailable {
+            accepted: 0,
+            total: set.len() as u32,
+        })?;
+    read_cell_quorum_at(rows, quorum).await
 }
 
 /// The quorum winner for one economic-root cell, if established. Used for
