@@ -1894,85 +1894,32 @@ impl AppRouterImpl {
             .map_err(|e| format!("unknown token {token_id}: {e}"))
     }
 
-    async fn handle_token_mint(&self, i: AppInvoke) -> AppResult {
-        let arg_pack = match generated::ArgPack::decode(&*i.args) {
-            Ok(p) => p,
-            Err(e) => return err(format!("decode ArgPack failed: {e}")),
-        };
-        let req = match generated::TokenMintRequest::decode(&*arg_pack.body) {
-            Ok(r) => r,
-            Err(e) => return err(format!("decode TokenMintRequest failed: {e}")),
-        };
-        if req.amount == 0 {
-            return err("token.mint: amount must be > 0".into());
-        }
-        let policy_commit = match self.resolve_token_for_value_op(&req.token_id) {
-            Ok(c) => c,
-            Err(e) => return err(format!("token.mint: {e}")),
-        };
-        let dev_id = self.device_id_bytes;
-        let authorization = match Self::sign_token_authorization(
-            &policy_commit,
-            "mint",
-            &req.token_id,
-            req.amount,
-            &dev_id,
-        ) {
-            Ok(w) => w,
-            Err(e) => return err(format!("token.mint: {e}")),
-        };
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let ref_hash = self
-            .core_sdk
-            .device_head()
-            .map(|s| s.genesis_digest())
-            .unwrap_or([0u8; 32]);
-
-        let op = dsm::types::operations::Operation::Mint {
-            amount: dsm::types::token_types::Balance::from_state(req.amount, ref_hash),
-            token_id: req.token_id.as_bytes().to_vec(),
-            policy_commit,
-            authorized_by: dev_id.to_vec(),
-            proof_of_authorization: authorization,
-            message: req.message.clone(),
-        };
-        let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit,
-            direction: dsm::types::device_state::BalanceDirection::Credit,
-            amount: req.amount,
-        }];
-
-        let outcome = match self.core_sdk.execute_on_relationship(
-            rel_key,
-            dev_id,
-            op,
-            &deltas,
-            Some(init_tip),
-        ) {
-            Ok((_s, o)) => o,
-            Err(e) => return err(format!("token.mint: {e}")),
-        };
-
-        let new_balance = outcome.new_device_state.balance(&policy_commit);
-        self.write_token_projection(
-            &dev_id,
-            &req.token_id,
-            &policy_commit,
-            &outcome,
-            new_balance,
-        );
-
-        pack_envelope_ok(generated::envelope::Payload::TokenMintResponse(
-            generated::TokenMintResponse {
-                success: true,
-                token_id: req.token_id,
-                new_balance,
-                message: "Minted".to_string(),
-            },
-        ))
+    /// `token.mint` — REFUSED until an authenticated issuance predicate exists.
+    ///
+    /// A mint creates units, so it is the one operation whose entire effect is
+    /// a credit with no prior holder. `R_econ` funds a credit only through a
+    /// `CreditSource`, and the arm that would carry issuance
+    /// (`0x0023 AuthorizedIssuance`) fails closed because its evidence class
+    /// `0x0029` is not written: nothing can yet prove a token policy authorized
+    /// this exact issuance.
+    ///
+    /// This route is DEFENSE IN DEPTH. The authoritative refusal is at the
+    /// accepting layer (`DeviceState::advance`), which protects every caller
+    /// rather than this one; deleting this arm must leave minting refused.
+    ///
+    /// The mint-construction body was DELETED rather than left unreachable. It
+    /// signed a self-authorization with the caller's own device key and applied
+    /// a credit delta — the shape that has to change completely once issuance
+    /// carries `0x0029` evidence, so keeping it would preserve a path whose
+    /// only remaining purpose was the thing being refused.
+    async fn handle_token_mint(&self, _i: AppInvoke) -> AppResult {
+        err(
+            "token.mint: issuance is unavailable — no authenticated issuance predicate exists \
+             yet (class 0x0029), so nothing could prove a token policy authorized this mint. \
+             Minted units would be unspendable in every validated lineage, and holding them \
+             would permanently block this device from activating its economic state."
+                .into(),
+        )
     }
 
     async fn handle_token_burn(&self, i: AppInvoke) -> AppResult {

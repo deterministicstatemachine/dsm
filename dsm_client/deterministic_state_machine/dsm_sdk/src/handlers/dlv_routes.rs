@@ -4670,7 +4670,6 @@ mod funded_creation_tests {
         };
         use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
         use dsm::types::operations::{Operation, TransactionMode};
-        use dsm::types::token_types::Balance;
 
         let kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[seed; 32])
             .expect("foreign trader keypair");
@@ -4687,33 +4686,12 @@ mod funded_creation_tests {
         };
 
         // Fund the foreign trader with the input asset so its settle can pay it.
-        let head = DeviceState::new(dev, dev, kp.public_key.clone(), 64);
-        let head = head
-            .advance(
-                rel,
-                dev,
-                Operation::Mint {
-                    amount: Balance::from_state(10_000, [0u8; 32]),
-                    token_id: b"IN".to_vec(),
-                    policy_commit: *pc_in,
-                    authorized_by: b"self".to_vec(),
-                    proof_of_authorization: Vec::new(),
-                    message: "seed".into(),
-                },
-                vec![0x11; 32],
-                None,
-                &[BalanceDelta {
-                    policy_commit: *pc_in,
-                    direction: BalanceDirection::Credit,
-                    amount: 10_000,
-                }],
-                Some(init),
-                None,
-                None,
-                None,
-            )
-            .expect("foreign mint")
-            .new_device_state;
+        // Installed directly rather than minted: issuance is refused at the
+        // accepting layer until class 0x0029 exists, and this fixture's subject
+        // is the RECONCILE's duplicate-generation refusal, not where the
+        // trader's units came from.
+        let head = DeviceState::new(dev, dev, kp.public_key.clone(), 64)
+            .with_balance_for_testing(*pc_in, 10_000);
 
         let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, &x);
         let (input_amount, output_amount) = (1_000u64, 500u64);
