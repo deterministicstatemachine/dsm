@@ -179,14 +179,32 @@ fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
     );
 }
 
+/// `token.mint` refuses BEFORE it resolves anything, and says why.
+///
+/// This used to assert that an unknown ticker fails closed. It cannot test that
+/// any more: the route now refuses issuance outright, before token resolution
+/// is reached, so an unknown ticker and a perfectly good one take the identical
+/// path. Asserting `!success` on an unknown ticker would therefore be vacuous —
+/// green whether or not resolution works at all.
+///
+/// What is still true and worth pinning is that the refusal is the ISSUANCE
+/// one, for a KNOWN token as much as an unknown one, and that it names the
+/// missing predicate rather than failing for an incidental reason.
 #[test]
 #[serial]
-fn mint_of_an_unknown_token_fails_closed() {
+fn mint_refuses_issuance_before_it_resolves_the_token() {
     init_test_storage();
     let router = new_router();
     fund_era(&router);
-    let res = mint(&router, "no-such-token", 10);
-    assert!(!res.success, "minting an unknown token must fail");
+    for ticker in ["ERA", "no-such-token"] {
+        let res = mint(&router, ticker, 10);
+        assert!(!res.success, "minting {ticker} must fail");
+        let msg = res.error_message.as_deref().unwrap_or_default();
+        assert!(
+            msg.contains("0x0029"),
+            "the refusal names the missing issuance predicate for {ticker}: {msg}"
+        );
+    }
 }
 
 #[test]

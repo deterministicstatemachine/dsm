@@ -1625,7 +1625,35 @@ impl DeviceState {
             }
         }
 
-        if let Operation::Mint { policy_commit, .. } = &operation {
+        // ISSUANCE REFUSAL — every asset, not just the builtins.
+        //
+        // A positive mint CREATES units, so it is the one operation whose whole
+        // effect is a credit with no prior holder. `R_econ` funds a credit only
+        // through a `CreditSource`, and the arm that would carry issuance
+        // (`0x0023 AuthorizedIssuance`) fails closed because its evidence class
+        // `0x0029` is not written yet: there is no foreign-verifiable proof
+        // that a token policy authorized this exact issuance.
+        //
+        // Until that predicate exists, the refusal belongs HERE, at the
+        // accepting layer, before any device-state balance changes. A route
+        // guard alone leaves every other caller — and every future one — free
+        // to credit units nothing can ever admit, and the damage is not
+        // confined to the minter: `dlv.create` funds vaults from the device
+        // head, so unadmittable units become vault reserves and a whole market
+        // that no verifier can accept. Worse, holding them is a ONE-WAY DOOR:
+        // `activate` refuses a device with a non-empty balance map, so the
+        // identity can never enter the economic model at all.
+        //
+        // The two reasons are genuinely different, so they are reported
+        // differently: a builtin's issuance is not self-authorizable at all,
+        // while a user asset's issuance is authorizable in principle and simply
+        // has no predicate yet.
+        if let Operation::Mint {
+            policy_commit,
+            amount,
+            ..
+        } = &operation
+        {
             if let Some(name) =
                 crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
                     policy_commit,
@@ -1635,6 +1663,39 @@ impl DeviceState {
                     "advance: refusing to mint the builtin token {name} — builtin issuance is not \
                      self-authorizable, and no authenticated issuance predicate is defined for it"
                 )));
+            }
+            if amount.value() > 0 {
+                return Err(DsmError::invalid_operation(
+                    "advance: refusing to mint units with no authenticated issuance predicate — \
+                     class 0x0029 (issuance authorization) is not defined, so no verifier could \
+                     ever fund this credit, and the units would be unspendable in every validated \
+                     lineage while permanently blocking this device's economic activation",
+                ));
+            }
+        }
+
+        // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
+        // and `validate_conservation` deliberately PERMITS it (the arm requires
+        // exactly one credit of `initial_supply` under the new token's own
+        // commit). Refusing it only in the route and only in the write-set
+        // builder leaves the chokepoint itself open — precisely the shape that
+        // made `Mint` a live defect, since a route guard binds one caller and
+        // the write-set rule binds only paths that build one.
+        //
+        // No production caller can reach it today: `Operation::CreateToken` has
+        // a single constructor, which passes only the ERA fee debit, so
+        // conservation would refuse a supply leg for want of the delta. That is
+        // an argument for fencing it now rather than later — the gap is
+        // currently free to close, and it is exactly the kind that a future
+        // caller closes by accident in the wrong direction.
+        if let Operation::CreateToken { initial_supply, .. } = &operation {
+            if initial_supply.value() > 0 {
+                return Err(DsmError::invalid_operation(
+                    "advance: refusing to create a token with initial supply — issuance needs an \
+                     authenticated predicate (class 0x0029) that is not defined yet, so the \
+                     supply could never be funded in any validated lineage. Create the token \
+                     with zero supply; issuance becomes available when the predicate does",
+                ));
             }
         }
 
@@ -3348,12 +3409,28 @@ mod tests {
         }
     }
 
-    /// The gate is keyed on the ASSET, not the ticker string. A mint carrying a
-    /// builtin ticker with a non-builtin `policy_commit` credits that non-builtin
-    /// asset and can never project as ERA, so refusing it would reject honest
-    /// issuance without closing anything. This pins that the gate stays narrow.
+    /// NO ASSET MINTS FROM AIR — and the two refusals stay distinguishable.
+    ///
+    /// This used to pin the opposite: a builtin ticker carrying a NON-builtin
+    /// `policy_commit` credited that asset, on the reasoning that refusing it
+    /// would reject honest issuance. That reasoning assumed honest issuance was
+    /// expressible. It is not: `R_econ` funds a credit only through a
+    /// `CreditSource`, the issuance arm (`0x0023`) fails closed while its
+    /// evidence class `0x0029` is unwritten, and there is no other arm that can
+    /// originate units. So the units were not honest issuance — they were
+    /// unadmittable, they became DLV vault reserves through the head-gated
+    /// funding path, and holding them permanently blocked `activate`.
+    ///
+    /// The gate is still keyed on the ASSET rather than the ticker: both assets
+    /// refuse, but for different reasons, and this pins that they do not
+    /// collapse into one blanket refusal. When `0x0029` lands, the non-builtin
+    /// arm is what changes.
+    ///
+    /// THE MUTATION CONTROL for the issuance refusal: delete the
+    /// `amount.value() > 0` block in `advance` and this test goes red by
+    /// actually crediting 1_000 units of a non-builtin asset into the head.
     #[test]
-    fn a_non_builtin_asset_still_mints_even_under_a_builtin_ticker() {
+    fn no_asset_mints_from_air_and_the_two_refusals_stay_distinct() {
         let pc = [0x5Au8; 32];
         assert!(
             crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
@@ -3367,8 +3444,9 @@ mod tests {
             &dev.devid, &dev.devid,
         );
         // `mint_op_for` hard-codes the ticker "ERA" while naming this commit.
-        let out = dev
-            .advance(
+        let err = format!(
+            "{}",
+            dev.advance(
                 rk,
                 dev.devid,
                 mint_op_for(1_000, pc),
@@ -3384,8 +3462,178 @@ mod tests {
                 None,
                 None,
             )
-            .expect("a non-builtin asset is unaffected by the builtin-issuance gate");
-        assert_eq!(out.new_device_state.balance(&pc), 1_000);
+            .expect_err("a non-builtin asset has no issuance predicate either")
+        );
+        assert!(
+            err.contains("0x0029"),
+            "the non-builtin refusal names the missing issuance predicate, got: {err}"
+        );
+        assert!(
+            !err.contains("builtin issuance is not self-authorizable"),
+            "…and is NOT the builtin refusal — the two reasons stay distinct: {err}"
+        );
+        // Nothing was credited. This is the half a deleted gate would break.
+        assert_eq!(
+            dev.balance(&pc),
+            0,
+            "a refused mint credits nothing, so the device can still activate"
+        );
+    }
+
+    /// THE SECOND ISSUANCE OPERATION IS FENCED AT THE CHOKEPOINT TOO.
+    ///
+    /// `validate_conservation` deliberately PERMITS `CreateToken`'s issuance
+    /// leg, and until this gate existed the only refusals were a route guard
+    /// and the write-set builder — both outside `advance`, i.e. exactly the
+    /// shape that made `Mint` a live defect. No production caller can reach it
+    /// (the single constructor passes only the fee debit), which is why it was
+    /// free to close now.
+    ///
+    /// MUTATION CONTROL: delete the `CreateToken` block in `advance` and this
+    /// goes red by creating 500 units of a brand-new asset from air.
+    #[test]
+    fn creating_a_token_with_initial_supply_is_refused_at_the_accepting_layer() {
+        let pc_new = [0x7Cu8; 32];
+        assert!(
+            crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc_new)
+                .is_none(),
+            "the new asset must not collide with a builtin"
+        );
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32], 64)
+            .with_balance_for_testing(era, 10_000);
+        let rk =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &dev.devid,
+        );
+        let op = Operation::CreateToken {
+            token_id: b"NEWCOIN".to_vec(),
+            initial_supply: bal(500),
+            policy_commit: pc_new,
+            fee_amount: 100,
+            name: "New Coin".to_string(),
+            symbol: "NEW".to_string(),
+            decimals: 0,
+            metadata_uri: None,
+            signature: Vec::new(),
+        };
+        let err = format!(
+            "{}",
+            dev.advance(
+                rk,
+                dev.devid,
+                op,
+                entropy(11),
+                None,
+                &[
+                    BalanceDelta {
+                        policy_commit: era,
+                        direction: BalanceDirection::Debit,
+                        amount: 100,
+                    },
+                    BalanceDelta {
+                        policy_commit: pc_new,
+                        direction: BalanceDirection::Credit,
+                        amount: 500,
+                    },
+                ],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect_err("issuance at creation has no predicate either")
+        );
+        assert!(
+            err.contains("0x0029"),
+            "the refusal names the missing issuance predicate, got: {err}"
+        );
+        // The half a deleted gate would break: no units of the new asset exist.
+        assert_eq!(dev.balance(&pc_new), 0, "a refused creation issues nothing");
+    }
+
+    /// Zero-supply creation is NOT issuance and stays available — the fee debit
+    /// is an ordinary spend. This is what keeps the refusal narrow.
+    #[test]
+    fn creating_a_token_with_zero_supply_is_still_allowed() {
+        let pc_new = [0x7Du8; 32];
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32], 64)
+            .with_balance_for_testing(era, 10_000);
+        let rk =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &dev.devid,
+        );
+        let op = Operation::CreateToken {
+            token_id: b"NEWCOIN".to_vec(),
+            initial_supply: bal(0),
+            policy_commit: pc_new,
+            fee_amount: 100,
+            name: "New Coin".to_string(),
+            symbol: "NEW".to_string(),
+            decimals: 0,
+            metadata_uri: None,
+            signature: Vec::new(),
+        };
+        let out = dev
+            .advance(
+                rk,
+                dev.devid,
+                op,
+                entropy(12),
+                None,
+                &[BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 100,
+                }],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("a zero-supply creation is an ordinary fee spend");
+        assert_eq!(out.new_device_state.balance(&era), 9_900);
+        assert_eq!(out.new_device_state.balance(&pc_new), 0);
+    }
+
+    /// A zero-amount mint is not issuance, so the issuance refusal does not
+    /// claim it — the gate is on units created, not on the operation's name.
+    #[test]
+    fn a_zero_amount_mint_is_not_refused_as_issuance() {
+        let pc = [0x5Au8; 32];
+        let dev = DeviceState::new(devid(0xA3), devid(0xA3), vec![0x03; 32], 64);
+        let rk =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &dev.devid,
+        );
+        let outcome = dev.advance(
+            rk,
+            dev.devid,
+            mint_op_for(0, pc),
+            entropy(9),
+            None,
+            &[BalanceDelta {
+                policy_commit: pc,
+                direction: BalanceDirection::Credit,
+                amount: 0,
+            }],
+            Some(tip),
+            None,
+            None,
+            None,
+        );
+        if let Err(e) = &outcome {
+            let msg = format!("{e}");
+            assert!(
+                !msg.contains("0x0029"),
+                "a zero mint creates no units, so the issuance refusal must not be the reason: \
+                 {msg}"
+            );
+        }
     }
 
     // ── reserve authority: the PRODUCTION funding path ─────────────────────
@@ -4579,11 +4827,47 @@ mod tests {
 
     /// Value op matching a delta's direction, amount AND asset — the guard now
     /// binds all three, so a fixture must name the asset its delta moves.
+    ///
+    /// The credit arm is a credit-direction `Transfer`, not a mint: issuance is
+    /// refused at the accepting layer until class 0x0029 exists, and a transfer
+    /// is the credit shape production actually admits. Callers driving the
+    /// credit direction through `advance` must attach the matching Prepared
+    /// admission — see `prepared_for`.
     fn value_op(dir: BalanceDirection, amount: u64, policy_commit: [u8; 32]) -> Operation {
         match dir {
-            BalanceDirection::Credit => mint_op_for(amount, policy_commit),
+            BalanceDirection::Credit => credit_transfer_op(amount, policy_commit),
             BalanceDirection::Debit => burn_op_for(amount, policy_commit),
         }
+    }
+
+    /// A credit-direction `Transfer` addressed to `to` — the only online credit
+    /// the accepting layer takes, and only with its admission attached.
+    fn credit_transfer_op(amount: u64, policy_commit: [u8; 32]) -> Operation {
+        Operation::Transfer {
+            to_device_id: devid(0xAA).to_vec(),
+            amount: bal(amount),
+            token_id: b"ERA".to_vec(),
+            policy_commit,
+            mode: crate::types::operations::TransactionMode::Bilateral,
+            nonce: vec![0x11; 32],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: devid(0xAA).to_vec(),
+            to: Vec::new(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+    }
+
+    /// The Prepared admission `advance` demands for a credit-direction transfer.
+    fn prepared_for(op: &Operation) -> crate::economic::admission::PendingEconomicAdmission {
+        crate::economic::admission::PendingEconomicAdmission::prepared(
+            crate::economic::admission::PendingAdmissionKind::DsmBacked,
+            1,
+            [0u8; 32],
+            crate::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+        )
     }
 
     #[test]
@@ -4758,11 +5042,39 @@ mod tests {
                 &bob.devid, &bob.devid,
             );
 
+        // THE CREDIT SHAPE PRODUCTION ACTUALLY USES. A mint is no longer a
+        // credit vehicle — issuance is refused at this layer until class
+        // 0x0029 exists — so this drives the only online credit that reaches
+        // `advance`: a credit-direction Transfer with its DSM-backed admission
+        // already attached, exactly as the recipient path builds it.
+        let credit_op = Operation::Transfer {
+            to_device_id: bob.devid.to_vec(),
+            amount: bal(50),
+            token_id: b"CUSTOM".to_vec(),
+            policy_commit: custom_token,
+            mode: TransactionMode::Bilateral,
+            nonce: vec![0x5C; 32],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: bob.devid.to_vec(),
+            to: Vec::new(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let bob = bob.with_pending_economic_admission(Some(
+            crate::economic::admission::PendingEconomicAdmission::prepared(
+                crate::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                crate::economic::faucet::dsm_operation_digest(&credit_op.to_bytes()),
+            ),
+        ));
         let outcome = bob
             .advance(
                 rk_self,
                 bob.devid,
-                mint_op_for(50, custom_token),
+                credit_op,
                 entropy(42),
                 None,
                 &[BalanceDelta {
@@ -4800,32 +5112,10 @@ mod tests {
         let token = pc(0xA1);
         let bundle = [0x7B; 32];
 
-        // Seed 100 of the token via a self-mint advance.
-        let rk_self =
-            crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
-        let init_tip =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &dev.devid, &dev.devid,
-            );
-        let funded = dev
-            .advance(
-                rk_self,
-                dev.devid,
-                mint_op_for(100, token),
-                entropy(1),
-                None,
-                &[BalanceDelta {
-                    policy_commit: token,
-                    direction: BalanceDirection::Credit,
-                    amount: 100,
-                }],
-                Some(init_tip),
-                None,
-                None,
-                None,
-            )
-            .expect("mint 100")
-            .new_device_state;
+        // Seed 100 of the token. Installed rather than minted: issuance is
+        // refused at the accepting layer, and this test's subject is what
+        // happens to the funds afterwards.
+        let funded = dev.with_balance_for_testing(token, 100);
 
         let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
         let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
@@ -4945,7 +5235,12 @@ mod tests {
         let commit1 = [0xC1u8; 32];
 
         // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
-        let dev = fresh_device(0xAB);
+        // A burn is value-bearing without being issuance, so it exercises the
+        // same advance path this test is about.
+        let dev = fresh_device(0xAB)
+            .with_balance_for_testing(pc(0xF1), 1_000)
+            .with_balance_for_testing(pc(0xF2), 1_000)
+            .with_balance_for_testing(pc(0xF3), 1_000);
         let dev = dev
             .with_anchor_state_leaf(&key, &commit0)
             .expect("bootstrap");
@@ -4959,12 +5254,12 @@ mod tests {
             .advance(
                 rk,
                 cp,
-                mint_op_for(10, pc(0xF1)),
+                burn_op_for(10, pc(0xF1)),
                 entropy(1),
                 None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
                 Some(init),
@@ -5026,12 +5321,12 @@ mod tests {
             .advance(
                 rk2,
                 cp2,
-                mint_op_for(5, pc(0xF2)),
+                burn_op_for(5, pc(0xF2)),
                 entropy(2),
                 None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF2),
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 5,
                 }],
                 Some(init2),
@@ -5050,12 +5345,12 @@ mod tests {
             .advance(
                 rk3,
                 cp3,
-                mint_op_for(7, pc(0xF3)),
+                burn_op_for(7, pc(0xF3)),
                 entropy(3),
                 None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF3),
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 7,
                 }],
                 Some(init3),
@@ -5088,31 +5383,13 @@ mod tests {
         let key = anchor_state_leaf_key(&b);
         let token = pc(0xA1);
 
-        // Bootstrap the anchor, mint 100 online, then load 40 into the offline allocation.
+        // Bootstrap the anchor, hold 100 online, then load 40 into the offline
+        // allocation. The 100 is installed rather than minted — issuance is
+        // refused at the accepting layer and is not what this test is about.
         let dev = fresh_device(0xD5)
             .with_anchor_state_leaf(&key, &[0xC0u8; 32])
             .expect("bootstrap");
-        let rk_self = compute_smt_key(&dev.devid, &dev.devid);
-        let init_self = initial_chain_tip_from_device_ids(&dev.devid, &dev.devid);
-        let funded = dev
-            .advance(
-                rk_self,
-                dev.devid,
-                mint_op_for(100, token),
-                entropy(1),
-                None,
-                &[BalanceDelta {
-                    policy_commit: token,
-                    direction: BalanceDirection::Credit,
-                    amount: 100,
-                }],
-                Some(init_self),
-                None,
-                None,
-                None,
-            )
-            .expect("mint 100")
-            .new_device_state;
+        let funded = dev.with_balance_for_testing(token, 100);
         let loaded = funded
             .load_offline_cash(&b, &token, 40)
             .expect("load 40")
@@ -5283,7 +5560,10 @@ mod tests {
         let (leaf0, leaf1, leaf2) = ([0xC0u8; 32], [0xC1u8; 32], [0xC2u8; 32]);
 
         // Sender device: bootstrap the anchor-state leaf at leaf_0.
-        let dev = fresh_device(0xAB)
+        let dev = (0u8..8)
+            .fold(fresh_device(0xAB), |d, u| {
+                d.with_balance_for_testing(pc(0xF0 + u), 1_000)
+            })
             .with_anchor_state_leaf(&key, &leaf0)
             .expect("bootstrap");
 
@@ -5295,12 +5575,12 @@ mod tests {
             dev.advance(
                 rk,
                 cp,
-                mint_op_for(1, pc(0xF0 + u as u8)),
+                burn_op_for(1, pc(0xF0 + u as u8)),
                 entropy(u as u8 + 1),
                 None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF0 + u as u8),
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 1,
                 }],
                 Some(init),
@@ -5357,7 +5637,12 @@ mod tests {
         use crate::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
-        let dev = fresh_device(0xAB);
+        // A burn is value-bearing exactly as a mint was, and unlike issuance it
+        // is still expressible: a debit needs no credit source.
+        let dev = fresh_device(0xAB)
+            .with_balance_for_testing(pc(0xF1), 1_000)
+            .with_balance_for_testing(pc(0xF2), 1_000)
+            .with_balance_for_testing(pc(0xF3), 1_000);
 
         // Relationship whose FIRST op is value-bearing → Yes.
         let cp = devid(0xC0);
@@ -5367,12 +5652,12 @@ mod tests {
             .advance(
                 rk,
                 cp,
-                mint_op_for(10, pc(0xF1)),
+                burn_op_for(10, pc(0xF1)),
                 entropy(1),
                 None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
                 Some(init),
@@ -5706,6 +5991,13 @@ mod tests {
     }
 
     /// Phase 6 test: balance overflow rejected.
+    ///
+    /// The credit MUST be one the accepting layer would otherwise take, or this
+    /// stops testing overflow. It used to mint, and the issuance refusal now
+    /// fires before the delta loop's `checked_add` is ever reached — the test
+    /// would still have been green while proving nothing. So it drives the
+    /// credit shape production actually admits, and asserts the failure is the
+    /// OVERFLOW rather than any earlier gate.
     #[test]
     fn advance_rejects_balance_overflow() {
         let mut dev = fresh_device(0xAA);
@@ -5718,23 +6010,32 @@ mod tests {
             &dev.devid, &bob,
         );
 
-        let r = dev.advance(
-            rk,
-            bob,
-            mint_op_for(1, token),
-            entropy(1),
-            None,
-            &[BalanceDelta {
-                policy_commit: token,
-                direction: BalanceDirection::Credit,
-                amount: 1,
-            }],
-            Some(init),
-            None,
-            None,
-            None,
+        let credit_op = credit_transfer_op(1, token);
+        let dev = dev.with_pending_economic_admission(Some(prepared_for(&credit_op)));
+        let err = format!(
+            "{}",
+            dev.advance(
+                rk,
+                bob,
+                credit_op,
+                entropy(1),
+                None,
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Credit,
+                    amount: 1,
+                }],
+                Some(init),
+                None,
+                None,
+                None,
+            )
+            .expect_err("u64::MAX + 1 must overflow")
         );
-        assert!(r.is_err(), "u64::MAX + 1 must overflow");
+        assert!(
+            err.contains("overflow"),
+            "the refusal must be the overflow itself, not an earlier gate: {err}"
+        );
     }
 
     /// Phase 6 test: balance conservation across cross-relationship sequence.
@@ -5768,11 +6069,21 @@ mod tests {
                 crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
                     &dev.devid, party,
                 );
-            let out = dev
+            let op = value_op(dir, amt, token);
+            // A credit needs its admission attached; a debit is self-harm and
+            // needs none. Both still move the same balance map, which is what
+            // this test conserves across.
+            let stepped = if matches!(dir, BalanceDirection::Credit) {
+                dev.clone()
+                    .with_pending_economic_admission(Some(prepared_for(&op)))
+            } else {
+                dev.clone()
+            };
+            let out = stepped
                 .advance(
                     rk,
                     *party,
-                    value_op(dir, amt, token),
+                    op,
                     entropy(i as u8),
                     None,
                     &[BalanceDelta {
@@ -5786,7 +6097,7 @@ mod tests {
                     None,
                 )
                 .expect("advance");
-            dev = out.new_device_state;
+            dev = out.new_device_state.with_pending_economic_admission(None);
         }
 
         let expected = (1000_i64 + net_delta) as u64;
