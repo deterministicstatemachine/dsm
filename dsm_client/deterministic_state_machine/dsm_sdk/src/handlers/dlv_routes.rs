@@ -1917,10 +1917,14 @@ impl AppRouterImpl {
                 continue;
             };
             let _ = &pair; // pair validity was the gate above; composition re-derives it
-            let Ok(composed) = compose_own_vault(&intent.vault_id).await else {
-                // Composition unavailable (baseline unpublished, storage
-                // unreachable): keep the intent and try again later.
-                continue;
+            let composed = match compose_own_vault(&intent.vault_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    // Composition unavailable (baseline unpublished, frontier
+                    // unreadable): keep the intent and try again later.
+                    log::warn!("[dlv.close resume] {vault_b32}: cannot compose yet: {e}");
+                    continue;
+                }
             };
             // THE FROZEN ENVELOPE, FROM STORAGE. This is the only claim this
             // pass can submit: `FrozenClaimEnvelope` has no constructor that
@@ -1961,9 +1965,14 @@ impl AppRouterImpl {
                 continue;
             }
             let Ok(catalog) = crate::sdk::storage_set::StorageSetCatalog::from_env_config() else {
+                log::warn!("[dlv.close resume] {vault_b32}: storage catalog unavailable; retrying");
                 continue;
             };
             let Some(claim_set) = catalog.resolve(&composed.storage_set_id) else {
+                log::warn!(
+                    "[dlv.close resume] {vault_b32}: the vault's storage set does not resolve \
+                     from this catalog; retrying"
+                );
                 continue;
             };
             let claim_set = claim_set.clone();
@@ -1994,7 +2003,10 @@ impl AppRouterImpl {
                     continue;
                 }
                 // Quorum unknown: keep the intent and retry on a later pass.
-                Err(_) => continue,
+                Err(e) => {
+                    log::warn!("[dlv.close resume] {vault_b32}: claim did not reach quorum: {e}");
+                    continue;
+                }
             }
 
             // The operation is REPLAYED from the frozen bytes — never rebuilt.
@@ -2006,14 +2018,10 @@ impl AppRouterImpl {
                 abandon("sequence overflow");
                 continue;
             };
-            let close_commitment = {
-                let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                    dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_COMMIT,
-                );
-                h.update(&intent.vault_id);
-                h.update(&intent.parent_sequence.to_be_bytes());
-                *h.finalize().as_bytes()
-            };
+            let close_commitment = dsm::dlv::settlement_slot_claim::close_slot_commitment(
+                &intent.vault_id,
+                intent.parent_sequence,
+            );
             match self
                 .finish_prepared_close(
                     &intent.vault_id,
@@ -2065,13 +2073,37 @@ impl AppRouterImpl {
         let composed = compose_own_vault(vault_id)
             .await
             .map_err(|e| format!("resumed close: {e}"))?;
-        if composed.sequence != parent_sequence {
+        // THE PARENT THIS CLOSE CONSUMES — which is not always the frontier.
+        //
+        // The claim half already published, and a published close claim is a
+        // real successor edge: the frontier walk folds it to the terminal
+        // state, so re-composing here legitimately reports `parent + 1`. The
+        // c_n this commit needs is the PARENT's, and the walk already computed
+        // it on the way through — it is the folded parent binding for exactly
+        // this generation. Any other composed generation means the vault moved
+        // for some other reason and the close must not proceed blind.
+        let parent_binding = if composed.sequence == parent_sequence {
+            composed.c_n
+        } else if composed.sequence == parent_sequence.saturating_add(1) {
+            *composed
+                .folded_parent_bindings
+                .iter()
+                .find(|(gen, _)| *gen == parent_sequence)
+                .map(|(_, c_n)| c_n)
+                .ok_or_else(|| {
+                    format!(
+                        "resumed close: the composed state is at generation {} but names no \
+                         parent binding for {parent_sequence}",
+                        composed.sequence
+                    )
+                })?
+        } else {
             return Err(format!(
                 "resumed close: the composed state is at generation {} but this close \
                  consumes {parent_sequence} — reconcile first",
                 composed.sequence
             ));
-        }
+        };
         self.commit_canonical_close(
             vault_id,
             parent_sequence,
@@ -2082,7 +2114,7 @@ impl AppRouterImpl {
             op,
             reserve_a,
             reserve_b,
-            composed.c_n,
+            parent_binding,
         )
         .await
     }
@@ -2221,23 +2253,11 @@ impl AppRouterImpl {
         // ── THE CLOSE'S IDENTITY ─────────────────────────────────────────────
         // Deterministic, so a retry occupies the SAME slot rather than a second
         // one, and a recovery replays the same bytes.
-        let x_close = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_X,
-            );
-            h.update(&vault_id);
-            h.update(&parent_sequence.to_be_bytes());
-            h.update(&head.devid());
-            *h.finalize().as_bytes()
-        };
-        let close_commitment = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::common::domain_tags::TAG_DSM_DLV_CLOSE_COMMIT,
-            );
-            h.update(&vault_id);
-            h.update(&parent_sequence.to_be_bytes());
-            *h.finalize().as_bytes()
-        };
+        let x_close =
+            dsm::dlv::settlement_slot_claim::close_slot_commitment(&vault_id, parent_sequence);
+        // The consume-once claim and the slot `x` are ONE derivation: the
+        // close's identity for this generation.
+        let close_commitment = x_close;
 
         // The canonical operation: derived, then signed.
         let op = dsm::types::operations::Operation::DlvClose {
@@ -5861,13 +5881,22 @@ mod funded_creation_tests {
         let _ = become_device(0x41);
         let res = close(&owner, &vault_id);
         assert!(!res.success, "the close must lose a contested parent");
+        // THE REFUSAL NOW COMES EARLIER, AND SAYS MORE. The close's first act
+        // is to establish the vault's frontier by reading the settlement-slot
+        // cells at quorum, and that read finds this generation already
+        // consumed by a claim it cannot reconcile with the owner's view. So
+        // the close stops before it records anything at all — a stronger
+        // outcome than the abandoned intent this test used to assert, because
+        // there is nothing for any sweep to resurrect.
+        //
+        // The close's own contested-claim path is NOT dead: it still guards
+        // the race where a rival takes the slot between this composition and
+        // the owner's own claim.
+        let message = res.error_message.as_deref().unwrap_or_default().to_string();
         assert!(
-            res.error_message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("another trade holds this vault generation"),
-            "the refusal names the contest: {:?}",
-            res.error_message
+            message.contains("DLV_BINDING_EVIDENCE_UNAVAILABLE")
+                && message.contains("quorum-established successor"),
+            "the refusal names the consumed generation: {message}"
         );
         assert_eq!(
             leaves(&owner, &vault_id, &pc_a, &pc_b),
@@ -5879,22 +5908,85 @@ mod funded_creation_tests {
             (40_000, 15_000),
             "and credits nothing"
         );
-        let intent = crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
-            .expect("intent read")
-            .expect("the close recorded an intent before claiming");
-        assert_eq!(
-            intent.state,
-            crate::storage::client_db::dlv_close_intent::CloseIntentState::Abandoned,
-            "a lost contest abandons the intent so no sweep can resurrect it"
+        assert!(
+            crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+                .expect("intent read")
+                .is_none(),
+            "a close that never established its frontier records no intent"
         );
         let resumed = crate::runtime::get_runtime()
             .block_on(owner.resume_close_intents())
             .expect("resume pass");
-        assert_eq!(resumed, 0, "and the resume pass leaves it abandoned");
+        assert_eq!(resumed, 0, "and there is nothing for the sweep to finish");
         assert_eq!(
             leaves(&owner, &vault_id, &pc_a, &pc_b),
             (10_000, 5_000, 0),
             "the vault stays open and funded — the safe direction"
+        );
+    }
+
+    /// A CLOSE WILL NOT ACT ON A FRONTIER IT COULD NOT READ.
+    ///
+    /// The owner's close consumes an exact generation with exact reserves, so
+    /// its first act is a live quorum read of the vault's settlement-slot
+    /// cells. With the fleet unreadable, that read establishes nothing — not
+    /// "no successor", which is what a single-member listing would have
+    /// reported — and the close stops before recording an intent or moving a
+    /// unit. The vault stays open and funded, which is the safe direction.
+    #[test]
+    #[serial]
+    fn a_close_refuses_when_the_frontier_cannot_be_read() {
+        install_identity();
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (_pk, _did) = become_device(0x41);
+        let owner = named_router("owner");
+        owner.core_sdk.set_device_head_for_testing(
+            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
+        );
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let members = vault_storage_members(&vault_id);
+        for m in &members {
+            crate::sdk::storage_io::fake_fleet::fail_member(m);
+        }
+
+        let res = close(&owner, &vault_id);
+        assert!(!res.success, "a close cannot proceed on an unread frontier");
+        let message = res.error_message.as_deref().unwrap_or_default().to_string();
+        assert!(
+            message.contains("DLV_BINDING_EVIDENCE_UNAVAILABLE"),
+            "the refusal names the unavailable binding evidence: {message}"
+        );
+        assert_eq!(
+            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            (10_000, 5_000, 0),
+            "nothing moved"
+        );
+        assert_eq!(spendable(&owner, &pc_a, &pc_b), (40_000, 15_000));
+        assert!(
+            crate::storage::client_db::dlv_close_intent::get_intent(&vault_id, 0)
+                .expect("intent read")
+                .is_none(),
+            "and nothing was recorded to resume"
+        );
+
+        // POSITIVE CONTROL: the same close succeeds the moment the frontier is
+        // readable again, so the refusal above is the quorum read and not a
+        // broken fixture.
+        for m in &members {
+            crate::sdk::storage_io::fake_fleet::heal_member(m);
+        }
+        let res = close(&owner, &vault_id);
+        assert!(
+            res.success,
+            "close failed once readable: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            spendable(&owner, &pc_a, &pc_b),
+            (50_000, 20_000),
+            "the recovered close returns the full delegation"
         );
     }
 
@@ -5942,17 +6034,26 @@ mod funded_creation_tests {
             "the vault must be born and published before this test unplugs the fleet"
         );
 
-        // The fleet goes away mid-close. The members are the vault's OWN —
-        // read from the set it was born under — because a hardcoded member name
-        // that matches nothing fails nothing, and the test would then assert a
-        // refusal against a fleet that was never down.
+        // The fleet stops ACCEPTING mid-close while still ANSWERING. The
+        // members are the vault's OWN — read from the set it was born under —
+        // because a hardcoded member name that matches nothing fails nothing,
+        // and the test would then assert a refusal against a fleet that was
+        // never down.
+        //
+        // Reads must keep working: a close first establishes the vault's
+        // frontier by reading the settlement-slot cells at quorum, and a close
+        // that cannot read its own frontier stops before it has anything to
+        // resume (proved separately by
+        // `a_close_refuses_when_the_frontier_cannot_be_read`). The
+        // interruption this test is about happens LATER — the claim cannot
+        // reach quorum — which is exactly where a resumable intent is left.
         let members = vault_storage_members(&vault_id);
         assert!(
             members.len() >= 2,
             "this test needs a set whose quorum can actually be lost, got {members:?}"
         );
         for m in &members {
-            crate::sdk::storage_io::fake_fleet::fail_member(m);
+            crate::sdk::storage_io::fake_fleet::refuse_claims(m);
         }
         let res = close(&owner, &vault_id);
         assert!(
@@ -5991,9 +6092,9 @@ mod funded_creation_tests {
             .expect("retention read")
             .expect("the close retained its claim envelope before going out");
 
-        // The fleet returns; the sweep finishes what the owner started.
+        // The fleet accepts again; the sweep finishes what the owner started.
         for m in &members {
-            crate::sdk::storage_io::fake_fleet::heal_member(m);
+            crate::sdk::storage_io::fake_fleet::accept_claims(m);
         }
         let resumed = crate::runtime::get_runtime()
             .block_on(owner.resume_close_intents())

@@ -166,6 +166,26 @@ pub fn sign_settlement_slot_claim(
     Ok(env.encode_to_vec())
 }
 
+/// The deterministic `x` a CLOSE claims its parent generation's settlement
+/// slot with: `H_dom(DSM/dlv-close-commit, vault_id ‖ u64_be(parent_sequence))`.
+///
+/// Close and settle contend for the SAME cell by design — one generation, one
+/// consumer — so a composer walking the register must be able to tell which
+/// kind of consumer won. This value is recomputable by anyone, and that is
+/// fine: what identifies a real close is not the `x` but that the claim on it
+/// is signed by the vault owner's proven authority key. A stranger can compute
+/// this `x` and claim the slot, and the result is a refusal to compose (the
+/// generation is consumed by something unverifiable), never a vault that
+/// appears closed.
+pub fn close_slot_commitment(vault_id: &[u8; 32], parent_sequence: u64) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_DLV_CLOSE_COMMIT,
+    );
+    h.update(vault_id);
+    h.update(&parent_sequence.to_be_bytes());
+    *h.finalize().as_bytes()
+}
+
 /// Strictly decode an envelope and verify its signature under the body's own
 /// `claimant_public_key`. Refuses anything that does not re-encode to exactly
 /// the input bytes.
