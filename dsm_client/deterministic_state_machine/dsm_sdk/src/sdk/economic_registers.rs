@@ -256,6 +256,22 @@ pub async fn read_winning_faucet_ticket(
     read_cell_quorum(set, rows).await
 }
 
+/// The quorum winner for one settlement-slot cell, if established — the
+/// 0x0026 arm's liveness anchor for a settlement's exclusivity.
+pub async fn read_winning_settlement_slot(
+    set: &StorageSet,
+    vault_id: &[u8; 32],
+    parent_sequence: u64,
+) -> Result<Option<Vec<u8>>, RegisterError> {
+    let rows = crate::sdk::storage_io::read_settlement_slot_cell(set, vault_id, parent_sequence)
+        .await
+        .map_err(|_| RegisterError::StorageUnavailable {
+            accepted: 0,
+            total: set.len() as u32,
+        })?;
+    read_cell_quorum(set, rows).await
+}
+
 /// The quorum winner for one economic-root cell, if established. Used for
 /// lost-response recovery: a crash after a register write is resolved by
 /// READING the register, never by re-signing.
@@ -327,6 +343,22 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         tokio::task::block_in_place(|| {
             self.runtime
                 .block_on(read_winning_faucet_ticket(self.set, &fid, ticket_index))
+        })
+        .map_err(|e| match e {
+            RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
+            other => PeerLineageFailure::Incomplete(other.to_string()),
+        })
+    }
+
+    fn settlement_slot_cell(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let v = *vault_id;
+        tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_winning_settlement_slot(self.set, &v, parent_sequence))
         })
         .map_err(|e| match e {
             RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
@@ -497,6 +529,20 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         )
     }
 
+    fn settlement_slot_cell(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        // A register read, not an immutable object — nothing to record; the
+        // q-durable closure covers content-addressed evidence only.
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_cell(
+            self.inner,
+            vault_id,
+            parent_sequence,
+        )
+    }
+
     fn immutable(
         &self,
         namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -546,6 +592,24 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         })
     }
 
+    fn winning_settlement_slot_claim(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
+        let set = self.set;
+        let v = *vault_id;
+        let bytes = tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_winning_settlement_slot(set, &v, parent_sequence))
+        })
+        .ok()
+        .flatten()?;
+        Some(dsm::economic::provenance::SettlementSlotWin {
+            envelope_bytes: bytes,
+        })
+    }
+
     fn immutable_evidence(
         &self,
         namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -561,6 +625,14 @@ pub(crate) fn faucet_ticket_path(faucet_id: &[u8; 32], ticket_index: u64) -> Str
         "/api/v2/faucet-ticket/{}/{}",
         text_id::encode_base32_crockford(faucet_id),
         ticket_index
+    )
+}
+
+pub(crate) fn settlement_slot_path(vault_id: &[u8; 32], parent_sequence: u64) -> String {
+    format!(
+        "/api/v2/settlement-slot/{}/{}",
+        text_id::encode_base32_crockford(vault_id),
+        parent_sequence
     )
 }
 

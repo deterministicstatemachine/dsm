@@ -71,6 +71,13 @@ pub trait PeerEvidenceFetcher {
         faucet_id: &[u8; 32],
         ticket_index: u64,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+    /// The quorum-agreed winner bytes for one settlement-slot cell
+    /// `(vault_id, parent_sequence)`.
+    fn settlement_slot_cell(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
     /// Exact immutable bytes at `addr` under `namespace`.
     fn immutable(
         &self,
@@ -135,6 +142,18 @@ impl ProvenanceResolver for WalkingResolver<'_> {
             .ok()
             .flatten()
             .map(|envelope_bytes| FaucetTicketWin { envelope_bytes })
+    }
+
+    fn winning_settlement_slot_claim(
+        &self,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+    ) -> Option<crate::economic::provenance::SettlementSlotWin> {
+        self.fetcher
+            .settlement_slot_cell(vault_id, parent_sequence)
+            .ok()
+            .flatten()
+            .map(|envelope_bytes| crate::economic::provenance::SettlementSlotWin { envelope_bytes })
     }
 
     fn immutable_evidence(

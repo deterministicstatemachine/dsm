@@ -293,6 +293,16 @@ impl AcceptedSubstrate {
             Self::OfflineBoundary(_) => None,
         }
     }
+
+    /// The exact operation the VERIFIED substrate carried — the provenance
+    /// context's one source for operation-level facts (0x0026 reads the
+    /// settle's `c_n`/`x`/amounts from it). `None` for an offline boundary.
+    pub fn dsm_verified_operation(&self) -> Option<&crate::types::operations::Operation> {
+        match self {
+            Self::DsmSuccessor(s) => Some(&s.verified_operation),
+            Self::OfflineBoundary(_) => None,
+        }
+    }
 }
 
 /// Why a registered root is not a validated successor.
@@ -567,6 +577,7 @@ pub fn advance_validated(
         proven_ak,
         canonical_storage_set_id: canonical_set,
         substrate_b_pair: accepted.dsm_successor_pair(),
+        verified_operation: accepted.dsm_verified_operation(),
     };
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
