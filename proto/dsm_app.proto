@@ -1228,6 +1228,17 @@ message ReserveConsumptionEvidenceV1 {
   repeated bytes reserve_b_siblings = 6 [(dsm_fixed_len)=32];
 }
 
+// 3.6 PR4: the 0x0027 (ValidatedDlvSettlementPayment) evidence bundle —
+// transport proto, no CCB class, frozen at `payment_evidence_addr` under
+// namespace DSM/dlv-settlement-payment-evidence/v1. Carries the trader's
+// settlement-receipt leaf and its 256-sibling inclusion witness; the
+// verifier proves the leaf into the INDEPENDENTLY derived
+// ValidatedEconomicRoot(trader_economic_position).
+message SettlementPaymentEvidenceV1 {
+  bytes receipt_state             = 1 [(dsm_max_len)=4096];
+  repeated bytes receipt_siblings = 2 [(dsm_fixed_len)=32];
+}
+
 message AuthorityEvidenceV1 {
   bytes  genesis_params_ccb   = 1 [(dsm_max_len)=4096];   // class 0x0018
   repeated SignedAuthorityObjectV1 delegations = 2;        // class 0x0019 + GRK sig

@@ -38,7 +38,8 @@ use std::collections::BTreeMap;
 
 use crate::economic::credit::{
     CreditSource, CreditSourceDlvReserveConsumption, CreditSourceSameTransitionMove,
-    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
+    CreditSourceValidatedDlvSettlementPayment, CreditSourceValidatedFaucetDistribution,
+    CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
@@ -183,6 +184,17 @@ pub enum CreditSourceFacts {
         peer_debit_mutation_index: u32,
         acceptance_evidence_addr: [u8; 32],
     },
+    /// The owner's input-reserve credit, funded by the trader's
+    /// already-admitted settlement payment (0x0027).
+    /// `trader_economic_position` is the UNTRUSTED locator of the trader's
+    /// validated economic ancestry; the evidence addr freezes the receipt
+    /// inclusion bundle. Every other coordinate is read from the OPERATION.
+    DlvSettlementPayment {
+        trader_genesis: [u8; 32],
+        trader_devid: [u8; 32],
+        trader_economic_position: u64,
+        payment_evidence_addr: [u8; 32],
+    },
     /// A trader's settle output, funded by consuming an owner vault reserve
     /// (0x0026). `owner_economic_position` is the UNTRUSTED locator of the
     /// owner's validated economic ancestry; the evidence addr freezes the
@@ -273,6 +285,19 @@ enum SemanticWriteSet {
         input: DlvLeg,
         output: DlvLeg,
         receipt: EconomicSettlementReceiptState,
+    },
+    /// `DlvOwnerApplyV2`: reserve[input] gains `input.1`, reserve[output]
+    /// loses `output.1`, both advancing `parent_sequence -> new_sequence`
+    /// (one step). NO balance movement — the fee accrues inside the reserves
+    /// as LP yield. The input-reserve credit is funded by
+    /// `ValidatedDlvSettlementPayment` (0x0027); non-reuse is the
+    /// reserve-sequence Merkle CAS, so there is no consumed-source leaf.
+    DlvOwnerApply {
+        vault_id: [u8; 32],
+        input: DlvLeg,
+        output: DlvLeg,
+        parent_sequence: u64,
+        new_sequence: u64,
     },
     /// `DlvClose`: both reserves `{amount, parent} -> {0, parent+1}` plus the
     /// matching balance credits, each funded by the reserve it drains
@@ -484,9 +509,47 @@ fn semantic_write_set(
                 receipt,
             })
         }
-        // The v2 owner-apply write set needs the 0x0027 provenance arm (PR4
-        // of the 3.6 cut) — refused honestly until then.
-        Operation::DlvOwnerApplyV2 { .. } => Err(WriteSetError::OperationWriteSetNotYetSpecified),
+        Operation::DlvOwnerApplyV2 {
+            vault_id,
+            parent_sequence,
+            new_sequence,
+            input_policy_commit,
+            output_policy_commit,
+            input_amount,
+            output_amount,
+            ..
+        } => {
+            let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
+                WriteSetError::MalformedVaultOperation {
+                    detail: "vault id is not 32 bytes",
+                }
+            })?;
+            if input_policy_commit == output_policy_commit {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "a settlement cannot name one asset on both legs",
+                });
+            }
+            if *input_amount == 0 || *output_amount == 0 {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "both settlement amounts must be non-zero",
+                });
+            }
+            if parent_sequence
+                .checked_add(1)
+                .is_none_or(|n| n != *new_sequence)
+            {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "an apply advances the vault by exactly one generation",
+                });
+            }
+            Ok(SemanticWriteSet::DlvOwnerApply {
+                vault_id: vault,
+                input: (*input_policy_commit, *input_amount),
+                output: (*output_policy_commit, *output_amount),
+                parent_sequence: *parent_sequence,
+                new_sequence: *new_sequence,
+            })
+        }
         other => match crate::economic::classifier::classify(other) {
             crate::economic::classifier::EconomicEffect::UnsupportedValueTransition => {
                 Err(WriteSetError::UnsupportedValueTransition)
@@ -693,6 +756,82 @@ pub fn build_write_set(
                 source: None,
             });
         }
+        SemanticWriteSet::DlvOwnerApply {
+            vault_id,
+            input,
+            output,
+            parent_sequence,
+            new_sequence,
+        } => {
+            if !matches!(facts, CreditSourceFacts::DlvSettlementPayment { .. }) {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            // The OUTPUT leg is the vault's liquidity being paid out: it must
+            // exist at exactly the parent generation and cover the payout.
+            let out_pre = pre_state.vault_reserves.get(&(vault_id, output.0)).ok_or(
+                WriteSetError::WrongWriteSet {
+                    detail: "the vault holds no output reserve for that settlement",
+                },
+            )?;
+            if out_pre.vault_id != vault_id
+                || out_pre.policy_commit != output.0
+                || out_pre.vault_sequence != parent_sequence
+            {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the output reserve is not at the consumed parent generation",
+                });
+            }
+            let out_next =
+                out_pre
+                    .amount
+                    .checked_sub(output.1)
+                    .ok_or(WriteSetError::WrongWriteSet {
+                        detail: "the vault cannot pay that settlement output",
+                    })?;
+            // The INPUT leg may be first-time (created at new_sequence); if
+            // it exists it shares the vault's generation.
+            let in_pre = pre_state.vault_reserves.get(&(vault_id, input.0));
+            if let Some(p) = in_pre {
+                if p.vault_id != vault_id
+                    || p.policy_commit != input.0
+                    || p.vault_sequence != parent_sequence
+                {
+                    return Err(WriteSetError::WrongWriteSet {
+                        detail: "the input reserve is at a different vault generation",
+                    });
+                }
+            }
+            let in_have = in_pre.map(|p| p.amount).unwrap_or(0);
+            let in_next = in_have
+                .checked_add(input.1)
+                .ok_or(WriteSetError::BalanceOverflow)?;
+            let reserve = |pc: [u8; 32], amount: u64| {
+                EconomicLeafState::VaultReserve(EconomicVaultReserveState {
+                    vault_id,
+                    policy_commit: pc,
+                    amount,
+                    vault_sequence: new_sequence,
+                })
+            };
+            // Input credit, funded by the trader's validated payment.
+            let post = reserve(input.0, in_next);
+            let key = post.leaf_key(genesis, device_id);
+            planned.push(PlannedLeaf {
+                key,
+                pre: in_pre.map(|p| EconomicLeafState::VaultReserve(p.clone())),
+                post: Some(post),
+                source: Some(PlannedSource::External(facts.clone())),
+            });
+            // Output debit. Zero stays PRESENT (the reserve-zero asymmetry).
+            let pre = EconomicLeafState::VaultReserve(out_pre.clone());
+            let key = pre.leaf_key(genesis, device_id);
+            planned.push(PlannedLeaf {
+                key,
+                pre: Some(pre),
+                post: Some(reserve(output.0, out_next)),
+                source: None,
+            });
+        }
         SemanticWriteSet::DlvFund {
             vault_id,
             leg_a,
@@ -880,6 +1019,38 @@ pub fn build_write_set(
                     acceptance_evidence_addr,
                 }),
                 (
+                    CreditSourceFacts::DlvSettlementPayment {
+                        trader_genesis,
+                        trader_devid,
+                        trader_economic_position,
+                        payment_evidence_addr,
+                    },
+                    Operation::DlvOwnerApplyV2 {
+                        vault_id,
+                        settlement_receipt_id,
+                        parent_sequence,
+                        ..
+                    },
+                ) => {
+                    let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
+                        WriteSetError::MalformedVaultOperation {
+                            detail: "vault id is not 32 bytes",
+                        }
+                    })?;
+                    CreditSource::ValidatedDlvSettlementPayment(
+                        CreditSourceValidatedDlvSettlementPayment {
+                            credit_mutation_index,
+                            vault_id: vault,
+                            settlement_receipt_id: *settlement_receipt_id,
+                            parent_sequence: *parent_sequence,
+                            trader_genesis,
+                            trader_devid,
+                            trader_economic_position,
+                            payment_evidence_addr,
+                        },
+                    )
+                }
+                (
                     CreditSourceFacts::DlvReserveConsumption {
                         owner_economic_position,
                         reserve_consumption_evidence_addr,
@@ -957,7 +1128,9 @@ pub fn verify_operation_write_set(
     // them outright, exactly as before 3.6.
     let reserves_legal = matches!(
         semantic,
-        SemanticWriteSet::DlvFund { .. } | SemanticWriteSet::DlvWithdraw { .. }
+        SemanticWriteSet::DlvFund { .. }
+            | SemanticWriteSet::DlvWithdraw { .. }
+            | SemanticWriteSet::DlvOwnerApply { .. }
     );
     let receipts_legal = matches!(semantic, SemanticWriteSet::DlvSettle { .. });
     let mut balances: Vec<ObservedBalance> = Vec::new();
@@ -1232,6 +1405,100 @@ pub fn verify_operation_write_set(
                     {
                         return Err(WriteSetError::WrongWriteSet {
                             detail: "reserve-consumption source names different coordinates \
+                                     than the operation",
+                        });
+                    }
+                    Ok(())
+                }
+                _ => Err(WriteSetError::WrongWriteSet {
+                    detail: "credit source kind does not match the operation",
+                }),
+            }
+        }
+        SemanticWriteSet::DlvOwnerApply {
+            vault_id,
+            input,
+            output,
+            parent_sequence,
+            new_sequence,
+        } => {
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an apply's non-reuse is the reserve-sequence CAS, not a \
+                             consumed source",
+                });
+            }
+            if witness.mutations.len() != 2 || !balances.is_empty() || reserves.len() != 2 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an apply is exactly two reserve mutations and moves no balances",
+                });
+            }
+            let input_r = expect_one_reserve(&reserves, input.0)?;
+            let in_pre = match &input_r.pre {
+                Some(p) => {
+                    if p.vault_id != vault_id || p.vault_sequence != parent_sequence {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "the input reserve is at a different vault generation",
+                        });
+                    }
+                    p.amount
+                }
+                None => 0,
+            };
+            if input_r.post.vault_id != vault_id
+                || input_r.post.vault_sequence != new_sequence
+                || input_r.post.amount.checked_sub(in_pre) != Some(input.1)
+            {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "input reserve credit is not exactly the authorized input at \
+                             parent + 1",
+                });
+            }
+            let output_r = expect_one_reserve(&reserves, output.0)?;
+            let out_pre = output_r.pre.as_ref().ok_or(WriteSetError::WrongWriteSet {
+                detail: "an apply pays out of an EXISTING output reserve",
+            })?;
+            if out_pre.vault_id != vault_id || out_pre.vault_sequence != parent_sequence {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the output reserve is not at the consumed parent generation",
+                });
+            }
+            if output_r.post.vault_id != vault_id
+                || output_r.post.vault_sequence != new_sequence
+                || out_pre.amount.checked_sub(output_r.post.amount) != Some(output.1)
+            {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "output reserve debit is not exactly the authorized output at \
+                             parent + 1",
+                });
+            }
+            if witness.credit_sources.len() != 1 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an apply has exactly one credit source",
+                });
+            }
+            match (&witness.credit_sources[0], operation) {
+                (
+                    CreditSource::ValidatedDlvSettlementPayment(d),
+                    Operation::DlvOwnerApplyV2 {
+                        vault_id: op_vault,
+                        settlement_receipt_id,
+                        parent_sequence: op_parent,
+                        ..
+                    },
+                ) => {
+                    if d.credit_mutation_index != input_r.mutation_index {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "settlement-payment source does not fund the input \
+                                     reserve credit",
+                        });
+                    }
+                    if d.vault_id.as_slice() != op_vault.as_slice()
+                        || d.settlement_receipt_id != *settlement_receipt_id
+                        || d.parent_sequence != *op_parent
+                    {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "settlement-payment source names different coordinates \
                                      than the operation",
                         });
                     }
