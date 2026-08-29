@@ -1210,6 +1210,24 @@ message SignedAuthorityObjectV1 {
 // FOREIGN verifier needs to run resolve_owner_authority_at_position for the
 // lineage owner — recovering the proven AK, DevID, and (via P0's genesis
 // recomputation) the committed network_id — from public material alone.
+// 3.6 PR3: the 0x0026 (DlvReserveConsumption) evidence bundle — transport
+// proto, no CCB class, frozen at `reserve_consumption_evidence_addr` under
+// namespace DSM/dlv-reserve-consumption-evidence/v1. A ValidatedEconomicRoot
+// is a ROOT conclusion, so the bundle carries the actual inclusion material:
+// the exact CCB(V_n) whose hash must equal the settle's parent_binding, the
+// owner's VAULT-BOUND authority evidence (resolved at
+// V_n.owner_authority_transition_digest — a different axis from the economic
+// manifest's authority position), and both reserve pre-leaves with their
+// 256-sibling witnesses against the owner's validated economic root.
+message ReserveConsumptionEvidenceV1 {
+  bytes exact_vault_state_ccb       = 1 [(dsm_max_len)=65535];
+  bytes owner_authority_evidence    = 2 [(dsm_max_len)=1048576];
+  bytes reserve_a_state             = 3 [(dsm_max_len)=4096];
+  repeated bytes reserve_a_siblings = 4 [(dsm_fixed_len)=32];
+  bytes reserve_b_state             = 5 [(dsm_max_len)=4096];
+  repeated bytes reserve_b_siblings = 6 [(dsm_fixed_len)=32];
+}
+
 message AuthorityEvidenceV1 {
   bytes  genesis_params_ccb   = 1 [(dsm_max_len)=4096];   // class 0x0018
   repeated SignedAuthorityObjectV1 delegations = 2;        // class 0x0019 + GRK sig
