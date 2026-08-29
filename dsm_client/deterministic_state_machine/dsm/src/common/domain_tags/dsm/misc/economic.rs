@@ -101,6 +101,18 @@ pub const TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION: TaggedHashDomain<'static>
 /// inclusion witnesses). Transport proto — no CCB class.
 pub const TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-reserve-consumption-evidence/v1");
+/// SourceId for a validated DLV settlement payment (0x0027):
+/// `H(tag ‖ 0x00 ‖ vault_id ‖ settlement_receipt_id)` — one receipt funds
+/// the owner's input-reserve credit exactly once; the non-reuse mechanism
+/// is the reserve-sequence Merkle CAS (after the first apply the reserve
+/// pre-state at n no longer exists in the owner's validated lineage).
+pub const TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/validated-dlv-settlement-payment/v1");
+/// Immutable namespace for the 0x0027 evidence bundle
+/// (`SettlementPaymentEvidenceV1`: the trader's receipt leaf + inclusion
+/// witness). Transport proto — no CCB class.
+pub const TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/dlv-settlement-payment-evidence/v1");
 pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
 

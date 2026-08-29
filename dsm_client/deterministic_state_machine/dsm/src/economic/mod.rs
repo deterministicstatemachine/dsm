@@ -72,6 +72,7 @@ pub mod provenance;
 pub mod register;
 pub mod release;
 pub mod reserve_consumption_evidence;
+pub mod settlement_payment_evidence;
 pub mod state;
 pub mod successor_evidence;
 pub mod tree;

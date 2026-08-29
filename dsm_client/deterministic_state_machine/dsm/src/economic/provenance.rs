@@ -240,6 +240,9 @@ pub enum ProvenanceError {
     /// A 0x0026 reserve-consumption clause failed — the message names the
     /// exact clause.
     DlvReserveConsumptionInvalid(String),
+    /// A 0x0027 settlement-payment clause failed — the message names the
+    /// exact clause.
+    DlvSettlementPaymentInvalid(String),
     /// The OWNER's economic lineage could not be resolved/validated at the
     /// descriptor's locator position (taxonomy preserved: an outage retries,
     /// a forgery does not).
@@ -411,6 +414,9 @@ impl core::fmt::Display for ProvenanceError {
             Self::DlvReserveConsumptionInvalid(m) => {
                 write!(f, "credit provenance: reserve consumption refused: {m}")
             }
+            Self::DlvSettlementPaymentInvalid(m) => {
+                write!(f, "credit provenance: settlement payment refused: {m}")
+            }
             Self::OwnerLineage(e) => {
                 write!(f, "credit provenance: owner lineage: {e}")
             }
@@ -450,6 +456,22 @@ pub fn dlv_reserve_consumption_source_id(
     h.update(vault_id);
     h.update(&parent_sequence.to_be_bytes());
     h.update(x);
+    *h.finalize().as_bytes()
+}
+
+/// SourceId for a validated DLV settlement payment (0x0027):
+/// `H(tag ‖ 0x00 ‖ vault_id ‖ settlement_receipt_id)`. Non-reuse is the
+/// reserve-sequence Merkle CAS, so `requires_consumed_source_record` stays
+/// false.
+pub fn validated_dlv_settlement_payment_source_id(
+    vault_id: &[u8; 32],
+    settlement_receipt_id: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
+    );
+    h.update(vault_id);
+    h.update(settlement_receipt_id);
     *h.finalize().as_bytes()
 }
 
@@ -984,8 +1006,124 @@ pub fn verify_credit_source(
                 amount: *output_amount,
             }
         }
-        CreditSource::ValidatedDlvSettlementPayment(_) => {
-            return Err(ProvenanceError::NotYetImplemented { class: 0x0027 })
+        CreditSource::ValidatedDlvSettlementPayment(d) => {
+            let invalid = |m: String| ProvenanceError::DlvSettlementPaymentInvalid(m);
+            // ── 0. The operation IS the v2 owner apply ────────────────────
+            let op = ctx.verified_operation.ok_or_else(|| {
+                invalid("a settlement payment requires the verified apply operation".into())
+            })?;
+            let crate::types::operations::Operation::DlvOwnerApplyV2 {
+                vault_id: op_vault,
+                settlement_receipt_id,
+                pending_pointer_x,
+                parent_sequence,
+                new_sequence,
+                input_policy_commit,
+                output_policy_commit,
+                input_amount,
+                output_amount,
+                ..
+            } = op
+            else {
+                return Err(invalid(
+                    "a settlement payment funds only a DlvOwnerApplyV2 input credit".into(),
+                ));
+            };
+            let vault: [u8; 32] = op_vault
+                .as_slice()
+                .try_into()
+                .map_err(|_| invalid("vault id is not 32 bytes".into()))?;
+            // ── 1. Descriptor ↔ operation coordinate equality ─────────────
+            if d.vault_id != vault
+                || d.settlement_receipt_id != *settlement_receipt_id
+                || d.parent_sequence != *parent_sequence
+            {
+                return Err(invalid(
+                    "descriptor coordinates do not equal the operation's".into(),
+                ));
+            }
+            // ── 2. The trader's VALIDATED economic root at the locator ────
+            // The locator is untrusted; the walk independently derives
+            // ValidatedEconomicRoot(position). The trader's admitted payment
+            // — the receipt leaf — is then proven against exactly that root.
+            let trader = resolver
+                .validated_peer_transition(
+                    &d.trader_genesis,
+                    &d.trader_devid,
+                    d.trader_economic_position,
+                )
+                .map_err(ProvenanceError::OwnerLineage)?;
+            let trader_root = trader.validated_root.economic_root();
+            // ── 3. The evidence bundle, by exact content address ──────────
+            let bundle_bytes = resolver
+                .immutable_evidence(
+                    crate::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
+                    &d.payment_evidence_addr,
+                )
+                .map_err(ProvenanceError::OwnerLineage)?;
+            if crate::storage_object::immutable_addr(
+                crate::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
+                &bundle_bytes,
+            ) != d.payment_evidence_addr
+            {
+                return Err(invalid(
+                    "evidence bytes do not hash to the descriptor's address".into(),
+                ));
+            }
+            let ev =
+                crate::economic::settlement_payment_evidence::decode_settlement_payment_evidence(
+                    &bundle_bytes,
+                )
+                .map_err(invalid)?;
+            let receipt = &ev.receipt;
+            // ── 4. The receipt leaf IS the trader's admitted payment ──────
+            // (Its own constructor already re-derived receipt_id from
+            // (vault, x) and enforced the sequence/amount/asset rules at
+            // decode.) It must name exactly this settlement:
+            if receipt.vault_id != vault
+                || receipt.receipt_id != *settlement_receipt_id
+                || receipt.x != *pending_pointer_x
+                || receipt.parent_sequence != *parent_sequence
+                || receipt.new_sequence != *new_sequence
+                || receipt.input_policy_commit != *input_policy_commit
+                || receipt.input_amount != *input_amount
+                || receipt.output_policy_commit != *output_policy_commit
+                || receipt.output_amount != *output_amount
+            {
+                return Err(invalid(
+                    "the trader's receipt does not state this apply's exact settlement".into(),
+                ));
+            }
+            // Proven INCLUDED under the trader's validated root, at the
+            // trader's own leaf key.
+            let state =
+                crate::economic::state::EconomicLeafState::SettlementReceipt(receipt.clone());
+            let key = state.leaf_key(&d.trader_genesis, &d.trader_devid);
+            let value = state
+                .leaf_value()
+                .map_err(|e| invalid(format!("receipt leaf value: {e}")))?;
+            let derived = crate::economic::tree::root_from_path(
+                &key,
+                &crate::economic::tree::leaf_node(&key, Some(&value)),
+                &ev.receipt_siblings,
+            );
+            if derived != trader_root {
+                return Err(invalid(
+                    "the receipt does not prove into the trader's validated root".into(),
+                ));
+            }
+            // The INPUT the trader paid is what funds the owner's input-
+            // reserve credit. Non-reuse: after the first apply, the reserve
+            // pre-state at `parent_sequence` no longer exists in the owner's
+            // validated lineage — the Merkle CAS, not a consumed-source leaf.
+            FundedCredit {
+                source_id: validated_dlv_settlement_payment_source_id(
+                    &vault,
+                    settlement_receipt_id,
+                ),
+                policy_commit: *input_policy_commit,
+                amount: *input_amount,
+            }
         }
         CreditSource::VerifiedOfflineReentry(_) => {
             return Err(ProvenanceError::NotYetImplemented { class: 0x0028 })
