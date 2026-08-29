@@ -126,31 +126,9 @@ pub(crate) fn constant_product_output(
     reserve_out: u64,
     fee_bps: u32,
 ) -> Option<u64> {
-    if input_amount == 0 || reserve_in == 0 || reserve_out == 0 {
-        return None;
-    }
-    if fee_bps >= 10_000 {
-        // Fee >= 100 % is not a real AMM hop; skip rather than divide
-        // a positive numerator by zero.
-        return None;
-    }
-    let input_amount = u128::from(input_amount);
-    let reserve_in = u128::from(reserve_in);
-    let reserve_out = u128::from(reserve_out);
-
-    let fee_complement = u128::from(10_000u32 - fee_bps);
-    let input_after_fee_num = input_amount.checked_mul(fee_complement)?;
-    // `reserve_in * 10000 + input_after_fee_num` (denominator).
-    let denom_lhs = reserve_in.checked_mul(10_000)?;
-    let denom = denom_lhs.checked_add(input_after_fee_num)?;
-    let num = reserve_out.checked_mul(input_after_fee_num)?;
-    let out = num / denom;
-    if out == 0 {
-        return None;
-    }
-    // Cannot exceed `reserve_out`, which came from a u64 — but check rather
-    // than reason about it.
-    u64::try_from(out).ok()
+    // ONE implementation: the core Class-K primitive (3.6 PR3) — the quote,
+    // the fold and the economic verifier must never drift.
+    dsm::dlv::route_commit::constant_product_output(input_amount, reserve_in, reserve_out, fee_bps)
 }
 
 /// Decode `reserve_*_u128` from its big-endian 16-byte wire form.  An

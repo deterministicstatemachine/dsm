@@ -41,6 +41,11 @@ pub const TAG_DSM_DLV_CLOSE_X: TaggedHashDomain<'static> =
 /// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_be)`.
 pub const TAG_DSM_DLV_CLOSE_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-close-commit");
+/// The external-commitment domain: `X = BLAKE3("DSM/ext\0" ‖ canonical
+/// signature-zeroed RouteCommit bytes)` (SoFi spec §3.2). RELOCATED from the
+/// SDK (3.6 PR3) — same bytes, one constant — because the 0x0026 economic
+/// verifier recomputes X in core.
+pub const TAG_DSM_EXT_COMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ext");
 /// Settlement-slot claim: the signed preimage `H(tag ‖ 0x00 ‖ canonical
 /// SettlementSlotClaimBodyV2 bytes)`, and (with `-envelope`) the digest of the
 /// frozen envelope bytes a register member stores and compares.

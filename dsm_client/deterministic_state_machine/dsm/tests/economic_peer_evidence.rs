@@ -373,6 +373,14 @@ impl ProvenanceResolver for OnePeer {
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
         None
     }
+
+    fn winning_settlement_slot_claim(
+        &self,
+        _vault_id: &[u8; 32],
+        _parent_sequence: u64,
+    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
+        None
+    }
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -459,6 +467,7 @@ fn recip_ctx<'a>(ak: &'a [u8], set_id: &'a [u8; 32]) -> ProvenanceContext<'a> {
         // The consuming substrate's own pair; these fixtures refuse before
         // the pair is compared, so a placeholder pair is inert here.
         substrate_b_pair: Some(([0x7A; 32], [0x7B; 32])),
+        verified_operation: None,
     }
 }
 
@@ -569,6 +578,14 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
             Ok(self.vpt.clone())
         }
         fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+            None
+        }
+
+        fn winning_settlement_slot_claim(
+            &self,
+            _vault_id: &[u8; 32],
+            _parent_sequence: u64,
+        ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
             None
         }
         fn immutable_evidence(

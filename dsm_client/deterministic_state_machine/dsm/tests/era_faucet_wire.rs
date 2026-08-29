@@ -138,6 +138,14 @@ impl ProvenanceResolver for OneTicket {
         })
     }
 
+    fn winning_settlement_slot_claim(
+        &self,
+        _vault_id: &[u8; 32],
+        _parent_sequence: u64,
+    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
+        None
+    }
+
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -158,6 +166,7 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
         proven_ak: ak,
         canonical_storage_set_id: SET_ID,
         substrate_b_pair: None,
+        verified_operation: None,
     }
 }
 
@@ -349,6 +358,14 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
             ))
         }
         fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
+            None
+        }
+
+        fn winning_settlement_slot_claim(
+            &self,
+            _vault_id: &[u8; 32],
+            _parent_sequence: u64,
+        ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
             None
         }
 

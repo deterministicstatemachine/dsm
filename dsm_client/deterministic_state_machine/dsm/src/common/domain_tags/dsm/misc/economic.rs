@@ -89,6 +89,18 @@ pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
 /// inside that transition. Two transitions moving value at the same mutation
 /// index are different sources, and must not collide in the consumed-source
 /// space.
+/// SourceId for a DLV reserve consumption (0x0026):
+/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_sequence_be ‖ x)` — one consumption of
+/// one vault generation by one trade; the write-once settlement-receipt leaf
+/// is the non-reuse marker, so no consumed-source leaf exists for this arm.
+pub const TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/dlv-reserve-consumption/v1");
+/// Immutable namespace for the 0x0026 evidence bundle
+/// (`ReserveConsumptionEvidenceV1`: exact CCB(V_n) + the owner's vault-bound
+/// authority evidence + both reserve pre-leaves with their 256-sibling
+/// inclusion witnesses). Transport proto — no CCB class.
+pub const TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/dlv-reserve-consumption-evidence/v1");
 pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
 

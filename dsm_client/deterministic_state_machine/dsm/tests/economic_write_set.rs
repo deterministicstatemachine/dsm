@@ -915,7 +915,7 @@ fn a_close_builder_requires_the_exact_reserve_pre_state() {
 }
 
 #[test]
-fn settle_and_v2_owner_apply_write_sets_are_deferred_honestly() {
+fn the_settle_demands_its_facts_and_the_v2_owner_apply_is_deferred_honestly() {
     let (a, b) = pair_assets();
     let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 500)], &[]);
     let settle = Operation::DlvSettle {
@@ -935,7 +935,10 @@ fn settle_and_v2_owner_apply_write_sets_are_deferred_honestly() {
         sigma: [0x75; 32],
         settler_public_key: vec![0xAC; 64],
         settler_devid: DEV,
-        settlement_receipt_id: [0x76; 32],
+        settlement_receipt_id: dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
+            &VAULT,
+            &[0x74; 32],
+        ),
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
     };
@@ -954,21 +957,37 @@ fn settle_and_v2_owner_apply_write_sets_are_deferred_honestly() {
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
     };
-    for op in [settle, apply] {
-        assert!(matches!(
-            build_write_set(
-                &op,
-                &G,
-                &DEV,
-                &econ_op_id(),
-                &EconomicPreState {
-                    balances: &balances,
-                    vault_reserves: &reserves
-                },
-                &mut tree,
-                &CreditSourceFacts::None,
-            ),
-            Err(WriteSetError::OperationWriteSetNotYetSpecified)
-        ));
-    }
+    // PR3: the settle write set EXISTS — but it demands its reserve
+    // consumption facts; bare facts are a producer error, not a deferral.
+    assert!(matches!(
+        build_write_set(
+            &settle,
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState {
+                balances: &balances,
+                vault_reserves: &reserves
+            },
+            &mut tree,
+            &CreditSourceFacts::None,
+        ),
+        Err(WriteSetError::FactsDoNotMatchOperation)
+    ));
+    // The v2 owner apply stays honestly refused until the 0x0027 arm (PR4).
+    assert!(matches!(
+        build_write_set(
+            &apply,
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState {
+                balances: &balances,
+                vault_reserves: &reserves
+            },
+            &mut tree,
+            &CreditSourceFacts::None,
+        ),
+        Err(WriteSetError::OperationWriteSetNotYetSpecified)
+    ));
 }

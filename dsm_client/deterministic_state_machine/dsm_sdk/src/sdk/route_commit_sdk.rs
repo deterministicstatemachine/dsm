@@ -32,7 +32,7 @@ use crate::util::text_id::encode_base32_crockford;
 /// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))`.
 /// Matches SoFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
 pub(crate) const EXT_COMMIT_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/ext");
+    dsm::common::domain_tags::TAG_DSM_EXT_COMMIT;
 
 /// Storage-node prefix for external-commitment anchors.  Each anchor
 /// is stored at `sofi/extcommit/{X_b32}` — the suffix doubles as the
@@ -46,7 +46,7 @@ pub(crate) const EXT_COMMIT_ROOT: &str = "sofi/extcommit/";
 /// accepted with its removed fields skipped. A route is now exactly one
 /// path bound to one anchored state producing one exact output under one
 /// signature; any state change rejects and forces a fresh quote + sign.
-pub(crate) const ROUTE_COMMIT_VERSION: u32 = 2;
+pub(crate) const ROUTE_COMMIT_VERSION: u32 = dsm::dlv::route_commit::ROUTE_COMMIT_VERSION;
 
 /// Anchor key for a given `X`.
 pub(crate) fn external_commitment_key(x: &[u8; 32]) -> String {
@@ -193,18 +193,14 @@ pub(crate) fn bind_path_to_route_commit(
 pub(crate) fn canonicalise_for_commitment(
     rc: &generated::RouteCommitV1,
 ) -> generated::RouteCommitV1 {
-    let mut out = rc.clone();
-    out.initiator_signature.clear();
-    out
+    dsm::dlv::route_commit::canonicalise_for_commitment(rc)
 }
 
 /// Compute `X = BLAKE3("DSM/ext\0" || canonical_bytes)` over the
 /// signature-zeroed RouteCommit.  Deterministic across encoders —
 /// prost emits canonical wire bytes for a given proto message.
 pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8; 32] {
-    let canonical = canonicalise_for_commitment(rc);
-    let canonical_bytes = canonical.encode_to_vec();
-    dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes)
+    dsm::dlv::route_commit::compute_external_commitment(rc)
 }
 
 /// One vault's parent-state binding: the canonical identity

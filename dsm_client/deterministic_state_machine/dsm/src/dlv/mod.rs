@@ -8,6 +8,7 @@
 pub mod beta_storage_profile; // the deployed three-member beta profile — fixed, not a formula
 pub mod controller_rotation;
 pub mod pair_identity;
+pub mod route_commit;
 pub mod settlement_receipt_leaf;
 pub mod settlement_slot_claim; // write-once claim envelope for the settlement-slot quorum register
 pub mod vault_pending_pointer;
