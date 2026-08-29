@@ -695,7 +695,7 @@ fn validate_conservation(
         // trader's advance, and the fee accrues inside the reserves as LP yield,
         // so the owner's spendable balance is untouched. Only reserve leaves
         // move, and those are checked by `validate_vault_reserve_conservation`.
-        Operation::DlvOwnerApply { .. } | Operation::DlvOwnerApplyV2 { .. } => {
+        Operation::DlvOwnerApplyV2 { .. } => {
             if !deltas.is_empty() {
                 return Err(DsmError::invalid_operation(
                     "conservation: an owner apply records a verified receipt and must not move balances",
@@ -1510,7 +1510,6 @@ impl DeviceState {
         if matches!(
             operation,
             Operation::DlvSettle { .. }
-                | Operation::DlvOwnerApply { .. }
                 | Operation::DlvClose { .. }
                 | Operation::DlvCreateFundedV2 { .. }
                 | Operation::DlvOwnerApplyV2 { .. }
@@ -1727,19 +1726,15 @@ impl DeviceState {
                 legs: funding_legs_in,
                 vault_sequence: *vault_sequence,
             };
-            // Only a value-bearing create may encumber reserves. The exact
-            // tokenless legacy shape classifies `EconomicEffect::None` (owner
-            // ruling 2026-08-28), and `None` must be IMPOSSIBLE for any
-            // transition that moves reserve state — so a tokenless DlvCreate
-            // carrying a Fund mutation is refused here, structurally.
+            // Only the funded v2 create may encumber reserves. DlvCreate is
+            // structurally state-only (`EconomicEffect::None`), and `None`
+            // must be IMPOSSIBLE for any transition that moves reserve state
+            // — so ANY DlvCreate carrying a Fund mutation is refused here.
             match &operation {
-                Operation::DlvCreate {
-                    token_id: Some(_), ..
-                } => {}
                 Operation::DlvCreate { .. } => {
                     return Err(DsmError::invalid_operation(
-                        "advance: a tokenless DlvCreate is state-only and may not encumber \
-                         reserves",
+                        "advance: DlvCreate is state-only and may not encumber reserves — \
+                         funded vaults are created with DlvCreateFundedV2",
                     ));
                 }
                 Operation::DlvCreateFundedV2 {
@@ -1871,7 +1866,6 @@ impl DeviceState {
         }) = &reserve_mutation
         {
             match &operation {
-                Operation::DlvOwnerApply { .. } => {}
                 Operation::DlvOwnerApplyV2 {
                     vault_id: op_vault,
                     parent_sequence: op_parent,
@@ -3426,8 +3420,6 @@ mod tests {
             parameters_hash: vec![0u8; 32],
             fulfillment_condition: vec![],
             intended_recipient: None,
-            token_id: None,
-            locked_amount: None,
             signature: vec![],
             mode: TransactionMode::Unilateral,
         })
@@ -3447,25 +3439,6 @@ mod tests {
             leg_b_policy_commit: b,
             leg_b_amount: rb,
             fee_bps: 30,
-            signature: vec![],
-            mode: TransactionMode::Unilateral,
-        })
-    }
-
-    /// A signed VALUE-BEARING legacy `DlvCreate` (`token_id: Some`). Still
-    /// accepted by the `Fund` arm until the PR5 cutover deletes the legacy
-    /// AMM construction — and the shape that keeps the mutation-only refusal
-    /// paths (pair completeness etc.) independently testable, since the v2 op
-    /// cross-check would fire first.
-    fn dlv_create_valuebearing_legacy(vault: [u8; 32]) -> Operation {
-        sign_op(Operation::DlvCreate {
-            vault_id: vault.to_vec(),
-            creator_public_key: pubkey(),
-            parameters_hash: vec![0u8; 32],
-            fulfillment_condition: vec![],
-            intended_recipient: None,
-            token_id: Some(b"ERA".to_vec()),
-            locked_amount: Some(crate::types::token_types::Balance::from_state(1, [0u8; 32])),
             signature: vec![],
             mode: TransactionMode::Unilateral,
         })
@@ -4248,7 +4221,7 @@ mod tests {
     #[test]
     fn dlv_owner_apply_authorizes_no_balance_movement() {
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        let op = Operation::DlvOwnerApply {
+        let op = Operation::DlvOwnerApplyV2 {
             vault_id: vec![0x77; 32],
             settlement_receipt_id: [0x77; 32],
             pending_pointer_x: [0x55; 32],
@@ -4258,6 +4231,8 @@ mod tests {
             output_policy_commit: rigb,
             input_amount: 1_000,
             output_amount: 970,
+            parent_binding: [0x23; 32],
+            fee_bps: 30,
             signature: vec![0xCC; 64],
             mode: TransactionMode::Bilateral,
         };
@@ -4525,8 +4500,6 @@ mod tests {
             parameters_hash: vec![0x11; 32],
             fulfillment_condition: Vec::new(),
             intended_recipient: None,
-            token_id: None,
-            locked_amount: None,
             signature: Vec::new(),
             mode: crate::types::operations::TransactionMode::Unilateral,
         };
@@ -5961,19 +5934,41 @@ mod tests {
         let (rk, tip) = self_loop(&dev);
         let root_before = dev.root();
 
-        for (name, legs) in [
-            ("one leg", vec![(era, 10_000)]),
-            ("three legs", vec![(dbtc, 1), (era, 10_000), (rigb, 5_000)]),
+        // With legacy value-bearing creates deleted, a malformed mutation is
+        // refused by ONE of two layers: legs that differ from the signed v2
+        // op hit the op↔mutation cross-check; legs that match the op but not
+        // the vault's pair hit pair completeness. Both layers named per case.
+        let honest = dlv_create_funded(vault, era, 10_000, rigb, 5_000);
+        for (name, op, legs, expect) in [
+            (
+                "one leg",
+                honest.clone(),
+                vec![(era, 10_000)],
+                "does not equal the signed DlvCreateFundedV2",
+            ),
+            (
+                "three legs",
+                honest.clone(),
+                vec![(dbtc, 1), (era, 10_000), (rigb, 5_000)],
+                "does not equal the signed DlvCreateFundedV2",
+            ),
             (
                 "an asset outside the pair",
+                dlv_create_funded(vault, dbtc, 1_000, era, 10_000),
                 vec![(dbtc, 1_000), (era, 10_000)],
+                "exactly the vault's pair",
             ),
-            ("the pair out of order", vec![(rigb, 5_000), (era, 10_000)]),
+            (
+                "the pair out of order",
+                dlv_create_funded(vault, rigb, 5_000, era, 10_000),
+                vec![(rigb, 5_000), (era, 10_000)],
+                "exactly the vault's pair",
+            ),
         ] {
             let err = dev.advance(
                 rk,
                 dev.devid,
-                dlv_create_valuebearing_legacy(vault),
+                op,
                 entropy(1),
                 None,
                 &[],
@@ -5989,8 +5984,8 @@ mod tests {
             );
             let err = format!("{}", err.expect_err(name));
             assert!(
-                err.contains("exactly the vault's pair"),
-                "{name}: must refuse on pair completeness, got: {err}"
+                err.contains(expect),
+                "{name}: expected the {expect:?} refusal, got: {err}"
             );
         }
         assert_eq!(dev.root(), root_before, "refusals move nothing");
@@ -6035,7 +6030,7 @@ mod tests {
             .new_device_state;
 
         let apply_op = |input: [u8; 32], output: [u8; 32], out_amt: u64| {
-            sign_op(Operation::DlvOwnerApply {
+            sign_op(Operation::DlvOwnerApplyV2 {
                 vault_id: vault.to_vec(),
                 settlement_receipt_id: [0x77; 32],
                 pending_pointer_x: [0x55; 32],
@@ -6045,6 +6040,8 @@ mod tests {
                 output_policy_commit: output,
                 input_amount: 1_000,
                 output_amount: out_amt,
+                parent_binding: [0x23; 32],
+                fee_bps: 30,
                 signature: vec![],
                 mode: TransactionMode::Bilateral,
             })
@@ -6263,12 +6260,12 @@ mod tests {
         );
     }
 
-    /// Owner ruling (2026-08-28): the exact tokenless legacy shape classifies
-    /// `EconomicEffect::None`, and `None` must be impossible for a transition
-    /// that moves reserve state — so a tokenless `DlvCreate` carrying a Fund
-    /// mutation is refused structurally.
+    /// Owner directive (2026-08-28): `DlvCreate` is structurally state-only
+    /// and classifies `EconomicEffect::None`; `None` must be impossible for a
+    /// transition that moves reserve state — so ANY `DlvCreate` carrying a
+    /// Fund mutation is refused structurally.
     #[test]
-    fn a_tokenless_legacy_create_cannot_encumber_reserves() {
+    fn a_state_only_create_cannot_encumber_reserves() {
         let mut dev = fresh_device(0xCA);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         dev.balances.insert(era, 1_000);
@@ -6530,7 +6527,7 @@ mod tests {
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let (funded, vault, rk, tip) = funded_for_close(0xD2, era, rigb, 10_000, 5_000);
         let pair = vault_pair(era, rigb);
-        let apply = sign_op(Operation::DlvOwnerApply {
+        let apply = sign_op(Operation::DlvOwnerApplyV2 {
             vault_id: vault.to_vec(),
             settlement_receipt_id: [0x77; 32],
             pending_pointer_x: [0x55; 32],
@@ -6540,6 +6537,8 @@ mod tests {
             output_policy_commit: rigb,
             input_amount: 1_000,
             output_amount: 970,
+            parent_binding: [0x23; 32],
+            fee_bps: 30,
             signature: Vec::new(),
             mode: TransactionMode::Bilateral,
         });

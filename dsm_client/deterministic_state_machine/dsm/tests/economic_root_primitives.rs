@@ -462,52 +462,22 @@ fn dlv_unlock_is_economically_inert_despite_being_value_bearing() {
     assert_eq!(classify(&op), EconomicEffect::None);
 }
 
-/// Owner ruling (2026-08-28): the classifier cares about ECONOMIC EFFECT,
-/// not the operation name. The EXACT tokenless legacy shape moves nothing
-/// and is `None`; anything value-bearing under the legacy tag never is.
+/// Owner directive (2026-08-28): DlvCreate is STRUCTURALLY state-only — the
+/// legacy value-bearing fields are deleted from the wire, so the value-bearing
+/// legacy shape is inexpressible, and every DlvCreate is economically `None`.
 #[test]
-fn the_exact_tokenless_legacy_dlv_create_is_economically_none() {
-    let tokenless = dsm::types::operations::Operation::DlvCreate {
+fn dlv_create_is_structurally_state_only_and_economically_none() {
+    let create = dsm::types::operations::Operation::DlvCreate {
         vault_id: vec![0xCC; 32],
         creator_public_key: vec![0x02; 64],
         parameters_hash: vec![0x03; 32],
         fulfillment_condition: Vec::new(),
         intended_recipient: None,
-        token_id: None,
-        locked_amount: None,
         signature: Vec::new(),
         mode: dsm::types::operations::TransactionMode::Unilateral,
     };
-    assert_eq!(classify(&tokenless), EconomicEffect::None);
-}
-
-#[test]
-fn a_value_bearing_legacy_dlv_create_is_never_none() {
-    let base = |token_id, locked_amount| dsm::types::operations::Operation::DlvCreate {
-        vault_id: vec![0xCC; 32],
-        creator_public_key: vec![0x02; 64],
-        parameters_hash: vec![0x03; 32],
-        fulfillment_condition: Vec::new(),
-        intended_recipient: None,
-        token_id,
-        locked_amount,
-        signature: Vec::new(),
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-    };
-    // token named, amount named, or both: value-bearing, unsupported.
-    for op in [
-        base(Some(b"ERA".to_vec()), None),
-        base(
-            None,
-            Some(dsm::types::token_types::Balance::from_state(5, [0u8; 32])),
-        ),
-        base(
-            Some(b"ERA".to_vec()),
-            Some(dsm::types::token_types::Balance::from_state(5, [0u8; 32])),
-        ),
-    ] {
-        assert_eq!(classify(&op), EconomicEffect::UnsupportedValueTransition);
-    }
+    assert_eq!(classify(&create), EconomicEffect::None);
+    assert!(!create.is_value_egress());
 }
 
 #[test]

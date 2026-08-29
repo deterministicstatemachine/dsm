@@ -425,48 +425,14 @@ impl TokenStateManager {
 
             // ── DLV operations ────────────────────────────────────
             //
-            // DlvCreate: lock tokens from the creator's available balance.
+            // DlvCreate: STATE-ONLY since the legacy value-bearing fields were
+            // deleted (owner directive 2026-08-28) — no balance change; funded
+            // creation moves value through the Fund reserve mutation on the
+            // DlvCreateFundedV2 advance, never through this legacy state path.
             // DlvInvalidate: return locked tokens to the creator.
             // DlvClaim: release locked tokens to the claimant.
             // DlvUnlock: state-only transition — no balance change.
-            Operation::DlvCreate {
-                token_id,
-                locked_amount,
-                creator_public_key,
-                ..
-            } => {
-                if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
-                    if amount.value() > 0 {
-                        let tid_str = canonical_token_id_str(tid).ok_or_else(|| {
-                            DsmError::invalid_operation("DlvCreate has malformed or empty token_id")
-                        })?;
-                        let creator_key =
-                            self.make_balance_key(creator_public_key.as_slice(), tid_str)?;
-
-                        let creator_balance = new_balances
-                            .get(&creator_key)
-                            .cloned()
-                            .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-
-                        if creator_balance.value() < amount.value() {
-                            return Err(DsmError::insufficient_balance(
-                                tid_str.to_string(),
-                                creator_balance.value(),
-                                amount.value(),
-                            ));
-                        }
-
-                        // Deduct locked amount from creator's available balance
-                        new_balances.insert(
-                            creator_key,
-                            Balance::from_state(
-                                creator_balance.value().saturating_sub(amount.value()),
-                                current_state.hash,
-                            ),
-                        );
-                    }
-                }
-            }
+            Operation::DlvCreate { .. } => {}
 
             Operation::DlvInvalidate {
                 creator_public_key, ..
