@@ -915,7 +915,7 @@ fn a_close_builder_requires_the_exact_reserve_pre_state() {
 }
 
 #[test]
-fn the_settle_demands_its_facts_and_the_v2_owner_apply_is_deferred_honestly() {
+fn the_dlv_value_write_sets_demand_their_facts() {
     let (a, b) = pair_assets();
     let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 500)], &[]);
     let settle = Operation::DlvSettle {
@@ -974,7 +974,8 @@ fn the_settle_demands_its_facts_and_the_v2_owner_apply_is_deferred_honestly() {
         ),
         Err(WriteSetError::FactsDoNotMatchOperation)
     ));
-    // The v2 owner apply stays honestly refused until the 0x0027 arm (PR4).
+    // PR4: the v2 owner apply's write set EXISTS — bare facts are the
+    // producer error now, not a deferral.
     assert!(matches!(
         build_write_set(
             &apply,
@@ -988,6 +989,6 @@ fn the_settle_demands_its_facts_and_the_v2_owner_apply_is_deferred_honestly() {
             &mut tree,
             &CreditSourceFacts::None,
         ),
-        Err(WriteSetError::OperationWriteSetNotYetSpecified)
+        Err(WriteSetError::FactsDoNotMatchOperation)
     ));
 }
