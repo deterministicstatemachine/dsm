@@ -579,6 +579,15 @@ pub fn advance_validated(
         substrate_b_pair: accepted.dsm_successor_pair(),
         verified_operation: accepted.dsm_verified_operation(),
     };
+    // THE MARKET-LEG TOKEN-POLICY CONJUNCT: a DLV successor's legs must
+    // satisfy the applicable token policy (SoFi Def 4.1 / Req 4.4 / Req 4.6).
+    // Central, on the VERIFIED operation, so fund and close are bound even
+    // though their SameTransitionMove credits carry no evidence channel.
+    // Non-DLV operations pass vacuously.
+    if let Some(op) = accepted.dsm_verified_operation() {
+        crate::economic::provenance::verify_market_leg_policies(op, resolver)
+            .map_err(EconomicValidationError::Provenance)?;
+    }
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 

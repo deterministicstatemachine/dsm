@@ -38,6 +38,62 @@ fn display_name_for(policy_commit: &[u8; 32]) -> String {
     }
 }
 
+/// THE MARKET-LEG TOKEN-POLICY PRE-FLIGHT (SoFi Def 4.1 / Req 4.4 / Req 4.6).
+///
+/// A non-builtin leg requires this device's OWN rooting in the token's public
+/// anchor: locally anchored bytes, or a fetch from the authoritative
+/// content-addressed path — re-hashed against the commit before anything
+/// trusts a byte, then persisted (anchors are public; anyone holding one may
+/// root). The parsed policy must then permit the asset as a market leg —
+/// today that means `transferable`, the one movement-relevant commitment a
+/// token policy carries. ERA and dBTC are pre-rooted on every device and
+/// skip.
+///
+/// This is the ROUTE layer of a three-layer rule: the advance funnel enforces
+/// the same matrix from local rooting for every caller, and the economic
+/// verifier reruns it foreign-verifiably in `advance_validated`. Only this
+/// layer may touch the network, which is why the fetch lives here.
+async fn require_rooted_market_leg(route: &str, pc: &[u8; 32]) -> Result<(), String> {
+    if dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(pc).is_some() {
+        return Ok(());
+    }
+    let bytes = match crate::storage::client_db::token_registry::load_policy_verified(pc) {
+        Ok(Some(b)) => b,
+        _ => {
+            let fetched = crate::handlers::token_routes::try_fetch_policy_from_network(pc)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "{route}: policy fetch failed for market leg {}: {e}",
+                        crate::util::text_id::encode_base32_crockford(pc)
+                    )
+                })?;
+            let Some(b) = fetched else {
+                return Err(format!(
+                    "{route}: market leg {} is not rooted and its policy is not retrievable \
+                     from the anchor path — root this device to the token, then retry",
+                    crate::util::text_id::encode_base32_crockford(pc)
+                ));
+            };
+            if dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &b)
+                != *pc
+            {
+                return Err(format!(
+                    "{route}: fetched policy bytes do not hash to market leg {} — refusing",
+                    crate::util::text_id::encode_base32_crockford(pc)
+                ));
+            }
+            let _ = crate::storage::client_db::token_registry::upsert_policy(pc, &b);
+            b
+        }
+    };
+    let policy = dsm::economic::issuance::parse_issuance_policy(&bytes)
+        .map_err(|e| format!("{route}: market leg policy: {e}"))?;
+    dsm::economic::issuance::check_market_leg_permitted(&policy)
+        .map_err(|e| format!("{route}: {e}"))?;
+    Ok(())
+}
+
 impl AppRouterImpl {
     /// Dispatch handler for `dlv.*` query (read-only) routes.
     pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
@@ -543,6 +599,16 @@ impl AppRouterImpl {
             // advertisement and the predicate all agree on which side is which.
             if funding[0].0 != pair.a() {
                 funding.swap(0, 1);
+            }
+        }
+
+        // Both legs must satisfy the applicable token policy BEFORE anything
+        // durable — and a leg must be a real, rooted asset at all: until this
+        // gate, any 32 random bytes with a balance under them was an
+        // acceptable funding leg.
+        for (pc, _) in &funding {
+            if let Err(e) = require_rooted_market_leg("dlv.create", pc).await {
+                return err(e);
             }
         }
 
@@ -1593,6 +1659,14 @@ impl AppRouterImpl {
                 ))
             }
         };
+        // The fold moves reserve value under both pair assets; each must
+        // satisfy the applicable token policy before the apply is derived.
+        for pc in [pair.a(), pair.b()] {
+            if let Err(e) = require_rooted_market_leg("dlv.reconcile", &pc).await {
+                return err(e);
+            }
+        }
+
         let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
             vault_id,
             input_policy_commit: receipt.trade.input_policy_commit,
@@ -2259,6 +2333,15 @@ impl AppRouterImpl {
         // close's identity for this generation.
         let close_commitment = x_close;
 
+        // The release must satisfy the applicable token policy (Req 4.6 /
+        // Req 21.14): both legs checked before anything is signed. The owner
+        // rooted both at creation; this fails closed rather than assuming.
+        for pc in [pair.a(), pair.b()] {
+            if let Err(e) = require_rooted_market_leg("dlv.close", &pc).await {
+                return err(e);
+            }
+        }
+
         // The canonical operation: derived, then signed.
         let op = dsm::types::operations::Operation::DlvClose {
             vault_id: vault_id.to_vec(),
@@ -2728,6 +2811,17 @@ impl AppRouterImpl {
         let Some(settle) = settle_terms.as_ref() else {
             return err("dlv.unlockRouted: routed settlement requires a verified AMM hop".into());
         };
+
+        // Both traded assets must satisfy the applicable token policy, and
+        // the TRADER must be rooted in their public anchors — before the
+        // first-writer claim, where a refusal still costs nothing. A trader
+        // may root here for the first time: adoption is open to anyone
+        // holding the commit, and the hop just authenticated both commits.
+        for pc in [&settle.input_policy_commit, &settle.output_policy_commit] {
+            if let Err(e) = require_rooted_market_leg("dlv.unlockRouted", pc).await {
+                return err(e);
+            }
+        }
 
         // FIRST-WRITER CLAIM, immediately before the advance. Everything after
         // this moves value; everything before it is reversible by stopping. A
@@ -6388,7 +6482,11 @@ mod funded_creation_tests {
     /// the new one must round-trip byte-for-byte.
     #[test]
     fn the_additive_display_fields_are_wire_compatible_in_both_directions() {
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        // Fixed byte patterns, NOT the rooted fixture pair: this test's
+        // subject is the WIRE (the naive tag scan below reads raw bytes, and
+        // a real commit can legitimately contain 0x8A/0x92 in its hash). No
+        // route or policy is involved here.
+        let (pc_a, pc_b) = ([0xA1u8; 32], [0xB2u8; 32]);
 
         // OLD -> NEW: a producer that never heard of tags 17/18. Encoding a summary with
         // the fields empty is byte-identical to what the pre-change encoder emitted,

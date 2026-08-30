@@ -435,7 +435,9 @@ async fn try_publish_policy_to_network(body: &[u8], expected_anchor: &[u8; 32]) 
     publish_policy_to_network(body, expected_anchor).await == PublishOutcome::Published
 }
 
-async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u8>>, String> {
+pub(crate) async fn try_fetch_policy_from_network(
+    anchor: &[u8; 32],
+) -> Result<Option<Vec<u8>>, String> {
     let urls = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
         Ok(cfg) => cfg.node_urls,
         Err(e) => {
