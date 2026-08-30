@@ -143,6 +143,15 @@ impl ProvenanceResolver for IssuanceResolver {
             Err(PeerLineageFailure::Incomplete("unknown address".into()))
         }
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 /// One honest issuance: 2-of-3 over 1_000 units of an uncapped policy.
