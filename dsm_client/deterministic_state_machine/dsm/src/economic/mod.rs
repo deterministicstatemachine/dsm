@@ -42,18 +42,14 @@
 //! verifier that turns a mutation list into a post-root, and the exhaustive
 //! classifier that says which operations owe a write set at all.
 //!
-//! It does **not** yet provide credit provenance. That gap is the whole
-//! remaining security question and it should be read as one: a closed write
-//! set proves *what changed*, never *why a credit may appear*. A verifier that
-//! checked only the mutations here would accept a trader crediting itself from
-//! nothing, because every mutation in that write set is individually
-//! well-formed. Provenance — the six-arm `CreditSource` algebra, classes
-//! `0x0023`–`0x0028` — is a separate and **conjunctive** obligation.
-//!
-//! Class `0x001D` (`EconomicTransitionWitness`) and the provenance classes
-//! `0x0023`–`0x0029` are allocated in [`crate::ccb::reserved`] and have no
-//! encoder; see [`witness`] for why, and `reserved_classes_have_no_encoder`
-//! for the test that keeps allocation from drifting into serialization.
+//! Credit provenance is a separate and **conjunctive** obligation: a closed
+//! write set proves *what changed*, never *why a credit may appear*, and a
+//! verifier that checked only the mutations would accept a trader crediting
+//! itself from nothing. The `CreditSource` algebra (classes
+//! `0x0023`–`0x0028`, plus `0x0030`) lives in [`provenance`], and class
+//! `0x0029` (`IssuanceAuthorizationBody`, [`issuance`]) is the policy-signed
+//! predicate the `0x0023` arm resolves — the producer is `token.mint`'s
+//! economic admission.
 
 pub mod admission;
 pub mod authority_evidence;

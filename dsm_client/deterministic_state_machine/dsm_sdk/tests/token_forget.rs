@@ -176,7 +176,7 @@ fn a_token_with_a_balance_cannot_be_forgotten() {
 
     // Hold the token: an adopted identity plus an installed balance. The
     // route can no longer CREATE a held token here — under 3.5b creator
-    // supply is refused pending the issuance predicate (0x0029) and the fee
+    // supply is refused (issuance goes through `token.mint`) and the fee
     // is an admitted debit integration tests cannot run — and this test is
     // about the FORGET rule, which reads canonical holdings however they
     // arrived.

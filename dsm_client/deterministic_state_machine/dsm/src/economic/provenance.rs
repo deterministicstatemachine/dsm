@@ -654,32 +654,16 @@ pub fn verify_credit_source(
             // 1. The exact accepted operation's own issuance coordinates. Read
             //    from the AUTHENTICATED successor, never from the descriptor.
             let (op_policy_commit, op_amount, op_kind) = match op {
+                // THE AUTHORIZATION NEVER RIDES INSIDE THE OPERATION IT
+                // AUTHORIZES — and since the producer cut this is structural,
+                // not a check: Mint has no authorization fields at all. The
+                // `0x0029` signatures cover this operation's digest and live
+                // only in the evidence bundle the descriptor addresses.
                 crate::types::operations::Operation::Mint {
                     policy_commit,
                     amount,
-                    proof_of_authorization,
                     ..
-                } => {
-                    // THE AUTHORIZATION NEVER RIDES INSIDE THE OPERATION IT
-                    // AUTHORIZES. The `0x0029` signatures cover this
-                    // operation's digest, so carrying them here would make the
-                    // digest depend on the signatures over it — a preimage
-                    // that cannot be constructed honestly, and an invitation
-                    // to a second, unverified place for the same fact to live.
-                    // Authorization is carried by the evidence bundle the
-                    // descriptor addresses, and only there. Refusing a
-                    // non-empty field keeps that the ONLY channel rather than
-                    // leaving a silently-ignored one beside it.
-                    if !proof_of_authorization.is_empty() {
-                        return Err(invalid(
-                            "a Mint funded by an issuance authorization must carry an empty \
-                             proof_of_authorization: the 0x0029 signatures cover this \
-                             operation's digest and live only in the evidence bundle"
-                                .into(),
-                        ));
-                    }
-                    (*policy_commit, amount.value(), "mint")
-                }
+                } => (*policy_commit, amount.value(), "mint"),
                 // Reachable only if supply-at-creation is later enabled; today
                 // the route, the write-set table and the accepting layer all
                 // refuse it. Handled here so the arm covers the operations the
@@ -707,7 +691,14 @@ pub fn verify_credit_source(
                     &d.issuance_authorization_addr,
                 )
                 .map_err(ProvenanceError::OwnerLineage)?;
-            if crate::storage_object::immutable_addr(
+            // The descriptor's address is the INNER content identity —
+            // `H_dom(namespace, payload)` — the same form every other object
+            // in the evidence DAG (witness, manifest, authority, successor
+            // evidence) is addressed by, and the form the resolver's fetch
+            // path derives its store key from. The outer storage-object addr
+            // exists too, but an arm that committed to it would name an
+            // address no resolver can dereference.
+            if crate::storage_object::immutable_inner(
                 crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
                 &bundle_bytes,
             ) != d.issuance_authorization_addr
