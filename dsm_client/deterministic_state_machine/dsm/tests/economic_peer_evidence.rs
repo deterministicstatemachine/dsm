@@ -388,6 +388,15 @@ impl ProvenanceResolver for OnePeer {
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         Err(PeerLineageFailure::Incomplete("no evidence store".into()))
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 /// A peer VPT whose witness has one exact debit, with `verified_operation`
@@ -594,6 +603,15 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
             _a: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             Ok(vec![0xEE; 64])
+        }
+
+        fn anchored_policy_bytes(
+            &self,
+            _policy_commit: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(
+                "this fixture roots no token anchors".into(),
+            ))
         }
     }
     let resolver = WrongBytes {

@@ -206,6 +206,21 @@ pub trait ProvenanceResolver {
         namespace: crate::crypto::domain::TaggedHashDomain<'static>,
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
+
+    /// The canonical `TokenPolicyV3` bytes rooted under `policy_commit` —
+    /// the VERIFIER'S OWN anchoring in the token's public anchor, never
+    /// counterparty-supplied bytes. Anchors are public identifiers (the
+    /// CoinGecko model): anyone holding the commit may root to the token, and
+    /// a verifier holding a `V_n`-authenticated commit IS a holder — so the
+    /// resolver serves its local rooting or fetches from the authoritative
+    /// content-addressed path. The verifier re-hashes whatever arrives
+    /// against the commit before trusting a byte; the resolver is a locator,
+    /// never authority. Unavailable bytes are `Incomplete` — an availability
+    /// condition, not a permission.
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
 /// Why a credit is not funded.
@@ -215,6 +230,12 @@ pub enum ProvenanceError {
     /// the policy bytes, the signed body, the V1 support matrix, or the
     /// k-of-N threshold over the exact issuance.
     AuthorizedIssuanceInvalid(String),
+    /// A DLV successor's leg fails the applicable token policy — the SoFi
+    /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
+    /// every release. The anchored bytes did not re-hash to the committed
+    /// leg, did not parse, or the parsed policy refuses the asset as a
+    /// market leg.
+    MarketLegPolicy(String),
     /// The verifier holds no validated transition for the named peer position.
     /// NOT a failure of the peer — a failure of *this* verifier to have
     /// established the prerequisite, and it fails closed.
@@ -300,6 +321,9 @@ impl core::fmt::Display for ProvenanceError {
         match self {
             Self::AuthorizedIssuanceInvalid(m) => {
                 write!(f, "authorized-issuance credit is invalid: {m}")
+            }
+            Self::MarketLegPolicy(m) => {
+                write!(f, "market leg token policy: {m}")
             }
             Self::PeerTransitionNotValidated {
                 peer_economic_position,
@@ -1405,6 +1429,83 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
         source,
         CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_)
     )
+}
+
+/// THE MARKET-LEG TOKEN-POLICY CONJUNCT (SoFi Def 4.1, Req 4.4, Req 4.6):
+/// every DLV successor's legs must satisfy the applicable token policy, and
+/// this is where a foreign verifier reruns that decision — centrally, on the
+/// VERIFIED operation, so fund and close are covered even though their
+/// credits are `SameTransitionMove` and carry no evidence channel.
+///
+/// Per leg: a builtin commit (ERA, dBTC) is pre-rooted on every device by
+/// construction and passes; any other commit requires the verifier's OWN
+/// anchoring — `resolver.anchored_policy_bytes` — whose bytes must re-hash
+/// under `TAG_DSM_POLICY` to the committed leg (the resolver locates, never
+/// authorizes), parse as a v3 policy, and pass
+/// [`crate::economic::issuance::check_market_leg_permitted`].
+///
+/// Non-DLV operations have no market legs and pass vacuously; their policy
+/// conjuncts live elsewhere (0x0023 for issuance, the transfer path's
+/// enforcement for sends).
+/// The market-leg policy commits a DLV value operation moves — empty for
+/// every non-DLV operation. ONE extraction, shared by the core conjunct, the
+/// SDK advance funnel and the route pre-flights, so the four ops cannot
+/// drift apart across layers.
+pub fn market_leg_commits(operation: &crate::types::operations::Operation) -> Vec<[u8; 32]> {
+    use crate::types::operations::Operation;
+    match operation {
+        Operation::DlvCreateFundedV2 {
+            leg_a_policy_commit,
+            leg_b_policy_commit,
+            ..
+        }
+        | Operation::DlvClose {
+            leg_a_policy_commit,
+            leg_b_policy_commit,
+            ..
+        } => vec![*leg_a_policy_commit, *leg_b_policy_commit],
+        Operation::DlvSettle {
+            input_policy_commit,
+            output_policy_commit,
+            ..
+        }
+        | Operation::DlvOwnerApplyV2 {
+            input_policy_commit,
+            output_policy_commit,
+            ..
+        } => vec![*input_policy_commit, *output_policy_commit],
+        _ => Vec::new(),
+    }
+}
+
+pub fn verify_market_leg_policies(
+    operation: &crate::types::operations::Operation,
+    resolver: &dyn ProvenanceResolver,
+) -> Result<(), ProvenanceError> {
+    for pc in market_leg_commits(operation) {
+        if crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
+            .is_some()
+        {
+            continue;
+        }
+        let bytes = resolver
+            .anchored_policy_bytes(&pc)
+            .map_err(ProvenanceError::OwnerLineage)?;
+        if crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_POLICY,
+            &bytes,
+        ) != pc
+        {
+            return Err(ProvenanceError::MarketLegPolicy(
+                "anchored policy bytes do not hash to the committed leg".into(),
+            ));
+        }
+        let policy = crate::economic::issuance::parse_issuance_policy(&bytes)
+            .map_err(|e| ProvenanceError::MarketLegPolicy(format!("leg policy: {e}")))?;
+        crate::economic::issuance::check_market_leg_permitted(&policy)
+            .map_err(|e| ProvenanceError::MarketLegPolicy(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Verify provenance for an entire transition.

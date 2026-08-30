@@ -252,6 +252,15 @@ impl ProvenanceResolver for ApplyResolver {
             Err(PeerLineageFailure::Incomplete("unknown address".into()))
         }
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 fn resolver_for(fx: &Fixture) -> ApplyResolver {
@@ -492,6 +501,15 @@ fn an_unresolvable_trader_lineage_fails_closed() {
             _a: &[u8; 32],
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete("outage".into()))
+        }
+
+        fn anchored_policy_bytes(
+            &self,
+            _policy_commit: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(
+                "this fixture roots no token anchors".into(),
+            ))
         }
     }
     match verify_transition_provenance(&fx.witness, &Nothing, &ctx) {

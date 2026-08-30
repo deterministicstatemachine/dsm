@@ -1045,3 +1045,92 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
         "resume used the SAME evidence bytes — nothing was re-signed"
     );
 }
+
+/// THE FUNNEL IS THE GATE, NOT THE ROUTE: a DLV advance driven DIRECTLY
+/// through the state-machine funnel — no route, no pre-flight — still refuses
+/// a non-transferable market leg. This is the every-caller property the mint
+/// gate taught: a route guard alone leaves any future caller free to reopen
+/// the hole.
+///
+/// MUTATION CONTROL: comment out the `enforce_market_leg_policies_local` call
+/// in `execute_on_relationship_inner` and this goes red — the refusal
+/// (if any) stops naming the market rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_direct_dlv_advance_with_a_non_transferable_leg_is_refused_at_the_funnel() {
+    let (core, _fleet) = crate::handlers::faucet_flow_tests_support::setup(0xE6);
+
+    // Root a NON-transferable policy — the funnel reads local rooting only.
+    let proto = {
+        use prost::Message;
+        let packed = crate::handlers::token_routes::build_policy_v3_bytes(
+            &crate::handlers::token_routes::ParsedTokenPolicy {
+                ticker: "NTFR".into(),
+                alias: "No Transfer".into(),
+                decimals: 0,
+                max_supply: 0,
+                initial_alloc: 0,
+                description: Option::None,
+                icon_url: Option::None,
+                mint_burn_enabled: true,
+                transferable: false,
+                unlimited_supply: true,
+                mint_burn_threshold: 1,
+                signers: vec![vec![0xE1; 64]],
+                allowlist_device_ids: Vec::new(),
+            },
+        )
+        .expect("pack");
+        crate::generated::TokenPolicyV3 {
+            policy_bytes: packed,
+        }
+        .encode_to_vec()
+    };
+    let pc =
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
+    client_db::token_registry::upsert_policy(&pc, &proto).expect("root");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let (lo, hi) = if era < pc { (era, pc) } else { (pc, era) };
+
+    let dev = core.device_head().expect("head").devid();
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev, &dev);
+    let tip =
+        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev, &dev);
+    let op = core
+        .sign_operation_sphincs(dsm::types::operations::Operation::DlvCreateFundedV2 {
+            vault_id: vec![0x77; 32],
+            creator_public_key: vec![0xE2; 64],
+            parameters_hash: vec![0xE3; 32],
+            fulfillment_condition: Vec::new(),
+            leg_a_policy_commit: lo,
+            leg_a_amount: 100,
+            leg_b_policy_commit: hi,
+            leg_b_amount: 100,
+            fee_bps: 30,
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        })
+        .expect("sign");
+    let refused = core.execute_on_relationship_with_reserve_mutation(
+        rel_key,
+        dev,
+        op,
+        &[],
+        Some(tip),
+        Some(dsm::types::device_state::VaultReserveMutation::Fund {
+            vault_id: [0x77; 32],
+            legs: vec![(lo, 100), (hi, 100)],
+            vault_sequence: 0,
+            pair: dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("pair"),
+        }),
+        None,
+    );
+    let msg = refused
+        .err()
+        .map(|e| e.to_string())
+        .expect("the funnel must refuse a non-transferable market leg");
+    assert!(
+        msg.contains("non-transferable") && msg.contains("market leg"),
+        "the funnel refusal names the market rule, got: {msg}"
+    );
+}

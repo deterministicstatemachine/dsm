@@ -331,6 +331,15 @@ impl ProvenanceResolver for OneTicket {
             "no evidence store in this fixture".into(),
         ))
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 fn accepted_for(op: &Operation) -> AcceptedSubstrate {
@@ -663,4 +672,272 @@ fn build_transition(operation_digest: [u8; 32]) -> (EconomicTransitionWitness, [
     )
     .expect("valid witness");
     (witness, post_root)
+}
+
+// ─── The market-leg token-policy conjunct (SoFi Def 4.1 / Req 4.4 / 4.6) ────
+//
+// `advance_validated` binds every DLV successor's legs to the applicable
+// token policy, resolved through the VERIFIER'S OWN anchoring — these tests
+// drive the full validation stack with a real `DlvFund` witness, so the
+// conjunct's reachability is proven, not assumed.
+
+/// A resolver that roots exactly the policies the fixture installs — the
+/// verifier's own anchor store, in miniature.
+struct MarketRooted {
+    policies: std::collections::HashMap<[u8; 32], Vec<u8>>,
+}
+
+impl ProvenanceResolver for MarketRooted {
+    fn validated_peer_transition(
+        &self,
+        _peer_genesis: &[u8; 32],
+        _peer_devid: &[u8; 32],
+        _peer_economic_position: u64,
+    ) -> Result<dsm::economic::provenance::ValidatedPeerTransition, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete("no peers here".into()))
+    }
+    fn winning_faucet_ticket(
+        &self,
+        _faucet_id: &[u8; 32],
+        _ticket_index: u64,
+    ) -> Option<dsm::economic::provenance::FaucetTicketWin> {
+        None
+    }
+    fn winning_settlement_slot_claim(
+        &self,
+        _vault_id: &[u8; 32],
+        _parent_sequence: u64,
+    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
+        None
+    }
+    fn immutable_evidence(
+        &self,
+        _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        _addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete("no evidence store".into()))
+    }
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.policies.get(policy_commit).cloned().ok_or_else(|| {
+            PeerLineageFailure::Incomplete(
+                "not rooted to this token's anchor — root, then retry".into(),
+            )
+        })
+    }
+}
+
+/// A canonical v3 policy proto (the exact packed layout, count included),
+/// varying only the transferable flag.
+fn market_policy_proto(transferable: bool) -> Vec<u8> {
+    let mut flags = 0x01u8; // mint_burn
+    if transferable {
+        flags |= 0x02;
+    }
+    flags |= 0x08; // unlimited
+    let signer = vec![0xE1u8; 64];
+    let mut b = vec![3u8, 0u8, flags, 1u8, 1u8];
+    b.extend_from_slice(&(signer.len() as u16).to_be_bytes());
+    b.extend_from_slice(&signer);
+    b.push(3);
+    b.extend_from_slice(b"TKX");
+    let alias = b"Token X";
+    b.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+    b.extend_from_slice(alias);
+    b.push(0);
+    b.extend_from_slice(&0u128.to_be_bytes());
+    b.extend_from_slice(&0u128.to_be_bytes());
+    b.extend_from_slice(&0u16.to_be_bytes());
+    b.extend_from_slice(&0u16.to_be_bytes());
+    b.push(0);
+    b.extend_from_slice(&0u16.to_be_bytes());
+    use prost::Message;
+    dsm::types::proto::TokenPolicyV3 { policy_bytes: b }.encode_to_vec()
+}
+
+/// A complete, well-formed DlvFund validation drive: two funded legs, the
+/// REAL write-set builder, and a predecessor rehydrated at the pre-root, so
+/// the only open question is the market-leg policy conjunct.
+#[allow(clippy::type_complexity)]
+fn dlv_fund_drive(
+    leg_x_pc: [u8; 32],
+    leg_y_pc: [u8; 32],
+    resolver: &MarketRooted,
+) -> Result<
+    (
+        dsm::economic::lineage::ValidatedEconomicRoot,
+        Vec<dsm::economic::provenance::FundedCredit>,
+    ),
+    EconomicValidationError,
+> {
+    use dsm::economic::write_set::{build_write_set, CreditSourceFacts, EconomicPreState};
+    let (lo, hi) = if leg_x_pc < leg_y_pc {
+        (leg_x_pc, leg_y_pc)
+    } else {
+        (leg_y_pc, leg_x_pc)
+    };
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert(lo, 1_000u64);
+    balances.insert(hi, 1_000u64);
+    let mut tree = EconomicSmt::new();
+    for (pc, amount) in &balances {
+        let leaf =
+            EconomicLeafState::Balance(EconomicBalanceState::new(*pc, *amount).expect("balance"));
+        tree.insert(leaf.leaf_key(&G, &DEV), leaf.leaf_value().expect("value"));
+    }
+    let pre_root = tree.root();
+
+    let op = Operation::DlvCreateFundedV2 {
+        vault_id: vec![0x77; 32],
+        creator_public_key: vec![0xE2; 64],
+        parameters_hash: vec![0xE3; 32],
+        fulfillment_condition: Vec::new(),
+        leg_a_policy_commit: lo,
+        leg_a_amount: 250,
+        leg_b_policy_commit: hi,
+        leg_b_amount: 400,
+        fee_bps: 30,
+        signature: vec![0xE4; 8],
+        mode: TransactionMode::Unilateral,
+    };
+    let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+    let econ_op_id = dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS);
+    let built = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id,
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::None,
+    )
+    .expect("the real builder builds the fund write set");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        econ_op_id,
+        op_digest,
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("valid witness");
+    let manifest = manifest_for(&witness);
+    let registered = registered_for(&manifest, 8, built.post_root);
+    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
+        op,
+        C_DSM_PLUS,
+        EMBEDDED_PARENT,
+        SUBSTRATE_ADDR,
+    );
+    let previous =
+        dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(7, pre_root);
+    advance_validated(
+        &previous,
+        &registered,
+        &manifest,
+        &witness,
+        &accepted,
+        resolver,
+        &G,
+        &DEV,
+        b"dsm-testnet",
+        &[0x55; 64],
+    )
+}
+
+fn tokx_pc(proto: &[u8]) -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, proto)
+}
+
+/// The honest case: one builtin leg, one rooted transferable leg — validates
+/// end to end. The resolver's map holds ONLY the non-builtin policy, so this
+/// simultaneously proves the builtin leg never consults the resolver.
+#[test]
+fn a_dlv_fund_with_a_rooted_transferable_leg_validates() {
+    let proto = market_policy_proto(true);
+    let pc = tokx_pc(&proto);
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let resolver = MarketRooted {
+        policies: [(pc, proto)].into_iter().collect(),
+    };
+    let (root, funded) = dlv_fund_drive(pc, era, &resolver)
+        .expect("a rooted transferable leg beside a builtin validates");
+    assert_eq!(root.economic_position(), 8);
+    assert_eq!(funded.len(), 2, "both reserve credits funded by SameMove");
+}
+
+/// Both legs builtin (ERA + dBTC): the resolver roots NOTHING and is never
+/// asked — pre-rooted by construction, the sole exceptions.
+#[test]
+fn builtin_legs_never_consult_the_resolver() {
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let dbtc = dsm::core::token::builtin_policy_commit_for_token("dBTC").expect("dBTC");
+    let resolver = MarketRooted {
+        policies: std::collections::HashMap::new(),
+    };
+    dlv_fund_drive(era, dbtc, &resolver)
+        .expect("a builtin pair validates with no anchoring at all");
+}
+
+/// THE MARKET RULE: a non-transferable asset cannot be a market leg — its
+/// committed policy restricts it to mint/burn, and a DLV successor moves
+/// control between parties.
+///
+/// MUTATION CONTROL for the lineage conjunct: comment out the
+/// `verify_market_leg_policies` call in `advance_validated` and this test
+/// goes red by validating reserve encumbrance of a non-transferable asset.
+#[test]
+fn a_non_transferable_leg_is_refused_as_a_market_leg() {
+    let proto = market_policy_proto(false);
+    let pc = tokx_pc(&proto);
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let resolver = MarketRooted {
+        policies: [(pc, proto)].into_iter().collect(),
+    };
+    let err = dlv_fund_drive(pc, era, &resolver)
+        .expect_err("a non-transferable market leg must be refused");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("MarketLegPolicy") && msg.contains("non-transferable"),
+        "the refusal names the market rule, got: {msg}"
+    );
+}
+
+/// An unrooted leg fails CLOSED as `Incomplete` — an availability condition
+/// (root, then retry), never a validity verdict.
+#[test]
+fn an_unrooted_market_leg_fails_closed_as_incomplete() {
+    let proto = market_policy_proto(true);
+    let pc = tokx_pc(&proto);
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let resolver = MarketRooted {
+        policies: std::collections::HashMap::new(),
+    };
+    let err = dlv_fund_drive(pc, era, &resolver).expect_err("unrooted leg fails closed");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Incomplete") && msg.contains("not rooted"),
+        "the refusal is retryable unavailability, got: {msg}"
+    );
+}
+
+/// Bytes that do not re-hash to the committed leg are refused: the resolver
+/// locates, it never authorizes.
+#[test]
+fn policy_bytes_that_do_not_hash_to_the_leg_are_refused() {
+    let proto = market_policy_proto(true);
+    let pc = tokx_pc(&proto);
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let wrong = market_policy_proto(false); // valid bytes, wrong commit
+    let resolver = MarketRooted {
+        policies: [(pc, wrong)].into_iter().collect(),
+    };
+    let err = dlv_fund_drive(pc, era, &resolver).expect_err("mismatched bytes refused");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("do not hash to the committed leg"),
+        "the refusal is the hash binding, got: {msg}"
+    );
 }

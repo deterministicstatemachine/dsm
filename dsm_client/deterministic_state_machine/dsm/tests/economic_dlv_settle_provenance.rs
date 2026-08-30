@@ -484,6 +484,15 @@ impl ProvenanceResolver for SettleResolver {
             Err(PeerLineageFailure::Incomplete("unknown address".into()))
         }
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 fn resolver_for(fx: &Fixture) -> SettleResolver {

@@ -81,10 +81,52 @@ pub(crate) fn token_pair() -> (Vec<u8>, Vec<u8>) {
     (b"AAA".to_vec(), b"BBB".to_vec())
 }
 
-/// Policy commits for that pair. Distinct, deterministic, and deliberately NOT
-/// derived from the ticker bytes — a ticker is not an identity.
+/// Policy commits for that pair: REAL anchors of real transferable policies,
+/// rooted on this device — because a market leg now requires exactly that.
+/// The old fixture used two arbitrary byte strings, which is the precise hole
+/// the market-leg gate closed; a fixture that kept them would be testing
+/// against assets that cannot exist. Distinct, deterministic (the protos are
+/// fixed), returned in canonical (lex) order, and best-effort rooted on every
+/// call so any test that reaches `dlv.create` finds the device anchored.
 pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
-    ([0xA1u8; 32], [0xB2u8; 32])
+    fn rooted_transferable(ticker: &str) -> [u8; 32] {
+        use prost::Message;
+        let packed = crate::handlers::token_routes::build_policy_v3_bytes(
+            &crate::handlers::token_routes::ParsedTokenPolicy {
+                ticker: ticker.into(),
+                alias: format!("{ticker} Test Asset"),
+                decimals: 0,
+                max_supply: 0,
+                initial_alloc: 0,
+                description: None,
+                icon_url: None,
+                mint_burn_enabled: true,
+                transferable: true,
+                unlimited_supply: true,
+                mint_burn_threshold: 1,
+                signers: vec![vec![0xE1; 64]],
+                allowlist_device_ids: Vec::new(),
+            },
+        )
+        .expect("fixture policy packs");
+        let proto = crate::generated::TokenPolicyV3 {
+            policy_bytes: packed,
+        }
+        .encode_to_vec();
+        let pc = dsm::crypto::blake3::domain_hash_bytes(
+            dsm::common::domain_tags::TAG_DSM_POLICY,
+            &proto,
+        );
+        let _ = crate::storage::client_db::token_registry::upsert_policy(&pc, &proto);
+        pc
+    }
+    let x = rooted_transferable("AAA");
+    let y = rooted_transferable("BBB");
+    if x < y {
+        (x, y)
+    } else {
+        (y, x)
+    }
 }
 
 /// A device holding `a` / `b` base units of the pair and nothing encumbered.

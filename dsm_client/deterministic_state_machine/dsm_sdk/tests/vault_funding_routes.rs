@@ -573,3 +573,129 @@ fn is_unknown_route(msg: &str) -> bool {
     m.contains("unknown")
         && (m.contains("invoke") || m.contains("query path") || m.contains("route"))
 }
+
+// ─── The market-leg token-policy gate at the route ──────────────────────────
+
+/// A canonical v3 policy proto (packed layout, allowlist count included),
+/// varying only the transferable flag.
+fn market_policy_proto(transferable: bool) -> Vec<u8> {
+    let mut flags = 0x01u8;
+    if transferable {
+        flags |= 0x02;
+    }
+    flags |= 0x08;
+    let signer = vec![0xE1u8; 64];
+    let mut b = vec![3u8, 0u8, flags, 1u8, 1u8];
+    b.extend_from_slice(&(signer.len() as u16).to_be_bytes());
+    b.extend_from_slice(&signer);
+    b.push(3);
+    b.extend_from_slice(b"TKX");
+    let alias = b"Token X";
+    b.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+    b.extend_from_slice(alias);
+    b.push(0);
+    b.extend_from_slice(&0u128.to_be_bytes());
+    b.extend_from_slice(&0u128.to_be_bytes());
+    b.extend_from_slice(&0u16.to_be_bytes());
+    b.extend_from_slice(&0u16.to_be_bytes());
+    b.push(0);
+    b.extend_from_slice(&0u16.to_be_bytes());
+    generated::TokenPolicyV3 { policy_bytes: b }.encode_to_vec()
+}
+
+fn create_req_for_pair(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
+    let spec = generated::DlvSpecV1 {
+        policy_digest: vec![0x11u8; 32],
+        fulfillment_bytes: amm_fulfillment_bytes(a, b, fee_bps),
+        ..Default::default()
+    };
+    generated::DlvInstantiateV1 {
+        spec: Some(spec),
+        creator_public_key: vec![0xABu8; 64],
+        signature: Vec::new(),
+        funding_legs: vec![
+            generated::DlvFundingLegV1 {
+                policy_commit: a.to_vec(),
+                amount: 1_000,
+            },
+            generated::DlvFundingLegV1 {
+                policy_commit: b.to_vec(),
+                amount: 1_000,
+            },
+        ],
+    }
+    .encode_to_vec()
+}
+
+/// THE HOLE THIS GATE CLOSES: any 32 random bytes with a balance under them
+/// used to be an acceptable funding leg. A leg this device is not rooted to
+/// is now refused by name, before any balance is touched.
+#[test]
+#[serial_test::serial]
+fn an_unrooted_market_leg_is_refused_at_creation() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    let phantom = [0x44u8; 32];
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let res = invoke(
+        &r,
+        "dlv.create",
+        pack(create_req_for_pair(&era, &phantom, 30)),
+    );
+    assert!(!res.success, "an unrooted leg must not create a vault");
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        msg.contains("not rooted"),
+        "the refusal names the missing rooting, got: {msg}"
+    );
+}
+
+/// THE MARKET RULE AT THE ROUTE: a rooted but NON-TRANSFERABLE asset is
+/// refused as a leg — its committed policy restricts it to mint/burn.
+#[test]
+#[serial_test::serial]
+fn a_non_transferable_leg_is_refused_at_creation() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    let proto = market_policy_proto(false);
+    let pc =
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
+    dsm_sdk::storage::client_db::token_registry::upsert_policy(&pc, &proto).expect("root");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let res = invoke(&r, "dlv.create", pack(create_req_for_pair(&era, &pc, 30)));
+    assert!(
+        !res.success,
+        "a non-transferable leg must not create a vault"
+    );
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        msg.contains("non-transferable") && msg.contains("market leg"),
+        "the refusal names the market rule, got: {msg}"
+    );
+}
+
+/// POSITIVE CONTROL: the same shape with a rooted TRANSFERABLE leg gets past
+/// the policy gate — its refusal (this fixture funds nothing) is the balance
+/// check, proving the two refusals above are the policy rules and not a
+/// broken request.
+#[test]
+#[serial_test::serial]
+fn a_rooted_transferable_leg_passes_the_policy_gate() {
+    runtime::dsm_init_runtime();
+    init_test_storage();
+    let r = new_router();
+    let proto = market_policy_proto(true);
+    let pc =
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
+    dsm_sdk::storage::client_db::token_registry::upsert_policy(&pc, &proto).expect("root");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+    let res = invoke(&r, "dlv.create", pack(create_req_for_pair(&era, &pc, 30)));
+    assert!(!res.success, "unfunded fixture cannot actually create");
+    let msg = res.error_message.unwrap_or_default();
+    assert!(
+        !msg.contains("not rooted") && !msg.contains("market leg"),
+        "a rooted transferable leg must pass the policy gate, got: {msg}"
+    );
+}

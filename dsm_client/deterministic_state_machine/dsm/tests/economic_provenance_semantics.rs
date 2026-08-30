@@ -64,6 +64,15 @@ impl ProvenanceResolver for NoPeers {
             "no evidence store in this fixture".into(),
         ))
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 const NETWORK: &[u8] = b"dsm-testnet";

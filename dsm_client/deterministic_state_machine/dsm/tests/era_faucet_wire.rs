@@ -155,6 +155,15 @@ impl ProvenanceResolver for OneTicket {
             "no evidence store in this fixture".into(),
         ))
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        _policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        Err(PeerLineageFailure::Incomplete(
+            "this fixture roots no token anchors".into(),
+        ))
+    }
 }
 
 fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
@@ -376,6 +385,15 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
         ) -> Result<Vec<u8>, PeerLineageFailure> {
             Err(PeerLineageFailure::Incomplete(
                 "no evidence store in this fixture".into(),
+            ))
+        }
+
+        fn anchored_policy_bytes(
+            &self,
+            _policy_commit: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(
+                "this fixture roots no token anchors".into(),
             ))
         }
     }
