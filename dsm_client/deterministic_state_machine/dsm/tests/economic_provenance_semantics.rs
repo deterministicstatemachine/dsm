@@ -234,12 +234,21 @@ fn an_asset_mismatch_is_refused() {
     ));
 }
 
+/// Issuance is resolvable NOW — class `0x0029` exists — but only against the
+/// authenticated operation it authorizes.
+///
+/// This used to assert `IssuancePredicateUndefined`, encoding the absence that
+/// also made the accepting layer refuse builtin issuance outright. That
+/// absence is gone. What remains, and what this pins, is that the arm reads
+/// its issuance coordinates from the VERIFIED SUCCESSOR and from nowhere else:
+/// with no verified operation in context there is nothing to authorize
+/// against, and a descriptor pointing at an evidence address cannot supply one.
+/// A caller cannot hand the arm an assertion in place of the operation.
+///
+/// The honest path, the k-of-N threshold and every refusal conjunct are proven
+/// on a real fixture in `economic_authorized_issuance.rs`.
 #[test]
-fn authorized_issuance_cannot_be_resolved_by_anyone() {
-    // The same absence that makes the accepting layer refuse builtin ERA/dBTC
-    // issuance. Class 0x0029 stays reserved because writing its field table
-    // would encode a "who may issue what" rule this protocol does not have —
-    // and a credit is not funded by an object nobody can check.
+fn issuance_resolves_only_against_the_authenticated_operation() {
     let w = witness(
         vec![mutation(None, Some(bal(ERA, 100)))],
         vec![CreditSource::AuthorizedIssuance(
@@ -249,10 +258,15 @@ fn authorized_issuance_cannot_be_resolved_by_anyone() {
             },
         )],
     );
-    assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
-        ProvenanceError::IssuancePredicateUndefined
-    );
+    match verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64]))
+        .unwrap_err()
+    {
+        ProvenanceError::AuthorizedIssuanceInvalid(m) => assert!(
+            m.contains("verified operation"),
+            "the refusal must name the missing verified operation, got: {m}"
+        ),
+        other => panic!("expected an issuance refusal, got {other:?}"),
+    }
 }
 
 #[test]

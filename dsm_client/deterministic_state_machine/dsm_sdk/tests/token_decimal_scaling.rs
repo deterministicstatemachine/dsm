@@ -123,9 +123,12 @@ fn create(
 // under 3.5b creator supply is refused pending the issuance predicate
 // (0x0029), and custom-token mint/burn has no economically admissible path.
 // The cap-scaling half of the contract (display cap -> BASE-unit registry
-// cap, scaled exactly once at the Rust boundary) is pinned live in the lib
-// e2e `handlers::sender_admission_tests::token_routes_admit_fee_only_create_and_burn_end_to_end`.
-// What stays here is the refusal side, which still runs in the same units.
+// cap) is no longer pinned on a SUCCESSFUL creation anywhere: a capped policy
+// is refused in beta, so no creation that reaches the registry carries a cap
+// to scale. What stays pinned here is the arithmetic itself, through the two
+// refusals that still run on the capped path before the capability gate —
+// overflow-on-scale and cap-vs-allocation, both in scaled units. When the cap
+// gate lifts, a successful-creation assertion belongs back in the route e2e.
 
 /// A cap that overflows once scaled is refused BEFORE anything is committed.
 #[test]
@@ -139,6 +142,15 @@ fn a_quantity_that_overflows_when_scaled_is_refused() {
     let root_before = r.core_sdk.device_head().map(|h| h.root());
     let res = create(&r, "HUGE", 18, u128::MAX / 10, 1);
     assert!(!res.success, "an overflowing cap must be refused");
+    // Assert the REASON, not just the refusal. Capped creation is also
+    // refused as a beta capability, and that gate sits just after this one —
+    // without this the test would keep passing if the overflow check were
+    // deleted, having silently become a test of the capability gate.
+    let msg = res.error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("overflows at 18 decimals"),
+        "must be refused by the scaling check, got: {msg}"
+    );
     assert_eq!(
         r.core_sdk.device_head().map(|h| h.root()),
         root_before,
@@ -164,6 +176,11 @@ fn an_allocation_above_the_cap_is_refused() {
     assert!(
         !res.success,
         "an allocation larger than the cap must be refused"
+    );
+    let msg = res.error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("initial allocation exceeds max supply"),
+        "must be refused by the cap comparison, got: {msg}"
     );
     assert_eq!(token_registry::all_tokens().expect("registry").len(), 0);
 }

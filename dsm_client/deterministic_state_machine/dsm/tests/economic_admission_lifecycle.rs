@@ -451,10 +451,21 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     }
 }
 
+/// THE BOOTSTRAP FINDING, RESOLVED — and what replaced it.
+///
+/// This test used to pin `IssuancePredicateUndefined`: with no authenticated
+/// issuance predicate, a positive credit could never enter a validated
+/// lineage at all, and the wallet was structurally unfundable except through
+/// the ERA faucet's bootstrap tickets.
+///
+/// Class `0x0029` answers that, so the blanket refusal is gone. What replaced
+/// it is narrower and is what this test now pins: the predicate must be
+/// SATISFIED, not merely defined. A mint whose witness carries no issuance
+/// source — as here — is refused because the credit it claims has no source
+/// of the kind the operation requires. Existence of a predicate never
+/// substitutes for evidence under it.
 #[test]
-fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
-    // A Mint-shaped transition: the write-set rule itself refuses it — no
-    // authenticated issuance predicate exists to derive a write set from.
+fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
     let fx = faucet_fixture(1);
     let (witness, post_root) = build_transition(fx.witness.operation_digest);
     let mint = Operation::Mint {
@@ -472,7 +483,7 @@ fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
         SUBSTRATE_ADDR,
     );
     // Rebind the witness digest to the mint operation so the refusal comes
-    // from the ISSUANCE clause, not a digest mismatch.
+    // from the write-set/source clause, not a digest mismatch.
     let witness = EconomicTransitionWitness::new(
         witness.pre_economic_root,
         witness.post_economic_root,
@@ -486,9 +497,12 @@ fn value_cannot_enter_a_lineage_without_an_issuance_predicate() {
     let registered = registered_for(&manifest, 1, post_root);
     match run(&fx, &registered, &manifest, &witness, &accepted) {
         Err(EconomicValidationError::WriteSet(
-            dsm::economic::write_set::WriteSetError::IssuancePredicateUndefined,
-        )) => {}
-        other => panic!("a credit from undefined issuance must be refused, got {other:?}"),
+            dsm::economic::write_set::WriteSetError::WrongWriteSet { detail },
+        )) => assert!(
+            detail.contains("credit source kind does not match"),
+            "the refusal must be the missing issuance source, got: {detail}"
+        ),
+        other => panic!("a mint with no issuance source must be refused, got {other:?}"),
     }
 }
 

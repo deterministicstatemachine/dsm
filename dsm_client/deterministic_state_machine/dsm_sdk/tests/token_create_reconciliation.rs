@@ -95,16 +95,16 @@ fn fund_era(r: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-fn request(ticker: &str, max: u128, alloc: u128) -> generated::TokenCreateRequest {
+fn request(ticker: &str, alloc: u128) -> generated::TokenCreateRequest {
     generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
         decimals: 2,
-        max_supply_u128: max.to_be_bytes().to_vec(),
+        max_supply_u128: 0u128.to_be_bytes().to_vec(),
         initial_alloc_u128: alloc.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
-        unlimited_supply: false,
+        unlimited_supply: true,
         mint_burn_threshold: 1,
         description: String::new(),
         icon_url: String::new(),
@@ -147,7 +147,7 @@ fn a_refused_creator_supply_leaves_no_reconcilable_trace() {
     let r = new_router();
     fund_era(&r);
 
-    let req = request("RECON", 1_000_000, 1_000);
+    let req = request("RECON", 1_000);
     let before = era(&r);
 
     let (ok1, _, msg1) = create(&r, &req);
@@ -181,8 +181,12 @@ fn an_unaffordable_creation_leaves_no_reconcilable_trace() {
     let r = new_router();
     // deliberately unfunded: no ERA for the fee
 
-    let (ok, _, _) = create(&r, &request("BROKE", 1_000, 10));
+    let (ok, _, msg) = create(&r, &request("BROKE", 0));
     assert!(!ok, "creation without the fee must fail");
+    assert!(
+        msg.contains("insufficient ERA"),
+        "must fail on affordability, not an earlier gate, got: {msg}"
+    );
     assert_eq!(
         token_registry::all_tokens().expect("registry").len(),
         0,
@@ -190,6 +194,6 @@ fn an_unaffordable_creation_leaves_no_reconcilable_trace() {
     );
 
     // And the retry must report a retryable failure, not a phantom success.
-    let (ok2, _, _) = create(&r, &request("BROKE", 1_000, 10));
+    let (ok2, _, _) = create(&r, &request("BROKE", 0));
     assert!(!ok2, "retrying an unaffordable creation must still fail");
 }

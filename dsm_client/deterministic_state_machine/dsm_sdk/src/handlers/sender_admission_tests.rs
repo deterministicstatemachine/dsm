@@ -239,15 +239,18 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
         crate::generated::TokenCreateRequest {
             ticker: "ADMT".into(),
             alias: "Admitted Token".into(),
-            // Nonzero decimals so the cap-scaling contract (display cap ->
-            // BASE-unit registry cap, scaled exactly once at the boundary)
-            // stays pinned now that no integration test can create a token.
+            // Decimals stay nonzero so the created token is not accidentally
+            // the trivial whole-unit shape. The cap-scaling contract is NOT
+            // pinned here any more: a capped creation is refused in beta, so
+            // the only creation that reaches the registry carries no cap.
+            // `token_decimal_scaling.rs` pins the scaling arithmetic through
+            // the capped path's own refusals.
             decimals: 2,
-            max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
+            max_supply_u128: 0u128.to_be_bytes().to_vec(),
             initial_alloc_u128: alloc.to_be_bytes().to_vec(),
             mint_burn_enabled: true,
             transferable: true,
-            unlimited_supply: false,
+            unlimited_supply: true,
             mint_burn_threshold: 1,
             description: String::new(),
             icon_url: String::new(),
@@ -320,8 +323,8 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
         .expect("registry read")
         .expect("registry row committed with the advance");
     assert_eq!(
-        row.max_supply, 100_000_000,
-        "display cap 1,000,000 at 2 decimals is recorded as BASE units"
+        row.max_supply, 0,
+        "an uncapped token records no cap — the only creation beta admits"
     );
     assert_eq!(resp.policy_anchor.len(), 32, "anchor is 32 bytes");
     let (stored_anchor, stored_policy) = client_db::token_registry::all_policies()
