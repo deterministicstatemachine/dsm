@@ -183,21 +183,16 @@ async fn e2e_online_transfer_era_and_custom_token() {
     println!("✅ Alice fixture ERA = {}", era_after_faucet);
 
     // --- Alice: Create custom token "BETA" ---
-    let beta_max_supply = {
-        let mut buf = [0u8; 16];
-        buf[8..].copy_from_slice(&1_000_000u64.to_be_bytes());
-        buf.to_vec()
-    };
 
     let beta_req = proto::TokenCreateRequest {
         ticker: "BETA".to_string(),
         alias: "Beta Token".to_string(),
         decimals: 2,
-        max_supply_u128: beta_max_supply,
+        max_supply_u128: 0u128.to_be_bytes().to_vec(),
         initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
-        unlimited_supply: false,
+        unlimited_supply: true,
         mint_burn_threshold: 1,
         description: String::new(),
         icon_url: String::new(),

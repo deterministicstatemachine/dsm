@@ -118,6 +118,21 @@ pub mod class {
     pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
     pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
 
+    /// `0x0029` — the authenticated issuance authorization an `0x0023`
+    /// `AuthorizedIssuance` credit resolves against.
+    ///
+    /// Allocated with the field table that earns it: it answers WHO HAD THE
+    /// RIGHT TO CREATE THESE UNITS, and it answers it from the committed token
+    /// policy rather than from the issuer's assertion. V1 is deliberately
+    /// narrow — it admits issuance only under a `TokenAuthority` threshold met
+    /// by distinct policy-named signers over the exact issuance, and refuses
+    /// every policy condition whose inputs are not foreign-verifiable.
+    ///
+    /// It proves POLICY AUTHORIZATION, never backing: nothing here establishes
+    /// that the issued units are redeemable for or collateralized by any other
+    /// asset.
+    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
+
     /// The recipient credit of a consumed ERA faucet ticket — the seventh
     /// provenance arm. Scoped to one network through its `faucet_id`.
     pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
@@ -142,25 +157,6 @@ pub mod class {
 /// it. Reaching into `reserved` from a `CcbObject` impl is caught by
 /// `reserved_classes_have_no_encoder`.
 pub mod reserved {
-    /// The authorization an `AuthorizedIssuance` credit resolves against.
-    ///
-    /// Still reserved after the provenance wire freeze, and deliberately. A
-    /// field table for this object would encode **who may issue what**, and
-    /// this protocol has no authenticated issuance predicate — that absence is
-    /// the finding behind the builtin ERA/dBTC mint repair, where the
-    /// accepting layer now refuses builtin issuance precisely because no such
-    /// predicate exists to validate against.
-    ///
-    /// Nothing is blocked by the reservation: `0x0023` references its
-    /// authorization by **address**, so the credit source is complete on the
-    /// wire while the object behind the address stays undefined until the
-    /// predicate it encodes does.
-    pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
-
-    // The offline-account boundary and portable-anchor objects, held for the
-    // Step-5 offline integration cut. Pre-assigned by the frozen plan; made
-    // STRUCTURAL here so a later PR cannot allocate one of these numbers
-    // because "the plan said it was reserved" while the code said nothing.
     pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
     pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
     pub const OFFLINE_SPEND_STEP_EVIDENCE: u16 = 0x002C;
@@ -171,7 +167,6 @@ pub mod reserved {
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
     pub const ALL: &[u16] = &[
-        ISSUANCE_AUTHORIZATION_BODY,
         OFFLINE_LOAD_BOUNDARY_BODY,
         OFFLINE_UNLOAD_BOUNDARY_BODY,
         OFFLINE_SPEND_STEP_EVIDENCE,
