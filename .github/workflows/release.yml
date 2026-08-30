@@ -90,7 +90,12 @@ jobs:
 
       - name: Test (workspace, excluding storage node default features)
         run: |
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture
+          # --test-threads=1 for the same reason as ci.yml: process-global
+          # singletons make parallel test threads a nondeterministic flake
+          # source, and #[serial] only serializes #[serial] tests against each
+          # other. This workflow previously omitted the flag, running a
+          # parallelism the merge gate never exercised.
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
           cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
 
       - name: Security audit
