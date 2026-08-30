@@ -394,11 +394,9 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
         amount: Balance::from_state(100, [0u8; 32]),
         token_id: b"NEW".to_vec(),
         policy_commit: pc,
-        authorized_by: Vec::new(),
         // The 0x0029 signatures live in the evidence bundle, never here: a
         // signature inside the operation would change the operation digest the
         // signed body commits to, and the scheme would have no fixed point.
-        proof_of_authorization: Vec::new(),
         message: String::new(),
     };
     assert_eq!(
@@ -438,8 +436,6 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
         amount: Balance::from_state(0, [0u8; 32]),
         token_id: b"NEW".to_vec(),
         policy_commit: pc,
-        authorized_by: Vec::new(),
-        proof_of_authorization: Vec::new(),
         message: String::new(),
     };
     assert_eq!(

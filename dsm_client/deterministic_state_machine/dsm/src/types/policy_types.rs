@@ -194,9 +194,11 @@ pub enum PolicyCondition {
     /// The `signers` list is the "N" in k-of-N — it did not exist anywhere in
     /// the data model before, which is why the threshold the wizard collected
     /// could never be enforced against anything. Verification takes the public
-    /// key from HERE; taking it from the caller's own proof (as the dead
-    /// `verify_mint_authorization_for_transition` did) authorises anyone able
-    /// to sign with a key they generated themselves.
+    /// key from HERE; taking it from the caller's own proof (as the deleted
+    /// legacy mint verifier did) authorises anyone able to sign with a key
+    /// they generated themselves. Mint itself no longer uses this condition —
+    /// its authority is the 0x0029 issuance evidence — so this gates burn and
+    /// create_token.
     TokenAuthority {
         /// Raw SPHINCS+ public keys permitted to mint/burn.
         signers: Vec<Vec<u8>>,

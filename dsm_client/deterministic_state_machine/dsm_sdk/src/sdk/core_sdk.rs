@@ -1102,33 +1102,22 @@ impl CoreSDK {
                 )))
             }
             DsmOperation::Mint {
-                token_id,
-                amount,
-                policy_commit,
-                authorized_by,
-                proof_of_authorization,
-                ..
+                token_id, amount, ..
             } => {
                 let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
                     DsmError::invalid_operation(
                         "Policy enforcement rejected: malformed or empty token_id",
                     )
                 })?;
+                // The amount facts stay so supply-shaped conditions keep their
+                // inputs. NO authorization witness: mint's authority is the
+                // 0x0029 issuance evidence verified during economic admission,
+                // and the TokenAuthority condition no longer gates "mint" —
+                // inserting the legacy witness here would be a second
+                // authorization channel beside the one that actually decides.
                 let amount_u64 = amount.value();
                 context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
                 context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("authorized_by".to_string(), authorized_by.clone());
-                // Authorisation witness for the TokenAuthority condition. The
-                // enforcer rebuilds the signed preimage from these, so it
-                // verifies the message actually being executed.
-                Self::insert_auth_witness(
-                    &mut context,
-                    policy_commit,
-                    token_id.as_bytes(),
-                    amount_u64,
-                    authorized_by,
-                    proof_of_authorization,
-                );
                 Ok(Some((token_id.to_string(), "mint".to_string(), context)))
             }
             DsmOperation::Burn {
@@ -2325,11 +2314,6 @@ impl CoreSDK {
         };
         self.write_genesis_device_head(genesis_state_hash)?;
 
-        // Optional dev-only seeding (idempotent)
-        if let Err(e) = self.maybe_dev_seed_after_genesis().await {
-            log::warn!("Dev seeding skipped: {}", e);
-        }
-
         Ok(GenesisInfo {
             genesis_hash: genesis_state.hash.to_vec(),
             device_id,
@@ -2359,95 +2343,6 @@ impl CoreSDK {
         };
         self.write_genesis_device_head(genesis_state_hash)?;
         Ok(genesis_state.hash)
-    }
-
-    /// Dev-only seeding of ERA token for local testing, idempotent via flag file
-    async fn maybe_dev_seed_after_genesis(&self) -> Result<(), DsmError> {
-        // Gate via env var DSM_DEV_SEED=1
-        let enabled = std::env::var("DSM_DEV_SEED")
-            .ok()
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if !enabled {
-            return Ok(());
-        }
-
-        // Determine flag path
-        let flag_path = std::env::var("DSM_DEV_SEED_DIR")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(".dsm_dev"));
-        let _ = std::fs::create_dir_all(&flag_path);
-        let flag_file = flag_path.join("seeded.flag");
-        if flag_file.exists() {
-            return Ok(());
-        }
-
-        // Construct a Mint operation for ERA
-        use dsm::types::operations::Operation as O;
-        use dsm::types::token_types::Balance as Bal;
-
-        // Ensure we have a current state
-        let _cur = self.get_current_state()?;
-
-        let mut amt = Bal::zero();
-        amt.update(1_000_000, true); // 1_000_000 units for local testing
-
-        let mint = O::Mint {
-            amount: amt,
-            token_id: b"ERA".to_vec(),
-            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").ok_or_else(
-                || DsmError::internal("ERA is a builtin token", None::<std::io::Error>),
-            )?,
-            authorized_by: crate::util::text_id::encode_base32_crockford(
-                &self.device_info.device_id,
-            )
-            .into_bytes(),
-            proof_of_authorization: blake3_cat(&[b"dev-seed", &self.device_info.device_id])
-                .to_vec(),
-            message: "dev seed".to_string(),
-        };
-
-        // Execute mint via relationship path (self-loop for authority mint)
-        let dev_id = self.device_info.device_id;
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
-        let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit: era_pc,
-            direction: dsm::types::device_state::BalanceDirection::Credit,
-            amount: 1_000_000,
-        }];
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let mut sm = self.state_machine.lock();
-        // Same fail-closed prepare → write → commit pattern as
-        // `execute_on_relationship`. The dev-seed mint participates in BCR
-        // archival so reader paths see the seeded balance.
-        let outcome = sm.prepare_advance_relationship(
-            rel_key,
-            dev_id,
-            mint,
-            &deltas,
-            Some(init_tip),
-            None, // anchor_leaf — dev-seed mint is an ordinary ingress transition
-            None, // offline_spend — online mint, no allocation draw
-            None,
-        )?;
-        // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
-        Self::dual_write_advance_outcome(&outcome, false)?;
-        sm.commit_advance(&outcome);
-        let new_hash = outcome.new_chain_state.compute_chain_tip();
-        log::info!("Dev seeding applied; new chain tip {:02x?}", &new_hash[..4]);
-
-        // Write flag to ensure idempotence
-        std::fs::write(flag_file, b"seeded=1").map_err(|e| {
-            DsmError::internal(
-                format!("Failed to write seed flag: {e}"),
-                None::<std::convert::Infallible>,
-            )
-        })?;
-
-        Ok(())
     }
 
     /// Strict range query; no time, fail-closed if history unsupported

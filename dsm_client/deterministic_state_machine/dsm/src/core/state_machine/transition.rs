@@ -420,15 +420,12 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                 ));
             }
         }
-        Operation::Mint {
-            proof_of_authorization,
-            ..
-        } => {
-            if proof_of_authorization.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "Mint missing proof_of_authorization",
-                ));
-            }
+        Operation::Mint { .. } => {
+            // Mint carries NO authorization bytes. Authorization of unit
+            // creation is the 0x0029 issuance evidence resolved during
+            // economic admission — there is nothing inside the operation for
+            // this legacy check to demand, and demanding anything here would
+            // recreate the second authorization channel that was deleted.
         }
         Operation::Burn {
             proof_of_ownership, ..
@@ -1234,22 +1231,17 @@ fn apply_token_balance_delta(
             }
         }
         Operation::Mint {
-            token_id,
-            amount,
-            authorized_by,
-            proof_of_authorization,
-            ..
+            token_id, amount, ..
         } => {
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
                 .to_string();
-            verify_mint_authorization_for_transition(
-                current_state,
-                &token_id_str,
-                amount.value(),
-                authorized_by,
-                proof_of_authorization,
-            )?;
+            // No embedded-proof verification: Mint authorization is the
+            // 0x0029 issuance evidence, proven by the economic verifier during
+            // admission. This legacy path performs only the balance
+            // arithmetic; on the canonical device-head path the accepting
+            // layer refuses any positive mint without an attached admission.
+            let _ = amount;
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
@@ -1357,34 +1349,6 @@ fn parse_embedded_proof(proof: &[u8], label: &str) -> Result<(Vec<u8>, Vec<u8>),
         )));
     }
     Ok((pk, sig))
-}
-
-fn verify_mint_authorization_for_transition(
-    current_state: &State,
-    token_id: &str,
-    amount: u64,
-    authorized_by: &[u8],
-    proof: &[u8],
-) -> Result<(), DsmError> {
-    let (pk, sig) = parse_embedded_proof(proof, "mint_proof")?;
-    let policy_commit = crate::core::token::resolve_policy_commit(token_id)?;
-
-    let mut msg = b"mint|v2|".to_vec();
-    msg.extend_from_slice(authorized_by);
-    msg.extend_from_slice(token_id.as_bytes());
-    msg.extend_from_slice(&amount.to_le_bytes());
-    msg.extend_from_slice(&current_state.hash);
-
-    let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "mint", &msg);
-    let verified = crate::crypto::sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)?;
-    if verified {
-        Ok(())
-    } else {
-        Err(DsmError::unauthorized(
-            "Invalid mint authorization proof",
-            None::<std::io::Error>,
-        ))
-    }
 }
 
 fn verify_burn_authorization_for_transition(
@@ -1573,8 +1537,10 @@ mod tests {
         signed_transfer_op_amount(sk, state_hash, nonce, message, "ERA", 10)
     }
 
-    fn signed_mint_op_amount(sk: &[u8], token_id: &str, amount: u64) -> Operation {
-        let mut op = Operation::Mint {
+    // Mint carries no authorization bytes — authority lives in the 0x0029
+    // admission evidence, so a fixture mint is just the economic intent.
+    fn mint_op_amount(token_id: &str, amount: u64) -> Operation {
+        Operation::Mint {
             amount: {
                 let mut balance = Balance::zero();
                 balance.update_add(amount);
@@ -1582,26 +1548,12 @@ mod tests {
             },
             token_id: token_id.as_bytes().to_vec(),
             policy_commit: [0u8; 32],
-            authorized_by: b"authority".to_vec(),
-            proof_of_authorization: vec![],
             message: "test mint".to_string(),
-        };
-
-        let bytes = op.to_bytes();
-        let sig = sphincs_sign(sk, &bytes).unwrap_or_else(|e| panic!("sign mint failed: {e}"));
-        if let Operation::Mint {
-            proof_of_authorization,
-            ..
-        } = &mut op
-        {
-            *proof_of_authorization = sig;
         }
-
-        op
     }
 
-    fn signed_mint_op(sk: &[u8]) -> Operation {
-        signed_mint_op_amount(sk, "token2", 100)
+    fn signed_mint_op(_sk: &[u8]) -> Operation {
+        mint_op_amount("token2", 100)
     }
 
     fn signed_burn_op_amount(sk: &[u8], token_id: &str, amount: u64) -> Operation {
@@ -1899,8 +1851,7 @@ mod tests {
             balance.update_add(150);
             balance
         });
-        let (_state, _pk, sk) = create_test_state_with_keypair(0);
-        let mint_op = signed_mint_op_amount(&sk, "token1", 50);
+        let mint_op = mint_op_amount("token1", 50);
 
         let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
         assert!(result.is_ok());
@@ -2209,8 +2160,7 @@ mod tests {
         let current_state = create_test_state(2);
 
         // Mint operation but token not added to current state
-        let (_state, _pk, sk) = create_test_state_with_keypair(0);
-        let mint_op = signed_mint_op_amount(&sk, "new_token", 100);
+        let mint_op = mint_op_amount("new_token", 100);
 
         let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
         assert!(result.is_ok());
@@ -2236,8 +2186,7 @@ mod tests {
             balance
         });
 
-        let (_state, _pk, sk) = create_test_state_with_keypair(0);
-        let mint_op = signed_mint_op_amount(&sk, "token1", 100);
+        let mint_op = mint_op_amount("token1", 100);
 
         let result = verify_token_balance_consistency(&prev_state, &current_state, &mint_op);
         assert!(result.is_ok());

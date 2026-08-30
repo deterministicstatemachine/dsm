@@ -798,9 +798,8 @@ mod tests {
             .with_balance_for_testing([0xF1; 32], 1_000);
 
         // A value relationship (Burn → Yes). A burn is value-bearing without
-        // being issuance, which the accepting layer refuses until class 0x0029
-        // exists; what this test needs is a relationship FLAGGED value-bearing,
-        // and either direction does that.
+        // needing an issuance admission attached; what this test needs is a
+        // relationship FLAGGED value-bearing, and either direction does that.
         let c_yes = [0xC1; 32];
         let rk_yes = compute_smt_key(&owner, &c_yes);
         let dev = dev

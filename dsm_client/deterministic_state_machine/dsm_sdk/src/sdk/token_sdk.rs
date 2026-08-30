@@ -1085,94 +1085,24 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 Ok(new_state)
             }
-            TokenOperation::Mint {
-                token_id,
-                recipient: _,
-                amount,
-                ..
-            } => {
-                if token_id == "ERA" {
-                    let era_token = self.era_token.read();
-                    if era_token.circulating_supply.value() + *amount
-                        > era_token.total_supply.value()
-                    {
-                        return Err(DsmError::invalid_operation(
-                            "Minting would exceed total ERA supply",
-                        ));
-                    }
-                }
-
-                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-                let signer_pk = current_state.device_info.public_key.clone();
-                let authorized_by = current_state.device_info.device_id.to_vec();
-                let signing_key = crate::sdk::signing_authority::current_secret_key()?;
-                let mut mint_msg = b"mint|v2|".to_vec();
-                mint_msg.extend_from_slice(&authorized_by);
-                mint_msg.extend_from_slice(token_id.as_bytes());
-                mint_msg.extend_from_slice(&amount.to_le_bytes());
-                mint_msg.extend_from_slice(&state_hash);
-                let mint_hash =
-                    dsm::crypto::blake3::token_domain_hash(&policy_commit, "mint", &mint_msg);
-                let mint_sig =
-                    dsm::crypto::sphincs::sphincs_sign(&signing_key, mint_hash.as_bytes())
-                        .map_err(|e| {
-                            DsmError::crypto(
-                                format!("Failed to sign mint authorization: {e}"),
-                                None::<std::io::Error>,
-                            )
-                        })?;
-
-                let op = Operation::Mint {
-                    amount: Balance::from_state(*amount, state_hash),
-                    token_id: token_id.as_bytes().to_vec(),
-                    policy_commit,
-                    authorized_by,
-                    proof_of_authorization: encode_embedded_proof(&signer_pk, &mint_sig)?,
-                    message: "Mint operation via TokenSDK".to_string(),
-                };
-
-                // Mint: relationship is device↔CPTA-authority (self for self-mint)
-                let mint_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                    &current_state.device_info.device_id,
-                    &current_state.device_info.device_id,
-                );
-                let mint_deltas = [dsm::types::device_state::BalanceDelta {
-                    policy_commit,
-                    direction: dsm::types::device_state::BalanceDirection::Credit,
-                    amount: *amount,
-                }];
-                let mint_init_tip =
-                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                        &current_state.device_info.device_id,
-                        &current_state.device_info.device_id,
-                    );
-                let (new_state, _) = self.core_sdk.execute_on_relationship(
-                    mint_rel_key,
-                    current_state.device_info.device_id,
-                    op,
-                    &mint_deltas,
-                    Some(mint_init_tip),
-                )?;
-                self.project_balance_cache_from_state(
-                    current_state.device_info.device_id,
-                    &new_state,
-                )?;
-
-                if token_id == "ERA" {
-                    let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(
-                        era_token.circulating_supply.value() + *amount,
-                        new_state.hash,
-                    );
-                    era_token.circulating_supply = new_circulation;
-                }
-
-                {
-                    let mut history = self.transaction_history.write();
-                    history.push((operation.clone(), crate::util::deterministic_time::tick()));
-                }
-
-                Ok(new_state)
+            TokenOperation::Mint { token_id, .. } => {
+                // OWNER RULING (0x0029 producer cut): token.mint is the ONE
+                // mint producer. This surface used to sign the legacy
+                // `mint|v2|` self-authorization and advance a raw credit via
+                // `execute_on_relationship` — a positive mint with NO economic
+                // admission, which the accepting layer refuses since the
+                // producer cut. Its remaining caller chain is the Bitcoin/dBTC
+                // deposit completion, and dBTC is a BUILTIN whose issuance is
+                // not self-authorizable at all: that success path was already
+                // structurally impossible, and it becomes honest here. dBTC
+                // issuance into R_econ arrives with the Bitcoin tap
+                // integration; user-token issuance goes through `token.mint`.
+                Err(DsmError::invalid_operation(format!(
+                    "TokenSDK mint of {token_id} is not a producer: a positive mint enters \
+                     canonical state only through token.mint's economic admission, whose \
+                     0x0029 issuance evidence a verifier reruns — and builtin dBTC issuance \
+                     arrives with the Bitcoin tap integration"
+                )))
             }
             TokenOperation::Burn {
                 token_id, amount, ..

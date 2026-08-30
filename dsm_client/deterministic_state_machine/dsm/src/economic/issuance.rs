@@ -57,9 +57,10 @@ use crate::crypto::blake3::dsm_domain_hasher;
 ///
 /// Keeping them outside makes the ordering acyclic and obvious: the operation
 /// is frozen first, its digest derived, and the authorities then sign a body
-/// that commits that digest. `Mint.proof_of_authorization` is canonically
-/// EMPTY under this schema — it must not become a second authorization
-/// channel — and the field itself is deleted in the producer cut.
+/// that commits that digest. Since the producer cut this is STRUCTURAL:
+/// `Operation::Mint` carries no authorization fields at all, so a second
+/// channel inside the operation is unrepresentable rather than merely
+/// forbidden.
 ///
 /// ## Non-reuse
 ///
@@ -126,12 +127,10 @@ impl IssuanceAuthorizationBody {
 /// Why a policy is not admissible for V1 issuance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssuancePolicyRefusal {
-    /// No `TokenAuthority` condition. V1 requires one: without it, "the
-    /// generic evaluator found nothing to deny" would become authenticated
     /// A `SupplyCap` with a finite ceiling. Its `circulating` input is derived
     /// from the ISSUER'S OWN chain history and is not global, so N authorized
-    /// devices would each mint to the cap. Burned for canonical issuance until
-    /// a globally non-duplicable cap mechanism exists.
+    /// devices would each mint to the cap. Refused for canonical issuance
+    /// until a globally non-duplicable cap mechanism exists.
     FiniteSupplyCap,
     /// A condition whose inputs are not foreign-verifiable, or whose issuance
     /// meaning is not defined by this schema.
@@ -157,20 +156,6 @@ impl core::fmt::Display for IssuancePolicyRefusal {
 }
 
 impl std::error::Error for IssuancePolicyRefusal {}
-
-/// The conditions V1 enforces, extracted from an admissible policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdmissibleIssuancePolicy<'a> {
-    /// The `k` of k-of-N.
-    pub threshold: u32,
-    /// The `N` — raw SPHINCS+ public keys the POLICY names. The verifier draws
-    /// keys from here and never from the presented proof.
-    pub signers: &'a [Vec<u8>],
-    /// Operations the policy permits, when it restricts them at all.
-    pub allowed_operations: Option<&'a [String]>,
-    /// A per-operation amount ceiling, when the policy sets one.
-    pub amount_limit: Option<u64>,
-}
 
 /// The issuance-relevant facts of a committed token policy, parsed in CORE.
 ///
@@ -262,23 +247,50 @@ pub fn parse_issuance_policy(policy_proto: &[u8]) -> Result<IssuancePolicy, Stri
     let icon_len = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
     i += 2 + icon_len;
 
+    // THE COMMITTED ALLOWLIST TAIL (owner-frozen, 2026-08-30). The SDK packer
+    // is the sole producer of this format and it writes the u16 count in BOTH
+    // kinds — a kind-NONE blob carries an explicit zero. `policy_commit`
+    // hashes those exact bytes, so this parser consumes what was actually
+    // committed rather than a tidier format nothing ever produced:
+    //
+    //   kind NONE   : u16 count MUST be present and MUST == 0
+    //   kind INLINE : u16 count MUST be present, MUST be > 0,
+    //                 exactly count x 32-byte DevIDs follow
+    //
+    // No dual-format acceptance. Every divergence — nonzero count under NONE,
+    // zero count under INLINE, a flag disagreeing with the payload, truncated
+    // entries, trailing bytes, an unknown kind — fails closed, mirroring the
+    // SDK reader exactly so two verifiers can never disagree about one blob.
     need(i, 1, len)?;
     let allowlist_kind = b[i];
     i += 1;
+    need(i, 2, len)?;
+    let allowlist_count = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
+    i += 2;
     let mut allowlist_device_ids = Vec::new();
-    if allowlist_kind == 1 {
-        need(i, 2, len)?;
-        let count = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
-        i += 2;
-        for _ in 0..count {
-            need(i, 32, len)?;
-            let mut d = [0u8; 32];
-            d.copy_from_slice(&b[i..i + 32]);
-            allowlist_device_ids.push(d);
-            i += 32;
+    match allowlist_kind {
+        0 => {
+            if allowlist_count != 0 {
+                return Err("policy blob allowlist kind NONE carries a nonzero count".into());
+            }
         }
-    } else if allowlist_kind != 0 {
-        return Err("policy blob has an unknown allowlist kind".into());
+        1 => {
+            if allowlist_count == 0 {
+                return Err("policy blob allowlist kind INLINE carries a zero count".into());
+            }
+            for _ in 0..allowlist_count {
+                need(i, 32, len)?;
+                let mut d = [0u8; 32];
+                d.copy_from_slice(&b[i..i + 32]);
+                allowlist_device_ids.push(d);
+                i += 32;
+            }
+        }
+        _ => return Err("policy blob has an unknown allowlist kind".into()),
+    }
+    let flag_claims_allowlist = flags & 0x04 != 0;
+    if flag_claims_allowlist != !allowlist_device_ids.is_empty() {
+        return Err("policy blob allowlist flag disagrees with its payload".into());
     }
 
     // The blob must be consumed EXACTLY. A padded policy would let two byte

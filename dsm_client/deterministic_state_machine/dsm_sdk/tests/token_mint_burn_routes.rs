@@ -7,7 +7,7 @@
 //! pins is therefore the REFUSAL surface:
 //!
 //!   * creation with `initial_supply > 0` gets the named issuance-predicate
-//!     refusal (owner ruling — creator supply waits for `0x0029`);
+//!     refusal (create with zero supply, then issue through `token.mint`);
 //!   * a fee-bearing creation with no economic ancestry fails closed;
 //!   * minting an unknown token fails closed;
 //!   * a burn that cannot be admitted is refused, never performed locally.
@@ -169,8 +169,8 @@ fn burn(router: &AppRouterImpl, token_id: &str, amount: u64) -> dsm_sdk::bridge:
 fn creation_with_initial_supply_gets_the_named_refusal() {
     // 3.5b (owner ruling): the new asset's supply credit has no
     // authenticated issuance/source predicate, so creator supply is REFUSED
-    // with the exact named error — token metadata + the ERA fee are the
-    // supported creation shape until 0x0029 exists.
+    // with the exact named error — the supply route is `token.mint` under a
+    // 0x0029 authorization, never supply-at-creation.
     init_test_storage();
     let router = new_router();
     fund_era(&router);
@@ -201,32 +201,43 @@ fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
     );
 }
 
-/// `token.mint` refuses BEFORE it resolves anything, and says why.
+/// `token.mint` resolves FIRST and refuses each bad shape for ITS OWN reason.
 ///
-/// This used to assert that an unknown ticker fails closed. It cannot test that
-/// any more: the route now refuses issuance outright, before token resolution
-/// is reached, so an unknown ticker and a perfectly good one take the identical
-/// path. Asserting `!success` on an unknown ticker would therefore be vacuous —
-/// green whether or not resolution works at all.
-///
-/// What is still true and worth pinning is that the refusal is the ISSUANCE
-/// one, for a KNOWN token as much as an unknown one, and that it names the
-/// missing predicate rather than failing for an incidental reason.
+/// The predecessor of this test pinned the pre-producer blanket refusal, whose
+/// doc predicted exactly this re-cut: with the 0x0029 producer live, the route
+/// resolves the ticker before anything else, so an unknown token gets the
+/// resolution refusal and a builtin gets the named builtin refusal — two
+/// distinct reasons where there used to be one indiscriminate wall.
 #[test]
 #[serial]
-fn mint_refuses_issuance_before_it_resolves_the_token() {
+fn mint_refuses_each_bad_shape_for_its_own_reason() {
     init_test_storage();
     let router = new_router();
     fund_era(&router);
-    for ticker in ["ERA", "no-such-token"] {
-        let res = mint(&router, ticker, 10);
-        assert!(!res.success, "minting {ticker} must fail");
-        let msg = res.error_message.as_deref().unwrap_or_default();
-        assert!(
-            msg.contains("0x0029"),
-            "the refusal names the missing issuance predicate for {ticker}: {msg}"
-        );
-    }
+
+    let unknown = mint(&router, "no-such-token", 10);
+    assert!(!unknown.success, "minting an unknown token must fail");
+    let msg = unknown.error_message.as_deref().unwrap_or_default();
+    assert!(
+        msg.contains("unknown token"),
+        "an unknown ticker fails at RESOLUTION, got: {msg}"
+    );
+
+    let builtin = mint(&router, "ERA", 10);
+    assert!(!builtin.success, "minting a builtin must fail");
+    let msg = builtin.error_message.as_deref().unwrap_or_default();
+    assert!(
+        msg.contains("builtin") && msg.contains("not self-authorizable"),
+        "a builtin fails on the NAMED builtin refusal before anything is signed, got: {msg}"
+    );
+
+    let zero = mint(&router, "ERA", 0);
+    assert!(!zero.success, "a zero mint must fail");
+    let msg = zero.error_message.as_deref().unwrap_or_default();
+    assert!(
+        msg.contains("amount must be > 0"),
+        "a zero amount is refused before resolution, got: {msg}"
+    );
 }
 
 #[test]

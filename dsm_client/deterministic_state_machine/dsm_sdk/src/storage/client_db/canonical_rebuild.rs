@@ -158,7 +158,12 @@ pub fn rebuild_head_from_checkpoint(
                 authority_policy: Option::None,
                 ..
             } if to_device_id.as_slice() == head.devid().as_slice()
-        ) || matches!(&state.operation, Operation::FaucetClaim { .. });
+        ) || matches!(&state.operation, Operation::FaucetClaim { .. })
+            // An admitted Mint is admission-gated the same way (0x0029
+            // producer cut): without this arm, a head rebuild TRUNCATES at the
+            // first historical mint — the replay hits the accepting gate with
+            // no fence attached and stops the whole reconstruction.
+            || matches!(&state.operation, Operation::Mint { .. });
         if is_gated_credit {
             head = head.with_pending_economic_admission(Some(
                 dsm::economic::admission::PendingEconomicAdmission::prepared(
