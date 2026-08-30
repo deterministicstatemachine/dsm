@@ -1328,6 +1328,49 @@ impl CoreSDK {
         Some(u64::try_from(circulating).unwrap_or(u64::MAX))
     }
 
+    /// Refuse a DLV value operation whose non-builtin legs are not locally
+    /// rooted, do not re-hash to their commits, do not parse, or whose
+    /// committed policy refuses the asset as a market leg (SoFi Def 4.1 /
+    /// Req 4.4 / Req 4.6 — the "applicable token policy" conjunct). ERA and
+    /// dBTC are pre-rooted on every device and skip. Non-DLV operations pass
+    /// vacuously; their policy conjuncts run in `enforce_policy_for_operation`.
+    fn enforce_market_leg_policies_local(
+        operation: &dsm::types::operations::Operation,
+    ) -> Result<(), DsmError> {
+        for pc in dsm::economic::provenance::market_leg_commits(operation) {
+            if dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
+                .is_some()
+            {
+                continue;
+            }
+            let Ok(Some(bytes)) =
+                crate::storage::client_db::token_registry::load_policy_verified(&pc)
+            else {
+                return Err(DsmError::policy_violation(
+                    crate::util::text_id::encode_base32_crockford(&pc),
+                    "market leg is not rooted on this device — root to the token's public \
+                     anchor, then retry",
+                    None::<std::convert::Infallible>,
+                ));
+            };
+            let policy = dsm::economic::issuance::parse_issuance_policy(&bytes).map_err(|e| {
+                DsmError::policy_violation(
+                    crate::util::text_id::encode_base32_crockford(&pc),
+                    format!("market leg policy: {e}"),
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            dsm::economic::issuance::check_market_leg_permitted(&policy).map_err(|e| {
+                DsmError::policy_violation(
+                    crate::util::text_id::encode_base32_crockford(&pc),
+                    e.to_string(),
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
@@ -1850,6 +1893,14 @@ impl CoreSDK {
         // execution path skipped policy checks.
         let current_state_hash = sm.device_head().map(|ds| ds.root()).unwrap_or([0u8; 32]);
         self.enforce_policy_for_operation(&operation, current_state_hash)?;
+        // The market-leg token-policy gate for DLV value operations — the
+        // funnel-level twin of the core verifier's conjunct, so EVERY caller
+        // is covered, not just the routes that pre-flight. Local rooting
+        // only: an owner or trader legitimately moving an asset is already
+        // rooted to its anchor (the routes fetch-and-root on first contact);
+        // an unrooted leg fails closed here rather than advancing state the
+        // economic verifier will refuse.
+        Self::enforce_market_leg_policies_local(&operation)?;
 
         // ── Admission serialization, UNDER the state-machine lock ──────────
         // A new admission atomically refuses an existing pending one and

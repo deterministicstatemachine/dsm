@@ -84,6 +84,14 @@ pub trait PeerEvidenceFetcher {
         namespace: TaggedHashDomain<'static>,
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
+    /// The canonical `TokenPolicyV3` bytes rooted under `policy_commit` —
+    /// the walker's own anchoring (local store or the authoritative
+    /// content-addressed path). The verifier re-hashes against the commit;
+    /// unavailable is `Incomplete`, never `Invalid`.
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
 /// A trusted starting memo: a coordinate THIS verifier validated earlier
@@ -162,6 +170,13 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.fetcher.immutable(namespace, addr)
+    }
+
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.fetcher.anchored_policy_bytes(policy_commit)
     }
 }
 

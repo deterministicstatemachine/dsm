@@ -445,6 +445,13 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.fetch_bytes(namespace, addr)
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        anchored_policy_bytes_local_or_network(policy_commit, &self.runtime)
+    }
 }
 
 /// The cache-aware walk shared by every fetcher-shaped resolver: cached
@@ -628,6 +635,19 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
             .push((namespace, *addr, bytes.clone()));
         Ok(bytes)
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        // NOT recorded: policy bytes are the VERIFIER'S OWN rooting in a
+        // public anchor, re-fetchable by anyone holding the commit — they are
+        // not part of the peer's evidence closure and owe no q-durability.
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::anchored_policy_bytes(
+            self.inner,
+            policy_commit,
+        )
+    }
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
@@ -689,6 +709,54 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.fetch_bytes(namespace, addr)
     }
+
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        anchored_policy_bytes_local_or_network(policy_commit, &self.runtime)
+    }
+}
+
+/// The verifier's OWN rooting in a token's public anchor: local anchored
+/// bytes first, else a fetch from the authoritative content-addressed path,
+/// re-hashed against the commit before anything trusts a byte (the network
+/// is a locator, never authority). Successfully fetched bytes are persisted
+/// — anchors are public, and anyone holding one may root to the token — so
+/// the rooting is one-time per device. Unavailable is `Incomplete`: an
+/// availability condition, never a permission.
+pub(crate) fn anchored_policy_bytes_local_or_network(
+    policy_commit: &[u8; 32],
+    runtime: &tokio::runtime::Handle,
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    if let Ok(Some(bytes)) =
+        crate::storage::client_db::token_registry::load_policy_verified(policy_commit)
+    {
+        return Ok(bytes);
+    }
+    let pc = *policy_commit;
+    let fetched = tokio::task::block_in_place(|| {
+        runtime.block_on(crate::handlers::token_routes::try_fetch_policy_from_network(&pc))
+    })
+    .map_err(PeerLineageFailure::Incomplete)?;
+    let Some(bytes) = fetched else {
+        return Err(PeerLineageFailure::Incomplete(
+            "anchored policy bytes unavailable — root this device to the token's public \
+             anchor, then retry"
+                .into(),
+        ));
+    };
+    if dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != pc
+    {
+        return Err(PeerLineageFailure::Incomplete(
+            "fetched policy bytes do not hash to the anchor — treating as unavailable".into(),
+        ));
+    }
+    // Root durably (best-effort): the bytes verified against the public
+    // anchor this device already holds.
+    let _ = crate::storage::client_db::token_registry::upsert_policy(&pc, &bytes);
+    Ok(bytes)
 }
 
 /// Base32 path helpers shared by live and fake paths.
