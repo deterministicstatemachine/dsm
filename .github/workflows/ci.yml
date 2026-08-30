@@ -88,8 +88,16 @@ jobs:
           # #[serial] tests against each OTHER, not against plain #[test] siblings
           # on other threads, so a non-serial test racing a serial one on that
           # shared state flakes a random test nondeterministically. Run serial.
-          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+          #
+          # --release: the gate exercises the SHIPPED profile. The suites are
+          # designed for it — the crypto property tests scale their case counts
+          # UP outside debug (`if cfg!(debug_assertions) { 3 } else { 10 }`),
+          # so a debug run was the reduced variant of the properties, and one
+          # adjacency check documented itself as silently skipped under debug
+          # (state_machine/mod.rs). Debug compilation coverage is not lost: the
+          # Build step above still compiles the workspace in the dev profile.
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
+          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
 
       - name: Codegen enforcement
         run: |
