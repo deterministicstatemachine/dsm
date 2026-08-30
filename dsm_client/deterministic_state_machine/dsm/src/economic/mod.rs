@@ -63,6 +63,8 @@ pub mod classifier;
 pub mod credit;
 pub mod decode;
 pub mod faucet;
+pub mod issuance;
+pub mod issuance_authorization_evidence;
 pub mod keys;
 pub mod lineage;
 pub mod mutation;

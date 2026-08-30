@@ -17,6 +17,7 @@
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
+use crate::economic::issuance::IssuanceAuthorizationBody;
 use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
@@ -157,6 +158,41 @@ pub fn decode_admission_manifest(bytes: &[u8]) -> Result<EconomicAdmissionManife
 }
 
 /// Decode a standalone `EconomicLeafState` — one of classes `0x001F`–`0x0022`.
+/// Decode a standalone `IssuanceAuthorizationBody` — class `0x0029`, schema 1.
+///
+/// Strict on both ends: the envelope must be exactly this class and schema,
+/// and the bytes must be fully consumed. The caller additionally requires
+/// re-encode equality, because the signature covers BYTES — two encodings
+/// carrying one authorization would be two authorizations.
+pub fn decode_issuance_authorization_body(
+    bytes: &[u8],
+) -> Result<IssuanceAuthorizationBody, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(
+        IssuanceAuthorizationBody::CLASS,
+        IssuanceAuthorizationBody::SCHEMA,
+    )?;
+    let policy_commit = c.digest32()?;
+    let issuer_genesis = c.digest32()?;
+    let issuer_devid = c.digest32()?;
+    let issuer_economic_position = c.u64()?;
+    let recipient_operation_digest = c.digest32()?;
+    let amount = c.u64()?;
+    if c.i != c.b.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: c.b.len() - c.i,
+        });
+    }
+    Ok(IssuanceAuthorizationBody {
+        policy_commit,
+        issuer_genesis,
+        issuer_devid,
+        issuer_economic_position,
+        recipient_operation_digest,
+        amount,
+    })
+}
+
 pub fn decode_leaf_state(bytes: &[u8]) -> Result<EconomicLeafState, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_leaf_state(&mut c)?;

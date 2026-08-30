@@ -146,6 +146,11 @@ fn create_rejects_initial_alloc_above_max_supply() {
         !res.success,
         "allocation above the cap must be rejected in Rust"
     );
+    let msg = res.error_message.clone().unwrap_or_default();
+    assert!(
+        msg.contains("initial allocation exceeds max supply"),
+        "must be the cap comparison, not a later capability gate, got: {msg}"
+    );
 }
 
 /// Ticker validation is protocol, not presentation.
