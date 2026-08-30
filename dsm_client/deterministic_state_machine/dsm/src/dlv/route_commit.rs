@@ -196,3 +196,65 @@ pub fn verify_route_commit_hop(
         fee_bps: hop.fee_bps,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE FUSED-ROUNDING CONFORMANCE VECTOR (SoFi v2.0 §5.1).
+    ///
+    /// The spec fixes one floor division and forbids rounding the fee-adjusted
+    /// input first. At `a=1, x=1, y=3, fee_bps=30` the two rules genuinely
+    /// part company: the fused rule yields 1, while flooring `a·(D−f)/D` first
+    /// collapses a sub-unit input to zero and takes the whole output with it.
+    ///
+    /// Note the spec's own example says this holds for "any fee_bps in the
+    /// legal range", which overstates it: at `f=0` there is no fee to round
+    /// and at `f=9999` both rules yield 0. The divergence is real for ordinary
+    /// fees, which is where a low-liquidity vault actually operates, so the
+    /// vector pins a fee that exhibits it rather than quoting the claim.
+    #[test]
+    fn the_fee_adjusted_input_is_never_rounded_before_the_curve() {
+        const D: u128 = 10_000;
+        let doubly_rounded = |a: u128, x: u128, y: u128, f: u128| -> u128 {
+            let pre = (a * (D - f)) / D; // the forbidden first rounding
+            if pre == 0 {
+                return 0;
+            }
+            (y * pre * D) / (x * D + pre * D)
+        };
+
+        assert_eq!(
+            constant_product_output(1, 1, 3, 30),
+            Some(1),
+            "the fused rule keeps the sub-unit input alive"
+        );
+        assert_eq!(
+            doubly_rounded(1, 1, 3, 30),
+            0,
+            "…and the doubly-rounded variant loses the whole output"
+        );
+
+        // The same shape across a spread of ordinary fees, so the vector is
+        // not a single lucky point.
+        for f in [1u32, 5, 30, 100, 300] {
+            assert_eq!(
+                constant_product_output(1, 1, 3, f),
+                Some(1),
+                "fused rule at fee_bps={f}"
+            );
+            assert_eq!(
+                doubly_rounded(1, 1, 3, f as u128),
+                0,
+                "doubly-rounded variant at fee_bps={f}"
+            );
+        }
+
+        // Honest boundaries: with no fee there is nothing to round, and a
+        // near-total fee zeroes both. Recording them stops a later reader
+        // from "fixing" the vector by widening it to every legal fee.
+        assert_eq!(constant_product_output(1, 1, 3, 0), Some(1));
+        assert_eq!(doubly_rounded(1, 1, 3, 0), 1, "no fee, no divergence");
+        assert_eq!(constant_product_output(1, 1, 3, 9_999), None);
+    }
+}
