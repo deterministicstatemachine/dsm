@@ -472,8 +472,6 @@ fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
         amount: Balance::from_state(100, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         policy_commit: ERA,
-        authorized_by: Vec::new(),
-        proof_of_authorization: Vec::new(),
         message: String::new(),
     };
     let accepted = AcceptedSubstrate::from_verified_dsm_successor(
@@ -495,14 +493,26 @@ fn issuance_requires_its_predicate_to_be_satisfied_not_merely_defined() {
     .expect("valid witness");
     let manifest = manifest_for(&witness);
     let registered = registered_for(&manifest, 1, post_root);
+    // LAYERING SHIFT (producer cut): the witness DOES carry a 0x0023
+    // descriptor, so the write-set shape check now passes — the missing
+    // verifier arm that used to refuse this as a kind mismatch was one of the
+    // defects the producer cut fixed. The refusal therefore moved DOWN to the
+    // layer that actually resolves the predicate: provenance must fetch the
+    // authorization evidence, and in this fixture no evidence store exists —
+    // the predicate is defined but unsatisfiable, and validation fails closed
+    // exactly there.
     match run(&fx, &registered, &manifest, &witness, &accepted) {
-        Err(EconomicValidationError::WriteSet(
-            dsm::economic::write_set::WriteSetError::WrongWriteSet { detail },
-        )) => assert!(
-            detail.contains("credit source kind does not match"),
-            "the refusal must be the missing issuance source, got: {detail}"
+        Err(EconomicValidationError::Provenance(e)) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("no evidence store in this fixture"),
+                "the refusal must be the unresolvable issuance evidence, got: {msg}"
+            );
+        }
+        other => panic!(
+            "a mint whose issuance predicate cannot be satisfied must be refused at the \
+             provenance layer, got {other:?}"
         ),
-        other => panic!("a mint with no issuance source must be refused, got {other:?}"),
     }
 }
 

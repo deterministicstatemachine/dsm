@@ -335,27 +335,13 @@ impl TokenStateManager {
             }
 
             Operation::Mint {
-                amount,
-                token_id,
-                authorized_by,
-                proof_of_authorization,
-                ..
+                amount, token_id, ..
             } => {
                 let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
                     DsmError::invalid_operation("Mint has malformed or empty token_id")
                 })?;
-                if !self.verify_mint_authorization(
-                    token_id_str,
-                    authorized_by,
-                    amount.value(),
-                    current_state.hash,
-                    proof_of_authorization,
-                )? {
-                    return Err(DsmError::unauthorized(
-                        "Invalid mint authorization",
-                        None::<std::io::Error>,
-                    ));
-                }
+                // No embedded-proof verification: Mint authorization is the
+                // 0x0029 issuance evidence, proven during economic admission.
 
                 let owner_pk = &current_state.device_info.public_key;
                 let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
@@ -483,59 +469,6 @@ impl TokenStateManager {
         ))
     }
 
-    fn verify_mint_authorization(
-        &self,
-        token_id: &str,
-        authorized_by: &[u8],
-        amount: u64,
-        state_hash: [u8; 32],
-        proof: &[u8],
-    ) -> Result<bool, DsmError> {
-        if proof.is_empty() {
-            return Ok(false);
-        }
-
-        // proof := u16 pk_len | pk_bytes | u16 sig_len | sig_bytes
-        if proof.len() < 4 {
-            return Ok(false);
-        }
-
-        let mut idx: usize = 0;
-        let read_u16 = |buf: &[u8], i: &mut usize| -> Result<u16, DsmError> {
-            if *i + 2 > buf.len() {
-                return Err(DsmError::invalid_parameter(
-                    "mint_proof: truncated length field",
-                ));
-            }
-            let v = u16::from_le_bytes([buf[*i], buf[*i + 1]]);
-            *i += 2;
-            Ok(v)
-        };
-        let read_bytes = |buf: &[u8], i: &mut usize, n: usize| -> Result<Vec<u8>, DsmError> {
-            if *i + n > buf.len() {
-                return Err(DsmError::invalid_parameter("mint_proof: truncated field"));
-            }
-            let out = buf[*i..*i + n].to_vec();
-            *i += n;
-            Ok(out)
-        };
-
-        let pk_len = read_u16(proof, &mut idx)? as usize;
-        let pk = read_bytes(proof, &mut idx, pk_len)?;
-        let sig_len = read_u16(proof, &mut idx)? as usize;
-        let sig = read_bytes(proof, &mut idx, sig_len)?;
-
-        let policy_commit = self.resolve_policy_commit(token_id)?;
-        let mut msg = b"mint|v2|".to_vec();
-        msg.extend_from_slice(authorized_by);
-        msg.extend_from_slice(token_id.as_bytes());
-        msg.extend_from_slice(&amount.to_le_bytes());
-        msg.extend_from_slice(&state_hash);
-        let msg_hash = crate::crypto::blake3::token_domain_hash(&policy_commit, "mint", &msg);
-
-        sphincs::sphincs_verify(&pk, msg_hash.as_bytes(), &sig)
-    }
-
     fn verify_token_ownership(
         &self,
         token_id: &str,
@@ -628,11 +561,10 @@ impl TokenStateManager {
                 );
                 context.insert("recipient".to_string(), recipient.clone());
             }
-            Operation::Mint {
-                amount,
-                authorized_by,
-                ..
-            } => {
+            Operation::Mint { amount, .. } => {
+                // Amount facts stay (supply semantics may read them); the
+                // legacy authorized_by witness is gone — Mint authority is the
+                // 0x0029 evidence, not a caller-chosen byte string.
                 context.insert(
                     "amount_u64".to_string(),
                     amount.value().to_le_bytes().to_vec(),
@@ -641,7 +573,6 @@ impl TokenStateManager {
                     "amount".to_string(),
                     amount.value().to_string().into_bytes(),
                 );
-                context.insert("authorized_by".to_string(), authorized_by.clone());
             }
             Operation::Burn { amount, .. } => {
                 context.insert(

@@ -45,10 +45,11 @@ use crate::ccb::{class, push_digest32, push_envelope, push_u32, push_u64, CcbErr
 
 /// `0x0023` schema 1 — funded by an authorized issuance transition.
 ///
-/// The authorization itself is addressed rather than inline: its class
-/// (`0x0029`) is still **reserved**, because a field table for it would encode
-/// an issuance predicate this protocol does not yet define. Referencing it by
-/// address costs nothing today and commits nothing prematurely.
+/// The authorization itself is addressed rather than inline: class `0x0029`
+/// (`IssuanceAuthorizationBody`) defines the issuance predicate, and the
+/// descriptor names the evidence bundle carrying it by INNER content identity.
+/// Inlining the bundle here would put one fact in two encodings; the arm
+/// fetches and re-verifies the addressed bytes instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreditSourceAuthorizedIssuance {
     pub credit_mutation_index: u32,

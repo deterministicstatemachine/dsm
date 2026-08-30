@@ -9,6 +9,12 @@
 //! caller's OWN proof, which authorises anybody able to sign with a key they
 //! generated themselves.
 //!
+//! Since the 0x0029 producer cut, `TokenAuthority` gates BURN and
+//! CREATE_TOKEN only: a mint's authority is the policy-signed issuance
+//! evidence verified during economic admission, so the mechanism tests here
+//! run against "burn" — the operation that still carries the embedded
+//! witness — and one test pins the severance itself.
+//!
 //! These tests exercise the enforcer directly, because that is where the
 //! guarantee lives. Each pins a property that the old design failed:
 //!
@@ -90,8 +96,8 @@ async fn authorized_signer_is_allowed() {
         signers: vec![pk.clone()],
         threshold: 1,
     };
-    let sig = sign_for(&sk, "mint", 100);
-    assert!(check(&cond, &ctx("mint", 100, witness(&pk, &sig))).await);
+    let sig = sign_for(&sk, "burn", 100);
+    assert!(check(&cond, &ctx("burn", 100, witness(&pk, &sig))).await);
 }
 
 /// THE CORE FLAW, CLOSED. A non-signer presenting a perfectly valid signature
@@ -107,9 +113,9 @@ async fn non_signer_with_a_valid_self_signed_proof_is_denied() {
         threshold: 1,
     };
     // Cryptographically valid — just not by anyone the policy names.
-    let sig = sign_for(&attacker_sk, "mint", 100);
+    let sig = sign_for(&attacker_sk, "burn", 100);
     assert!(
-        !check(&cond, &ctx("mint", 100, witness(&attacker_pk, &sig))).await,
+        !check(&cond, &ctx("burn", 100, witness(&attacker_pk, &sig))).await,
         "the verifying key must come from the policy, never from the proof"
     );
 }
@@ -123,25 +129,25 @@ async fn signature_over_a_different_amount_is_denied() {
         signers: vec![pk.clone()],
         threshold: 1,
     };
-    let sig_for_1 = sign_for(&sk, "mint", 1);
+    let sig_for_1 = sign_for(&sk, "burn", 1);
     assert!(
-        !check(&cond, &ctx("mint", 1_000_000, witness(&pk, &sig_for_1))).await,
+        !check(&cond, &ctx("burn", 1_000_000, witness(&pk, &sig_for_1))).await,
         "a signature authorising 1 must not authorise 1,000,000"
     );
 }
 
-/// Nor onto the opposite operation.
+/// Nor onto a different operation: the preimage names the op.
 #[tokio::test]
-async fn signature_for_mint_does_not_authorize_a_burn() {
+async fn signature_for_burn_does_not_authorize_a_create() {
     let (pk, sk) = keypair(1);
     let cond = PolicyCondition::TokenAuthority {
         signers: vec![pk.clone()],
         threshold: 1,
     };
-    let mint_sig = sign_for(&sk, "mint", 50);
+    let burn_sig = sign_for(&sk, "burn", 50);
     assert!(
-        !check(&cond, &ctx("burn", 50, witness(&pk, &mint_sig))).await,
-        "a mint authorisation must not authorise a burn"
+        !check(&cond, &ctx("create_token", 50, witness(&pk, &burn_sig))).await,
+        "a burn authorisation must not authorise a token creation"
     );
 }
 
@@ -157,10 +163,10 @@ async fn threshold_counts_distinct_signers() {
     };
 
     // One signer, twice → still one distinct signer.
-    let mut doubled = witness(&pk1, &sign_for(&sk1, "mint", 7));
-    doubled.extend_from_slice(&witness(&pk1, &sign_for(&sk1, "mint", 7)));
+    let mut doubled = witness(&pk1, &sign_for(&sk1, "burn", 7));
+    doubled.extend_from_slice(&witness(&pk1, &sign_for(&sk1, "burn", 7)));
     assert!(
-        !check(&cond, &ctx("mint", 7, doubled)).await,
+        !check(&cond, &ctx("burn", 7, doubled)).await,
         "the same key twice must not satisfy a 2-of-2 threshold"
     );
 
@@ -168,15 +174,15 @@ async fn threshold_counts_distinct_signers() {
     assert!(
         !check(
             &cond,
-            &ctx("mint", 7, witness(&pk1, &sign_for(&sk1, "mint", 7)))
+            &ctx("burn", 7, witness(&pk1, &sign_for(&sk1, "burn", 7)))
         )
         .await
     );
 
     // Both → satisfied.
-    let mut both = witness(&pk1, &sign_for(&sk1, "mint", 7));
-    both.extend_from_slice(&witness(&pk2, &sign_for(&sk2, "mint", 7)));
-    assert!(check(&cond, &ctx("mint", 7, both)).await);
+    let mut both = witness(&pk1, &sign_for(&sk1, "burn", 7));
+    both.extend_from_slice(&witness(&pk2, &sign_for(&sk2, "burn", 7)));
+    assert!(check(&cond, &ctx("burn", 7, both)).await);
 }
 
 /// No witness at all must be denied, not waved through.
@@ -187,9 +193,31 @@ async fn missing_authorization_is_denied() {
         signers: vec![pk],
         threshold: 1,
     };
-    let mut c = ctx("mint", 10, Vec::new());
+    let mut c = ctx("burn", 10, Vec::new());
     c.data.remove(witness_keys::AUTHORIZATIONS);
     assert!(!check(&cond, &c).await);
+}
+
+/// THE SEVERANCE PIN. `TokenAuthority` does NOT gate "mint" any more: a mint
+/// with no witness at all passes this CONDITION, because a mint's authority is
+/// the 0x0029 issuance evidence verified during economic admission — and a
+/// second, embedded channel beside it is exactly what the producer cut
+/// deleted. (The mint itself is still gated: the accepting layer requires the
+/// attached admission, whose source the economic verifier proves.)
+#[tokio::test]
+async fn token_authority_does_not_gate_mint() {
+    let (pk, _sk) = keypair(1);
+    let cond = PolicyCondition::TokenAuthority {
+        signers: vec![pk],
+        threshold: 1,
+    };
+    let mut c = ctx("mint", 10, Vec::new());
+    c.data.remove(witness_keys::AUTHORIZATIONS);
+    assert!(
+        check(&cond, &c).await,
+        "TokenAuthority must not demand a witness from an operation whose \
+         authorization channel is the 0x0029 admission evidence"
+    );
 }
 
 // ── supply cap ──────────────────────────────────────────────────────────────

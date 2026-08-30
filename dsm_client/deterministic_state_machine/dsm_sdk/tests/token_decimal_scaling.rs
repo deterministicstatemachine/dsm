@@ -120,8 +120,9 @@ fn create(
 
 // The creation-credit scaling tests (display alloc -> base-unit credit) and
 // the mint/burn base-unit accounting tests are DELETED with their capability:
-// under 3.5b creator supply is refused pending the issuance predicate
-// (0x0029), and custom-token mint/burn has no economically admissible path.
+// creator supply is refused (issuance goes through `token.mint` under a
+// 0x0029 authorization), and this integration fixture has no fleet to admit
+// a mint through.
 // The cap-scaling half of the contract (display cap -> BASE-unit registry
 // cap) is no longer pinned on a SUCCESSFUL creation anywhere: a capped policy
 // is refused in beta, so no creation that reaches the registry carries a cap

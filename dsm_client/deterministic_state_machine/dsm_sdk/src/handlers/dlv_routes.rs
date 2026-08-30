@@ -4686,9 +4686,9 @@ mod funded_creation_tests {
         };
 
         // Fund the foreign trader with the input asset so its settle can pay it.
-        // Installed directly rather than minted: issuance is refused at the
-        // accepting layer until class 0x0029 exists, and this fixture's subject
-        // is the RECONCILE's duplicate-generation refusal, not where the
+        // Installed directly rather than minted: an authorized mint would drag
+        // a policy, an admission and a fleet into a fixture whose subject is
+        // the RECONCILE's duplicate-generation refusal, not where the
         // trader's units came from.
         let head = DeviceState::new(dev, dev, kp.public_key.clone(), 64)
             .with_balance_for_testing(*pc_in, 10_000);

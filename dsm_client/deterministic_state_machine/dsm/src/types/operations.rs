@@ -318,7 +318,16 @@ pub enum Operation {
         /// Which ticket. Must be `< ERA_FAUCET_TICKET_COUNT`.
         ticket_index: u64,
     },
-    /// Mint new tokens into existence (requires authorization proof).
+    /// Mint new tokens into existence.
+    ///
+    /// NOTHING IN THIS OPERATION ASSERTS ISSUANCE AUTHORITY. The legacy
+    /// `authorized_by` / `proof_of_authorization` channel is deleted: those
+    /// bytes participated in the operation digest, and the `0x0029`
+    /// authorization signs a body that COMMITS that digest — so authorization
+    /// material inside the operation has no fixed point. Authority comes only
+    /// from the attached economic admission: this operation's exact digest is
+    /// named by a policy-signed `IssuanceAuthorizationBody`, resolved by the
+    /// `0x0023 AuthorizedIssuance` arm during validation.
     Mint {
         /// Quantity of tokens to mint (must be > 0).
         amount: Balance,
@@ -332,10 +341,6 @@ pub enum Operation {
         /// delta's count/direction/amount, and a mint for token X could credit
         /// ERA. Mirrors `Transfer.policy_commit`.
         policy_commit: [u8; 32],
-        /// Binary identifier of the authority that authorized this minting.
-        authorized_by: Vec<u8>,
-        /// Cryptographic proof from the minting authority.
-        proof_of_authorization: Vec<u8>,
         /// Human-readable description of the minting event.
         message: String,
     },
@@ -1222,8 +1227,6 @@ impl Operation {
                 amount,
                 token_id,
                 policy_commit,
-                authorized_by,
-                proof_of_authorization,
                 message,
             } => {
                 put_u8(&mut out, 4);
@@ -1232,8 +1235,6 @@ impl Operation {
                 put_bytes(&mut out, token_id);
                 // CPTA policy commitment — same length-prefixed convention as Transfer.
                 put_bytes(&mut out, policy_commit);
-                put_bytes(&mut out, authorized_by);
-                put_bytes(&mut out, proof_of_authorization);
                 put_str(&mut out, message);
             }
             Burn {
@@ -1979,15 +1980,11 @@ impl Operation {
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("mint policy_commit must be 32 bytes")
                     })?;
-                let authorized_by = get_bytes(&mut input)?;
-                let proof_of_authorization = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Mint {
                     amount,
                     token_id,
                     policy_commit,
-                    authorized_by,
-                    proof_of_authorization,
                     message,
                 }
             }
@@ -2543,10 +2540,9 @@ impl Operation {
     /// Get proof of authorization if available
     pub fn get_proof_of_authorization(&self) -> Option<Vec<u8>> {
         match self {
-            Operation::Mint {
-                proof_of_authorization,
-                ..
-            } => Some(proof_of_authorization.clone()),
+            // Mint carries NO authorization bytes: its authority is the 0x0029
+            // evidence bundle resolved during economic admission, never a
+            // field inside the operation whose digest that evidence signs.
             // For Transfer, the signature IS the proof of authorization
             Operation::Transfer { signature, .. } if !signature.is_empty() => {
                 Some(signature.clone())
@@ -3096,8 +3092,6 @@ mod tests {
             amount: test_balance(1),
             token_id: vec![1],
             policy_commit: [0u8; 32],
-            authorized_by: vec![],
-            proof_of_authorization: vec![],
             message: String::new(),
         }
         .is_value_egress());
@@ -3121,8 +3115,6 @@ mod tests {
             amount: test_balance(1),
             token_id: vec![1],
             policy_commit: [0u8; 32],
-            authorized_by: vec![],
-            proof_of_authorization: vec![],
             message: String::new(),
         };
         assert!(!mint.is_value_egress() && mint.is_value_bearing());
@@ -3210,8 +3202,6 @@ mod tests {
             amount: test_balance(1),
             token_id: b"ERA".to_vec(),
             policy_commit: [0u8; 32],
-            authorized_by: vec![],
-            proof_of_authorization: vec![],
             message: String::new(),
         };
         for op in [
@@ -3352,8 +3342,6 @@ mod tests {
                 amount: test_balance(10_000),
                 token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                authorized_by: vec![0xAA; 32],
-                proof_of_authorization: vec![0xBB; 64],
                 message: "mint tokens".into(),
             });
         }
@@ -3882,8 +3870,6 @@ mod tests {
                 amount: test_balance(1),
                 token_id: vec![],
                 policy_commit: [0u8; 32],
-                authorized_by: vec![],
-                proof_of_authorization: vec![],
                 message: String::new(),
             };
             assert_eq!(mint.get_operation_type(), "mint");
@@ -4285,8 +4271,6 @@ mod tests {
                 amount: test_balance(50),
                 token_id: b"ERA".to_vec(),
                 policy_commit: [0u8; 32],
-                authorized_by: vec![],
-                proof_of_authorization: vec![],
                 message: String::new(),
             };
             assert!(TokenOps::is_valid(&op));
@@ -4400,8 +4384,6 @@ mod tests {
                 amount: bal.clone(),
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
-                authorized_by: vec![],
-                proof_of_authorization: vec![],
                 message: String::new(),
             };
             let decoded = roundtrip(&op);

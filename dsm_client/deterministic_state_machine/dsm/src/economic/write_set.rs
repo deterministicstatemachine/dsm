@@ -1352,6 +1352,34 @@ pub fn verify_operation_write_set(
                     }
                     Ok(())
                 }
+                (
+                    FactsKind::AuthorizedIssuance,
+                    CreditSource::AuthorizedIssuance(d),
+                    Operation::Mint { .. } | Operation::CreateToken { .. },
+                ) => {
+                    // THE SHAPE HALF of the issuance rule. Exactly one balance
+                    // credit and nothing else: non-reuse is the signed body's
+                    // position + operation-digest binding, proven by the
+                    // 0x0023 provenance arm — never a consumed-source leaf.
+                    // Everything semantic (the policy bytes, the k-of-N
+                    // signatures, amount, position, digest) is that arm's job;
+                    // this layer pins that the witness claims exactly the
+                    // effect the operation derives and that the descriptor
+                    // funds exactly the one credit.
+                    if !consumed.is_empty() || witness.mutations.len() != 1 {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "an authorized issuance is exactly one balance credit — \
+                                     its non-reuse is the authorization's position+digest \
+                                     binding, not a consumed-source leaf",
+                        });
+                    }
+                    if d.credit_mutation_index != b.mutation_index {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "issuance source does not fund the balance credit",
+                        });
+                    }
+                    Ok(())
+                }
                 (FactsKind::PeerDebit, CreditSource::ValidatedPeerDebit(d), _) => {
                     if consumed.len() != 1 || witness.mutations.len() != 2 {
                         return Err(WriteSetError::WrongWriteSet {

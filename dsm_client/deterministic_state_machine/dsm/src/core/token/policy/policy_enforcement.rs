@@ -366,12 +366,16 @@ impl PolicyEnforcer {
             }
 
             PolicyCondition::TokenAuthority { signers, threshold } => {
-                // Only gates value issuance/destruction; other operations are
-                // governed by their own conditions.
-                if !matches!(
-                    ctx.operation_type.as_str(),
-                    "mint" | "burn" | "create_token"
-                ) {
+                // Gates burn and create_token, which still authorize through
+                // the embedded `token_authorization_preimage` witness. MINT IS
+                // DELIBERATELY EXCLUDED: since the 0x0029 producer cut, mint
+                // authorization is the policy-signed issuance evidence bundle
+                // verified during economic admission — the operation carries
+                // no witness for this condition to check, and gating it here
+                // would resurrect the second authorization channel that was
+                // deleted. Other operations are governed by their own
+                // conditions.
+                if !matches!(ctx.operation_type.as_str(), "burn" | "create_token") {
                     return Ok(EnforcementResult::allowed(
                         "TokenAuthority does not gate this operation",
                         tick,
