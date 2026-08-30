@@ -211,14 +211,10 @@ pub trait ProvenanceResolver {
 /// Why a credit is not funded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvenanceError {
-    /// No authenticated issuance predicate is defined for this protocol, so an
-    /// `AuthorizedIssuance` source cannot be resolved by anyone.
-    ///
-    /// This is the same absence that makes the accepting layer refuse builtin
-    /// ERA/dBTC issuance outright. Class `0x0029` stays reserved precisely
-    /// because writing its field table would encode a predicate that does not
-    /// exist, and a credit is not funded by an object nobody can check.
-    IssuancePredicateUndefined,
+    /// A `0x0023` authorized-issuance credit failed one of the conjuncts:
+    /// the policy bytes, the signed body, the V1 support matrix, or the
+    /// k-of-N threshold over the exact issuance.
+    AuthorizedIssuanceInvalid(String),
     /// The verifier holds no validated transition for the named peer position.
     /// NOT a failure of the peer — a failure of *this* verifier to have
     /// established the prerequisite, and it fails closed.
@@ -302,12 +298,9 @@ pub enum ProvenanceError {
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::IssuancePredicateUndefined => write!(
-                f,
-                "credit provenance: no authenticated issuance predicate is defined, so an \
-                 authorized-issuance credit cannot be funded by anyone — the same absence that \
-                 makes the accepting layer refuse builtin issuance"
-            ),
+            Self::AuthorizedIssuanceInvalid(m) => {
+                write!(f, "authorized-issuance credit is invalid: {m}")
+            }
             Self::PeerTransitionNotValidated {
                 peer_economic_position,
                 failure,
@@ -475,6 +468,25 @@ pub fn validated_dlv_settlement_payment_source_id(
     *h.finalize().as_bytes()
 }
 
+/// `SourceId` for a policy-authorized issuance.
+///
+/// Derived only from authenticated coordinates, all of which the verifier has
+/// already required to equal the operation and the position under validation.
+/// The position and the operation digest are what make it unique per issuance
+/// event rather than per (asset, amount) pair.
+pub fn authorized_issuance_source_id(
+    body: &crate::economic::issuance::IssuanceAuthorizationBody,
+) -> [u8; 32] {
+    let mut h =
+        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ECON_SOURCE_AUTHORIZED_ISSUANCE);
+    h.update(&body.policy_commit);
+    h.update(&body.issuer_genesis);
+    h.update(&body.issuer_devid);
+    h.update(&body.issuer_economic_position.to_be_bytes());
+    h.update(&body.recipient_operation_digest);
+    *h.finalize().as_bytes()
+}
+
 /// `SourceId` for a peer's validated debit.
 pub fn validated_peer_debit_source_id(
     peer_genesis: &[u8; 32],
@@ -625,11 +637,176 @@ pub fn verify_credit_source(
         })?;
 
     let funded = match source {
-        // No authenticated issuance predicate exists, so nobody can resolve
-        // this. Refusing is the honest outcome; inventing one here would be
-        // exactly the disguised backdoor the mint repair avoided.
-        CreditSource::AuthorizedIssuance(_) => {
-            return Err(ProvenanceError::IssuancePredicateUndefined)
+        // ── 0x0023: POLICY-AUTHORIZED ISSUANCE (V1) ───────────────────────
+        //
+        // Answers WHO HAD THE RIGHT TO CREATE THESE UNITS, from the committed
+        // token policy rather than the issuer's assertion.
+        //
+        // It does NOT answer whether the units are backed. There is no backing
+        // condition in the policy vocabulary to enforce, so "authorized" must
+        // never be read as "collateralized" — here or anywhere downstream.
+        CreditSource::AuthorizedIssuance(d) => {
+            let invalid = |m: String| ProvenanceError::AuthorizedIssuanceInvalid(m);
+            let op = ctx
+                .verified_operation
+                .ok_or_else(|| invalid("issuance requires the verified operation".into()))?;
+
+            // 1. The exact accepted operation's own issuance coordinates. Read
+            //    from the AUTHENTICATED successor, never from the descriptor.
+            let (op_policy_commit, op_amount, op_kind) = match op {
+                crate::types::operations::Operation::Mint {
+                    policy_commit,
+                    amount,
+                    proof_of_authorization,
+                    ..
+                } => {
+                    // THE AUTHORIZATION NEVER RIDES INSIDE THE OPERATION IT
+                    // AUTHORIZES. The `0x0029` signatures cover this
+                    // operation's digest, so carrying them here would make the
+                    // digest depend on the signatures over it — a preimage
+                    // that cannot be constructed honestly, and an invitation
+                    // to a second, unverified place for the same fact to live.
+                    // Authorization is carried by the evidence bundle the
+                    // descriptor addresses, and only there. Refusing a
+                    // non-empty field keeps that the ONLY channel rather than
+                    // leaving a silently-ignored one beside it.
+                    if !proof_of_authorization.is_empty() {
+                        return Err(invalid(
+                            "a Mint funded by an issuance authorization must carry an empty \
+                             proof_of_authorization: the 0x0029 signatures cover this \
+                             operation's digest and live only in the evidence bundle"
+                                .into(),
+                        ));
+                    }
+                    (*policy_commit, amount.value(), "mint")
+                }
+                // Reachable only if supply-at-creation is later enabled; today
+                // the route, the write-set table and the accepting layer all
+                // refuse it. Handled here so the arm covers the operations the
+                // descriptor may legitimately accompany rather than silently
+                // depending on which of the three refuses first.
+                crate::types::operations::Operation::CreateToken {
+                    policy_commit,
+                    initial_supply,
+                    ..
+                } => (*policy_commit, initial_supply.value(), "create_token"),
+                _ => {
+                    return Err(invalid(
+                        "an authorized-issuance credit requires a Mint or CreateToken".into(),
+                    ))
+                }
+            };
+            if op_amount == 0 {
+                return Err(invalid("issuance of zero units authorizes nothing".into()));
+            }
+
+            // 2. The evidence bundle, by exact content address.
+            let bundle_bytes = resolver
+                .immutable_evidence(
+                    crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
+                    &d.issuance_authorization_addr,
+                )
+                .map_err(ProvenanceError::OwnerLineage)?;
+            if crate::storage_object::immutable_addr(
+                crate::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
+                &bundle_bytes,
+            ) != d.issuance_authorization_addr
+            {
+                return Err(invalid(
+                    "issuance evidence bytes do not hash to the descriptor's address".into(),
+                ));
+            }
+            let ev = crate::economic::issuance_authorization_evidence::
+                decode_issuance_authorization_evidence(&bundle_bytes)
+                .map_err(invalid)?;
+
+            // 3. The policy bytes ARE the policy: re-hash them to the commit
+            //    the OPERATION names. Nothing is fetched and nothing mutable
+            //    is trusted — the commit is the content hash.
+            let recomputed = crate::crypto::blake3::domain_hash_bytes(
+                crate::common::domain_tags::TAG_DSM_POLICY,
+                &ev.canonical_policy_bytes,
+            );
+            if recomputed != op_policy_commit {
+                return Err(invalid(
+                    "the carried policy bytes do not hash to the operation's policy commit".into(),
+                ));
+            }
+
+            // 4. The signed body states THIS issuance, on THIS lineage, at
+            //    THIS write-once position. Position + operation digest are the
+            //    non-reuse mechanism: the same bytes replayed at another
+            //    position carry the earlier one and fail here.
+            let b = &ev.body;
+            if b.policy_commit != op_policy_commit
+                || b.amount != op_amount
+                || b.issuer_genesis != *ctx.genesis
+                || b.issuer_devid != *ctx.device_id
+            {
+                return Err(invalid(
+                    "the issuance authorization states a different issuance".into(),
+                ));
+            }
+            if b.issuer_economic_position != ctx.economic_position {
+                return Err(invalid(
+                    "the issuance authorization is for a different economic position".into(),
+                ));
+            }
+            if b.recipient_operation_digest != witness.operation_digest {
+                return Err(invalid(
+                    "the issuance authorization is for a different operation".into(),
+                ));
+            }
+
+            // 5. The policy's issuance conditions, decided by the V1 support
+            //    matrix. Anything not independently foreign-verifiable refuses
+            //    rather than being ignored.
+            let policy =
+                crate::economic::issuance::parse_issuance_policy(&ev.canonical_policy_bytes)
+                    .map_err(|e| invalid(format!("issuance policy: {e}")))?;
+            crate::economic::issuance::check_issuance_permitted(
+                &policy,
+                op_kind,
+                op_amount,
+                ctx.device_id,
+            )
+            .map_err(|e| invalid(format!("issuance policy: {e}")))?;
+
+            // 6. k of N DISTINCT policy-named signers over the exact body.
+            //    Keys come from the POLICY; a key presented in the bundle that
+            //    the policy does not name is not a signer, however valid its
+            //    signature.
+            let digest = b
+                .signing_digest()
+                .map_err(|e| invalid(format!("issuance signing digest: {e}")))?;
+            let mut satisfied: Vec<usize> = Vec::new();
+            for (pk, sig) in &ev.signatures {
+                let Some(idx) = policy.signers.iter().position(|s| s == pk) else {
+                    continue;
+                };
+                if satisfied.contains(&idx) {
+                    continue;
+                }
+                if matches!(
+                    crate::crypto::sphincs::sphincs_verify(pk, &digest, sig),
+                    Ok(true)
+                ) {
+                    satisfied.push(idx);
+                }
+            }
+            if (satisfied.len() as u32) < policy.threshold {
+                return Err(invalid(format!(
+                    "issuance authorized by {} distinct policy signer(s), threshold is {}",
+                    satisfied.len(),
+                    policy.threshold
+                )));
+            }
+
+            FundedCredit {
+                source_id: authorized_issuance_source_id(b),
+                policy_commit: op_policy_commit,
+                amount: op_amount,
+            }
         }
 
         // Intra-transition, and the ONLY arm that reaches nothing outside.

@@ -37,9 +37,9 @@
 use std::collections::BTreeMap;
 
 use crate::economic::credit::{
-    CreditSource, CreditSourceDlvReserveConsumption, CreditSourceSameTransitionMove,
-    CreditSourceValidatedDlvSettlementPayment, CreditSourceValidatedFaucetDistribution,
-    CreditSourceValidatedPeerDebit,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
+    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
+    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
@@ -61,13 +61,20 @@ pub enum WriteSetError {
     /// against a tree whose leaf is non-zero); refusing at build gives an
     /// honest producer a named error instead of an unverifiable witness.
     SourceAlreadyConsumed,
-    /// `CreateToken` with `initial_supply > 0`: the new asset's supply credit
-    /// has no fundable source until the issuance predicate (`0x0029`) exists.
-    /// Funding it from the ERA fee debit would turn a fee payment into
-    /// arbitrary issuance (`SameTransitionMove` is same-asset conservation).
+    /// `CreateToken` with `initial_supply > 0`: supply-at-creation is not an
+    /// enabled path.
+    ///
+    /// The name predates class `0x0029`, which now exists — so the reason has
+    /// changed rather than the outcome. Issuance is available, but through
+    /// `Mint` against an already-anchored policy: create with zero supply,
+    /// then issue under the policy's own authority. The original hazard also
+    /// still stands — funding a new asset's supply from the ERA fee debit
+    /// would turn a fee payment into arbitrary issuance, since
+    /// `SameTransitionMove` is same-asset conservation.
+    ///
+    /// Enabling supply-at-creation is a deliberate three-place diff: this
+    /// arm, the route guard, and the accepting-layer refusal.
     CreateTokenInitialSupplyRequiresIssuancePredicate,
-    /// `Mint`: no authenticated issuance predicate exists.
-    IssuancePredicateUndefined,
     /// Classified `ClosedWriteSet` but its write set is deferred
     /// (`DlvSettle`/`DlvClose` — 3.6).
     OperationWriteSetNotYetSpecified,
@@ -117,12 +124,8 @@ impl core::fmt::Display for WriteSetError {
             Self::CreateTokenInitialSupplyRequiresIssuancePredicate => write!(
                 f,
                 "CreateToken with initial_supply > 0 cannot enter a validated lineage: the new \
-                 asset's supply credit has no authenticated issuance/source predicate yet, and \
+                 asset's supply must be issued through Mint against the anchored policy, and \
                  the ERA fee debit must not fund a different asset"
-            ),
-            Self::IssuancePredicateUndefined => write!(
-                f,
-                "Mint has no authenticated issuance predicate; nothing can fund its credit"
             ),
             Self::OperationWriteSetNotYetSpecified => write!(
                 f,
@@ -194,6 +197,14 @@ pub enum CreditSourceFacts {
         trader_devid: [u8; 32],
         trader_economic_position: u64,
         payment_evidence_addr: [u8; 32],
+    },
+    /// A policy-authorized issuance (0x0023 -> 0x0029). The evidence address
+    /// freezes the bundle carrying the canonical policy bytes, the signed
+    /// authorization body and the k-of-N signatures. EVERY other coordinate —
+    /// asset, amount, issuer, position, operation digest — is read from the
+    /// operation and the witness, never supplied twice.
+    AuthorizedIssuance {
+        issuance_authorization_addr: [u8; 32],
     },
     /// A trader's settle output, funded by consuming an owner vault reserve
     /// (0x0026). `owner_economic_position` is the UNTRUSTED locator of the
@@ -343,6 +354,7 @@ fn dlv_pair_legs(
 enum FactsKind {
     FaucetTicket,
     PeerDebit,
+    AuthorizedIssuance,
 }
 
 /// The one table: what an operation does to `R_econ`, or why it cannot be
@@ -409,7 +421,24 @@ fn semantic_write_set(
             amount: crate::economic::faucet::ERA_FAUCET_PAYOUT,
             facts_required: FactsKind::FaucetTicket,
         }),
-        Operation::Mint { .. } => Err(WriteSetError::IssuancePredicateUndefined),
+        // ISSUANCE: one balance credit of exactly the operation's amount,
+        // funded by the 0x0023 arm resolving a 0x0029 authorization. The
+        // amount and asset come from the operation; the write set states the
+        // effect, and the arm states who was entitled to cause it.
+        Operation::Mint {
+            policy_commit,
+            amount,
+            ..
+        } => {
+            if amount.value() == 0 {
+                return Err(WriteSetError::NoEconomicWriteSet);
+            }
+            Ok(SemanticWriteSet::Credit {
+                policy_commit: *policy_commit,
+                amount: amount.value(),
+                facts_required: FactsKind::AuthorizedIssuance,
+            })
+        }
         Operation::DlvCreateFundedV2 {
             vault_id,
             leg_a_policy_commit,
@@ -650,6 +679,10 @@ pub fn build_write_set(
                     CreditSourceFacts::FaucetTicket { .. },
                     FactsKind::FaucetTicket
                 ) | (CreditSourceFacts::PeerDebit { .. }, FactsKind::PeerDebit)
+                    | (
+                        CreditSourceFacts::AuthorizedIssuance { .. },
+                        FactsKind::AuthorizedIssuance
+                    )
             );
             if !matches {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
@@ -985,6 +1018,20 @@ pub fn build_write_set(
                 PlannedSource::External(facts) => facts,
             };
             let source = match (facts, operation) {
+                // The descriptor carries the evidence ADDRESS and the credit
+                // index, and nothing else: asset, amount, issuer, position and
+                // operation digest all live in the signed authorization body
+                // the arm resolves, so there is no second place for one fact
+                // to disagree with itself.
+                (
+                    CreditSourceFacts::AuthorizedIssuance {
+                        issuance_authorization_addr,
+                    },
+                    Operation::Mint { .. } | Operation::CreateToken { .. },
+                ) => CreditSource::AuthorizedIssuance(CreditSourceAuthorizedIssuance {
+                    credit_mutation_index,
+                    issuance_authorization_addr,
+                }),
                 (
                     CreditSourceFacts::FaucetTicket {
                         faucet_claim_evidence_addr,

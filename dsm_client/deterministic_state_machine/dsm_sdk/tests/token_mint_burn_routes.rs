@@ -88,22 +88,44 @@ fn fund_era(router: &AppRouterImpl) {
     .expect("seed the fixture ERA balance");
 }
 
-/// Attempt a token creation, returning the raw route result.
-fn try_create_token(
+/// Attempt a CAPPED token creation — the shape beta refuses.
+fn try_create_capped_token(
     router: &AppRouterImpl,
     ticker: &str,
     max_supply: u128,
-    alloc: u128,
 ) -> dsm_sdk::bridge::AppResult {
     let req = generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
         decimals: 0,
         max_supply_u128: max_supply.to_be_bytes().to_vec(),
-        initial_alloc_u128: alloc.to_be_bytes().to_vec(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
         unlimited_supply: false,
+        mint_burn_threshold: 1,
+        description: String::new(),
+        icon_url: String::new(),
+        allowlist_device_ids: Vec::new(),
+    };
+    invoke(router, "token.create", pack(req.encode_to_vec()))
+}
+
+/// Attempt a token creation, returning the raw route result.
+fn try_create_token(
+    router: &AppRouterImpl,
+    ticker: &str,
+    alloc: u128,
+) -> dsm_sdk::bridge::AppResult {
+    let req = generated::TokenCreateRequest {
+        ticker: ticker.to_string(),
+        alias: format!("{ticker} Token"),
+        decimals: 0,
+        max_supply_u128: 0u128.to_be_bytes().to_vec(),
+        initial_alloc_u128: alloc.to_be_bytes().to_vec(),
+        mint_burn_enabled: true,
+        transferable: true,
+        unlimited_supply: true,
         mint_burn_threshold: 1,
         description: String::new(),
         icon_url: String::new(),
@@ -152,7 +174,7 @@ fn creation_with_initial_supply_gets_the_named_refusal() {
     init_test_storage();
     let router = new_router();
     fund_era(&router);
-    let res = try_create_token(&router, "TSTA", 1_000_000, 1_000);
+    let res = try_create_token(&router, "TSTA", 1_000);
     assert!(!res.success, "creator supply must be refused");
     let msg = res.error_message.unwrap_or_default();
     assert!(
@@ -172,7 +194,7 @@ fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
     init_test_storage();
     let router = new_router();
     fund_era(&router);
-    let res = try_create_token(&router, "TSTB", 1_000_000, 0);
+    let res = try_create_token(&router, "TSTB", 0);
     assert!(
         !res.success,
         "a fee debit with no economic ancestry must not be admittable"
@@ -231,3 +253,60 @@ fn burn_requires_an_admitted_economic_lineage() {
 // validated lineage, so custom-token mint/burn currently has no economically
 // admissible path. Deleted rather than weakened — a green test for a removed
 // capability is how it silently returns.
+
+/// A FINITE SUPPLY CAP IS REFUSED AT CREATION, BEFORE ANY SIDE EFFECT.
+///
+/// A token policy is immutable once anchored. Anchoring one whose positive
+/// supply can never enter `R_econ` would create an asset that looks supported
+/// and is permanently unissuable, discoverable only at mint time. So the
+/// refusal happens at the moment the choice is made — and it must leave
+/// nothing behind: no policy anchor, no registry entry, no ERA fee debit, no
+/// state transition.
+///
+/// This is a BETA CAPABILITY refusal, not a reinterpretation of `max_supply`:
+/// the encoding and its parser are untouched, and the gate lifts unchanged
+/// when a globally non-duplicable supply predicate exists.
+#[test]
+#[serial]
+fn a_capped_token_is_refused_at_creation_and_leaves_nothing_behind() {
+    init_test_storage();
+    let router = new_router();
+    fund_era(&router);
+
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit");
+    let before = router
+        .core_sdk
+        .device_head()
+        .map(|h| h.balance(&era))
+        .unwrap_or(0);
+    let res = try_create_capped_token(&router, "CAPPED", 1_000_000);
+    assert!(!res.success, "a finite max_supply must be refused");
+    let msg = res.error_message.as_deref().unwrap_or_default();
+    assert!(
+        msg.contains("CAPPED_TOKEN_ISSUANCE_UNSUPPORTED_IN_BETA"),
+        "the refusal names the beta capability limit: {msg}"
+    );
+    // NO SIDE EFFECT. The fee is the observable one: if the refusal happened
+    // after the debit, this is what would show it.
+    assert_eq!(
+        router
+            .core_sdk
+            .device_head()
+            .map(|h| h.balance(&era))
+            .unwrap_or(0),
+        before,
+        "a refused creation must not debit the ERA fee"
+    );
+
+    // POSITIVE CONTROL. This fixture has no admission environment, so an
+    // uncapped creation cannot SUCCEED here — it fails later, on the economic
+    // admission. What it proves is the part that matters: the identical
+    // request without the cap gets PAST the cap gate, so the refusal above is
+    // the cap rule and not something wrong with the request.
+    let uncapped = try_create_token(&router, "UNCAPPED", 0);
+    let umsg = uncapped.error_message.as_deref().unwrap_or_default();
+    assert!(
+        !umsg.contains("CAPPED_TOKEN_ISSUANCE_UNSUPPORTED_IN_BETA"),
+        "an uncapped request must not hit the cap gate: {umsg}"
+    );
+}

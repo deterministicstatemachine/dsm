@@ -378,28 +378,84 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
     ));
 }
 
+/// A mint now HAS a write set — one balance credit of exactly the operation's
+/// amount — but it still demands its issuance facts.
+///
+/// This used to assert `IssuancePredicateUndefined`, which was correct while
+/// class 0x0029 did not exist. The refusal did not disappear; it MOVED to
+/// where it can actually be checked: the write set states the effect, and the
+/// 0x0023 arm states who was entitled to cause it. Bare facts are refused
+/// here, and a wrong authorization is refused there.
 #[test]
-fn mint_is_refused_by_the_write_set_rule_itself() {
+fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
     let (mut tree, balances) = funded_tree(era(), 100);
+    let pc = [0x7Eu8; 32];
+    let mint = Operation::Mint {
+        amount: Balance::from_state(100, [0u8; 32]),
+        token_id: b"NEW".to_vec(),
+        policy_commit: pc,
+        authorized_by: Vec::new(),
+        // The 0x0029 signatures live in the evidence bundle, never here: a
+        // signature inside the operation would change the operation digest the
+        // signed body commits to, and the scheme would have no fixed point.
+        proof_of_authorization: Vec::new(),
+        message: String::new(),
+    };
     assert_eq!(
         build_write_set(
-            &Operation::Mint {
-                amount: Balance::from_state(100, [0u8; 32]),
-                token_id: b"ERA".to_vec(),
-                policy_commit: era(),
-                authorized_by: Vec::new(),
-                proof_of_authorization: Vec::new(),
-                message: String::new(),
-            },
+            &mint,
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState::balances_only(&balances),
+            &mut tree.clone(),
+            &CreditSourceFacts::None,
+        )
+        .expect_err("a credit with no source is not fundable"),
+        WriteSetError::FactsDoNotMatchOperation
+    );
+
+    let built = build_write_set(
+        &mint,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::AuthorizedIssuance {
+            issuance_authorization_addr: [0xA9; 32],
+        },
+    )
+    .expect("issuance facts make the mint buildable");
+    assert_eq!(built.mutations.len(), 1, "one balance credit, nothing else");
+    assert_eq!(built.credit_sources.len(), 1);
+    assert!(matches!(
+        built.credit_sources[0],
+        dsm::economic::credit::CreditSource::AuthorizedIssuance(_)
+    ));
+    // A zero-unit mint creates nothing, so it has no economic write set at all.
+    let zero = Operation::Mint {
+        amount: Balance::from_state(0, [0u8; 32]),
+        token_id: b"NEW".to_vec(),
+        policy_commit: pc,
+        authorized_by: Vec::new(),
+        proof_of_authorization: Vec::new(),
+        message: String::new(),
+    };
+    assert_eq!(
+        build_write_set(
+            &zero,
             &G,
             &DEV,
             &econ_op_id(),
             &EconomicPreState::balances_only(&balances),
             &mut tree,
-            &CreditSourceFacts::None,
+            &CreditSourceFacts::AuthorizedIssuance {
+                issuance_authorization_addr: [0xA9; 32],
+            },
         )
-        .expect_err("no issuance predicate"),
-        WriteSetError::IssuancePredicateUndefined
+        .expect_err("zero units is not issuance"),
+        WriteSetError::NoEconomicWriteSet
     );
 }
 

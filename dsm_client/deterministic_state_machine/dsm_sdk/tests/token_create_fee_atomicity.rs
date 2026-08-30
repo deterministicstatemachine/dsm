@@ -82,16 +82,16 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
 /// `DECIMALS` is what turns those into the base units canonical state holds.
 const DECIMALS: u32 = 2;
 
-fn create_request(ticker: &str, display_alloc: u128) -> Vec<u8> {
+fn create_request(ticker: &str) -> Vec<u8> {
     let req = generated::TokenCreateRequest {
         ticker: ticker.to_string(),
         alias: format!("{ticker} Token"),
         decimals: DECIMALS,
-        max_supply_u128: 1_000_000u128.to_be_bytes().to_vec(),
-        initial_alloc_u128: display_alloc.to_be_bytes().to_vec(),
+        max_supply_u128: 0u128.to_be_bytes().to_vec(),
+        initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
         mint_burn_enabled: true,
         transferable: true,
-        unlimited_supply: false,
+        unlimited_supply: true,
         mint_burn_threshold: 1,
         description: String::new(),
         icon_url: String::new(),
@@ -158,7 +158,7 @@ fn an_unadmittable_creation_fails_closed_and_burns_nothing() {
         "fixture funds the fee — the refusal must not be affordability"
     );
 
-    let res = invoke(&r, "token.create", create_request("FEEA", 0));
+    let res = invoke(&r, "token.create", create_request("FEEA"));
     assert!(
         !res.success,
         "a fee debit with no admittable economic lineage must be refused"
@@ -191,7 +191,7 @@ fn insufficient_era_rejects_and_burns_nothing() {
     let before_root = head_root(&r);
     assert!(before_era < FEE, "fixture must start below the fee");
 
-    let res = invoke(&r, "token.create", create_request("POOR", 10));
+    let res = invoke(&r, "token.create", create_request("POOR"));
     assert!(!res.success, "creation must reject without the fee");
     let msg = res.error_message.unwrap_or_default();
     assert!(

@@ -1229,6 +1229,63 @@ impl AppRouterImpl {
                     return err("token.create: initial allocation exceeds max supply".to_string());
                 }
 
+                // SUPPLY AT CREATION IS REFUSED FOR ITS OWN REASON, AND IT IS
+                // CHECKED FIRST.
+                //
+                // A positive `initial_alloc` is only expressible on a CAPPED
+                // policy (`unlimited` requires both the cap and the allocation
+                // to be zero), so without this the capped gate below would
+                // answer every supply-at-creation request with a message about
+                // caps. That answer is true and useless: the caller's actual
+                // problem is that the supply credit has no issuance source, and
+                // switching to unlimited would not fix it. Issue through `Mint`
+                // against the anchored policy instead, which carries a `0x0029`
+                // authorization the verifier can rerun.
+                //
+                // This guard is DIAGNOSTIC, not load-bearing. Removing it does
+                // not make supply-at-creation possible: the policy parser
+                // refuses the encoding, the CreateToken write-set rule refuses
+                // the credit, and the accepting layer refuses the transition.
+                // What removing it costs is the reason — the caller is told
+                // its policy cannot be re-read. Enforcement lives in those
+                // three places; do not treat this as the fourth.
+                if req.initial_alloc_u128.iter().any(|b| *b != 0) {
+                    return err(
+                        "token.create: CreateToken with initial_supply > 0 cannot enter a \
+                         validated lineage: the new asset's supply credit has no authenticated \
+                         issuance source. Create the token with no initial supply and issue it \
+                         with token.mint, whose credit is funded by a 0x0029 issuance \
+                         authorization"
+                            .into(),
+                    );
+                }
+                // CAPPED TOKEN CREATION IS REFUSED IN BETA, BEFORE ANY SIDE
+                // EFFECT — no policy anchor, no registry entry, no ERA fee
+                // debit, no state transition.
+                //
+                // A token policy is IMMUTABLE once anchored. Anchoring one
+                // whose positive supply can never enter `R_econ` would create
+                // an asset that looks supported and is permanently unissuable,
+                // discoverable only at mint time — the exact
+                // "looks-supported, actually-unreachable" shape just removed
+                // from the DLV path. Refusing at creation makes the limit
+                // visible at the moment the choice is made.
+                //
+                // This is a BETA CAPABILITY REFUSAL, not a reinterpretation of
+                // `max_supply`. The finite-cap encoding, its parser and its
+                // policy-condition meaning are all left intact: issuance under
+                // a finite cap needs a globally non-duplicable supply
+                // predicate, and the per-device circulating total is not one
+                // (N authorized devices would each mint to the ceiling). When
+                // such a predicate exists this gate lifts; nothing about the
+                // format has to change for that.
+                if !req.unlimited_supply {
+                    return err(
+                        "token.create: CAPPED_TOKEN_ISSUANCE_UNSUPPORTED_IN_BETA — a finite max_supply cannot be enforced, because circulating supply is derived per-device and every authorized device would get its own ceiling. Create the token with unlimited supply; capped issuance returns when a globally non-duplicable supply predicate exists"
+                            .into(),
+                    );
+                }
+
                 let mut allowlist_device_ids: Vec<[u8; 32]> = Vec::new();
                 for id in &req.allowlist_device_ids {
                     match <[u8; 32]>::try_from(id.as_slice()) {
