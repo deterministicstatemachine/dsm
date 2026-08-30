@@ -38,23 +38,23 @@ const ALLOWLIST_KIND_INLINE: u8 = 1;
 const MAX_POLICY_SIGNERS: usize = 16;
 
 #[derive(Debug, Clone, Default)]
-struct ParsedTokenPolicy {
-    ticker: String,
-    alias: String,
-    decimals: u32,
-    max_supply: u128,
-    initial_alloc: u128,
-    description: Option<String>,
-    icon_url: Option<String>,
-    mint_burn_enabled: bool,
-    transferable: bool,
-    unlimited_supply: bool,
+pub(crate) struct ParsedTokenPolicy {
+    pub(crate) ticker: String,
+    pub(crate) alias: String,
+    pub(crate) decimals: u32,
+    pub(crate) max_supply: u128,
+    pub(crate) initial_alloc: u128,
+    pub(crate) description: Option<String>,
+    pub(crate) icon_url: Option<String>,
+    pub(crate) mint_burn_enabled: bool,
+    pub(crate) transferable: bool,
+    pub(crate) unlimited_supply: bool,
     /// Signatures required to authorize a mint or burn (`k` in k-of-n).
-    mint_burn_threshold: u8,
+    pub(crate) mint_burn_threshold: u8,
     /// The `n` in k-of-n: raw SPHINCS+ public keys permitted to mint/burn.
-    signers: Vec<Vec<u8>>,
+    pub(crate) signers: Vec<Vec<u8>>,
     /// Inline allowlist of 32-byte device ids; empty when not restricted.
-    allowlist_device_ids: Vec<[u8; 32]>,
+    pub(crate) allowlist_device_ids: Vec<[u8; 32]>,
 }
 
 /// Byte-cursor over a policy blob. Every read is bounds-checked and the blob
@@ -126,7 +126,7 @@ impl<'a> PolicyReader<'a> {
 ///   u8   allowlist_kind (0 NONE | 1 INLINE)
 ///   u16  allowlist_count, count x 32B device_id
 /// ```
-fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, String> {
+pub(crate) fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, String> {
     if p.signers.is_empty() || p.signers.len() > MAX_POLICY_SIGNERS {
         return Err(format!(
             "policy: signer count must be 1..={MAX_POLICY_SIGNERS}, got {}",
@@ -213,7 +213,7 @@ fn build_policy_v3_bytes(p: &ParsedTokenPolicy) -> Result<Vec<u8>, String> {
 /// Parse a canonical v3 policy blob. Fail-closed on every field: a policy
 /// that cannot be fully validated is not a policy, because it is the anchored
 /// definition of an asset's rules.
-fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
+pub(crate) fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
     let policy = generated::TokenPolicyV3::decode(raw_proto).ok()?;
     let mut r = PolicyReader::new(&policy.policy_bytes);
 
@@ -486,7 +486,7 @@ async fn try_fetch_policy_from_network(anchor: &[u8; 32]) -> Result<Option<Vec<u
 /// reconstructs a byte-identical `PolicyFile`. Creation and restart
 /// rehydration both call this — there is no second place that decides what a
 /// token's policy means.
-fn derive_policy_file(
+pub(crate) fn derive_policy_file(
     ticker: &str,
     parsed: &ParsedTokenPolicy,
 ) -> dsm::types::policy_types::PolicyFile {
@@ -1631,12 +1631,11 @@ impl AppRouterImpl {
                     signature: authorization,
                 };
 
-                // 3.5b (owner ruling): initial creator supply is REFUSED —
-                // the new asset's credit has no authenticated issuance/source
-                // predicate yet, and an operation that cannot be admitted
-                // must not strand an active economic lineage. Token creation
-                // metadata + its ERA fee are supported now; creator supply
-                // waits for the issuance predicate (0x0029).
+                // Initial creator supply is REFUSED: supply at creation has
+                // no issuance source. The lifecycle is create-with-zero then
+                // `token.mint`, whose credit carries a 0x0029 authorization
+                // the verifier reruns — one issuance operation, one source
+                // predicate.
                 if initial_alloc_u64 > 0 {
                     return err(format!(
                         "token.create: {}",
@@ -1698,6 +1697,12 @@ impl AppRouterImpl {
                         &self.core_sdk,
                         create_op,
                         deltas[0].clone(),
+                        |_| {
+                            Ok((
+                                dsm::economic::write_set::CreditSourceFacts::None,
+                                Vec::new(),
+                            ))
+                        },
                         Some(&insert_registry),
                     )
                     .await
@@ -1951,32 +1956,243 @@ impl AppRouterImpl {
             .map_err(|e| format!("unknown token {token_id}: {e}"))
     }
 
-    /// `token.mint` — REFUSED until an authenticated issuance predicate exists.
+    /// `token.mint` — THE canonical issuance producer.
     ///
-    /// A mint creates units, so it is the one operation whose entire effect is
-    /// a credit with no prior holder. `R_econ` funds a credit only through a
-    /// `CreditSource`, and the arm that would carry issuance
-    /// (`0x0023 AuthorizedIssuance`) fails closed because its evidence class
-    /// `0x0029` is not written: nothing can yet prove a token policy authorized
-    /// this exact issuance.
+    /// A mint creates units, so its authority cannot be asserted by the
+    /// operation itself: the `0x0029` signatures cover this operation's
+    /// digest, which is why they live in a separate evidence bundle and why
+    /// `Operation::Mint` carries no authorization fields at all. The producer
+    /// ordering is load-bearing and acyclic:
     ///
-    /// This route is DEFENSE IN DEPTH. The authoritative refusal is at the
-    /// accepting layer (`DeviceState::advance`), which protects every caller
-    /// rather than this one; deleting this arm must leave minting refused.
+    /// ```text
+    /// Mint frozen -> operation_digest -> 0x0029 body (at the TARGET economic
+    /// position) -> signature -> evidence object -> admission
+    /// ```
     ///
-    /// The mint-construction body was DELETED rather than left unreachable. It
-    /// signed a self-authorization with the caller's own device key and applied
-    /// a credit delta — the shape that has to change completely once issuance
-    /// carries `0x0029` evidence, so keeping it would preserve a path whose
-    /// only remaining purpose was the thing being refused.
-    async fn handle_token_mint(&self, _i: AppInvoke) -> AppResult {
-        err(
-            "token.mint: issuance is unavailable — no authenticated issuance predicate exists \
-             yet (class 0x0029), so nothing could prove a token policy authorized this mint. \
-             Minted units would be unspendable in every validated lineage, and holding them \
-             would permanently block this device from activating its economic state."
-                .into(),
+    /// Every pre-flight failure happens BEFORE anything durable — no advance,
+    /// no fence, no frozen artifact. The evidence bytes are frozen in the SAME
+    /// transaction as the advance and the pending admission, so either the
+    /// mint never became locally accepted, or the mint, its admission and its
+    /// exact evidence all exist durably for resume. The route reports success
+    /// only after ECON_ADMITTED.
+    async fn handle_token_mint(&self, i: AppInvoke) -> AppResult {
+        let arg_pack = match generated::ArgPack::decode(&*i.args) {
+            Ok(p) => p,
+            Err(e) => return err(format!("decode ArgPack failed: {e}")),
+        };
+        let req = match generated::TokenMintRequest::decode(&*arg_pack.body) {
+            Ok(r) => r,
+            Err(e) => return err(format!("decode TokenMintRequest failed: {e}")),
+        };
+        if req.amount == 0 {
+            return err("token.mint: amount must be > 0".into());
+        }
+        let policy_commit = match self.resolve_token_for_value_op(&req.token_id) {
+            Ok(c) => c,
+            Err(e) => return err(format!("token.mint: {e}")),
+        };
+        // BUILTINS FAIL CLOSED BEFORE ANYTHING IS SIGNED. ERA must not become
+        // self-mintable merely because this device can sign something: ERA
+        // enters through the faucet's bootstrap tickets, and dBTC issuance
+        // arrives with the Bitcoin tap integration.
+        if let Some(name) =
+            dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+                &policy_commit,
+            )
+        {
+            return err(format!(
+                "token.mint: {name} is a builtin — its issuance is not self-authorizable; ERA \
+                 is distributed by the faucet and dBTC issuance arrives with the Bitcoin tap"
+            ));
+        }
+        // THE EXACT COMMITTED POLICY BYTES, verified against their own commit.
+        // The evidence carries these bytes verbatim — never a reconstruction
+        // from parsed fields, never a mutable metadata row.
+        let canonical_policy_bytes =
+            match crate::storage::client_db::token_registry::load_policy_verified(&policy_commit) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    return err(format!(
+                        "token.mint: the anchored policy bytes for {} are not available on this \
+                         device, so the issuance evidence cannot carry them",
+                        req.token_id
+                    ));
+                }
+                Err(e) => return err(format!("token.mint: policy load failed: {e}")),
+            };
+        // Run the CORE parser and support matrix against the committed bytes,
+        // so an unsupported V1 shape (finite cap, disabled mint/burn, an
+        // allowlist excluding this device, an unsatisfiable authority) fails
+        // HERE rather than after local mutation.
+        let policy = match dsm::economic::issuance::parse_issuance_policy(&canonical_policy_bytes) {
+            Ok(p) => p,
+            Err(e) => return err(format!("token.mint: committed policy: {e}")),
+        };
+        let own_devid = self.device_id_bytes;
+        if let Err(e) = dsm::economic::issuance::check_issuance_permitted(
+            &policy, "mint", req.amount, &own_devid,
+        ) {
+            return err(format!("token.mint: {e}"));
+        }
+        // This wallet must actually HOLD the issuing authority: its signing
+        // key must be one the policy names, and the threshold must be
+        // satisfiable with the keys held locally (exactly one). A policy this
+        // device adopted but cannot satisfy gets a clean refusal, not a
+        // signature the verifier will not count.
+        let signer_public_key = match crate::sdk::signing_authority::current_public_key() {
+            Ok(pk) => pk,
+            Err(e) => return err(format!("token.mint: signing identity unavailable: {e}")),
+        };
+        if !policy.signers.iter().any(|s| s == &signer_public_key) {
+            return err(format!(
+                "token.mint: this wallet does not hold the issuing authority for {} — its \
+                 signing key is not among the policy's committed signers",
+                req.token_id
+            ));
+        }
+        if policy.threshold > 1 {
+            return err(format!(
+                "token.mint: the policy requires {} distinct authority signatures and this \
+                 wallet holds one policy key — a k-of-n issuance needs the other signers' \
+                 signatures, which no local producer can supply",
+                policy.threshold
+            ));
+        }
+
+        // The COMMITTED operation carries the CANONICAL token id, not the
+        // alias the caller typed: a mint addressed by ticker and one addressed
+        // by id must freeze IDENTICAL operation bytes, and the advance-path
+        // policy engine is keyed by the canonical id. The registry row is the
+        // same one strict resolution just verified a policy for.
+        let canonical_token_id =
+            crate::storage::client_db::token_registry::get_token(&req.token_id)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    crate::storage::client_db::token_registry::get_token_by_ticker(&req.token_id)
+                        .ok()
+                        .flatten()
+                })
+                .map(|row| row.token_id)
+                .unwrap_or_else(|| req.token_id.clone());
+
+        // FREEZE the exact Mint. Nothing may be inserted into it afterward —
+        // its digest is about to be committed inside the signed body.
+        let ref_hash = self
+            .core_sdk
+            .device_head()
+            .map(|s| s.genesis_digest())
+            .unwrap_or([0u8; 32]);
+        let op = dsm::types::operations::Operation::Mint {
+            amount: dsm::types::token_types::Balance::from_state(req.amount, ref_hash),
+            token_id: canonical_token_id.as_bytes().to_vec(),
+            policy_commit,
+            message: req.message.clone(),
+        };
+        let operation_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
+        let (issuer_genesis, issuer_devid) = match self.core_sdk.device_head() {
+            Some(h) => (h.genesis_digest(), h.devid()),
+            Option::None => return err("token.mint: no device head".into()),
+        };
+        // The delta credits EXACTLY the strict-resolved asset; conservation
+        // re-checks this against the signed operation inside `advance`.
+        let delta = dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Credit,
+            amount: req.amount,
+        };
+        let amount = req.amount;
+
+        let outcome = match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
+            &self.core_sdk,
+            op,
+            delta,
+            // Runs once the TARGET POSITION is fixed — the same coordinate the
+            // admission seam CAS-checks — and before anything durable. The
+            // body binds this issuance to that write-once register cell and to
+            // the exact frozen operation, which is the whole non-reuse story.
+            move |target_position| {
+                let body = dsm::economic::issuance::IssuanceAuthorizationBody {
+                    policy_commit,
+                    issuer_genesis,
+                    issuer_devid,
+                    issuer_economic_position: target_position,
+                    recipient_operation_digest: operation_digest,
+                    amount,
+                };
+                let body_ccb = body.encode().map_err(|e| {
+                    dsm::types::error::DsmError::invalid_operation(format!(
+                        "issuance body encode: {e}"
+                    ))
+                })?;
+                let digest = body.signing_digest().map_err(|e| {
+                    dsm::types::error::DsmError::invalid_operation(format!(
+                        "issuance signing digest: {e}"
+                    ))
+                })?;
+                let secret_key = crate::sdk::signing_authority::current_secret_key()?;
+                let signature =
+                    dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).map_err(|e| {
+                        dsm::types::error::DsmError::crypto(
+                            format!("issuance authorization signing failed: {e}"),
+                            Option::<std::io::Error>::None,
+                        )
+                    })?;
+                let evidence_bytes = generated::IssuanceAuthorizationEvidenceV1 {
+                    canonical_policy_bytes,
+                    authorization_body_ccb: body_ccb,
+                    signatures: vec![generated::PolicySignerSignatureV1 {
+                        signer_public_key,
+                        signature,
+                    }],
+                }
+                .encode_to_vec();
+                // INNER identity — the evidence-DAG addressing form the
+                // resolver's fetch derives its store key from.
+                let issuance_authorization_addr = dsm::storage_object::immutable_inner(
+                    dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
+                    &evidence_bytes,
+                );
+                let object_key = crate::sdk::economic_registers::immutable_object_key(
+                    dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
+                    &evidence_bytes,
+                );
+                Ok((
+                    dsm::economic::write_set::CreditSourceFacts::AuthorizedIssuance {
+                        issuance_authorization_addr,
+                    },
+                    vec![(
+                        object_key,
+                        evidence_bytes,
+                        "issuance-authorization-evidence",
+                    )],
+                ))
+            },
+            None,
         )
+        .await
+        {
+            Ok((o, _admitted)) => o,
+            Err(e) => return err(format!("token.mint: {e}")),
+        };
+
+        let new_balance = outcome.new_device_state.balance(&policy_commit);
+        self.write_token_projection(
+            &own_devid,
+            &req.token_id,
+            &policy_commit,
+            &outcome,
+            new_balance,
+        );
+
+        pack_envelope_ok(generated::envelope::Payload::TokenMintResponse(
+            generated::TokenMintResponse {
+                success: true,
+                token_id: req.token_id,
+                new_balance,
+                message: "Minted under the policy's issuing authority".to_string(),
+            },
+        ))
     }
 
     async fn handle_token_burn(&self, i: AppInvoke) -> AppResult {
@@ -2044,6 +2260,12 @@ impl AppRouterImpl {
             &self.core_sdk,
             op,
             deltas[0].clone(),
+            |_| {
+                Ok((
+                    dsm::economic::write_set::CreditSourceFacts::None,
+                    Vec::new(),
+                ))
+            },
             None,
         )
         .await
@@ -2132,6 +2354,53 @@ mod tests {
             signers: vec![vec![0xAB; 64]],
             allowlist_device_ids: Vec::new(),
         }
+    }
+
+    // ── SDK -> core issuance-parser conformance (owner control) ──────
+    //
+    // `policy_commit` hashes the exact bytes the SOLE production packer
+    // emits, and the 0x0029 verifier parses those SAME bytes in core. These
+    // two tests are the round-trip control the owner froze with the format:
+    // packer -> commit -> core `parse_issuance_policy` -> exact semantic
+    // fields, for BOTH allowlist shapes. The mismatch this pins against was
+    // real: core once read no count for kind NONE and refused every
+    // allowlist-free policy as trailing bytes — a blob no user token could
+    // ever issue under, invisible until the bytes crossed the crate boundary.
+
+    #[test]
+    fn core_issuance_parser_reads_the_packed_none_allowlist_policy() {
+        let src = ParsedTokenPolicy {
+            unlimited_supply: true,
+            max_supply: 0,
+            initial_alloc: 0,
+            ..fungible_fixture()
+        };
+        let proto = v3_policy(src.clone());
+        let policy = dsm::economic::issuance::parse_issuance_policy(&proto)
+            .expect("core must parse the canonical packed NONE-allowlist policy");
+        assert_eq!(policy.threshold, u32::from(src.mint_burn_threshold));
+        assert_eq!(policy.signers, src.signers);
+        assert!(policy.mint_burn_enabled);
+        assert!(policy.transferable);
+        assert!(policy.unlimited_supply);
+        assert!(policy.allowlist_device_ids.is_empty());
+    }
+
+    #[test]
+    fn core_issuance_parser_reads_the_packed_inline_allowlist_policy() {
+        let src = ParsedTokenPolicy {
+            unlimited_supply: true,
+            max_supply: 0,
+            initial_alloc: 0,
+            allowlist_device_ids: vec![[0x11; 32], [0x22; 32]],
+            ..fungible_fixture()
+        };
+        let proto = v3_policy(src.clone());
+        let policy = dsm::economic::issuance::parse_issuance_policy(&proto)
+            .expect("core must parse the canonical packed INLINE-allowlist policy");
+        assert_eq!(policy.allowlist_device_ids, src.allowlist_device_ids);
+        assert_eq!(policy.signers, src.signers);
+        assert!(policy.unlimited_supply);
     }
 
     // ── v3 round trip ────────────────────────────────────────────────

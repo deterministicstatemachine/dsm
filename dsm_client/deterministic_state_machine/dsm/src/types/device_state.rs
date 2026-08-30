@@ -1540,13 +1540,13 @@ impl DeviceState {
         // future route, or any direct `advance` caller, would silently reopen the
         // hole. This is the chokepoint every mint must cross.
         //
-        // Fail-closed with no exemption: `EXCEPT through an explicit issuance
-        // predicate whose evidence THIS verifier validates` is the intended
-        // shape, and no such predicate exists yet — so there is no admissible
-        // builtin issuance today rather than a placeholder one. A `SupplyCap`
-        // condition would NOT be that predicate: it reads `circulating_le` from
-        // caller-supplied enforcement context, and no canonical producer
-        // authenticates that number.
+        // Fail-closed with no exemption for BUILTINS: class 0x0029 exists and
+        // authorizes user-token issuance, but a builtin's issuance is not
+        // self-authorizable under any policy signature — ERA enters through
+        // the faucet's bootstrap tickets, dBTC through the Bitcoin tap. A
+        // `SupplyCap` condition would NOT be an issuance predicate either: it
+        // reads `circulating_le` from caller-supplied enforcement context, and
+        // no canonical producer authenticates that number.
         // Keyed on `policy_commit`, which is the identity that actually moves
         // value: `validate_conservation` binds the credit delta to it, `balances`
         // is keyed by it, and the compat projection resolves a ticker FROM it.
@@ -1625,29 +1625,19 @@ impl DeviceState {
             }
         }
 
-        // ISSUANCE REFUSAL — every asset, not just the builtins.
+        // THE MINT GATE. A positive mint CREATES units — the one operation
+        // whose whole effect is a credit with no prior holder — so it may
+        // enter canonical device state only through the economic-admission
+        // fence, exactly like a faucet claim or an online credit-direction
+        // transfer. This layer does NOT parse the 0x0029 evidence; its job is
+        // narrower and load-bearing: no raw local positive credit without an
+        // attached admission. The economic verifier proves the admission's
+        // 0x0023 AuthorizedIssuance source during validation.
         //
-        // A positive mint CREATES units, so it is the one operation whose whole
-        // effect is a credit with no prior holder. `R_econ` funds a credit only
-        // through a `CreditSource`, and the arm that would carry issuance
-        // (`0x0023 AuthorizedIssuance`) fails closed because its evidence class
-        // `0x0029` is not written yet: there is no foreign-verifiable proof
-        // that a token policy authorized this exact issuance.
-        //
-        // Until that predicate exists, the refusal belongs HERE, at the
-        // accepting layer, before any device-state balance changes. A route
-        // guard alone leaves every other caller — and every future one — free
-        // to credit units nothing can ever admit, and the damage is not
-        // confined to the minter: `dlv.create` funds vaults from the device
-        // head, so unadmittable units become vault reserves and a whole market
-        // that no verifier can accept. Worse, holding them is a ONE-WAY DOOR:
-        // `activate` refuses a device with a non-empty balance map, so the
-        // identity can never enter the economic model at all.
-        //
-        // The two reasons are genuinely different, so they are reported
-        // differently: a builtin's issuance is not self-authorizable at all,
-        // while a user asset's issuance is authorizable in principle and simply
-        // has no predicate yet.
+        // The builtin arm stays UNCONDITIONAL and is keyed on the COMMIT, not
+        // the ticker: builtin issuance is not self-authorizable under any
+        // admission — ERA enters through the faucet's bootstrap tickets, and
+        // dBTC arrives with the Bitcoin tap integration.
         if let Operation::Mint {
             policy_commit,
             amount,
@@ -1661,16 +1651,12 @@ impl DeviceState {
             {
                 return Err(DsmError::invalid_operation(format!(
                     "advance: refusing to mint the builtin token {name} — builtin issuance is not \
-                     self-authorizable, and no authenticated issuance predicate is defined for it"
+                     self-authorizable; ERA is distributed by the faucet's bootstrap tickets and \
+                     dBTC issuance arrives with the Bitcoin tap integration"
                 )));
             }
             if amount.value() > 0 {
-                return Err(DsmError::invalid_operation(
-                    "advance: refusing to mint units with no authenticated issuance predicate — \
-                     class 0x0029 (issuance authorization) is not defined, so no verifier could \
-                     ever fund this credit, and the units would be unspendable in every validated \
-                     lineage while permanently blocking this device's economic activation",
-                ));
+                self.require_attached_dsm_admission(&operation, "an authorized issuance mint")?;
             }
         }
 
@@ -1691,10 +1677,10 @@ impl DeviceState {
         if let Operation::CreateToken { initial_supply, .. } = &operation {
             if initial_supply.value() > 0 {
                 return Err(DsmError::invalid_operation(
-                    "advance: refusing to create a token with initial supply — issuance needs an \
-                     authenticated predicate (class 0x0029) that is not defined yet, so the \
-                     supply could never be funded in any validated lineage. Create the token \
-                     with zero supply; issuance becomes available when the predicate does",
+                    "advance: refusing to create a token with initial supply — supply at \
+                     creation has no issuance source. Create the token with zero supply and \
+                     issue through token.mint, whose credit is funded by a 0x0029 issuance \
+                     authorization the verifier reruns",
                 ));
             }
         }
@@ -3415,20 +3401,26 @@ mod tests {
     /// `policy_commit` credited that asset, on the reasoning that refusing it
     /// would reject honest issuance. That reasoning assumed honest issuance was
     /// expressible. It is not: `R_econ` funds a credit only through a
-    /// `CreditSource`, the issuance arm (`0x0023`) fails closed while its
-    /// evidence class `0x0029` is unwritten, and there is no other arm that can
-    /// originate units. So the units were not honest issuance — they were
+    /// `CreditSource`, and AT THE TIME the issuance arm (`0x0023`) failed
+    /// closed with class `0x0029` unwritten (it exists now; the builtin
+    /// refusal here is unconditional regardless). So the units were not
+    /// honest issuance — they were
     /// unadmittable, they became DLV vault reserves through the head-gated
     /// funding path, and holding them permanently blocked `activate`.
     ///
     /// The gate is still keyed on the ASSET rather than the ticker: both assets
     /// refuse, but for different reasons, and this pins that they do not
-    /// collapse into one blanket refusal. When `0x0029` lands, the non-builtin
-    /// arm is what changes.
+    /// collapse into one blanket refusal. Since the 0x0029 producer cut, the
+    /// non-builtin reason is the ADMISSION FENCE: a positive mint may enter
+    /// only with an attached DsmBacked admission whose digest names exactly
+    /// this operation — a raw local credit is refused before any balance
+    /// changes, and the economic verifier proves the admission's issuance
+    /// source separately.
     ///
-    /// THE MUTATION CONTROL for the issuance refusal: delete the
-    /// `amount.value() > 0` block in `advance` and this test goes red by
-    /// actually crediting 1_000 units of a non-builtin asset into the head.
+    /// THE MUTATION CONTROL for the issuance gate: replace the
+    /// `require_attached_dsm_admission` call in the Mint arm of `advance` with
+    /// `Ok(())` and this test goes red by actually crediting 1_000 units of a
+    /// non-builtin asset into the head.
     #[test]
     fn no_asset_mints_from_air_and_the_two_refusals_stay_distinct() {
         let pc = [0x5Au8; 32];
@@ -3462,11 +3454,11 @@ mod tests {
                 None,
                 None,
             )
-            .expect_err("a non-builtin asset has no issuance predicate either")
+            .expect_err("an unadmitted mint must be refused at the accepting layer")
         );
         assert!(
-            err.contains("0x0029"),
-            "the non-builtin refusal names the missing issuance predicate, got: {err}"
+            err.contains("no pending economic admission"),
+            "the non-builtin refusal is the ADMISSION FENCE, got: {err}"
         );
         assert!(
             !err.contains("builtin issuance is not self-authorizable"),
@@ -4807,8 +4799,6 @@ mod tests {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
             policy_commit,
-            authorized_by: vec![],
-            proof_of_authorization: vec![],
             message: String::new(),
         }
     }
@@ -4828,11 +4818,11 @@ mod tests {
     /// Value op matching a delta's direction, amount AND asset — the guard now
     /// binds all three, so a fixture must name the asset its delta moves.
     ///
-    /// The credit arm is a credit-direction `Transfer`, not a mint: issuance is
-    /// refused at the accepting layer until class 0x0029 exists, and a transfer
-    /// is the credit shape production actually admits. Callers driving the
-    /// credit direction through `advance` must attach the matching Prepared
-    /// admission — see `prepared_for`.
+    /// The credit arm is a credit-direction `Transfer`, not a mint: a mint
+    /// requires an attached admission carrying `0x0029` issuance evidence,
+    /// and this fixture's subject is delta/asset binding, not issuance.
+    /// Callers driving the credit direction through `advance` must attach the
+    /// matching Prepared admission — see `prepared_for`.
     fn value_op(dir: BalanceDirection, amount: u64, policy_commit: [u8; 32]) -> Operation {
         match dir {
             BalanceDirection::Credit => credit_transfer_op(amount, policy_commit),

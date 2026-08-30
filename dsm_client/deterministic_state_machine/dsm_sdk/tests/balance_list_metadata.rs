@@ -69,7 +69,7 @@ fn fund_era(r: &AppRouterImpl) {
 
 /// Install a HELD custom token directly: a registry row plus a fixture
 /// balance in base units. `token.create` can no longer produce one here —
-/// creator supply is refused pending the issuance predicate (0x0029), and
+/// creator supply is refused (issuance goes through `token.mint`), and
 /// the creation fee is an ADMITTED economic debit integration tests cannot
 /// run (no fake register fleet) — and these are READ-path tests: the
 /// balance list is indifferent to how the units arrived.

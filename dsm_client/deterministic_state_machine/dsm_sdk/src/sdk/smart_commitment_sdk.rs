@@ -144,19 +144,16 @@ impl SmartCommitmentSDK {
                 amount,
                 token_id,
                 policy_commit,
-                authorized_by,
-                proof_of_authorization,
                 message,
             } => {
                 buf.extend_from_slice(b"MINT");
                 Self::push_bytes(&mut buf, token_id);
                 // The asset being minted is part of what is signed; without it
-                // a signature would not say WHICH asset it authorises.
+                // a signature would not say WHICH asset it authorises. Mint
+                // carries no authorization bytes — its authority is the 0x0029
+                // admission evidence, outside the operation by construction.
                 buf.extend_from_slice(policy_commit);
                 buf.extend_from_slice(&amount.value().to_le_bytes());
-                Self::push_bytes(&mut buf, authorized_by);
-                buf.extend_from_slice(&(proof_of_authorization.len() as u32).to_le_bytes());
-                buf.extend_from_slice(proof_of_authorization);
                 Self::push_str(&mut buf, message);
             }
             Operation::Burn {
@@ -545,8 +542,6 @@ mod tests {
             amount: Balance::from_state(500, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
             policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").unwrap(),
-            authorized_by: b"authority".to_vec(),
-            proof_of_authorization: b"auth_proof".to_vec(),
             message: "mint".to_string(),
         }
     }

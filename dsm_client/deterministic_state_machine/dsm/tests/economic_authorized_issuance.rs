@@ -83,7 +83,11 @@ fn policy_bytes(
     b.extend_from_slice(&0u16.to_be_bytes()); // description
     b.extend_from_slice(&0u16.to_be_bytes()); // icon_url
     if allowlist.is_empty() {
+        // Kind NONE still carries its u16 count, committed as zero — the
+        // canonical SDK packer always writes it, and this helper's whole
+        // reason to exist is producing the bytes the packer actually commits.
         b.push(0);
+        b.extend_from_slice(&0u16.to_be_bytes());
     } else {
         b.push(1);
         b.extend_from_slice(&(allowlist.len() as u16).to_be_bytes());
@@ -174,8 +178,6 @@ fn fixture(
         amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"NEW".to_vec(),
         policy_commit,
-        authorized_by: Vec::new(),
-        proof_of_authorization: Vec::new(),
         message: String::new(),
     };
     let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
@@ -204,7 +206,7 @@ fn fixture(
         signatures,
     }
     .encode_to_vec();
-    let evidence_addr = dsm::storage_object::immutable_addr(
+    let evidence_addr = dsm::storage_object::immutable_inner(
         dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
         &evidence_bytes,
     );
@@ -256,8 +258,6 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"NEW".to_vec(),
         policy_commit,
-        authorized_by: Vec::new(),
-        proof_of_authorization: Vec::new(),
         message: String::new(),
     };
     let op_digest = dsm::economic::faucet::dsm_operation_digest(&op.to_bytes());
@@ -289,7 +289,7 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         signatures,
     }
     .encode_to_vec();
-    let evidence_addr = dsm::storage_object::immutable_addr(
+    let evidence_addr = dsm::storage_object::immutable_inner(
         dsm::common::domain_tags::TAG_DSM_ISSUANCE_AUTHORIZATION_EVIDENCE,
         &evidence_bytes,
     );
@@ -415,8 +415,6 @@ fn an_amount_the_authorization_does_not_name_is_refused() {
             amount: Balance::from_state(1_001, [0u8; 32]),
             token_id: token_id.clone(),
             policy_commit: *policy_commit,
-            authorized_by: Vec::new(),
-            proof_of_authorization: Vec::new(),
             message: String::new(),
         },
         _ => unreachable!(),
@@ -435,8 +433,6 @@ fn a_policy_commit_the_authorization_does_not_name_is_refused() {
             amount: amount.clone(),
             token_id: token_id.clone(),
             policy_commit: [0xEE; 32],
-            authorized_by: Vec::new(),
-            proof_of_authorization: Vec::new(),
             message: String::new(),
         },
         _ => unreachable!(),
@@ -498,28 +494,10 @@ fn an_authority_its_own_signer_set_cannot_satisfy_refuses_the_issuance() {
         .expect("a satisfiable authority admits the issuance");
 }
 
-/// THE AUTHORIZATION MAY NOT RIDE INSIDE THE OPERATION IT AUTHORIZES.
-///
-/// The `0x0029` signatures cover this Mint's own digest, so a bundle carried
-/// in `proof_of_authorization` would have to be signed before it existed.
-/// The field is refused when non-empty so the evidence bundle stays the only
-/// channel — an ignored second channel is how one fact acquires two homes.
-#[test]
-fn a_mint_carrying_its_own_authorization_is_refused() {
-    let fx = fixture(3, 2, 1_000, true, true, &[], true);
-    let mut op = fx.op.clone();
-    if let Operation::Mint {
-        proof_of_authorization,
-        ..
-    } = &mut op
-    {
-        *proof_of_authorization = vec![0xAB; 8];
-    } else {
-        panic!("the fixture operation is a Mint");
-    }
-    refusal(&fx, &resolver(&fx), &op, "empty proof_of_authorization");
-}
-
+// `a_mint_carrying_its_own_authorization_is_refused` was DELETED with the
+// channel it guarded: `Operation::Mint` no longer has authorization fields,
+// so an authorization riding inside the operation is unrepresentable — the
+// type system now enforces what that test asserted at runtime.
 /// Tampered evidence bytes do not hash to the descriptor's address.
 #[test]
 fn tampered_evidence_is_refused_by_address() {

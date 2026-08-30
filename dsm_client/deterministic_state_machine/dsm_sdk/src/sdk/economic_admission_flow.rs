@@ -380,15 +380,33 @@ pub(crate) fn build_dsm_admission(
     })
 }
 
-/// One ADMITTED self-loop operation (Burn, CreateToken fee), end to end:
-/// resume any pending admission, assemble prerequisites, run the fence-
+/// One ADMITTED self-loop operation (Burn, CreateToken fee, Mint), end to
+/// end: resume any pending admission, assemble prerequisites, run the fence-
 /// coupled advance through the generalized seam, publish/register/validate,
 /// admit. The route gets the advance outcome back for its response
-/// projection. The debit registers BEFORE the route reports success.
+/// projection. The operation registers BEFORE the route reports success.
+///
+/// `facts_for_position` supplies the operation's credit-source facts plus any
+/// extra evidence artifacts, given the TARGET ECONOMIC POSITION this
+/// admission will occupy. It runs after the position and operation digest are
+/// fixed and before anything durable — a Mint builds and signs its `0x0029`
+/// authorization here, binding the signed body to exactly the position the
+/// admission seam CAS-checks. Pure operations pass
+/// `|_| Ok((CreditSourceFacts::None, Vec::new()))`. The returned artifacts
+/// are frozen in the SAME transaction as the advance and the pending
+/// admission, so the crash invariant holds: either the operation never
+/// became locally accepted, or the operation, its pending admission and its
+/// exact evidence bytes all exist durably.
 pub(crate) async fn admitted_self_loop_operation(
     core: &CoreSDK,
     operation: Operation,
     delta: dsm::types::device_state::BalanceDelta,
+    facts_for_position: impl FnOnce(
+        u64,
+    ) -> Result<
+        (CreditSourceFacts, Vec<(String, Vec<u8>, &'static str)>),
+        DsmError,
+    >,
     in_tx_extra: Option<
         &(dyn Fn(
             &rusqlite::Transaction<'_>,
@@ -415,6 +433,7 @@ pub(crate) async fn admitted_self_loop_operation(
     let authority = authority_material(&network_id, &genesis)?;
     let target_position = validated.economic_position() + 1;
     let op_digest = dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+    let (facts, extra_artifacts) = facts_for_position(target_position)?;
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         target_position,
@@ -434,9 +453,9 @@ pub(crate) async fn admitted_self_loop_operation(
                 &operation,
                 &pre_balances,
                 &mut tree,
-                &CreditSourceFacts::None,
+                &facts,
                 &authority,
-                Vec::new(),
+                extra_artifacts,
             )?;
             let coords = parts.coords;
             let artifacts = parts.artifacts.clone();
