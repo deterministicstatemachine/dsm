@@ -506,6 +506,50 @@ fn take_withdrawal_execution_test_result(
     Some(expectation.result)
 }
 
+/// The public-witness fence.
+///
+/// Tap creation is DISABLED. The shipped construction derives Bitcoin spend
+/// authority from public data — `manifold_seed = BLAKE3(TAG, policy_commit)`
+/// over a compile-time constant, combined with the `deposit_nonce` that is
+/// PUBLISHED in the vault advertisement — so anyone who can read an
+/// unauthenticated storage node can reconstruct the claim private key and
+/// sweep the tap. Reproduced end to end in
+/// `dsm_sdk/tests/dbtc_public_data_attack.rs`.
+///
+/// The exposure is independent of the accepting-layer mint refusal: BTC locks
+/// on-chain when the funding transaction is broadcast, and that refusal only
+/// blocks the dBTC credit. So every door refuses INDEPENDENTLY — a fence on
+/// one is not a fence on another.
+///
+/// THREE doors manufacture a publicly-derivable output, and all three refuse:
+///
+/// ```text
+/// bitcoin.deposit.initiate            open_tap() mints the tap
+/// bitcoin.deposit.fund_and_broadcast  puts BTC behind it
+/// bitcoin.fractional.exit             pour_partial() re-locks the remainder
+///                                     into a SUCCESSOR tap; its fresh
+///                                     deposit_nonce is OsRng but is then
+///                                     PUBLISHED in the advertisement (which
+///                                     rejects an empty one), so the successor
+///                                     claim key is public data again
+/// ```
+///
+/// Exit-direction routes stay OPEN so nothing is stranded: `bitcoin.full.sweep`
+/// (creates no successor), `bitcoin.sweep.recover`, `bitcoin.claim.auto` and
+/// `bitcoin.deposit.refund` all move value OUT of a vulnerable tap. Disposition
+/// of already-funded taps is an owner decision this fence does not make.
+///
+/// This lifts when sealed per-tap authority is bound behind an admitted dBTC
+/// in-flight consumption. There is deliberately no override, no environment
+/// escape and no migration path.
+const DBTC_PUBLIC_WITNESS_FENCE: &str =
+    "DBTC_PUBLIC_WITNESS_FENCED: new BTC->dBTC tap creation is disabled — the \
+     shipped tap derives its Bitcoin spend authority from public data (the \
+     builtin policy commit plus the advertised deposit nonce), so anyone who \
+     can read a storage-node advertisement can sweep the funds. This lifts \
+     when sealed per-tap authority is bound behind an admitted dBTC in-flight \
+     consumption.";
+
 impl AppRouterImpl {
     async fn prepare_deposit_completion_prep(
         &self,
@@ -1697,6 +1741,11 @@ impl AppRouterImpl {
             }
 
             "bitcoin.deposit.initiate" => {
+                // FENCED — see DBTC_PUBLIC_WITNESS_FENCE. Refuse before the
+                // request is even decoded: nothing about the caller's input
+                // can make creating a public-witness tap safe.
+                return err(DBTC_PUBLIC_WITNESS_FENCE.to_string());
+                #[allow(unreachable_code)]
                 let pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
@@ -2596,6 +2645,16 @@ impl AppRouterImpl {
             }
 
             "bitcoin.fractional.exit" => {
+                // FENCED INDEPENDENTLY — a partial exit is also a MANUFACTURING
+                // door: pour_partial() pays the remainder into a successor
+                // P2WSH whose claim key derives from the same public chain. Use
+                // bitcoin.full.sweep, which exits without minting a successor.
+                return err(format!(
+                    "{DBTC_PUBLIC_WITNESS_FENCE} Partial exit is fenced because \
+                     it re-locks the remainder into a successor tap with the \
+                     same defect; use bitcoin.full.sweep to exit the vault."
+                ));
+                #[allow(unreachable_code)]
                 let pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
@@ -3445,6 +3504,12 @@ impl AppRouterImpl {
 
             // -------- Universal: fund HTLC from user wallet + complete deposit --------
             "bitcoin.deposit.fund_and_broadcast" => {
+                // FENCED INDEPENDENTLY of deposit.initiate — a tap record that
+                // already exists (created before this fence, or restored from
+                // a backup) must still not be able to lock BTC behind a
+                // publicly-derivable key.
+                return err(DBTC_PUBLIC_WITNESS_FENCE.to_string());
+                #[allow(unreachable_code)]
                 let vault_op_id = match generated::ArgPack::decode(&*i.args) {
                     Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                         match generated::DepositRefundRequest::decode(&*pack.body) {
