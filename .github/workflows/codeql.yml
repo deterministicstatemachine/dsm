@@ -181,7 +181,7 @@ jobs:
       # this module green on ubuntu-latest with the same JDK.
       - name: Set up JDK 17
         if: matrix.language == 'java-kotlin'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
