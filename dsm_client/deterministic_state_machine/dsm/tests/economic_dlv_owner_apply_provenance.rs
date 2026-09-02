@@ -76,7 +76,7 @@ fn fixture() -> Fixture {
         receipt_siblings: siblings.iter().map(|s| s.to_vec()).collect(),
     };
     let evidence_bytes = evidence.encode_to_vec();
-    let evidence_addr = dsm::storage_object::immutable_addr(
+    let evidence_addr = dsm::storage_object::immutable_inner(
         dsm::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
         &evidence_bytes,
     );
