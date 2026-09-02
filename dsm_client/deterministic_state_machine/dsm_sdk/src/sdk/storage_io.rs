@@ -148,11 +148,16 @@ pub(crate) async fn put_bytes_to_all_members(
     // Exactly one of these blocks survives cfg expansion, and it is the
     // function's tail expression (the shape `BitcoinTapSdk::storage_put_bytes`
     // uses for the same test seam).
-    #[cfg(test)]
+    // The fake/real I/O selectors include `test-utils`, not just `test`.
+    // Integration tests in `tests/*.rs` compile the library WITHOUT `cfg(test)`,
+    // so under a `cfg(test)`-only selector they took the REAL HTTP branch and
+    // talked to a port nothing listens on. That is why the legitimate funding
+    // path was unreachable from them, and why they fabricated balances instead.
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::put(set, key, payload))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         put_bytes_to_all_members_live(set, key, payload).await
     }
@@ -168,7 +173,7 @@ pub(crate) async fn put_immutable_to_all_members(
     payload: &[u8],
     expected_addr_b32: &str,
 ) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // The fake fleet stores under a key carrying the address, so tests can
         // assert exactly which immutable object reached which member.
@@ -178,7 +183,7 @@ pub(crate) async fn put_immutable_to_all_members(
             payload,
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
@@ -196,7 +201,7 @@ pub(crate) async fn fetch_immutable_payload(
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
     inner: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // The frozen-artifact sweep delivers immutable tuples to the fake
         // fleet under `immutable::{namespace}::{addr_b32}` — read them back
@@ -218,7 +223,7 @@ pub(crate) async fn fetch_immutable_payload(
         }
         Ok(Some(payload))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
             DsmError::storage(
@@ -258,11 +263,11 @@ pub(crate) async fn submit_faucet_ticket_claim(
     set: &crate::sdk::storage_set::StorageSet,
     envelope: &[u8],
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::claim(set, "faucet-ticket", envelope))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
@@ -280,11 +285,11 @@ pub(crate) async fn submit_economic_root_claim(
     set: &crate::sdk::storage_set::StorageSet,
     envelope: &[u8],
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::claim(set, "economic-root", envelope))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
@@ -303,7 +308,7 @@ pub(crate) async fn read_faucet_ticket_cell(
     faucet_id: &[u8; 32],
     ticket_index: u64,
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
             set,
@@ -311,7 +316,7 @@ pub(crate) async fn read_faucet_ticket_cell(
             &fake_registers::ticket_key(faucet_id, ticket_index),
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::faucet_ticket_path(faucet_id, ticket_index);
@@ -323,7 +328,7 @@ pub(crate) async fn read_economic_root_cell_rows(
     set: &crate::sdk::storage_set::StorageSet,
     k_root: &[u8; 32],
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
             set,
@@ -331,7 +336,7 @@ pub(crate) async fn read_economic_root_cell_rows(
             &fake_registers::root_key(k_root),
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::economic_root_path(k_root);
@@ -343,8 +348,19 @@ pub(crate) async fn read_economic_root_cell_rows(
 /// member per register kind, with the same injectable echo/failure seams the
 /// settlement fake fleet has. Envelope digests use the REAL protocol digests,
 /// so the counting logic under test sees production shapes.
-#[cfg(test)]
+// Widened from `cfg(test)` to include `test-utils`: the LEGITIMATE funding
+// path must be reachable from integration tests in `tests/*.rs`, which are
+// external consumers a `cfg(test)` gate is invisible to. That invisibility is
+// exactly why those tests fabricated balances instead of claiming them.
+// `test-utils` is non-default and reaches the build only through
+// dev-dependencies, so this still ships in nothing.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) mod fake_registers {
+    // Test-only transport double, never in a shipped artifact: an invalid
+    // envelope handed to the fake register is a broken test, and a panic is the
+    // right failure. The production-safety clippy pass compiles this module
+    // under `--all-features`, which is the only reason the allowance is needed.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
@@ -510,11 +526,11 @@ pub(crate) async fn read_settlement_slot_cell(
     vault_id: &[u8; 32],
     parent_sequence: u64,
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::read_slot(set, vault_id, parent_sequence))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::settlement_slot_path(vault_id, parent_sequence);
@@ -528,11 +544,11 @@ pub(crate) async fn submit_settlement_slot_claim(
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
     // Exactly one of these blocks survives cfg expansion, and it is the
     // function's tail expression.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::claim(set, envelope))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         submit_settlement_slot_claim_live(set, envelope).await
     }
@@ -542,8 +558,11 @@ pub(crate) async fn submit_settlement_slot_claim(
 /// URL), an injectable per-member failure, and an injectable echoed node id —
 /// so a test can drive the real per-member replay/quorum logic through
 /// partition splits, echo mismatches and foreign sets without HTTP.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) mod fake_fleet {
+    // As for `fake_registers`: a test-only double compiled under production
+    // lints only by `--all-features`.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 

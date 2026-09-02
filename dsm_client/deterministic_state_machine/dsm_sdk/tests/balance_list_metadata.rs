@@ -23,88 +23,38 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::{AppQuery, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030), replacing a fabricated identity plus a directly-written balance.
+///
+/// The old pair installed [0xAA;32]/[0xBB;32]/[0xCC;32] with no genesis record —
+/// so no network was committed and no admission could ever run — and then wrote
+/// 100 ERA straight onto the head. That balance had no economic lineage, and
+/// since debits are not fenced it was fully spendable through canonical
+/// acceptance. 100 is also exactly the faucet's payout, so assertions written
+/// against it are unchanged.
+fn funded_router(seed: u8) -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
+    dsm_sdk::economic_fixtures::funded_router(seed)
 }
 
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
-}
-
-fn fund_era(r: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        r,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
-}
-
-/// Install a HELD custom token directly: a registry row plus a fixture
-/// balance in base units. `token.create` can no longer produce one here —
-/// creator supply is refused (issuance goes through `token.mint`), and
-/// the creation fee is an ADMITTED economic debit integration tests cannot
-/// run (no fake register fleet) — and these are READ-path tests: the
-/// balance list is indifferent to how the units arrived.
+/// Hold a custom token the LEGITIMATE way: create it and mint into it, both
+/// admitted (0x0029 authorized issuance -> 0x0023).
+///
+/// This replaced a three-layer fabrication — a registry row owned by a device
+/// that does not exist ([0xAA;32]), a balance written straight onto the head,
+/// and a hand-built projection row. The old doc justified it with "the creation
+/// fee is an ADMITTED economic debit integration tests cannot run (no fake
+/// register fleet)"; that is no longer true, which is what made the fabrication
+/// removable rather than merely undesirable.
+///
+/// `token.mint` takes BASE units, so the display allocation is scaled here —
+/// the same conversion the old fixture did before writing the balance directly.
 fn install_held(r: &AppRouterImpl, ticker: &str, decimals: u32, display_alloc: u128) {
-    let commit = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_POLICY,
-        ticker.as_bytes(),
-    );
-    token_registry::insert_token(&token_registry::TokenRegistryRow {
-        token_id: format!("{ticker}TOKENID"),
-        policy_commit: commit,
-        ticker: ticker.to_string(),
-        alias: format!("{ticker} Token"),
-        decimals,
-        max_supply: 1_000_000,
-        owner_device_id: [0xAAu8; 32],
-    })
-    .expect("register held token");
     let base = u64::try_from(display_alloc * 10u128.pow(decimals)).expect("base units fit u64");
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(r, commit, base)
-        .expect("install held balance");
-    // `balance.list` reads the PERSISTED balance projections (the advance
-    // used to write one); mirror the installed head balance there.
-    let head = r.core_sdk.device_head().expect("head");
-    let device_txt = dsm_sdk::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
-    let rec = dsm_sdk::storage::client_db::build_balance_projection_from_device_head(
-        &device_txt,
-        ticker,
-        &commit,
-        &head,
-        base,
-        0,
-    )
-    .expect("projection row");
-    dsm_sdk::storage::client_db::upsert_balance_projection(&rec).expect("persist projection");
+    dsm_sdk::economic_fixtures::mint_asset(r, ticker, decimals, base);
 }
 
 /// The ACTUAL wire records, decoded from the encoded response.
@@ -138,10 +88,8 @@ fn row<'a>(
 #[serial_test::serial]
 fn a_held_custom_token_carries_its_decimals_on_the_wire() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x81);
     r.install_policy_resolver();
-    fund_era(&r);
     install_held(&r, "RIGB", 2, 1_000);
 
     let rows = wire_rows(&r);
@@ -192,8 +140,7 @@ fn a_held_custom_token_carries_its_decimals_on_the_wire() {
 #[serial_test::serial]
 fn a_zero_balance_registered_token_carries_its_decimals() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x81);
 
     // A receiver's registry row: registered, never held.
     token_registry::insert_token(&token_registry::TokenRegistryRow {
@@ -226,14 +173,12 @@ fn a_zero_balance_registered_token_carries_its_decimals() {
 #[serial_test::serial]
 fn decimals_survive_a_restart_for_a_held_token() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x81);
     r.install_policy_resolver();
-    fund_era(&r);
     install_held(&r, "PERSIS", 2, 500);
     drop(r);
 
-    let r2 = new_router();
+    let r2 = dsm_sdk::economic_fixtures::restart_router();
     r2.install_policy_resolver();
     let rows = wire_rows(&r2);
     let t = row(&rows, "PERSIS");
@@ -248,9 +193,7 @@ fn decimals_survive_a_restart_for_a_held_token() {
 #[serial_test::serial]
 fn builtin_tokens_keep_their_metadata() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x81);
 
     let rows = wire_rows(&r);
     let era = row(&rows, "ERA");
@@ -285,10 +228,8 @@ fn builtin_tokens_keep_their_metadata() {
 #[serial_test::serial]
 fn a_zero_decimal_custom_token_is_unchanged() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x81);
     r.install_policy_resolver();
-    fund_era(&r);
     install_held(&r, "WHOLE", 0, 750);
 
     let rows = wire_rows(&r);

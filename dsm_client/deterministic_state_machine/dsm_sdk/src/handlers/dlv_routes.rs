@@ -658,25 +658,13 @@ impl AppRouterImpl {
         // express a two-sided vault at all, which is why AMM vaults were
         // created holding nothing and advertised reserves nobody held. Zero
         // legs is a content-only vault; an AMM vault must carry exactly two.
-        // Reject insufficiency BEFORE anything is built or signed, with a
-        // message naming the shortfall. The chokepoint checks again — this is
-        // the readable failure, that is the structural one.
-        if let Some(head) = self.core_sdk.device_head() {
-            for (pc, amount) in funding.iter() {
-                let have = head.balance(pc);
-                if have < *amount {
-                    // DISPLAY metadata, resolved from the identity — never the
-                    // other way round. commit → ticker is one-to-one and safe;
-                    // ticker → commit is the ambiguous direction that was
-                    // removed. If the name is unknown the anchor still names the
-                    // asset exactly.
-                    let named = display_name_for(pc);
-                    return err(format!(
-                        "dlv.create: insufficient {named} to encumber (need {amount}, have {have})"
-                    ));
-                }
-            }
-        }
+        // Sufficiency is NOT checked here any more. It was read from
+        // `device_head()`, a different ledger from the one the write set
+        // actually debits — on a device whose head and `R_econ` had diverged
+        // the route reported "sufficient" and the admission then failed. The
+        // funded path now decides it inside the admission facade, against the
+        // exact staged predecessor the transition is built on, so there is one
+        // observation instead of two. See `admitted_dlv_create_funded`.
 
         let policy_commit_opt: Option<[u8; 32]> = funding.first().map(|(pc, _)| *pc);
 
@@ -969,18 +957,26 @@ impl AppRouterImpl {
                     }
                     Ok(())
                 };
-                if let Err(e) = self
-                    .core_sdk
-                    .execute_on_relationship_staged_with_reserve_mutation(
-                        rel_key,
-                        actor,
-                        op,
-                        &[],
-                        Some(init_tip),
-                        Some(funding_mutation),
-                        build,
-                        write,
-                    )
+                // ADMITTED. A funded creation is an economically originating
+                // operation: it moves spendable balance into vault reserves, so
+                // it belongs in `R_econ` exactly like a mint or a faucet claim,
+                // and the accepting layer now REFUSES it without an attached
+                // DSM-backed admission. Same staged build/write as before — the
+                // birth objects are still signed off this advance's own root
+                // and frozen in its transaction — the difference is that the
+                // economic transition is now real rather than head-only.
+                if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_create_funded(
+                    &self.core_sdk,
+                    op,
+                    rel_key,
+                    actor,
+                    init_tip,
+                    funding_mutation,
+                    display_name_for,
+                    build,
+                    write,
+                )
+                .await
                 {
                     return err(format!("dlv.create: funded creation failed: {e}"));
                 }
@@ -3394,6 +3390,7 @@ mod funded_creation_tests {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
+        respawn_fleet();
         crate::storage::client_db::reset_database_for_tests();
         // The "storage node" every device in these tests shares is a
         // process-global in-memory object store, and vault ids are
@@ -3407,6 +3404,17 @@ mod funded_creation_tests {
         // previous test's quorum on the SAME deterministic vault id would make
         // a later vault look born, published, or already claimed.
         crate::sdk::storage_io::fake_fleet::reset();
+        // The ECONOMIC ROOT REGISTER is a third store, separate from both the
+        // object fleet and the settlement-slot register: under cfg(test)
+        // `submit_economic_root_claim` writes to `fake_registers`. It holds one
+        // write-once cell per (device, economic position), and these tests
+        // reuse identity seeds — so without this reset the second test to fund
+        // the same identity is refused with "REGISTER CONFLICT — quarantine",
+        // which is the register correctly refusing what looks like equivocation.
+        // Every other admitting suite already resets it (two_device.rs:393,
+        // faucet_flow_tests.rs:115, storage_routes.rs); this one did not,
+        // because until now nothing here admitted anything.
+        crate::sdk::storage_io::fake_registers::reset();
         let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
             "./.dsm_testdata_funded_creation",
         ));
@@ -3426,26 +3434,156 @@ mod funded_creation_tests {
     /// phases. The device heads and DLV managers are per-router, so each side
     /// keeps its own state — which is the boundary that matters: the trader has
     /// no access to the owner's leaves and must work from published artifacts.
+    /// A three-node fake fleet, FRESH PER TEST.
+    ///
+    /// Deliberately not spawned once for the binary. The economic root register
+    /// is stateful: it holds one write-once record per (device, economic
+    /// position), and these tests reuse identity seeds. A shared fleet therefore
+    /// makes the second test to fund the same identity collide with the first —
+    /// "REGISTER CONFLICT — quarantine, do not retry" — which is the register
+    /// behaving CORRECTLY against what looks to it like equivocation.
+    /// `Pair::boot` spawns per-test for the same reason.
+    fn fleet_slot() -> &'static std::sync::Mutex<Vec<crate::test_support::fake_node::FakeB0xNode>> {
+        static SLOT: std::sync::OnceLock<
+            std::sync::Mutex<Vec<crate::test_support::fake_node::FakeB0xNode>>,
+        > = std::sync::OnceLock::new();
+        SLOT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+    }
+
+    /// Replace the fleet. Called by `install_identity`, i.e. once per test.
+    fn respawn_fleet() {
+        let nodes: Vec<_> = (0..3)
+            .map(|_| crate::test_support::fake_node::FakeB0xNode::spawn())
+            .collect();
+        *fleet_slot().lock().expect("fleet slot") = nodes;
+    }
+
+    /// The current fleet's endpoints, with the loader pointed at them.
+    ///
+    /// `point_env_config_at` names the members canonically (`dsm-node-N`), which
+    /// is what makes the beta root-register profile resolve: the catalog matches
+    /// a set by RE-HASHING its member ids, so a differently-named fleet can
+    /// never satisfy it and admission fails closed. In test mode the env var
+    /// alone decides and deliberately does not persist, so this runs on every
+    /// use rather than once.
+    fn fleet_endpoints() -> Vec<String> {
+        let guard = fleet_slot().lock().expect("fleet slot");
+        assert!(
+            !guard.is_empty(),
+            "fleet_endpoints before install_identity: every test must respawn its own fleet"
+        );
+        let eps: Vec<String> = guard.iter().map(|n| n.endpoint.clone()).collect();
+        drop(guard);
+        crate::test_support::fake_node::point_env_config_at(&eps);
+        eps
+    }
+
     fn become_device(seed: u8) -> (Vec<u8>, [u8; 32]) {
-        crate::sdk::funded_vault_fixture::install_v3_identity(seed)
+        crate::sdk::funded_vault_fixture::install_v3_identity_on_fleet(seed, &fleet_endpoints())
     }
 
     fn named_router(name: &str) -> AppRouterImpl {
-        AppRouterImpl::new(SdkConfig {
+        let router = AppRouterImpl::new(SdkConfig {
             node_id: name.to_string(),
-            storage_endpoints: vec![],
+            storage_endpoints: fleet_endpoints(),
             enable_offline: true,
         })
-        .expect("router init")
+        .expect("router init");
+        // As production bring-up does (`init.rs`): the durable policy resolver
+        // the enforcer consults on an in-memory miss.
+        router.install_policy_resolver();
+        router
     }
 
     fn router() -> AppRouterImpl {
-        AppRouterImpl::new(SdkConfig {
-            node_id: "funded-creation-test".to_string(),
-            storage_endpoints: vec![],
-            enable_offline: true,
-        })
-        .expect("router init")
+        named_router("funded-creation-test")
+    }
+
+    /// The current fleet's nodes — what a participant boots against. Points
+    /// the loader at them as a side effect, exactly like `fleet_endpoints`.
+    fn fleet_nodes() -> Vec<crate::test_support::fake_node::FakeB0xNode> {
+        let _ = fleet_endpoints();
+        fleet_slot().lock().expect("fleet slot").clone()
+    }
+
+    /// A market participant on its OWN database slot, identity, router and
+    /// head — the isolation two handsets actually have.
+    ///
+    /// Owner and traders used to share one database under a swapped process
+    /// identity, which handed a trader the owner's token registry and vault
+    /// record for free. On hardware a trader's whole knowledge of the market
+    /// is what was published, and its whole holding of the owner's asset is
+    /// what the owner sent it; a separate slot makes both true here.
+    fn participant(slot: &'static str, tag: u8) -> crate::test_support::two_device::TestDevice {
+        let nodes = fleet_nodes();
+        let mut dev = crate::test_support::two_device::TestDevice::create(slot, tag);
+        dev.boot(&nodes);
+        dev
+    }
+
+    /// The display name the OWNER registered for `pc`. Read while the owner is
+    /// the entered device — only its registry knows the tokens it created.
+    fn ticker_of(pc: &[u8; 32]) -> String {
+        crate::storage::client_db::token_registry::get_token_by_policy_commit(pc)
+            .expect("registry read")
+            .expect("a created asset")
+            .ticker
+    }
+
+    /// The owner's asset reaches a trader the ONLY legitimate way.
+    ///
+    /// The trader roots itself to the owner's PUBLIC policy anchor — fetched
+    /// from the storage node's copy and re-hashed against the commit, never
+    /// copied out of the owner's registry — and then receives a canonical,
+    /// admitted owner→trader transfer (0x0025) through the real `wallet.send`
+    /// and `storage.sync`. No holder is hand-seeded anywhere.
+    fn owner_transfers(
+        owner: &crate::test_support::two_device::TestDevice,
+        trader: &crate::test_support::two_device::TestDevice,
+        policy_commit: &[u8; 32],
+        amount: u64,
+    ) {
+        let rt = crate::runtime::get_runtime();
+        owner.enter();
+        let ticker = ticker_of(policy_commit);
+        owner.add_contact(trader);
+        trader.enter();
+        trader.add_contact(owner);
+        // First sync = registration on every node, which is what lets the
+        // owner resolve the trader's identity at quorum before sending.
+        rt.block_on(trader.sync());
+        let rooted = rt.block_on(trader.router().query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: crate::util::text_id::encode_base32_crockford(policy_commit).into_bytes(),
+        }));
+        assert!(
+            rooted.success,
+            "the trader roots to {ticker} from the network: {:?}",
+            rooted.error_message
+        );
+        owner.enter();
+        rt.block_on(owner.sync());
+        let sent = rt.block_on(owner.send_token(trader, &ticker, amount));
+        assert!(
+            sent.success,
+            "the owner sends {amount} {ticker}: {:?}",
+            sent.error_message
+        );
+        trader.enter();
+        rt.block_on(trader.sync());
+        let held = trader
+            .router()
+            .core_sdk
+            .device_head()
+            .map(|h| h.balance(policy_commit))
+            .unwrap_or(0);
+        assert_eq!(
+            held, amount,
+            "the trader holds exactly what the owner sent, admitted on its own head"
+        );
+        // The sender's finalize-on-receipt pass.
+        owner.enter();
+        rt.block_on(owner.sync());
     }
 
     fn pack(body: Vec<u8>) -> Vec<u8> {
@@ -3479,12 +3617,15 @@ mod funded_creation_tests {
         install_identity();
         let r = router();
 
-        // A head holding spendable balance and nothing encumbered — creation is
-        // what encumbers it.
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        let spendable = crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000);
-        let (owner_genesis, owner_devid) = (spendable.genesis(), spendable.devid());
-        r.core_sdk.set_device_head_for_testing(spendable);
+        // Spendable balance from ADMITTED origins — faucet ERA, then two
+        // created-and-minted assets. Creation is what encumbers it. A
+        // fabricated head cannot be used any more: a funded create is an
+        // admitted operation, and `activate` refuses to self-root a device
+        // already holding value it never admitted.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let head = r.core_sdk.device_head().expect("funded head");
+        let (owner_genesis, owner_devid) = (head.genesis(), head.devid());
 
         let policy_digest = vec![0x5Au8; 32];
         let req = generated::DlvInstantiateV1 {
@@ -3616,11 +3757,10 @@ mod funded_creation_tests {
         let r = router();
 
         let wallet_pk = crate::sdk::signing_authority::current_public_key().expect("pk");
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
 
         // Empty creator key AND empty signature: both are the wallet's to fill.
         let req = generated::DlvInstantiateV1 {
@@ -3691,7 +3831,8 @@ mod funded_creation_tests {
         install_identity();
         let r = router();
 
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
         let build = |content_digest: Vec<u8>| generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5Au8; 32],
@@ -3726,9 +3867,6 @@ mod funded_creation_tests {
         // A digest that is neither absent nor 32 bytes is malformed, and is
         // refused on those grounds rather than truncated or padded.
         for bad_len in [1usize, 16, 31, 33, 64] {
-            r.core_sdk.set_device_head_for_testing(
-                crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000),
-            );
             let res = call(build(vec![0xAAu8; bad_len]));
             assert!(
                 !res.success,
@@ -3741,11 +3879,8 @@ mod funded_creation_tests {
             );
         }
 
-        // Absent is the accept-or-compute path: Rust derives it.
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Absent is the accept-or-compute path: Rust derives it. The refusals
+        // above moved nothing, so the admitted funding is all still there.
         assert!(
             call(build(Vec::new())).success,
             "an absent digest must be computed, not required from the caller"
@@ -3767,15 +3902,14 @@ mod funded_creation_tests {
     #[serial]
     fn a_funded_vault_is_listed_by_a_router_that_never_created_it() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let vault_id;
         let root_before;
         let head_before;
+        let (pc_a, pc_b);
         {
             let r = router();
-            r.core_sdk.set_device_head_for_testing(
-                crate::sdk::funded_vault_fixture::owner_holding(50_000, 20_000),
-            );
+            (pc_a, pc_b) =
+                crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
             let create = generated::DlvInstantiateV1 {
                 spec: Some(generated::DlvSpecV1 {
                     policy_digest: vec![0x5A; 32],
@@ -3887,12 +4021,11 @@ mod funded_creation_tests {
     #[serial]
     fn a_vault_missing_a_reserve_leg_is_withheld_rather_than_shown_as_zero() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let r = router();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5A; 32],
@@ -3923,12 +4056,11 @@ mod funded_creation_tests {
         assert!(res.success, "create failed: {:?}", res.error_message);
 
         // The RECORD stays; the LEAVES are gone. Exactly the shape a
-        // half-written or tampered state takes.
+        // half-written or tampered state takes — a head carrying the real
+        // identity and no reserves at all.
         let r2 = router();
         r2.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::observer_device());
         let q = crate::runtime::get_runtime().block_on(async {
             r2.query(crate::bridge::AppQuery {
                 path: "dlv.listOwnedAmmVaults".to_string(),
@@ -3973,11 +4105,10 @@ mod funded_creation_tests {
     fn a_vault_posted_to_a_recipient_is_advertised_under_that_recipient() {
         install_identity();
         let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
 
         let recipient = vec![0xC7u8; 1184];
         let create = generated::DlvInstantiateV1 {
@@ -4056,14 +4187,15 @@ mod funded_creation_tests {
         use prost::Message as _;
 
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
 
         // ── OWNER ────────────────────────────────────────────────────────────
-        let (owner_pk, _owner_did) = become_device(0x41);
-        let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // The OWNER funds from ADMITTED origins. 55_000/20_000 is load-bearing:
+        // after the 10_000 leg and the 5_000 it sends the trader, this test
+        // pins the owner's spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5Au8; 32],
@@ -4122,34 +4254,30 @@ mod funded_creation_tests {
         assert!(res.success, "publish failed: {:?}", res.error_message);
 
         // ── TRADER ───────────────────────────────────────────────────────────
-        // THE FOREIGN-DEVICE CONDITION, made real rather than nominal: on
-        // hardware the trader holds NO amm_vault_record — its whole knowledge
-        // of the vault came from storage. The shared test database would hand
-        // the trader the owner's record for free and mask any settle-path
-        // dependence on it, so the record is REMOVED for the trader phase and
-        // restored when the owner returns. A settle that needs it is a settle
-        // that only works on the owner's own device.
-        let owner_record =
+        // THE FOREIGN-DEVICE CONDITION, made real rather than nominal: the
+        // trader is its own device — own database, registry, identity and
+        // head — so it holds NO amm_vault_record and NO copy of the owner's
+        // policy. Its whole knowledge of the vault comes from storage, and its
+        // whole holding of the input asset came from the owner through a
+        // canonical admitted transfer. A settle that needs anything else is a
+        // settle that only works on the owner's own device.
+        let trader_dev = participant("trader", 0x51);
+        let (trader_pk, trader_did) = (trader_dev.ak_pk.clone(), trader_dev.device_id);
+        assert_ne!(
+            trader_pk, owner_dev.ak_pk,
+            "the two devices must be distinct"
+        );
+        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        assert!(
             crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
                 .expect("record read")
-                .expect("owner has the record");
-        {
-            let conn = crate::storage::client_db::get_connection().expect("db");
-            let conn = conn.lock().expect("db lock");
-            conn.execute(
-                "DELETE FROM amm_vault_records WHERE vault_id = ?1",
-                rusqlite::params![vault_id.as_slice()],
-            )
-            .expect("simulate the foreign device: no local record");
-        }
-        let (trader_pk, trader_did) = become_device(0x51);
-        assert_ne!(trader_pk, owner_pk, "the two devices must be distinct");
-        let trader = named_router("trader");
-        // A head holding only the input asset. Crucially it holds NO reserve for
-        // this vault — the trader does not own the liquidity it trades against.
-        trader.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD2, 5_000, 0),
+                .is_none(),
+            "the trader's own database holds no record of the owner's vault"
         );
+        // Crucially the trader holds NO reserve for this vault — it does not
+        // own the liquidity it trades against.
         let trader_head = trader.core_sdk.device_head().expect("trader head");
         assert_eq!(
             trader_head.vault_reserve(&vault_id, &pc_a),
@@ -4262,11 +4390,7 @@ mod funded_creation_tests {
         );
 
         // ── OWNER RECONCILES ─────────────────────────────────────────────────
-        // The owner's device gets its record back (it never lost it — the
-        // deletion above simulated the TRADER's device).
-        crate::storage::client_db::amm_vault_records::put_amm_vault_record(&owner_record)
-            .expect("restore the owner's record");
-        let _ = become_device(0x41);
+        owner_dev.enter();
         let owner_before = owner.core_sdk.device_head().expect("owner head");
         assert_eq!(
             owner_before.vault_reserve(&vault_id, &pc_a),
@@ -4363,11 +4487,10 @@ mod funded_creation_tests {
     fn the_compose_vault_query_answers_with_the_composed_frontier() {
         install_identity();
         let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -4411,7 +4534,7 @@ mod funded_creation_tests {
             panic!("unexpected payload")
         };
         let value = resp.value.expect("value");
-        let frontier = composed_frontier(&vault_id);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
         assert_eq!(
             value,
             format!(
@@ -4429,11 +4552,12 @@ mod funded_creation_tests {
 
         install_identity();
         let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        // 50_000/20_000: this test pins the POST-LEG spendable balance at
+        // (40_000, 15_000), so the funding headroom is load-bearing here.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
 
         // (1) FUND a vault through the dispatcher.
         let create = generated::DlvInstantiateV1 {
@@ -4501,7 +4625,7 @@ mod funded_creation_tests {
         // (2) The verified baseline the settling path will read back. Its
         // existence — a P0-P6-verifiable presentation and the exact CCB(V_0)
         // — is the precondition the composition gate enforces.
-        let frontier = composed_frontier(&vault_id);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
         assert_eq!(
             (frontier.sequence, frontier.reserves_a, frontier.reserves_b),
             (0, 10_000, 5_000),
@@ -4745,47 +4869,46 @@ mod funded_creation_tests {
     }
 
     /// Build a GENUINELY FOREIGN, fully valid settlement receipt: a different
-    /// trader device (its own genesis/devid/keypair), funded, settling the SAME
-    /// owner vault at parent generation 0 with a DISTINCT external commitment `x`.
-    /// The receipt is signed against that trader's own post-settle root and
-    /// verifies stand-alone (`verify_trader_settlement_receipt` is stateless), so
-    /// it is exactly what a second device produces in a cross-partition race — the
-    /// case the storage slot-claim cannot prevent and the durable consume-once
-    /// claim must catch at reconcile.
+    /// trader device — its own database, identity and keypair, holding the
+    /// input asset through an admitted owner→trader transfer — settling the
+    /// SAME owner vault at parent generation 0 with a DISTINCT external
+    /// commitment `x`. The settle is advanced on the trader's real head
+    /// directly rather than through the route, because the route's storage
+    /// slot-claim would refuse the second settle locally — and this is
+    /// precisely the cross-partition case the slot-claim admits it cannot
+    /// prevent, which the durable consume-once claim must catch at reconcile.
+    /// The receipt is signed against the trader's post-settle root and
+    /// verifies stand-alone (`verify_trader_settlement_receipt` is stateless).
     fn build_foreign_receipt(
+        trader: &crate::test_support::two_device::TestDevice,
         vault_id: &[u8; 32],
         pc_in: &[u8; 32],
         pc_out: &[u8; 32],
         x: [u8; 32],
-        seed: u8,
     ) -> dsm::dlv::settlement_receipt_leaf::SignedTraderSettlementReceipt {
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
-        use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+        use dsm::types::device_state::{BalanceDelta, BalanceDirection};
         use dsm::types::operations::{Operation, TransactionMode};
 
-        let kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(&[seed; 32])
-            .expect("foreign trader keypair");
-        let dev = [seed; 32];
+        trader.enter();
+        let head = trader
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("the foreign trader's admitted head");
+        let dev = trader.device_id;
         let rel = compute_smt_key(&dev, &dev);
         let init = initial_chain_tip_from_device_ids(&dev, &dev);
         let sign = |op: Operation| -> Operation {
             let sig = dsm::crypto::sphincs::sphincs_sign(
-                &kp.secret_key,
+                &trader.ak_sk,
                 &op.with_cleared_signature().to_bytes(),
             )
             .expect("sign foreign op");
             op.with_signature(sig)
         };
-
-        // Fund the foreign trader with the input asset so its settle can pay it.
-        // Installed directly rather than minted: an authorized mint would drag
-        // a policy, an admission and a fleet into a fixture whose subject is
-        // the RECONCILE's duplicate-generation refusal, not where the
-        // trader's units came from.
-        let head = DeviceState::new(dev, dev, kp.public_key.clone(), 64)
-            .with_balance_for_testing(*pc_in, 10_000);
 
         let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, &x);
         let (input_amount, output_amount) = (1_000u64, 500u64);
@@ -4804,7 +4927,7 @@ mod funded_creation_tests {
             output_amount,
             fee_bps: 30,
             sigma: [0u8; 32],
-            settler_public_key: kp.public_key.clone(),
+            settler_public_key: trader.ak_pk.clone(),
             settler_devid: dev,
             settlement_receipt_id: receipt_id,
             signature: Vec::new(),
@@ -4863,8 +4986,8 @@ mod funded_creation_tests {
             &head.devid(),
             &head.root(),
             siblings,
-            &kp.public_key,
-            &kp.secret_key,
+            &trader.ak_pk,
+            &trader.ak_sk,
         )
         .expect("sign foreign receipt")
     }
@@ -4890,12 +5013,13 @@ mod funded_creation_tests {
         use prost::Message as _;
 
         install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        let owner_dev = participant("owner", 0x41);
+        let r = owner_dev.router();
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        // 20_000 of A: 10_000 for the vault leg, 5_000 for each foreign trader.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(r, 20_000, 5_000);
 
         // Fund an owner vault at generation 0.
         let create = generated::DlvInstantiateV1 {
@@ -4934,8 +5058,18 @@ mod funded_creation_tests {
 
         // WINNER: trader A settles generation 0. Publish its receipt and reconcile
         // it through the production route — it consumes the generation.
+        // Both foreign traders hold the input asset through admitted
+        // owner→trader transfers BEFORE either settles: the owner's own sends
+        // advance the owner's head, and the property below is that a REFUSED
+        // fold moves nothing — so nothing else may move the owner in between.
+        let trader_a = participant("trader-a", 0xC1);
+        owner_transfers(&owner_dev, &trader_a, &pc_a, 5_000);
+        let trader_b = participant("trader-b", 0xC2);
+        owner_transfers(&owner_dev, &trader_b, &pc_a, 5_000);
+
         let x_a = [0xA0u8; 32];
-        let receipt_a = build_foreign_receipt(&vault_id, &pc_a, &pc_b, x_a, 0xC1);
+        let receipt_a = build_foreign_receipt(&trader_a, &vault_id, &pc_a, &pc_b, x_a);
+        owner_dev.enter();
         crate::runtime::get_runtime()
             .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt_a))
             .expect("publish winner receipt");
@@ -4977,7 +5111,8 @@ mod funded_creation_tests {
         // (a cross-partition race the slot-claim could not prevent). Its receipt is
         // fully valid and fetch-verifies — but reconcile must REFUSE it.
         let x_b = [0xB0u8; 32];
-        let receipt_b = build_foreign_receipt(&vault_id, &pc_a, &pc_b, x_b, 0xC2);
+        let receipt_b = build_foreign_receipt(&trader_b, &vault_id, &pc_a, &pc_b, x_b);
+        owner_dev.enter();
         assert_ne!(
             receipt_b.receipt_id, receipt_a.receipt_id,
             "the two settlements are distinct"
@@ -5089,8 +5224,8 @@ mod funded_creation_tests {
     /// `constant_product_output(input, ra, rb, 30)`, and a probe may lie.
     /// Returns the route result and the external commitment `x`.
     ///
-    /// The caller must have switched process identity to this trader
-    /// (`become_device`) and installed the trader's head on `router`.
+    /// The caller must have ENTERED this trader's device
+    /// (`TestDevice::enter`), so its identity, database and head are active.
     #[allow(clippy::too_many_arguments)]
     fn trader_settles(
         router: &AppRouterImpl,
@@ -5126,7 +5261,7 @@ mod funded_creation_tests {
         // OTHER (already-consumed or not-yet-existing) state gets the c_n of
         // exactly the state it claims — so what refuses it is the vault-side
         // byte-equality gate, not a malformed fixture.
-        let frontier = composed_frontier(vault_id);
+        let frontier = composed_frontier(vault_id, pc_a, pc_b);
         let parent_binding =
             if (frontier.sequence, frontier.reserves_a, frontier.reserves_b) == (seq, ra, rb) {
                 frontier.c_n
@@ -5192,23 +5327,38 @@ mod funded_creation_tests {
     }
 
     /// The vault's full composed state, as ANY verifier derives it: the
-    /// birth presentation + `CCB(V_0)` through P0-P6, plus every verified
-    /// trader generation folded on.
+    /// advertisement locates the birth presentation, then `CCB(V_0)` through
+    /// P0-P6, plus every verified trader generation folded on. The DISCOVERED
+    /// path deliberately — a trader on its own device has no record to compose
+    /// from, and the owner must agree with what a stranger derives.
     fn composed_frontier(
         vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
     ) -> crate::sdk::vault_state_composition::ComposedVaultState {
         crate::runtime::get_runtime()
-            .block_on(compose_own_vault(vault_id))
-            .expect("the vault composes from its published baseline")
+            .block_on(
+                crate::sdk::vault_state_composition::compose_discovered_vault(
+                    vault_id, pc_a, pc_b, 30,
+                ),
+            )
+            .expect("the vault composes from its published advertisement and baseline")
     }
 
-    /// Every immutable object key the fleet has seen a PUT for. The terminal
-    /// set's keys are content-derived, so tests read them back from the
-    /// delivery log rather than re-deriving the terminal state by hand.
+    /// Every VAULT object key the fleet has seen a PUT for — the vault-state
+    /// and anchor-presentation namespaces. The terminal set's keys are
+    /// content-derived, so tests read them back from the delivery log rather
+    /// than re-deriving the terminal state by hand. Scoped to the vault's own
+    /// namespaces because every economic admission (faucet, issuance,
+    /// transfer, settlement) publishes its own immutable evidence to the same
+    /// fleet, and those are not what a close is accountable for.
     fn immutable_keys_in_fleet() -> Vec<String> {
         let mut keys: Vec<String> = crate::sdk::storage_io::fake_fleet::put_log()
             .into_iter()
-            .filter(|(_, key, _)| key.starts_with("immutable::"))
+            .filter(|(_, key, _)| {
+                key.starts_with("immutable::DSM/vault-state::")
+                    || key.starts_with("immutable::DSM/anchor-presentation/v1::")
+            })
             .map(|(_, key, _)| key)
             .collect();
         keys.sort();
@@ -5218,8 +5368,8 @@ mod funded_creation_tests {
 
     /// The composed state as the production QUOTE side sees it, reduced to
     /// `(sequence, reserve_a, reserve_b)`.
-    fn composed(vault_id: &[u8; 32], _pc_a: &[u8; 32], _pc_b: &[u8; 32]) -> (u64, u64, u64) {
-        let c = composed_frontier(vault_id);
+    fn composed(vault_id: &[u8; 32], pc_a: &[u8; 32], pc_b: &[u8; 32]) -> (u64, u64, u64) {
+        let c = composed_frontier(vault_id, pc_a, pc_b);
         (c.sequence, c.reserves_a, c.reserves_b)
     }
 
@@ -5264,7 +5414,6 @@ mod funded_creation_tests {
         use prost::Message as _;
 
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let cp = |input: u64, ra: u64, rb: u64| -> u64 {
             crate::sdk::routing_path_sdk::constant_product_output(input, ra, rb, 30)
                 .expect("curve output")
@@ -5272,11 +5421,31 @@ mod funded_creation_tests {
 
         // ── OWNER funds a Required-policy vault at generation 0, advertises it,
         //    and then goes OFFLINE (no further owner action until the end). ─────
-        let (_owner_pk, _owner_did) = become_device(0x41);
-        let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // The OWNER funds from ADMITTED origins. 75_000/20_000 is load-bearing:
+        // after the 10_000 leg and the 5 × 5_000 it sends the market's
+        // participants, this test pins the LP's spendable at (40_000, 15_000)
+        // and requires it NEVER to move again.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 75_000, 20_000);
+
+        // The market's participants, each on its own device, each holding the
+        // input asset only because the LP sent it — before the LP goes away.
+        let traders: Vec<_> = [("trader0", 0x51u8), ("trader1", 0x52), ("trader2", 0x53)]
+            .into_iter()
+            .map(|(slot, tag)| {
+                let t = participant(slot, tag);
+                owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+                t
+            })
+            .collect();
+        let probe_behind = participant("probe-behind", 0x61);
+        owner_transfers(&owner_dev, &probe_behind, &pc_a, 5_000);
+        let probe_ahead = participant("probe-ahead", 0x62);
+        owner_transfers(&owner_dev, &probe_ahead, &pc_a, 5_000);
+        owner_dev.enter();
+
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5Au8; 32],
@@ -5344,12 +5513,10 @@ mod funded_creation_tests {
         let mut xs: Vec<[u8; 32]> = Vec::new();
         for (i, &input) in inputs.iter().enumerate() {
             let gen = i as u64;
-            let seed = 0x51 + i as u8;
-            let (tpk, tdid) = become_device(seed);
-            let trader = named_router(&format!("trader{i}"));
-            trader.core_sdk.set_device_head_for_testing(
-                crate::sdk::funded_vault_fixture::device_holding(0xD2 + i as u8, 5_000, 0),
-            );
+            let trader_dev = &traders[i];
+            trader_dev.enter();
+            let trader = trader_dev.router();
+            let (tpk, tdid) = (trader_dev.ak_pk.clone(), trader_dev.device_id);
             let before = trader.core_sdk.device_head().expect("trader head");
             let (ba, bb) = (before.balance(&pc_a), before.balance(&pc_b));
 
@@ -5363,7 +5530,7 @@ mod funded_creation_tests {
 
             let out = cp(input, reserves.0, reserves.1);
             let (res, x) = trader_settles(
-                &trader,
+                trader,
                 &tpk,
                 &tdid,
                 &vault_id,
@@ -5415,13 +5582,11 @@ mod funded_creation_tests {
         // ── STALE AND FUTURE HOPS ARE REFUSED (the delegation guard). ─────────
         // A hop bound BEHIND the composed generation (parent already consumed)…
         {
-            let (tpk, tdid) = become_device(0x61);
-            let probe = named_router("probe-behind");
-            probe.core_sdk.set_device_head_for_testing(
-                crate::sdk::funded_vault_fixture::device_holding(0xE1, 5_000, 0),
-            );
+            probe_behind.enter();
+            let probe = probe_behind.router();
+            let (tpk, tdid) = (probe_behind.ak_pk.clone(), probe_behind.device_id);
             let (res, _) = trader_settles(
-                &probe,
+                probe,
                 &tpk,
                 &tdid,
                 &vault_id,
@@ -5449,14 +5614,12 @@ mod funded_creation_tests {
         // guard this settles and emits a receipt naming a parent it never
         // consumed — a self-credit no owner fold can ever honour.
         {
-            let (tpk, tdid) = become_device(0x62);
-            let probe = named_router("probe-ahead");
-            probe.core_sdk.set_device_head_for_testing(
-                crate::sdk::funded_vault_fixture::device_holding(0xE2, 5_000, 0),
-            );
+            probe_ahead.enter();
+            let probe = probe_ahead.router();
+            let (tpk, tdid) = (probe_ahead.ak_pk.clone(), probe_ahead.device_id);
             let out_now = cp(300, final_reserves.0, final_reserves.1);
             let (res, _) = trader_settles(
-                &probe,
+                probe,
                 &tpk,
                 &tdid,
                 &vault_id,
@@ -5485,7 +5648,7 @@ mod funded_creation_tests {
         }
 
         // ── THE LP RETURNS. Nothing was folded while it was away. ─────────────
-        let _ = become_device(0x41);
+        owner_dev.enter();
         let back = owner.core_sdk.device_head().expect("owner head");
         assert_eq!(
             (
@@ -5503,7 +5666,7 @@ mod funded_creation_tests {
         );
 
         // Folding out of order is REFUSED: generation 1 is not current.
-        let res = reconcile(&owner, &vault_id, &xs[1]);
+        let res = reconcile(owner, &vault_id, &xs[1]);
         assert!(
             !res.success,
             "folding generation 1->2 before 0->1 must be refused (parent not current)"
@@ -5519,7 +5682,7 @@ mod funded_creation_tests {
         let mut expect = (10_000u64, 5_000u64);
         for (i, &input) in inputs.iter().enumerate() {
             let out = cp(input, expect.0, expect.1);
-            let res = reconcile(&owner, &vault_id, &xs[i]);
+            let res = reconcile(owner, &vault_id, &xs[i]);
             assert!(res.success, "fold {i} failed: {:?}", res.error_message);
             expect = (expect.0 + input, expect.1 - out);
             let h = owner.core_sdk.device_head().expect("owner head");
@@ -5564,7 +5727,7 @@ mod funded_creation_tests {
 
         // REPLAY is idempotent: same receipt again, nothing moves.
         let root = h.root();
-        let res = reconcile(&owner, &vault_id, &xs[2]);
+        let res = reconcile(owner, &vault_id, &xs[2]);
         assert!(res.success, "replaying the last fold must not error");
         assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
     }
@@ -5636,12 +5799,14 @@ mod funded_creation_tests {
     /// that settlement back. Returns `(vault_id, reserves_now, x)` — `x` names
     /// the settlement, so a caller that skipped the fold can perform it later.
     fn vault_after_one_trade(
-        owner: &AppRouterImpl,
+        owner_dev: &crate::test_support::two_device::TestDevice,
         pc_a: &[u8; 32],
         pc_b: &[u8; 32],
         fold: bool,
     ) -> ([u8; 32], (u64, u64), [u8; 32]) {
         use prost::Message as _;
+        owner_dev.enter();
+        let owner = owner_dev.router();
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             owner, pc_a, pc_b, 10_000, 5_000,
         );
@@ -5668,13 +5833,12 @@ mod funded_creation_tests {
         assert!(res.success, "advertise failed: {:?}", res.error_message);
         let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
             .expect("curve output");
-        let (tpk, tdid) = become_device(0x51);
-        let trader = named_router("trader");
-        trader.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD2, 5_000, 0),
-        );
+        let trader_dev = participant("trader", 0x51);
+        let (tpk, tdid) = (trader_dev.ak_pk.clone(), trader_dev.device_id);
+        owner_transfers(owner_dev, &trader_dev, pc_a, 5_000);
+        trader_dev.enter();
         let (res, x) = trader_settles(
-            &trader,
+            trader_dev.router(),
             &tpk,
             &tdid,
             &vault_id,
@@ -5687,7 +5851,7 @@ mod funded_creation_tests {
             0x20,
         );
         assert!(res.success, "trader settle failed: {:?}", res.error_message);
-        let _ = become_device(0x41);
+        owner_dev.enter();
         if fold {
             let res = reconcile(owner, &vault_id, &x);
             assert!(res.success, "owner fold failed: {:?}", res.error_message);
@@ -5712,16 +5876,17 @@ mod funded_creation_tests {
     #[serial]
     fn closing_a_traded_vault_returns_exactly_the_leaf_reserves_and_kills_the_vault() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        let (_pk, _did) = become_device(0x41);
-        let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // The OWNER funds from ADMITTED origins. 55_000/20_000 is load-bearing:
+        // after the 10_000 leg and the 5_000 sent to the trader, this test
+        // pins the owner's spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
 
-        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner_dev, &pc_a, &pc_b, true);
         assert_eq!(
-            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            leaves(owner, &vault_id, &pc_a, &pc_b),
             (reserves.0, reserves.1, 1),
             "the fold left the vault at generation 1 with the traded reserves"
         );
@@ -5730,29 +5895,29 @@ mod funded_creation_tests {
             (1, reserves.0, reserves.1),
             "and the market sees the same generation"
         );
-        let before = spendable(&owner, &pc_a, &pc_b);
+        let before = spendable(owner, &pc_a, &pc_b);
         assert_eq!(before, (40_000, 15_000), "funding is still delegated");
 
-        let res = close(&owner, &vault_id);
+        let res = close(owner, &vault_id);
         assert!(res.success, "close failed: {:?}", res.error_message);
 
         // THE RETURN IS EXACT — the leaf amounts, both legs, nothing rounded.
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             (before.0 + reserves.0, before.1 + reserves.1),
             "the close credits exactly what the leaves held"
         );
         // Stated as the round trip: everything funded came back, plus what the
         // market added and minus what it took.
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             (51_000, 20_000 - (5_000 - reserves.1)),
             "delegation is a loop: funded out, traded, withdrawn back"
         );
 
         // THE VAULT IS DEAD — but its leaves are still there, at zero.
         assert_eq!(
-            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            leaves(owner, &vault_id, &pc_a, &pc_b),
             (0, 0, 2),
             "closing ends the leaves at 0 @ K+1: present, never deleted"
         );
@@ -5785,8 +5950,8 @@ mod funded_creation_tests {
         }
 
         // A SECOND CLOSE IS REFUSED, and moves nothing.
-        let after = spendable(&owner, &pc_a, &pc_b);
-        let res = close(&owner, &vault_id);
+        let after = spendable(owner, &pc_a, &pc_b);
+        let res = close(owner, &vault_id);
         assert!(!res.success, "a closed vault cannot be closed again");
         assert!(
             res.error_message
@@ -5797,7 +5962,7 @@ mod funded_creation_tests {
             res.error_message
         );
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             after,
             "the refused second close credited nothing"
         );
@@ -5808,7 +5973,7 @@ mod funded_creation_tests {
             .expect("resume pass");
         assert_eq!(resumed, 0, "a committed close leaves no unfinished intent");
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             after,
             "and the resume pass credited nothing"
         );
@@ -5825,20 +5990,21 @@ mod funded_creation_tests {
     #[serial]
     fn a_close_is_refused_while_a_settlement_is_unreconciled() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        let (_pk, _did) = become_device(0x41);
-        let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // The OWNER funds from ADMITTED origins. 55_000/20_000 is load-bearing:
+        // after the 10_000 leg and the 5_000 sent to the trader, this test
+        // pins the owner's spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
 
         // Traded, NOT folded: the owner's leaves say generation 0, the market
         // says generation 1.
-        let (vault_id, reserves, x) = vault_after_one_trade(&owner, &pc_a, &pc_b, false);
-        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
+        let (vault_id, reserves, x) = vault_after_one_trade(&owner_dev, &pc_a, &pc_b, false);
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
         assert_eq!(composed(&vault_id, &pc_a, &pc_b).0, 1);
 
-        let res = close(&owner, &vault_id);
+        let res = close(owner, &vault_id);
         assert!(!res.success, "a stale close must be refused");
         assert!(
             res.error_message
@@ -5849,12 +6015,12 @@ mod funded_creation_tests {
             res.error_message
         );
         assert_eq!(
-            leaves(&owner, &vault_id, &pc_a, &pc_b),
+            leaves(owner, &vault_id, &pc_a, &pc_b),
             (10_000, 5_000, 0),
             "the refused close moved no reserves"
         );
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             (40_000, 15_000),
             "and credited nothing"
         );
@@ -5871,20 +6037,20 @@ mod funded_creation_tests {
         // SEQUENCING, NOT LOCKING. Fold the outstanding settlement and the SAME
         // vault closes, returning the reserves of the generation the market
         // actually reached — the ones the refused close would have missed.
-        let res = reconcile(&owner, &vault_id, &x);
+        let res = reconcile(owner, &vault_id, &x);
         assert!(res.success, "fold failed: {:?}", res.error_message);
-        let res = close(&owner, &vault_id);
+        let res = close(owner, &vault_id);
         assert!(
             res.success,
             "once folded, the same vault must close: {:?}",
             res.error_message
         );
         assert_eq!(
-            spendable(&owner, &pc_a, &pc_b),
+            spendable(owner, &pc_a, &pc_b),
             (40_000 + reserves.0, 15_000 + reserves.1),
             "the close returns the TRADED reserves, not the funded ones"
         );
-        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
     }
 
     /// A CONTESTED PARENT. Exclusivity over a generation belongs to the quorum
@@ -5901,12 +6067,12 @@ mod funded_creation_tests {
     #[serial]
     fn a_contested_parent_refuses_the_close_and_moves_nothing() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let (_pk, _did) = become_device(0x41);
         let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        // The OWNER funds from ADMITTED origins. 50_000/20_000 is load-bearing:
+        // these tests pin the post-leg spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&owner, 50_000, 20_000);
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &owner, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -6009,12 +6175,12 @@ mod funded_creation_tests {
     #[serial]
     fn a_close_refuses_when_the_frontier_cannot_be_read() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let (_pk, _did) = become_device(0x41);
         let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        // The OWNER funds from ADMITTED origins. 50_000/20_000 is load-bearing:
+        // these tests pin the post-leg spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&owner, 50_000, 20_000);
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &owner, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -6092,12 +6258,12 @@ mod funded_creation_tests {
     #[serial]
     fn an_interrupted_close_is_completed_by_the_resume_pass_with_identical_bytes() {
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
         let (_pk, _did) = become_device(0x41);
         let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        // The OWNER funds from ADMITTED origins. 50_000/20_000 is load-bearing:
+        // these tests pin the post-leg spendable balance at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&owner, 50_000, 20_000);
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &owner, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -6266,20 +6432,20 @@ mod funded_creation_tests {
         use prost::Message as _;
 
         install_identity();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        let (_pk, _did) = become_device(0x41);
-        let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
-        let (vault_id, reserves, _x) = vault_after_one_trade(&owner, &pc_a, &pc_b, true);
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // The OWNER funds from ADMITTED origins: a 10_000 leg, 5_000 to the
+        // trader and 5_000 to the probe leave it at (40_000, 15_000).
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 60_000, 20_000);
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner_dev, &pc_a, &pc_b, true);
 
         // The probe learns the vault while it is still live and funded.
-        let (tpk, tdid) = become_device(0x52);
-        let probe = named_router("probe-dead-market");
-        probe.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xE3, 5_000, 0),
-        );
+        let probe_dev = participant("probe-dead-market", 0x54);
+        let (tpk, tdid) = (probe_dev.ak_pk.clone(), probe_dev.device_id);
+        owner_transfers(&owner_dev, &probe_dev, &pc_a, 5_000);
+        probe_dev.enter();
+        let probe = probe_dev.router();
         let res = crate::runtime::get_runtime().block_on(async {
             probe
                 .invoke(AppInvoke {
@@ -6301,8 +6467,8 @@ mod funded_creation_tests {
         };
 
         // The owner withdraws everything.
-        let _ = become_device(0x41);
-        let res = close(&owner, &vault_id);
+        owner_dev.enter();
+        let res = close(owner, &vault_id);
         assert!(res.success, "close failed: {:?}", res.error_message);
         assert_eq!(
             composed(&vault_id, &pc_a, &pc_b),
@@ -6312,12 +6478,12 @@ mod funded_creation_tests {
 
         // The probe settles against the reserves the vault held before the
         // close, at the generation the close produced.
-        let _ = become_device(0x52);
+        probe_dev.enter();
         let out =
             crate::sdk::routing_path_sdk::constant_product_output(300, reserves.0, reserves.1, 30)
                 .expect("curve output on the pre-close reserves");
         let (res, _x) = trader_settles(
-            &probe, &tpk, &tdid, &vault_id, &pc_a, &pc_b, 2, reserves, 300, out, 0x40,
+            probe, &tpk, &tdid, &vault_id, &pc_a, &pc_b, 2, reserves, 300, out, 0x40,
         );
         assert!(!res.success, "a closed vault must not settle a trade");
         // The refusal must come from the vault's STATE. "The trader has never
@@ -6345,8 +6511,8 @@ mod funded_creation_tests {
         );
 
         // …and the vault is still dead: a refused settle cannot revive it.
-        let _ = become_device(0x41);
-        assert_eq!(leaves(&owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+        owner_dev.enter();
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
     }
 
     /// Only the creating owner can close. A device with no record of the vault
@@ -6357,9 +6523,9 @@ mod funded_creation_tests {
     fn a_vault_this_device_never_created_cannot_be_closed() {
         install_identity();
         let owner = named_router("owner");
-        owner.core_sdk.set_device_head_for_testing(
-            crate::sdk::funded_vault_fixture::device_holding(0xD1, 50_000, 20_000),
-        );
+        owner
+            .core_sdk
+            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::observer_device());
         let res = close(&owner, &[0x7Eu8; 32]);
         assert!(!res.success, "an unknown vault cannot be closed");
         assert!(
@@ -6389,16 +6555,10 @@ mod funded_creation_tests {
     fn list_owned_amm_vaults_keeps_commits_reports_real_reserves_and_resolves_tickers() {
         install_identity();
         let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-
-        // Known display names for those exact commits.
-        dsm::core::token::register_policy_commit_ticker(pc_a, "AAA");
-        dsm::core::token::register_policy_commit_ticker(pc_b, "BBB");
-
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets, created by this device under their display
+        // names — which is what the route resolves for the screen.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5Au8; 32],
@@ -6469,8 +6629,11 @@ mod funded_creation_tests {
         );
 
         // 3. THE DISPLAY WOUND: resolved labels, so the frontend never decodes a digest.
-        assert_eq!(v.token_a_ticker, "AAA");
-        assert_eq!(v.token_b_ticker, "BBB");
+        assert_eq!(v.token_a_ticker, ticker_of(&pc_a));
+        assert_eq!(v.token_b_ticker, ticker_of(&pc_b));
+        let mut names = [v.token_a_ticker.as_str(), v.token_b_ticker.as_str()];
+        names.sort_unstable();
+        assert_eq!(names, ["AAA", "BBB"], "both created assets, by name");
     }
 
     /// WIRE COMPATIBILITY for the additive display fields.
@@ -6540,14 +6703,7 @@ mod funded_creation_tests {
     #[serial_test::serial]
     fn an_unresolvable_token_falls_back_to_its_canonical_encoding_never_empty() {
         install_identity();
-        let r = router();
-        let (pc_a, pc_b) = ([0x7Eu8; 32], [0x7Fu8; 32]);
-
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::device_holding(
-                0x99, 50_000, 20_000,
-            ));
-        let _ = (pc_a, pc_b);
+        let pc_a = [0x7Eu8; 32];
 
         // Resolution itself is the unit under test here — the route wraps exactly this.
         let label = |pc: [u8; 32]| -> String {
@@ -6586,11 +6742,10 @@ mod funded_creation_tests {
         let r = router();
 
         // (1) CREATE through the real dispatcher.
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: vec![0x5Au8; 32],
@@ -6767,11 +6922,11 @@ mod funded_creation_tests {
         install_identity();
         let r = router();
 
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // Two ADMITTED assets: faucet ERA, then create+mint. The commits come
+        // back from the funding because they do not exist until the tokens do.
+        // 50_000/20_000: two 10_000/5_000 vaults, and the remainder is pinned.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
 
         let req = || generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
@@ -6827,65 +6982,100 @@ mod funded_creation_tests {
         assert_eq!(head.balance(&pc_b), 10_000, "20_000 less two 5_000 legs");
     }
 
-    /// An ORPHANED ENCUMBRANCE refuses: reserve leaves exist with no record.
+    /// A RECORD WHOSE HEAD COMMIT WAS LOST refuses creation rather than being
+    /// adopted.
     ///
-    /// Creation must not quietly adopt them. Completing a partial prior creation
-    /// from inside a value-moving constructor is a repair, and a repair belongs
-    /// in an explicit recovery operation where it can be audited.
+    /// A vault's id is derived from the creator, the spec AND the reference
+    /// state hash, so on an honest head no later request can ever re-derive
+    /// an id whose reserve leaves already sit in that head — the leaves moved
+    /// the hash. The inconsistency a creation CAN meet is the other one: a
+    /// record persisted under an id the current head derives, with no reserves
+    /// behind it — a head commit lost to a restored backup or a tampered
+    /// database. That is corrupted durable state, constructed here as an
+    /// explicit invalid vector from two REAL states: the head before the
+    /// creation, reinstalled behind the record the creation wrote.
+    ///
+    /// Completing a partial prior creation from inside a value-moving
+    /// constructor is a repair, and a repair belongs in an explicit recovery
+    /// operation where it can be audited.
     #[test]
     #[serial]
-    fn an_orphaned_encumbrance_refuses_rather_than_being_adopted() {
+    fn an_inconsistent_record_refuses_creation_rather_than_being_adopted() {
         install_identity();
         let r = router();
 
-        // A head already holding reserves for the vault a creation would target,
-        // with no record anywhere — the shape a crash between advance and record
-        // write would once have left.
-        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
-        let (pc_a, pc_b) = (v.pc_a, v.pc_b);
-        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let head_before = r.core_sdk.device_head().expect("the funded head");
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
         assert!(
-            crate::storage::client_db::amm_vault_records::list_amm_vault_records()
-                .expect("list")
-                .is_empty(),
-            "precondition: no record"
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .is_some(),
+            "precondition: the creation wrote its record"
         );
 
-        // Both legs orphaned, then just one — a single stray leg is equally a
-        // refusal, because half an encumbrance is not a fundable vault.
-        for legs in [
-            vec![(pc_a, 10_000u64), (pc_b, 5_000u64)],
-            vec![(pc_a, 10_000u64)],
-        ] {
-            let req = generated::DlvInstantiateV1 {
-                spec: Some(generated::DlvSpecV1 {
-                    policy_digest: vec![0x5Au8; 32],
-                    fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
-                    anchor_enforcement: generated::AnchorEnforcement::Required as i32,
-                    ..Default::default()
-                }),
-                creator_public_key: Vec::new(),
-                signature: Vec::new(),
-                funding_legs: legs
-                    .iter()
-                    .map(|(pc, amt)| generated::DlvFundingLegV1 {
-                        policy_commit: pc.to_vec(),
-                        amount: *amt,
-                    })
-                    .collect(),
-            };
-            let res = crate::runtime::get_runtime().block_on(async {
-                r.invoke(AppInvoke {
-                    method: "dlv.create".to_string(),
-                    args: pack(req.encode_to_vec()),
-                })
-                .await
-            });
-            assert!(
-                !res.success,
-                "creation over an orphaned encumbrance must be refused"
-            );
-        }
+        // THE CORRUPTION: the head commit is lost — the device is back on the
+        // head it held before the creation, while the record survived.
+        r.core_sdk.set_device_head_for_testing(head_before.clone());
+        assert_eq!(
+            r.core_sdk
+                .device_head()
+                .expect("head")
+                .vault_reserve(&vault_id, &pc_a),
+            0,
+            "precondition: this head holds no reserves for the recorded vault"
+        );
+
+        // The SAME creation again derives the SAME id — same creator, same
+        // spec, same reference state — and meets its own record with nothing
+        // behind it. It must refuse, naming the inconsistency, and move nothing.
+        let req = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5Au8; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(req.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(
+            !res.success,
+            "creation over an inconsistent record must be refused"
+        );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("inconsistent state"),
+            "the refusal names the inconsistency, not an incidental failure: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            r.core_sdk.device_head().expect("head").root(),
+            head_before.root(),
+            "a refused creation moves nothing"
+        );
     }
 
     /// Creation that cannot be paid for changes nothing — no balance moves, and
@@ -6896,10 +7086,9 @@ mod funded_creation_tests {
         install_identity();
         let r = router();
 
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        let spendable = crate::sdk::funded_vault_fixture::owner_holding(100, 100);
-        let root_before = spendable.root();
-        r.core_sdk.set_device_head_for_testing(spendable);
+        // Holding 100 of each from admitted origins; asking to encumber far more.
+        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 100, 100);
+        let root_before = r.core_sdk.device_head().expect("head").root();
 
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {

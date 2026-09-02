@@ -5884,20 +5884,10 @@ mod tests {
         contact.verified = true;
         crate::storage::client_db::store_contact(&contact).expect("seed contact");
 
-        crate::storage::client_db::upsert_balance_projection(
-            &crate::storage::client_db::BalanceProjectionRecord {
-                balance_key: format!("{sender_b32}:ERA"),
-                device_id: sender_b32.clone(),
-                token_id: "ERA".to_string(),
-                policy_commit: crate::util::text_id::encode_base32_crockford(&[0x0Fu8; 32]),
-                available: 1000,
-                locked: 0,
-                source_state_hash: String::new(),
-                updated_at: 0,
-            },
-        )
-        .expect("seed balance");
-
+        // No balance is seeded: a projection row is display state, not the
+        // head the send debits, and the head here holds nothing. When this
+        // scaffold is re-sited it funds the sender through the faucet fixture
+        // like every other admitting suite.
         let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
             node_id: "gate2".to_string(),
             storage_endpoints: endpoints.clone(),

@@ -380,6 +380,90 @@ pub(crate) fn build_dsm_admission(
     })
 }
 
+/// The authoritative economic predecessor and everything derived from it.
+///
+/// This is phase one of the ONE admission pipeline. Both typed facades —
+/// [`admitted_self_loop_operation`] and [`admitted_dlv_create_funded`] — run
+/// it, then perform their own advance, then run [`finish_admission`]. The
+/// facades differ only in the SHAPE of the advance (a balance delta versus a
+/// reserve mutation, plain versus staged writers); the admission itself has a
+/// single implementation and is never duplicated per operation.
+///
+/// `pre_balances` is the snapshot the write set will actually debit. A caller
+/// that needs a sufficiency answer must take it from HERE and not re-read the
+/// economic root separately: a second, independently-timed lookup reasons from
+/// a different observation than the transition it is attempting.
+pub(crate) struct StagedAdmission {
+    pub network_id: Vec<u8>,
+    pub genesis: [u8; 32],
+    pub devid: [u8; 32],
+    pub set: StorageSet,
+    pub validated: ValidatedEconomicRoot,
+    pub tree: EconomicSmt,
+    pub pre_balances: BTreeMap<[u8; 32], u64>,
+    pub authority: AuthorityMaterial,
+    pub target_position: u64,
+    pub facts: CreditSourceFacts,
+    pub extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+    pub prepared: PendingEconomicAdmission,
+}
+
+/// Resolve the admitted predecessor, derive the producer tree and balances from
+/// it, and prepare the successor coordinate this admission will CAS against.
+///
+/// Any pending admission is resumed first, so the caller always stages against
+/// a settled predecessor.
+pub(crate) async fn stage_admission(
+    core: &CoreSDK,
+    operation: &Operation,
+    facts_for_position: impl FnOnce(
+        u64,
+    ) -> Result<
+        (CreditSourceFacts, Vec<(String, Vec<u8>, &'static str)>),
+        DsmError,
+    >,
+) -> Result<StagedAdmission, DsmError> {
+    let network_id = committed_network_id()?;
+    if let Some(pending) = core
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+    {
+        resume_pending_admission(core, &network_id, pending).await?;
+    }
+    let head = core
+        .device_head()
+        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
+    let genesis = head.genesis_digest();
+    let devid = head.devid();
+    let set = canonical_set(&network_id)?;
+    let validated = validated_root_or_activate(core)?;
+    let (tree, pre_balances) = producer_tree_and_balances(&validated)?;
+    let authority = authority_material(&network_id, &genesis)?;
+    let target_position = validated.economic_position() + 1;
+    let op_digest = dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+    let (facts, extra_artifacts) = facts_for_position(target_position)?;
+    let prepared = PendingEconomicAdmission::prepared(
+        dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+        target_position,
+        tree.root(),
+        op_digest,
+    );
+    Ok(StagedAdmission {
+        network_id,
+        genesis,
+        devid,
+        set,
+        validated,
+        tree,
+        pre_balances,
+        authority,
+        target_position,
+        facts,
+        extra_artifacts,
+        prepared,
+    })
+}
+
 /// One ADMITTED self-loop operation (Burn, CreateToken fee, Mint), end to
 /// end: resume any pending admission, assemble prerequisites, run the fence-
 /// coupled advance through the generalized seam, publish/register/validate,
@@ -415,31 +499,20 @@ pub(crate) async fn admitted_self_loop_operation(
               + Sync),
     >,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    let network_id = committed_network_id()?;
-    if let Some(pending) = core
-        .device_head()
-        .and_then(|h| h.pending_economic_admission().cloned())
-    {
-        resume_pending_admission(core, &network_id, pending).await?;
-    }
-    let head = core
-        .device_head()
-        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
-    let genesis = head.genesis_digest();
-    let devid = head.devid();
-    let set = canonical_set(&network_id)?;
-    let validated = validated_root_or_activate(core)?;
-    let (mut tree, pre_balances) = producer_tree_and_balances(&validated)?;
-    let authority = authority_material(&network_id, &genesis)?;
-    let target_position = validated.economic_position() + 1;
-    let op_digest = dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes());
-    let (facts, extra_artifacts) = facts_for_position(target_position)?;
-    let prepared = PendingEconomicAdmission::prepared(
-        dsm::economic::admission::PendingAdmissionKind::DsmBacked,
-        target_position,
-        tree.root(),
-        op_digest,
-    );
+    let StagedAdmission {
+        network_id,
+        genesis,
+        devid,
+        set,
+        validated,
+        mut tree,
+        pre_balances,
+        authority,
+        facts,
+        extra_artifacts,
+        prepared,
+        ..
+    } = stage_admission(core, &operation, facts_for_position).await?;
     let mut built: Option<DsmAdmissionParts> = None;
     let (outcome, pending) = core.faucet_claim_advance(
         operation.clone(),
@@ -470,6 +543,167 @@ pub(crate) async fn admitted_self_loop_operation(
             ) -> Result<(), DsmError>
         }),
     )?;
+    let parts = built.ok_or_else(|| {
+        DsmError::storage(
+            "advance committed without building the witness".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    let admitted = finish_admission(
+        core,
+        &network_id,
+        &set,
+        &validated,
+        tree,
+        parts.witness,
+        parts.manifest,
+        operation,
+        pending,
+        Vec::new(),
+    )
+    .await?;
+    Ok((outcome, admitted))
+}
+
+/// The funded-DLV facade: `DlvCreateFundedV2` admitted into `R_econ`.
+///
+/// Phase one and phase three are the shared pipeline — [`stage_admission`] and
+/// [`finish_admission`], identical to [`admitted_self_loop_operation`]. Only
+/// the ADVANCE differs, and it differs structurally:
+///
+/// ```text
+/// self-loop     one BalanceDelta, no reserve mutation, optional in-tx writer
+/// funded DLV    ZERO balance deltas, exactly one VaultReserveMutation::Fund,
+///               staged build/write (the vault's birth objects are signed off
+///               the exact root this advance produces, before anything persists)
+/// ```
+///
+/// Zero deltas is not an omission: conservation REFUSES deltas for this
+/// operation, because the value moves through reserve leaves
+/// (`device_state.rs`, the `DlvCreateFundedV2` arm of the delta classifier).
+///
+/// The facts are fixed at `CreditSourceFacts::None` and are not a parameter:
+/// a funded create consumes no external source and is funded by two
+/// `SameTransitionMove` (0x0024) credits the write-set builder derives itself.
+/// Making them settable would let a caller ask for a write set this operation
+/// can never have.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admitted_dlv_create_funded<A>(
+    core: &CoreSDK,
+    operation: Operation,
+    rel_key: [u8; 32],
+    counterparty_devid: [u8; 32],
+    initial_chain_tip: [u8; 32],
+    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
+    // Display resolver for the shortfall message only. Never an identity —
+    // commit to name is one-to-one and safe; the reverse direction was
+    // removed deliberately.
+    name_for: impl Fn(&[u8; 32]) -> String,
+    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+    write_extra: impl Fn(
+        &rusqlite::Transaction<'_>,
+        &dsm::types::device_state::AdvanceOutcome,
+        &A,
+    ) -> Result<(), DsmError>,
+) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    let StagedAdmission {
+        network_id,
+        genesis,
+        devid,
+        set,
+        validated,
+        mut tree,
+        pre_balances,
+        authority,
+        facts,
+        extra_artifacts,
+        prepared,
+        ..
+    } = stage_admission(core, &operation, |_| {
+        Ok((CreditSourceFacts::None, Vec::new()))
+    })
+    .await?;
+
+    // SUFFICIENCY, from the SAME snapshot the admission will CAS against.
+    //
+    // The structural check is `plan_balance_debit` inside the write-set
+    // builder, against these exact `pre_balances`. This loop exists only to
+    // name the shortfall, and it reads the staged predecessor rather than
+    // `device_head()` precisely so it cannot disagree with the transition
+    // being attempted: a second, independently-timed lookup would let the
+    // route report "sufficient" against position n while the admission builds
+    // against n+1.
+    if let Operation::DlvCreateFundedV2 {
+        leg_a_policy_commit,
+        leg_a_amount,
+        leg_b_policy_commit,
+        leg_b_amount,
+        ..
+    } = &operation
+    {
+        for (pc, need) in [
+            (leg_a_policy_commit, *leg_a_amount),
+            (leg_b_policy_commit, *leg_b_amount),
+        ] {
+            let have = pre_balances.get(pc).copied().unwrap_or(0);
+            if have < need {
+                return Err(DsmError::invalid_operation(format!(
+                    "insufficient {} to encumber (need {need}, have {have} admitted)",
+                    name_for(pc)
+                )));
+            }
+        }
+    }
+
+    let set_id = set.id();
+    let op_for_build = operation.clone();
+    let mut built: Option<DsmAdmissionParts> = None;
+    let mut accepted_out: Option<PendingEconomicAdmission> = None;
+
+    let outcome = {
+        let plan = crate::sdk::core_sdk::AdmissionPlan {
+            prepared,
+            storage_set_id: set_id,
+            build: Box::new(|o: &dsm::types::device_state::AdvanceOutcome| {
+                let parts = build_dsm_admission(
+                    &genesis,
+                    &devid,
+                    &o.new_chain_state,
+                    &op_for_build,
+                    &pre_balances,
+                    &mut tree,
+                    &facts,
+                    &authority,
+                    extra_artifacts,
+                )?;
+                let coords = parts.coords;
+                let artifacts = parts.artifacts.clone();
+                built = Some(parts);
+                Ok((coords, artifacts))
+            }),
+            accepted_out: &mut accepted_out,
+        };
+        let (_state, outcome, _artifacts) = core
+            .execute_on_relationship_staged_with_reserve_mutation_and_admission(
+                rel_key,
+                counterparty_devid,
+                operation.clone(),
+                &[],
+                Some(initial_chain_tip),
+                Some(reserve_mutation),
+                build_artifacts,
+                write_extra,
+                Some(plan),
+            )?;
+        outcome
+    };
+
+    let pending = accepted_out.ok_or_else(|| {
+        DsmError::storage(
+            "funded create committed without an accepted admission".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
     let parts = built.ok_or_else(|| {
         DsmError::storage(
             "advance committed without building the witness".to_string(),

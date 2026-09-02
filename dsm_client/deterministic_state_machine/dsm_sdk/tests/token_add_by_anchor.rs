@@ -21,30 +21,21 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::AppRouter;
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030), replacing a fabricated identity plus a directly-written balance.
+///
+/// The old pair installed [0xAA;32]/[0xBB;32]/[0xCC;32] with no genesis record —
+/// so no network was committed and no admission could ever run — and then wrote
+/// 100 ERA straight onto the head. That balance had no economic lineage, and
+/// since debits are not fenced it was fully spendable through canonical
+/// acceptance. 100 is also exactly the faucet's payout, so assertions written
+/// against it are unchanged.
+fn funded_router(seed: u8) -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
+    dsm_sdk::economic_fixtures::funded_router(seed)
 }
 
 /// Adopt from the TEXT a user supplied — a bare Base32 anchor or a scanned
@@ -69,24 +60,6 @@ fn query(r: &AppRouterImpl, path: &str, params: Vec<u8>) -> dsm_sdk::bridge::App
         })
         .await
     })
-}
-
-fn fund_era(r: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        r,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
 }
 
 fn era(r: &AppRouterImpl) -> u64 {
@@ -144,8 +117,7 @@ fn create_token(_r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
 #[serial_test::serial]
 fn every_token_query_route_is_reachable_through_the_dispatcher() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x83);
 
     for path in [
         "tokens.getPolicy",
@@ -173,8 +145,7 @@ fn every_token_query_route_is_reachable_through_the_dispatcher() {
 #[serial_test::serial]
 fn the_route_is_reachable_through_the_production_dispatcher() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x83);
 
     // Deliberately wrong length: we want the ROUTE's own rejection, which
     // proves dispatch reached it, not the dispatcher's unknown-path error.
@@ -195,9 +166,7 @@ fn the_route_is_reachable_through_the_production_dispatcher() {
 #[serial_test::serial]
 fn adoption_costs_no_era_and_does_not_advance_device_state() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "ADOPT");
 
     let era_before = era(&r);
@@ -219,9 +188,7 @@ fn adoption_costs_no_era_and_does_not_advance_device_state() {
 #[serial_test::serial]
 fn adopting_the_same_token_twice_is_idempotent() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "TWICE");
 
     for attempt in 1..=3 {
@@ -253,8 +220,7 @@ fn adopting_the_same_token_twice_is_idempotent() {
 #[serial_test::serial]
 fn an_anchor_that_resolves_to_nothing_fails_closed() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x83);
 
     let res = adopt(&r, &anchor_text(&[0x5A; 32]));
     assert!(!res.success, "an unknown anchor must not adopt anything");
@@ -271,9 +237,7 @@ fn an_anchor_that_resolves_to_nothing_fails_closed() {
 #[serial_test::serial]
 fn an_adopted_token_survives_a_restart() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "PERSIST");
     assert!(adopt(&r, &anchor_text(&anchor)).success);
 
@@ -283,7 +247,7 @@ fn an_adopted_token_survives_a_restart() {
 
     // A fresh router over the same storage is what a relaunch looks like.
     drop(r);
-    let r2 = new_router();
+    let r2 = dsm_sdk::economic_fixtures::restart_router();
     let after = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
         .expect("still adopted after restart");
@@ -315,9 +279,7 @@ fn derive_token_id(anchor: &[u8; 32], ticker: &str) -> String {
 #[serial_test::serial]
 fn a_scanned_payload_adopts_the_same_token_as_the_bare_anchor() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "SCANME");
     let token_id = derive_token_id(&anchor, "SCANME");
 
@@ -341,9 +303,7 @@ fn a_scanned_payload_adopts_the_same_token_as_the_bare_anchor() {
 #[serial_test::serial]
 fn a_payload_that_lies_about_its_ticker_is_refused() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "HONEST");
     let token_id = derive_token_id(&anchor, "HONEST");
 
@@ -368,9 +328,7 @@ fn a_payload_that_lies_about_its_ticker_is_refused() {
 #[serial_test::serial]
 fn a_payload_that_lies_about_its_token_id_is_refused() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "IDCHK");
 
     let lying = dsm_sdk::handlers::token_routes::build_adoption_uri(&anchor, "IDCHK", "WRONGID");

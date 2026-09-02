@@ -31,48 +31,21 @@
 use std::path::PathBuf;
 
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030), replacing a fabricated identity plus a directly-written balance.
+///
+/// The old pair installed [0xAA;32]/[0xBB;32]/[0xCC;32] with no genesis record —
+/// so no network was committed and no admission could ever run — and then wrote
+/// 100 ERA straight onto the head. That balance had no economic lineage, and
+/// since debits are not fenced it was fully spendable through canonical
+/// acceptance. 100 is also exactly the faucet's payout, so assertions written
+/// against it are unchanged.
+fn funded_router(seed: u8) -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
-}
-
-fn fund_era(r: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        r,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
+    dsm_sdk::economic_fixtures::funded_router(seed)
 }
 
 /// Install RIGB in the durable shape a committed creation leaves (registry
@@ -112,9 +85,7 @@ fn create_rigb(_r: &AppRouterImpl) -> (String, [u8; 32]) {
 #[serial_test::serial]
 fn the_ui_ticker_resolves_to_the_canonical_token_id_and_commitment() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x86);
     let (token_id, anchor) = create_rigb(&r);
 
     // What the send form actually supplies.
@@ -139,9 +110,7 @@ fn the_ui_ticker_resolves_to_the_canonical_token_id_and_commitment() {
 #[serial_test::serial]
 fn token_id_and_ticker_resolve_to_identical_metadata() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x86);
     let (token_id, _) = create_rigb(&r);
 
     let by_id = token_registry::get_token(&token_id)
@@ -165,9 +134,7 @@ fn token_id_and_ticker_resolve_to_identical_metadata() {
 #[serial_test::serial]
 fn an_unknown_identifier_fails_before_signing() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x86);
 
     let root_before = r.core_sdk.device_head().map(|h| h.root());
     assert!(
@@ -195,8 +162,7 @@ fn an_unknown_identifier_fails_before_signing() {
 #[serial_test::serial]
 fn a_registered_token_with_no_local_create_still_resolves() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router(0x86);
 
     // A receiver's registry row: no CreateToken was ever executed here.
     let anchor = [0x7Cu8; 32];

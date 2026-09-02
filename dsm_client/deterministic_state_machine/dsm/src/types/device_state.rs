@@ -1283,35 +1283,6 @@ impl DeviceState {
     }
 
     /// Snapshot of all device-level balances (read-only view).
-    /// Install a fixture balance. TEST-ONLY: compiled under `cfg(test)` or the
-    /// non-default `testing` feature; a production build never sees it.
-    ///
-    /// This is FIXTURE CONSTRUCTION, not issuance. Builtin issuance is refused at
-    /// `advance`, and that refusal is total — it applies in tests exactly as in
-    /// production, which is what makes it worth anything. A fixture therefore
-    /// cannot obtain ERA by minting and MUST NOT try: not via `faucet.claim`, not
-    /// via `wallet.mint_for_self`, not via `Operation::Mint`. Those are issuance
-    /// ROUTES, and re-opening one for tests re-opens it for everyone.
-    ///
-    /// What this does instead is install the state a device would already be in —
-    /// the same thing `restore` does for a reloaded device — asserting nothing
-    /// about whether any issuance was authorized. Balances live outside the SMT,
-    /// so `root()` is unchanged, exactly as in `restore`.
-    ///
-    /// The amount installed has NO provenance and must never be read as though it
-    /// had. This is for tests whose subject is something else and that merely need
-    /// a funded starting point.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn with_balance_for_testing(&self, policy_commit: [u8; 32], amount: u64) -> Self {
-        let mut next = self.clone();
-        if amount == 0 {
-            next.balances.remove(&policy_commit);
-        } else {
-            next.balances.insert(policy_commit, amount);
-        }
-        next
-    }
-
     pub fn balances_snapshot(&self) -> &BTreeMap<[u8; 32], u64> {
         &self.balances
     }
@@ -1402,6 +1373,201 @@ impl DeviceState {
             )));
         }
         Ok(())
+    }
+
+    /// TEST-ONLY: advance with the Prepared economic admission that the
+    /// accepting fences require for an economically-originating operation.
+    ///
+    /// This is the INPUT SHAPE production hands `advance`: the admission
+    /// producer (`stage_admission` -> `AdmissionPlan`) attaches a Prepared
+    /// DSM-backed admission bound to exactly this operation's digest, then
+    /// advances. Whether the admission is TRUE — whether a register accepted
+    /// the position, whether the evidence verifies — is established one layer
+    /// up, by the producer and the economic verifier, and is proven there.
+    /// At this layer there is no other way a credit enters the head, which is
+    /// what makes this the legitimate origin for a core test rather than a
+    /// bypass: every gate `advance` owns still runs. It is not asserting that
+    /// an unadmitted origin is acceptable;
+    /// `a_raw_funded_create_is_refused_without_an_attached_admission` pins
+    /// that it is not.
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_admitted(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: Operation,
+        entropy: Vec<u8>,
+        encapsulated_entropy: Option<Vec<u8>>,
+        deltas: &[BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+        anchor_leaf: Option<AnchorLeafUpdate>,
+        offline_spend: Option<OfflineSpend>,
+        reserve_mutation: Option<VaultReserveMutation>,
+    ) -> Result<AdvanceOutcome, DsmError> {
+        let mut staged = self.clone();
+        staged.pending_economic_admission = Some(
+            crate::economic::admission::PendingEconomicAdmission::prepared(
+                crate::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                crate::economic::faucet::dsm_operation_digest(&operation.to_bytes()),
+            ),
+        );
+        staged.advance(
+            rel_key,
+            counterparty_devid,
+            operation,
+            entropy,
+            encapsulated_entropy,
+            deltas,
+            initial_chain_tip,
+            anchor_leaf,
+            offline_spend,
+            reserve_mutation,
+        )
+    }
+
+    /// TEST-ONLY. ERA through the faucet, at the core layer: one admitted
+    /// `FaucetClaim` on this device's self-loop, crediting exactly the
+    /// protocol payout (`ERA_FAUCET_PAYOUT`) of builtin ERA. A test that
+    /// needs more claims more tickets — there is no amount to ask for,
+    /// because the faucet has none.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_faucet_claim(
+        &self,
+        ticket_index: u64,
+        entropy_seed: u8,
+    ) -> Result<Self, DsmError> {
+        let (rel_key, initial_tip) = self.self_loop_coordinates();
+        self.advance_admitted(
+            rel_key,
+            self.devid,
+            Operation::FaucetClaim {
+                faucet_id: crate::economic::faucet::era_faucet_id(b"dsm-testnet"),
+                ticket_index,
+            },
+            vec![entropy_seed; 32],
+            None,
+            &[BalanceDelta {
+                policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
+                direction: BalanceDirection::Credit,
+                amount: crate::economic::faucet::ERA_FAUCET_PAYOUT,
+            }],
+            Some(initial_tip),
+            None,
+            None,
+            None,
+        )
+        .map(|o| o.new_device_state)
+    }
+
+    /// TEST-ONLY. A user asset through authorized issuance, at the core
+    /// layer: one admitted `Mint` of `amount` units of `policy_commit` on the
+    /// self-loop. A builtin commit is refused exactly as in production — ERA
+    /// comes only from [`Self::admitted_faucet_claim`].
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_mint(
+        &self,
+        policy_commit: [u8; 32],
+        amount: u64,
+        entropy_seed: u8,
+    ) -> Result<Self, DsmError> {
+        let (rel_key, initial_tip) = self.self_loop_coordinates();
+        self.advance_admitted(
+            rel_key,
+            self.devid,
+            Operation::Mint {
+                amount: crate::types::token_types::Balance::from_state(amount, [0u8; 32]),
+                token_id: b"TEST".to_vec(),
+                policy_commit,
+                message: String::new(),
+            },
+            vec![entropy_seed; 32],
+            None,
+            &[BalanceDelta {
+                policy_commit,
+                direction: BalanceDirection::Credit,
+                amount,
+            }],
+            Some(initial_tip),
+            None,
+            None,
+            None,
+        )
+        .map(|o| o.new_device_state)
+    }
+
+    /// TEST-ONLY. A funded vault through the production transition, at the
+    /// core layer: one admitted, SIGNED `DlvCreateFundedV2` on the self-loop
+    /// carrying a `Fund` reserve mutation for exactly `legs`. `secret_key`
+    /// must be the mate of this head's `public_key` — `advance` verifies the
+    /// creator's signature against the head, as it does for every creator.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_funded_create(
+        &self,
+        vault_id: [u8; 32],
+        legs: [([u8; 32], u64); 2],
+        fee_bps: u32,
+        secret_key: &[u8],
+        entropy_seed: u8,
+    ) -> Result<Self, DsmError> {
+        let (rel_key, initial_tip) = self.self_loop_coordinates();
+        let [(x, xa), (y, ya)] = legs;
+        let ((a, ra), (b, rb)) = if x < y {
+            ((x, xa), (y, ya))
+        } else {
+            ((y, ya), (x, xa))
+        };
+        let pair = VaultStatePair::new(a, b, fee_bps)?;
+        let unsigned = Operation::DlvCreateFundedV2 {
+            vault_id: vault_id.to_vec(),
+            creator_public_key: self.public_key.clone(),
+            parameters_hash: vec![0u8; 32],
+            fulfillment_condition: Vec::new(),
+            leg_a_policy_commit: a,
+            leg_a_amount: ra,
+            leg_b_policy_commit: b,
+            leg_b_amount: rb,
+            fee_bps,
+            signature: Vec::new(),
+            mode: crate::types::operations::TransactionMode::Unilateral,
+        };
+        let signature = crate::crypto::sphincs::sphincs_sign(
+            secret_key,
+            &unsigned.with_cleared_signature().to_bytes(),
+        )?;
+        self.advance_admitted(
+            rel_key,
+            self.devid,
+            unsigned.with_signature(signature),
+            vec![entropy_seed; 32],
+            None,
+            &[],
+            Some(initial_tip),
+            None,
+            None,
+            Some(VaultReserveMutation::Fund {
+                vault_id,
+                legs: vec![(a, ra), (b, rb)],
+                vault_sequence: 0,
+                pair,
+            }),
+        )
+        .map(|o| o.new_device_state)
+    }
+
+    /// The device's self-loop relationship key and its spec-canonical initial
+    /// tip — where every self-authored economic origin lands.
+    #[cfg(any(test, feature = "testing"))]
+    fn self_loop_coordinates(&self) -> ([u8; 32], [u8; 32]) {
+        (
+            crate::core::bilateral_transaction_manager::compute_smt_key(&self.devid, &self.devid),
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &self.devid,
+                &self.devid,
+            ),
+        )
     }
 
     /// Attempt to build an advance by one transition on `rel_key`.
@@ -1658,6 +1824,24 @@ impl DeviceState {
             if amount.value() > 0 {
                 self.require_attached_dsm_admission(&operation, "an authorized issuance mint")?;
             }
+        }
+
+        // THE FUNDED VAULT CREATION. `DlvCreateFundedV2` moves spendable
+        // balance into vault reserve leaves, which is an economically
+        // ORIGINATING effect — it creates the reserve position every later
+        // settlement proves against. It classifies `ClosedWriteSet` and has a
+        // complete write set, producer and verifier, yet until now nothing
+        // required its admission at the chokepoint: a caller could submit the
+        // raw operation and encumber reserves the economic lineage never saw,
+        // leaving a head whose reserves `R_econ` cannot account for.
+        //
+        // Deliberately NARROW. Settle, close and owner-apply are not fenced
+        // here: they consume or return an existing position rather than
+        // originating one, and their admission wiring is a separate cut with a
+        // separate evidence story. Widening this gate before those producers
+        // exist would strand the trader path with no replacement.
+        if matches!(operation, Operation::DlvCreateFundedV2 { .. }) {
+            self.require_attached_dsm_admission(&operation, "a funded vault creation")?;
         }
 
         // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
@@ -2705,6 +2889,12 @@ impl DeviceState {
     /// leaf is what lets a verifier tie reserves to a specific vault state.
     ///
     /// Pure: on `Err` nothing is mutated and the caller's state is untouched.
+    // Private, and now test-only by construction: both callers
+    // (`fund_vault_reserves`, `withdraw_vault_reserves`) are gated, because
+    // the production doors for moving reserves are the SIGNED transitions
+    // `DlvCreateFundedV2` and `DlvClose`. With this gated too, no unsigned
+    // reserve-movement path exists in a shipped artifact at all.
+    #[cfg(any(test, feature = "testing"))]
     fn move_vault_reserves(
         &self,
         vault_id: &[u8; 32],
@@ -2948,6 +3138,21 @@ impl DeviceState {
 
     /// Encumber `legs` into `vault_id`, debiting the online balance. Fails closed on
     /// insufficient funds, leaving this state untouched.
+    ///
+    /// TEST-ONLY, and gated so it cannot ship. The one production door for
+    /// encumbering is the signed `DlvCreateFundedV2` transition (a `Fund`
+    /// reserve mutation riding `advance`, now behind an attached DSM-backed
+    /// economic admission); an UNSIGNED funding path must not exist in a
+    /// production build, exactly as its sibling `withdraw_vault_reserves`
+    /// already says of un-encumbering. It had zero production callers — every
+    /// one is a test — and the file already called it "a test-only shim"
+    /// while leaving it `pub` and ungated.
+    ///
+    /// The gate is `any(test, feature = "testing")` rather than plain `test`
+    /// because `dsm_sdk`'s integration tests are a separate crate. `testing` is
+    /// a non-default feature enabled only through dev-dependencies, so it does
+    /// not unify into `cargo build`.
+    #[cfg(any(test, feature = "testing"))]
     pub fn fund_vault_reserves(
         &self,
         vault_id: &[u8; 32],
@@ -3492,8 +3697,11 @@ mod tests {
             "the new asset must not collide with a builtin"
         );
         let era = crate::core::token::token_state_manager::era_policy_commit();
+        // ERA from the faucet: one admitted claim, the protocol payout — enough
+        // for the creation fee, which is all this refusal needs to get past.
         let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32], 64)
-            .with_balance_for_testing(era, 10_000);
+            .admitted_faucet_claim(0, 0xA4)
+            .expect("faucet claim");
         let rk =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
         let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
@@ -3551,8 +3759,10 @@ mod tests {
     fn creating_a_token_with_zero_supply_is_still_allowed() {
         let pc_new = [0x7Du8; 32];
         let era = crate::core::token::token_state_manager::era_policy_commit();
+        // ERA from the faucet: one admitted claim, exactly the creation fee.
         let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32], 64)
-            .with_balance_for_testing(era, 10_000);
+            .admitted_faucet_claim(0, 0xA5)
+            .expect("faucet claim");
         let rk =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
         let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
@@ -3587,7 +3797,11 @@ mod tests {
                 None,
             )
             .expect("a zero-supply creation is an ordinary fee spend");
-        assert_eq!(out.new_device_state.balance(&era), 9_900);
+        assert_eq!(
+            out.new_device_state.balance(&era),
+            crate::economic::faucet::ERA_FAUCET_PAYOUT - 100,
+            "the fee is an ordinary debit of the claimed ERA"
+        );
         assert_eq!(out.new_device_state.balance(&pc_new), 0);
     }
 
@@ -3730,7 +3944,7 @@ mod tests {
         // An AMM vault is funded with exactly its pair, so the other side rides
         // along; the claim under test is about the ERA remainder.
         let funded = dev
-            .advance(
+            .advance_admitted(
                 rk,
                 dev.devid,
                 dlv_create_funded(vault, era, 60, rigb, 10),
@@ -3846,7 +4060,7 @@ mod tests {
         let vault = [0x72u8; 32];
         let rigb = pc(0xF0);
         let root_before = *spent.smt.root();
-        let err = spent.advance(
+        let err = spent.advance_admitted(
             rk,
             spent.devid,
             dlv_create_funded(vault, era, 60, rigb, 10),
@@ -3900,7 +4114,7 @@ mod tests {
         let (rk, tip) = self_loop(&dev);
 
         let funded = dev
-            .advance(
+            .advance_admitted(
                 rk,
                 dev.devid,
                 dlv_create_funded(vault, era, 60, rigb, 10),
@@ -3922,7 +4136,7 @@ mod tests {
         let root_before = *funded.smt.root();
 
         // A second funding of the same assets for the same vault — refused.
-        let err = funded.advance(
+        let err = funded.advance_admitted(
             rk,
             funded.devid,
             dlv_create_funded(vault, era, 10, rigb, 5),
@@ -5102,10 +5316,9 @@ mod tests {
         let token = pc(0xA1);
         let bundle = [0x7B; 32];
 
-        // Seed 100 of the token. Installed rather than minted: issuance is
-        // refused at the accepting layer, and this test's subject is what
+        // 100 of the token from an admitted issuance; the subject is what
         // happens to the funds afterwards.
-        let funded = dev.with_balance_for_testing(token, 100);
+        let funded = dev.admitted_mint(token, 100, 0xC1).expect("admitted mint");
 
         let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
         let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
@@ -5225,12 +5438,15 @@ mod tests {
         let commit1 = [0xC1u8; 32];
 
         // (bootstrap) The admitted device SMT carries commit_0 at the stable anchor-state key.
-        // A burn is value-bearing without being issuance, so it exercises the
-        // same advance path this test is about.
+        // Three admitted issuances to burn from: a burn is value-bearing without
+        // being issuance, so it exercises the same advance path this test is about.
         let dev = fresh_device(0xAB)
-            .with_balance_for_testing(pc(0xF1), 1_000)
-            .with_balance_for_testing(pc(0xF2), 1_000)
-            .with_balance_for_testing(pc(0xF3), 1_000);
+            .admitted_mint(pc(0xF1), 1_000, 0xF1)
+            .expect("admitted mint")
+            .admitted_mint(pc(0xF2), 1_000, 0xF2)
+            .expect("admitted mint")
+            .admitted_mint(pc(0xF3), 1_000, 0xF3)
+            .expect("admitted mint");
         let dev = dev
             .with_anchor_state_leaf(&key, &commit0)
             .expect("bootstrap");
@@ -5373,13 +5589,12 @@ mod tests {
         let key = anchor_state_leaf_key(&b);
         let token = pc(0xA1);
 
-        // Bootstrap the anchor, hold 100 online, then load 40 into the offline
-        // allocation. The 100 is installed rather than minted — issuance is
-        // refused at the accepting layer and is not what this test is about.
+        // Bootstrap the anchor, hold 100 online from an admitted issuance, then
+        // load 40 into the offline allocation.
         let dev = fresh_device(0xD5)
             .with_anchor_state_leaf(&key, &[0xC0u8; 32])
             .expect("bootstrap");
-        let funded = dev.with_balance_for_testing(token, 100);
+        let funded = dev.admitted_mint(token, 100, 0xD5).expect("admitted mint");
         let loaded = funded
             .load_offline_cash(&b, &token, 40)
             .expect("load 40")
@@ -5552,7 +5767,8 @@ mod tests {
         // Sender device: bootstrap the anchor-state leaf at leaf_0.
         let dev = (0u8..8)
             .fold(fresh_device(0xAB), |d, u| {
-                d.with_balance_for_testing(pc(0xF0 + u), 1_000)
+                d.admitted_mint(pc(0xF0 + u), 1_000, 0xF0 + u)
+                    .expect("admitted mint")
             })
             .with_anchor_state_leaf(&key, &leaf0)
             .expect("bootstrap");
@@ -5627,12 +5843,15 @@ mod tests {
         use crate::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
         };
-        // A burn is value-bearing exactly as a mint was, and unlike issuance it
-        // is still expressible: a debit needs no credit source.
+        // Three admitted issuances to burn from: a burn is value-bearing exactly
+        // as a mint is, and a debit needs no credit source of its own.
         let dev = fresh_device(0xAB)
-            .with_balance_for_testing(pc(0xF1), 1_000)
-            .with_balance_for_testing(pc(0xF2), 1_000)
-            .with_balance_for_testing(pc(0xF3), 1_000);
+            .admitted_mint(pc(0xF1), 1_000, 0xF1)
+            .expect("admitted mint")
+            .admitted_mint(pc(0xF2), 1_000, 0xF2)
+            .expect("admitted mint")
+            .admitted_mint(pc(0xF3), 1_000, 0xF3)
+            .expect("admitted mint");
 
         // Relationship whose FIRST op is value-bearing → Yes.
         let cp = devid(0xC0);
@@ -6119,7 +6338,7 @@ mod tests {
         let (rk, tip) = self_loop(&dev);
 
         let out = dev
-            .advance(
+            .advance_admitted(
                 rk,
                 dev.devid,
                 dlv_create_funded(vault, era, 10_000, rigb, 5_000),
@@ -6266,7 +6485,7 @@ mod tests {
                 "exactly the vault's pair",
             ),
         ] {
-            let err = dev.advance(
+            let err = dev.advance_admitted(
                 rk,
                 dev.devid,
                 op,
@@ -6310,7 +6529,7 @@ mod tests {
         let pair = vault_pair(era, rigb);
 
         let funded = owner
-            .advance(
+            .advance_admitted(
                 rk,
                 owner.devid,
                 dlv_create_funded(vault, era, 10_000, rigb, 5_000),
@@ -6449,7 +6668,7 @@ mod tests {
         let vault = [b ^ 0x5A; 32];
         let (rk, tip) = self_loop(&dev);
         let funded = dev
-            .advance(
+            .advance_admitted(
                 rk,
                 dev.devid,
                 dlv_create_funded(vault, era, ra, rigb, rb),
@@ -6608,7 +6827,7 @@ mod tests {
         dev.balances.insert(rigb, 1_000);
         let vault = [0x7Bu8; 32];
         let (rk, tip) = self_loop(&dev);
-        let err = dev.advance(
+        let err = dev.advance_admitted(
             rk,
             dev.devid,
             dlv_create_funded(vault, era, 60, rigb, 10),
@@ -6797,7 +7016,7 @@ mod tests {
         let e = format!("{}", second.expect_err("a closed vault cannot close again"));
         assert!(e.contains("already closed"), "got: {e}");
 
-        let refund = after.advance(
+        let refund = after.advance_admitted(
             rk,
             after.devid,
             dlv_create_funded(vault, era, 10, rigb, 5),

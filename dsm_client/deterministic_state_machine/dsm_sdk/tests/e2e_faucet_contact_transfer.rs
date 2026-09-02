@@ -140,16 +140,30 @@ async fn e2e_flow_faucet_contact_transfer() {
 
     // 6. Faucet Claim
 
-    // Seed the fixture ERA balance directly. This used to call `faucet.claim`,
-    // which minted builtin ERA on a caller-supplied device_id — the unauthorized
-    // issuance the accepting-layer gate now refuses in tests exactly as in
-    // production. Fixtures seed state; they do not mint.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        &router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
+    // A REAL faucet claim (0x0030) against the live fleet — the legitimate
+    // origin, and what this section is labelled as. It had been replaced by a
+    // direct balance write when `faucet.claim` was fenced for minting builtin
+    // ERA on a caller-supplied device_id; the route is correct now, and this
+    // test runs against live nodes, so the real claim is available to it.
+    // A directly written balance has no economic lineage and no admission can
+    // debit it.
+    {
+        let claim = dsm_sdk::generated::FaucetClaimRequest {
+            device_id: device_id.clone(),
+        };
+        let args = dsm_sdk::generated::ArgPack {
+            schema_hash: None,
+            codec: dsm_sdk::generated::Codec::Proto as i32,
+            body: prost::Message::encode_to_vec(&claim),
+        };
+        let res = router
+            .invoke(dsm_sdk::bridge::AppInvoke {
+                method: "faucet.claim".to_string(),
+                args: prost::Message::encode_to_vec(&args),
+            })
+            .await;
+        assert!(res.success, "faucet claim: {:?}", res.error_message);
+    }
     println!("✅ Fixture ERA seeded");
 
     // 6b. Verify faucet updated ERA balance

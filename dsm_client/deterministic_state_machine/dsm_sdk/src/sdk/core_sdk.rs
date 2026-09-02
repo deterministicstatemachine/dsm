@@ -2176,7 +2176,7 @@ impl CoreSDK {
     // own integration tests (external consumers, for which `cfg(test)` is false)
     // can build a funded fixture head. Still `pub(crate)`: the only way a test
     // outside the crate seeds state is the narrow
-    // `install_balance_for_testing`, which installs ONE balance rather than
+    // a value-bearing head. Value comes from `economic_fixtures`, which
     // replacing the whole head.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn set_device_head_for_testing(&self, head: dsm::types::device_state::DeviceState) {

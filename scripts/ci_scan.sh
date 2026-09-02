@@ -315,4 +315,23 @@ fail_if_found "static: DlvCreateV3 was reintroduced" \
   -e 'DlvCreateV3' \
   "$CORE_SRC/" "$SDK_SRC/" proto/
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ECONOMIC FABRICATION — deleted helpers stay deleted (2026-09-02 remediation).
+#
+# Each of these could install a positive balance, a reserve, an admission or a
+# policy anchor into canonical device state with no protocol origin — no
+# faucet admission, no authorized issuance, no admitted transfer, no funded
+# creation. Debits are deliberately unfenced in core, so a fabricated balance
+# does not sit below the acceptance boundary: it CROSSES it the moment it is
+# spent, and every test that held one was green against a state the product
+# can never reach. The legitimate test-support origins are `economic_fixtures`
+# (faucet, issuance, transfer, through the real routes) and, at the core
+# layer, `DeviceState::admitted_faucet_claim` / `admitted_mint` /
+# `admitted_funded_create` — the same accepting path production takes.
+# ─────────────────────────────────────────────────────────────────────────────
+FABRICATION_BAN_PATTERN='\bwith_balance_for_testing\b|\binstall_balance_for_testing\b|\bseed_in_memory_balance\b|\bforce_set_balance(_for_self)?\b|\bseed_token_balance_for_self\b|\bunadmitted_(owner|device)_holding\b|\bpair_commits\b|\bfunded_vault_with_surplus\b|\bfund_unadmitted\b|\bseed_era_projection\b'
+fail_if_found "static: an economic-fabrication helper was reintroduced — fund through economic_fixtures or the core admitted_* origins" \
+  -e "$FABRICATION_BAN_PATTERN" \
+  "$CORE_SRC/" "$SDK_SRC/" dsm_client/deterministic_state_machine/dsm_sdk/tests/
+
 green "[CI-SCAN] PASS: No violations detected"
