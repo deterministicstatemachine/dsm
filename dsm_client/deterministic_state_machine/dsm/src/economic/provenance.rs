@@ -989,7 +989,14 @@ pub fn verify_credit_source(
                     &d.reserve_consumption_evidence_addr,
                 )
                 .map_err(ProvenanceError::OwnerLineage)?;
-            if crate::storage_object::immutable_addr(
+            // INNER content identity — `H_dom(namespace, payload)` — the form
+            // every object in the evidence DAG is addressed by, and the form
+            // the resolver's fetch derives its store key from. The outer
+            // storage-object addr exists too, but an arm committing to it
+            // names an address no resolver can dereference, which made this
+            // arm unsatisfiable by any producer emission. Matches the 0x0023
+            // arm above.
+            if crate::storage_object::immutable_inner(
                 crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
                 &bundle_bytes,
             ) != d.reserve_consumption_evidence_addr
@@ -1253,7 +1260,8 @@ pub fn verify_credit_source(
                     &d.payment_evidence_addr,
                 )
                 .map_err(ProvenanceError::OwnerLineage)?;
-            if crate::storage_object::immutable_addr(
+            // INNER content identity, as in the 0x0023 and 0x0026 arms.
+            if crate::storage_object::immutable_inner(
                 crate::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
                 &bundle_bytes,
             ) != d.payment_evidence_addr

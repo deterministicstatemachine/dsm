@@ -295,7 +295,7 @@ fn fixture() -> Fixture {
         reserve_b_siblings: reserve_b.1.iter().map(|s| s.to_vec()).collect(),
     };
     let evidence_bytes = evidence.encode_to_vec();
-    let evidence_addr = dsm::storage_object::immutable_addr(
+    let evidence_addr = dsm::storage_object::immutable_inner(
         dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
         &evidence_bytes,
     );
@@ -850,7 +850,7 @@ fn an_insufficient_output_reserve_is_refused() {
             .collect(),
     };
     let evidence_bytes = evidence.encode_to_vec();
-    let evidence_addr = dsm::storage_object::immutable_addr(
+    let evidence_addr = dsm::storage_object::immutable_inner(
         dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
         &evidence_bytes,
     );
