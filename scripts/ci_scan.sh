@@ -329,7 +329,7 @@ fail_if_found "static: DlvCreateV3 was reintroduced" \
 # layer, `DeviceState::admitted_faucet_claim` / `admitted_mint` /
 # `admitted_funded_create` — the same accepting path production takes.
 # ─────────────────────────────────────────────────────────────────────────────
-FABRICATION_BAN_PATTERN='\bwith_balance_for_testing\b|\binstall_balance_for_testing\b|\bseed_in_memory_balance\b|\bforce_set_balance(_for_self)?\b|\bseed_token_balance_for_self\b|\bunadmitted_(owner|device)_holding\b|\bpair_commits\b|\bfunded_vault_with_surplus\b|\bfund_unadmitted\b|\bseed_era_projection\b'
+FABRICATION_BAN_PATTERN='\bwith_balance_for_testing\b|\binstall_balance_for_testing\b|\bseed_in_memory_balance\b|\bforce_set_balance(_for_self)?\b|\bseed_token_balance_for_self\b|\bunadmitted_(owner|device)_holding\b|\bpair_commits\b|\bfunded_vault_with_surplus\b|\bfund_unadmitted\b|\bseed_era_projection\b|\bseed_dbtc_balance\b'
 fail_if_found "static: an economic-fabrication helper was reintroduced — fund through economic_fixtures or the core admitted_* origins" \
   -e "$FABRICATION_BAN_PATTERN" \
   "$CORE_SRC/" "$SDK_SRC/" dsm_client/deterministic_state_machine/dsm_sdk/tests/
