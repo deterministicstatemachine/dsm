@@ -42,6 +42,9 @@ pub(crate) struct RehydratedVault {
     pub vault_id: [u8; 32],
     /// Canonical pair, lex-sorted over the policy commits.
     pub pair: dsm::dlv::pair_identity::CanonicalPair,
+    /// From the record, but only after the vault-state leaf has been recomputed
+    /// from it and matched — a fee this device never committed cannot reach a
+    /// quote. Foreign verification of the fee is the signed baseline's job.
     pub fee_bps: u32,
     /// The enforcement mode the vault was created with — never a default.
     pub anchor_enforcement: i32,
@@ -73,6 +76,19 @@ pub(crate) enum RehydrationError {
     /// together in one batch, so this cannot happen to a coherent vault and
     /// must not be resolved by picking one.
     LegSequencesDisagree { a: u64, b: u64 },
+    /// The head holds reserve legs for this vault but the device root commits
+    /// no vault-state leaf for it. `advance` writes that leaf on every funding
+    /// and every settlement, so its absence means these legs were not produced
+    /// by a vault transition — there is nothing to check the record against.
+    VaultStateLeafMissing,
+    /// The record disagrees with the vault-state leaf this device wrote. The
+    /// leaf folds the pair, the fee and both reserves at this generation into
+    /// one value; recomputing it from the record and the legs must reproduce it
+    /// exactly. The fee is the field this catches on its own: nothing else in
+    /// the reconstruction would notice a row claiming a fee the device never
+    /// committed, and a vault quoting at it would charge a rate its own state
+    /// does not carry.
+    RecordDisagreesWithRoot,
 }
 
 impl std::fmt::Display for RehydrationError {
@@ -96,6 +112,14 @@ impl std::fmt::Display for RehydrationError {
             RehydrationError::LegSequencesDisagree { a, b } => write!(
                 f,
                 "vault legs were last written at different sequences ({a} vs {b}); the vault is incoherent"
+            ),
+            RehydrationError::VaultStateLeafMissing => write!(
+                f,
+                "the device root commits no vault-state leaf for this vault; its reserve legs were not written by a vault transition"
+            ),
+            RehydrationError::RecordDisagreesWithRoot => write!(
+                f,
+                "the vault record disagrees with the device root (pair, fee or reserves at this generation); the root is the authority, not the row"
             ),
         }
     }
@@ -161,6 +185,52 @@ pub(crate) fn rehydrate_amm_vault(
             a: leg_a.sequence,
             b: leg_b.sequence,
         });
+    }
+
+    // THE ROW MUST AGREE WITH THE LEAF THE TRANSITION WROTE.
+    //
+    // Everything above reads the record for the pair and the fee, and the
+    // leaves for the reserves, and never compares the two. `advance` folds
+    // (generation, pair, fee, both reserves) into a vault-state leaf on every
+    // funding and every settlement, so recompute that leaf from the record's
+    // own fields and the legs this head holds — with the SAME derivation the
+    // transition used, `VaultStatePair::reserves_digest` — and require it to
+    // match.
+    //
+    // The fee is why this matters. The reserves and the generation come from
+    // the leaves and cannot drift, and a wrong pair leg already failed above as
+    // unfunded; nothing else in the reconstruction would notice a row claiming
+    // a fee the device never committed, and the vault would quote, advertise
+    // and settle at it.
+    //
+    // WHAT THIS IS NOT. It is a coherence check between two local stores — the
+    // record row and this device's own leaf map — not an authority proof. The
+    // head is persisted in the same local database as the row, and its load
+    // check is self-consistency (`bcr`: encoded root vs recomputed), so an
+    // adversary able to rewrite both can make them agree. Nor is it an
+    // inclusion proof: `extra_leaves` is a superset of the SMT's live leaves,
+    // which evict FIFO past the tree's bound (the direction that cannot cause a
+    // false refusal). The fee's foreign-verifiable authority is the SIGNED
+    // baseline CCB, checked in `vault_state_composition` against
+    // `baseline_state.fee_policy`. What this gate buys is that a stale,
+    // desynced or partially-edited row cannot reach a quote.
+    let committed = head
+        .extra_leaves_snapshot()
+        .get(&dsm::dlv::vault_smt_leaf::compute_vault_smt_key(
+            &record.vault_id,
+        ))
+        .copied()
+        .ok_or(RehydrationError::VaultStateLeafMissing)?;
+    // `from_pair` is documented as the only production source and cannot fail:
+    // the pair was parsed canonical above, which is exactly its precondition.
+    let state_pair = dsm::types::device_state::VaultStatePair::from_pair(&pair, record.fee_bps);
+    if committed
+        != dsm::dlv::vault_smt_leaf::compute_vault_smt_value(
+            leg_a.sequence,
+            &state_pair.reserves_digest(leg_a.amount, leg_b.amount),
+        )
+    {
+        return Err(RehydrationError::RecordDisagreesWithRoot);
     }
 
     Ok(RehydratedVault {
@@ -604,6 +674,67 @@ mod tests {
         assert_eq!(
             rehydrate_amm_vault(&doubled, &head),
             Err(RehydrationError::RecordNotCanonical)
+        );
+    }
+
+    /// THE ROOT-VERSUS-ROW GATE. The record supplies the fee; the device root
+    /// COMMITS it, in the vault-state leaf every funding and every settlement
+    /// writes. A row claiming a fee the root never committed must not produce a
+    /// quoting vault.
+    ///
+    /// The fee is the field that needs this. Reserves and generation are read
+    /// from the leaves and so cannot drift; the pair is caught as an unfunded
+    /// leg. A wrong fee is invisible to every other check, and it is the one
+    /// the constant-product quote is computed with.
+    #[test]
+    #[serial]
+    fn a_record_whose_fee_disagrees_with_the_root_fails_closed() {
+        init_test_db();
+        let (record, head) = funded_and_advanced();
+        // Positive control: untouched, this record rebuilds. Whatever the
+        // mutated one refuses for, it is the mutation.
+        assert!(
+            rehydrate_amm_vault(&record, &head).is_ok(),
+            "the record as written must rebuild"
+        );
+
+        let mut tampered = record.clone();
+        tampered.fee_bps = record.fee_bps + 1;
+        assert_eq!(
+            rehydrate_amm_vault(&tampered, &head),
+            Err(RehydrationError::RecordDisagreesWithRoot),
+            "a fee the root does not commit cannot reach a quote"
+        );
+    }
+
+    /// Reserve legs that no vault transition wrote are not a vault. `advance`
+    /// derives the vault-state leaf from the mutation it just applied, so legs
+    /// that appear without one were not produced by a funding or a settlement,
+    /// and there is nothing for the record to be checked against.
+    #[test]
+    #[serial]
+    fn reserve_legs_with_no_root_committed_vault_state_leaf_fail_closed() {
+        init_test_db();
+        let (record, _) = funded_and_advanced();
+        // Both legs, one generation — everything the earlier checks ask for.
+        // What is missing is the leaf the root commits.
+        let head = admitted_holding(&[
+            (record.policy_commit_a, 50_000),
+            (record.policy_commit_b, 20_000),
+        ])
+        .fund_vault_reserves(
+            &record.vault_id,
+            &[
+                (record.policy_commit_a, 10_000),
+                (record.policy_commit_b, 5_000),
+            ],
+            0,
+        )
+        .expect("both legs at one generation")
+        .new_device_state;
+        assert_eq!(
+            rehydrate_amm_vault(&record, &head),
+            Err(RehydrationError::VaultStateLeafMissing)
         );
     }
 
