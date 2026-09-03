@@ -443,6 +443,13 @@ mod tests {
             ),
         );
         let pair = VaultStatePair::new(pc_a, pc_b, 30).expect("canonical pair");
+        // Priced by the canonical curve from the reserves the head holds, naming
+        // the head's own parent state — `advance` refuses anything else.
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        let parent = head
+            .parent_vault_state_for_tests(&vault_id, &pair)
+            .expect("parent state");
         let unsigned = Operation::DlvOwnerApplyV2 {
             vault_id: vault_id.to_vec(),
             settlement_receipt_id: [0x77; 32],
@@ -452,8 +459,8 @@ mod tests {
             input_policy_commit: pc_a,
             output_policy_commit: pc_b,
             input_amount: 1_000,
-            output_amount: 970,
-            parent_binding: [0x23; 32],
+            output_amount: out,
+            parent_binding: dsm::ccb::vault_state_commitment(&parent).expect("c_n"),
             fee_bps: 30,
             signature: Vec::new(),
             mode: TransactionMode::Bilateral,
@@ -477,10 +484,11 @@ mod tests {
                     input_policy_commit: pc_a,
                     input_amount: 1_000,
                     output_policy_commit: pc_b,
-                    output_amount: 970,
+                    output_amount: out,
                     parent_sequence: 0,
                     new_sequence: 1,
                     pair,
+                    parent_state: parent.encode().expect("ccb"),
                 }),
             )
             .expect("owner apply")
@@ -504,6 +512,14 @@ mod tests {
             vault_post_proto: Vec::new(),
         };
         (record, head)
+    }
+
+    /// The reserves after the one settlement `funded_and_advanced` folds:
+    /// 1 000 in on 10 000/5 000 at 30 bps, priced by the canonical curve.
+    fn settled_reserves() -> (u64, u64) {
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        (11_000, 5_000 - out)
     }
 
     /// Simulate a restart: the head goes through the real persistence codec and
@@ -543,7 +559,7 @@ mod tests {
             after.anchor_enforcement, REQUIRED,
             "NOT downgraded to permissive"
         );
-        assert_eq!((after.reserve_a, after.reserve_b), (11_000, 4_030));
+        assert_eq!((after.reserve_a, after.reserve_b), settled_reserves());
         assert_eq!(after.pair.a(), [0x11u8; 32]);
         assert_eq!(after.pair.b(), [0x22u8; 32]);
         assert_eq!(after.fee_bps, 30);
@@ -605,7 +621,7 @@ mod tests {
             second.current_sequence, 1,
             "the settlement in the leaves is read, never re-applied"
         );
-        assert_eq!((second.reserve_a, second.reserve_b), (11_000, 4_030));
+        assert_eq!((second.reserve_a, second.reserve_b), settled_reserves());
     }
 
     /// Reserve leaves with NO record do not become a tradable vault. The record

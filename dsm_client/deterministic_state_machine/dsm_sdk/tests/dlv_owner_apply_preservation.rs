@@ -132,8 +132,34 @@ fn rich_owner_head() -> DeviceState {
     .expect("funded create")
 }
 
-/// The operation exactly as `dlv.reconcile` builds it today
-/// (dsm_sdk/src/handlers/dlv_routes.rs:1395).
+/// What the vault's own curve pays for the settlement every test here folds:
+/// 100 ERA into 500/400 reserves at 30 bps. Priced by the ONE canonical
+/// implementation, never by a literal — `advance` refuses any other output.
+fn curve_out() -> u64 {
+    dsm::dlv::route_commit::constant_product_output(100, 500, 400, 30).expect("curve")
+}
+
+/// The parent state the owner apply consumes — the head's own, at generation
+/// 0 — as its signed commitment and its bytes. `rich_owner_head` is
+/// deterministic, so every test's head holds this same parent.
+fn parent() -> ([u8; 32], Vec<u8>) {
+    static PARENT: std::sync::OnceLock<([u8; 32], Vec<u8>)> = std::sync::OnceLock::new();
+    PARENT
+        .get_or_init(|| {
+            let head = rich_owner_head();
+            let state = head
+                .parent_vault_state_for_tests(&VAULT, &vault_pair())
+                .expect("parent state");
+            (
+                dsm::ccb::vault_state_commitment(&state).expect("c_n"),
+                state.encode().expect("ccb"),
+            )
+        })
+        .clone()
+}
+
+/// The operation exactly as `dlv.reconcile` builds it: amounts the curve
+/// yields, and the parent binding naming the state the head holds.
 fn owner_apply_op_as_built_by_reconcile() -> Operation {
     Operation::DlvOwnerApplyV2 {
         vault_id: VAULT.to_vec(),
@@ -144,8 +170,8 @@ fn owner_apply_op_as_built_by_reconcile() -> Operation {
         input_policy_commit: era(),
         output_policy_commit: second_asset(),
         input_amount: 100,
-        output_amount: 60,
-        parent_binding: [0x23; 32],
+        output_amount: curve_out(),
+        parent_binding: parent().0,
         fee_bps: 30,
         // dlv_routes.rs:1408.
         signature: Vec::new(),
@@ -180,10 +206,11 @@ fn try_apply_settlement(
             input_policy_commit: era(),
             input_amount: 100,
             output_policy_commit: second_asset(),
-            output_amount: 60,
+            output_amount: curve_out(),
             parent_sequence: 0,
             new_sequence: 1,
             pair: vault_pair(),
+            parent_state: parent().1,
         }),
     )
 }
@@ -203,8 +230,8 @@ fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operati
         input_policy_commit: era(),
         output_policy_commit: second_asset(),
         input_amount: 100,
-        output_amount: 60,
-        parent_binding: [0x23; 32],
+        output_amount: curve_out(),
+        parent_binding: parent().0,
         fee_bps: 30,
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
@@ -281,7 +308,7 @@ fn owner_apply_preserves_every_field_the_settlement_does_not_own() {
         let after_val = reserves_after.get(key).expect("reserve leaf preserved");
         let delta = after_val.amount as i128 - before_val.amount as i128;
         assert!(
-            delta == 100 || delta == -60 || delta == 0,
+            delta == 100 || delta == -(curve_out() as i128) || delta == 0,
             "a reserve leg moved by an amount the settlement did not name: {delta}"
         );
     }
@@ -351,8 +378,9 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
     );
     assert_eq!(inp.sequence, 1);
     assert_eq!(
-        out.amount, 340,
-        "output reserve reflects exactly one settlement (400 - 60)"
+        out.amount,
+        400 - curve_out(),
+        "output reserve reflects exactly one settlement (400 - curve)"
     );
     assert_eq!(
         inp.amount, 600,
@@ -386,7 +414,8 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
         "the refused settlement did not advance the generation"
     );
     assert_eq!(
-        out_after.amount, 340,
+        out_after.amount,
+        400 - curve_out(),
         "the refused settlement moved no reserve"
     );
 

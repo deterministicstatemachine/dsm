@@ -80,6 +80,16 @@ use crate::sdk::routing_path_sdk::constant_product_output;
 /// per quote.
 pub(crate) const MAX_PENDING_CHAIN_DEPTH: usize = 64;
 
+/// A parent the fold consumed on its way to the frontier — see
+/// [`ComposedVaultState::folded_parents`].
+#[derive(Debug, Clone)]
+pub(crate) struct FoldedParent {
+    pub generation: u64,
+    /// `vault_state_commitment(&state)`, computed by the walk.
+    pub c_n: [u8; 32],
+    pub state: VaultStateV2,
+}
+
 /// Result of composing pending pointers onto a presentation-verified
 /// baseline.
 #[derive(Debug, Clone)]
@@ -107,12 +117,13 @@ pub(crate) struct ComposedVaultState {
     pub c_n: [u8; 32],
     /// `state.generation`, broken out for callers that only order by it.
     pub sequence: u64,
-    /// The parent identity CONSUMED by each successful fold, oldest first:
-    /// `(parent_generation, parent c_n)`. This is how a caller reconciling a
-    /// settlement N generations back names the exact historical parent state
-    /// that settlement consumed — the fold computed every cursor identity on
-    /// the way here, so no re-derivation and no second source.
-    pub folded_parent_bindings: Vec<(u64, [u8; 32])>,
+    /// The parent CONSUMED by each successful fold, oldest first: its
+    /// generation, its `c_n`, and the state itself. This is how a caller
+    /// reconciling a settlement N generations back names the exact historical
+    /// parent state that settlement consumed — and proves its trade against
+    /// that state's own reserves and fee — from the chain the composition
+    /// itself verified: no re-derivation and no second source.
+    pub folded_parents: Vec<FoldedParent>,
     /// `state.reserve_a` / `state.reserve_b`, broken out for AMM math.
     pub reserves_a: u64,
     pub reserves_b: u64,
@@ -308,7 +319,7 @@ pub(crate) async fn compose_vault_state(
     let mut cursor_state = baseline_state;
     let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
-    let mut folded_parent_bindings: Vec<(u64, [u8; 32])> = Vec::new();
+    let mut folded_parents: Vec<FoldedParent> = Vec::new();
     loop {
         // Saturation is NOT a frontier. A walk that stops because it ran out
         // of budget has established nothing about maximality, and reporting
@@ -402,7 +413,11 @@ pub(crate) async fn compose_vault_state(
             next_state.parent_state_commitment = cursor_c_n;
             let next_c_n = vault_state_commitment(&next_state)
                 .map_err(|e| unavailable(&format!("its terminal state does not encode: {e}")))?;
-            folded_parent_bindings.push((cursor_state.generation, cursor_c_n));
+            folded_parents.push(FoldedParent {
+                generation: cursor_state.generation,
+                c_n: cursor_c_n,
+                state: cursor_state.clone(),
+            });
             cursor_state = next_state;
             cursor_c_n = next_c_n;
             chain_len += 1;
@@ -547,7 +562,11 @@ pub(crate) async fn compose_vault_state(
                 return Err(unavailable(&format!("its successor does not encode: {e}")));
             }
         };
-        folded_parent_bindings.push((cursor_state.generation, cursor_c_n));
+        folded_parents.push(FoldedParent {
+            generation: cursor_state.generation,
+            c_n: cursor_c_n,
+            state: cursor_state.clone(),
+        });
         cursor_state = next_state;
         cursor_c_n = next_c_n;
         chain_len += 1;
@@ -563,7 +582,7 @@ pub(crate) async fn compose_vault_state(
         owner_public_key: owner.ak_pk,
         storage_set_id,
         c_n: cursor_c_n,
-        folded_parent_bindings,
+        folded_parents,
         state: cursor_state,
     })
 }
