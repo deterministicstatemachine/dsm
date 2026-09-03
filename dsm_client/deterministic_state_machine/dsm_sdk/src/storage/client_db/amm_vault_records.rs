@@ -10,23 +10,27 @@
 //! disagree — with nothing to say which was right.
 //!
 //! What a restart genuinely loses is the vault's IDENTITY AND POLICY:
-//! `current_sequence` and `anchor_enforcement` were documented as "Domain-only:
-//! not persisted", so a reloaded wallet had a vault at sequence 0 enforcing
-//! nothing. A sequence reset to 0 makes every `Required` anchor gate mismatch,
-//! and — since gate 1 — makes the reserve proof at the baseline sequence
-//! unfindable. The vault was silently un-tradable and looked fine.
+//! `current_sequence` was documented as "Domain-only: not persisted", so a
+//! reloaded wallet had a vault at sequence 0. A sequence reset to 0 makes
+//! every anchor binding mismatch, and — since gate 1 — makes the reserve proof
+//! at the baseline sequence unfindable. The vault was silently un-tradable and
+//! looked fine.
 //!
 //! NOTHING IS REPAIRED BY DEFAULT. A record that is absent, malformed, or
 //! inconsistent with the leaves makes that vault UNAVAILABLE. Defaulting
-//! `current_sequence` to 0 or `anchor_enforcement` to permissive would turn
-//! missing reconstruction data into a vault that trades under rules nobody
-//! chose — the failure mode this exists to prevent, arriving as a repair.
+//! `current_sequence` to 0 would turn missing reconstruction data into a vault
+//! that trades under rules nobody chose — the failure mode this exists to
+//! prevent, arriving as a repair.
+//!
+//! `anchor_enforcement` is no longer part of that story. It is deprecation
+//! residue: anchor binding is unconditional in the code that enforces it, so
+//! the column could only ever have described a weaker posture than the one in
+//! force. Nothing reads it for a decision; see the field's doc below.
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// The authoritative reconstruction inputs for one AMM vault.
 ///
@@ -44,7 +48,11 @@ pub struct AmmVaultRecord {
     pub policy_commit_a: [u8; 32],
     pub policy_commit_b: [u8; 32],
     pub fee_bps: u32,
-    /// `AnchorEnforcement` as i32. Never defaulted on read.
+    /// DEPRECATION RESIDUE — SEMANTICALLY DEAD, scheduled for removal with the
+    /// column. Written with the canonical `Required` and read by no decision:
+    /// `rehydrate_amm_vault` derives the posture instead, because anchor
+    /// binding is unconditional in `enforce_parent_binding` and always was.
+    /// Do not add a reader.
     pub anchor_enforcement: i32,
     /// The CPTA policy anchor governing this vault.
     pub policy_digest: [u8; 32],
@@ -69,8 +77,20 @@ pub struct AmmVaultRecord {
     pub vault_post_proto: Vec<u8>,
 }
 
+/// TEST-ONLY full-row writer.
+///
+/// `INSERT OR REPLACE` over every column is a whole-record overwrite: it can
+/// replace a live vault's owner, pair, fee, policy digest and both baseline
+/// blobs in one statement, with no pre-check and no transaction around it.
+/// Production does not need that shape and must not have it — `dlv.create`
+/// inserts inside the advance transaction (with its own concurrent-creation
+/// pre-check) and every later change goes through a NARROW writer
+/// (`update_baseline_with_conn`, `update_vault_post_proto`). Compiling this
+/// out of shipping builds is what makes "no production path can rewrite a
+/// whole vault row" a property of the binary rather than of review.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn put_amm_vault_record(rec: &AmmVaultRecord) -> Result<()> {
-    let now = tick();
+    let now = crate::util::deterministic_time::tick();
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned in put_amm_vault_record, recovering");
