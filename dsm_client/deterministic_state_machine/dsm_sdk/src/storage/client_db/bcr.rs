@@ -841,6 +841,21 @@ mod tests {
         ))
     }
 
+    /// The owner keypair the fixture head is built on.
+    ///
+    /// A vault is funded by a SIGNED `DlvCreateFundedV2`, and `advance`
+    /// verifies that signature against the head's OWN public key — so a head
+    /// carrying a placeholder key cannot reach the production funding
+    /// transition at all. Deterministic and cached: SPHINCS+ keygen is not
+    /// cheap and every test in this module shares one owner.
+    fn owner_keypair() -> &'static dsm::crypto::SignatureKeyPair {
+        static KP: std::sync::OnceLock<dsm::crypto::SignatureKeyPair> = std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            dsm::crypto::SignatureKeyPair::generate_from_entropy(b"DSM/test/bcr-device-head")
+                .expect("owner keypair")
+        })
+    }
+
     fn sample_device_and_rel() -> (
         [u8; 32],
         [u8; 32],
@@ -852,7 +867,12 @@ mod tests {
         let counterparty = [0xB2; 32];
         let rel_key = [0xC3; 32];
         let policy_commit = [0xD4; 32];
-        let device = DeviceState::new([0x11; 32], device_id, vec![0x22; 64], 1024);
+        let device = DeviceState::new(
+            [0x11; 32],
+            device_id,
+            owner_keypair().public_key.clone(),
+            1024,
+        );
         // The PR4 credit gate: a credit-direction Transfer advances only
         // with a matching Prepared DsmBacked admission attached — the honest
         // fixture precondition, exactly what production attaches. Stripped
@@ -1065,14 +1085,32 @@ mod tests {
     #[test]
     fn device_head_codec_roundtrip_preserves_vault_reserves() {
         let (_, _, _, _, head0) = sample_device_and_rel();
-        let token = [0xD4u8; 32]; // funded with 7 by sample_device_and_rel
+        let token = [0xD4u8; 32]; // credited 7 by sample_device_and_rel's admitted advance
+        let pair_asset = [0xE7u8; 32];
         let vault = [0x5Eu8; 32];
 
-        let head = head0
-            .fund_vault_reserves(&vault, &[(token, 5)], 0)
-            .expect("encumber 5 into the vault")
-            .new_device_state;
-        assert_ne!(head.root(), head0.root(), "funding must advance the root");
+        // Both legs hold ADMITTED value before anything is encumbered: the
+        // sample's own credited 7 of `token`, plus one admitted issuance for
+        // the vault's second leg. The reserves are then written by the
+        // production transition — a signed `DlvCreateFundedV2` carrying the
+        // `Fund` mutation through `advance`, which is the only path that can
+        // move spendable balance into a reserve leaf.
+        let holding = head0
+            .admitted_mint(pair_asset, 4, 0x10)
+            .expect("admitted issuance for the second leg");
+        let head = holding
+            .admitted_funded_create(
+                vault,
+                [(token, 5), (pair_asset, 4)],
+                30,
+                &owner_keypair().secret_key,
+                0x11,
+            )
+            .expect("signed funded create encumbers 5 into the vault")
+            .with_pending_economic_admission(None);
+        // Compared against the head as it stood AFTER the issuance, so the
+        // assertion still isolates the funding transition as the cause.
+        assert_ne!(head.root(), holding.root(), "funding must advance the root");
 
         let bytes = encode_device_state(&head);
         let (decoded, stored_root) =
@@ -1105,15 +1143,32 @@ mod tests {
     fn device_head_codec_roundtrip_preserves_many_reserves() {
         let (_, _, _, _, head0) = sample_device_and_rel();
         let token = [0xD4u8; 32];
+        let pair_asset = [0xE7u8; 32];
         let (v1, v2) = ([0x11u8; 32], [0x22u8; 32]);
 
+        // Two vaults, each created by its own signed `DlvCreateFundedV2` over
+        // admitted holdings — 3 + 2 of the credited 7, and 3 + 2 of one
+        // admitted issuance for the pair's second leg.
         let head = head0
-            .fund_vault_reserves(&v1, &[(token, 3)], 0)
+            .admitted_mint(pair_asset, 5, 0x20)
+            .expect("admitted issuance for the second leg")
+            .admitted_funded_create(
+                v1,
+                [(token, 3), (pair_asset, 3)],
+                30,
+                &owner_keypair().secret_key,
+                0x21,
+            )
             .expect("v1")
-            .new_device_state
-            .fund_vault_reserves(&v2, &[(token, 2)], 0)
+            .admitted_funded_create(
+                v2,
+                [(token, 2), (pair_asset, 2)],
+                30,
+                &owner_keypair().secret_key,
+                0x22,
+            )
             .expect("v2")
-            .new_device_state;
+            .with_pending_economic_admission(None);
 
         let bytes = encode_device_state(&head);
         let (decoded, _) = decode_device_state(&bytes, None).expect("decode");
