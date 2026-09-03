@@ -182,29 +182,6 @@ describe('LiquidityScreen', () => {
     expect(screen.getByText(/ad: ✓ seq=3/)).toBeInTheDocument();
   });
 
-  it('rejects a wrong-length policy anchor at create-time', async () => {
-    mockedList.mockResolvedValue({ success: true, vaults: [] });
-    render(<LiquidityScreen />);
-    await waitFor(() => expect(screen.getByText(/My vaults \(0\)/)).toBeInTheDocument());
-
-    fireEvent.click(screen.getByRole('button', { name: /\+ Create vault/ }));
-    fireEvent.change(screen.getByLabelText(/Token A/), { target: { value: ANCHOR_A } });
-    fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_B } });
-    fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '1000' } });
-    fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '2000' } });
-    fireEvent.change(screen.getByLabelText(/Policy anchor/), { target: { value: 'TOOSHORT' } });
-    fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
-
-    await waitFor(() => expect(screen.getByText(/policy anchor must decode to 32 bytes/)).toBeInTheDocument());
-    expect(mockedCreate).not.toHaveBeenCalled();
-  });
-
-  /// REQUIRED PROOF: two assets sharing a ticker stay distinguishable through
-  /// the UI, and the identity sent is the one selected — not the name shown.
-  ///
-  /// Both holdings are called RIGB. Under free-text entry they were the same
-  /// asset, and a vault "RIGB/RIGB" was indistinguishable from a real market.
   it('sends the selected identity, not the shared ticker', async () => {
     mockedList.mockResolvedValue({ success: true, vaults: [] });
     mockedCreate.mockResolvedValue({ success: true, vaultIdBase32: ZERO_VAULT_ID_B32 });
@@ -218,9 +195,6 @@ describe('LiquidityScreen', () => {
     fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_B } });
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '2000' } });
-    fireEvent.change(screen.getByLabelText(/Policy anchor/), {
-      target: { value: ANCHOR_A },
-    });
     fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
 
@@ -254,9 +228,6 @@ describe('LiquidityScreen', () => {
     fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_A } });
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '2000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '1000' } });
-    fireEvent.change(screen.getByLabelText(/Policy anchor/), {
-      target: { value: ANCHOR_A },
-    });
     fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
 
@@ -309,9 +280,6 @@ describe('LiquidityScreen', () => {
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '2000' } });
     // 32 zero bytes Base32 Crockford = '0000000000000000000000000000000000000000000000000000'
-    fireEvent.change(screen.getByLabelText(/Policy anchor/), {
-      target: { value: '0000000000000000000000000000000000000000000000000000' },
-    });
     fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
 

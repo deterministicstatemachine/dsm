@@ -290,15 +290,6 @@ internal fun u128beToLong(bytes: ByteArray): Long {
 
 internal fun b32(bytes: ByteArray): String = BridgeEncoding.base32CrockfordEncode(bytes)
 
-/** Deterministic 32-byte digest from a label string.  Uses MessageDigest
- *  SHA-256 (BLAKE3 isn't in the AndroidX stdlib but the digest only
- *  needs to be 32 bytes + collision-resistant within the test scope —
- *  the dlv.create handler stores it verbatim without semantic check). */
-internal fun blake3Like32(label: String): ByteArray {
-    val md = java.security.MessageDigest.getInstance("SHA-256")
-    md.update(label.toByteArray(Charsets.UTF_8))
-    return md.digest()
-}
 
 /** Build a per-run salted OUTPUT_TOKEN that lex-sorts BELOW ERA so the
  *  canonical token pair stamping is deterministic.  Returns a triple
@@ -342,16 +333,14 @@ internal class SoFiTestContext(
             .build()
         val fulfillmentBytes = fm.toByteArray()
 
-        // Distinct content per vault → distinct vault_id (computed
-        // Rust-side from device_id + policy_digest + content_digest).
+        // Distinct content per vault → distinct vault_id (derived Rust-side
+        // from the creator key, content and the vault's signed parameters).
         val content = "SoFiTradeRealHwTest:$label:fee=$feeBps".toByteArray(Charsets.UTF_8)
-        // Synthetic but stable 32-byte policy anchor — the dlv.create
-        // handler stores this verbatim without verifying it against
-        // a registered CPTA policy.  Sufficient for vault creation.
-        val policyDigest = blake3Like32("DSM/sofi-test-policy:$label")
-
+        // `policy_digest` is the vault's DLV-POLICY digest and is DERIVED by
+        // dlv.create from the vault's release and fee policy; a synthetic
+        // value here would now be refused. Left empty so Rust derives it.
         val spec = DlvSpecV1.newBuilder()
-            .setPolicyDigest(ByteString.copyFrom(policyDigest))
+            .setPolicyDigest(ByteString.EMPTY)
             // Leave content_digest + fulfillment_digest empty — Rust
             // computes them per the accept-or-compute path.
             .setFulfillmentBytes(ByteString.copyFrom(fulfillmentBytes))
@@ -390,7 +379,9 @@ internal class SoFiTestContext(
         // trader's `route.syncVaultsForPair`, leaving the trader's
         // DLVManager empty and `dlv.unlockRouted` rejecting with
         // "vault not in local DLVManager".
-        val unlockSpecDigest = blake3Like32("DSM/sofi-test-unlock:$label")
+        // The advertised digest is the vault record's DLV-policy digest, filled
+        // by Rust; a synthesized value would be refused. Empty means "the record's".
+        val unlockSpecDigest = ByteArray(0)
         val req = PublishRoutingAdvertisementRequest.newBuilder()
             .setVaultId(ByteString.copyFrom(vaultId))
             .setTokenA(ByteString.copyFrom(lexLower))

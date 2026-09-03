@@ -68,6 +68,7 @@ impl DLVManager {
 
     /// Prepare a secret-free vault draft.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_vault(
         &self,
         creator_public_key: &[u8],
@@ -77,6 +78,7 @@ impl DLVManager {
         intended_recipient: Option<Vec<u8>>,
         encryption_public_key: &[u8],
         reference_state_hash: &[u8; 32],
+        policy_digest: Option<[u8; 32]>,
     ) -> Result<LimboVaultDraft, DsmError> {
         LimboVault::create_draft(
             creator_public_key,
@@ -86,6 +88,7 @@ impl DLVManager {
             intended_recipient.clone(),
             encryption_public_key,
             reference_state_hash,
+            policy_digest,
         )
     }
 

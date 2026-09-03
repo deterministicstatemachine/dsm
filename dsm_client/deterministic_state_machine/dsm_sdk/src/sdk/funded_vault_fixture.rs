@@ -286,7 +286,7 @@ pub(crate) fn create_funded_amm_vault(
     .encode_to_vec();
     let req = generated::DlvInstantiateV1 {
         spec: Some(generated::DlvSpecV1 {
-            policy_digest: vec![0x5Au8; 32],
+            policy_digest: Vec::new(),
             fulfillment_bytes: fulfillment,
             anchor_enforcement: generated::AnchorEnforcement::Required as i32,
             ..Default::default()

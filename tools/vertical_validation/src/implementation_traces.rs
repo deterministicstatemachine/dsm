@@ -889,6 +889,8 @@ fn trace_dlv_manager_inventory_consistency(
             None,
             &encryption_pk,
             &reference_state.hash,
+            // Not an AMM vault: no DLV-layer policy object to derive a digest from.
+            None,
         ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault alpha failed: {e}")],
@@ -913,6 +915,8 @@ fn trace_dlv_manager_inventory_consistency(
             None,
             &encryption_pk,
             &reference_state.hash,
+            // Not an AMM vault: no DLV-layer policy object to derive a digest from.
+            None,
         ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault beta failed: {e}")],

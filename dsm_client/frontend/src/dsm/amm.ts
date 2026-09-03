@@ -75,9 +75,13 @@ function compareBytes(a: Uint8Array, b: Uint8Array): number {
  * over the wire (Track C.4 accept-or-stamp path; mirrors chunk #6's
  * `route.signRouteCommit`).
  *
- * `policyDigest` MUST be the 32-byte CPTA anchor of the token
- * governing this vault.  `content` is a small placeholder (AMM
- * vaults don't carry encrypted content the way posted-mode DLVs do).
+ * The vault's DLV-policy digest is DERIVED by the Rust `dlv.create`
+ * handler from the vault's release and fee policy (the two DLV-layer
+ * members of the creator-signed vault state) and folded into the
+ * creator-signed parameters — it is not a CPTA/token anchor and is not
+ * chosen here, so the spec rides with the field EMPTY. `content` is a
+ * small placeholder (AMM vaults don't carry encrypted content the way
+ * posted-mode DLVs do).
  *
  * Returns the vault_id Base32 on success.
  */
@@ -95,15 +99,10 @@ export async function createAmmVault(input: {
   reserveA: bigint;
   reserveB: bigint;
   feeBps: number;
-  /** 32-byte CPTA anchor of the policy governing this vault. */
-  policyDigest: Uint8Array;
   /** Optional informational content (default = "AMM vault"). */
   content?: Uint8Array;
 }): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
   try {
-    if (!input?.policyDigest || input.policyDigest.length !== 32) {
-      return { success: false, error: 'policyDigest must be 32 bytes' };
-    }
     if (input.reserveA <= 0n || input.reserveB <= 0n) {
       return { success: false, error: 'both funding legs must be greater than zero' };
     }
@@ -115,7 +114,9 @@ export async function createAmmVault(input: {
     const content = input.content ?? new TextEncoder().encode('AMM vault');
 
     const spec = new pb.DlvSpecV1({
-      policyDigest: input.policyDigest as any,
+      // Empty → Rust derives the DLV-policy digest from the vault's own
+      // release and fee policy; a supplied value that differs is refused.
+      policyDigest: new Uint8Array() as any,
       // Empty digests → Rust accept-or-compute (chunk #6).
       contentDigest: new Uint8Array() as any,
       fulfillmentDigest: new Uint8Array() as any,
