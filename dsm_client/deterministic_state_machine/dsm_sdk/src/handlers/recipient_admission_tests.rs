@@ -210,8 +210,8 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
             .unwrap();
         dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(pos, root)
     };
-    let (mut tree, pre_balances) =
-        crate::sdk::economic_admission_flow::producer_tree_and_balances(&validated).unwrap();
+    let (mut tree, pre_state) =
+        crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated).unwrap();
 
     // A second credit consuming the SAME (position, debit index).
     let op = dsm::types::operations::Operation::Transfer {
@@ -235,7 +235,7 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
         &p.b.genesis,
         &p.b.device_id,
         &econ_op_id,
-        &dsm::economic::write_set::EconomicPreState::balances_only(&pre_balances),
+        &pre_state.as_write_set_pre_state(),
         &mut tree,
         &dsm::economic::write_set::CreditSourceFacts::PeerDebit {
             peer_genesis: p.a.genesis,
