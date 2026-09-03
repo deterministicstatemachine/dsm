@@ -127,7 +127,7 @@ export default function DevDlvScreen(): JSX.Element {
           </div>
           <div style={{ display: 'grid', gap: 2, marginLeft: 8 }}>
             <div><strong>DLV Create (<code>DlvInstantiateV1</code>)</strong></div>
-            <div>1) <code>spec.policy_digest</code>: the vault&apos;s DLV-policy digest — for an AMM vault leave it empty (Rust derives it from the release and fee policy); it is not a CPTA/token anchor.</div>
+            <div>1) <code>spec.policy_digest</code>: the vault&apos;s DLV-policy digest; leave it empty for AMM vaults (Rust derives it from the release and fee policy). Non-AMM vaults still supply 32 creator-signed bytes. It is not a CPTA/token anchor.</div>
             <div>2) <code>spec.content_digest</code>: 32-byte H(&quot;DSM/dlv-content&quot;, content).</div>
             <div>3) <code>spec.fulfillment_digest</code>: 32-byte H(&quot;DSM/dlv-fulfillment&quot;, fulfillment_bytes).</div>
             <div>4) <code>spec.intended_recipient</code>: optional Kyber pk (empty = self-encrypted).</div>
