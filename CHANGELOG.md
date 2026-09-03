@@ -36,6 +36,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   This option disappears once production persistence matters; at that point the
   same boundary would need a real migration or an explicit terminal state.
 
+- **Every DLV's creator signature now covers its DLV-policy digest — pre-existing
+  vault signatures stop verifying.** `LimboVault::parameters_hash`, the preimage
+  the creator signs at birth, now folds the vault's `policy_digest` (presence-
+  tagged). `LimboVault::verify` recomputes that preimage from the vault's fields,
+  so a vault created before this change carries a signature over a preimage that
+  no longer matches and is refused as unverifiable — everywhere it is read.
+
+  **No migration, no re-signing, deliberately.** Those signatures were made over
+  a different statement. Re-signing, synthesising, or translating them would
+  preserve exactly the historical accommodation this line of work exists to
+  remove. Beta runs on `dsm-testnet` with no production user state, so the
+  remedy is the same wipe as above.
+
+  Alongside it, `DlvSpecV1.policy_digest` changes meaning and contract: it is the
+  vault's DLV-POLICY digest — a derived view of the release and fee policy the
+  creator-signed vault state already commits — not a CPTA/token anchor. An AMM
+  `dlv.create` now derives it (leave the field empty) and refuses any other
+  supplied value; the LiquidityScreen's "policy anchor" paste box is gone.
+
 ---
 
 ## [0.1.0-beta.3] — 2026-04-22

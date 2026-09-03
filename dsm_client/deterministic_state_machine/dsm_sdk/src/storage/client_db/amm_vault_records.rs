@@ -273,6 +273,15 @@ pub fn list_amm_vault_records() -> Result<Vec<AmmVaultRecord>> {
 
 #[cfg(test)]
 mod tests {
+    /// The DLV-policy digest a record for this fee carries — a derived view of
+    /// the beta release family and the fee, exactly what `dlv.create` persists.
+    fn derived_policy_digest(fee_bps: u32) -> [u8; 32] {
+        dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &dsm::ccb::FeePolicy::new(fee_bps).expect("fee below the denominator"),
+        )
+    }
+
     use super::*;
     use serial_test::serial;
 
@@ -291,7 +300,7 @@ mod tests {
             policy_commit_b: [0x22; 32],
             fee_bps: 30,
             anchor_enforcement: 2,
-            policy_digest: [0x5A; 32],
+            policy_digest: derived_policy_digest(30),
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),

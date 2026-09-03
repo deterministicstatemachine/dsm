@@ -499,7 +499,16 @@ pub struct LimboVault {
     /// It is not in `LimboVaultProto` either: the decoder hardcodes 0, so a
     /// loaded vault has never carried a meaningful value here.
     pub anchor_enforcement: i32,
-    /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+    /// THE DLV-POLICY DIGEST — the vault's behavioural-policy identity, and a
+    /// creator-SIGNED one: it is folded into `parameters_hash`, so `verify`
+    /// refuses a vault whose digest was altered after birth. For an AMM vault
+    /// it is `dsm::ccb::dlv_policy_digest(release_policy, fee_policy)`, a
+    /// deterministic view of the two DLV-layer members the signed
+    /// `VaultStateV2` already commits — never the pair's CPTA commits, which
+    /// are the token layer and stay independent. `dlv.create` DERIVES it; a
+    /// supplied value that does not match is refused.
+    ///
+    /// Historical: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
     /// routing advertisement's `unlock_spec_digest` so the owner-side
     /// LiquidityScreen republish path can read the canonical digest
@@ -533,6 +542,9 @@ pub struct LimboVaultDraft {
     pub parameters_hash: Vec<u8>,
     pub verification_positions: Vec<Position>,
     pub reference_state_hash: [u8; 32],
+    /// The vault's DLV-POLICY digest, folded into `parameters_hash` and so
+    /// covered by the creator signature — see [`LimboVault::policy_digest`].
+    pub policy_digest: Option<[u8; 32]>,
 }
 
 /* ------------------------------ Proto conversions ---------------------------- */
@@ -683,7 +695,7 @@ impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
                 .collect(),
             reference_state_hash: v.reference_state_hash.to_vec(),
             entry_header: v.entry_header.map(|eh| eh.to_vec()),
-            // Phase 13 follow-up: persisted policy_digest (CPTA anchor).
+            // The DLV-policy digest (creator-signed via parameters_hash).
             // Re-used as routing advertisement unlock_spec_digest.
             policy_digest: v.policy_digest.map(|d| d.to_vec()),
         }
@@ -1021,6 +1033,11 @@ impl LimboVault {
     /// `reference_state.hash[0] as u64`) has been dropped: the full 32-byte
     /// reference hash already serves the position-in-chain identifier role,
     /// so the u64 reduction was both redundant and a §4.3 violation.
+    // Eight parameters: the DLV-policy digest joined the signed parameters, and
+    // it belongs here rather than in a post-finalize stamp, because the draft is
+    // what gets signed. The repo's other signed-preimage builders carry the same
+    // allowance.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_draft(
         creator_public_key: &[u8],
         fulfillment_condition: FulfillmentMechanism,
@@ -1029,6 +1046,9 @@ impl LimboVault {
         intended_recipient: Option<Vec<u8>>, // Kyber public key for access control (if Some)
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
         reference_state_hash: &[u8; 32],
+        // The DLV-policy digest, signed with the rest of the parameters. `None`
+        // only for a vault that has no DLV-layer policy object (non-AMM).
+        policy_digest: Option<[u8; 32]>,
     ) -> Result<LimboVaultDraft, DsmError> {
         // dBTC bearer-fungibility guard (see
         // .github/instructions/dBTCimplement.instructions.md, Definition 17 +
@@ -1155,6 +1175,10 @@ impl LimboVault {
         // commitment's variable-length to_bytes(); now just the
         // salted-BLAKE3 32 bytes).
         parameters.extend_from_slice(&commitment);
+        // The DLV-policy digest, presence-tagged so "absent" and "32 zero
+        // bytes" are different preimages. Folding it here is what makes the
+        // vault's policy identity creator-signed rather than a free field.
+        fold_policy_digest(&mut parameters, policy_digest.as_ref());
 
         let parameters_hash =
             domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
@@ -1191,7 +1215,21 @@ impl LimboVault {
             parameters_hash,
             verification_positions,
             reference_state_hash: ref_hash,
+            policy_digest,
         })
+    }
+}
+
+/// Fold an optional DLV-policy digest into a parameters preimage:
+/// `0x00` when absent, `0x01 || digest` when present. Shared by the builder
+/// and `verify` so the two cannot drift.
+fn fold_policy_digest(parameters: &mut Vec<u8>, policy_digest: Option<&[u8; 32]>) {
+    match policy_digest {
+        None => parameters.push(0x00),
+        Some(d) => {
+            parameters.push(0x01);
+            parameters.extend_from_slice(d);
+        }
     }
 }
 
@@ -1217,7 +1255,7 @@ impl LimboVaultDraft {
             // Phase 13 follow-up: no policy digest at finalize time;
             // dlv.create stamps the real value via `dlv_manager.get_vault()`
             // after this function returns.
-            policy_digest: None,
+            policy_digest: self.policy_digest,
         };
 
         if !vault.verify()? {
@@ -1258,6 +1296,7 @@ impl LimboVault {
         }
         // 32-byte raw commitment hash (Issue #184 F2).
         parameters.extend_from_slice(&self.content_commitment);
+        fold_policy_digest(&mut parameters, self.policy_digest.as_ref());
 
         let computed =
             domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
@@ -2831,6 +2870,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft");
         (draft, creator_secret_key, reference_state_hash)
@@ -2843,6 +2883,52 @@ mod tests {
                 .expect("creator signature");
         let vault = draft.finalize(&creator_signature).expect("signed vault");
         (vault, creator_secret_key, reference_state_hash)
+    }
+
+    /// THE DLV-POLICY DIGEST IS CREATOR-SIGNED. It rides `parameters_hash`,
+    /// so a vault whose digest is altered — or dropped — after signing fails
+    /// `verify`, and "absent" is a different preimage from any 32 bytes.
+    #[test]
+    fn a_policy_digest_altered_after_signing_fails_verify() {
+        let (creator_public_key, creator_secret_key) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let draft = LimboVault::create_draft(
+            &creator_public_key,
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![0x11; 32],
+                public_params: vec![0x22; 16],
+            },
+            b"policy digest under signature",
+            "application/octet-stream",
+            None,
+            &kyber_pair.public_key,
+            &[0x24; 32],
+            Some([0x77; 32]),
+        )
+        .expect("vault draft");
+        let sig = crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
+            .expect("creator signature");
+        let vault = draft.finalize(&sig).expect("signed vault");
+        assert_eq!(
+            vault.policy_digest,
+            Some([0x77; 32]),
+            "finalize carries the digest"
+        );
+        assert!(vault.verify().expect("verify"), "as signed, it verifies");
+
+        let mut altered = vault.clone();
+        altered.policy_digest = Some([0x78; 32]);
+        assert!(
+            !altered.verify().expect("verify"),
+            "a different digest is not what was signed"
+        );
+        let mut dropped = vault.clone();
+        dropped.policy_digest = None;
+        assert!(
+            !dropped.verify().expect("verify"),
+            "an absent digest is not what was signed either"
+        );
     }
 
     #[test]
@@ -2876,6 +2962,7 @@ mod tests {
             None,
             encryption_pk,
             &ref_hash,
+            None,
         )
         .expect("vault draft")
     }
@@ -2994,6 +3081,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft a");
         let draft_b = LimboVault::create_draft(
@@ -3007,6 +3095,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft b");
 
@@ -3305,6 +3394,7 @@ mod tests {
             Some(bogus_recipient),
             &kyber_pair.public_key,
             &[0x42; 32],
+            None,
         );
         let err = result.expect_err("create_draft must reject intended_recipient + BitcoinHTLC");
         let msg = format!("{err}");
@@ -3331,6 +3421,7 @@ mod tests {
             None, // bearer-authorized: no recipient binding at DSM layer
             &kyber_pair.public_key,
             &[0x42; 32],
+            None,
         )
         .expect("create_draft must accept BitcoinHTLC + intended_recipient=None");
         assert!(draft.intended_recipient.is_none());

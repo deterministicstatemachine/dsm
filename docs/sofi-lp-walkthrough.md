@@ -53,7 +53,7 @@ What Alice does:
    her mnemonic seed (GenesisV2, mnemonic-rooted). No external KYC, no
    contract approval — the keys are a property of the device.
 2. Opens **AMM VAULT (DEV)** in the wallet. Fills in `token_a`,
-   `token_b`, `reserve_a`, `reserve_b`, `fee_bps`, `policy_anchor`.
+   `token_b`, `reserve_a`, `reserve_b`, `fee_bps`. (There is no policy-anchor field: the vault's DLV-policy digest is derived by `dlv.create` from its release and fee policy, and the pair's two CPTA anchors come from the selected holdings.)
    Taps **Create AMM vault**. The wallet builds a `DlvSpecV1` with an
    `AmmConstantProduct` fulfillment, signs it with her SPHINCS+ key, and
    the vault id is committed locally.
@@ -192,7 +192,7 @@ makes sense for service operations.
 When Alice creates an AMM vault, she holds:
 
 - The vault's SPHINCS+ signing authority (her wallet key).
-- The vault's unlock predicate (encoded in `policy_anchor`).
+- The vault's unlock predicate (the `AmmConstantProduct` fulfillment mechanism: the pair and the fee), and its DLV-policy digest, derived from the release and fee policy the signed vault state commits.
 - 100% of fee accrual (no protocol skim).
 - Lifecycle control — when to publish the ad, when to unwind.
 

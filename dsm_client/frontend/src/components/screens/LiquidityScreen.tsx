@@ -57,7 +57,6 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   const [reserveA, setReserveA] = useState('');
   const [reserveB, setReserveB] = useState('');
   const [feeBps, setFeeBps] = useState('30');
-  const [policyAnchor, setPolicyAnchor] = useState('');
   const [pendingPublishId, setPendingPublishId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -216,9 +215,8 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     if (!tokenA.trim() || !tokenB.trim()) return false;
     if (tokenA === tokenB) return false;
     if (!reserveA.trim() || !reserveB.trim()) return false;
-    if (!policyAnchor.trim()) return false;
     return true;
-  }, [tokenA, tokenB, reserveA, reserveB, policyAnchor]);
+  }, [tokenA, tokenB, reserveA, reserveB]);
 
   const handleCreate = useCallback(async () => {
     setError('');
@@ -245,18 +243,16 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         throw new Error('fee_bps must be an integer in [0, 9999]');
       }
 
-      const policyBytes = decodeBase32Crockford(policyAnchor.trim());
-      if (policyBytes.length !== 32) {
-        throw new Error(`policy anchor must decode to 32 bytes (got ${policyBytes.length})`);
-      }
-
+      // No policy anchor is pasted: the vault's DLV-policy digest is derived
+      // by Rust from its release and fee policy. A token's CPTA anchor never
+      // belonged in that slot — the pair's two anchors are the token layer,
+      // carried separately by the AMM predicate.
       const r = await createAmmVault({
         tokenA: aBytes,
         tokenB: bBytes,
         reserveA: rA,
         reserveB: rB,
         feeBps: fee,
-        policyDigest: policyBytes,
       });
       if (!r.success || !r.vaultIdBase32) {
         throw new Error(r.error || 'createAmmVault failed');
@@ -283,11 +279,10 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         reserveA: rA,
         reserveB: rB,
         feeBps: fee,
-        // The policy anchor doubles as a stable 32-byte unlock-spec
-        // identifier for the v1 SoFi UI flow.  Traders read the
-        // digest verbatim from the published advertisement; the
-        // protocol doesn't require it to differ from policyDigest.
-        unlockSpecDigest: policyBytes,
+        // Empty: the publisher fills the advertised digest from the vault
+        // record — the DLV-policy digest dlv.create derived and signed —
+        // and refuses any other value. Nothing here chooses it.
+        unlockSpecDigest: new Uint8Array(),
         unlockSpecKey: `defi/spec/amm/${r.vaultIdBase32.slice(0, 16)}`,
         // No vaultProtoBytes — Rust derives.  No ownerPublicKey —
         // Rust stamps the wallet pk.
@@ -313,14 +308,13 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       setTokenB('');
       setReserveA('');
       setReserveB('');
-      setPolicyAnchor('');
       await refresh();
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'create failed';
       setError(msg);
       setPhase('error');
     }
-  }, [tokenA, tokenB, reserveA, reserveB, feeBps, policyAnchor, refresh]);
+  }, [tokenA, tokenB, reserveA, reserveB, feeBps, refresh]);
 
   return (
     <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
@@ -444,12 +438,9 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                     </button>
                   )}
                   {!v.closed && !v.routingAdvertised && v.publicationState === 'published' && v.unlockSpecDigest && v.unlockSpecKey && (
-                    // Phase 13 follow-up: hide the button for legacy
-                    // vaults whose persisted policy_digest is absent.
-                    // Republishing them would require stamping a zero
-                    // digest (the pre-fix bug); refuse instead so the
-                    // owner can re-create with a fresh CPTA anchor
-                    // rather than silently corrupting the ad.
+                    // Hide the button for a vault whose persisted DLV-policy
+                    // digest is absent: it cannot be advertised, and the
+                    // owner re-creates it (the digest is derived at birth).
                     <button
                       type="button"
                       onClick={() => void handleRepublish(v)}
@@ -522,10 +513,6 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
             <div className="form-group">
               <label htmlFor="liq-fee">Fee (bps)</label>
               <input id="liq-fee" type="number" min="0" max="9999" className="form-input" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label htmlFor="liq-policy">Policy anchor (Base32 Crockford, 32 bytes)</label>
-              <textarea id="liq-policy" className="form-input" value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="paste 52-char Base32" rows={2} />
             </div>
             <div className="form-actions">
               <button type="button" className="cancel-button" onClick={() => setShowCreate(false)} disabled={phase === 'creating' || phase === 'publishing'}>Cancel</button>

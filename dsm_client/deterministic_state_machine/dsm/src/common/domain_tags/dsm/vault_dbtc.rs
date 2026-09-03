@@ -35,6 +35,13 @@ pub const TAG_DSM_DLV_PARAMS: TaggedHashDomain<'static> = crate::tagged_domain!(
 pub const TAG_DSM_DLV_PARTITION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-partition");
 pub const TAG_DSM_DLV_POLICY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-policy");
+/// The DLV-POLICY DIGEST: `BLAKE3(this || CCB(ReleasePolicy) || CCB(FeePolicy))`,
+/// a deterministic view of the two DLV-layer members the creator-signed
+/// `VaultStateV2` already commits (members 8 and 9). Distinct from
+/// `TAG_DSM_DLV_POLICY`, which hashes a `SmartPolicy` proto — a different
+/// preimage under a different domain, never the same one.
+pub const TAG_DSM_DLV_POLICY_DIGEST: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/dlv-policy-digest");
 pub const TAG_DSM_DLV_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-proof");
 pub const TAG_DSM_DLV_REFUND: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-refund");
 pub const TAG_DSM_DLV_UNLOCK: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/dlv-unlock");
@@ -74,6 +81,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_DLV_PARAMS,
     TAG_DSM_DLV_PARTITION,
     TAG_DSM_DLV_POLICY,
+    TAG_DSM_DLV_POLICY_DIGEST,
     TAG_DSM_DLV_PROOF,
     TAG_DSM_DLV_REFUND,
     TAG_DSM_DLV_UNLOCK,

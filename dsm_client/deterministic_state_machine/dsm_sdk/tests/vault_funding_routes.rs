@@ -184,7 +184,7 @@ fn a_funding_leg_that_is_not_a_policy_commit_fails_closed() {
         // and not an earlier gate. A test that passes on an unrelated error
         // credits a guard for work it is not doing.
         let spec = generated::DlvSpecV1 {
-            policy_digest: vec![0x11u8; 32],
+            policy_digest: Vec::new(),
             fulfillment_bytes: amm_fulfillment_bytes(&[0x11u8; 32], &[0x22u8; 32], 30),
             // The canonical posture: an AMM create refuses any other, so this
             // spec is well-formed on every axis except the one under test and
@@ -248,7 +248,7 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
     // a balance shortfall.
     // The vault's predicate declares ERA / RIGB-one.
     let spec = generated::DlvSpecV1 {
-        policy_digest: vec![0x11u8; 32],
+        policy_digest: Vec::new(),
         fulfillment_bytes: amm_fulfillment_bytes(&era, &rigb_one, 30),
         // The canonical posture, so the refusal below is the pair check and not
         // the create-time selector gate.
@@ -578,7 +578,7 @@ fn market_policy_proto(transferable: bool) -> Vec<u8> {
 
 fn create_req_for_pair(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
     let spec = generated::DlvSpecV1 {
-        policy_digest: vec![0x11u8; 32],
+        policy_digest: Vec::new(),
         fulfillment_bytes: amm_fulfillment_bytes(a, b, fee_bps),
         // Every request built here is an AMM create, which requires the
         // canonical posture. `..Default::default()` left this 0 and would make

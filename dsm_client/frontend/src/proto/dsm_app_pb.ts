@@ -6651,12 +6651,15 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
   entryHeader?: Uint8Array;
 
   /**
-   * Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
-   * (32 bytes, BLAKE3 anchor of the CPTA spec).  Re-used as the
-   * routing advertisement's `unlock_spec_digest` so the LiquidityScreen
-   * republish path can fetch the real digest instead of stamping zeros.
-   * Optional for backward compatibility with vaults created before this
-   * field was added; legacy vaults render with no Publish-retry button.
+   * The vault's DLV-POLICY digest — its behavioural-policy identity, NOT a
+   * CPTA/token anchor (the pair's two CPTA commits are separate, independent
+   * token-policy authorities carried by the AMM predicate). For an AMM vault
+   * it is BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)),
+   * a deterministic view of the two DLV-layer members the creator-signed
+   * VaultStateV2 commits; dlv.create derives it and folds it into the
+   * creator-signed parameters_hash. Re-used as the routing advertisement's
+   * `unlock_spec_digest`. Optional only because the field post-dates the
+   * proto; a vault without it cannot be advertised.
    *
    * @generated from field: optional bytes policy_digest = 15;
    */
@@ -7736,7 +7739,11 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
  */
 export class DlvSpecV1 extends Message<DlvSpecV1> {
   /**
-   * CPTA anchor
+   * The DLV-POLICY digest, NOT a CPTA anchor: the vault's own behavioural-
+   * policy identity, distinct from the two token policies the AMM predicate
+   * names. For an AMM vault it is DERIVED by dlv.create —
+   * BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)) —
+   * so leave it EMPTY; a supplied value that is not the derivation is refused.
    *
    * @generated from field: bytes policy_digest = 1;
    */
@@ -8609,7 +8616,701 @@ export class SignedAuthorityObjectV1 extends Message<SignedAuthorityObjectV1> {
  * transition, re-derives d_o from ak_pk + atta, and enforces
  * K_cand == K_proven against candidate_public_key. Published as an immutable
  * object; discovery paths carry its 32-byte content address, never bytes.
+ * Portable P0-P6 authority evidence for ECONOMIC lineage validation — the
+ * manifest's `authority_evidence_addr` points at the exact bytes of this
+ * object in the immutable store (namespace DSM/economic-authority-evidence/v1).
+ * It is AnchorPresentationV3 minus the vault-anchor fields: everything a
+ * FOREIGN verifier needs to run resolve_owner_authority_at_position for the
+ * lineage owner — recovering the proven AK, DevID, and (via P0's genesis
+ * recomputation) the committed network_id — from public material alone.
+ * 3.6 PR3: the 0x0026 (DlvReserveConsumption) evidence bundle — transport
+ * proto, no CCB class, frozen at `reserve_consumption_evidence_addr` under
+ * namespace DSM/dlv-reserve-consumption-evidence/v1. A ValidatedEconomicRoot
+ * is a ROOT conclusion, so the bundle carries the actual inclusion material:
+ * the exact CCB(V_n) whose hash must equal the settle's parent_binding, the
+ * owner's VAULT-BOUND authority evidence (resolved at
+ * V_n.owner_authority_transition_digest — a different axis from the economic
+ * manifest's authority position), and both reserve pre-leaves with their
+ * 256-sibling witnesses against the owner's validated economic root.
  *
+ * @generated from message dsm.ReserveConsumptionEvidenceV1
+ */
+export class ReserveConsumptionEvidenceV1 extends Message<ReserveConsumptionEvidenceV1> {
+  /**
+   * @generated from field: bytes exact_vault_state_ccb = 1;
+   */
+  exactVaultStateCcb = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_authority_evidence = 2;
+   */
+  ownerAuthorityEvidence = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_a_state = 3;
+   */
+  reserveAState = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes reserve_a_siblings = 4;
+   */
+  reserveASiblings: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes reserve_b_state = 5;
+   */
+  reserveBState = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes reserve_b_siblings = 6;
+   */
+  reserveBSiblings: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ReserveConsumptionEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReserveConsumptionEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "exact_vault_state_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "owner_authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "reserve_a_state", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_a_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 5, name: "reserve_b_state", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "reserve_b_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReserveConsumptionEvidenceV1 {
+    return new ReserveConsumptionEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReserveConsumptionEvidenceV1 {
+    return new ReserveConsumptionEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReserveConsumptionEvidenceV1 {
+    return new ReserveConsumptionEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReserveConsumptionEvidenceV1 | PlainMessage<ReserveConsumptionEvidenceV1> | undefined, b: ReserveConsumptionEvidenceV1 | PlainMessage<ReserveConsumptionEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(ReserveConsumptionEvidenceV1, a, b);
+  }
+}
+
+/**
+ * 3.6 PR4: the 0x0027 (ValidatedDlvSettlementPayment) evidence bundle —
+ * transport proto, no CCB class, frozen at `payment_evidence_addr` under
+ * namespace DSM/dlv-settlement-payment-evidence/v1. Carries the trader's
+ * settlement-receipt leaf and its 256-sibling inclusion witness; the
+ * verifier proves the leaf into the INDEPENDENTLY derived
+ * ValidatedEconomicRoot(trader_economic_position).
+ *
+ * @generated from message dsm.SettlementPaymentEvidenceV1
+ */
+export class SettlementPaymentEvidenceV1 extends Message<SettlementPaymentEvidenceV1> {
+  /**
+   * @generated from field: bytes receipt_state = 1;
+   */
+  receiptState = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated bytes receipt_siblings = 2;
+   */
+  receiptSiblings: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<SettlementPaymentEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SettlementPaymentEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipt_state", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "receipt_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementPaymentEvidenceV1 {
+    return new SettlementPaymentEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementPaymentEvidenceV1 {
+    return new SettlementPaymentEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementPaymentEvidenceV1 {
+    return new SettlementPaymentEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SettlementPaymentEvidenceV1 | PlainMessage<SettlementPaymentEvidenceV1> | undefined, b: SettlementPaymentEvidenceV1 | PlainMessage<SettlementPaymentEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(SettlementPaymentEvidenceV1, a, b);
+  }
+}
+
+/**
+ * Step 2: the 0x0029 (AuthorizedIssuance) evidence bundle — transport proto,
+ * no CCB class, frozen at `issuance_authorization_addr` under namespace
+ * DSM/issuance-authorization-evidence/v1.
+ *
+ * It CARRIES the canonical policy bytes rather than addressing them, because
+ * the policy commit IS their content hash (policy_anchor =
+ * H(DSM/policy, TokenPolicyV3 bytes)) — so a verifier re-hashes what it was
+ * given against a commit the OPERATION names, and needs nothing fetched.
+ * Addressing them instead would make issuance depend on mutable availability:
+ * token.create warns and proceeds when the policy reaches ZERO storage nodes,
+ * so a fetch-only design would fail closed on honest tokens.
+ *
+ * The signatures live HERE and never inside the Mint operation whose digest
+ * they authorize. Putting them in the operation would have no fixed point:
+ * the signature would change the operation digest that the signed body
+ * commits to.
+ *
+ * @generated from message dsm.PolicySignerSignatureV1
+ */
+export class PolicySignerSignatureV1 extends Message<PolicySignerSignatureV1> {
+  /**
+   * @generated from field: bytes signer_public_key = 1;
+   */
+  signerPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes signature = 2;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PolicySignerSignatureV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PolicySignerSignatureV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "signer_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PolicySignerSignatureV1 {
+    return new PolicySignerSignatureV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PolicySignerSignatureV1 {
+    return new PolicySignerSignatureV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PolicySignerSignatureV1 {
+    return new PolicySignerSignatureV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PolicySignerSignatureV1 | PlainMessage<PolicySignerSignatureV1> | undefined, b: PolicySignerSignatureV1 | PlainMessage<PolicySignerSignatureV1> | undefined): boolean {
+    return proto3.util.equals(PolicySignerSignatureV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.IssuanceAuthorizationEvidenceV1
+ */
+export class IssuanceAuthorizationEvidenceV1 extends Message<IssuanceAuthorizationEvidenceV1> {
+  /**
+   * Exact TokenPolicyV3 bytes; must re-hash to the operation's policy_commit.
+   *
+   * @generated from field: bytes canonical_policy_bytes = 1;
+   */
+  canonicalPolicyBytes = new Uint8Array(0);
+
+  /**
+   * Exact CCB of the 0x0029 IssuanceAuthorizationBody the signers signed.
+   *
+   * @generated from field: bytes authorization_body_ccb = 2;
+   */
+  authorizationBodyCcb = new Uint8Array(0);
+
+  /**
+   * k-of-N: keys are MATCHED against the policy's signer set, never trusted
+   * from here.
+   *
+   * @generated from field: repeated dsm.PolicySignerSignatureV1 signatures = 3;
+   */
+  signatures: PolicySignerSignatureV1[] = [];
+
+  constructor(data?: PartialMessage<IssuanceAuthorizationEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.IssuanceAuthorizationEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "canonical_policy_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "authorization_body_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "signatures", kind: "message", T: PolicySignerSignatureV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IssuanceAuthorizationEvidenceV1 {
+    return new IssuanceAuthorizationEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): IssuanceAuthorizationEvidenceV1 {
+    return new IssuanceAuthorizationEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): IssuanceAuthorizationEvidenceV1 {
+    return new IssuanceAuthorizationEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: IssuanceAuthorizationEvidenceV1 | PlainMessage<IssuanceAuthorizationEvidenceV1> | undefined, b: IssuanceAuthorizationEvidenceV1 | PlainMessage<IssuanceAuthorizationEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(IssuanceAuthorizationEvidenceV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.AuthorityEvidenceV1
+ */
+export class AuthorityEvidenceV1 extends Message<AuthorityEvidenceV1> {
+  /**
+   * class 0x0018
+   *
+   * @generated from field: bytes genesis_params_ccb = 1;
+   */
+  genesisParamsCcb = new Uint8Array(0);
+
+  /**
+   * class 0x0019 + GRK sig
+   *
+   * @generated from field: repeated dsm.SignedAuthorityObjectV1 delegations = 2;
+   */
+  delegations: SignedAuthorityObjectV1[] = [];
+
+  /**
+   * class 0x001A + delegate sig
+   *
+   * @generated from field: repeated dsm.SignedAuthorityObjectV1 transitions = 3;
+   */
+  transitions: SignedAuthorityObjectV1[] = [];
+
+  /**
+   * DevTreeProof::to_bytes
+   *
+   * @generated from field: bytes inclusion_proof = 4;
+   */
+  inclusionProof = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ak_public_key = 5;
+   */
+  akPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes atta = 6;
+   */
+  atta = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<AuthorityEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AuthorityEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_params_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "delegations", kind: "message", T: SignedAuthorityObjectV1, repeated: true },
+    { no: 3, name: "transitions", kind: "message", T: SignedAuthorityObjectV1, repeated: true },
+    { no: 4, name: "inclusion_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "ak_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "atta", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AuthorityEvidenceV1 {
+    return new AuthorityEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AuthorityEvidenceV1 {
+    return new AuthorityEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AuthorityEvidenceV1 {
+    return new AuthorityEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AuthorityEvidenceV1 | PlainMessage<AuthorityEvidenceV1> | undefined, b: AuthorityEvidenceV1 | PlainMessage<AuthorityEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(AuthorityEvidenceV1, a, b);
+  }
+}
+
+/**
+ * Replayable accepted-successor evidence for ECONOMIC lineage validation —
+ * the manifest's `dsm_successor_evidence_addr` points at the exact bytes of
+ * this object (namespace DSM/economic-dsm-successor-evidence/v1). Carries the
+ * BALANCE-FREE v2 chain-tip preimage fields (succession facts only — R_econ
+ * is the sole authenticated balance representation), the resulting C_dsm+,
+ * and sigma_dsm: the owner-AK signature over
+ * H(DSM/economic-substrate-sign/v1, G ‖ DevID ‖ C_dsm+ ‖ operation_digest).
+ * A foreign verifier recomputes C_dsm+ from the preimage, recomputes the
+ * operation digest from the embedded operation bytes, and checks sigma_dsm
+ * under the P0-P6-proven AK — "this identity accepted this successor
+ * carrying this operation" becomes checkable, not asserted.
+ * One per-device per-step EK certificate step, content-addressed by its
+ * PREDECESSOR (namespace DSM/ek-cert-step/v1). Certificate ancestry follows
+ * the SIGNER (the device, within a relationship), not the A/B role of any
+ * one receipt: role reversal and BLE steps both advance the same device
+ * chain, so the acceptance bundle references each side's predecessor by
+ * signer identity through these objects. `prior_step_addr` absent means
+ * relationship genesis: the expected certifying key is the signer's
+ * P0-P6-proven AK.
+ *
+ * @generated from message dsm.EkCertStepV1
+ */
+export class EkCertStepV1 extends Message<EkCertStepV1> {
+  /**
+   * @generated from field: bytes ek_pk = 1;
+   */
+  ekPk = new Uint8Array(0);
+
+  /**
+   * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+   *
+   * @generated from field: bytes ek_cert = 2;
+   */
+  ekCert = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes h_n = 3;
+   */
+  hN = new Uint8Array(0);
+
+  /**
+   * @generated from field: optional bytes prior_step_addr = 4;
+   */
+  priorStepAddr?: Uint8Array;
+
+  constructor(data?: PartialMessage<EkCertStepV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EkCertStepV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ek_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "h_n", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EkCertStepV1 {
+    return new EkCertStepV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EkCertStepV1 {
+    return new EkCertStepV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EkCertStepV1 {
+    return new EkCertStepV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined, b: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined): boolean {
+    return proto3.util.equals(EkCertStepV1, a, b);
+  }
+}
+
+/**
+ * Portable bilateral-acceptance evidence for a peer-funded economic credit —
+ * what `CreditSourceValidatedPeerDebit.acceptance_evidence_addr` names
+ * (namespace DSM/peer-transfer-acceptance/v1). The recipient-produced
+ * countersignature is the acceptance FACT; the A-side material alone is a
+ * proposal. Each side's EK certificate ancestry is referenced through
+ * EkCertStepV1 predecessors (by signer, see above).
+ *
+ * @generated from message dsm.PeerTransferAcceptanceEvidenceV1
+ */
+export class PeerTransferAcceptanceEvidenceV1 extends Message<PeerTransferAcceptanceEvidenceV1> {
+  /**
+   * exact OnlineTransferRequest
+   *
+   * @generated from field: bytes transfer_request_bytes = 1;
+   */
+  transferRequestBytes = new Uint8Array(0);
+
+  /**
+   * exact full ReceiptCommit wire
+   *
+   * @generated from field: bytes receipt_evidence_a_bytes = 2;
+   */
+  receiptEvidenceABytes = new Uint8Array(0);
+
+  /**
+   * exact ReceiptCountersignB wire
+   *
+   * @generated from field: bytes receipt_countersign_b_bytes = 3;
+   */
+  receiptCountersignBBytes = new Uint8Array(0);
+
+  /**
+   * sender EK ancestry
+   *
+   * @generated from field: optional bytes a_prior_step_addr = 4;
+   */
+  aPriorStepAddr?: Uint8Array;
+
+  /**
+   * recipient EK ancestry
+   *
+   * @generated from field: optional bytes b_prior_step_addr = 5;
+   */
+  bPriorStepAddr?: Uint8Array;
+
+  constructor(data?: PartialMessage<PeerTransferAcceptanceEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PeerTransferAcceptanceEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "transfer_request_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "receipt_evidence_a_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "receipt_countersign_b_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "a_prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 5, name: "b_prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PeerTransferAcceptanceEvidenceV1 {
+    return new PeerTransferAcceptanceEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PeerTransferAcceptanceEvidenceV1 {
+    return new PeerTransferAcceptanceEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PeerTransferAcceptanceEvidenceV1 {
+    return new PeerTransferAcceptanceEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PeerTransferAcceptanceEvidenceV1 | PlainMessage<PeerTransferAcceptanceEvidenceV1> | undefined, b: PeerTransferAcceptanceEvidenceV1 | PlainMessage<PeerTransferAcceptanceEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(PeerTransferAcceptanceEvidenceV1, a, b);
+  }
+}
+
+/**
+ * The recipient's post-admission RELEASE — the TRANSPORT-ONLY finalization
+ * authority (3.5b PR4; no CCB class). `sig_b` inside the published acceptance
+ * bundle is acceptance PROVENANCE and becomes discoverable when the evidence
+ * DAG publishes, BEFORE ECON_ADMITTED — so bare sig_b is insufficient to
+ * finalize the sender. The release exists only once the recipient's credit is
+ * admitted into validated R_econ: it is constructed and frozen in the accept
+ * transaction (every field is an output of the build), HELD, and promoted to
+ * deliverable in the SAME terminal transaction that records ECON_ADMITTED.
+ * Sender finalization requires this release AND an independent quorum read of
+ * the recipient's register cell at the named position (post-root + manifest
+ * address must match) — never the recipient's private "admitted" flag.
+ *
+ * @generated from message dsm.RecipientEconomicReleaseBodyV1
+ */
+export class RecipientEconomicReleaseBodyV1 extends Message<RecipientEconomicReleaseBodyV1> {
+  /**
+   * @generated from field: bytes receipt_commitment = 1;
+   */
+  receiptCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes acceptance_evidence_addr = 2;
+   */
+  acceptanceEvidenceAddr = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_genesis = 3;
+   */
+  recipientGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes recipient_devid = 4;
+   */
+  recipientDevid = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 recipient_economic_position = 5;
+   */
+  recipientEconomicPosition = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes post_economic_root = 6;
+   */
+  postEconomicRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes admission_manifest_addr = 7;
+   */
+  admissionManifestAddr = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecipientEconomicReleaseBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecipientEconomicReleaseBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipt_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "acceptance_evidence_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "recipient_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "recipient_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "recipient_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "post_economic_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "admission_manifest_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecipientEconomicReleaseBodyV1 {
+    return new RecipientEconomicReleaseBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecipientEconomicReleaseBodyV1 {
+    return new RecipientEconomicReleaseBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecipientEconomicReleaseBodyV1 {
+    return new RecipientEconomicReleaseBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecipientEconomicReleaseBodyV1 | PlainMessage<RecipientEconomicReleaseBodyV1> | undefined, b: RecipientEconomicReleaseBodyV1 | PlainMessage<RecipientEconomicReleaseBodyV1> | undefined): boolean {
+    return proto3.util.equals(RecipientEconomicReleaseBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.RecipientEconomicReleaseV1
+ */
+export class RecipientEconomicReleaseV1 extends Message<RecipientEconomicReleaseV1> {
+  /**
+   * exact encoded body (sign target)
+   *
+   * @generated from field: bytes body = 1;
+   */
+  body = new Uint8Array(0);
+
+  /**
+   * SPX256f over H(release-sign-tag, body)
+   *
+   * @generated from field: bytes recipient_signature = 2;
+   */
+  recipientSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RecipientEconomicReleaseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RecipientEconomicReleaseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "recipient_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecipientEconomicReleaseV1 {
+    return new RecipientEconomicReleaseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecipientEconomicReleaseV1 {
+    return new RecipientEconomicReleaseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecipientEconomicReleaseV1 {
+    return new RecipientEconomicReleaseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RecipientEconomicReleaseV1 | PlainMessage<RecipientEconomicReleaseV1> | undefined, b: RecipientEconomicReleaseV1 | PlainMessage<RecipientEconomicReleaseV1> | undefined): boolean {
+    return proto3.util.equals(RecipientEconomicReleaseV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DsmSuccessorEvidenceV1
+ */
+export class DsmSuccessorEvidenceV1 extends Message<DsmSuccessorEvidenceV1> {
+  /**
+   * @generated from field: bytes rel_key = 1;
+   */
+  relKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes embedded_parent = 2;
+   */
+  embeddedParent = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_devid = 3;
+   */
+  counterpartyDevid = new Uint8Array(0);
+
+  /**
+   * Operation::to_bytes (canonical)
+   *
+   * @generated from field: bytes operation_bytes = 4;
+   */
+  operationBytes = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes entropy = 5;
+   */
+  entropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: optional bytes encapsulated_entropy = 6;
+   */
+  encapsulatedEntropy?: Uint8Array;
+
+  /**
+   * @generated from field: bytes c_dsm_plus = 7;
+   */
+  cDsmPlus = new Uint8Array(0);
+
+  /**
+   * SPX256f under the owner AK
+   *
+   * @generated from field: bytes sigma_dsm = 8;
+   */
+  sigmaDsm = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DsmSuccessorEvidenceV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DsmSuccessorEvidenceV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "rel_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "embedded_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "counterparty_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "encapsulated_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 7, name: "c_dsm_plus", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "sigma_dsm", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DsmSuccessorEvidenceV1 {
+    return new DsmSuccessorEvidenceV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DsmSuccessorEvidenceV1 {
+    return new DsmSuccessorEvidenceV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DsmSuccessorEvidenceV1 {
+    return new DsmSuccessorEvidenceV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DsmSuccessorEvidenceV1 | PlainMessage<DsmSuccessorEvidenceV1> | undefined, b: DsmSuccessorEvidenceV1 | PlainMessage<DsmSuccessorEvidenceV1> | undefined): boolean {
+    return proto3.util.equals(DsmSuccessorEvidenceV1, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.AnchorPresentationV3
  */
 export class AnchorPresentationV3 extends Message<AnchorPresentationV3> {
@@ -9138,7 +9839,7 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
  * makes trader-vs-close and trader-vs-trader exclusivity exact.
  *
  * The signature covers the BODY only (you cannot sign bytes that contain the
- * signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v1" || 0x00 ||
+ * signature): `SPHINCS+(sk, BLAKE3("DSM/settlement-slot-claim/v2" || 0x00 ||
  * canonical_body_bytes))`. Nodes verify claimant ATTRIBUTION — the body's
  * `claimant_public_key` must be the authenticated caller's device key and the
  * signature must verify — so an authenticated caller cannot claim as someone
@@ -9146,10 +9847,16 @@ export class VaultPendingPointerV1 extends Message<VaultPendingPointerV1> {
  * fields, decode→re-encode equality; the client encodes ONCE and retains the
  * exact envelope bytes for every retry (a byte-different re-encode reads as a
  * different claimant at the node).
+ * V2 (3.6): KEY BY NAME, BIND BY STATE — the register key stays
+ * (vault_id, parent_sequence) so two contestants with divergent views of V_n
+ * still contend for ONE cell, and the body binds the exact parent vault state
+ * `c_n = H(DSM/vault-state, CCB(V_n))` so a divergence is a detectable
+ * contradiction rather than two silent winners. V1 (no parent binding) is
+ * deleted and its domains are burned; the beta wipe covers persisted cells.
  *
- * @generated from message dsm.SettlementSlotClaimBodyV1
+ * @generated from message dsm.SettlementSlotClaimBodyV2
  */
-export class SettlementSlotClaimBodyV1 extends Message<SettlementSlotClaimBodyV1> {
+export class SettlementSlotClaimBodyV2 extends Message<SettlementSlotClaimBodyV2> {
   /**
    * @generated from field: bytes vault_id = 1;
    */
@@ -9181,78 +9888,309 @@ export class SettlementSlotClaimBodyV1 extends Message<SettlementSlotClaimBodyV1
    */
   storageSetId = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<SettlementSlotClaimBodyV1>) {
+  /**
+   * The exact parent vault state this claim consumes.
+   *
+   * @generated from field: bytes parent_binding_c_n = 6;
+   */
+  parentBindingCN = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SettlementSlotClaimBodyV2>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SettlementSlotClaimBodyV1";
+  static readonly typeName = "dsm.SettlementSlotClaimBodyV2";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "parent_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "parent_binding_c_n", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimBodyV1 {
-    return new SettlementSlotClaimBodyV1().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimBodyV2 {
+    return new SettlementSlotClaimBodyV2().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV1 {
-    return new SettlementSlotClaimBodyV1().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV2 {
+    return new SettlementSlotClaimBodyV2().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV1 {
-    return new SettlementSlotClaimBodyV1().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimBodyV2 {
+    return new SettlementSlotClaimBodyV2().fromJsonString(jsonString, options);
   }
 
-  static equals(a: SettlementSlotClaimBodyV1 | PlainMessage<SettlementSlotClaimBodyV1> | undefined, b: SettlementSlotClaimBodyV1 | PlainMessage<SettlementSlotClaimBodyV1> | undefined): boolean {
-    return proto3.util.equals(SettlementSlotClaimBodyV1, a, b);
+  static equals(a: SettlementSlotClaimBodyV2 | PlainMessage<SettlementSlotClaimBodyV2> | undefined, b: SettlementSlotClaimBodyV2 | PlainMessage<SettlementSlotClaimBodyV2> | undefined): boolean {
+    return proto3.util.equals(SettlementSlotClaimBodyV2, a, b);
   }
 }
 
 /**
- * @generated from message dsm.SettlementSlotClaimV1
+ * @generated from message dsm.SettlementSlotClaimV2
  */
-export class SettlementSlotClaimV1 extends Message<SettlementSlotClaimV1> {
+export class SettlementSlotClaimV2 extends Message<SettlementSlotClaimV2> {
   /**
-   * @generated from field: dsm.SettlementSlotClaimBodyV1 body = 1;
+   * @generated from field: dsm.SettlementSlotClaimBodyV2 body = 1;
    */
-  body?: SettlementSlotClaimBodyV1;
+  body?: SettlementSlotClaimBodyV2;
 
   /**
    * @generated from field: bytes signature = 2;
    */
   signature = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<SettlementSlotClaimV1>) {
+  constructor(data?: PartialMessage<SettlementSlotClaimV2>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.SettlementSlotClaimV1";
+  static readonly typeName = "dsm.SettlementSlotClaimV2";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "body", kind: "message", T: SettlementSlotClaimBodyV1 },
+    { no: 1, name: "body", kind: "message", T: SettlementSlotClaimBodyV2 },
     { no: 2, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimV1 {
-    return new SettlementSlotClaimV1().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementSlotClaimV2 {
+    return new SettlementSlotClaimV2().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimV1 {
-    return new SettlementSlotClaimV1().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementSlotClaimV2 {
+    return new SettlementSlotClaimV2().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimV1 {
-    return new SettlementSlotClaimV1().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementSlotClaimV2 {
+    return new SettlementSlotClaimV2().fromJsonString(jsonString, options);
   }
 
-  static equals(a: SettlementSlotClaimV1 | PlainMessage<SettlementSlotClaimV1> | undefined, b: SettlementSlotClaimV1 | PlainMessage<SettlementSlotClaimV1> | undefined): boolean {
-    return proto3.util.equals(SettlementSlotClaimV1, a, b);
+  static equals(a: SettlementSlotClaimV2 | PlainMessage<SettlementSlotClaimV2> | undefined, b: SettlementSlotClaimV2 | PlainMessage<SettlementSlotClaimV2> | undefined): boolean {
+    return proto3.util.equals(SettlementSlotClaimV2, a, b);
+  }
+}
+
+/**
+ * A trader's claim on one cell of the economic root register: the write-once
+ * value at K_root = H("DSM/trader-economic-root-register-key/v1" || 0x00 || G
+ * || DevID || u64_be(economic_position)).
+ *
+ * Registering establishes NON-EQUIVOCATION and nothing else: this identity
+ * named one root at this position and can never name a second. It does NOT
+ * establish that the root resulted from a valid transition — a malicious
+ * trader registers an arbitrary root perfectly consistently. accepted_root is
+ * not valid_root, and nodes never judge which it is.
+ *
+ * The body travels as its EXACT CCB bytes (object class 0x001B, schema 1),
+ * NOT as a nested proto mirror. Canonicalization for the body already exists
+ * and is what the signature covers; a proto mirror would be a second canonical
+ * form of one object, and the two could disagree. So this envelope is a
+ * carrier, not a re-description.
+ *
+ * The signature covers the BODY only (you cannot sign bytes containing the
+ * signature): SPHINCS+(sk, BLAKE3("DSM/economic-root-claim-sign/v1" || 0x00 ||
+ * body_ccb)). Members verify claimant ATTRIBUTION only — the body's
+ * claimant_public_key must be the authenticated caller's device key, the
+ * body's trader_devid must be the caller's device, the signature must verify,
+ * and the body's storage_set_id must be this member's own set. Attribution is
+ * not politeness: the register is write-once, so without it anyone could
+ * preempt a victim's next position and permanently burn it.
+ *
+ * Strict: decode -> re-encode equality. The client encodes ONCE and retains
+ * the exact envelope bytes for every retry, because a byte-different re-encode
+ * is a different value at a write-once cell.
+ *
+ * @generated from message dsm.EconomicRootClaimV1
+ */
+export class EconomicRootClaimV1 extends Message<EconomicRootClaimV1> {
+  /**
+   * @generated from field: bytes body_ccb = 1;
+   */
+  bodyCcb = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes claimant_signature = 2;
+   */
+  claimantSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EconomicRootClaimV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EconomicRootClaimV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "claimant_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EconomicRootClaimV1 {
+    return new EconomicRootClaimV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EconomicRootClaimV1 {
+    return new EconomicRootClaimV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EconomicRootClaimV1 {
+    return new EconomicRootClaimV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EconomicRootClaimV1 | PlainMessage<EconomicRootClaimV1> | undefined, b: EconomicRootClaimV1 | PlainMessage<EconomicRootClaimV1> | undefined): boolean {
+    return proto3.util.equals(EconomicRootClaimV1, a, b);
+  }
+}
+
+/**
+ * A claim on ONE single-use ERA faucet ticket — the unit of the network's
+ * finite bootstrap allocation (800,000,000 tickets x 100 ERA = 80B ERA per
+ * DSM network; era_faucet_id is network-scoped).
+ *
+ * Consuming the ticket IS the source depletion: there is no faucet reserve
+ * leaf, no mutable `remaining`, no global faucet successor chain. Each ticket
+ * is an independent write-once cell keyed (faucet_id, ticket_index), so a
+ * contested or poisoned ticket affects only itself and the faucet cannot be
+ * bricked at a shared head.
+ *
+ * The body binds the claimant identity (genesis/devid/AK), the TARGET
+ * economic position, and the recipient operation digest. Position + digest
+ * binding is the non-reuse mechanism: the envelope commits ONE target
+ * position (whose root-register cell is itself write-once) and ONE exact
+ * operation, so a winning ticket funds at most one validated credit.
+ *
+ * Signature covers the BODY only:
+ * SPHINCS+(sk, BLAKE3("DSM/era-faucet-ticket-claim-sign/v1" || 0x00 ||
+ * canonical_body_bytes)). Members verify claimant ATTRIBUTION (public key and
+ * devid == authenticated caller) plus COORDINATE VALIDITY (canonical
+ * faucet_id, ticket_index < 800M) — rejecting a coordinate that does not
+ * exist in the protocol is not judging economics; it denies an invented
+ * faucet universe any place to write. Everything beyond that (balances,
+ * provenance, admission) is judged by verifiers, never by nodes.
+ *
+ * Strict: decode -> re-encode equality; the client signs ONCE and replays the
+ * exact bytes on every retry (a byte-different re-encode is a different value
+ * at a write-once cell).
+ *
+ * @generated from message dsm.FaucetTicketClaimBodyV1
+ */
+export class FaucetTicketClaimBodyV1 extends Message<FaucetTicketClaimBodyV1> {
+  /**
+   * @generated from field: bytes faucet_id = 1;
+   */
+  faucetId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 ticket_index = 2;
+   */
+  ticketIndex = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes claimant_genesis = 3;
+   */
+  claimantGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes claimant_devid = 4;
+   */
+  claimantDevid = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 claimant_economic_position = 5;
+   */
+  claimantEconomicPosition = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes recipient_operation_digest = 6;
+   */
+  recipientOperationDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes claimant_public_key = 7;
+   */
+  claimantPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes storage_set_id = 8;
+   */
+  storageSetId = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<FaucetTicketClaimBodyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.FaucetTicketClaimBodyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "faucet_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ticket_index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "claimant_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "claimant_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "claimant_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "recipient_operation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetTicketClaimBodyV1 {
+    return new FaucetTicketClaimBodyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FaucetTicketClaimBodyV1 {
+    return new FaucetTicketClaimBodyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FaucetTicketClaimBodyV1 {
+    return new FaucetTicketClaimBodyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: FaucetTicketClaimBodyV1 | PlainMessage<FaucetTicketClaimBodyV1> | undefined, b: FaucetTicketClaimBodyV1 | PlainMessage<FaucetTicketClaimBodyV1> | undefined): boolean {
+    return proto3.util.equals(FaucetTicketClaimBodyV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.FaucetTicketClaimV1
+ */
+export class FaucetTicketClaimV1 extends Message<FaucetTicketClaimV1> {
+  /**
+   * @generated from field: dsm.FaucetTicketClaimBodyV1 body = 1;
+   */
+  body?: FaucetTicketClaimBodyV1;
+
+  /**
+   * @generated from field: bytes claimant_signature = 2;
+   */
+  claimantSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<FaucetTicketClaimV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.FaucetTicketClaimV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "body", kind: "message", T: FaucetTicketClaimBodyV1 },
+    { no: 2, name: "claimant_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetTicketClaimV1 {
+    return new FaucetTicketClaimV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FaucetTicketClaimV1 {
+    return new FaucetTicketClaimV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FaucetTicketClaimV1 {
+    return new FaucetTicketClaimV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: FaucetTicketClaimV1 | PlainMessage<FaucetTicketClaimV1> | undefined, b: FaucetTicketClaimV1 | PlainMessage<FaucetTicketClaimV1> | undefined): boolean {
+    return proto3.util.equals(FaucetTicketClaimV1, a, b);
   }
 }
 
@@ -9597,10 +10535,10 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   feeBps = 0;
 
   /**
-   * Hash of the canonical CPTA spec describing the vault's unlock
-   * condition set (constant product, stable swap, custom curve, …).
-   * Routers verify a vault is satisfiable by re-fetching the spec
-   * bytes via the `unlock_spec_key` storage pointer below.
+   * The vault's DLV-POLICY digest, echoed from the vault record (which
+   * holds the value dlv.create derived and the creator signed). The
+   * publisher fills it from the record; a caller may leave it empty or
+   * repeat the record's value, never choose one. Not a CPTA anchor.
    *
    * @generated from field: bytes unlock_spec_digest = 8;
    */
@@ -21473,55 +22411,9 @@ export class RecoveryBundleV1 extends Message<RecoveryBundleV1> {
 }
 
 /**
- * One device-level balance-witness entry (CPTA policy_commit -> u64 balance). Encoded
- * sorted by policy_commit to match the canonical chain-tip hash (BTreeMap order).
- *
- * @generated from message dsm.BalanceWitnessEntryProto
- */
-export class BalanceWitnessEntryProto extends Message<BalanceWitnessEntryProto> {
-  /**
-   * @generated from field: bytes policy_commit = 1;
-   */
-  policyCommit = new Uint8Array(0);
-
-  /**
-   * @generated from field: uint64 value = 2;
-   */
-  value = protoInt64.zero;
-
-  constructor(data?: PartialMessage<BalanceWitnessEntryProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BalanceWitnessEntryProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "value", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceWitnessEntryProto {
-    return new BalanceWitnessEntryProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BalanceWitnessEntryProto {
-    return new BalanceWitnessEntryProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BalanceWitnessEntryProto {
-    return new BalanceWitnessEntryProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BalanceWitnessEntryProto | PlainMessage<BalanceWitnessEntryProto> | undefined, b: BalanceWitnessEntryProto | PlainMessage<BalanceWitnessEntryProto> | undefined): boolean {
-    return proto3.util.equals(BalanceWitnessEntryProto, a, b);
-  }
-}
-
-/**
  * Faithful wire codec for `dsm::types::device_state::RelationshipChainState`. Round-trips
- * EVERY field that feeds `compute_chain_tip()` (rel_key, embedded_parent, counterparty_devid,
- * canonical operation bytes, entropy, optional encapsulated_entropy, sorted balance witness)
+ * EVERY field that feeds the v2 chain-tip preimage (rel_key, embedded_parent,
+ * counterparty_devid, canonical operation bytes, entropy, optional encapsulated_entropy)
  * plus the two optional signatures (NOT hashed — they sign the digest). proto3 `optional`
  * distinguishes None from an empty Some, which the chain-tip hash treats differently; a
  * faithful round-trip is REQUIRED so a decoder can recompute the tip and assert equality.
@@ -21564,11 +22456,9 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
   encapsulatedEntropy?: Uint8Array;
 
   /**
-   * @generated from field: repeated dsm.BalanceWitnessEntryProto balance_witness = 8;
-   */
-  balanceWitness: BalanceWitnessEntryProto[] = [];
-
-  /**
+   * balance-free (DSM/relationship-chain-tip/v2); R_econ is the sole
+   * authenticated online balance representation
+   *
    * SPX256f
    *
    * @generated from field: optional bytes entity_sig = 9;
@@ -21596,7 +22486,6 @@ export class RelationshipChainStateProto extends Message<RelationshipChainStateP
     { no: 4, name: "operation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "encapsulated_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
-    { no: 8, name: "balance_witness", kind: "message", T: BalanceWitnessEntryProto, repeated: true },
     { no: 9, name: "entity_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
     { no: 10, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
@@ -22329,6 +23218,26 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
    */
   receiptEvidenceDigest = new Uint8Array(0);
 
+  /**
+   * ── Sender economic locators (3.5b) ──────────────────────────────────────
+   * Sender economic coordinates on OnlineTransferRequest are untrusted
+   * locators, never authority; the verifier accepts them only after the
+   * resolved ValidatedEconomicRoot proves that the named debit belongs to the
+   * exact signed online Transfer addressed to this consuming identity.
+   * The values are OUTPUTS of the sender's built admission (the admitted
+   * position and THE debit mutation index of the exact write set), populated
+   * in the same staged build phase that freezes this envelope — never
+   * predicted beside it.
+   *
+   * @generated from field: uint64 sender_economic_position = 13;
+   */
+  senderEconomicPosition = protoInt64.zero;
+
+  /**
+   * @generated from field: uint32 sender_debit_mutation_index = 14;
+   */
+  senderDebitMutationIndex = 0;
+
   constructor(data?: PartialMessage<OnlineTransferRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22348,6 +23257,8 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
     { no: 9, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "receipt_evidence_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "sender_economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 14, name: "sender_debit_mutation_index", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferRequest {
@@ -22510,6 +23421,21 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
    */
   bChildTip = new Uint8Array(0);
 
+  /**
+   * 3.5b PR4: the CONTENT ADDRESS of the recipient's post-admission RELEASE
+   * (namespace DSM/recipient-economic-release/v1; the ~50KB SPHINCS+ release
+   * inline would exceed the reply-envelope cap). The countersign DELTA must
+   * carry it and the sender finalizes only after fetching + verifying the
+   * exact release bytes AND independently validating the registered root the
+   * release names — bare sig_b is acceptance provenance, insufficient to
+   * finalize. Left EMPTY inside acceptance bundles (the provenance object),
+   * which never carry finalization authority. The release object is frozen
+   * in the ADMIT transaction, never earlier.
+   *
+   * @generated from field: bytes recipient_economic_release_addr = 9;
+   */
+  recipientEconomicReleaseAddr = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ReceiptCountersignB>) {
     super();
     proto3.util.initPartial(data, this);
@@ -22526,6 +23452,7 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
     { no: 6, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "b_parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "b_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "recipient_economic_release_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptCountersignB {

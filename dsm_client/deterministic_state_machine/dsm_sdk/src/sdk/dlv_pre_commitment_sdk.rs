@@ -114,6 +114,8 @@ impl DlvPreCommitmentSdk {
                 intended_recipient.clone(),
                 encryption_key,
                 &reference_state.hash,
+                // No DLV-layer policy object here (not an AMM vault): nothing to derive.
+                None,
             )?;
             let creator_signature = dsm::crypto::sphincs::sphincs_sign(
                 creator_signing_keypair.secret_key(),

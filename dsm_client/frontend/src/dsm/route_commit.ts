@@ -283,8 +283,10 @@ export async function publishRoutingAdvertisement(input: {
     if (!input?.vaultId || input.vaultId.length !== 32) {
       return { success: false, error: 'vaultId must be 32 bytes' };
     }
-    if (!input.unlockSpecDigest || input.unlockSpecDigest.length !== 32) {
-      return { success: false, error: 'unlockSpecDigest must be 32 bytes' };
+    // Empty means "the record's": Rust fills the advertised DLV-policy
+    // digest from the vault record and refuses any other value.
+    if (input.unlockSpecDigest && input.unlockSpecDigest.length !== 0 && input.unlockSpecDigest.length !== 32) {
+      return { success: false, error: 'unlockSpecDigest must be empty (derived) or 32 bytes' };
     }
     const req = new pb.PublishRoutingAdvertisementRequest({
       vaultId: input.vaultId as any,
@@ -294,7 +296,7 @@ export async function publishRoutingAdvertisement(input: {
       // encumbered reserve leaves — a client that could state its own
       // liquidity could advertise a vault it had never funded.
       feeBps: input.feeBps,
-      unlockSpecDigest: input.unlockSpecDigest as any,
+      unlockSpecDigest: (input.unlockSpecDigest ?? new Uint8Array()) as any,
       unlockSpecKey: input.unlockSpecKey,
       // Empty bytes → Rust accept-or-stamp; wallet pk is filled in.
       ownerPublicKey: (input.ownerPublicKey ?? new Uint8Array()) as any,

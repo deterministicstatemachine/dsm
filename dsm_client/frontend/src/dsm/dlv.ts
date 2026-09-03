@@ -27,8 +27,11 @@ import { decodeFramedEnvelopeV3 } from './decoding';
  * mismatches.
  */
 export interface BuildDlvInstantiateInput {
-  /** 32-byte CPTA anchor bound to the token's policy.  Typically the
-   *  Base32-Crockford-decoded response from `tokens.publishPolicy`. */
+  /**
+   * The DLV-policy digest of the vault being instantiated — NOT a CPTA/token
+   * anchor. For a custom (non-AMM) DLV there is no DLV-layer policy object to
+   * derive it from, so the 32 bytes are caller-supplied and creator-signed.
+   */
   policyDigest: Uint8Array;
   /** Optional pre-computed digest.  Default = empty (Rust computes). */
   contentDigest?: Uint8Array;

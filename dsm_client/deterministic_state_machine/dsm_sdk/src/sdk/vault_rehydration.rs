@@ -81,6 +81,13 @@ pub(crate) enum RehydrationError {
     /// and every settlement, so its absence means these legs were not produced
     /// by a vault transition — there is nothing to check the record against.
     VaultStateLeafMissing,
+    /// The record's `policy_digest` is not the DLV-policy digest derived from
+    /// the vault's release and fee policy. The digest is a deterministic view of
+    /// the two DLV-layer members the creator-signed `VaultStateV2` commits;
+    /// `dlv.create` derives it and persists only that value, so a row carrying
+    /// anything else was not written by the producer. (The fee itself was
+    /// already checked against the root-committed leaf above.)
+    PolicyDigestNotDerived,
     /// The record disagrees with the vault-state leaf this device wrote. The
     /// leaf folds the pair, the fee and both reserves at this generation into
     /// one value; recomputing it from the record and the legs must reproduce it
@@ -112,6 +119,10 @@ impl std::fmt::Display for RehydrationError {
             RehydrationError::VaultStateLeafMissing => write!(
                 f,
                 "the device root commits no vault-state leaf for this vault; its reserve legs were not written by a vault transition"
+            ),
+            RehydrationError::PolicyDigestNotDerived => write!(
+                f,
+                "the vault record's policy_digest is not the DLV-policy digest derived from its release and fee policy; the digest is derived, never stored on trust"
             ),
             RehydrationError::RecordDisagreesWithRoot => write!(
                 f,
@@ -212,6 +223,24 @@ pub(crate) fn rehydrate_amm_vault(
         )
     {
         return Err(RehydrationError::RecordDisagreesWithRoot);
+    }
+
+    // THE POLICY DIGEST IS A DERIVED VIEW, SO DERIVE IT AGAIN. The record's
+    // fee has just been proven against the root-committed leaf; the release
+    // family is the one admissible beta family (the CCB decoder refuses any
+    // other). A row whose digest is not the view of those two was not written
+    // by `dlv.create`, and the value it carries is what every advertisement
+    // and route hop would repeat. `FeePolicy::new` also refuses a fee at or
+    // above the denominator, which the leaf pair does not bound on its own.
+    let fee = dsm::ccb::FeePolicy::new(record.fee_bps)
+        .map_err(|_| RehydrationError::RecordNotCanonical)?;
+    if record.policy_digest
+        != dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &fee,
+        )
+    {
+        return Err(RehydrationError::PolicyDigestNotDerived);
     }
 
     Ok(RehydratedVault {
@@ -327,6 +356,15 @@ pub(crate) async fn unapplied_settlements_for_vault(
 
 #[cfg(test)]
 mod tests {
+    /// The DLV-policy digest a record for this fee carries — a derived view of
+    /// the beta release family and the fee, exactly what `dlv.create` persists.
+    fn derived_policy_digest(fee_bps: u32) -> [u8; 32] {
+        dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &dsm::ccb::FeePolicy::new(fee_bps).expect("fee below the denominator"),
+        )
+    }
+
     use super::*;
     use crate::storage::client_db::amm_vault_records::{get_amm_vault_record, put_amm_vault_record};
     use serial_test::serial;
@@ -459,7 +497,7 @@ mod tests {
             policy_commit_b: pc_b,
             fee_bps: 30,
             anchor_enforcement: REQUIRED,
-            policy_digest: [0x5A; 32],
+            policy_digest: derived_policy_digest(30),
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
@@ -509,7 +547,11 @@ mod tests {
         assert_eq!(after.pair.a(), [0x11u8; 32]);
         assert_eq!(after.pair.b(), [0x22u8; 32]);
         assert_eq!(after.fee_bps, 30);
-        assert_eq!(after.policy_digest, [0x5A; 32]);
+        assert_eq!(
+            after.policy_digest,
+            derived_policy_digest(30),
+            "the DLV-policy digest survives the restart as the derived view"
+        );
     }
 
     /// The quote inputs a trader would derive are the same before and after, so
@@ -677,6 +719,28 @@ mod tests {
         );
     }
 
+    /// THE POLICY DIGEST IS RE-DERIVED, NOT TRUSTED. A record whose
+    /// `policy_digest` is not the view of its (leaf-proven) fee and the beta
+    /// release family was not written by `dlv.create`, and fails closed
+    /// before the value can reach an advertisement or a route hop.
+    #[test]
+    #[serial]
+    fn a_record_whose_policy_digest_is_not_the_derived_view_fails_closed() {
+        init_test_db();
+        let (record, head) = funded_and_advanced();
+        assert!(
+            rehydrate_amm_vault(&record, &head).is_ok(),
+            "the record as written carries the derived digest and rebuilds"
+        );
+        let mut tampered = record.clone();
+        tampered.policy_digest = [0x99u8; 32];
+        assert_eq!(
+            rehydrate_amm_vault(&tampered, &head),
+            Err(RehydrationError::PolicyDigestNotDerived),
+            "a digest that is not the derived view is refused by name"
+        );
+    }
+
     /// THE ROOT-VERSUS-ROW GATE. The record supplies the fee; the device root
     /// COMMITS it, in the vault-state leaf every funding and every settlement
     /// writes. A row claiming a fee the root never committed must not produce a
@@ -786,7 +850,7 @@ mod tests {
             policy_commit_b: pc_b,
             fee_bps: 30,
             anchor_enforcement: REQUIRED,
-            policy_digest: [0x5A; 32],
+            policy_digest: derived_policy_digest(30),
             storage_set_id: [0x6B; 32],
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),

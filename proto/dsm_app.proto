@@ -754,12 +754,15 @@ message LimboVaultProto {
   repeated bytes verification_positions = 12;
   bytes reference_state_hash = 13;
   optional bytes entry_header = 14; // 80-byte Bitcoin block header cached at entry (Invariant 19, §12.2.3)
-  // Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
-  // (32 bytes, BLAKE3 anchor of the CPTA spec).  Re-used as the
-  // routing advertisement's `unlock_spec_digest` so the LiquidityScreen
-  // republish path can fetch the real digest instead of stamping zeros.
-  // Optional for backward compatibility with vaults created before this
-  // field was added; legacy vaults render with no Publish-retry button.
+  // The vault's DLV-POLICY digest — its behavioural-policy identity, NOT a
+  // CPTA/token anchor (the pair's two CPTA commits are separate, independent
+  // token-policy authorities carried by the AMM predicate). For an AMM vault
+  // it is BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)),
+  // a deterministic view of the two DLV-layer members the creator-signed
+  // VaultStateV2 commits; dlv.create derives it and folds it into the
+  // creator-signed parameters_hash. Re-used as the routing advertisement's
+  // `unlock_spec_digest`. Optional only because the field post-dates the
+  // proto; a vault without it cannot be advertised.
   optional bytes policy_digest = 15;
 }
 
@@ -926,11 +929,11 @@ message TokenCreateResponse {
 }
 
 // ------------------------- DLV Lifecycle Objects --------------------------
-// Device-neutral, content-addressed vault template.
-// spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
-//     policy_digest || content_digest || fulfillment_digest || recipient_digest)
-// where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
-// else 32 zero bytes.
+// Device-neutral vault template. The creator-signed binding of a spec is
+// LimboVault.parameters_hash (creator key, vault id, reference state,
+// fulfillment, recipient, content commitment, DLV-policy digest); there is
+// no separate spec_id — the derivation once described here was never
+// implemented and is not a link in any authority chain.
 
 // Anchor enforcement posture for an AMM vault.
 //
@@ -956,7 +959,12 @@ enum AnchorEnforcement {
 }
 
 message DlvSpecV1 {
-  bytes policy_digest       = 1 [(dsm_fixed_len)=32];  // CPTA anchor
+  // The DLV-POLICY digest, NOT a CPTA anchor: the vault's own behavioural-
+  // policy identity, distinct from the two token policies the AMM predicate
+  // names. For an AMM vault it is DERIVED by dlv.create —
+  // BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)) —
+  // so leave it EMPTY; a supplied value that is not the derivation is refused.
+  bytes policy_digest       = 1 [(dsm_fixed_len)=32];
   bytes content_digest      = 2 [(dsm_fixed_len)=32];  // H("DSM/dlv-content", content)
   bytes fulfillment_digest  = 3 [(dsm_fixed_len)=32];  // H("DSM/dlv-fulfillment", fulfillment_bytes)
   bytes intended_recipient  = 4 [(dsm_max_len)=1568];  // Kyber pk, optional (empty = self-encrypted)
@@ -1801,10 +1809,10 @@ message RoutingVaultAdvertisementV1 {
   // Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
   // the routing graph weights deterministic and clockless.
   uint32 fee_bps                 = 7;
-  // Hash of the canonical CPTA spec describing the vault's unlock
-  // condition set (constant product, stable swap, custom curve, …).
-  // Routers verify a vault is satisfiable by re-fetching the spec
-  // bytes via the `unlock_spec_key` storage pointer below.
+  // The vault's DLV-POLICY digest, echoed from the vault record (which
+  // holds the value dlv.create derived and the creator signed). The
+  // publisher fills it from the record; a caller may leave it empty or
+  // repeat the record's value, never choose one. Not a CPTA anchor.
   bytes  unlock_spec_digest      = 8 [(dsm_fixed_len)=32];
   string unlock_spec_key         = 9;
   bytes  vault_proto_key         = 10; // not [(dsm_fixed_len)] — string blob
