@@ -1967,10 +1967,27 @@ impl AppRouterImpl {
             let Some(head) = self.core_sdk.device_head() else {
                 return Ok(finished);
             };
-            let Ok(live) = crate::sdk::vault_rehydration::rehydrate_amm_vault(&record, &head)
-            else {
-                abandon("the vault could not be rehydrated");
-                continue;
+            let live = match crate::sdk::vault_rehydration::rehydrate_amm_vault(&record, &head) {
+                Ok(v) => v,
+                // These two say something about the HEAD we are holding, not
+                // about the intent: a head that has not caught up commits no
+                // vault-state leaf for this vault, or commits one the row does
+                // not match yet. Abandoning is irreversible, so keep the
+                // intent and try again — the same treatment composition-
+                // unavailable gets below.
+                Err(
+                    e @ (crate::sdk::vault_rehydration::RehydrationError::VaultStateLeafMissing
+                    | crate::sdk::vault_rehydration::RehydrationError::RecordDisagreesWithRoot),
+                ) => {
+                    log::warn!(
+                        "[dlv.close resume] {vault_b32}: not resumable against this head: {e}"
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    abandon("the vault could not be rehydrated");
+                    continue;
+                }
             };
             if live.current_sequence != intent.parent_sequence {
                 // Either the close already committed (leaves at parent+1) or a
