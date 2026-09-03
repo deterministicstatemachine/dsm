@@ -76,7 +76,7 @@ pub(crate) fn can_sign() -> bool {
 // an input to the derivation and is retained only for call-site compatibility.
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn derive_signing_keypair_for_testing(
     _device_id: &[u8],
     genesis_hash: &[u8],
@@ -93,7 +93,7 @@ pub(crate) fn derive_signing_keypair_for_testing(
     crate::init::derive_device_signing_keypair(wallet_seed, &genesis)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn derive_signing_keys_for_testing(
     device_id: &[u8],
     genesis_hash: &[u8],

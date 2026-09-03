@@ -61,22 +61,6 @@ fn configure_local_identity_for_receipts(
     );
 }
 
-fn seed_era_projection(device_txt: &str, available: u64) {
-    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
-        balance_key: format!("test:{device_txt}:ERA"),
-        device_id: device_txt.to_string(),
-        token_id: "ERA".to_string(),
-        policy_commit: dsm_sdk::util::text_id::encode_base32_crockford(
-            dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
-        ),
-        available,
-        locked: 0,
-        source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
-        updated_at: 0,
-    })
-    .expect("seed ERA projection");
-}
-
 #[tokio::test]
 #[ignore = "requires live AWS storage nodes for MPC genesis"]
 #[allow(clippy::await_holding_lock)]
@@ -198,10 +182,6 @@ async fn verify_frontend_event_guarantees() {
 
     let alice_mgr_shared = Arc::new(RwLock::new(alice_mgr));
     let bob_mgr_shared = Arc::new(RwLock::new(bob_mgr));
-
-    // Seed Alice's ERA balance via projection storage.
-    let alice_device_txt = dsm_sdk::util::text_id::encode_base32_crockford(&alice_dev_id);
-    seed_era_projection(&alice_device_txt, 10_000);
 
     // --- CRITICAL TEST SETUP: Capture Events on Alice ---
     let captured_events = Arc::new(Mutex::new(Vec::new()));

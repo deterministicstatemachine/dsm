@@ -14,36 +14,11 @@
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
-use std::path::PathBuf;
 
 use dsm_sdk::bridge::{AppInvoke, AppQuery, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::reset_database_for_tests;
-
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "vault-funding-test".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
-}
 
 fn pack(body: Vec<u8>) -> Vec<u8> {
     generated::ArgPack {
@@ -85,8 +60,7 @@ fn query(r: &AppRouterImpl, path: &str, params: Vec<u8>) -> dsm_sdk::bridge::App
 #[serial_test::serial]
 fn an_unfunded_vault_cannot_be_advertised() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     let req = generated::PublishRoutingAdvertisementRequest {
         vault_id: vec![0x77u8; 32],
@@ -120,8 +94,7 @@ fn an_unfunded_vault_cannot_be_advertised() {
 #[serial_test::serial]
 fn an_advertisement_pair_must_be_policy_commits_not_labels() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     let req = generated::PublishRoutingAdvertisementRequest {
         vault_id: vec![0x77u8; 32],
@@ -156,8 +129,7 @@ fn an_advertisement_pair_must_be_policy_commits_not_labels() {
 #[serial_test::serial]
 fn routed_settlement_refuses_a_vault_with_no_verified_reserve_proof() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     let req = generated::DlvUnlockRoutedV1 {
         vault_id: vec![0x77u8; 32],
@@ -199,8 +171,7 @@ fn amm_fulfillment_bytes(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
 #[serial_test::serial]
 fn a_funding_leg_that_is_not_a_policy_commit_fails_closed() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     // A ticker, an empty identity, and near-miss lengths.
     for bad in [
@@ -250,8 +221,7 @@ fn a_funding_leg_that_is_not_a_policy_commit_fails_closed() {
 #[serial_test::serial]
 fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     // Two tokens a user would both call "RIGB".
     let rigb_one = [0x11u8; 32];
@@ -317,8 +287,7 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
 #[serial_test::serial]
 fn eligibility_is_rejected_before_any_reserve_or_settlement_work() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     // A structurally valid request whose RouteCommit cannot pass eligibility:
     // the initiator signature is absent, so nothing about this route is
@@ -370,8 +339,7 @@ fn eligibility_is_rejected_before_any_reserve_or_settlement_work() {
 #[serial_test::serial]
 fn claim_and_invalidate_take_typed_protos_not_a_bare_vault_id() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     for method in ["dlv.claim", "dlv.invalidate"] {
         // A bare vault id: not a `DlvClaimV1`, and not a `DlvInvalidateV1`.
@@ -432,8 +400,7 @@ fn claim_and_invalidate_take_typed_protos_not_a_bare_vault_id() {
 #[serial_test::serial]
 fn settlement_reaches_the_reserve_gate_and_refuses_unproven_liquidity() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     let vault_id = [0x77u8; 32];
     let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
@@ -481,8 +448,7 @@ fn settlement_reaches_the_reserve_gate_and_refuses_unproven_liquidity() {
 #[serial_test::serial]
 fn every_sofi_route_is_reachable_through_the_dispatcher() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
 
     // ENUMERATED, not sampled. A handler arm and the router's match are two
     // different tables, and adding to one without the other produces a route
@@ -634,8 +600,7 @@ fn create_req_for_pair(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
 #[serial_test::serial]
 fn an_unrooted_market_leg_is_refused_at_creation() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
     let phantom = [0x44u8; 32];
     let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
     let res = invoke(
@@ -657,8 +622,7 @@ fn an_unrooted_market_leg_is_refused_at_creation() {
 #[serial_test::serial]
 fn a_non_transferable_leg_is_refused_at_creation() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
     let proto = market_policy_proto(false);
     let pc =
         dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
@@ -684,8 +648,7 @@ fn a_non_transferable_leg_is_refused_at_creation() {
 #[serial_test::serial]
 fn a_rooted_transferable_leg_passes_the_policy_gate() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xab);
     let proto = market_policy_proto(true);
     let pc =
         dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);

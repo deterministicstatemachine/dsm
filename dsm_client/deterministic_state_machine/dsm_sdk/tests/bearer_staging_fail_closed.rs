@@ -19,6 +19,10 @@
 //! no process-global factory to leak into neighbouring tests. Inside `cfg(test)` the
 //! `#[cfg(test)]` arm returns a working in-process mock and staging would SUCCEED, so the
 //! same test written as a unit test would silently exercise nothing.
+//!
+//! The sender is a REAL testnet identity whose ERA came from a real faucet admission —
+//! the head the bilateral confirm debits is the canonical head the router persisted, so
+//! "nothing moved" is asserted against value that was actually there to move.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -32,19 +36,22 @@ use dsm::core::bilateral_transaction_manager::{
 };
 use dsm::core::contact_manager::DsmContactManager;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{canonical_offline_bearer_policy, Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
 use dsm_sdk::bluetooth::bilateral_ble_handler::{BilateralBleHandler, BilateralPhase};
+use dsm_sdk::economic_fixtures;
 use dsm_sdk::storage::client_db;
 
-const SENDER: [u8; 32] = [0xA1; 32];
+/// The receiver never holds canonical state here, so a placeholder identity is
+/// all it needs; the SENDER is the real, funded device.
 const RECEIVER: [u8; 32] = [0xB2; 32];
-const GENESIS: [u8; 32] = [0xC3; 32];
-const SEED_ERA: u64 = 500;
-const SEND_AMOUNT: u64 = 100;
+const RECEIVER_GENESIS: [u8; 32] = [0xC3; 32];
+/// What one faucet claim yields — the sender's whole balance.
+const SENDER_ERA: u64 = dsm::economic::faucet::ERA_FAUCET_PAYOUT;
+const SEND_AMOUNT: u64 = 50;
 
 fn era_policy() -> [u8; 32] {
     dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit")
@@ -54,55 +61,53 @@ fn keypair(seed: u8) -> SignatureKeyPair {
     SignatureKeyPair::generate_from_entropy(&[seed; 32]).expect("keypair")
 }
 
-/// Everything global this test touches, reset so a neighbouring test cannot pre-seed it.
-fn install_identity(device_id: [u8; 32], public_key: Vec<u8>) {
-    unsafe {
-        std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        std::env::remove_var("DSM_ENV_CONFIG_PATH");
-    }
+/// The funded sender: a real testnet identity on a fresh database, its router built
+/// on an EMPTY head carrying that identity, then funded through the REAL faucet
+/// admission (0x0030) and persisted by the router's own commit path.
+struct Sender {
+    keypair: SignatureKeyPair,
+    devid: [u8; 32],
+    genesis: [u8; 32],
+    router: dsm_sdk::handlers::app_router_impl::AppRouterImpl,
+    _fleet: economic_fixtures::FleetGuard,
+}
+
+fn funded_sender() -> Sender {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
         "./.dsm_testdata_missing_release",
     ));
-    // The router builds a WalletSDK, which refuses to construct against a locked wallet.
-    dsm_sdk::set_wallet_seed_for_testing(vec![0x5E; 32]);
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        device_id.to_vec(),
-        public_key,
-        GENESIS.to_vec(),
-        vec![0u8; 32],
+    // Offline mode on: the bilateral storage the BLE handler's confirm path
+    // consults exists only when the router is built with it.
+    let (router, keypair, fleet) = economic_fixtures::empty_router_with(0xA1, true);
+    let head = router.core_sdk.device_head().expect("the empty head");
+    let (devid, genesis) = (head.devid(), head.genesis_digest());
+    let position = economic_fixtures::claim_era(&router);
+    assert_eq!(
+        position, 1,
+        "the faucet claim is the sender's economic position 1"
     );
-    dsm_sdk::sdk::app_state::AppState::set_has_identity(true);
+
+    Sender {
+        keypair,
+        devid,
+        genesis,
+        router,
+        _fleet: fleet,
+    }
 }
 
-/// Seed the sender's CANONICAL head with spendable ERA via a self-mint advance, and
-/// persist it. The head — not the SQL projection — is what
-/// `simulate_advance_for_confirm` debits, so seeding only `balance_projections` would
-/// leave the sender with nothing to debit and the test would pass vacuously.
-fn seed_sender_head_with_era() -> DeviceState {
-    let kp = keypair(0xA1);
-    let base = DeviceState::new(GENESIS, SENDER, kp.public_key.clone(), 1024);
-    // Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
-    // `advance` — in tests exactly as in production, which is the property that makes
-    // the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
-    // `with_balance_for_testing` installs the state a device would already be in;
-    // balances live outside the SMT, so `root()` is unaffected, as with `restore`.
-    let head = base.with_balance_for_testing(era_policy(), SEED_ERA);
-    client_db::update_bcr_device_head(&head).expect("persist seeded head");
-    head
-}
-
-/// Persist the counterparty as a client_db contact WITH a Kyber public key.
+/// Persist a counterparty as a client_db contact WITH a Kyber public key.
 ///
 /// Per-step EK signing (§11) encapsulates against the counterparty's ML-KEM-768 key when
 /// building the receipt, and refuses a contact that has none. Without this the flow dies
 /// at `handle_prepare_response` long before staging, and the test would prove nothing.
-fn store_contact_with_kyber(device: [u8; 32], signing_pk: Vec<u8>, alias: &str) {
+fn store_contact_with_kyber(device: [u8; 32], genesis: [u8; 32], signing_pk: Vec<u8>, alias: &str) {
     let kyber = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
     client_db::store_contact(&client_db::ContactRecord {
         contact_id: alias.to_string(),
         device_id: device.to_vec(),
         alias: alias.to_string(),
-        genesis_hash: GENESIS.to_vec(),
+        genesis_hash: genesis.to_vec(),
         public_key: signing_pk,
         kyber_public_key: kyber.public_key.clone(),
         current_chain_tip: None,
@@ -122,7 +127,9 @@ fn store_contact_with_kyber(device: [u8; 32], signing_pk: Vec<u8>, alias: &str) 
 
 fn handler_for(
     device: [u8; 32],
+    own_genesis: [u8; 32],
     counterparty: [u8; 32],
+    counterparty_genesis: [u8; 32],
     kp: SignatureKeyPair,
     counterparty_pk: Vec<u8>,
 ) -> BilateralBleHandler {
@@ -131,7 +138,7 @@ fn handler_for(
         .add_verified_contact(dsm::types::contact_types::DsmVerifiedContact {
             alias: "peer".to_string(),
             device_id: counterparty,
-            genesis_hash: GENESIS,
+            genesis_hash: counterparty_genesis,
             public_key: counterparty_pk,
             genesis_material: vec![0; 32],
             chain_tip: None,
@@ -145,7 +152,7 @@ fn handler_for(
         })
         .expect("verified contact");
 
-    let mgr = BilateralTransactionManager::new(contacts, kp, device, GENESIS);
+    let mgr = BilateralTransactionManager::new(contacts, kp, device, own_genesis);
     let mgr = Arc::new(RwLock::new(mgr));
     futures::executor::block_on(async {
         mgr.write()
@@ -188,14 +195,14 @@ struct DurableSenderState {
     chain_state_rows: usize,
 }
 
-fn snapshot_sender() -> DurableSenderState {
-    let head = client_db::load_bcr_device_head(&SENDER)
+fn snapshot_sender(sender: &[u8; 32]) -> DurableSenderState {
+    let head = client_db::load_bcr_device_head(sender)
         .expect("head query must not error")
         .expect("the sender head MUST exist — without it every assertion is vacuous");
     DurableSenderState {
         head_root: head.root(),
         era_balance: head.balance(&era_policy()),
-        chain_state_rows: client_db::get_bcr_chain_states(&SENDER, false)
+        chain_state_rows: client_db::get_bcr_chain_states(sender, false)
             .expect("chain-state query")
             .len(),
     }
@@ -206,54 +213,56 @@ fn snapshot_sender() -> DurableSenderState {
 /// Staging fails, the SENDER refuses to build the confirm (the deleted fail-open path
 /// used to proceed here), and NOTHING the sender owns moves: same head root, same
 /// balance, no new chain-state row, session never committed.
-#[tokio::test]
+///
+/// Multi-threaded on purpose: the faucet fixture blocks on the SDK's own runtime,
+/// which a current-thread test runtime cannot host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
-    let sender_kp = keypair(0xA1);
     let receiver_kp = keypair(0xB2);
 
-    client_db::reset_database_for_tests();
-    install_identity(SENDER, sender_kp.public_key.clone());
-    client_db::init_database().expect("init db");
-
-    // Head first: CoreSDK reads it once at construction, so it must exist before the
-    // router is built.
-    let seeded = seed_sender_head_with_era();
+    let sender = tokio::task::block_in_place(funded_sender);
+    let sender_pk = sender.keypair.public_key().to_vec();
+    let sender_devid = sender.devid;
     assert_eq!(
-        seeded.balance(&era_policy()),
-        SEED_ERA,
-        "precondition: the sender actually holds spendable ERA, so a debit is possible"
+        snapshot_sender(&sender_devid).era_balance,
+        SENDER_ERA,
+        "precondition: the sender actually holds spendable, admitted ERA, so a debit is \
+         possible"
     );
 
-    let router = dsm_sdk::handlers::app_router_impl::AppRouterImpl::new(dsm_sdk::init::SdkConfig {
-        node_id: "missing-release-reachability".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: true,
-    })
-    .expect("router init");
-    dsm_sdk::bridge::install_app_router(Arc::new(router)).expect("install app_router");
+    dsm_sdk::bridge::install_app_router(Arc::new(sender.router)).expect("install app_router");
 
-    let sender = handler_for(
-        SENDER,
+    let sender_handler = handler_for(
+        sender_devid,
+        sender.genesis,
         RECEIVER,
-        keypair(0xA1),
+        RECEIVER_GENESIS,
+        sender.keypair.clone(),
         receiver_kp.public_key.clone(),
     );
     let receiver = handler_for(
         RECEIVER,
-        SENDER,
+        RECEIVER_GENESIS,
+        sender_devid,
+        sender.genesis,
         keypair(0xB2),
-        sender_kp.public_key.clone(),
+        sender_pk.clone(),
     );
 
-    store_contact_with_kyber(RECEIVER, receiver_kp.public_key.clone(), "receiver");
-    store_contact_with_kyber(SENDER, sender_kp.public_key.clone(), "sender");
+    store_contact_with_kyber(
+        RECEIVER,
+        RECEIVER_GENESIS,
+        receiver_kp.public_key.clone(),
+        "receiver",
+    );
+    store_contact_with_kyber(sender_devid, sender.genesis, sender_pk.clone(), "sender");
 
-    let before = snapshot_sender();
-    assert_eq!(before.era_balance, SEED_ERA);
+    let before = snapshot_sender(&sender_devid);
+    assert_eq!(before.era_balance, SENDER_ERA);
 
     // --- 3-step bilateral, driven directly (the BLE transport is not what is on trial) ---
-    let (prepare_bytes, commitment) = sender
+    let (prepare_bytes, commitment) = sender_handler
         .prepare_bilateral_transaction(RECEIVER, bearer_transfer(), 300)
         .await
         .expect("prepare");
@@ -271,9 +280,9 @@ async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
         .expect("accept envelope");
 
     dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        SENDER.to_vec(),
-        sender_kp.public_key.clone(),
-        GENESIS.to_vec(),
+        sender_devid.to_vec(),
+        sender_pk.clone(),
+        sender.genesis.to_vec(),
         vec![0u8; 32],
     );
     // Absorbing the accept IS what builds the confirm (it drives send_bilateral_confirm
@@ -282,7 +291,7 @@ async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
     // sender-side refusal: the confirm is never built, no online Debit survives anywhere,
     // and no bytes reach the receiver. (The receiver-side MissingRelease refusal that used
     // to strand the fail-open confirm remains unit-tested in `anchor_accept.rs`.)
-    let err = sender
+    let err = sender_handler
         .handle_prepare_response(&accept_bytes)
         .await
         .expect_err("a bearer send whose staging failed MUST refuse at the sender");
@@ -294,7 +303,7 @@ async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
     );
 
     // --- THE FOUR ASSERTIONS, all on durable state ---
-    let after = snapshot_sender();
+    let after = snapshot_sender(&sender_devid);
 
     assert_eq!(
         after.head_root, before.head_root,
@@ -311,7 +320,7 @@ async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
         "BLOCKER: a new bcr_chain_states row was written — the advance was committed"
     );
 
-    let phase = sender.get_session_phase(&commitment).await;
+    let phase = sender_handler.get_session_phase(&commitment).await;
     assert_ne!(
         phase,
         Some(BilateralPhase::Committed),
@@ -332,30 +341,28 @@ async fn a_failed_bearer_staging_refuses_the_send_and_strands_no_debit() {
 ///
 /// Without this, a snapshot that silently returned constants would make the proof pass
 /// while detecting nothing.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn the_durable_probes_detect_a_real_commit() {
-    let sender_kp = keypair(0xA1);
-    client_db::reset_database_for_tests();
-    install_identity(SENDER, sender_kp.public_key.clone());
-    client_db::init_database().expect("init db");
-
-    let head = seed_sender_head_with_era();
-    let before = snapshot_sender();
-    assert_eq!(before.era_balance, SEED_ERA, "control precondition");
+    let sender = tokio::task::block_in_place(funded_sender);
+    let sender_devid = sender.devid;
+    let head = client_db::load_bcr_device_head(&sender_devid)
+        .expect("head query")
+        .expect("the funded head is persisted");
+    let before = snapshot_sender(&sender_devid);
+    assert_eq!(before.era_balance, SENDER_ERA, "control precondition");
 
     // A real committed advance, persisted exactly as a committed advance persists.
     //
-    // This was a second self-mint of ERA, which `advance` now refuses — builtin
-    // issuance is not self-authorizable. The probes do not care WHICH advance moved
-    // the state, only that a committed one moves all three: head root, ERA balance,
-    // chain-state row. A debiting transfer does that without minting, so the test
-    // keeps its subject and loses only its illegal vehicle.
-    let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&SENDER, &SENDER);
+    // The probes do not care WHICH advance moved the state, only that a committed
+    // one moves all three: head root, ERA balance, chain-state row. A debiting
+    // transfer does that without issuing anything.
+    let rel =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&sender_devid, &sender_devid);
     let outcome = head
         .advance(
             rel,
-            SENDER,
+            sender_devid,
             Operation::Transfer {
                 to_device_id: [0xBBu8; 32].to_vec(),
                 amount: Balance::from_state(7, [0u8; 32]),
@@ -378,17 +385,20 @@ async fn the_durable_probes_detect_a_real_commit() {
                 direction: BalanceDirection::Debit,
                 amount: 7,
             }],
-            Some(initial_chain_tip_from_device_ids(&SENDER, &SENDER)),
+            Some(initial_chain_tip_from_device_ids(
+                &sender_devid,
+                &sender_devid,
+            )),
             None,
             None,
             None,
         )
         .expect("control advance");
     client_db::update_bcr_device_head(&outcome.new_device_state).expect("persist head");
-    client_db::store_bcr_chain_state(&SENDER, &outcome.new_chain_state, false)
+    client_db::store_bcr_chain_state(&sender_devid, &outcome.new_chain_state, false)
         .expect("persist chain state");
 
-    let after = snapshot_sender();
+    let after = snapshot_sender(&sender_devid);
     assert_ne!(
         after.head_root, before.head_root,
         "probe 1 is dead: a committed advance did not move the head root"

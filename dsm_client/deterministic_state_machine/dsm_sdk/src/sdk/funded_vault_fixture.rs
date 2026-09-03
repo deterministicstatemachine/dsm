@@ -1,154 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Test fixture: a vault whose reserves are ENCUMBERED, not asserted.
+//! Test fixture: devices that hold what the PROTOCOL gave them, and vaults born
+//! through the PRODUCTION route.
 //!
-//! Every AMM test in this crate used to build its own
-//! `FulfillmentMechanism::AmmConstantProduct { reserve_a, reserve_b, .. }` and read
-//! the quantities straight back out of the predicate. That is the model this cut
-//! removes: a condition describing liquidity nobody held, which is why a settled
-//! swap moved zero value and why those tests stayed green throughout.
+//! Every balance a device holds here was produced by the same path that
+//! produces it in the real system — a faucet admission for ERA, an admitted
+//! `token.create` + `token.mint` for a user asset — and every vault was created
+//! by the real `dlv.create` handler, which is the only thing that encumbers
+//! reserves. There is deliberately no way here to install a balance, a reserve
+//! or an admission directly: a fixture that could would let a test go green
+//! against a state the product can never reach, which is exactly the shape
+//! that kept a settled swap moving zero value for months.
 //!
-//! So this fixture exists to make the new model the only convenient one. It:
-//!
-//!   1. builds the predicate from token identities and `fee_bps` ONLY — there is
-//!      no longer a field to put a reserve in;
-//!   2. funds both legs through [`DeviceState::fund_vault_reserves`], the same
-//!      chokepoint production uses, so a test cannot conjure liquidity a device
-//!      never had;
-//!   3. reads reserves back from the owner's vault-reserve LEAVES, so what a test
-//!      asserts against is what the device root actually commits;
-//!   4. offers no path from an advertisement into authoritative state — an ad is a
-//!      discovery hint, and a fixture that let one populate reserves would re-teach
-//!      the habit this change exists to end.
-//!
-//! A test that wants stale or hostile reserves passes them explicitly to the
-//! function under test. That is the point: quantities are now an INPUT to
-//! verification, not a property of the thing being verified.
+//! What a test may still hand a router directly is an EMPTY head carrying the
+//! real installed identity ([`observer_device`]). Having nothing is not an
+//! economic claim.
 
 #![cfg(test)]
 
-use std::collections::BTreeMap;
-
 use dsm::types::device_state::DeviceState;
-use dsm::vault::FulfillmentMechanism;
 
-/// Deterministic ids shared by the AMM tests.
-const GENESIS: [u8; 32] = [0u8; 32];
-const DEVID: [u8; 32] = [0xD0u8; 32];
-pub(crate) const VAULT_ID: [u8; 32] = [0x77u8; 32];
-
-/// A vault that actually holds what it says it holds.
-pub(crate) struct FundedVault {
-    pub vault_id: [u8; 32],
-    /// Lex-lower token identity, and its policy commit.
-    pub token_a: Vec<u8>,
-    pub pc_a: [u8; 32],
-    /// Lex-higher token identity, and its policy commit.
-    pub token_b: Vec<u8>,
-    pub pc_b: [u8; 32],
-    pub fee_bps: u32,
-    /// The owner's device head AFTER funding — the authority for the reserves.
-    pub head: DeviceState,
-}
-
-impl FundedVault {
-    /// The unlock predicate: which pair, at what fee. No quantities.
-    pub fn predicate(&self) -> FulfillmentMechanism {
-        FulfillmentMechanism::AmmConstantProduct {
-            token_a: self.token_a.clone(),
-            token_b: self.token_b.clone(),
-            fee_bps: self.fee_bps,
-        }
-    }
-
-    /// Reserves read from the owner's encumbered leaves — never from the
-    /// predicate, and never from an advertisement.
-    pub fn reserves(&self) -> (u64, u64) {
-        (
-            self.head.vault_reserve(&self.vault_id, &self.pc_a),
-            self.head.vault_reserve(&self.vault_id, &self.pc_b),
-        )
-    }
-
-    /// Spendable (unencumbered) balance for one leg.
-    pub fn spendable(&self, policy_commit: &[u8; 32]) -> u64 {
-        self.head.balance(policy_commit)
-    }
-}
-
-/// Token identities used across the AMM tests, lex-ordered.
-pub(crate) fn token_pair() -> (Vec<u8>, Vec<u8>) {
-    (b"AAA".to_vec(), b"BBB".to_vec())
-}
-
-/// Policy commits for that pair: REAL anchors of real transferable policies,
-/// rooted on this device — because a market leg now requires exactly that.
-/// The old fixture used two arbitrary byte strings, which is the precise hole
-/// the market-leg gate closed; a fixture that kept them would be testing
-/// against assets that cannot exist. Distinct, deterministic (the protos are
-/// fixed), returned in canonical (lex) order, and best-effort rooted on every
-/// call so any test that reaches `dlv.create` finds the device anchored.
-pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
-    fn rooted_transferable(ticker: &str) -> [u8; 32] {
-        use prost::Message;
-        let packed = crate::handlers::token_routes::build_policy_v3_bytes(
-            &crate::handlers::token_routes::ParsedTokenPolicy {
-                ticker: ticker.into(),
-                alias: format!("{ticker} Test Asset"),
-                decimals: 0,
-                max_supply: 0,
-                initial_alloc: 0,
-                description: None,
-                icon_url: None,
-                mint_burn_enabled: true,
-                transferable: true,
-                unlimited_supply: true,
-                mint_burn_threshold: 1,
-                signers: vec![vec![0xE1; 64]],
-                allowlist_device_ids: Vec::new(),
-            },
-        )
-        .expect("fixture policy packs");
-        let proto = crate::generated::TokenPolicyV3 {
-            policy_bytes: packed,
-        }
-        .encode_to_vec();
-        let pc = dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_POLICY,
-            &proto,
-        );
-        let _ = crate::storage::client_db::token_registry::upsert_policy(&pc, &proto);
-        pc
-    }
-    let x = rooted_transferable("AAA");
-    let y = rooted_transferable("BBB");
-    if x < y {
-        (x, y)
-    } else {
-        (y, x)
-    }
-}
-
-/// A device holding `a` / `b` base units of the pair and nothing encumbered.
-///
-/// Built through `DeviceState::restore`, the public constructor that takes a
-/// balance map — so the starting balances are ones a real device could hold.
-/// As [`owner_holding`], but on a NAMED device.
-///
-/// Two devices in one test must not share a devid: reserve leaf keys are derived
-/// from `(genesis, devid, vault_id, policy_commit)`, so identical devids would
-/// make two heads derive the same leaf positions and the boundary between them
-/// would be nominal.
-/// The public key a fixture head must carry: the CURRENTLY INSTALLED signing key.
-///
-/// Fixtures used to hardcode `vec![9u8; 32]`, which was harmless only while nothing
-/// verified anything. `DeviceState::advance` now verifies `DlvSettle` / `DlvOwnerApply`
-/// against the advancing device's own key, so a head whose `public_key` is not the key
-/// the signer actually holds cannot authorize its own transitions — production keeps
-/// them equal (a real head carries a 64-byte SPX256f key) and the fixture must too.
-///
-/// Falls back to the old placeholder when no identity is installed, so fixtures that
-/// never sign keep working unchanged.
 /// Install a REAL v3 identity for `seed` — the state-identity cut derives
 /// every vault birth's authority chain (GRK → D_0 → T_0) from the wallet
 /// seed, so fixture identities must be seed-rooted exactly like production
@@ -157,13 +28,25 @@ pub(crate) fn pair_commits() -> ([u8; 32], [u8; 32]) {
 /// signing authority from the SAME wallet seed (the signing cache IS the
 /// wallet-seed cache), and primes AppState. The database must already be
 /// initialized. Returns `(signing_public_key, device_id)`.
-#[cfg(test)]
 pub(crate) fn install_v3_identity(seed: u8) -> (Vec<u8>, [u8; 32]) {
+    install_v3_identity_on_fleet(seed, &[])
+}
+
+/// As [`install_v3_identity`], but records `endpoints` as the identity's
+/// storage nodes.
+///
+/// A funded creation is an ADMITTED economic operation, and admission
+/// resolves its root register from the network the genesis record commits.
+/// Only the beta network `dsm-testnet` has a register profile — an unknown
+/// network fails closed by design — so the fixture commits that, exactly like
+/// `test_support::two_device::TestDevice`. The endpoints are what
+/// `finish_admission` publishes evidence to and reads quorum from.
+pub(crate) fn install_v3_identity_on_fleet(seed: u8, endpoints: &[String]) -> (Vec<u8>, [u8; 32]) {
     let wallet_seed = vec![seed; 64];
     let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
     let genesis = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
         &wallet_seed,
-        b"dsm-test",
+        b"dsm-testnet",
         0,
         0,
         3,
@@ -190,7 +73,7 @@ pub(crate) fn install_v3_identity(seed: u8) -> (Vec<u8>, [u8; 32]) {
             participant_count: 0,
             progress_marker: "genesis".to_string(),
             publication_hash: crate::util::text_id::encode_base32_crockford(&genesis.g),
-            storage_nodes: Vec::new(),
+            storage_nodes: endpoints.to_vec(),
             entropy_hash: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
             protocol_version: "genesis-v3".to_string(),
             hash_chain_proof: None,
@@ -198,7 +81,7 @@ pub(crate) fn install_v3_identity(seed: u8) -> (Vec<u8>, [u8; 32]) {
             verification_step: None,
             genesis_nonce: crate::util::text_id::encode_base32_crockford(&genesis.genesis_nonce),
             genesis_profile: "MnemonicV3".to_string(),
-            network_id: "dsm-test".to_string(),
+            network_id: "dsm-testnet".to_string(),
         },
     )
     .expect("store genesis record");
@@ -212,105 +95,169 @@ pub(crate) fn install_v3_identity(seed: u8) -> (Vec<u8>, [u8; 32]) {
     (public_key, genesis.devid)
 }
 
+/// The public key a fixture head must carry: the CURRENTLY INSTALLED signing
+/// key. `DeviceState::advance` verifies `DlvSettle` / `DlvOwnerApply` against
+/// the advancing device's own key, so a head whose `public_key` is not the key
+/// the signer actually holds cannot authorize its own transitions.
 fn fixture_public_key() -> Vec<u8> {
-    crate::sdk::signing_authority::current_public_key().unwrap_or_else(|_| vec![9u8; 32])
+    crate::sdk::signing_authority::current_public_key().expect("an identity must be installed")
 }
 
-pub(crate) fn device_holding(devid_seed: u8, a: u64, b: u64) -> DeviceState {
-    let (pc_a, pc_b) = pair_commits();
-    let mut balances = BTreeMap::new();
-    if a > 0 {
-        balances.insert(pc_a, a);
+/// Fund `router`'s device through REAL ADMITTED ORIGINS and return the two
+/// asset commits, canonically ordered.
+///
+/// ```text
+/// faucet claim            ERA, admitted via 0x0030
+/// token.create AAA/BBB    the creation fee, admitted; policies signed by the
+///                         DEVICE's real key, which is what lets the mint's
+///                         0x0029 authorization verify
+/// token.mint  a / b       admitted via 0x0029 -> 0x0023
+/// ```
+///
+/// One faucet claim covers both creation fees. The amounts are assigned by
+/// COMMIT ORDER — `a` belongs to the lower commit — and the commits are not
+/// known until the policies exist, which is why they come back from here
+/// rather than being computed up front: a commit computed any other way names
+/// a policy no device can issue under.
+pub(crate) fn admitted_device_holding(
+    router: &crate::handlers::app_router_impl::AppRouterImpl,
+    a: u64,
+    b: u64,
+) -> ([u8; 32], [u8; 32]) {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use dsm::types::proto as generated;
+    use prost::Message as _;
+
+    let pack = |body: Vec<u8>| {
+        generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body,
+        }
+        .encode_to_vec()
+    };
+
+    // The head must carry the REAL identity and NOTHING else. Economic
+    // admissions re-derive and re-verify everything from (G, DevID), so a
+    // lazily-bootstrapped zero-genesis head cannot admit; and it must be EMPTY,
+    // because `activate` refuses to self-root a device already holding value.
+    // Position 0 with the real identity is the only state that can become
+    // position 1.
+    router
+        .core_sdk
+        .set_device_head_for_testing(observer_device());
+
+    crate::runtime::get_runtime().block_on(async {
+        crate::sdk::faucet_claim_flow::claim_era_faucet(&router.core_sdk, b"dsm-testnet")
+            .await
+            .expect("fixture: faucet claim must admit");
+        for ticker in ["AAA", "BBB"] {
+            let created = router
+                .invoke(AppInvoke {
+                    method: "token.create".into(),
+                    args: pack(
+                        generated::TokenCreateRequest {
+                            ticker: ticker.into(),
+                            alias: format!("{ticker} Test Asset"),
+                            decimals: 0,
+                            max_supply_u128: 0u128.to_be_bytes().to_vec(),
+                            initial_alloc_u128: 0u128.to_be_bytes().to_vec(),
+                            mint_burn_enabled: true,
+                            transferable: true,
+                            unlimited_supply: true,
+                            mint_burn_threshold: 1,
+                            description: String::new(),
+                            icon_url: String::new(),
+                            allowlist_device_ids: Vec::new(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await;
+            assert!(
+                created.success,
+                "fixture: token.create {ticker}: {:?}",
+                created.error_message
+            );
+        }
+        let commit_of = |ticker: &str| {
+            crate::storage::client_db::token_registry::get_token_by_ticker(ticker)
+                .expect("registry read")
+                .unwrap_or_else(|| panic!("fixture: {ticker} not registered"))
+                .policy_commit
+        };
+        let (lo_t, hi_t) = if commit_of("AAA") < commit_of("BBB") {
+            ("AAA", "BBB")
+        } else {
+            ("BBB", "AAA")
+        };
+        for (ticker, amount) in [(lo_t, a), (hi_t, b)] {
+            if amount == 0 {
+                continue;
+            }
+            let minted = router
+                .invoke(AppInvoke {
+                    method: "token.mint".into(),
+                    args: pack(
+                        generated::TokenMintRequest {
+                            token_id: ticker.into(),
+                            amount,
+                            message: String::new(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await;
+            assert!(
+                minted.success,
+                "fixture: token.mint {ticker} {amount}: {:?}",
+                minted.error_message
+            );
+        }
+    });
+
+    let commit = |ticker: &str| {
+        crate::storage::client_db::token_registry::get_token_by_ticker(ticker)
+            .expect("registry read")
+            .unwrap_or_else(|| panic!("fixture: {ticker} not registered"))
+            .policy_commit
+    };
+    let (x, y) = (commit("AAA"), commit("BBB"));
+    if x < y {
+        (x, y)
+    } else {
+        (y, x)
     }
-    if b > 0 {
-        balances.insert(pc_b, b);
-    }
-    DeviceState::restore(
-        GENESIS,
-        [devid_seed; 32],
-        fixture_public_key(),
-        None,
-        balances,
-        Vec::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        None, // no admission pending in this fixture
-        1024,
-    )
-    .expect("fixture device state")
 }
 
-pub(crate) fn owner_holding(a: u64, b: u64) -> DeviceState {
-    let (pc_a, pc_b) = pair_commits();
-    let mut balances = BTreeMap::new();
-    if a > 0 {
-        balances.insert(pc_a, a);
-    }
-    if b > 0 {
-        balances.insert(pc_b, b);
-    }
-    DeviceState::restore(
-        GENESIS,
-        DEVID,
-        fixture_public_key(),
-        None,
-        balances,
-        Vec::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        BTreeMap::new(),
-        None, // no admission pending in this fixture
-        1024,
-    )
-    .expect("fixture owner state")
-}
-
-/// Fund a vault with `reserve_a` / `reserve_b` base units at vault sequence 0.
-pub(crate) fn funded_vault(reserve_a: u64, reserve_b: u64, fee_bps: u32) -> FundedVault {
-    funded_vault_with_surplus(reserve_a, reserve_b, fee_bps, 0)
-}
-
-/// As [`funded_vault`], but leaving `surplus` of each leg SPENDABLE — so a test
-/// can show that encumbered value moved out of `balances` rather than being
-/// credited from nowhere.
-pub(crate) fn funded_vault_with_surplus(
-    reserve_a: u64,
-    reserve_b: u64,
-    fee_bps: u32,
-    surplus: u64,
-) -> FundedVault {
-    let (token_a, token_b) = token_pair();
-    let (pc_a, pc_b) = pair_commits();
-
-    let head = owner_holding(reserve_a + surplus, reserve_b + surplus)
-        .fund_vault_reserves(&VAULT_ID, &[(pc_a, reserve_a), (pc_b, reserve_b)], 0)
-        .expect("fixture funding must succeed")
-        .new_device_state;
-
-    FundedVault {
-        vault_id: VAULT_ID,
-        token_a,
-        pc_a,
-        token_b,
-        pc_b,
-        fee_bps,
-        head,
-    }
+/// A device that holds NO economic position and never claims one.
+///
+/// For tests whose device exists only to receive published bytes, read an
+/// advertisement, verify foreign lineage, or exercise artifact transport. It
+/// carries the REAL installed identity — so anything it publishes or signs is
+/// genuine — and zero balances, zero reserves, position 0. Having nothing is
+/// the POINT, not an unfunded accident: a reader cannot reach for it to stand
+/// in for a holder.
+pub(crate) fn observer_device() -> DeviceState {
+    let genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
+        .unwrap_or_default()
+        .as_slice()
+        .try_into()
+        .expect("observer_device: an identity must be installed first");
+    let devid: [u8; 32] = crate::sdk::app_state::AppState::get_device_id()
+        .unwrap_or_default()
+        .as_slice()
+        .try_into()
+        .expect("observer_device: an identity must be installed first");
+    DeviceState::new(genesis, devid, fixture_public_key(), 1024)
 }
 
 /// Create a funded AMM vault through the REAL `dlv.create` route and return its
 /// id.
 ///
-/// [`funded_vault`] builds device STATE directly, which is the right shape for
-/// testing verification but leaves the vault unborn as far as the market is
-/// concerned: no frozen publication artifacts, so nothing at quorum. Routes that
-/// require a vault to be market-active — advertising it, closing it — must not
-/// be handed that state, or the test proves the route works on a vault the
-/// production path can never produce.
-///
-/// So this is the mandatory producer: the same handler the app calls, including
-/// the five birth objects it freezes and publishes.
+/// This is the mandatory producer for a market-active vault: the same handler
+/// the app calls, including the five birth objects it freezes and publishes.
+/// A vault any other way is one the production path can never produce.
 pub(crate) fn create_funded_amm_vault(
     router: &crate::handlers::app_router_impl::AppRouterImpl,
     pc_a: &[u8; 32],
@@ -385,19 +332,22 @@ pub(crate) fn create_funded_amm_vault(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use dsm::vault::FulfillmentMechanism;
     use prost::Message;
 
-    /// (1) RESERVE-FREE PREDICATE SERIALIZATION.
+    /// RESERVE-FREE PREDICATE SERIALIZATION.
     ///
-    /// The condition must not carry quantities in memory OR on the wire. If a
-    /// reserve could still round-trip through the proto, the old model would
+    /// The unlock condition names a pair and a fee — never a quantity — in
+    /// memory AND on the wire. If a reserve could round-trip through the proto,
+    /// the old model (liquidity asserted by the owner, held by nobody) would
     /// survive in serialized form and reappear on the next decode.
     #[test]
     fn the_predicate_serializes_without_reserves() {
-        let v = funded_vault(1_000_000, 500_000, 30);
-        let predicate = v.predicate();
+        let predicate = FulfillmentMechanism::AmmConstantProduct {
+            token_a: b"AAA".to_vec(),
+            token_b: b"BBB".to_vec(),
+            fee_bps: 30,
+        };
 
         let proto: dsm::types::proto::FulfillmentMechanism = (&predicate).into();
         let bytes = proto.encode_to_vec();
@@ -421,142 +371,5 @@ mod tests {
             }
             other => panic!("expected an AMM predicate both sides, got {other:?}"),
         }
-
-        // And the encoding carries neither reserve: 1_000_000 and 500_000 do not
-        // appear anywhere in the bytes, in either width.
-        for probe in [
-            1_000_000u64.to_be_bytes().to_vec(),
-            500_000u64.to_be_bytes().to_vec(),
-            1_000_000u128.to_be_bytes().to_vec(),
-            500_000u128.to_be_bytes().to_vec(),
-        ] {
-            assert!(
-                !bytes.windows(probe.len()).any(|w| w == probe.as_slice()),
-                "a reserve quantity leaked into the serialized predicate"
-            );
-        }
-    }
-
-    /// (2) TWO-LEG FUNDING moves spendable balance into reserve leaves, and both
-    /// legs land under ONE final root.
-    #[test]
-    fn funding_moves_spendable_into_leaves_under_one_root() {
-        let v = funded_vault_with_surplus(1_000_000, 500_000, 30, 7);
-
-        assert_eq!(v.reserves(), (1_000_000, 500_000), "leaves hold the legs");
-        assert_eq!(v.spendable(&v.pc_a), 7, "only the surplus stays spendable");
-        assert_eq!(v.spendable(&v.pc_b), 7);
-
-        // Per asset, spendable + encumbered is what the owner started with.
-        assert_eq!(v.spendable(&v.pc_a) + v.reserves().0, 1_000_007);
-        assert_eq!(v.spendable(&v.pc_b) + v.reserves().1, 500_007);
-
-        // Both leaves verify against the SAME root — no proof binds a state in
-        // which the vault held one side of the pair.
-        let root = v.head.root();
-        for (pc, amount) in [(v.pc_a, 1_000_000u64), (v.pc_b, 500_000u64)] {
-            let key = dsm::dlv::vault_reserve_leaf::vault_reserve_key(
-                &v.head.genesis_digest(),
-                &v.head.devid(),
-                &v.vault_id,
-                &pc,
-            );
-            let value = dsm::dlv::vault_reserve_leaf::vault_reserve_value(amount, 0);
-            assert_eq!(
-                v.head.extra_leaves_snapshot().get(&key),
-                Some(&value),
-                "leg committed at the funding sequence"
-            );
-        }
-        assert_ne!(root, [0u8; 32]);
-    }
-
-    /// (3) DEGENERATE AND HOSTILE FUNDING REJECTS WITH ZERO MUTATION.
-    ///
-    /// Zero, duplicate and insufficient legs must each leave the owner's root
-    /// and balances byte-identical — a partially-applied funding would encumber
-    /// value the vault does not account for.
-    #[test]
-    fn bad_funding_rejects_with_zero_mutation() {
-        let (pc_a, pc_b) = pair_commits();
-        let owner = owner_holding(1_000, 1_000);
-        let root_before = owner.root();
-        let bal_before = (owner.balance(&pc_a), owner.balance(&pc_b));
-
-        let cases: Vec<(&str, Vec<([u8; 32], u64)>)> = vec![
-            ("no legs at all", vec![]),
-            ("a zero-amount leg", vec![(pc_a, 0)]),
-            ("the same asset twice", vec![(pc_a, 100), (pc_a, 200)]),
-            ("more than is held", vec![(pc_a, 1_001)]),
-            (
-                "the SECOND leg unaffordable — the first must not move either",
-                vec![(pc_a, 500), (pc_b, 5_000)],
-            ),
-        ];
-
-        for (why, legs) in cases {
-            assert!(
-                owner.fund_vault_reserves(&VAULT_ID, &legs, 0).is_err(),
-                "must refuse: {why}"
-            );
-            assert_eq!(owner.root(), root_before, "root unchanged after: {why}");
-            assert_eq!(
-                (owner.balance(&pc_a), owner.balance(&pc_b)),
-                bal_before,
-                "balances unchanged after: {why}"
-            );
-            assert_eq!(owner.vault_reserve(&VAULT_ID, &pc_a), 0);
-            assert_eq!(owner.vault_reserve(&VAULT_ID, &pc_b), 0);
-        }
-    }
-
-    /// (6) A DISCOVERY ADVERTISEMENT CANNOT POPULATE AUTHORITATIVE STATE.
-    ///
-    /// `route.syncVaultsForPair` used to copy an ad's reserves into the owner's
-    /// local vault so the owner could "observe" a settle — which made a hint
-    /// anyone could publish the authority for the owner's own liquidity.
-    ///
-    /// The structural guarantee is stronger than any test of that one path: an
-    /// advertisement is a proto with no route into `vault_reserves`, which only
-    /// the funding chokepoints write. Here that is shown end to end — an ad
-    /// claiming enormous reserves changes nothing about what the device holds.
-    #[test]
-    fn an_advertisement_cannot_change_what_the_device_holds() {
-        let v = funded_vault(1_000, 2_000, 30);
-        let before = (v.reserves(), v.head.root());
-
-        // An ad claiming this vault holds far more than it does.
-        let lying_ad = dsm::types::proto::RoutingVaultAdvertisementV1 {
-            version: 1,
-            vault_id: v.vault_id.to_vec(),
-            token_a: v.token_a.clone(),
-            token_b: v.token_b.clone(),
-            reserve_a: u64::MAX,
-            reserve_b: u64::MAX,
-            fee_bps: v.fee_bps,
-            updated_state_number: 99,
-            ..Default::default()
-        };
-        assert_eq!(lying_ad.reserve_a, u64::MAX, "the ad says what it likes");
-
-        // The device is unmoved: reserves and root are exactly as funded. There
-        // is no API that would take the ad and apply it, which is the point.
-        assert_eq!(v.reserves(), before.0, "reserves unchanged by an ad");
-        assert_eq!(v.head.root(), before.1, "root unchanged by an ad");
-        assert_eq!(v.reserves(), (1_000, 2_000));
-    }
-
-    /// The fixture itself must not offer a way to fake liquidity: reserves come
-    /// from the leaves, so they always agree with the device root.
-    #[test]
-    fn fixture_reserves_are_the_leaves_not_a_stored_number() {
-        let v = funded_vault(400, 600, 30);
-        assert_eq!(
-            v.reserves(),
-            (
-                v.head.vault_reserve(&v.vault_id, &v.pc_a),
-                v.head.vault_reserve(&v.vault_id, &v.pc_b)
-            )
-        );
     }
 }

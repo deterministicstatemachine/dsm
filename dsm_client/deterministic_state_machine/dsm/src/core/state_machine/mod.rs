@@ -370,47 +370,22 @@ mod state_machine_tests {
     #[test]
     fn current_state_always_reflects_the_canonical_head_never_an_override() {
         let devid = [0x42u8; 32];
-        // Install a real ERA balance on the head by RESTORE, not by minting.
-        //
-        // The subject here is that `current_state` reflects the canonical head rather
-        // than an override — how the head came to hold a balance is incidental. Minting
-        // is no longer a way to get one: `advance` refuses builtin issuance (ERA/dBTC
-        // are not self-authorizable), and only builtins survive the compat projection
-        // that `token_balances` is read from, so a synthetic asset would project as
-        // empty. `restore` is the honest fixture: it is exactly the shape a reloaded
-        // device has.
-        let policy = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
-        let rel = crate::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
-        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &devid, &devid,
-        );
-        let mut balances = std::collections::BTreeMap::new();
-        balances.insert(policy, 275u64);
-        let restored = crate::types::device_state::DeviceState::restore(
-            devid,
-            devid,
-            vec![0xAAu8; 32],
-            None,
-            balances,
-            vec![(
-                rel,
-                crate::types::device_state::RelChainTip {
-                    chain_tip: init,
-                    counterparty_devid: devid,
-                    tip_entropy: vec![0x11u8; 32],
-                    value_capability: crate::types::device_state::ValueCapability::Yes,
-                },
-            )],
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            None, // no admission pending in this fixture
-            64,
-        )
-        .expect("restore a head carrying a real balance");
+        // The head holds ERA through the ONLY path that produces ERA in the real
+        // system: admitted faucet claims on the device's self-loop, the protocol
+        // payout each. The subject here is that `current_state` reflects the
+        // canonical head rather than an override — but how the head came to hold
+        // a balance is not incidental: a restored, invented balance would make
+        // this test pass against a head no device could ever have.
+        let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64)
+            .admitted_faucet_claim(0, 0x42)
+            .expect("faucet claim")
+            .admitted_faucet_claim(1, 0x43)
+            .expect("faucet claim")
+            .admitted_faucet_claim(2, 0x44)
+            .expect("faucet claim");
 
         let mut sm = StateMachine::new();
-        sm.set_device_head(restored.clone());
+        sm.set_device_head(head.clone());
 
         let cs = sm.current_state().expect("state from head");
         let era = cs
@@ -420,10 +395,10 @@ mod state_machine_tests {
             .max()
             .unwrap_or(0);
         assert_eq!(
-            era, 275,
+            era, 300,
             "current_state must reflect the canonical head's balance"
         );
-        assert_eq!(cs.hash, restored.root(), "hash is the canonical SMT root");
+        assert_eq!(cs.hash, head.root(), "hash is the canonical SMT root");
     }
     use crate::types::state_types::DeviceInfo;
     use crate::types::token_types::Balance;

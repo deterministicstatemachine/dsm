@@ -24,36 +24,12 @@
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
-use std::path::PathBuf;
 
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
-
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    let cfg = SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    };
-    AppRouterImpl::new(cfg).expect("AppRouterImpl::new should succeed in test")
-}
+use dsm_sdk::storage::client_db::token_registry;
 
 /// The request carries DISPLAY units; canonical state and the registry hold
 /// base units. Everything asserted below is scaled by `SCALE`.
@@ -70,25 +46,6 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
             })
             .await
     })
-}
-
-/// Creation now costs ERA, so every fixture must fund the device first.
-fn fund_era(router: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
 }
 
 /// Install a token in the durable shape a committed creation leaves — the
@@ -131,19 +88,20 @@ fn install_created(ticker: &str) -> (String, [u8; 32]) {
 #[serial_test::serial]
 fn token_survives_restart_and_resolves_from_the_database() {
     runtime::dsm_init_runtime();
-    init_test_storage();
 
-    let (token_id, anchor32) = {
-        let first = new_router();
-        fund_era(&first);
-        let out = install_created("PERSB");
+    // A fresh store and a real identity; the fleet guard outlives the restart
+    // so the second router comes up in the same world. Nothing economic is
+    // asserted here, so nothing is claimed — the registry row is the subject.
+    let (token_id, anchor32, _fleet) = {
+        let (first, fleet) = dsm_sdk::economic_fixtures::empty_router(0xa7);
+        let (token_id, anchor) = install_created("PERSB");
         drop(first); // in-memory caches go with it
-        out
+        (token_id, anchor, fleet)
     };
     let anchor = anchor32.to_vec();
 
     // "Restart": a brand-new router over the same database.
-    let second = new_router();
+    let second = dsm_sdk::economic_fixtures::restart_router();
     runtime::get_runtime().block_on(second.rehydrate_token_registry());
 
     // The policy is served again...
@@ -180,9 +138,7 @@ fn token_survives_restart_and_resolves_from_the_database() {
 #[serial_test::serial]
 fn created_token_projects_under_its_real_ticker() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xa9);
     let (token_id, _anchor) = install_created("READBK");
     let _ = &r;
 
@@ -217,7 +173,6 @@ fn created_token_projects_under_its_real_ticker() {
 #[serial_test::serial]
 fn unnameable_balance_yields_no_key() {
     runtime::dsm_init_runtime();
-    init_test_storage();
     let unknown = [0x7Eu8; 32];
     assert!(
         dsm::core::token::resolve_ticker_for_policy_commit(&unknown).is_none(),

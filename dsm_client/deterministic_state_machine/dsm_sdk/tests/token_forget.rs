@@ -25,30 +25,25 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission.
+///
+/// Replaces the old `init_test_storage()` + `new_router()` pair, which installed
+/// a fabricated identity ([0xAA;32] / [0xBB;32] / [0xCC;32], no genesis record)
+/// and then wrote a balance straight onto the head. That balance
+/// had no economic lineage, and because debits are not fenced it was fully
+/// spendable through canonical acceptance.
+fn funded_router() -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
+    dsm_sdk::economic_fixtures::funded_router(0x71)
 }
 
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
+/// The same, with no ERA. For tests that never spend.
+fn empty_router() -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
+    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
+    dsm_sdk::economic_fixtures::empty_router(0x71)
 }
 
 fn pack(body: Vec<u8>) -> Vec<u8> {
@@ -83,24 +78,6 @@ fn forget(r: &AppRouterImpl, key: &str) -> dsm_sdk::bridge::AppResult {
     )
 }
 
-fn fund_era(r: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        r,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
-}
-
 /// Register an identity the way ADOPTION does: a row and its anchored policy,
 /// with no balance and no local creation.
 fn adopt(ticker: &str, policy_bytes: &[u8]) -> String {
@@ -133,8 +110,7 @@ fn adopt(ticker: &str, policy_bytes: &[u8]) -> String {
 #[serial_test::serial]
 fn forgetting_a_zero_balance_token_frees_its_ticker() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = empty_router();
     let stale = adopt("RIGB", b"the-superseded-policy");
 
     let res = forget(&r, "RIGB");
@@ -169,24 +145,15 @@ fn forgetting_a_zero_balance_token_frees_its_ticker() {
 #[serial_test::serial]
 fn a_token_with_a_balance_cannot_be_forgotten() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = funded_router();
     r.install_policy_resolver();
-    fund_era(&r);
 
-    // Hold the token: an adopted identity plus an installed balance. The
-    // route can no longer CREATE a held token here — under 3.5b creator
-    // supply is refused (issuance goes through `token.mint`) and the fee
-    // is an admitted debit integration tests cannot run — and this test is
-    // about the FORGET rule, which reads canonical holdings however they
-    // arrived.
-    let token_id = adopt("HELD", b"held-token-policy");
-    let commit = token_registry::get_token(&token_id)
-        .expect("registry")
-        .expect("row")
-        .policy_commit;
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(&r, commit, 100_000)
-        .expect("install held balance");
+    // Hold the token the LEGITIMATE way: create it and mint into it, both
+    // admitted. The previous fixture adopted a registry row and then wrote the
+    // balance straight onto the head, justified by "the fee is an admitted
+    // debit integration tests cannot run" — no longer true. The forget rule
+    // reads canonical holdings, and now they are canonical.
+    dsm_sdk::economic_fixtures::mint_asset(&r, "HELD", 0, 100_000);
 
     let res = forget(&r, "HELD");
     assert!(!res.success, "a held token must not be forgettable");
@@ -208,8 +175,7 @@ fn a_token_with_a_balance_cannot_be_forgotten() {
 #[serial_test::serial]
 fn builtin_tokens_cannot_be_forgotten() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = empty_router();
 
     for builtin in ["ERA", "dBTC"] {
         let res = forget(&r, builtin);
@@ -229,8 +195,7 @@ fn builtin_tokens_cannot_be_forgotten() {
 #[serial_test::serial]
 fn forgetting_an_unknown_token_is_refused() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = empty_router();
 
     let res = forget(&r, "NEVERSEEN");
     assert!(!res.success);
@@ -244,8 +209,7 @@ fn forgetting_an_unknown_token_is_refused() {
 #[serial_test::serial]
 fn a_token_can_be_forgotten_by_its_id() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = empty_router();
     let id = adopt("BYID", b"byid-policy");
 
     assert!(forget(&r, &id).success);

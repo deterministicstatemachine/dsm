@@ -794,8 +794,12 @@ mod tests {
 
         let genesis = [0x6E; 32];
         let owner = [0xA0; 32];
+        // The issuance lands on the device's SELF-LOOP — a value relationship
+        // of its own, exactly as a real device's faucet claim is.
         let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024)
-            .with_balance_for_testing([0xF1; 32], 1_000);
+            .admitted_mint([0xF1; 32], 1_000, 0xF1)
+            .expect("admitted mint");
+        let rk_self = compute_smt_key(&owner, &owner);
 
         // A value relationship (Burn → Yes). A burn is value-bearing without
         // needing an issuance admission attached; what this test needs is a
@@ -872,15 +876,24 @@ mod tests {
         assert_eq!(head.genesis_id, genesis);
         assert_eq!(head.pd_smt_root, dev.root());
         assert!(head.is_genesis_head());
-        assert_eq!(leaves.len(), 2);
+        assert_eq!(
+            leaves.len(),
+            3,
+            "the self-loop the issuance landed on, the burn relationship, the generic one"
+        );
 
-        // Gate-set: the value relationship is included, the proven-No one excluded.
+        // Gate-set: the value relationships are included, the proven-No one excluded.
         let gs = crate::recovery::gate_set::build_gate_set(&owner, &head, &anchored, &leaves, &[])
             .expect("gate set");
         assert!(gs.members.contains(&c_yes));
+        assert!(
+            gs.members.contains(&owner),
+            "the self-loop carried value too"
+        );
         assert!(!gs.members.contains(&c_no));
-        // The included leaf's rel_key matches the symmetric derivation.
+        // The included leaves' rel_keys match the symmetric derivation.
         assert_eq!(gs.rel_keys.get(&c_yes), Some(&rk_yes));
+        assert_eq!(gs.rel_keys.get(&owner), Some(&rk_self));
         let _ = rk_no;
     }
 }

@@ -39,13 +39,11 @@ use crate::auth::DeviceContext;
 use crate::db;
 use crate::AppState;
 use dsm::economic::faucet::{
-    decode_and_verify_faucet_ticket_claim, era_faucet_id, faucet_claim_evidence_addr,
-    FaucetClaimError, ERA_FAUCET_TICKET_COUNT,
+    decode_and_verify_faucet_ticket_claim, faucet_claim_evidence_addr,
+    verify_faucet_claim_attribution, FaucetAttributionError, FaucetClaimError,
 };
+use dsm::economic::register::{AuthenticatedCaller, MAX_CLAIM_BYTES};
 use dsm_sdk::util::text_id;
-
-/// One SPHINCS+ SPX256f signature (~49.9 KiB) + key + small fields.
-const MAX_CLAIM_BYTES: usize = 160 * 1024;
 
 pub const OUTCOME_HEADER: &str = "x-dsm-faucet-ticket-outcome";
 pub const HELD_DIGEST_HEADER: &str = "x-dsm-faucet-ticket-held-digest";
@@ -78,7 +76,9 @@ fn outcome(status: StatusCode, outcome: &'static str) -> Response {
 /// Check order: size → strict decode + signature → attribution (key AND
 /// devid) → set → network configured → CANONICAL faucet id → range → the ONE
 /// atomic write. Every refusal happens before the write; nothing is retried,
-/// updated or deleted.
+/// updated or deleted. The attribution and coordinate checks are the
+/// protocol's own `verify_faucet_claim_attribution` — the same function the
+/// in-process register double calls — not a local reimplementation.
 pub async fn post_claim(
     Extension(state): Extension<Arc<AppState>>,
     Extension(caller): Extension<DeviceContext>,
@@ -94,37 +94,44 @@ pub async fn post_claim(
         }
         Err(_) => return outcome(StatusCode::BAD_REQUEST, "malformed"),
     };
-    // ATTRIBUTION: key and device id must both be the authenticated caller's.
-    // Both, because the ticket space is public — anyone may claim ticket i —
-    // and what must be impossible is claiming AS someone else.
-    if verified.body.claimant_public_key != caller.public_key {
-        return outcome(StatusCode::FORBIDDEN, "claimant-not-caller");
-    }
-    let caller_devid =
-        text_id::decode_base32_crockford(&caller.device_id).filter(|v| v.len() == 32);
+    let caller_devid = text_id::decode_base32_crockford(&caller.device_id)
+        .filter(|v| v.len() == 32)
+        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
     let Some(caller_devid) = caller_devid else {
         return outcome(StatusCode::BAD_REQUEST, "caller-id-malformed");
     };
-    if verified.body.claimant_devid.as_slice() != caller_devid.as_slice() {
-        return outcome(StatusCode::FORBIDDEN, "device-not-caller");
-    }
-    // THE SET, then THE NETWORK — both fail closed when unconfigured.
-    let Some(set) = state.storage_set.as_ref() else {
-        return outcome(StatusCode::SERVICE_UNAVAILABLE, "no-storage-set");
+    let auth_caller = AuthenticatedCaller {
+        public_key: caller.public_key.clone(),
+        device_id: caller_devid,
     };
-    if verified.body.storage_set_id != set.id {
-        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "foreign-set");
-    }
-    let Some(network) = state.network_id.as_ref() else {
-        return outcome(StatusCode::SERVICE_UNAVAILABLE, "no-network");
-    };
-    // COORDINATE VALIDITY: the canonical faucet for THIS network, and a
-    // ticket that exists. An invented faucet id gets no cell to occupy.
-    if verified.body.faucet_id != era_faucet_id(network) {
-        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "noncanonical-faucet");
-    }
-    if verified.body.ticket_index >= ERA_FAUCET_TICKET_COUNT {
-        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "ticket-out-of-range");
+    match verify_faucet_claim_attribution(
+        &verified,
+        &auth_caller,
+        state.storage_set.as_ref().map(|s| &s.id),
+        state.network_id.as_ref().map(|n| n.as_slice()),
+    ) {
+        Ok(()) => {}
+        Err(FaucetAttributionError::ClaimantIsNotCaller) => {
+            return outcome(StatusCode::FORBIDDEN, "claimant-not-caller");
+        }
+        Err(FaucetAttributionError::DeviceIsNotCaller) => {
+            return outcome(StatusCode::FORBIDDEN, "device-not-caller");
+        }
+        Err(FaucetAttributionError::StorageSetUnconfigured) => {
+            return outcome(StatusCode::SERVICE_UNAVAILABLE, "no-storage-set");
+        }
+        Err(FaucetAttributionError::WrongStorageSet { .. }) => {
+            return outcome(StatusCode::UNPROCESSABLE_ENTITY, "foreign-set");
+        }
+        Err(FaucetAttributionError::NetworkUnconfigured) => {
+            return outcome(StatusCode::SERVICE_UNAVAILABLE, "no-network");
+        }
+        Err(FaucetAttributionError::NoncanonicalFaucet) => {
+            return outcome(StatusCode::UNPROCESSABLE_ENTITY, "noncanonical-faucet");
+        }
+        Err(FaucetAttributionError::TicketOutOfRange) => {
+            return outcome(StatusCode::UNPROCESSABLE_ENTITY, "ticket-out-of-range");
+        }
     }
 
     let digest = faucet_claim_evidence_addr(&body);
@@ -196,7 +203,9 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::replication::{ReplicationConfig, ReplicationManager};
-    use dsm::economic::faucet::{sign_faucet_ticket_claim, FaucetTicketClaimBody};
+    use dsm::economic::faucet::{
+        era_faucet_id, sign_faucet_ticket_claim, FaucetTicketClaimBody, ERA_FAUCET_TICKET_COUNT,
+    };
 
     const NETWORK: &[u8] = b"dsm-testnet";
 

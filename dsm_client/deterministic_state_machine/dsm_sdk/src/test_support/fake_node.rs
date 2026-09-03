@@ -18,6 +18,8 @@
 //! | `GET  /api/v2/b0x/retrieve` | un-ACKed envelopes for `x-dsm-b0x-address` as `BatchEnvelope`; 204 if none |
 //! | `POST /api/v2/b0x/ack` | retire the ids in the `BatchEnvelope` body; 204 |
 //! | `GET  /api/v2/b0x/status/{id}` | 204 acked · 409 spooled · 404 unknown |
+//! | `POST /api/v2/policy` | index the canonical policy bytes; answer their content anchor |
+//! | `POST /api/v2/policy/get` | serve the bytes under a 32-byte anchor, or 404 |
 //!
 //! Per-message-id status overrides let a test make ONE submission fail
 //! (`503`) or answer a status probe differently, then lift the override — the
@@ -63,6 +65,10 @@ struct NodeState {
     /// message delayed in transit (e.g. a certificate the recipient has not
     /// seen yet while the next transfer already arrived).
     held: std::collections::HashSet<String>,
+    /// Canonical token-policy bytes by content anchor — the node's public,
+    /// content-addressed policy index, which is how a peer roots to an asset
+    /// it did not create.
+    policies: HashMap<[u8; 32], Vec<u8>>,
 }
 
 /// Handle to one running fake node.
@@ -257,6 +263,24 @@ impl FakeB0xNode {
                     None => (404, Vec::new()),
                 }
             }
+            ("POST", "/api/v2/policy") => {
+                // The real node's contract: index the canonical bytes and
+                // echo their content anchor, so the creator can confirm the
+                // node named exactly what it was handed.
+                let anchor = dsm::crypto::blake3::domain_hash_bytes(
+                    dsm::common::domain_tags::TAG_DSM_POLICY,
+                    body,
+                );
+                st.policies.insert(anchor, body.to_vec());
+                (200, anchor.to_vec())
+            }
+            ("POST", "/api/v2/policy/get") => match <[u8; 32]>::try_from(body) {
+                Ok(anchor) => match st.policies.get(&anchor) {
+                    Some(bytes) => (200, bytes.clone()),
+                    None => (404, Vec::new()),
+                },
+                Err(_) => (404, Vec::new()),
+            },
             _ => (204, Vec::new()),
         }
     }

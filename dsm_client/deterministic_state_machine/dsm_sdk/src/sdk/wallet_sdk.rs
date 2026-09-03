@@ -1300,16 +1300,6 @@ impl WalletSDK {
         Ok(info)
     }
 
-    /// Execute a token operation directly through TokenSDK.
-    /// Unconditionally set the local in-memory balance cache without advancing
-    /// the state machine. Used by the b0x rollback path to restore the cached
-    /// pre-send value after a failed storage-node delivery.
-    pub fn force_set_balance_for_self(&self, token_id: &str, amount: u64) {
-        let device_id = self.device_id_array();
-        self.token_sdk
-            .force_set_balance(device_id, token_id, amount);
-    }
-
     /// Reload the local in-memory balance cache from canonical reads and any
     /// derived projections needed to hydrate the cache.
     pub fn reload_balance_cache_for_self(&self) -> Result<(), DsmError> {
@@ -1326,18 +1316,6 @@ impl WalletSDK {
         let device_id = self.device_id_array();
         self.token_sdk
             .project_balance_cache_from_state(device_id, state)
-    }
-
-    pub fn seed_token_balance_for_self(&self, token_id: &str, amount: u64) -> Result<(), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        let device_id = self.device_id_array();
-        self.token_sdk
-            .seed_in_memory_balance(device_id, token_id, amount)
     }
 
     ///

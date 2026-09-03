@@ -104,6 +104,51 @@ impl AppState {
     }
 }
 
+/// The device-authenticated WRITE half of the two economic write-once
+/// registers (faucet tickets, economic roots), behind `auth::device_auth` so
+/// attribution runs against the authenticated key AND device.
+///
+/// ONE assembly, used by the binary's router and by the register conformance
+/// suite, so what the suite drives is what the binary serves.
+pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> {
+    let auth_state = Arc::new(auth::AuthState {
+        db_pool: state.db_pool.clone(),
+    });
+    api::economic::faucet_ticket::create_write_router()
+        .merge(api::economic::root_register::create_write_router())
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            auth::device_auth,
+        ))
+        .layer(Extension(state))
+}
+
+/// The public READ half of the same two registers. The binary rate-limits it;
+/// the conformance suite mounts it bare.
+pub fn economic_register_read_router(state: Arc<AppState>) -> axum::Router<()> {
+    api::economic::faucet_ticket::create_read_router(state.clone())
+        .merge(api::economic::root_register::create_read_router(state))
+}
+
+/// Echo this node's configured protocol identity on EVERY response.
+///
+/// A client fanning a keyed write out over a canonical storage set counts an
+/// acceptance only when the answering node IS the member its catalog says
+/// lives at that endpoint — "distinct members" is executable, not
+/// administrative. This is identity, not authentication (crash-fault node
+/// model): it prevents two catalog entries on one physical node from yielding
+/// two acceptances; it does not prove the node is honest. The value is the
+/// RAW configured id, byte-for-byte what the client's catalog names.
+pub fn node_identity_echo_layer(
+    node_id: &str,
+) -> tower_http::set_header::SetResponseHeaderLayer<axum::http::HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(
+        axum::http::header::HeaderName::from_static("x-dsm-node-id"),
+        axum::http::HeaderValue::from_str(node_id)
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid-node-id")),
+    )
+}
+
 /// Minimal app builder for tests that don't require DB access.
 /// It wires only the routes needed by tests (registry gate), with a lazy pool.
 ///

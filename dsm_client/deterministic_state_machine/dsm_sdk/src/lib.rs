@@ -158,6 +158,9 @@ mod tests;
 // b64 re-export removed per binary-only policy
 
 // Generated protobuf types
+#[cfg(any(test, feature = "test-utils"))]
+pub mod economic_fixtures;
+
 pub mod generated;
 pub mod util;
 

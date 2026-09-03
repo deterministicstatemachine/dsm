@@ -23,9 +23,7 @@ use log::info;
 use rustls::crypto::{self, CryptoProvider};
 use std::sync::Once;
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::{
-    limit::RequestBodyLimitLayer, set_header::SetResponseHeaderLayer, trace::TraceLayer,
-};
+use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use dsm_sdk::util::text_id;
 
@@ -284,26 +282,13 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // split — writes behind device auth (attribution against the
     // authenticated key AND device), reads public. The x-dsm-node-id echo on
     // every response is NORMATIVE for these registers: quorum reads count a
-    // response only when the echo equals the member queried.
-    let economic_auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    let faucet_ticket_write_router = api::economic::faucet_ticket::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            economic_auth_state.clone(),
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    let faucet_ticket_read_router = api::economic::faucet_ticket::create_read_router(state.clone())
-        .layer(public_rate_layer.clone());
-    let economic_root_write_router = api::economic::root_register::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            economic_auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    let economic_root_read_router = api::economic::root_register::create_read_router(state.clone())
-        .layer(public_rate_layer.clone());
+    // response only when the echo equals the member queried. Assembled by
+    // the library so the conformance suite drives exactly what is served.
+    let economic_register_write_router =
+        dsm_storage_node::economic_register_write_router(state.clone());
+    let economic_register_read_router =
+        dsm_storage_node::economic_register_read_router(state.clone())
+            .layer(public_rate_layer.clone());
     let recovery_capsule_router =
         api::vault::recovery::create_router(state.clone()).layer(public_rate_layer.clone());
     // Device registration
@@ -348,11 +333,9 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(genesis_router)
         .merge(dlv_slot_router)
         .merge(slot_claim_write_router)
-        .merge(faucet_ticket_write_router)
-        .merge(economic_root_write_router)
+        .merge(economic_register_write_router)
         .merge(slot_claim_read_router)
-        .merge(faucet_ticket_read_router)
-        .merge(economic_root_read_router)
+        .merge(economic_register_read_router)
         .merge(recovery_capsule_router)
         .merge(device_router) // exposes /api/v2/device/register
         .merge(paidk_router) // PaidK spend-gate endpoints
@@ -365,18 +348,9 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
-        // Echo this node's configured protocol identity on EVERY response. A
-        // client fanning a keyed write out over a canonical storage set counts
-        // an acceptance only when the answering node IS the member its catalog
-        // says lives at that endpoint — "distinct members" is executable, not
-        // administrative. This is identity, not authentication (crash-fault node
-        // model): it prevents two catalog entries on one physical node from
-        // yielding two acceptances; it does not prove the node is honest.
-        .layer(SetResponseHeaderLayer::overriding(
-            axum::http::header::HeaderName::from_static("x-dsm-node-id"),
-            axum::http::HeaderValue::from_str(&config.node_id)
-                .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid-node-id")),
-        ))
+        // The node-identity echo (see `node_identity_echo_layer`): NORMATIVE
+        // for every quorum read and write, so it is the one shared layer.
+        .layer(dsm_storage_node::node_identity_echo_layer(&config.node_id))
         .layer(Extension(state))
 }
 

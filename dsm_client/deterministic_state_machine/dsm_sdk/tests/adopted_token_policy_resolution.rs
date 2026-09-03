@@ -25,34 +25,8 @@
 
 #![allow(clippy::disallowed_methods)]
 
-use std::path::PathBuf;
-
-use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
-
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "receiving-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
-}
+use dsm_sdk::storage::client_db::token_registry;
 
 /// Register a token exactly as ADOPTION does on a receiving device: an
 /// identity row plus the anchored policy bytes, and NO CreateToken of its own.
@@ -80,9 +54,11 @@ fn adopt(ticker: &str, policy_bytes: &[u8]) -> [u8; 32] {
 #[serial_test::serial]
 fn an_adopted_token_resolves_without_a_local_creation() {
     runtime::dsm_init_runtime();
-    init_test_storage();
+    // The router initialises the database and installs the identity, so it
+    // must come BEFORE anything writes a registry row. No funding: these are
+    // policy-RESOLUTION tests and hold no economic value.
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa1);
     let commit = adopt("RIGB", b"rigb-policy-bytes");
-    let r = new_router();
 
     let resolved = r
         .core_sdk
@@ -100,9 +76,11 @@ fn an_adopted_token_resolves_without_a_local_creation() {
 #[serial_test::serial]
 fn an_adopted_token_resolves_by_token_id_too() {
     runtime::dsm_init_runtime();
-    init_test_storage();
+    // The router initialises the database and installs the identity, so it
+    // must come BEFORE anything writes a registry row. No funding: these are
+    // policy-RESOLUTION tests and hold no economic value.
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa1);
     let commit = adopt("BYID", b"byid-policy-bytes");
-    let r = new_router();
 
     assert_eq!(
         r.core_sdk
@@ -119,7 +97,11 @@ fn an_adopted_token_resolves_by_token_id_too() {
 #[serial_test::serial]
 fn a_registry_row_whose_policy_does_not_hash_to_its_commit_does_not_resolve() {
     runtime::dsm_init_runtime();
-    init_test_storage();
+    // The router initialises the database; the deliberately-inconsistent rows
+    // below are an adversarial TEST VECTOR (policy bytes filed under a commit
+    // that is not their hash) proving resolution REFUSES them — not fabricated
+    // economic value, and nothing here is expected to be accepted.
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa1);
 
     // An identity row pointing at a commitment with no matching policy bytes.
     token_registry::insert_token(&token_registry::TokenRegistryRow {
@@ -136,7 +118,6 @@ fn a_registry_row_whose_policy_does_not_hash_to_its_commit_does_not_resolve() {
     token_registry::upsert_policy(&[0x99; 32], b"these-bytes-hash-to-something-else")
         .expect("store");
 
-    let r = new_router();
     assert!(
         r.core_sdk.resolve_policy_commit_strict(b"LIAR").is_err(),
         "a row that does not carry the real policy must not resolve"
@@ -148,8 +129,7 @@ fn a_registry_row_whose_policy_does_not_hash_to_its_commit_does_not_resolve() {
 #[serial_test::serial]
 fn builtin_tokens_still_resolve() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa1);
 
     assert_eq!(
         r.core_sdk
@@ -164,8 +144,7 @@ fn builtin_tokens_still_resolve() {
 #[serial_test::serial]
 fn an_unknown_token_still_fails_closed() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa1);
 
     assert!(
         r.core_sdk

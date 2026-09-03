@@ -13,6 +13,13 @@
 //! actor whose SELF-LOOP transition is being advanced — verified against the head's own
 //! `public_key`, never against a key carried inside the operation, because a key
 //! travelling inside the material it authorizes proves nothing.
+//!
+//! The properties that only concern the operation bytes — preimage stability,
+//! signature installation — need no head at all. The ones that assert what the REAL
+//! `advance` path accepts or refuses cross the economic boundary, so the head they run
+//! against holds its value through admitted origins at the core layer (a faucet claim
+//! for ERA, an admitted issuance for the second asset) and its vault through the
+//! production `DlvCreateFundedV2` transition.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -38,8 +45,16 @@ fn other_keypair() -> &'static SignatureKeyPair {
 fn era() -> [u8; 32] {
     dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA")
 }
-fn dbtc() -> [u8; 32] {
-    dsm::core::token::builtin_policy_commit_for_token("dBTC").expect("dBTC")
+/// A SECOND asset, deliberately not a builtin.
+///
+/// This suite's subject is operation SIGNING, not which assets move. The
+/// settle/owner-apply operations care that the two legs are distinct, nothing
+/// more — and a non-builtin is the only kind a device can issue itself.
+fn second_asset() -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        b"dlv-value-op-signing-second-asset",
+    )
 }
 
 fn sign_with(kp: &SignatureKeyPair, op: &Operation) -> Vec<u8> {
@@ -55,7 +70,7 @@ fn owner_apply_op() -> Operation {
         parent_sequence: 0,
         new_sequence: 1,
         input_policy_commit: era(),
-        output_policy_commit: dbtc(),
+        output_policy_commit: second_asset(),
         input_amount: 100,
         output_amount: 60,
         parent_binding: [0x23; 32],
@@ -72,7 +87,7 @@ fn settle_op() -> Operation {
         owner_devid: [0xA1; 32],
         owner_genesis: [0u8; 32],
         input_policy_commit: era(),
-        output_policy_commit: dbtc(),
+        output_policy_commit: second_asset(),
         parent_sequence: 0,
         parent_binding: [0x11; 32],
         route_commit_bytes: vec![0x44; 8],
@@ -97,23 +112,25 @@ fn both() -> Vec<(&'static str, Operation)> {
     ]
 }
 
-/// A head whose `public_key` IS the actor's AK, funded and with the vault encumbered —
-/// exactly the production relationship between a device head and its signing key.
+/// A head whose `public_key` IS the actor's AK, holding its value through
+/// admitted origins and its vault through the production funding transition —
+/// exactly the production relationship between a device head, its signing key
+/// and its economic state.
+///
+/// ERA: two faucet claims, the protocol payout each — 100 for the settle's
+/// input leg and 100 into the vault. The second asset: one admitted issuance
+/// of 200, half of it into the vault.
 fn actor_head() -> DeviceState {
-    let base = DeviceState::new(ACTOR, ACTOR, actor_keypair().public_key.clone(), 64);
-
-    // Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
-    // `advance` — in tests exactly as in production, which is the property that makes
-    // the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
-    // `with_balance_for_testing` installs the state a device would already be in;
-    // balances live outside the SMT, so `root()` is unaffected, as with `restore`.
-    let mut head = base;
-    for (pc, amt) in [(era(), 10_000u64), (dbtc(), 10_000)] {
-        head = head.with_balance_for_testing(pc, amt);
-    }
-    head.fund_vault_reserves(&VAULT, &[(era(), 5_000), (dbtc(), 4_000)], 0)
-        .expect("fund")
-        .new_device_state
+    let sk = &actor_keypair().secret_key;
+    DeviceState::new(ACTOR, ACTOR, actor_keypair().public_key.clone(), 64)
+        .admitted_faucet_claim(0, 0x01)
+        .expect("faucet claim")
+        .admitted_faucet_claim(1, 0x02)
+        .expect("faucet claim")
+        .admitted_mint(second_asset(), 200, 0x03)
+        .expect("admitted issuance")
+        .admitted_funded_create(VAULT, [(era(), 100), (second_asset(), 100)], 30, sk, 0x04)
+        .expect("funded create")
 }
 
 /// Advance the actor's self-loop with `op`. `DlvOwnerApplyV2` also moves reserves.
@@ -132,7 +149,7 @@ fn advance_with(
                 amount: 100,
             },
             BalanceDelta {
-                policy_commit: dbtc(),
+                policy_commit: second_asset(),
                 direction: BalanceDirection::Credit,
                 amount: 60,
             },
@@ -152,15 +169,15 @@ fn advance_with(
             vault_id: VAULT,
             input_policy_commit: era(),
             input_amount: 100,
-            output_policy_commit: dbtc(),
+            output_policy_commit: second_asset(),
             output_amount: 60,
             parent_sequence: 0,
             new_sequence: 1,
             pair: {
-                let (lo, hi) = if era() < dbtc() {
-                    (era(), dbtc())
+                let (lo, hi) = if era() < second_asset() {
+                    (era(), second_asset())
                 } else {
-                    (dbtc(), era())
+                    (second_asset(), era())
                 };
                 dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
             },

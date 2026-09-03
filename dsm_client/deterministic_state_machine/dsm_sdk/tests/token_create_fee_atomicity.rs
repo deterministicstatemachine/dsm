@@ -39,32 +39,23 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
 const FEE: u64 = dsm::core::token::TOKEN_CREATION_FEE_ERA;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030), replacing a fabricated identity plus a directly-written balance.
+///
+/// The old pair installed [0xAA;32]/[0xBB;32]/[0xCC;32] with no genesis record —
+/// so no network was committed and no admission could ever run — and then wrote
+/// 100 ERA straight onto the head. That balance had no economic lineage, and
+/// since debits are not fenced it was fully spendable through canonical
+/// acceptance. 100 is exactly the faucet's payout, so assertions written against
+/// it are unchanged.
+fn funded_router(seed: u8) -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    let cfg = SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    };
-    AppRouterImpl::new(cfg).expect("AppRouterImpl::new should succeed in test")
+    dsm_sdk::economic_fixtures::funded_router(seed)
 }
 
 fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::AppResult {
@@ -105,25 +96,6 @@ fn create_request(ticker: &str) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Claim ERA from the faucet so the device can afford the fee.
-fn fund_era(router: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
-}
-
 fn era_balance(router: &AppRouterImpl) -> u64 {
     let commit = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA builtin");
     router
@@ -141,39 +113,149 @@ fn head_root(router: &AppRouterImpl) -> [u8; 32] {
         .unwrap_or([0u8; 32])
 }
 
-/// A creation whose fee debit cannot be ADMITTED (no reachable register
-/// fleet here) must fail closed: no fee burned, no head advance, no row.
+/// THE RECOVERY PROPERTY, end to end: an admission interrupted by an
+/// unreachable register completes exactly once when the register returns, and
+/// charges its fee exactly once.
+///
+/// This replaces an assertion that is no longer reachable. The old test claimed
+/// "no fee burned, no head advance" for a device that was funded but had no
+/// admissible ancestry — a state that existed ONLY because the fixture wrote the
+/// balance directly. What becomes unreachable is precisely
+/// `positive spendable value with no admissible economic ancestry`; a
+/// legitimately funded device attempting an operation that cannot currently
+/// complete admission is a REAL lifecycle state, not a defect, and this is it.
+///
+/// ```text
+/// ERA 100, admitted position 1
+///   register unavailable
+///     -> local acceptance, ERA 90, LocalAcceptedPendingEcon, evidence durable
+///   register restored
+///     -> resume -> ECON_ADMITTED
+///     -> ERA still 90            (the fee is not charged twice)
+///     -> position 1 -> 2 exactly (one admission, not two)
+/// ```
 #[test]
 #[serial_test::serial]
-fn an_unadmittable_creation_fails_closed_and_burns_nothing() {
+fn an_interrupted_admission_completes_once_and_charges_the_fee_once() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
-
+    // FUNDED legitimately. Nothing here is fabricated: the balance came from a
+    // real faucet admission, and only the TRANSPORT is taken down.
+    let (r, _fleet) = funded_router(0xa6);
     let before_era = era_balance(&r);
-    let before_root = head_root(&r);
-    assert!(
-        before_era >= FEE,
-        "fixture funds the fee — the refusal must not be affordability"
-    );
+    let before_position =
+        dsm_sdk::economic_fixtures::admitted_position(&r).expect("funded => admitted");
+    assert_eq!(before_era, 100, "the faucet payout");
+    assert_eq!(before_position, 1, "the faucet claim is position 1");
 
+    dsm_sdk::economic_fixtures::take_register_offline();
     let res = invoke(&r, "token.create", create_request("FEEA"));
     assert!(
         !res.success,
-        "a fee debit with no admittable economic lineage must be refused"
+        "a creation whose admission cannot reach quorum must not report success"
     );
-    assert_eq!(era_balance(&r), before_era, "no ERA may be burned");
+
+    // Locally accepted, fee debited, admission durable and in flight.
     assert_eq!(
-        head_root(&r),
-        before_root,
-        "canonical head must not advance"
+        dsm_sdk::economic_fixtures::pending_state(&r),
+        Some(dsm::economic::admission::EconomicAdmissionState::LocalAcceptedPendingEcon),
+        "the operation stopped at local acceptance, awaiting the register"
+    );
+    let mid_era = era_balance(&r);
+    assert_eq!(mid_era, before_era - FEE, "the fee is debited exactly once");
+    assert_eq!(
+        dsm_sdk::economic_fixtures::admitted_position(&r),
+        Some(before_position),
+        "an incomplete admission must NOT advance the admitted position"
+    );
+
+    // The register returns. The SAME operation resumes — no re-submission.
+    dsm_sdk::economic_fixtures::bring_register_online();
+    let resumed = dsm_sdk::economic_fixtures::resume_pending(&r);
+
+    assert_eq!(
+        resumed,
+        before_position + 1,
+        "the interrupted admission advances the position EXACTLY once"
+    );
+    assert_eq!(
+        dsm_sdk::economic_fixtures::admitted_position(&r),
+        Some(before_position + 1),
+        "the admitted lineage records that one advance"
+    );
+    assert_eq!(
+        era_balance(&r),
+        mid_era,
+        "the fee is not charged a second time by the resume"
     );
     assert!(
-        token_registry::get_token_by_ticker("FEEA")
-            .expect("read")
-            .is_none(),
-        "no registry row may survive a refused creation"
+        dsm_sdk::economic_fixtures::pending_state(&r).is_none(),
+        "no fence may remain after ECON_ADMITTED"
+    );
+}
+
+/// THE CRASH CASE: a restart while an admission is `LocalAcceptedPendingEcon`
+/// recovers the EXACT pending operation — one admission, one fee, and no
+/// alternate successor at that economic position.
+///
+/// The interrupted-admission test above resumes in the same process. This one
+/// throws the process state away first: a second router over the same identity
+/// and the same durable database, which is what a real restart looks like. The
+/// crash-safety invariant is that either the operation never became locally
+/// accepted, or it AND its pending admission AND its evidence are all durable —
+/// so a restart must find the same operation, not a re-derived one.
+#[test]
+#[serial_test::serial]
+fn a_restart_mid_admission_recovers_the_same_operation_and_charges_once() {
+    runtime::dsm_init_runtime();
+    let (r, _fleet) = funded_router(0xa7);
+    let before_era = era_balance(&r);
+    let before_position =
+        dsm_sdk::economic_fixtures::admitted_position(&r).expect("funded => admitted");
+
+    dsm_sdk::economic_fixtures::take_register_offline();
+    let res = invoke(&r, "token.create", create_request("CRSH"));
+    assert!(!res.success, "the admission cannot reach quorum");
+    let pending_before = r
+        .core_sdk
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+        .expect("a locally accepted operation leaves its pending admission");
+    assert_eq!(era_balance(&r), before_era - FEE, "fee debited once");
+
+    // RESTART: a new router over the same identity and the same database.
+    // Nothing is re-seeded — that is the whole point of a cold start.
+    drop(r);
+    let r2 = dsm_sdk::economic_fixtures::restart_router();
+
+    let pending_after = r2
+        .core_sdk
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+        .expect("the pending admission must survive the restart");
+    assert_eq!(
+        pending_after.operation_digest, pending_before.operation_digest,
+        "the recovered admission must name the SAME operation, not a re-derived one"
+    );
+    assert_eq!(
+        pending_after.economic_position, pending_before.economic_position,
+        "and the same economic position — no alternate successor"
+    );
+
+    dsm_sdk::economic_fixtures::bring_register_online();
+    let resumed = dsm_sdk::economic_fixtures::resume_pending(&r2);
+    assert_eq!(
+        resumed,
+        before_position + 1,
+        "the recovered admission advances the position exactly once"
+    );
+    assert_eq!(
+        era_balance(&r2),
+        before_era - FEE,
+        "the fee survives the restart charged exactly once"
+    );
+    assert!(
+        dsm_sdk::economic_fixtures::pending_state(&r2).is_none(),
+        "no fence remains after ECON_ADMITTED"
     );
 }
 
@@ -183,8 +265,10 @@ fn an_unadmittable_creation_fails_closed_and_burns_nothing() {
 #[serial_test::serial]
 fn insufficient_era_rejects_and_burns_nothing() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    // EMPTY on purpose: this test's subject is the REFUSAL of an operation
+    // with no admitted economic ancestry. Funding it would make the refusal
+    // unreachable and the assertion vacuous.
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa6);
     // Deliberately NOT funded.
 
     let before_era = era_balance(&r);

@@ -1583,63 +1583,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         Ok(op)
     }
 
-    /// Seed the in-memory balance for a device/token from a validated external
-    /// source without advancing the state machine.
-    ///
-    /// Only seeds upward: if the map already has a value >= `amount` it is left
-    /// unchanged — a tracked in-memory spend must not be wiped by a stale read.
-    /// If the token is absent or the tracked in-memory value is below `amount`,
-    /// it is set to `amount`.
-    ///
-    /// This is the correct fix for bilateral-receive tokens: bilateral receive
-    /// may hydrate derived storage before the in-memory map is refreshed. Without seeding, the first Burn
-    /// of a bilaterally-received token would hit an "Insufficient balance" error
-    /// *after* `execute_dsm_operation` has already advanced the state machine,
-    /// leaving canonical state and the cache out of sync.
-    pub fn seed_in_memory_balance(
-        &self,
-        device_id: DevId,
-        token_id: &str,
-        amount: u64,
-    ) -> Result<(), DsmError> {
-        if amount == 0 {
-            return Ok(());
-        }
-        let current_state = self.core_sdk.get_current_state()?;
-        let state_hash = current_state.hash;
-        let _state_number = current_state.hash[0] as u64;
-        let mut balances = self.balances.write();
-        let device_balances = balances.entry(device_id).or_default();
-        let current = device_balances
-            .get(token_id)
-            .map(|b| b.value())
-            .unwrap_or(0);
-        if current < amount {
-            device_balances.insert(
-                token_id.to_string(),
-                Balance::from_state(amount, state_hash),
-            );
-        }
-        Ok(())
-    }
-
-    /// Unconditionally set the in-memory balance for a device+token pair.
-    /// Used by the atomic b0x rollback path to restore the pre-send balance
-    /// after a failed storage-node delivery.
-    pub fn force_set_balance(&self, device_id: DevId, token_id: &str, amount: u64) {
-        let (state_hash, state_number) = self
-            .core_sdk
-            .get_current_state()
-            .map(|s| (s.hash, s.hash[0] as u64))
-            .unwrap_or(([0u8; 32], 0));
-        let mut balances = self.balances.write();
-        let device_balances = balances.entry(device_id).or_default();
-        device_balances.insert(
-            token_id.to_string(),
-            Balance::from_state(amount, state_hash),
-        );
-    }
-
     pub fn discard_transfer_history_entry(
         &self,
         token_id: &str,

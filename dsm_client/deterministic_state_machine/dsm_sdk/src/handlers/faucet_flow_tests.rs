@@ -133,6 +133,45 @@ fn canonical_set() -> StorageSet {
         .expect("canonical set resolvable in test mode")
 }
 
+/// The process authenticated as ANOTHER device for the duration of one
+/// register request, restored on drop. A register member attributes a
+/// claim to the device that authenticated the request; a test that has a
+/// second party claim must make that party the caller, exactly as a second
+/// handset would be — never present its envelope from the first party's
+/// session and rely on a lenient double.
+struct AsDevice {
+    saved: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
+}
+
+impl AsDevice {
+    fn enter(device_id: [u8; 32], public_key: Vec<u8>) -> Self {
+        use crate::sdk::app_state::AppState;
+        let saved = match (
+            AppState::get_device_id(),
+            AppState::get_public_key(),
+            AppState::get_genesis_hash(),
+            AppState::get_device_tree_root(),
+        ) {
+            (Some(d), Some(p), Some(g), Some(r)) => Some((d, p, g, r.to_vec())),
+            _ => None,
+        };
+        let genesis = AppState::get_genesis_hash().unwrap_or_else(|| vec![0u8; 32]);
+        let root = AppState::get_device_tree_root()
+            .map(|r| r.to_vec())
+            .unwrap_or_else(|| vec![0u8; 32]);
+        AppState::set_identity_info(device_id.to_vec(), public_key, genesis, root);
+        Self { saved }
+    }
+}
+
+impl Drop for AsDevice {
+    fn drop(&mut self) {
+        if let Some((d, p, g, r)) = self.saved.take() {
+            crate::sdk::app_state::AppState::set_identity_info(d, p, g, r);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn a_full_claim_credits_100_era_and_admits_position_1() {
@@ -184,26 +223,32 @@ async fn poisoned_ticket_does_not_brick_the_faucet_end_to_end() {
     let target = crate::sdk::economic_registers::select_ticket(&genesis, &devid, 1, 0)
         .expect("victim's attempt-0 ticket");
 
-    // Attacker (its own identity/key) wins that exact ticket first.
+    // Attacker (its own identity/key) wins that exact ticket first — as
+    // ITSELF: a register attributes a claim to the authenticated device, so
+    // the attacker's envelope must arrive from the attacker's session.
     let (atk_pk, atk_sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
+    let attacker_devid = [0x67u8; 32];
     let set = canonical_set();
     let poison = dsm::economic::faucet::sign_faucet_ticket_claim(
         &dsm::economic::faucet::FaucetTicketClaimBody {
             faucet_id: dsm::economic::faucet::era_faucet_id(NETWORK),
             ticket_index: target,
             claimant_genesis: [0x66; 32],
-            claimant_devid: [0x67; 32],
+            claimant_devid: attacker_devid,
             claimant_economic_position: 1,
             recipient_operation_digest: [0x68; 32],
-            claimant_public_key: atk_pk,
+            claimant_public_key: atk_pk.clone(),
             storage_set_id: set.id(),
         },
         &atk_sk,
     )
     .unwrap();
-    crate::sdk::economic_registers::claim_faucet_ticket(&set, &poison)
-        .await
-        .expect("attacker consumes the ticket — allowed, costs exactly that ticket");
+    {
+        let _as_attacker = AsDevice::enter(attacker_devid, atk_pk);
+        crate::sdk::economic_registers::claim_faucet_ticket(&set, NETWORK, &poison)
+            .await
+            .expect("attacker consumes the ticket — allowed, costs exactly that ticket");
+    }
 
     let outcome = claim_era_faucet(&core, NETWORK)
         .await
@@ -249,7 +294,7 @@ async fn crash_after_ticket_win_before_acceptance_resumes_byte_identically() {
     )
     .unwrap();
     client_db::economic_faucet::put_frozen_ticket_claim(&faucet_id, ticket, &envelope, 1).unwrap();
-    crate::sdk::economic_registers::claim_faucet_ticket(&set, &envelope)
+    crate::sdk::economic_registers::claim_faucet_ticket(&set, NETWORK, &envelope)
         .await
         .expect("pre-crash quorum win");
 

@@ -2,7 +2,7 @@
 
 //! Shared test support: a testnet identity funded through a REAL faucet
 //! claim over the fake fleet — the canonical way any economic test obtains
-//! value with ancestry (install_balance_for_testing funds a balance with no
+//! value with ancestry (a balance written directly onto a head has no
 //! economic lineage, which no admission can debit).
 
 use crate::sdk::core_sdk::CoreSDK;

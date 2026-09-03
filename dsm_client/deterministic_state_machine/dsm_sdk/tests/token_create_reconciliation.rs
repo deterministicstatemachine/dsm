@@ -32,30 +32,21 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::{reset_database_for_tests, token_registry};
+use dsm_sdk::storage::client_db::token_registry;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030), replacing a fabricated identity plus a directly-written balance.
+///
+/// The old pair installed [0xAA;32]/[0xBB;32]/[0xCC;32] with no genesis record —
+/// so no network was committed and no admission could ever run — and then wrote
+/// 100 ERA straight onto the head. That balance had no economic lineage, and
+/// since debits are not fenced it was fully spendable through canonical
+/// acceptance. 100 is also exactly the faucet's payout, so assertions written
+/// against it are unchanged.
+fn funded_router(seed: u8) -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    AppRouterImpl::new(SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    })
-    .expect("router")
+    dsm_sdk::economic_fixtures::funded_router(seed)
 }
 
 fn pack(body: Vec<u8>) -> Vec<u8> {
@@ -75,24 +66,6 @@ fn invoke(r: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridge::Ap
         })
         .await
     })
-}
-
-fn fund_era(r: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        r,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
 }
 
 fn request(ticker: &str, alloc: u128) -> generated::TokenCreateRequest {
@@ -143,9 +116,7 @@ fn era(r: &AppRouterImpl) -> u64 {
 #[serial_test::serial]
 fn a_refused_creator_supply_leaves_no_reconcilable_trace() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
-    fund_era(&r);
+    let (r, _fleet) = funded_router(0x84);
 
     let req = request("RECON", 1_000);
     let before = era(&r);
@@ -177,8 +148,7 @@ fn a_refused_creator_supply_leaves_no_reconcilable_trace() {
 #[serial_test::serial]
 fn an_unaffordable_creation_leaves_no_reconcilable_trace() {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let r = new_router();
+    let (r, _fleet) = dsm_sdk::economic_fixtures::empty_router(0x84);
     // deliberately unfunded: no ERA for the fee
 
     let (ok, _, msg) = create(&r, &request("BROKE", 0));

@@ -203,12 +203,19 @@ pub struct AuthenticatedCaller {
     pub device_id: [u8; 32],
 }
 
+/// The largest claim envelope a register member reads: one SPHINCS+ SPX256f
+/// signature (~49.9 KiB) plus a key and a small body. Shared by every member
+/// implementation — the storage node's handlers and the in-process register
+/// double — so "too large" is refused at the same byte on both.
+pub const MAX_CLAIM_BYTES: usize = 160 * 1024;
+
 /// Why a member refuses to store a claim. All storage-layer; none is a
-/// judgement about economics.
+/// judgement about economics. Attribution is checked on a claim whose
+/// signature ALREADY verified — a signature failure is
+/// [`super::claim_envelope::ClaimEnvelopeError::SignatureInvalid`], never an
+/// attribution outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributionError {
-    /// The signature does not verify over the body under the body's own key.
-    SignatureInvalid,
     /// The claim names a claimant that is not the authenticated caller.
     ClaimantIsNotCaller,
     /// The claim names a device that is not the authenticated caller's.
@@ -223,12 +230,6 @@ pub enum AttributionError {
 impl core::fmt::Display for AttributionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SignatureInvalid => {
-                write!(
-                    f,
-                    "economic root claim: signature does not verify over the body"
-                )
-            }
             Self::ClaimantIsNotCaller => write!(
                 f,
                 "economic root claim: claimant_public_key is not the authenticated caller — \

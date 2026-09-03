@@ -22,32 +22,19 @@ use std::path::PathBuf;
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::reset_database_for_tests;
 
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn router() -> AppRouterImpl {
+/// A router on a REAL testnet identity, funded through a REAL faucet admission
+/// (0x0030).
+///
+/// Replaces a fabricated identity ([0xAA;32]/[0xBB;32]/[0xCC;32], no genesis
+/// record, so no network was committed and no admission could run) plus a
+/// balance written straight onto the head. 100 is the faucet's own payout, so
+/// downstream assertions are unchanged.
+fn router() -> (AppRouterImpl, dsm_sdk::economic_fixtures::FleetGuard) {
     runtime::dsm_init_runtime();
-    init_test_storage();
-    let cfg = SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    };
-    AppRouterImpl::new(cfg).expect("AppRouterImpl::new should succeed in test")
+    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
+    dsm_sdk::economic_fixtures::funded_router(0xb1)
 }
 
 fn create_request(ticker: &str, max_supply: u128, initial_alloc: u128) -> Vec<u8> {
@@ -85,32 +72,13 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
 }
 
 /// Creation now costs ERA, so every fixture must fund the device first.
-fn fund_era(router: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
-}
-
 /// The publish route must return the LOCAL content hash, never a node-supplied
 /// value. With no storage nodes configured this holds trivially; the assertion
 /// pins the contract so a future change that adopts a remote anchor fails here.
 #[test]
 #[serial_test::serial]
 fn publish_returns_the_local_content_hash() {
-    let r = router();
-    fund_era(&r);
+    let (r, _fleet) = router();
     let proto = generated::TokenPolicyV3 {
         policy_bytes: vec![0x01, 0x02, 0x03, 0x04],
     }
@@ -139,8 +107,7 @@ fn publish_returns_the_local_content_hash() {
 #[test]
 #[serial_test::serial]
 fn create_rejects_initial_alloc_above_max_supply() {
-    let r = router();
-    fund_era(&r);
+    let (r, _fleet) = router();
     let res = invoke(&r, "token.create", create_request("OVER", 100, 101));
     assert!(
         !res.success,
@@ -157,8 +124,7 @@ fn create_rejects_initial_alloc_above_max_supply() {
 #[test]
 #[serial_test::serial]
 fn create_rejects_bad_ticker() {
-    let r = router();
-    fund_era(&r);
+    let (r, _fleet) = router();
     let res = invoke(&r, "token.create", create_request("X", 1_000, 1));
     assert!(!res.success, "a 1-char ticker must be rejected");
 }

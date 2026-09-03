@@ -2519,33 +2519,6 @@ pub fn test_online_chain_tip_from_sdk_context_b32() -> Result<(Vec<u8>, String),
     online_chain_tip_from_sdk_context_b32()
 }
 
-/// Seed a fixture balance onto this router's device head. TEST-ONLY, compiled
-/// only under `cfg(test)` or the non-default `test-utils` feature.
-///
-/// A thin wrapper over `DeviceState::with_balance_for_testing`, which carries the
-/// full rationale: this is fixture construction, NOT issuance, and a fixture must
-/// never route through `faucet.claim`, `wallet.mint_for_self`, or
-/// `Operation::Mint` to obtain a balance.
-///
-/// Deliberately narrow: it installs ONE balance rather than taking an arbitrary
-/// `DeviceState`, so a test that needs funding does not thereby gain the power to
-/// replace the whole head.
-#[cfg(any(test, feature = "test-utils"))]
-pub fn install_balance_for_testing(
-    router: &AppRouterImpl,
-    policy_commit: [u8; 32],
-    amount: u64,
-) -> Result<(), String> {
-    let head = router
-        .core_sdk
-        .device_head()
-        .ok_or_else(|| "install_balance_for_testing: no device head".to_string())?;
-    router
-        .core_sdk
-        .set_device_head_for_testing(head.with_balance_for_testing(policy_commit, amount));
-    Ok(())
-}
-
 fn compute_initial_relationship_chain_tip(
     local_device_id: [u8; 32],
     local_genesis: [u8; 32],

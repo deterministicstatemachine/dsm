@@ -18,24 +18,6 @@ use std::collections::HashMap;
 use rand::rngs::OsRng;
 use tokio::time::{timeout, Duration};
 
-fn seed_era_projection(device_txt: &str, available: u64) {
-    dsm_sdk::storage::client_db::upsert_balance_projection(
-        &dsm_sdk::storage::client_db::BalanceProjectionRecord {
-            balance_key: format!("test:{device_txt}:ERA"),
-            device_id: device_txt.to_string(),
-            token_id: "ERA".to_string(),
-            policy_commit: dsm_sdk::util::text_id::encode_base32_crockford(
-                dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
-            ),
-            available,
-            locked: 0,
-            source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
-            updated_at: 0,
-        },
-    )
-    .unwrap_or_else(|e| panic!("Failed to seed ERA projection: {e}"));
-}
-
 fn persist_live_genesis_record(
     genesis_device_id: &[u8],
     genesis_hash: &[u8],
@@ -163,16 +145,30 @@ async fn e2e_online_transfer_era_and_custom_token() {
     clear_inbox_receipts();
 
     // --- Alice: Faucet claim ---
-    // Seed the fixture ERA balance directly. This used to call `faucet.claim`,
-    // which minted builtin ERA on a caller-supplied device_id — the unauthorized
-    // issuance the accepting-layer gate now refuses in tests exactly as in
-    // production. Fixtures seed state; they do not mint.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        &router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
+    // A REAL faucet claim (0x0030) against the live fleet — the legitimate
+    // origin, and what this section is labelled as. It had been replaced by a
+    // direct balance write when `faucet.claim` was fenced for minting builtin
+    // ERA on a caller-supplied device_id; the route is correct now, and this
+    // test runs against live nodes, so the real claim is available to it.
+    // A directly written balance has no economic lineage and no admission can
+    // debit it.
+    {
+        let claim = dsm_sdk::generated::FaucetClaimRequest {
+            device_id: alice_device_id.clone(),
+        };
+        let args = dsm_sdk::generated::ArgPack {
+            schema_hash: None,
+            codec: dsm_sdk::generated::Codec::Proto as i32,
+            body: prost::Message::encode_to_vec(&claim),
+        };
+        let res = router
+            .invoke(dsm_sdk::bridge::AppInvoke {
+                method: "faucet.claim".to_string(),
+                args: prost::Message::encode_to_vec(&args),
+            })
+            .await;
+        assert!(res.success, "faucet claim: {:?}", res.error_message);
+    }
 
     let balances = fetch_balances(&router).await;
     let era_after_faucet = get_era_balance(&balances).unwrap_or(0);
@@ -623,8 +619,21 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         );
         ensure_b0x_tokens(&sender_router, &storage_nodes).await;
 
-        let sender_device_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&sender_device_id);
-        seed_era_projection(&sender_device_b32, 1_000);
+        // The sender's ERA comes from a REAL faucet claim (0x0030) against the
+        // live fleet — the only origin with economic lineage. A directly
+        // written projection row carried a balance no admission could debit.
+        {
+            let claim = dsm_sdk::generated::FaucetClaimRequest {
+                device_id: sender_device_id.clone(),
+            };
+            let res = sender_router
+                .invoke(AppInvoke {
+                    method: "faucet.claim".to_string(),
+                    args: pack_proto(&claim),
+                })
+                .await;
+            assert!(res.success, "sender faucet claim: {:?}", res.error_message);
+        }
 
         let relationship_tip = compute_initial_chain_tip(
             &sender_device_id,
