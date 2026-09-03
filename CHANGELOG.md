@@ -9,7 +9,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-_No changes yet on `main` past `v0.1.0-beta.3`._
+### Breaking — requires a device state wipe
+
+- **Vault rehydration fails closed on funded heads that predate the vault-state leaf.**
+  `advance` began deriving a vault-state leaf on every funding and settlement in
+  `607ec24f` (2026-08-19), but reserve mutations had existed since `05c16b99`
+  (2026-07-31). A head funded in that window holds reserve legs with **no**
+  vault-state leaf. Rehydration now checks the vault record against that leaf,
+  so such a vault is refused everywhere it is read: omitted from the vault list,
+  not quotable, and **not closable** — reserves encumbered in that window are
+  unreachable on that device.
+
+  The persistence codec does not catch this. `DEVICE_STATE_VERSION` was last
+  raised in `80c9f3f6` (2026-08-12), before the leaf derivation landed, so an
+  affected head still decodes cleanly and reaches rehydration looking valid.
+
+  **There is no migration, deliberately.** The missing leaf is never
+  synthesized: writing a commitment the device did not make is exactly the class
+  of fabricated state this line of work exists to remove, and a migration would
+  create compatibility logic for a state shape we do not want to preserve. Beta
+  runs on `dsm-testnet` and carries no production user state, so the remedy is a
+  state wipe — reinstall or clear application data, then re-fund. Today's funded
+  create cannot produce such a head, so only a device still carrying state from
+  that window is affected.
+
+  This option disappears once production persistence matters; at that point the
+  same boundary would need a real migration or an explicit terminal state.
 
 ---
 
