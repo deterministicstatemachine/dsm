@@ -3483,15 +3483,27 @@ mod tests {
     /// ordinary spend path — `BalanceDelta` can only reach `balances`.
     #[test]
     fn funded_reserves_are_unspendable_by_transfer() {
-        let mut dev = fresh_device(0xA4);
-        let era = pc(0xE0);
-        dev.balances.insert(era, 10_000);
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
         let vault = [0x77u8; 32];
 
-        let funded = dev
-            .fund_vault_reserves(&vault, &[(era, 10_000)], 0)
+        // The value is admitted (issued through the accepting transition) and
+        // then encumbered through the production funded-create, which takes
+        // exactly the vault's pair: the second leg rides along; the claim under
+        // test is about the first.
+        let funded = fresh_device(0xA4)
+            .admitted_mint(era, 10_000, 0xA0)
+            .expect("admitted issuance")
+            .admitted_mint(rigb, 10, 0xA1)
+            .expect("admitted issuance")
+            .admitted_funded_create(
+                vault,
+                [(era, 10_000), (rigb, 10)],
+                30,
+                &test_keypair().secret_key,
+                0xA2,
+            )
             .expect("funding")
-            .new_device_state;
+            .with_pending_economic_admission(None);
         assert_eq!(funded.balance(&era), 0, "all of it is encumbered");
         assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
 
@@ -4041,10 +4053,13 @@ mod tests {
     /// clears and leaves the 60 still encumbered.
     #[test]
     fn funding_via_production_dlvcreate_advance_reduces_spendable_to_the_remainder() {
-        let mut dev = fresh_device(0xC1);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 100);
-        dev.balances.insert(rigb, 10);
+        let dev = fresh_device(0xC1)
+            .admitted_mint(era, 100, 0xA0)
+            .expect("admitted issuance")
+            .admitted_mint(rigb, 10, 0xA1)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
         let vault = [0x71u8; 32];
         let (rk, tip) = self_loop(&dev);
 
@@ -4139,9 +4154,11 @@ mod tests {
     /// refusal leaves the head byte-identical: no half-encumbrance.
     #[test]
     fn spending_first_then_funding_beyond_the_remainder_is_refused() {
-        let mut dev = fresh_device(0xC2);
         let era = pc(0xE0);
-        dev.balances.insert(era, 100);
+        let dev = fresh_device(0xC2)
+            .admitted_mint(era, 100, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
         let (rk, tip) = self_loop(&dev);
 
         let spent = dev
@@ -4214,10 +4231,13 @@ mod tests {
     /// (parent-consumption / reconcile-first) lives at the SDK layer, not here.
     #[test]
     fn refunding_an_already_encumbered_vault_asset_is_refused() {
-        let mut dev = fresh_device(0xC3);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 100);
-        dev.balances.insert(rigb, 100);
+        let dev = fresh_device(0xC3)
+            .admitted_mint(era, 100, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 100, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x73u8; 32];
         let (rk, tip) = self_loop(&dev);
 
@@ -4575,19 +4595,28 @@ mod tests {
     /// user's conservation rule actually asks for, and it needs a real advance.
     #[test]
     fn dlv_settle_advance_moves_two_balances_and_leaves_everything_else_identical() {
-        let mut trader = fresh_device(0xB1);
         let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        trader.balances.insert(era, 50_000);
-        trader.balances.insert(rigb, 2_000);
-        trader.balances.insert(dbtc, 7_777);
+        let trader = fresh_device(0xB1)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 2_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .admitted_mint(dbtc, 7_777, 0xA2)
+            .expect("admitted issuance of dbtc");
 
         // The trader also runs a vault of its own. A settlement it performs as a
         // TRADER must not touch reserves it holds as an OWNER.
         let own_vault = [0x99u8; 32];
         let trader = trader
-            .fund_vault_reserves(&own_vault, &[(era, 10_000), (dbtc, 1_000)], 0)
+            .admitted_funded_create(
+                own_vault,
+                [(era, 10_000), (dbtc, 1_000)],
+                30,
+                &test_keypair().secret_key,
+                0xA3,
+            )
             .expect("trader funds its own vault")
-            .new_device_state;
+            .with_pending_economic_admission(None);
 
         let before_dbtc = trader.balance(&dbtc);
         let before_reserves = trader.vault_reserves_snapshot();
@@ -4649,10 +4678,11 @@ mod tests {
             verify_trader_settlement_receipt, SettledTrade,
         };
 
-        let mut trader = fresh_device(0xB7);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        trader.balances.insert(era, 50_000);
-        trader.balances.insert(rigb, 0);
+        let trader = fresh_device(0xB7)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .with_pending_economic_admission(None);
 
         let vault = [0x77u8; 32];
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
@@ -6045,8 +6075,11 @@ mod tests {
         let bob = devid(0xBB);
 
         let tip_with_balances = |seed: u64| {
-            let mut dev = fresh_device(0xAA);
-            dev.balances.insert(token, 100 + seed); // differing balance state
+            // differing balance state, each reached through an admitted issuance
+            let dev = fresh_device(0xAA)
+                .admitted_mint(token, 100 + seed, 0xA0 + seed as u8)
+                .expect("admitted issuance")
+                .with_pending_economic_admission(None);
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
             let init =
                 crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
@@ -6082,8 +6115,10 @@ mod tests {
         );
 
         // And the helper IS the commitment — one preimage, two entry points.
-        let mut dev = fresh_device(0xAA);
-        dev.balances.insert(token, 100);
+        let dev = fresh_device(0xAA)
+            .admitted_mint(token, 100, 0xA8)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
         let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &dev.devid, &bob,
@@ -6127,9 +6162,11 @@ mod tests {
     /// sees its `parent_r_a` no longer matches the current head.
     #[test]
     fn concurrent_advances_from_same_root_produce_different_children() {
-        let mut dev = fresh_device(0xAA);
         let token = pc(0xCC);
-        dev.balances.insert(token, 100);
+        let dev = fresh_device(0xAA)
+            .admitted_mint(token, 100, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let charlie = devid(0xDD);
@@ -6209,9 +6246,11 @@ mod tests {
     /// embed the same `embedded_parent`. Verifiers seeing both must reject one.
     #[test]
     fn tripwire_same_relationship_same_parent_different_children() {
-        let mut dev = fresh_device(0xAA);
         let token = pc(0xCC);
-        dev.balances.insert(token, 100);
+        let dev = fresh_device(0xAA)
+            .admitted_mint(token, 100, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
@@ -6275,9 +6314,11 @@ mod tests {
     /// Phase 6 test: balance underflow rejected.
     #[test]
     fn advance_rejects_balance_underflow() {
-        let mut dev = fresh_device(0xAA);
         let token = pc(0xCC);
-        dev.balances.insert(token, 5);
+        let dev = fresh_device(0xAA)
+            .admitted_mint(token, 5, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
@@ -6317,9 +6358,11 @@ mod tests {
     /// OVERFLOW rather than any earlier gate.
     #[test]
     fn advance_rejects_balance_overflow() {
-        let mut dev = fresh_device(0xAA);
         let token = pc(0xCC);
-        dev.balances.insert(token, u64::MAX);
+        let dev = fresh_device(0xAA)
+            .admitted_mint(token, u64::MAX, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
 
         let bob = devid(0xBB);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
@@ -6361,9 +6404,11 @@ mod tests {
     #[test]
     fn balance_conservation_across_sequence() {
         let _ = TransactionMode::Bilateral; // import keep-alive
-        let mut dev = fresh_device(0xAA);
         let token = pc(0xCC);
-        dev.balances.insert(token, 1000);
+        let mut dev = fresh_device(0xAA)
+            .admitted_mint(token, 1000, 0xA0)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
 
         let parties: Vec<[u8; 32]> = (0u8..5).map(|i| devid(0xB0 + i)).collect();
         let mut net_delta: i64 = 0;
@@ -6438,10 +6483,13 @@ mod tests {
     fn a_funding_advance_writes_the_vault_state_leaf_under_the_same_root() {
         use crate::dlv::vault_smt_leaf::{compute_vault_smt_key, verify_vault_smt_inclusion};
 
-        let mut dev = fresh_device(0xC5);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 50_000);
-        dev.balances.insert(rigb, 20_000);
+        let dev = fresh_device(0xC5)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 20_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x75u8; 32];
         let (rk, tip) = self_loop(&dev);
 
@@ -6553,11 +6601,15 @@ mod tests {
     /// describe different reserves than the leaves hold.
     #[test]
     fn funding_legs_that_are_not_exactly_the_pair_are_refused() {
-        let mut dev = fresh_device(0xC6);
         let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        dev.balances.insert(era, 50_000);
-        dev.balances.insert(rigb, 20_000);
-        dev.balances.insert(dbtc, 9_000);
+        let dev = fresh_device(0xC6)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 20_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .admitted_mint(dbtc, 9_000, 0xA2)
+            .expect("admitted issuance of dbtc")
+            .with_pending_economic_admission(None);
         let vault = [0x76u8; 32];
         let (rk, tip) = self_loop(&dev);
         let root_before = dev.root();
@@ -6628,10 +6680,13 @@ mod tests {
     fn owner_apply_advance_keeps_the_vault_state_leaf_in_lockstep_and_refuses_a_third_asset() {
         use crate::dlv::vault_smt_leaf::verify_vault_smt_inclusion;
 
-        let mut owner = fresh_device(0xC7);
         let (era, rigb, dbtc) = (pc(0xE0), pc(0xF0), pc(0xD0));
-        owner.balances.insert(era, 50_000);
-        owner.balances.insert(rigb, 20_000);
+        let owner = fresh_device(0xC7)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 20_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x77u8; 32];
         let (rk, tip) = self_loop(&owner);
         let pair = vault_pair(era, rigb);
@@ -6762,7 +6817,13 @@ mod tests {
     // Closing a vault: the complete reserve set returns, exactly once
     // ─────────────────────────────────────────────────────────────
 
-    /// A funded vault at generation 0, with `era`/`rigb` reserves.
+    /// A funded vault at generation 0, with `era`/`rigb` reserves, on a head
+    /// whose every unit entered through an admitted origin: one admitted
+    /// issuance per leg asset (`ra + 1_000` / `rb + 500`, so a spendable
+    /// remainder stays behind), then one admitted, signed funded create for
+    /// exactly `(era, ra), (rigb, rb)` at 30 bps. The head is returned as an
+    /// admitted head is after `finish_admission`: carrying no pending
+    /// admission.
     fn funded_for_close(
         b: u8,
         era: [u8; 32],
@@ -6770,31 +6831,22 @@ mod tests {
         ra: u64,
         rb: u64,
     ) -> (DeviceState, [u8; 32], [u8; 32], [u8; 32]) {
-        let mut dev = fresh_device(b);
-        dev.balances.insert(era, ra + 1_000);
-        dev.balances.insert(rigb, rb + 500);
         let vault = [b ^ 0x5A; 32];
-        let (rk, tip) = self_loop(&dev);
-        let funded = dev
-            .advance_admitted(
-                rk,
-                dev.devid,
-                dlv_create_funded(vault, era, ra, rigb, rb),
-                entropy(1),
-                None,
-                &[],
-                Some(tip),
-                None,
-                None,
-                Some(VaultReserveMutation::Fund {
-                    vault_id: vault,
-                    legs: vec![(era, ra), (rigb, rb)],
-                    vault_sequence: 0,
-                    pair: vault_pair(era, rigb),
-                }),
+        let funded = fresh_device(b)
+            .admitted_mint(era, ra + 1_000, 0xA0)
+            .expect("admitted issuance of the first leg's asset")
+            .admitted_mint(rigb, rb + 500, 0xA1)
+            .expect("admitted issuance of the second leg's asset")
+            .admitted_funded_create(
+                vault,
+                [(era, ra), (rigb, rb)],
+                30,
+                &test_keypair().secret_key,
+                0xA2,
             )
             .expect("fund")
-            .new_device_state;
+            .with_pending_economic_admission(None);
+        let (rk, tip) = self_loop(&funded);
         (funded, vault, rk, tip)
     }
 
@@ -6845,10 +6897,13 @@ mod tests {
     /// `DlvSettle`/`DlvClose`.
     #[test]
     fn an_unsigned_v2_vault_operation_is_refused_by_advance() {
-        let mut dev = fresh_device(0xC9);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 1_000);
-        dev.balances.insert(rigb, 1_000);
+        let dev = fresh_device(0xC9)
+            .admitted_mint(era, 1_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 1_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x79u8; 32];
         let (rk, tip) = self_loop(&dev);
         let unsigned = Operation::DlvCreateFundedV2 {
@@ -6894,10 +6949,13 @@ mod tests {
     /// Fund mutation is refused structurally.
     #[test]
     fn a_state_only_create_cannot_encumber_reserves() {
-        let mut dev = fresh_device(0xCA);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 1_000);
-        dev.balances.insert(rigb, 1_000);
+        let dev = fresh_device(0xCA)
+            .admitted_mint(era, 1_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 1_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x7Au8; 32];
         let (rk, tip) = self_loop(&dev);
         let err = dev.advance(
@@ -6929,10 +6987,13 @@ mod tests {
     /// decides what moves.
     #[test]
     fn a_fund_mutation_that_disagrees_with_the_signed_v2_create_is_refused() {
-        let mut dev = fresh_device(0xCB);
         let (era, rigb) = (pc(0xE0), pc(0xF0));
-        dev.balances.insert(era, 1_000);
-        dev.balances.insert(rigb, 1_000);
+        let dev = fresh_device(0xCB)
+            .admitted_mint(era, 1_000, 0xA0)
+            .expect("admitted issuance of era")
+            .admitted_mint(rigb, 1_000, 0xA1)
+            .expect("admitted issuance of rigb")
+            .with_pending_economic_admission(None);
         let vault = [0x7Bu8; 32];
         let (rk, tip) = self_loop(&dev);
         let err = dev.advance_admitted(
