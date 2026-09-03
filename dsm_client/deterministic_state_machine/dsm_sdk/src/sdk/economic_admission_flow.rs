@@ -131,23 +131,51 @@ pub(crate) fn validated_root_or_activate(
 /// recovery truth (for position 0/1 in beta: the empty tree, since nothing
 /// beyond the first admissions exists to replay yet).
 pub(crate) fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<EconomicSmt, DsmError> {
-    Ok(producer_tree_and_balances(validated)?.0)
+    Ok(producer_tree_and_pre_state(validated)?.0)
 }
 
-/// The producer tree PLUS the admitted balance map decoded from the same
+/// The admitted pre-state a write set reads: every leaf class in `R_econ` that
+/// a mutation can start from, owned so it can outlive the decode.
+///
+/// It is NOT "the balances plus some extras". `build_write_set` reads exactly
+/// two classes — balances, and the vault reserves an owner apply or a close
+/// draws down — and a class the producer drops is not a smaller pre-state but
+/// an ABSENT LEAF: `DlvOwnerApply` and `DlvWithdraw` fail closed with "the
+/// vault holds no output reserve for that settlement" against a validated root
+/// that commits exactly that reserve. Receipt and consumed-source leaves are
+/// deliberately absent: they are write-once records a write set inserts, never
+/// a state it starts from.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct AdmittedPreState {
+    pub balances: BTreeMap<[u8; 32], u64>,
+    pub vault_reserves:
+        BTreeMap<([u8; 32], [u8; 32]), dsm::economic::state::EconomicVaultReserveState>,
+}
+
+impl AdmittedPreState {
+    /// The borrowed view `build_write_set` takes.
+    pub fn as_write_set_pre_state(&self) -> dsm::economic::write_set::EconomicPreState<'_> {
+        dsm::economic::write_set::EconomicPreState {
+            balances: &self.balances,
+            vault_reserves: &self.vault_reserves,
+        }
+    }
+}
+
+/// The producer tree PLUS the admitted pre-state decoded from the same
 /// cache rows. Admission pre-states come from `R_econ` ITSELF — never the
 /// device head, whose balance map can carry credits no admission backs (a
 /// received transfer awaiting PR4 recipient admission). Building from the
 /// head would pair a mutation pre-state the validated pre-root cannot prove;
 /// building from the tree makes unadmitted value simply unspendable, which
 /// is the economic-root guarantee working.
-pub(crate) fn producer_tree_and_balances(
+pub(crate) fn producer_tree_and_pre_state(
     validated: &ValidatedEconomicRoot,
-) -> Result<(EconomicSmt, BTreeMap<[u8; 32], u64>), DsmError> {
+) -> Result<(EconomicSmt, AdmittedPreState), DsmError> {
     let mut tree = EconomicSmt::new();
-    let mut balances = BTreeMap::new();
+    let mut pre = AdmittedPreState::default();
     if validated.economic_position() == 0 {
-        return Ok((tree, balances));
+        return Ok((tree, pre));
     }
     let leaves =
         economic_lineage::load_leaf_cache().map_err(|e| storage_err("load leaf cache", e))?;
@@ -155,8 +183,22 @@ pub(crate) fn producer_tree_and_balances(
         tree.insert(*key, *value);
         let state = dsm::economic::decode::decode_leaf_state(ccb)
             .map_err(|e| storage_err("decode cached leaf state", e))?;
-        if let dsm::economic::state::EconomicLeafState::Balance(b) = state {
-            balances.insert(b.policy_commit, b.amount);
+        // Every class the tree carries is decoded here, and the two a write
+        // set can START from are kept. Dropping one would not narrow the
+        // pre-state — it would assert the leaf is absent from a root that
+        // commits it, and the write set would fail closed on state the device
+        // provably holds.
+        match state {
+            dsm::economic::state::EconomicLeafState::Balance(b) => {
+                pre.balances.insert(b.policy_commit, b.amount);
+            }
+            dsm::economic::state::EconomicLeafState::VaultReserve(r) => {
+                pre.vault_reserves.insert((r.vault_id, r.policy_commit), r);
+            }
+            // Write-once records, inserted by a write set and never a
+            // predecessor it reads.
+            dsm::economic::state::EconomicLeafState::SettlementReceipt(_)
+            | dsm::economic::state::EconomicLeafState::ConsumedSource(_) => {}
         }
     }
     if tree.root() != validated.economic_root() {
@@ -167,7 +209,7 @@ pub(crate) fn producer_tree_and_balances(
             None::<std::io::Error>,
         ));
     }
-    Ok((tree, balances))
+    Ok((tree, pre))
 }
 
 /// The portable P0–P6 authority material for THIS device, built from the
@@ -228,7 +270,7 @@ pub(crate) fn build_dsm_admission(
     devid: &[u8; 32],
     chain_state: &RelationshipChainState,
     operation: &Operation,
-    pre_balances: &BTreeMap<[u8; 32], u64>,
+    pre_state: &AdmittedPreState,
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
     authority: &AuthorityMaterial,
@@ -245,7 +287,7 @@ pub(crate) fn build_dsm_admission(
         genesis,
         devid,
         &econ_op_id,
-        &dsm::economic::write_set::EconomicPreState::balances_only(pre_balances),
+        &pre_state.as_write_set_pre_state(),
         tree,
         facts,
     )
@@ -389,10 +431,11 @@ pub(crate) fn build_dsm_admission(
 /// reserve mutation, plain versus staged writers); the admission itself has a
 /// single implementation and is never duplicated per operation.
 ///
-/// `pre_balances` is the snapshot the write set will actually debit. A caller
-/// that needs a sufficiency answer must take it from HERE and not re-read the
-/// economic root separately: a second, independently-timed lookup reasons from
-/// a different observation than the transition it is attempting.
+/// `pre_state` is the snapshot the write set will actually read — balances it
+/// debits, vault reserves it draws down. A caller that needs a sufficiency
+/// answer must take it from HERE and not re-read the economic root separately:
+/// a second, independently-timed lookup reasons from a different observation
+/// than the transition it is attempting.
 pub(crate) struct StagedAdmission {
     pub network_id: Vec<u8>,
     pub genesis: [u8; 32],
@@ -400,7 +443,7 @@ pub(crate) struct StagedAdmission {
     pub set: StorageSet,
     pub validated: ValidatedEconomicRoot,
     pub tree: EconomicSmt,
-    pub pre_balances: BTreeMap<[u8; 32], u64>,
+    pub pre_state: AdmittedPreState,
     pub authority: AuthorityMaterial,
     pub target_position: u64,
     pub facts: CreditSourceFacts,
@@ -437,7 +480,7 @@ pub(crate) async fn stage_admission(
     let devid = head.devid();
     let set = canonical_set(&network_id)?;
     let validated = validated_root_or_activate(core)?;
-    let (tree, pre_balances) = producer_tree_and_balances(&validated)?;
+    let (tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let authority = authority_material(&network_id, &genesis)?;
     let target_position = validated.economic_position() + 1;
     let op_digest = dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes());
@@ -455,7 +498,7 @@ pub(crate) async fn stage_admission(
         set,
         validated,
         tree,
-        pre_balances,
+        pre_state,
         authority,
         target_position,
         facts,
@@ -506,7 +549,7 @@ pub(crate) async fn admitted_self_loop_operation(
         set,
         validated,
         mut tree,
-        pre_balances,
+        pre_state,
         authority,
         facts,
         extra_artifacts,
@@ -524,7 +567,7 @@ pub(crate) async fn admitted_self_loop_operation(
                 &devid,
                 chain_state,
                 &operation,
-                &pre_balances,
+                &pre_state,
                 &mut tree,
                 &facts,
                 &authority,
@@ -613,7 +656,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
         set,
         validated,
         mut tree,
-        pre_balances,
+        pre_state,
         authority,
         facts,
         extra_artifacts,
@@ -627,7 +670,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
     // SUFFICIENCY, from the SAME snapshot the admission will CAS against.
     //
     // The structural check is `plan_balance_debit` inside the write-set
-    // builder, against these exact `pre_balances`. This loop exists only to
+    // builder, against these exact admitted balances. This loop exists only to
     // name the shortfall, and it reads the staged predecessor rather than
     // `device_head()` precisely so it cannot disagree with the transition
     // being attempted: a second, independently-timed lookup would let the
@@ -645,7 +688,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
             (leg_a_policy_commit, *leg_a_amount),
             (leg_b_policy_commit, *leg_b_amount),
         ] {
-            let have = pre_balances.get(pc).copied().unwrap_or(0);
+            let have = pre_state.balances.get(pc).copied().unwrap_or(0);
             if have < need {
                 return Err(DsmError::invalid_operation(format!(
                     "insufficient {} to encumber (need {need}, have {have} admitted)",
@@ -670,7 +713,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
                     &devid,
                     &o.new_chain_state,
                     &op_for_build,
-                    &pre_balances,
+                    &pre_state,
                     &mut tree,
                     &facts,
                     &authority,
@@ -1194,7 +1237,7 @@ pub(crate) struct RecipientAdmissionPrereqs {
     pub set: StorageSet,
     pub validated: ValidatedEconomicRoot,
     pub tree: EconomicSmt,
-    pub pre_balances: BTreeMap<[u8; 32], u64>,
+    pub pre_state: AdmittedPreState,
     pub authority: AuthorityMaterial,
     pub prepared: PendingEconomicAdmission,
     /// The wire's exact unsigned canonical operation bytes — the closure's
@@ -1249,7 +1292,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     // a fresh identity) — terminal for every inbound transfer.
     let validated =
         validated_root_or_activate(core).map_err(|e| terminal(format!("economic root: {e}")))?;
-    let (tree, pre_balances) = producer_tree_and_balances(&validated)
+    let (tree, pre_state) = producer_tree_and_pre_state(&validated)
         .map_err(|e| incomplete(format!("economic tree: {e}")))?;
     let head = core
         .device_head()
@@ -1391,7 +1434,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         set,
         validated,
         tree,
-        pre_balances,
+        pre_state,
         authority,
         prepared,
         pinned_canonical_bytes: wire.canonical_operation_bytes,
@@ -1535,7 +1578,7 @@ pub(crate) fn build_recipient_admission(
         devid,
         chain_state,
         signed_op,
-        &prereqs.pre_balances,
+        &prereqs.pre_state,
         tree,
         &facts,
         &prereqs.authority,
