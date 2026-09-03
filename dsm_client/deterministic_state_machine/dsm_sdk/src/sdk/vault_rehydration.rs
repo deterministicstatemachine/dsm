@@ -286,40 +286,117 @@ mod tests {
 
     const REQUIRED: i32 = dsm::types::proto::AnchorEnforcement::Required as i32;
 
-    /// A device head holding `balances`. Built through `restore`, the same
-    /// constructor the persistence layer uses, so the fixture cannot diverge
-    /// from what a reloaded device actually looks like.
-    fn holding(balances: &[([u8; 32], u64)]) -> DeviceState {
-        DeviceState::restore(
-            [0u8; 32],
-            [0xB0u8; 32],
-            vec![0xAA; 64],
-            None,
-            balances.iter().copied().collect(),
-            Vec::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            None, // no admission pending in this fixture
-            1024,
-        )
-        .expect("device head")
+    const GENESIS: [u8; 32] = [0u8; 32];
+    const DEVID: [u8; 32] = [0xB0u8; 32];
+
+    /// The fixture device's REAL signing keypair, generated once (SPHINCS+
+    /// keygen is slow).
+    ///
+    /// A head's `public_key` is what `advance` verifies a funded create and an
+    /// owner-apply against, so a placeholder key cannot authorize its own
+    /// transitions: the head must carry the mate of the key that signs.
+    fn identity() -> &'static (Vec<u8>, Vec<u8>) {
+        static KP: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("fixture keypair")
+        })
+    }
+
+    /// A real device head holding NOTHING — genesis, before any value.
+    fn empty_head() -> DeviceState {
+        DeviceState::new(GENESIS, DEVID, identity().0.clone(), 1024)
+    }
+
+    /// A head holding `legs`, where every unit entered through an ADMITTED
+    /// origin: one `admitted_mint` per asset, each an admitted, fenced
+    /// `advance` on the device's own self-loop. Nothing here invents a
+    /// balance — the head is returned as an admitted head stands after
+    /// `finish_admission`, carrying no pending admission.
+    fn admitted_holding(legs: &[([u8; 32], u64)]) -> DeviceState {
+        let mut head = empty_head();
+        for (i, (pc, amount)) in legs.iter().enumerate() {
+            head = head
+                .admitted_mint(*pc, *amount, 0xA0 + i as u8)
+                .expect("admitted issuance");
+        }
+        head.with_pending_economic_admission(None)
     }
 
     /// A funded vault, advanced past sequence zero, under `Required`
     /// enforcement — the state a restart has to reproduce.
+    ///
+    /// Every step is a production transition through `advance`: admitted
+    /// issuance of both legs, a SIGNED `DlvCreateFundedV2` carrying the `Fund`
+    /// mutation, then a SIGNED `DlvOwnerApplyV2` carrying the settlement fold
+    /// that moves the vault to generation 1 — the same operation
+    /// `dlv.reconcile` builds.
     fn funded_and_advanced() -> (AmmVaultRecord, DeviceState) {
+        use dsm::types::device_state::{VaultReserveMutation, VaultStatePair};
+        use dsm::types::operations::{Operation, TransactionMode};
+
         let (pc_a, pc_b) = ([0x11u8; 32], [0x22u8; 32]);
         let vault_id = [0x77u8; 32];
-        let head = holding(&[(pc_a, 50_000), (pc_b, 20_000)])
-            .fund_vault_reserves(&vault_id, &[(pc_a, 10_000), (pc_b, 5_000)], 0)
-            .expect("fund")
-            .new_device_state;
-        // Advance past zero, as a settlement does.
+        let (_, sk) = identity();
+        let head = admitted_holding(&[(pc_a, 50_000), (pc_b, 20_000)])
+            .admitted_funded_create(vault_id, [(pc_a, 10_000), (pc_b, 5_000)], 30, sk, 0xA2)
+            .expect("admitted funded create");
+
+        // Advance past zero the way a settlement does: one owner-apply through
+        // `advance`, which verifies the signature against this head's own key,
+        // checks the fold against the vault's pair, and moves the legs and the
+        // vault-state leaf together.
+        let (rel_key, tip) = (
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&DEVID, &DEVID),
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &DEVID, &DEVID,
+            ),
+        );
+        let pair = VaultStatePair::new(pc_a, pc_b, 30).expect("canonical pair");
+        let unsigned = Operation::DlvOwnerApplyV2 {
+            vault_id: vault_id.to_vec(),
+            settlement_receipt_id: [0x77; 32],
+            pending_pointer_x: [0x55; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            input_policy_commit: pc_a,
+            output_policy_commit: pc_b,
+            input_amount: 1_000,
+            output_amount: 970,
+            parent_binding: [0x23; 32],
+            fee_bps: 30,
+            signature: Vec::new(),
+            mode: TransactionMode::Bilateral,
+        };
+        let signature =
+            dsm::crypto::sphincs::sphincs_sign(sk, &unsigned.with_cleared_signature().to_bytes())
+                .expect("sign the owner apply");
         let head = head
-            .apply_settlement_to_reserves(&vault_id, &pc_a, 1_000, &pc_b, 970, 1)
-            .expect("settle")
-            .new_device_state;
+            .advance(
+                rel_key,
+                DEVID,
+                unsigned.with_signature(signature),
+                vec![0xA3; 32],
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(VaultReserveMutation::ApplySettlement {
+                    vault_id,
+                    input_policy_commit: pc_a,
+                    input_amount: 1_000,
+                    output_policy_commit: pc_b,
+                    output_amount: 970,
+                    parent_sequence: 0,
+                    new_sequence: 1,
+                    pair,
+                }),
+            )
+            .expect("owner apply")
+            .new_device_state
+            // The admission that authorized the create is settled by the time a
+            // head is persisted; a restart reloads it with none in flight.
+            .with_pending_economic_admission(None);
 
         let record = AmmVaultRecord {
             vault_id,
@@ -456,19 +533,23 @@ mod tests {
     fn a_record_without_leaves_fails_closed() {
         init_test_db();
         let (record, _) = funded_and_advanced();
-        let empty = holding(&[]);
-        let err = rehydrate_amm_vault(&record, &empty).expect_err("must refuse");
+        let err = rehydrate_amm_vault(&record, &empty_head()).expect_err("must refuse");
         assert!(matches!(err, RehydrationError::LegNotFunded { .. }));
     }
 
     /// One funded leg is not a vault either — the case that would otherwise
     /// advertise a market it cannot make.
+    ///
+    /// THE INVALID WITNESS is the half-funded HEAD, as it was before: a funded
+    /// create takes exactly two legs, so no production transition can leave a
+    /// vault with one. The leaf writer stamps the single leg; the VALUE it
+    /// encumbers is admitted issuance, never invented.
     #[test]
     #[serial]
     fn a_half_funded_vault_fails_closed() {
         init_test_db();
         let (record, _) = funded_and_advanced();
-        let head = holding(&[(record.policy_commit_a, 50_000)])
+        let head = admitted_holding(&[(record.policy_commit_a, 50_000)])
             .fund_vault_reserves(&record.vault_id, &[(record.policy_commit_a, 10_000)], 0)
             .expect("fund one leg")
             .new_device_state;
@@ -543,13 +624,21 @@ mod tests {
     /// Legs written at different sequences are incoherent — they are written
     /// together in one batch, so this cannot happen to a healthy vault and must
     /// not be resolved by picking one.
+    ///
+    /// THE INVALID WITNESS. No production transition can produce it: a funded
+    /// create stamps both legs at sequence 0 and an owner-apply moves both to
+    /// the same `new_sequence`, so the shape is reached with the leaf writer
+    /// (`fund_vault_reserves`) alone. The VALUE it writes is not invented —
+    /// every unit comes from an admitted issuance and is debited out of
+    /// `balances` by the writer, exactly as funding does. Only the SEQUENCE
+    /// stamping is deliberately impossible, which is the property under test.
     #[test]
     #[serial]
     fn legs_at_different_sequences_fail_closed() {
         init_test_db();
         let (pc_a, pc_b) = ([0x11u8; 32], [0x22u8; 32]);
         let vault_id = [0x77u8; 32];
-        let head = holding(&[(pc_a, 50_000), (pc_b, 20_000)])
+        let head = admitted_holding(&[(pc_a, 50_000), (pc_b, 20_000)])
             .fund_vault_reserves(&vault_id, &[(pc_a, 10_000)], 0)
             .expect("leg a at seq 0")
             .new_device_state;
