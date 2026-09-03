@@ -49,7 +49,7 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::{
     authority_material, build_dsm_admission, canonical_set, finish_admission,
-    producer_tree_and_balances, resume_pending_admission, validated_root_or_activate,
+    producer_tree_and_pre_state, resume_pending_admission, validated_root_or_activate,
 };
 use crate::sdk::economic_registers::{claim_faucet_ticket, select_ticket, RegisterError};
 use crate::storage::client_db::economic_faucet;
@@ -159,7 +159,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
     // The witness is built by the SAME write-set table the verifier checks;
     // the faucet contributes only its facts (the ticket evidence address)
     // and its extra frozen artifact (the exact winning envelope).
-    let (mut tree, pre_balances) = producer_tree_and_balances(&validated)?;
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let pre_root = tree.root();
     let op = Operation::FaucetClaim {
         faucet_id,
@@ -199,7 +199,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 &devid,
                 chain_state,
                 &op,
-                &pre_balances,
+                &pre_state,
                 &mut tree,
                 &facts,
                 &authority,

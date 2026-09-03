@@ -1224,8 +1224,9 @@ impl AppRouterImpl {
         // head can hold credits no admission backs yet (a received transfer
         // awaiting recipient admission), and a debit built on those would
         // pair a pre-state the validated pre-root cannot prove.
-        let (econ_tree, econ_pre_balances) =
-            match crate::sdk::economic_admission_flow::producer_tree_and_balances(&econ_validated) {
+        let (econ_tree, econ_pre_state) =
+            match crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&econ_validated)
+            {
                 Ok((t, b)) => (std::cell::RefCell::new(t), b),
                 Err(e) => return err(format!("wallet.send: economic tree: {e}")),
             };
@@ -1322,7 +1323,7 @@ impl AppRouterImpl {
                 &econ_devid,
                 &advance_outcome.new_chain_state,
                 &admission_op,
-                &econ_pre_balances,
+                &econ_pre_state,
                 &mut econ_tree.borrow_mut(),
                 &dsm::economic::write_set::CreditSourceFacts::None,
                 &econ_authority,

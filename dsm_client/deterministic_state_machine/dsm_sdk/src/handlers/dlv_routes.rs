@@ -6014,6 +6014,164 @@ mod funded_creation_tests {
         );
     }
 
+    /// THE ADMITTED PRE-STATE MUST CARRY WHAT A WRITE SET DRAWS DOWN.
+    ///
+    /// An admitted funded create writes both vault-reserve leaves into
+    /// `R_econ`, and `finish_admission` caches them with their exact state
+    /// CCBs. The producer rebuilds the tree from those same rows — so the root
+    /// matched all along — but it used to lift ONLY balance leaves into the
+    /// pre-state, which told the write-set builder the reserves were absent
+    /// from a root that provably commits them. `DlvOwnerApply` (and `DlvClose`)
+    /// read exactly those leaves, so the owner-apply write set could not be
+    /// built at all: fail-closed on state the device holds.
+    ///
+    /// The proposition is the difference, and it is checked both ways: the
+    /// produced pre-state builds the owner-apply write set; the balances-only
+    /// view of the SAME admitted root refuses it by name. (The write set is a
+    /// pure function; the settlement-payment coordinates below are its inputs,
+    /// not persisted economic state, and nothing here advances a chain.)
+    #[test]
+    #[serial_test::serial]
+    fn the_admitted_pre_state_carries_the_vault_reserves_an_owner_apply_draws_down() {
+        use dsm::economic::write_set::{build_write_set, CreditSourceFacts, EconomicPreState};
+        use prost::Message as _;
+
+        install_identity();
+        let owner_dev = participant("owner", 0x45);
+        let r = owner_dev.router();
+        // 20 000 of A and 5 000 of B admitted; 10 000 / 5 000 of it encumbered.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(r, 20_000, 5_000);
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        // The admitted predecessor, and the pre-state derived from it.
+        let validated =
+            crate::sdk::economic_admission_flow::validated_root_or_activate(&r.core_sdk)
+                .expect("the funded create admitted a root");
+        let (tree, pre) =
+            crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated)
+                .expect("producer pre-state");
+
+        // Both reserve legs, at the generation the create produced.
+        for (pc, amount) in [(pc_a, 10_000u64), (pc_b, 5_000u64)] {
+            let leg = pre
+                .vault_reserves
+                .get(&(vault_id, pc))
+                .unwrap_or_else(|| panic!("the admitted root commits a reserve leg for {pc:02x?}"));
+            assert_eq!(
+                leg.amount, amount,
+                "the reserve leg carries its admitted amount"
+            );
+            assert_eq!(
+                leg.vault_sequence, 0,
+                "at the vault generation the create produced"
+            );
+            assert_eq!(leg.vault_id, vault_id);
+            assert_eq!(leg.policy_commit, pc);
+        }
+        // The balance arm is unchanged: what was not encumbered is still there.
+        assert_eq!(
+            pre.balances.get(&pc_a).copied(),
+            Some(10_000),
+            "the unencumbered remainder is still an admitted balance"
+        );
+
+        // The owner apply this vault would fold: 1 000 of A in, the curve out.
+        let head = r.core_sdk.device_head().expect("head");
+        let (genesis, devid) = (head.genesis(), head.devid());
+        let out_amount =
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve");
+        let op = dsm::types::operations::Operation::DlvOwnerApplyV2 {
+            vault_id: vault_id.to_vec(),
+            settlement_receipt_id: [0x21; 32],
+            pending_pointer_x: [0x22; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_binding: [0x23; 32],
+            input_policy_commit: pc_a,
+            output_policy_commit: pc_b,
+            input_amount: 1_000,
+            output_amount: out_amount,
+            fee_bps: 30,
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+        let facts = CreditSourceFacts::DlvSettlementPayment {
+            trader_genesis: [0x31; 32],
+            trader_devid: [0x32; 32],
+            trader_economic_position: 1,
+            payment_evidence_addr: [0x33; 32],
+        };
+
+        // WITH the produced pre-state: the write set builds, and it moves
+        // exactly the two reserve legs.
+        let built = build_write_set(
+            &op,
+            &genesis,
+            &devid,
+            &[0x44; 32],
+            &pre.as_write_set_pre_state(),
+            &mut tree.clone(),
+            &facts,
+        )
+        .expect("the owner-apply write set builds from the admitted reserves");
+        assert_eq!(
+            built.mutations.len(),
+            2,
+            "an owner apply moves exactly the input and output reserve legs"
+        );
+
+        // WITH the balances-only view of the SAME admitted root: refused by
+        // name. This is the gap the producer used to create.
+        let err = build_write_set(
+            &op,
+            &genesis,
+            &devid,
+            &[0x44; 32],
+            &EconomicPreState::balances_only(&pre.balances),
+            &mut tree.clone(),
+            &facts,
+        )
+        .expect_err("a balances-only pre-state cannot see the reserves");
+        assert!(
+            format!("{err}").contains("no output reserve"),
+            "the refusal must name the absent reserve leaf, got: {err}"
+        );
+    }
+
     /// One trader's full production settle against `vault_id` at generation
     /// `seq`, whose reserves the trader believes to be `(ra, rb)`: mirror the
     /// vault, bind a hop to `(seq, reserves_digest, anchor_digest)`, sign the
