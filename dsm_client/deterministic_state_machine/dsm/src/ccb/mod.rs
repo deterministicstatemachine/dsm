@@ -507,7 +507,7 @@ pub(crate) fn push_present(out: &mut Vec<u8>) {
 }
 
 /// `c_n = H(DSM/vault-state ‖ CCB(V_n))`.
-/// THE DLV-POLICY DIGEST — a deterministic VIEW of the vault's DLV-layer
+/// THE AMM DLV-POLICY DIGEST — a deterministic VIEW of the vault's DLV-layer
 /// policy, not a second commitment.
 ///
 /// `VaultStateV2` carries three policy members under the creator-signed
@@ -518,10 +518,13 @@ pub(crate) fn push_present(out: &mut Vec<u8>) {
 /// assets themselves and stay separate commitments under the same signature.
 /// That exclusion is the layer separation, stated in the derivation.
 ///
-/// Anyone holding `CCB(V_n)` can recompute it, so every external
+/// Anyone holding an AMM `CCB(V_n)` can recompute it, so every AMM external
 /// representation of the vault's policy identity (`DlvSpecV1.policy_digest`,
 /// the persisted record, the routing advertisement's `unlock_spec_digest`)
-/// is a copy of this value, never a caller's choice. It is also folded into
+/// is a copy of this value, never a caller's choice. Non-AMM DLVs have no
+/// `ReleasePolicy`/`FeePolicy` object to derive from; today's supplied
+/// 32-byte digest remains caller-supplied but creator-signed, and tightening
+/// that meaning is follow-up semantic debt. The digest is folded into
 /// `LimboVault::parameters_hash`, so the creator signs it at birth.
 pub fn dlv_policy_digest(release: &ReleasePolicy, fee: &FeePolicy) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_DLV_POLICY_DIGEST);

@@ -500,7 +500,7 @@ impl AppRouterImpl {
             .map(|(a, b, _)| (a.clone(), b.clone()));
         let amm_fee_bps: u32 = amm_predicate.as_ref().map(|(_, _, f)| *f).unwrap_or(0);
 
-        // THE DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN.
+        // THE AMM DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN.
         //
         // An AMM vault's policy identity is a deterministic view of the two
         // DLV-layer members the creator-signed `VaultStateV2` commits — its
@@ -525,7 +525,7 @@ impl AppRouterImpl {
             );
             if !spec.policy_digest.is_empty() && spec.policy_digest.as_slice() != derived {
                 return err(
-                    "dlv.create: spec.policy_digest is not this vault's DLV-policy digest — it is \
+                    "dlv.create: spec.policy_digest is not this AMM vault's DLV-policy digest — it is \
                      derived from the vault's release and fee policy, never chosen; leave it empty \
                      or supply the derived value"
                         .into(),
@@ -4223,7 +4223,7 @@ mod funded_creation_tests {
     /// Every case is bracketed by a POSITIVE CONTROL — the untouched row
     /// verifies and publishes — so a refusal is attributable to the mutation
     /// and not to a broken fixture.
-    /// THE DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN. An AMM create with the
+    /// THE AMM DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN. An AMM create with the
     /// field empty is born with the digest derived from its release and fee
     /// policy; the record, the in-memory vault and the creator SIGNATURE all
     /// carry that value. A create that supplies any other 32 bytes is refused
@@ -4300,7 +4300,7 @@ mod funded_creation_tests {
         assert!(!res.success, "a chosen policy digest must be refused");
         let msg = res.error_message.unwrap_or_default();
         assert!(
-            msg.contains("not this vault's DLV-policy digest"),
+            msg.contains("not this AMM vault's DLV-policy digest"),
             "the refusal names the derivation, got: {msg}"
         );
 
