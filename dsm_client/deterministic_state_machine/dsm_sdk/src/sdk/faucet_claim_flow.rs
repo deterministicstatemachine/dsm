@@ -139,7 +139,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             }
         };
 
-        match claim_faucet_ticket(&set, &envelope).await {
+        match claim_faucet_ticket(&set, network_id, &envelope).await {
             Ok(_) => {
                 won = Some((ticket_index, envelope, op_digest));
                 break;

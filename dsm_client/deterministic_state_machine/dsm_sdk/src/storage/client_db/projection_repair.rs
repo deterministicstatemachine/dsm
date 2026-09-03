@@ -296,59 +296,31 @@ mod tests {
         f(&conn)
     }
 
-    /// Build a canonical head carrying `amount` ERA via a self-mint advance, and
-    /// return (devid, head).
-    fn head_with_era(amount: u64) -> ([u8; 32], dsm::types::device_state::DeviceState) {
+    /// Build a canonical head holding ERA through the ONLY path that produces
+    /// ERA in the real system: `claims` admitted faucet claims on the device's
+    /// self-loop, the protocol payout (`ERA_FAUCET_PAYOUT` = 100) each. The
+    /// head is then persisted-and-reloaded by the code under test exactly as a
+    /// device's own head is; nothing here writes a balance directly.
+    fn head_with_era(claims: u64) -> ([u8; 32], dsm::types::device_state::DeviceState) {
         let devid = [0x8Cu8; 32];
-        let policy = crate::policy::builtin_policy_commit("ERA").unwrap();
-        let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
-        let init = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &devid, &devid,
-        );
-
-        // Install the ERA balance by RESTORE, not by minting.
-        //
-        // `advance` refuses builtin issuance (ERA/dBTC are not self-authorizable), and
-        // ERA specifically IS load-bearing here: the projection resolves a ticker FROM
-        // the builtin commit, so a synthetic asset would project as empty and these
-        // tests would assert against nothing. `restore` is the honest fixture — it is
-        // exactly the shape a reloaded device has, which is also the case these tests
-        // are about.
-        let mut balances = std::collections::BTreeMap::new();
-        balances.insert(policy, amount);
-        let head = dsm::types::device_state::DeviceState::restore(
-            devid,
-            devid,
-            vec![0xAAu8; 32],
-            None,
-            balances,
-            vec![(
-                rel,
-                dsm::types::device_state::RelChainTip {
-                    chain_tip: init,
-                    counterparty_devid: devid,
-                    tip_entropy: vec![0x11u8; 32],
-                    value_capability: dsm::types::device_state::ValueCapability::Yes,
-                },
-            )],
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            std::collections::BTreeMap::new(),
-            None, // no admission pending in this fixture
-            64,
-        )
-        .expect("restore a head carrying a real ERA balance");
+        let mut head =
+            dsm::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
+        for ticket in 0..claims {
+            head = head
+                .admitted_faucet_claim(ticket, 0x8C ^ (ticket as u8))
+                .expect("an admitted faucet claim on the self-loop");
+        }
         (devid, head)
     }
 
-    /// THE 8XK CASE. Head intact at 275, projection empty (blanked out-of-band, no
-    /// repair ever queued). The startup reconcile must rebuild the projection from
-    /// the head WITHOUT touching the head.
+    /// THE 8XK CASE. Head intact (three faucet payouts = 300 ERA), projection
+    /// empty (blanked out-of-band, no repair ever queued). The startup reconcile
+    /// must rebuild the projection from the head WITHOUT touching the head.
     #[test]
     #[serial]
     fn reconcile_rebuilds_a_projection_blanked_out_of_band() {
         init();
-        let (devid, head) = head_with_era(275);
+        let (devid, head) = head_with_era(3);
         crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
         let root_before = head.root();
 
@@ -369,7 +341,7 @@ mod tests {
             .unwrap()
             .expect("projection rebuilt");
         assert_eq!(
-            proj.available, 275,
+            proj.available, 300,
             "projection rebuilt to the head's balance"
         );
 
@@ -446,7 +418,7 @@ mod tests {
     #[serial]
     fn reconcile_is_a_noop_when_projection_matches() {
         init();
-        let (devid, head) = head_with_era(100);
+        let (devid, head) = head_with_era(1);
         crate::storage::client_db::update_bcr_device_head(&head).expect("write head");
         assert_eq!(reconcile_projections_against_head(&devid).unwrap(), (1, 1));
         // Second pass: already matches → nothing rebuilt.

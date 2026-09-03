@@ -19,36 +19,11 @@
 
 use prost::Message;
 use serial_test::serial;
-use std::path::PathBuf;
 
 use dsm_sdk::bridge::{AppInvoke, AppRouter};
 use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
-use dsm_sdk::init::SdkConfig;
 use dsm_sdk::runtime;
-use dsm_sdk::storage::client_db::reset_database_for_tests;
-
-fn init_test_storage() {
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    reset_database_for_tests();
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(PathBuf::from("./.dsm_testdata"));
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xAA; 32],
-        vec![0xBB; 32],
-        vec![0xCC; 32],
-        vec![0xDD; 32],
-    );
-    dsm_sdk::set_wallet_seed_for_testing(vec![0xEE; 32]);
-}
-
-fn new_router() -> AppRouterImpl {
-    let cfg = SdkConfig {
-        node_id: "test-device".to_string(),
-        storage_endpoints: vec![],
-        enable_offline: false,
-    };
-    AppRouterImpl::new(cfg).expect("AppRouterImpl::new should succeed in test")
-}
 
 fn pack(body: Vec<u8>) -> Vec<u8> {
     generated::ArgPack {
@@ -68,24 +43,6 @@ fn invoke(router: &AppRouterImpl, method: &str, args: Vec<u8>) -> dsm_sdk::bridg
             })
             .await
     })
-}
-
-fn fund_era(router: &AppRouterImpl) {
-    // Seed the fixture balance DIRECTLY. This used to call `faucet.claim`, which
-    // minted builtin ERA on nothing more than a caller-supplied device_id — the
-    // same unauthorized-issuance defect the accepting-layer gate now refuses. That
-    // refusal is total: it applies in tests exactly as in production, so a fixture
-    // cannot mint and must not try (no `faucet.claim`, no `wallet.mint_for_self`,
-    // no `Operation::Mint`).
-    //
-    // 100 base units — the amount the old faucet granted (`claim_amount: 100`), so
-    // balance assertions downstream are unchanged.
-    dsm_sdk::handlers::app_router_impl::install_balance_for_testing(
-        router,
-        dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit"),
-        100,
-    )
-    .expect("seed the fixture ERA balance");
 }
 
 /// Attempt a CAPPED token creation — the shape beta refuses.
@@ -171,9 +128,7 @@ fn creation_with_initial_supply_gets_the_named_refusal() {
     // authenticated issuance/source predicate, so creator supply is REFUSED
     // with the exact named error — the supply route is `token.mint` under a
     // 0x0029 authorization, never supply-at-creation.
-    init_test_storage();
-    let router = new_router();
-    fund_era(&router);
+    let (router, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xa8);
     let res = try_create_token(&router, "TSTA", 1_000);
     assert!(!res.success, "creator supply must be refused");
     let msg = res.error_message.unwrap_or_default();
@@ -191,9 +146,10 @@ fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
     // — the route must fail CLOSED rather than create a token whose fee was
     // never registered. The admitted-creation happy path lives in the lib
     // tests over the fake fleet (sender_admission_tests).
-    init_test_storage();
-    let router = new_router();
-    fund_era(&router);
+    // EMPTY on purpose: this test's subject is the REFUSAL of an operation
+    // with no admitted economic ancestry. Funding it would make the refusal
+    // unreachable and the assertion vacuous.
+    let (router, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa8);
     let res = try_create_token(&router, "TSTB", 0);
     assert!(
         !res.success,
@@ -211,9 +167,7 @@ fn fee_bearing_creation_without_economic_ancestry_fails_closed() {
 #[test]
 #[serial]
 fn mint_refuses_each_bad_shape_for_its_own_reason() {
-    init_test_storage();
-    let router = new_router();
-    fund_era(&router);
+    let (router, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xa8);
 
     let unknown = mint(&router, "no-such-token", 10);
     assert!(!unknown.success, "minting an unknown token must fail");
@@ -248,9 +202,10 @@ fn burn_requires_an_admitted_economic_lineage() {
     // burn that would desynchronize R_econ. Admitted-burn coverage (with a
     // real faucet-funded lineage and the foreign walk) lives in
     // sender_admission_tests.
-    init_test_storage();
-    let router = new_router();
-    fund_era(&router);
+    // EMPTY on purpose: this test's subject is the REFUSAL of an operation
+    // with no admitted economic ancestry. Funding it would make the refusal
+    // unreachable and the assertion vacuous.
+    let (router, _fleet) = dsm_sdk::economic_fixtures::empty_router(0xa8);
     let res = burn(&router, "ERA", 10);
     assert!(
         !res.success,
@@ -280,9 +235,7 @@ fn burn_requires_an_admitted_economic_lineage() {
 #[test]
 #[serial]
 fn a_capped_token_is_refused_at_creation_and_leaves_nothing_behind() {
-    init_test_storage();
-    let router = new_router();
-    fund_era(&router);
+    let (router, _fleet) = dsm_sdk::economic_fixtures::funded_router(0xa8);
 
     let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA commit");
     let before = router

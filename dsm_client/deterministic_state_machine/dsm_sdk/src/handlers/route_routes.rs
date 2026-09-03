@@ -1063,39 +1063,26 @@ mod stamping_tests {
     use serial_test::serial;
 
     use crate::bridge::AppRouter;
-    use crate::init::SdkConfig;
 
-    fn install_identity() -> Vec<u8> {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-            std::env::remove_var("DSM_ENV_CONFIG_PATH");
-        }
-        crate::storage::client_db::reset_database_for_tests();
-        // Vault ids are deterministic in (owner, spec, funding), so without
-        // these resets one test's published birth proofs and advertisements
-        // answer for the NEXT test's vault of the same id.
-        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
-        crate::sdk::storage_io::fake_fleet::reset();
+    /// A router on a REAL testnet identity with an ADMITTED ERA balance.
+    ///
+    /// The old pair pinned the identity to `dsm-test`, which has no
+    /// root-register profile, so no admission could ever run — which is why the
+    /// callers wrote balances onto the head instead. The storage base dir is set
+    /// FIRST: moving it after the database is initialised points the app at a
+    /// different database, and the admission then fails with "re-derived G does
+    /// not match this device's stored genesis id".
+    fn funded_router() -> (AppRouterImpl, crate::economic_fixtures::FleetGuard) {
         let _ = crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
             "./.dsm_testdata_route_stamping",
         ));
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        // The database must exist BEFORE the identity: the v3 fixture
-        // persists the genesis record the presentation builder reads back.
-        crate::storage::client_db::init_database().expect("init db");
-        let (public_key, _did) = crate::sdk::funded_vault_fixture::install_v3_identity(0x0A);
-        public_key
-    }
-
-    fn router() -> AppRouterImpl {
-        AppRouterImpl::new(SdkConfig {
-            node_id: "route-stamping-test".to_string(),
-            storage_endpoints: vec![],
-            enable_offline: true,
-        })
-        .expect("router init")
+        // Vault ids are deterministic in (owner, spec, funding), so without this
+        // reset one test's published birth proofs answer for the next test's
+        // vault of the same id.
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
+        let (router, guard) = crate::economic_fixtures::empty_router(0x0A);
+        crate::economic_fixtures::claim_era(&router);
+        (router, guard)
     }
 
     fn pack(body: Vec<u8>) -> Vec<u8> {
@@ -1201,13 +1188,12 @@ mod stamping_tests {
     fn publishing_a_commitment_writes_the_pointer_at_the_authenticated_generation() {
         use prost::Message as _;
 
-        install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA, then create+mint both legs. The commits
+        // come back from the issuance — they do not exist until the tokens do.
+        let (r, _fleet) = funded_router();
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1348,13 +1334,12 @@ mod stamping_tests {
     fn no_pointer_is_published_for_a_parent_the_authenticated_state_does_not_name() {
         use prost::Message as _;
 
-        install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA, then create+mint both legs. The commits
+        // come back from the issuance — they do not exist until the tokens do.
+        let (r, _fleet) = funded_router();
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1430,8 +1415,7 @@ mod stamping_tests {
     #[test]
     #[serial]
     fn publishing_a_commitment_with_no_route_behind_it_is_refused() {
-        install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
         // An X that no `route.signRouteCommit` on this device ever produced.
         let x = [0x5Eu8; 32];
         let anchor = generated::ExternalCommitmentV1 {
@@ -1473,8 +1457,9 @@ mod stamping_tests {
     #[test]
     #[serial]
     fn signing_stamps_the_wallet_identity_and_signs_over_it() {
-        let wallet_pk = install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
+        let wallet_pk =
+            crate::sdk::signing_authority::current_public_key().expect("installed identity");
 
         let signed = sign_through_router(&r, &rc_fixture());
 
@@ -1536,30 +1521,50 @@ mod stamping_tests {
     ///
     /// This is the gate's own proof. The three tests above satisfy it by going
     /// through the real create route, so none of them would notice if it stopped
-    /// refusing; this one holds a vault in exactly the state `funded_vault`
-    /// builds — reserves encumbered on the head, nothing published — and
-    /// requires the refusal.
+    /// refusing; this one holds a vault born through that route and caught
+    /// BEFORE its birth proofs are confirmed at quorum, and requires the
+    /// refusal.
     #[test]
     #[serial]
     fn an_unpublished_vault_cannot_be_advertised() {
         use prost::Message as _;
 
-        install_identity();
-        let r = router();
-        // Funded on the device, never born through the route: no frozen birth
-        // artifacts, so nothing at quorum.
-        let v = crate::sdk::funded_vault_fixture::funded_vault(10_000, 5_000, 30);
-        r.core_sdk.set_device_head_for_testing(v.head.clone());
+        let (r, _fleet) = funded_router();
+        // Born through the real route, then its frozen birth artifacts rolled
+        // back to `publication_pending` — the durable state a device is in
+        // when it crashed after freezing and before the publication pass
+        // recorded the acks. The vault, its reserves and its record are all
+        // genuine; only the activation boundary has not been crossed.
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let keys = crate::handlers::dlv_routes::baseline_object_keys(&vault_id)
+            .expect("a born vault names its two baseline objects");
+        {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            for key in &keys {
+                conn.execute(
+                    "UPDATE frozen_publication_artifact SET state = 'publication_pending' \
+                     WHERE object_key = ?1",
+                    rusqlite::params![key],
+                )
+                .expect("roll the birth proof back to pending");
+            }
+        }
         assert!(
-            !crate::handlers::dlv_routes::baseline_is_published(&v.vault_id),
-            "precondition: this vault's birth proofs are not published"
+            !crate::handlers::dlv_routes::baseline_is_published(&vault_id),
+            "precondition: this vault's birth proofs are not confirmed at quorum"
         );
 
         let req = generated::PublishRoutingAdvertisementRequest {
-            vault_id: v.vault_id.to_vec(),
-            token_a: v.pc_a.to_vec(),
-            token_b: v.pc_b.to_vec(),
-            fee_bps: v.fee_bps,
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
             unlock_spec_digest: vec![0x5A; 32],
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
@@ -1587,7 +1592,7 @@ mod stamping_tests {
 
         // And nothing was written: a refused publish leaves no discoverable
         // record behind for a trader to find later.
-        let key = crate::sdk::routing_sdk::advertisement_key(&v.pc_a, &v.pc_b, &v.vault_id);
+        let key = crate::sdk::routing_sdk::advertisement_key(&pc_a, &pc_b, &vault_id);
         assert!(
             crate::runtime::get_runtime()
                 .block_on(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key))
@@ -1613,18 +1618,19 @@ mod stamping_tests {
     fn a_published_advertisement_and_its_address_describe_the_same_market() {
         use prost::Message as _;
 
-        let wallet_pk = install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
+        let wallet_pk =
+            crate::sdk::signing_authority::current_public_key().expect("installed identity");
 
         // A genuinely funded vault: publication reads the reserve leaves, so an
         // unfunded head is refused before any stamping happens.
         // The vault is born through the REAL create route, so its birth proofs
         // are frozen and at quorum — the precondition the publish gate checks.
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA (already claimed by the router), then
+        // create+mint both legs. The commits come back from the issuance.
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1703,15 +1709,14 @@ mod stamping_tests {
     fn the_route_and_the_sdk_return_the_same_advertisements() {
         use prost::Message as _;
 
-        install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
         // The vault is born through the REAL create route, so its birth proofs
         // are frozen and at quorum — the precondition the publish gate checks.
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA (already claimed by the router), then
+        // create+mint both legs. The commits come back from the issuance.
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1809,15 +1814,16 @@ mod stamping_tests {
     fn a_supplied_publisher_identity_is_honoured_not_overwritten() {
         use prost::Message as _;
 
-        let wallet_pk = install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
+        let wallet_pk =
+            crate::sdk::signing_authority::current_public_key().expect("installed identity");
         // The vault is born through the REAL create route, so its birth proofs
         // are frozen and at quorum — the precondition the publish gate checks.
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA (already claimed by the router), then
+        // create+mint both legs. The commits come back from the issuance.
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1866,8 +1872,9 @@ mod stamping_tests {
     #[test]
     #[serial]
     fn signing_discards_a_caller_supplied_identity() {
-        let wallet_pk = install_identity();
-        let r = router();
+        let (r, _fleet) = funded_router();
+        let wallet_pk =
+            crate::sdk::signing_authority::current_public_key().expect("installed identity");
 
         let mut impostor = rc_fixture();
         impostor.initiator_public_key = vec![0xEEu8; 64];
@@ -1903,13 +1910,12 @@ mod stamping_tests {
     #[test]
     #[serial]
     fn the_advertisement_publishes_from_durable_state_after_a_restart() {
-        install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA, then create+mint both legs. The commits
+        // come back from the issuance — they do not exist until the tokens do.
+        let (r, _fleet) = funded_router();
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
@@ -1934,7 +1940,8 @@ mod stamping_tests {
         // head survives a real restart via the persistence codec, so it is
         // carried over; the manager's contents are not.
         let head = r.core_sdk.device_head().expect("head after create");
-        let r2 = router();
+        // A RESTART on the same identity and database — no reset, no re-funding.
+        let r2 = crate::economic_fixtures::restart_router();
         r2.core_sdk.set_device_head_for_testing(head);
         publish_ad(&r2, &vault_id, &pc_a, &pc_b);
     }
@@ -1945,13 +1952,12 @@ mod stamping_tests {
     #[test]
     #[serial]
     fn an_empty_frozen_post_refuses_to_publish_instead_of_rederiving() {
-        install_identity();
-        let r = router();
-        let (pc_a, pc_b) = crate::sdk::funded_vault_fixture::pair_commits();
-        r.core_sdk
-            .set_device_head_for_testing(crate::sdk::funded_vault_fixture::owner_holding(
-                50_000, 20_000,
-            ));
+        // ADMITTED funding: faucet ERA, then create+mint both legs. The commits
+        // come back from the issuance — they do not exist until the tokens do.
+        let (r, _fleet) = funded_router();
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );

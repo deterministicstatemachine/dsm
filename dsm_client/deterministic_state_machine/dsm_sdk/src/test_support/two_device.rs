@@ -162,6 +162,11 @@ impl TestDevice {
             enable_offline: false,
         })
         .expect("router");
+        // Production bring-up (`init.rs`, `spawn_token_registry_rehydrate`)
+        // installs the durable policy resolver right after constructing the
+        // router; without it the in-memory policy index fails closed for any
+        // created token, and a device could not send an asset it holds.
+        router.install_policy_resolver();
         // The head must carry the REAL identity: economic admissions derive
         // and re-verify everything from (G, DevID), so a lazily-bootstrapped
         // zero-genesis head cannot admit anything.
@@ -252,9 +257,8 @@ impl TestDevice {
     /// (the fixed payout). Amounts must be multiples of 100 — a fixture
     /// asking for anything else is asking for value the protocol cannot
     /// issue. Sends debit the economic tree, so ancestry-less value cannot
-    /// fund a send. (`fund_unadmitted` is DELETED — under the PR4 credit
-    /// gate an ancestry-less inbound apply is refused in core, exactly as
-    /// in production.)
+    /// fund a send, and under the PR4 credit gate an ancestry-less inbound
+    /// apply is refused in core, exactly as in production.
     pub async fn fund_admitted(&self, amount: u64) {
         assert!(
             amount.is_multiple_of(100),
@@ -283,11 +287,22 @@ impl TestDevice {
     /// The REAL `wallet.send`: builds, signs, advances, freezes and delivers an
     /// online transfer of `amount` ERA to `to` through the production handler.
     pub async fn send(&self, to: &TestDevice, amount: u64) -> crate::bridge::AppResult {
+        self.send_token(to, "ERA", amount).await
+    }
+
+    /// As [`send`](Self::send), for any asset this device holds, by ticker —
+    /// a created token moves through exactly the handler ERA does.
+    pub async fn send_token(
+        &self,
+        to: &TestDevice,
+        token_id: &str,
+        amount: u64,
+    ) -> crate::bridge::AppResult {
         self.enter();
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         self.router()
             .process_online_transfer_logic(dsm::types::proto::OnlineTransferRequest {
-                token_id: "ERA".to_string(),
+                token_id: token_id.to_string(),
                 to_device_id: to.device_id.to_vec(),
                 amount,
                 memo: format!("{}->{} #{seq}", self.slot, to.slot),

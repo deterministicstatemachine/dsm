@@ -148,11 +148,16 @@ pub(crate) async fn put_bytes_to_all_members(
     // Exactly one of these blocks survives cfg expansion, and it is the
     // function's tail expression (the shape `BitcoinTapSdk::storage_put_bytes`
     // uses for the same test seam).
-    #[cfg(test)]
+    // The fake/real I/O selectors include `test-utils`, not just `test`.
+    // Integration tests in `tests/*.rs` compile the library WITHOUT `cfg(test)`,
+    // so under a `cfg(test)`-only selector they took the REAL HTTP branch and
+    // talked to a port nothing listens on. That is why the legitimate funding
+    // path was unreachable from them, and why they fabricated balances instead.
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::put(set, key, payload))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         put_bytes_to_all_members_live(set, key, payload).await
     }
@@ -168,7 +173,7 @@ pub(crate) async fn put_immutable_to_all_members(
     payload: &[u8],
     expected_addr_b32: &str,
 ) -> Result<crate::sdk::storage_node_sdk::KeyedPutFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // The fake fleet stores under a key carrying the address, so tests can
         // assert exactly which immutable object reached which member.
@@ -178,7 +183,7 @@ pub(crate) async fn put_immutable_to_all_members(
             payload,
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
@@ -196,7 +201,7 @@ pub(crate) async fn fetch_immutable_payload(
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
     inner: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         // The frozen-artifact sweep delivers immutable tuples to the fake
         // fleet under `immutable::{namespace}::{addr_b32}` — read them back
@@ -218,7 +223,7 @@ pub(crate) async fn fetch_immutable_payload(
         }
         Ok(Some(payload))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
             DsmError::storage(
@@ -254,16 +259,29 @@ pub(crate) async fn fetch_immutable_payload(
 /// Economic-register seams. Same cfg discipline as the settlement claim:
 /// tests drive the fake fleet; production fans out over the set's members
 /// with per-member auth.
+///
+/// `network_id` is the network the members of `set` serve. A live member
+/// knows its own network and gates the canonical faucet identity on it; the
+/// in-process double must be told, so that it refuses a claim for another
+/// network's faucet exactly as a live member would.
 pub(crate) async fn submit_faucet_ticket_claim(
     set: &crate::sdk::storage_set::StorageSet,
+    network_id: &[u8],
     envelope: &[u8],
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
-        Ok(fake_registers::claim(set, "faucet-ticket", envelope))
+        Ok(fake_registers::claim(
+            set,
+            fake_registers::RegisterKind::FaucetTicket,
+            envelope,
+            fake_registers::process_caller().as_ref(),
+            Some(network_id),
+        ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
+        let _ = network_id;
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
             .submit_one_shot_claim(
@@ -280,11 +298,17 @@ pub(crate) async fn submit_economic_root_claim(
     set: &crate::sdk::storage_set::StorageSet,
     envelope: &[u8],
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
-        Ok(fake_registers::claim(set, "economic-root", envelope))
+        Ok(fake_registers::claim(
+            set,
+            fake_registers::RegisterKind::EconomicRoot,
+            envelope,
+            fake_registers::process_caller().as_ref(),
+            None,
+        ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         Ok(sdk
@@ -303,15 +327,15 @@ pub(crate) async fn read_faucet_ticket_cell(
     faucet_id: &[u8; 32],
     ticket_index: u64,
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
             set,
-            "faucet-ticket",
+            fake_registers::RegisterKind::FaucetTicket,
             &fake_registers::ticket_key(faucet_id, ticket_index),
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::faucet_ticket_path(faucet_id, ticket_index);
@@ -323,15 +347,15 @@ pub(crate) async fn read_economic_root_cell_rows(
     set: &crate::sdk::storage_set::StorageSet,
     k_root: &[u8; 32],
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
             set,
-            "economic-root",
+            fake_registers::RegisterKind::EconomicRoot,
             &fake_registers::root_key(k_root),
         ))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::economic_root_path(k_root);
@@ -343,18 +367,59 @@ pub(crate) async fn read_economic_root_cell_rows(
 /// member per register kind, with the same injectable echo/failure seams the
 /// settlement fake fleet has. Envelope digests use the REAL protocol digests,
 /// so the counting logic under test sees production shapes.
-#[cfg(test)]
-pub(crate) mod fake_registers {
+///
+/// The in-process double for the storage node's write-once ECONOMIC
+/// registers (faucet tickets, economic roots).
+///
+/// Protocol-faithful by construction, not by resemblance: every check a
+/// live member performs before touching its cell is the SAME shared
+/// function the node's handler calls (`decode_and_verify_*`,
+/// `verify_claim_attribution`, `verify_faucet_claim_attribution`,
+/// `MAX_CLAIM_BYTES`), applied in the node's order, and every refusal is
+/// expressed as the node's `(status, outcome)` pair and handed to the ONE
+/// client-side classifier the live path uses. The double therefore never
+/// constructs a client result of its own; it reproduces what a member
+/// would have answered. Its equivalence with the real endpoint is proven
+/// by `dsm_storage_node/tests/economic_register_conformance.rs`, which
+/// drives identical vectors through both.
+///
+/// What it does NOT model, stated rather than hidden: the transport-layer
+/// refusals a real member's `device_auth` can emit for a caller it does
+/// know (revoked, bad token, replayed message id, oversize body), and the
+/// per-member independence of a real fleet under concurrent claims — the
+/// double serialises a whole fan-out, so every member agrees on one
+/// winner, where real members decide independently and can split.
+// Widened from `cfg(test)` to include `test-utils`: the LEGITIMATE funding
+// path must be reachable from integration tests in `tests/*.rs`, which are
+// external consumers a `cfg(test)` gate is invisible to. That invisibility is
+// exactly why those tests fabricated balances instead of claiming them.
+// `test-utils` is non-default and reaches the build only through
+// dev-dependencies, so this still ships in nothing.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod fake_registers {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
-    use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimOutcome, MemberClaimResult};
+    use dsm::economic::register::AuthenticatedCaller;
+
+    use crate::sdk::storage_node_sdk::{
+        classify_one_shot_response, ClaimFanout, MemberClaimOutcome, MemberClaimResult,
+    };
     use crate::sdk::storage_set::StorageSet;
+
+    /// Which write-once register a claim targets. A type rather than a name:
+    /// a member routes on the endpoint it was asked, never on a string that
+    /// could fall through to a default.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum RegisterKind {
+        FaucetTicket,
+        EconomicRoot,
+    }
 
     #[derive(Default)]
     struct State {
-        /// (member_id, register kind) -> (cell key -> (bytes, digest))
-        cells: HashMap<(String, String), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
+        /// (member_id, register) -> (cell key -> (bytes, digest))
+        cells: HashMap<(String, RegisterKind), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
         failing: HashSet<String>,
         echo_override: HashMap<String, Option<String>>,
     }
@@ -371,6 +436,11 @@ pub(crate) mod fake_registers {
         *guard = Some(State::default());
     }
 
+    /// Take a member down (or bring it back). A down member answers nothing:
+    /// its claim outcome is an unattributed `Unavailable`, and its read row is
+    /// an unattributed empty — exactly the shape the live client produces for
+    /// a transport failure, and never the attributed empty of a member that is
+    /// up and holds nothing.
     pub fn fail_member(member_id: &str, failing: bool) {
         with_state(|s| {
             if failing {
@@ -397,38 +467,145 @@ pub(crate) mod fake_registers {
         k_root.to_vec()
     }
 
-    fn digest_for(kind: &str, envelope: &[u8]) -> [u8; 32] {
+    /// The identity a live member would have authenticated for THIS process:
+    /// the device id and signing key the process registered with its storage
+    /// nodes — the same `AppState` fields `resolve_storage_auth` reads. `None`
+    /// when no identity is installed, which a member answers as an
+    /// unauthenticated request.
+    pub fn process_caller() -> Option<AuthenticatedCaller> {
+        let device_id = crate::sdk::app_state::AppState::get_device_id()?;
+        let public_key = crate::sdk::app_state::AppState::get_public_key()?;
+        let device_id: [u8; 32] = device_id.as_slice().try_into().ok()?;
+        Some(AuthenticatedCaller {
+            public_key,
+            device_id,
+        })
+    }
+
+    fn digest_for(kind: RegisterKind, envelope: &[u8]) -> [u8; 32] {
         match kind {
-            "faucet-ticket" => dsm::economic::faucet::faucet_claim_evidence_addr(envelope),
-            _ => dsm::economic::claim_envelope::economic_root_claim_envelope_digest(envelope),
+            RegisterKind::FaucetTicket => {
+                dsm::economic::faucet::faucet_claim_evidence_addr(envelope)
+            }
+            RegisterKind::EconomicRoot => {
+                dsm::economic::claim_envelope::economic_root_claim_envelope_digest(envelope)
+            }
         }
     }
 
-    fn cell_key_for(kind: &str, envelope: &[u8]) -> Vec<u8> {
+    /// Everything a member decides BEFORE it touches its cell, in the node's
+    /// order, as the node's answer: `Ok(cell key)` or the `(status, outcome)`
+    /// pair the node's handler (or its `device_auth` layer) would return.
+    fn precheck(
+        kind: RegisterKind,
+        envelope: &[u8],
+        caller: Option<&AuthenticatedCaller>,
+        configured_set_id: &[u8; 32],
+        network_id: Option<&[u8]>,
+    ) -> Result<Vec<u8>, (u16, &'static str)> {
+        // device_auth: no authenticated device -> 401, no outcome header.
+        let Some(caller) = caller else {
+            return Err((401, ""));
+        };
+        if envelope.is_empty() || envelope.len() > dsm::economic::register::MAX_CLAIM_BYTES {
+            return Err((400, "malformed"));
+        }
         match kind {
-            "faucet-ticket" => {
-                let v = dsm::economic::faucet::decode_and_verify_faucet_ticket_claim(envelope)
-                    .expect("fake register given an invalid ticket envelope");
-                ticket_key(&v.body.faucet_id, v.body.ticket_index)
+            RegisterKind::FaucetTicket => {
+                use dsm::economic::faucet::{
+                    decode_and_verify_faucet_ticket_claim, verify_faucet_claim_attribution,
+                    FaucetAttributionError, FaucetClaimError,
+                };
+                let verified = match decode_and_verify_faucet_ticket_claim(envelope) {
+                    Ok(v) => v,
+                    Err(FaucetClaimError::SignatureInvalid) => {
+                        return Err((403, "signature-invalid"))
+                    }
+                    Err(_) => return Err((400, "malformed")),
+                };
+                match verify_faucet_claim_attribution(
+                    &verified,
+                    caller,
+                    Some(configured_set_id),
+                    network_id,
+                ) {
+                    Ok(()) => {}
+                    Err(FaucetAttributionError::ClaimantIsNotCaller) => {
+                        return Err((403, "claimant-not-caller"))
+                    }
+                    Err(FaucetAttributionError::DeviceIsNotCaller) => {
+                        return Err((403, "device-not-caller"))
+                    }
+                    Err(FaucetAttributionError::StorageSetUnconfigured) => {
+                        return Err((503, "no-storage-set"))
+                    }
+                    Err(FaucetAttributionError::WrongStorageSet { .. }) => {
+                        return Err((422, "foreign-set"))
+                    }
+                    Err(FaucetAttributionError::NetworkUnconfigured) => {
+                        return Err((503, "no-network"))
+                    }
+                    Err(FaucetAttributionError::NoncanonicalFaucet) => {
+                        return Err((422, "noncanonical-faucet"))
+                    }
+                    Err(FaucetAttributionError::TicketOutOfRange) => {
+                        return Err((422, "ticket-out-of-range"))
+                    }
+                }
+                Ok(ticket_key(
+                    &verified.body.faucet_id,
+                    verified.body.ticket_index,
+                ))
             }
-            _ => {
-                let v =
-                    dsm::economic::claim_envelope::decode_and_verify_economic_root_claim(envelope)
-                        .expect("fake register given an invalid root envelope");
-                dsm::economic::register::economic_root_register_key(
-                    &v.body.trader_genesis,
-                    &v.body.trader_devid,
-                    v.body.economic_position,
+            RegisterKind::EconomicRoot => {
+                use dsm::economic::claim_envelope::{
+                    decode_and_verify_economic_root_claim, verify_claim_attribution,
+                    ClaimEnvelopeError,
+                };
+                use dsm::economic::register::AttributionError;
+                let verified = match decode_and_verify_economic_root_claim(envelope) {
+                    Ok(v) => v,
+                    Err(ClaimEnvelopeError::SignatureInvalid) => {
+                        return Err((403, "signature-invalid"))
+                    }
+                    Err(_) => return Err((400, "malformed")),
+                };
+                match verify_claim_attribution(&verified, caller, configured_set_id) {
+                    Ok(()) => {}
+                    Err(AttributionError::ClaimantIsNotCaller) => {
+                        return Err((403, "claimant-not-caller"))
+                    }
+                    Err(AttributionError::DeviceIsNotCaller) => {
+                        return Err((403, "device-not-caller"))
+                    }
+                    Err(AttributionError::WrongStorageSet { .. }) => {
+                        return Err((422, "foreign-set"))
+                    }
+                }
+                Ok(dsm::economic::register::economic_root_register_key(
+                    &verified.body.trader_genesis,
+                    &verified.body.trader_devid,
+                    verified.body.economic_position,
                 )
-                .to_vec()
+                .to_vec())
             }
         }
     }
 
-    /// First-write-wins per member, exactly like the node.
-    pub fn claim(set: &StorageSet, kind: &str, envelope: &[u8]) -> ClaimFanout {
+    /// Submit `envelope` to every member of `set` as `caller`, on members
+    /// configured for `set` and (faucet register only) for `network_id`.
+    /// First-write-wins per member, exactly like the node; every refusal is
+    /// the node's own `(status, outcome)` through the shared classifier.
+    pub fn claim(
+        set: &StorageSet,
+        kind: RegisterKind,
+        envelope: &[u8],
+        caller: Option<&AuthenticatedCaller>,
+        network_id: Option<&[u8]>,
+    ) -> ClaimFanout {
+        let configured_set_id = set.id();
+        let decision = precheck(kind, envelope, caller, &configured_set_id, network_id);
         let digest = digest_for(kind, envelope);
-        let key = cell_key_for(kind, envelope);
         let mut outcomes = Vec::new();
         with_state(|s| {
             for member in set.members() {
@@ -446,19 +623,25 @@ pub(crate) mod fake_registers {
                     });
                     continue;
                 }
-                let cells = s
-                    .cells
-                    .entry((member.member_id.clone(), kind.to_string()))
-                    .or_default();
-                let result = match cells.get(&key) {
-                    None => {
-                        cells.insert(key.clone(), (envelope.to_vec(), digest));
-                        MemberClaimResult::Accepted
+                let result = match &decision {
+                    Err((status, outcome)) => classify_one_shot_response(*status, outcome, None),
+                    Ok(key) => {
+                        let cells = s.cells.entry((member.member_id.clone(), kind)).or_default();
+                        match cells.get(key) {
+                            None => {
+                                cells.insert(key.clone(), (envelope.to_vec(), digest));
+                                classify_one_shot_response(200, "accepted", None)
+                            }
+                            Some((_, held)) if *held == digest => {
+                                classify_one_shot_response(200, "held-identical", None)
+                            }
+                            Some((_, held)) => classify_one_shot_response(
+                                409,
+                                "refused",
+                                Some(&crate::util::text_id::encode_base32_crockford(held)),
+                            ),
+                        }
                     }
-                    Some((_, held)) if *held == digest => MemberClaimResult::HeldIdentical,
-                    Some((_, held)) => MemberClaimResult::Refused {
-                        held_digest: Some(held.to_vec()),
-                    },
                 };
                 outcomes.push(MemberClaimOutcome {
                     member_id: member.member_id.clone(),
@@ -474,28 +657,32 @@ pub(crate) mod fake_registers {
         }
     }
 
+    /// Member-attributed read of one cell: `(member_id, echoed node id,
+    /// winner bytes)` per member. A down member yields `(id, None, None)` —
+    /// the live client's row for a transport failure — so silence can never
+    /// count as an attributed empty.
     pub fn read(
         set: &StorageSet,
-        kind: &str,
+        kind: RegisterKind,
         key: &[u8],
     ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
         with_state(|s| {
             set.members()
                 .iter()
                 .map(|member| {
+                    if s.failing.contains(&member.member_id) {
+                        return (member.member_id.clone(), None, None);
+                    }
                     let echoed = s
                         .echo_override
                         .get(&member.member_id)
                         .cloned()
                         .unwrap_or_else(|| Some(member.member_id.clone()));
-                    let bytes = if s.failing.contains(&member.member_id) {
-                        None
-                    } else {
-                        s.cells
-                            .get(&(member.member_id.clone(), kind.to_string()))
-                            .and_then(|cells| cells.get(key))
-                            .map(|(b, _)| b.clone())
-                    };
+                    let bytes = s
+                        .cells
+                        .get(&(member.member_id.clone(), kind))
+                        .and_then(|cells| cells.get(key))
+                        .map(|(b, _)| b.clone());
                     (member.member_id.clone(), echoed, bytes)
                 })
                 .collect()
@@ -510,11 +697,11 @@ pub(crate) async fn read_settlement_slot_cell(
     vault_id: &[u8; 32],
     parent_sequence: u64,
 ) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::read_slot(set, vault_id, parent_sequence))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::settlement_slot_path(vault_id, parent_sequence);
@@ -528,11 +715,11 @@ pub(crate) async fn submit_settlement_slot_claim(
 ) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
     // Exactly one of these blocks survives cfg expansion, and it is the
     // function's tail expression.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::claim(set, envelope))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-utils")))]
     {
         submit_settlement_slot_claim_live(set, envelope).await
     }
@@ -542,8 +729,11 @@ pub(crate) async fn submit_settlement_slot_claim(
 /// URL), an injectable per-member failure, and an injectable echoed node id —
 /// so a test can drive the real per-member replay/quorum logic through
 /// partition splits, echo mismatches and foreign sets without HTTP.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) mod fake_fleet {
+    // As for `fake_registers`: a test-only double compiled under production
+    // lints only by `--all-features`.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 

@@ -172,6 +172,136 @@ pub struct VerifiedFaucetTicketClaim {
     pub envelope_bytes: Vec<u8>,
 }
 
+/// Why a register member refuses to STORE a ticket claim that decoded and
+/// verified. Storage-layer only; none of these is a judgement about economics.
+///
+/// The variants are listed in the order a member checks them, and every
+/// member implementation — the storage node's handler and the in-process
+/// register double — checks them by calling ONE function,
+/// [`verify_faucet_claim_attribution`], so the two cannot disagree about
+/// which refusal a claim meets first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FaucetAttributionError {
+    /// The claim names a claimant key that is not the authenticated caller's.
+    ClaimantIsNotCaller,
+    /// The claim names a device that is not the authenticated caller's.
+    DeviceIsNotCaller,
+    /// The member is not configured with a storage set at all.
+    StorageSetUnconfigured,
+    /// The claim names a storage set this member is not a member of.
+    WrongStorageSet {
+        claimed: [u8; 32],
+        configured: [u8; 32],
+    },
+    /// The member does not know which network it serves.
+    NetworkUnconfigured,
+    /// The claim names a faucet other than the canonical one for the
+    /// member's network — an invented faucet id gets no cell to occupy.
+    NoncanonicalFaucet,
+    /// The ticket index is not a coordinate that exists.
+    TicketOutOfRange,
+}
+
+impl core::fmt::Display for FaucetAttributionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ClaimantIsNotCaller => write!(
+                f,
+                "faucet ticket claim: claimant_public_key is not the authenticated caller — \
+                 an authenticated caller may not claim as someone else"
+            ),
+            Self::DeviceIsNotCaller => write!(
+                f,
+                "faucet ticket claim: claimant_devid is not the authenticated caller's device"
+            ),
+            Self::StorageSetUnconfigured => {
+                write!(
+                    f,
+                    "faucet ticket claim: this member has no storage set configured"
+                )
+            }
+            Self::WrongStorageSet {
+                claimed,
+                configured,
+            } => write!(
+                f,
+                "faucet ticket claim: names storage set {} but this member is configured for {}",
+                crate::types::identifiers::encode_crockford(claimed),
+                crate::types::identifiers::encode_crockford(configured)
+            ),
+            Self::NetworkUnconfigured => {
+                write!(
+                    f,
+                    "faucet ticket claim: this member does not know its network"
+                )
+            }
+            Self::NoncanonicalFaucet => write!(
+                f,
+                "faucet ticket claim: faucet_id is not the canonical faucet for this network"
+            ),
+            Self::TicketOutOfRange => write!(
+                f,
+                "faucet ticket claim: ticket_index is not a coordinate that exists — the \
+                 allocation is exactly {ERA_FAUCET_TICKET_COUNT} tickets"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FaucetAttributionError {}
+
+/// The member-side attribution and coordinate check for a ticket claim, in
+/// the ONE order every member applies it:
+///
+/// ```text
+/// claimant key == caller key      -> ClaimantIsNotCaller
+/// claimant devid == caller devid  -> DeviceIsNotCaller
+/// member has a set                -> StorageSetUnconfigured
+/// body set == member's set        -> WrongStorageSet
+/// member knows its network        -> NetworkUnconfigured
+/// faucet_id == era_faucet_id(net) -> NoncanonicalFaucet
+/// ticket_index < the allocation   -> TicketOutOfRange
+/// ```
+///
+/// Both attribution halves, because the ticket space is public — anyone may
+/// claim ticket i — and what must be impossible is claiming AS someone else.
+/// Takes a decoded-and-verified claim for the same reason
+/// [`super::claim_envelope::verify_claim_attribution`] does: attribution
+/// without a verified signature would accept a body anyone wrote in the
+/// caller's name.
+pub fn verify_faucet_claim_attribution(
+    claim: &VerifiedFaucetTicketClaim,
+    caller: &super::register::AuthenticatedCaller,
+    configured_storage_set_id: Option<&[u8; 32]>,
+    network_id: Option<&[u8]>,
+) -> Result<(), FaucetAttributionError> {
+    if claim.body.claimant_public_key != caller.public_key {
+        return Err(FaucetAttributionError::ClaimantIsNotCaller);
+    }
+    if claim.body.claimant_devid != caller.device_id {
+        return Err(FaucetAttributionError::DeviceIsNotCaller);
+    }
+    let Some(configured) = configured_storage_set_id else {
+        return Err(FaucetAttributionError::StorageSetUnconfigured);
+    };
+    if claim.body.storage_set_id != *configured {
+        return Err(FaucetAttributionError::WrongStorageSet {
+            claimed: claim.body.storage_set_id,
+            configured: *configured,
+        });
+    }
+    let Some(network) = network_id else {
+        return Err(FaucetAttributionError::NetworkUnconfigured);
+    };
+    if claim.body.faucet_id != era_faucet_id(network) {
+        return Err(FaucetAttributionError::NoncanonicalFaucet);
+    }
+    if claim.body.ticket_index >= ERA_FAUCET_TICKET_COUNT {
+        return Err(FaucetAttributionError::TicketOutOfRange);
+    }
+    Ok(())
+}
+
 /// Why an envelope is not a usable ticket claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaucetClaimError {

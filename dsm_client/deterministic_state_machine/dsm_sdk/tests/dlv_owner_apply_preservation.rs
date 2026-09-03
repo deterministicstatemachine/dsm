@@ -13,6 +13,10 @@
 //! superseded operation stays durable in `bcr_chain_states`.
 //!
 //! What the size drop actually reveals is the subject of the second test.
+//!
+//! Every head here crosses the REAL `advance` path, so its value has admitted ancestry
+//! at the core layer — faucet claims for ERA, an admitted issuance for the second asset
+//! — and its vault is encumbered through the production `DlvCreateFundedV2` transition.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -51,37 +55,43 @@ fn era() -> [u8; 32] {
     dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit")
 }
 
-fn sofi() -> [u8; 32] {
-    dsm::core::token::builtin_policy_commit_for_token("dBTC").expect("dBTC policy commit")
+/// The vault's SECOND asset — a user-issued one, deliberately not a builtin: the
+/// settlement's subject is which fields it may touch, not which assets move, and a
+/// non-builtin is the only kind the owner can have issued itself.
+fn second_asset() -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        b"dlv-owner-apply-preservation-second-asset",
+    )
 }
 
 /// The vault's canonical pair + fee, as the owner's own vault record carries it.
 fn vault_pair() -> dsm::types::device_state::VaultStatePair {
-    let (lo, hi) = if era() < sofi() {
-        (era(), sofi())
+    let (lo, hi) = if era() < second_asset() {
+        (era(), second_asset())
     } else {
-        (sofi(), era())
+        (second_asset(), era())
     };
     dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
 }
 
-// Seed the balance DIRECTLY rather than minting. Builtin issuance is refused at
-// `advance` — in tests exactly as in production, which is the property that makes
-// the refusal worth anything — so a fixture cannot mint ERA/dBTC and must not try.
-// `with_balance_for_testing` installs the state a device would already be in;
-// balances live outside the SMT, so `root()` is unaffected, as with `restore`.
-fn mint(head: &DeviceState, policy: [u8; 32], _token: &[u8], amount: u64) -> DeviceState {
-    // Accumulates, matching the mint it replaces.
-    head.with_balance_for_testing(policy, head.balance(&policy) + amount)
-}
-
 /// An owner head carrying non-trivial material in every field a settlement does NOT
-/// own: two balances, a second (peer) relationship tip, a vault-state extra leaf, and
+/// own: two balances, a second (peer) relationship tip, an anchor-state extra leaf, and
 /// funded reserves on both legs.
+///
+/// ERA: ten faucet claims of the protocol payout, so the 500-unit vault leg and a
+/// spendable remainder both have admitted ancestry. The second asset: one admitted
+/// issuance of 2_000, 400 of it into the vault.
 fn rich_owner_head() -> DeviceState {
-    let base = DeviceState::new(OWNER, OWNER, owner_keypair().public_key.clone(), 64);
-    let head = mint(&base, era(), b"ERA", 1_000);
-    let head = mint(&head, sofi(), b"dBTC", 2_000);
+    let mut head = DeviceState::new(OWNER, OWNER, owner_keypair().public_key.clone(), 64);
+    for ticket in 0..10u64 {
+        head = head
+            .admitted_faucet_claim(ticket, 0x10 + ticket as u8)
+            .expect("faucet claim");
+    }
+    let head = head
+        .admitted_mint(second_asset(), 2_000, 0x20)
+        .expect("admitted issuance");
 
     // A SECOND relationship, so the test can prove an unrelated tip survives intact.
     let peer_rel = compute_smt_key(&OWNER, &PEER);
@@ -105,15 +115,21 @@ fn rich_owner_head() -> DeviceState {
     // An unrelated extra leaf (an anchor-state leaf; commits into r_A, must be
     // replayed by restore and must survive a settlement untouched). The vault's
     // OWN state leaf is not planted here: `advance` derives and writes it as
-    // part of the settlement's SMT batch.
+    // part of the funding's SMT batch and again in the settlement's.
     let head = head
         .with_anchor_state_leaf(&[0x33; 32], &[0x34; 32])
         .expect("anchor state leaf");
 
-    // Encumber both legs so ApplySettlement has reserves to move.
-    head.fund_vault_reserves(&VAULT, &[(era(), 500), (sofi(), 400)], 0)
-        .expect("fund reserves")
-        .new_device_state
+    // Encumber both legs through the production funding transition, so
+    // ApplySettlement has reserves to move.
+    head.admitted_funded_create(
+        VAULT,
+        [(era(), 500), (second_asset(), 400)],
+        30,
+        &owner_keypair().secret_key,
+        0x30,
+    )
+    .expect("funded create")
 }
 
 /// The operation exactly as `dlv.reconcile` builds it today
@@ -126,7 +142,7 @@ fn owner_apply_op_as_built_by_reconcile() -> Operation {
         parent_sequence: 0,
         new_sequence: 1,
         input_policy_commit: era(),
-        output_policy_commit: sofi(),
+        output_policy_commit: second_asset(),
         input_amount: 100,
         output_amount: 60,
         parent_binding: [0x23; 32],
@@ -163,7 +179,7 @@ fn try_apply_settlement(
             vault_id: VAULT,
             input_policy_commit: era(),
             input_amount: 100,
-            output_policy_commit: sofi(),
+            output_policy_commit: second_asset(),
             output_amount: 60,
             parent_sequence: 0,
             new_sequence: 1,
@@ -185,7 +201,7 @@ fn distinct_owner_apply_op(receipt_id: [u8; 32], pointer_x: [u8; 32]) -> Operati
         parent_sequence: 0,
         new_sequence: 1,
         input_policy_commit: era(),
-        output_policy_commit: sofi(),
+        output_policy_commit: second_asset(),
         input_amount: 100,
         output_amount: 60,
         parent_binding: [0x23; 32],
@@ -306,7 +322,7 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
     );
     assert_eq!(
         winner_first
-            .vault_reserve_entry(&VAULT, &sofi())
+            .vault_reserve_entry(&VAULT, &second_asset())
             .expect("out")
             .sequence,
         1,
@@ -314,7 +330,7 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
     );
     assert_eq!(
         loser_first
-            .vault_reserve_entry(&VAULT, &sofi())
+            .vault_reserve_entry(&VAULT, &second_asset())
             .expect("out")
             .sequence,
         1,
@@ -324,7 +340,7 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
     // THE WINNER consumes generation 0. Exactly one child generation is installed,
     // and each reserve leg reflects exactly ONE settlement.
     let out = winner_first
-        .vault_reserve_entry(&VAULT, &sofi())
+        .vault_reserve_entry(&VAULT, &second_asset())
         .expect("output leg");
     let inp = winner_first
         .vault_reserve_entry(&VAULT, &era())
@@ -363,7 +379,7 @@ fn two_settlements_racing_one_parent_generation_only_one_is_consumed() {
     // THE LOSER MOVED NOTHING: no canonical mutation, no reserve mutation. The
     // vault is still at generation 1 with the winner's amounts.
     let out_after = winner_first
-        .vault_reserve_entry(&VAULT, &sofi())
+        .vault_reserve_entry(&VAULT, &second_asset())
         .expect("output leg");
     assert_eq!(
         out_after.sequence, 1,
@@ -516,10 +532,10 @@ fn value_moving_dlv_operations_are_signed_and_verified_on_the_real_path() {
     assert!(
         after.chain_tip(&rel).is_some(),
         "root {} should carry the signed owner tip",
-        hex_root(&after)
+        root_prefix(&after)
     );
 }
 
-fn hex_root(s: &DeviceState) -> String {
-    s.root()[..6].iter().map(|b| format!("{b:02x}")).collect()
+fn root_prefix(s: &DeviceState) -> String {
+    dsm_sdk::util::text_id::encode_base32_crockford(&s.root()[..6])
 }

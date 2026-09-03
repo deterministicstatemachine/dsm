@@ -2168,16 +2168,17 @@ impl CoreSDK {
     /// builds, so no shipping path can bypass the advance that normally
     /// produces a head.
     ///
-    /// Exists because a handler that reads reserves out of the head cannot be
-    /// exercised without one, and constructing a funded head through real
-    /// advances would mean minting and funding through several routes before
-    /// reaching the behaviour under test.
+    /// This installs a head; it is NOT a way to give a device value. Every
+    /// head handed to it is either zero-value (`DeviceState::new`,
+    /// `observer_device`) or was produced by legitimate origins and is being
+    /// re-installed to model a restart, an inconsistent record, or the
+    /// Prepared admission production attaches before a credit-direction apply.
+    /// Value comes from `economic_fixtures` (faucet claims, issuance,
+    /// transfers) — never from replacing the head with an invented one;
+    /// `scripts/ci_scan.sh` bans the helpers that used to do that.
     // Also reachable under the non-default `test-utils` feature so this crate's
     // own integration tests (external consumers, for which `cfg(test)` is false)
-    // can build a funded fixture head. Still `pub(crate)`: the only way a test
-    // outside the crate seeds state is the narrow
-    // `install_balance_for_testing`, which installs ONE balance rather than
-    // replacing the whole head.
+    // can install a fixture head. Still `pub(crate)`.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn set_device_head_for_testing(&self, head: dsm::types::device_state::DeviceState) {
         self.state_machine.lock().set_device_head(head);

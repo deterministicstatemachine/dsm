@@ -5329,36 +5329,6 @@ mod tests {
         );
     }
 
-    /// Seed canonical dBTC projection for the test device ([0xA1; 32]).
-    fn seed_dbtc_balance(router: &AppRouterImpl, amount_sats: u64) {
-        let state = router
-            .core_sdk
-            .get_current_state()
-            .expect("load current state for dBTC projection seed");
-        let device_id = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
-        let state_hash = state
-            .hash()
-            .expect("hash current state for dBTC projection seed");
-        let balance_key = dsm::core::token::derive_canonical_balance_key(
-            crate::policy::builtins::DBTC_POLICY_COMMIT,
-            &state.device_info.public_key,
-            crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID,
-        );
-        client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
-            balance_key,
-            device_id,
-            token_id: crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID.to_string(),
-            policy_commit: crate::util::text_id::encode_base32_crockford(
-                crate::policy::builtins::DBTC_POLICY_COMMIT,
-            ),
-            available: amount_sats,
-            locked: 0,
-            source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            updated_at: crate::util::deterministic_time::tick(),
-        })
-        .expect("seed dBTC projection");
-    }
-
     #[test]
     #[serial]
     fn persist_committed_withdrawal_metadata_transitions_existing_row() {
@@ -5421,7 +5391,6 @@ mod tests {
         let source_amount = request_net_sats + full_fee;
         let vault_id = vid_from_label("000-vault-consumed");
 
-        seed_dbtc_balance(&router, request_net_sats * 3); // enough for multiple withdrawals
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5568,7 +5537,6 @@ mod tests {
         let source_amount = request_net_sats + full_fee;
         let vault_id = vid_from_label("vault-execute-success");
 
-        seed_dbtc_balance(&router, request_net_sats * 3);
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5748,7 +5716,6 @@ mod tests {
         let source_amount = request_gross_sats + full_fee;
         let vault_id = vid_from_label("vault-policy");
 
-        seed_dbtc_balance(&router, request_gross_sats * 3);
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5847,7 +5814,6 @@ mod tests {
         let actual_policy_commit = *crate::policy::builtins::DBTC_POLICY_COMMIT;
         let mismatched_policy_commit = [0xAB; 32];
 
-        seed_dbtc_balance(&router, amount_sats);
         let mismatch_vid = vid_from_label("vault-policy-mismatch");
         let mismatch_b32 = crate::util::text_id::encode_base32_crockford(&mismatch_vid);
         seed_vault_execution_advertisement(mismatch_vid, amount_sats, actual_policy_commit);

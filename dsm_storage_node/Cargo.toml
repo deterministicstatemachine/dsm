@@ -93,6 +93,11 @@ name = "storage_node"
 path = "src/main.rs"
 
 [dev-dependencies]
+# The register conformance suite drives the in-process register double
+# (`dsm_sdk::sdk::storage_io::fake_registers`, gated `test-utils`) against
+# this node's real routers. Same package edge as the normal dependency above;
+# only the feature is unified onto the test build.
+dsm_sdk = { version = "0.1.0-beta.3", path = "../dsm_client/deterministic_state_machine/dsm_sdk", features = ["test-utils"] }
 hyper = { version = "1.10", features = ["full"] }
 prost = "0.14"
 serial_test = "3"

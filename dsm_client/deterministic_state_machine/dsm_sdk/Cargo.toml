@@ -195,8 +195,10 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, fea
 # `cfg(test)` gate is invisible to them and the feature would otherwise never be
 # on. A normal `cargo build`/`cargo install` does not resolve dev-dependencies,
 # so the test-only seams stay out of every production artifact — which is the
-# point: builtin issuance is refused everywhere, including in tests, and fixtures
-# seed state directly instead of minting.
+# point: none of the test-only seams reach a production artifact. Builtin
+# issuance stays refused everywhere, including in tests; fixtures obtain value
+# through the REAL origins (faucet admission, authorized issuance, admitted
+# transfer), never by writing it onto a head.
 dsm_sdk = { path = ".", features = ["test-utils"] }
 
 

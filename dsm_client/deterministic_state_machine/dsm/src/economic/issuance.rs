@@ -289,7 +289,7 @@ pub fn parse_issuance_policy(policy_proto: &[u8]) -> Result<IssuancePolicy, Stri
         _ => return Err("policy blob has an unknown allowlist kind".into()),
     }
     let flag_claims_allowlist = flags & 0x04 != 0;
-    if flag_claims_allowlist != !allowlist_device_ids.is_empty() {
+    if flag_claims_allowlist == allowlist_device_ids.is_empty() {
         return Err("policy blob allowlist flag disagrees with its payload".into());
     }
 

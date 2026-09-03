@@ -38,11 +38,10 @@ use dsm::economic::claim_envelope::{
     decode_and_verify_economic_root_claim, economic_root_claim_envelope_digest,
     verify_claim_attribution, ClaimEnvelopeError,
 };
-use dsm::economic::register::{economic_root_register_key, AttributionError, AuthenticatedCaller};
+use dsm::economic::register::{
+    economic_root_register_key, AttributionError, AuthenticatedCaller, MAX_CLAIM_BYTES,
+};
 use dsm_sdk::util::text_id;
-
-/// One SPHINCS+ signature + a CCB body with one key field.
-const MAX_CLAIM_BYTES: usize = 160 * 1024;
 
 pub const OUTCOME_HEADER: &str = "x-dsm-economic-root-outcome";
 pub const HELD_DIGEST_HEADER: &str = "x-dsm-economic-root-held-digest";
@@ -111,9 +110,6 @@ pub async fn post_claim(
         }
         Err(AttributionError::WrongStorageSet { .. }) => {
             return outcome(StatusCode::UNPROCESSABLE_ENTITY, "foreign-set");
-        }
-        Err(AttributionError::SignatureInvalid) => {
-            return outcome(StatusCode::FORBIDDEN, "signature-invalid");
         }
     }
 
