@@ -444,9 +444,11 @@ impl AppRouterImpl {
                     .into(),
             );
         }
-        if req.unlock_spec_digest.len() != 32 {
+        if !(req.unlock_spec_digest.is_empty() || req.unlock_spec_digest.len() == 32) {
             return err(
-                "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
+                "route.publishRoutingAdvertisement: unlock_spec_digest must be empty (derived from \
+                 the vault record) or 32 bytes"
+                    .into(),
             );
         }
 
@@ -555,8 +557,20 @@ impl AppRouterImpl {
             }
         }
 
-        let mut unlock_digest = [0u8; 32];
-        unlock_digest.copy_from_slice(&req.unlock_spec_digest);
+        // THE ADVERTISED POLICY DIGEST COMES FROM THE RECORD, NOT THE REQUEST.
+        // The record's `policy_digest` is the DLV-policy digest `dlv.create`
+        // derived and signed; a caller may leave the field empty or repeat that
+        // value, but the ad never carries a digest the vault does not have.
+        let unlock_digest: [u8; 32] = record.policy_digest;
+        if !req.unlock_spec_digest.is_empty() && req.unlock_spec_digest.as_slice() != unlock_digest
+        {
+            return err(
+                "route.publishRoutingAdvertisement: unlock_spec_digest is not this vault's \
+                 DLV-policy digest — it is derived from the vault record, never chosen; leave it \
+                 empty or supply the record's value"
+                    .into(),
+            );
+        }
 
         // The ad carries the DISCOVERY handle for the owner's verification
         // bundle: the inner digest of the exact presentation bytes the birth
@@ -1158,7 +1172,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -1571,7 +1585,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: b"vault-proto".to_vec(),
@@ -1646,7 +1660,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(), // empty → stamp me
             vault_proto_bytes: b"vault-proto".to_vec(),
@@ -1710,6 +1724,89 @@ mod stamping_tests {
     ///
     /// So: publish through the route, then read the same pair BOTH ways, and
     /// require the records to be identical.
+    /// THE ADVERTISED POLICY DIGEST IS THE RECORD'S, NEVER THE REQUEST'S. An
+    /// empty request field is filled from the record — the DLV-policy digest
+    /// `dlv.create` derived and signed; a request naming any other digest is
+    /// refused by name; a request repeating the record's value is accepted
+    /// (the positive control).
+    #[test]
+    #[serial]
+    fn the_advertised_policy_digest_is_the_records_never_the_requests() {
+        use crate::bridge::{AppInvoke, AppRouter};
+        let (r, _fleet) = funded_router();
+        let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
+        let b = crate::economic_fixtures::mint_asset(&r, "BBB", 0, 20_000);
+        let (pc_a, pc_b) = if a < b { (a, b) } else { (b, a) };
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("read")
+            .expect("record");
+        let derived = dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &dsm::ccb::FeePolicy::new(30).expect("fee"),
+        );
+        assert_eq!(
+            record.policy_digest, derived,
+            "the record holds the derived digest"
+        );
+        let publish = |unlock_spec_digest: Vec<u8>| {
+            let req = generated::PublishRoutingAdvertisementRequest {
+                vault_id: vault_id.to_vec(),
+                token_a: pc_a.to_vec(),
+                token_b: pc_b.to_vec(),
+                fee_bps: 30,
+                unlock_spec_digest,
+                unlock_spec_key: "sofi/spec/test".to_string(),
+                owner_public_key: Vec::new(),
+                vault_proto_bytes: b"vault-proto".to_vec(),
+            };
+            crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(req.encode_to_vec()),
+                })
+                .await
+            })
+        };
+
+        // (1) A chosen digest is refused by name.
+        let res = publish(vec![0x5Au8; 32]);
+        assert!(!res.success, "a chosen unlock_spec_digest must be refused");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("not this vault's DLV-policy digest"),
+            "the refusal names the derivation, got: {msg}"
+        );
+
+        // (2) Empty is filled from the record, and the ad carries that value.
+        let res = publish(Vec::new());
+        assert!(res.success, "empty is derived: {:?}", res.error_message);
+        let ads = crate::runtime::get_runtime()
+            .block_on(crate::sdk::routing_sdk::load_all_advertisements_for_pair(
+                &pc_a, &pc_b,
+            ))
+            .expect("ads");
+        let mine = ads
+            .iter()
+            .find(|ad| ad.advertisement.vault_id.as_slice() == vault_id.as_slice())
+            .expect("this vault's advertisement");
+        assert_eq!(
+            mine.advertisement.unlock_spec_digest.as_slice(),
+            derived.as_slice(),
+            "the advertisement carries the record's derived digest"
+        );
+
+        // (3) Repeating the record's value is accepted — positive control.
+        let res = publish(derived.to_vec());
+        assert!(
+            res.success,
+            "the record's own value is accepted: {:?}",
+            res.error_message
+        );
+    }
+
     #[test]
     #[serial]
     fn the_route_and_the_sdk_return_the_same_advertisements() {
@@ -1732,7 +1829,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: b"vault-proto".to_vec(),
@@ -1842,7 +1939,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: integration_pk.clone(),
             vault_proto_bytes: b"vault-proto".to_vec(),
@@ -1984,7 +2081,7 @@ mod stamping_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5A; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/test".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),

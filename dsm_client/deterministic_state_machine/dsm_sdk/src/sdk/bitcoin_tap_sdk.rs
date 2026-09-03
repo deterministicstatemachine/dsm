@@ -1483,6 +1483,8 @@ impl BitcoinTapSdk {
             Some(kem_public_key.to_vec()),
             kem_public_key,
             &reference_state.hash,
+            // No DLV-layer policy object here (not an AMM vault): nothing to derive.
+            None,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -1733,6 +1735,8 @@ impl BitcoinTapSdk {
             Some(kem_public_key.to_vec()),
             kem_public_key,
             &reference_state.hash,
+            // No DLV-layer policy object here (not an AMM vault): nothing to derive.
+            None,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),

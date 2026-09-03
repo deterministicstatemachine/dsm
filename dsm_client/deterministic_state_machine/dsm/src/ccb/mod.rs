@@ -37,6 +37,7 @@ use blake3::Hasher;
 
 use crate::common::domain_tags::{
     TAG_DSM_STORAGE_SET, TAG_DSM_VAULT_STATE, TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2,
+    TAG_DSM_DLV_POLICY_DIGEST,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -506,6 +507,29 @@ pub(crate) fn push_present(out: &mut Vec<u8>) {
 }
 
 /// `c_n = H(DSM/vault-state ‖ CCB(V_n))`.
+/// THE DLV-POLICY DIGEST — a deterministic VIEW of the vault's DLV-layer
+/// policy, not a second commitment.
+///
+/// `VaultStateV2` carries three policy members under the creator-signed
+/// anchor: member 7 `market_policy` (the pair's two CPTA commits — the TOKEN
+/// layer), member 8 `release_policy` and member 9 `fee_policy` (the DLV
+/// layer). This digest folds members 8 and 9 and deliberately EXCLUDES
+/// member 7: the two token policies are independent authorities over the
+/// assets themselves and stay separate commitments under the same signature.
+/// That exclusion is the layer separation, stated in the derivation.
+///
+/// Anyone holding `CCB(V_n)` can recompute it, so every external
+/// representation of the vault's policy identity (`DlvSpecV1.policy_digest`,
+/// the persisted record, the routing advertisement's `unlock_spec_digest`)
+/// is a copy of this value, never a caller's choice. It is also folded into
+/// `LimboVault::parameters_hash`, so the creator signs it at birth.
+pub fn dlv_policy_digest(release: &ReleasePolicy, fee: &FeePolicy) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_DLV_POLICY_DIGEST);
+    h.update(&release.encode());
+    h.update(&fee.encode());
+    *h.finalize().as_bytes()
+}
+
 pub fn vault_state_commitment(state: &VaultStateV2) -> Result<[u8; 32], CcbError> {
     let ccb = state.encode()?;
     let mut h = dsm_domain_hasher(TAG_DSM_VAULT_STATE);
@@ -543,4 +567,61 @@ pub fn storage_set_id(members: &StorageSetMembers) -> Result<[u8; 32], CcbError>
     let mut h: Hasher = dsm_domain_hasher(TAG_DSM_STORAGE_SET);
     h.update(&body);
     Ok(*h.finalize().as_bytes())
+}
+
+#[cfg(test)]
+mod dlv_policy_digest_tests {
+    use super::*;
+
+    /// THE LAYER SEPARATION, IN THE DERIVATION. Two vaults over DIFFERENT
+    /// token pairs but the same release family and fee have the SAME
+    /// DLV-policy digest — member 7 (the CPTA pair) is not an input — while
+    /// the pair IS in the signed state commitment. Two vaults over the same
+    /// pair with different fees have different digests: member 9 is an input.
+    #[test]
+    fn dlv_policy_digest_folds_the_dlv_layer_and_excludes_the_cpta_pair() {
+        let release = ReleasePolicy::beta_owner_local_full_close();
+        let fee30 = FeePolicy::new(30).expect("fee");
+        let fee31 = FeePolicy::new(31).expect("fee");
+        let d = dlv_policy_digest(&release, &fee30);
+        assert_eq!(d, dlv_policy_digest(&release, &fee30), "deterministic");
+        assert_ne!(d, [0u8; 32]);
+        assert_ne!(
+            d,
+            dlv_policy_digest(&release, &fee31),
+            "the fee is a DLV-layer input"
+        );
+
+        let state_of = |mp: MarketPolicy| VaultStateV2 {
+            owner_genesis_id: [1; 32],
+            owner_device_id: [2; 32],
+            vault_id: [3; 32],
+            generation: 0,
+            reserve_a: 1,
+            reserve_b: 1,
+            market_policy: mp,
+            release_policy: ReleasePolicy::beta_owner_local_full_close(),
+            fee_policy: FeePolicy::new(30).expect("fee"),
+            encumbrances: EncumbranceSet::empty(),
+            iteration_budget: None,
+            parent_state_commitment: [0; 32],
+            owner_authority_transition_digest: [0; 32],
+            storage_set: StorageSetMembers::new(&[&[9u8; 32][..]]).expect("set"),
+            quorum: 1,
+        };
+        let sa =
+            state_of(MarketPolicy::beta_constant_product([0x11; 32], [0x22; 32]).expect("pair"));
+        let sb =
+            state_of(MarketPolicy::beta_constant_product([0x33; 32], [0x44; 32]).expect("pair"));
+        assert_ne!(
+            vault_state_commitment(&sa).expect("c_n"),
+            vault_state_commitment(&sb).expect("c_n"),
+            "the pair IS in the signed state commitment"
+        );
+        assert_eq!(
+            dlv_policy_digest(&sa.release_policy, &sa.fee_policy),
+            dlv_policy_digest(&sb.release_policy, &sb.fee_policy),
+            "and is NOT in the DLV-policy digest"
+        );
+    }
 }

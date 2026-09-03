@@ -375,8 +375,15 @@ impl AppRouterImpl {
             Some(s) => s,
             None => return err("dlv.create: DlvInstantiateV1.spec is required".into()),
         };
-        if spec.policy_digest.len() != 32 {
-            return err("dlv.create: spec.policy_digest must be 32 bytes".into());
+        // `policy_digest` is the DLV-POLICY digest and, for an AMM vault, it is
+        // DERIVED below from the vault's own release and fee policy — a caller
+        // may leave it empty or may supply the value it expects, but cannot
+        // choose it. Shape is checked here; the derivation runs once the
+        // predicate is known.
+        if !(spec.policy_digest.is_empty() || spec.policy_digest.len() == 32) {
+            return err(
+                "dlv.create: spec.policy_digest must be empty (derived) or 32 bytes".into(),
+            );
         }
 
         // Compute the canonical digests Rust-side.  Per the
@@ -493,6 +500,49 @@ impl AppRouterImpl {
             .map(|(a, b, _)| (a.clone(), b.clone()));
         let amm_fee_bps: u32 = amm_predicate.as_ref().map(|(_, _, f)| *f).unwrap_or(0);
 
+        // THE DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN.
+        //
+        // An AMM vault's policy identity is a deterministic view of the two
+        // DLV-layer members the creator-signed `VaultStateV2` commits — its
+        // release policy (the beta family) and its fee policy — and never of
+        // the pair's CPTA commits, which are the TOKEN layer and independent
+        // authorities of their own. It used to be 32 free bytes the UI asked a
+        // human to paste ("policy anchor"), labelled a CPTA anchor and compared
+        // to nothing: a token identity in a vault-policy slot. Now `dlv.create`
+        // computes it, refuses a supplied value that disagrees, persists and
+        // echoes only the derived value, and folds it into `parameters_hash`
+        // so the creator SIGNS it. Non-AMM vaults have no DLV-layer policy
+        // object to derive from; their supplied 32 bytes are kept, and are now
+        // at least covered by the creator signature.
+        let policy_digest: [u8; 32] = if amm_pair.is_some() {
+            let fee = match dsm::ccb::FeePolicy::new(amm_fee_bps) {
+                Ok(f) => f,
+                Err(e) => return err(format!("dlv.create: fee policy: {e}")),
+            };
+            let derived = dsm::ccb::dlv_policy_digest(
+                &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+                &fee,
+            );
+            if !spec.policy_digest.is_empty() && spec.policy_digest.as_slice() != derived {
+                return err(
+                    "dlv.create: spec.policy_digest is not this vault's DLV-policy digest — it is \
+                     derived from the vault's release and fee policy, never chosen; leave it empty \
+                     or supply the derived value"
+                        .into(),
+                );
+            }
+            derived
+        } else {
+            if spec.policy_digest.len() != 32 {
+                return err(
+                    "dlv.create: spec.policy_digest must be 32 bytes for a non-AMM vault".into(),
+                );
+            }
+            let mut pd = [0u8; 32];
+            pd.copy_from_slice(&spec.policy_digest);
+            pd
+        };
+
         // Reference state (current device head).
         let reference_state = match self.core_sdk.get_current_state() {
             Ok(s) => s,
@@ -533,6 +583,9 @@ impl AppRouterImpl {
             intended_recipient_opt.clone(),
             &encryption_pk,
             &reference_state.hash,
+            // Signed with the rest of the parameters: the vault's DLV-policy
+            // identity is part of what the creator attests to at birth.
+            Some(policy_digest),
         ) {
             Ok(d) => d,
             Err(e) => return err(format!("dlv.create: prepare_vault failed: {e}")),
@@ -854,8 +907,8 @@ impl AppRouterImpl {
                                     .into(),
                             );
                         };
-                        let mut pd = [0u8; 32];
-                        pd.copy_from_slice(&spec.policy_digest);
+                        // The DERIVED digest, never the caller's bytes.
+                        let pd = policy_digest;
                         Some(
                             crate::storage::client_db::amm_vault_records::AmmVaultRecord {
                                 vault_id,
@@ -1107,27 +1160,18 @@ impl AppRouterImpl {
         // no gate consults it, and `enforce_parent_binding` is unconditional.
         // Scheduled for removal with the `anchor_enforcement` column.
         //
-        // Phase 13 follow-up: also stamp the vault's `policy_digest` from
-        // the spec.  This is the canonical 32-byte CPTA anchor that the
-        // owner's first publish stamped into the routing advertisement's
-        // `unlock_spec_digest`.  Persisting it on the vault lets the
-        // owner-side LiquidityScreen republish path read the real digest
-        // from `AmmVaultSummaryV1` instead of stamping 32 zero bytes
-        // (which silently corrupted advertisements pre-fix).
+        // The DLV-policy digest is NOT stamped here: it rode the draft into
+        // `parameters_hash` and was signed there, so the finalized vault
+        // already carries it (see `LimboVault::policy_digest`).
         match dlv_manager.get_vault(&vault_id).await {
             Ok(vault_lock) => {
                 let mut vault = vault_lock.lock().await;
                 vault.anchor_enforcement = generated::AnchorEnforcement::Required as i32;
-                // spec.policy_digest length is already validated as 32
-                // bytes at line 227-229; copy into a fixed array.  Skip
-                // stamping if the spec carried no digest (defensive — the
-                // earlier validation rejects empty too, so this is just
-                // belt-and-braces).
-                if spec.policy_digest.len() == 32 {
-                    let mut pd = [0u8; 32];
-                    pd.copy_from_slice(&spec.policy_digest);
-                    vault.policy_digest = Some(pd);
-                }
+                debug_assert_eq!(
+                    vault.policy_digest,
+                    Some(policy_digest),
+                    "the finalized vault carries the derived, signed DLV-policy digest"
+                );
             }
             Err(e) => {
                 log::warn!(
@@ -3797,7 +3841,13 @@ mod funded_creation_tests {
         let head = r.core_sdk.device_head().expect("funded head");
         let (owner_genesis, owner_devid) = (head.genesis(), head.devid());
 
-        let policy_digest = vec![0x5Au8; 32];
+        // The DLV-policy digest this vault will be born with — supplied explicitly here so
+        // the restart test also exercises the accept-the-derived-value path.
+        let policy_digest: Vec<u8> = dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &dsm::ccb::FeePolicy::new(30).expect("fee"),
+        )
+        .to_vec();
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
                 policy_digest: policy_digest.clone(),
@@ -3935,7 +3985,7 @@ mod funded_creation_tests {
         // Empty creator key AND empty signature: both are the wallet's to fill.
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -4005,7 +4055,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
         let build = |content_digest: Vec<u8>| generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 content_digest,
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
@@ -4075,7 +4125,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
         let build = |anchor_enforcement: i32| generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5A; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement,
                 ..Default::default()
@@ -4173,6 +4223,131 @@ mod funded_creation_tests {
     /// Every case is bracketed by a POSITIVE CONTROL — the untouched row
     /// verifies and publishes — so a refusal is attributable to the mutation
     /// and not to a broken fixture.
+    /// THE DLV-POLICY DIGEST IS DERIVED, NOT CHOSEN. An AMM create with the
+    /// field empty is born with the digest derived from its release and fee
+    /// policy; the record, the in-memory vault and the creator SIGNATURE all
+    /// carry that value. A create that supplies any other 32 bytes is refused
+    /// by name (a token anchor in the vault-policy slot is exactly what used to
+    /// be pasted here). A create that supplies the derived value is accepted —
+    /// the positive control that pins the refusal to the mismatch.
+    #[test]
+    #[serial]
+    fn an_amm_create_derives_the_dlv_policy_digest_and_refuses_a_chosen_one() {
+        use crate::bridge::{AppInvoke, AppRouter};
+        use prost::Message as _;
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let derived = dsm::ccb::dlv_policy_digest(
+            &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            &dsm::ccb::FeePolicy::new(30).expect("fee"),
+        );
+        let create = |policy_digest: Vec<u8>, content: &[u8]| {
+            let (lo, hi) = if pc_a <= pc_b {
+                (pc_a, pc_b)
+            } else {
+                (pc_b, pc_a)
+            };
+            let fulfillment = generated::FulfillmentMechanism {
+                kind: Some(generated::fulfillment_mechanism::Kind::AmmConstantProduct(
+                    generated::AmmConstantProduct {
+                        token_a: lo.to_vec(),
+                        token_b: hi.to_vec(),
+                        fee_bps: 30,
+                    },
+                )),
+            }
+            .encode_to_vec();
+            let req = generated::DlvInstantiateV1 {
+                spec: Some(generated::DlvSpecV1 {
+                    policy_digest,
+                    fulfillment_bytes: fulfillment,
+                    content: content.to_vec(),
+                    anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                    ..Default::default()
+                }),
+                creator_public_key: Vec::new(),
+                signature: Vec::new(),
+                funding_legs: vec![
+                    generated::DlvFundingLegV1 {
+                        policy_commit: pc_a.to_vec(),
+                        amount: 1_000,
+                    },
+                    generated::DlvFundingLegV1 {
+                        policy_commit: pc_b.to_vec(),
+                        amount: 500,
+                    },
+                ],
+            };
+            let args = generated::ArgPack {
+                schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+                codec: generated::Codec::Proto as i32,
+                body: req.encode_to_vec(),
+            }
+            .encode_to_vec();
+            crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args,
+                })
+                .await
+            })
+        };
+
+        // (1) A chosen digest — a token anchor pasted into the vault-policy slot.
+        let res = create(vec![0x5Au8; 32], b"chosen digest");
+        assert!(!res.success, "a chosen policy digest must be refused");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("not this vault's DLV-policy digest"),
+            "the refusal names the derivation, got: {msg}"
+        );
+
+        // (2) Empty — derived. The record and the signed vault carry the derivation.
+        let res = create(Vec::new(), b"derived digest");
+        assert!(
+            res.success,
+            "an empty digest is derived: {:?}",
+            res.error_message
+        );
+        // The refused create above recorded nothing, so this is the only record.
+        let vault_id: [u8; 32] =
+            crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+                .expect("records")
+                .pop()
+                .expect("the derived-digest create recorded a vault")
+                .vault_id;
+        assert_eq!(
+            record_of(&vault_id).policy_digest,
+            derived,
+            "the record carries the derived value"
+        );
+        let vault_lock = crate::runtime::get_runtime()
+            .block_on(r.bitcoin_tap.dlv_manager().get_vault(&vault_id))
+            .expect("the created vault");
+        let vault = crate::runtime::get_runtime()
+            .block_on(vault_lock.lock())
+            .clone();
+        assert_eq!(
+            vault.policy_digest,
+            Some(derived),
+            "the vault carries the derived value"
+        );
+        assert!(
+            vault.verify().expect("verify"),
+            "and the creator signature covers it"
+        );
+
+        // (3) The derived value supplied explicitly — accepted. Positive control.
+        let res = create(derived.to_vec(), b"supplied derived digest");
+        assert!(
+            res.success,
+            "supplying the derived digest is accepted: {:?}",
+            res.error_message
+        );
+    }
+
     #[test]
     #[serial]
     fn a_tampered_or_cross_pasted_baseline_is_not_market_active() {
@@ -4359,7 +4534,7 @@ mod funded_creation_tests {
                 crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
             let create = generated::DlvInstantiateV1 {
                 spec: Some(generated::DlvSpecV1 {
-                    policy_digest: vec![0x5A; 32],
+                    policy_digest: Vec::new(),
                     fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                     anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                     ..Default::default()
@@ -4475,7 +4650,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5A; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -4560,7 +4735,7 @@ mod funded_creation_tests {
         let recipient = vec![0xC7u8; 1184];
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 intended_recipient: recipient.clone(),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
@@ -4645,7 +4820,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -4685,7 +4860,7 @@ mod funded_creation_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/two-device".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -4947,7 +5122,7 @@ mod funded_creation_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/observable".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -5009,7 +5184,7 @@ mod funded_creation_tests {
         // (1) FUND a vault through the dispatcher.
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -5055,7 +5230,7 @@ mod funded_creation_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/settle-test".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -5472,7 +5647,7 @@ mod funded_creation_tests {
         // Fund an owner vault at generation 0.
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -5896,7 +6071,7 @@ mod funded_creation_tests {
 
         let create = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -5933,7 +6108,7 @@ mod funded_creation_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/lp-offline".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -6265,7 +6440,7 @@ mod funded_creation_tests {
             token_a: pc_a.to_vec(),
             token_b: pc_b.to_vec(),
             fee_bps: 30,
-            unlock_spec_digest: vec![0x5Au8; 32],
+            unlock_spec_digest: Vec::new(),
             unlock_spec_key: "sofi/spec/close".to_string(),
             owner_public_key: Vec::new(),
             vault_proto_bytes: Vec::new(),
@@ -7009,7 +7184,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -7196,7 +7371,7 @@ mod funded_creation_tests {
             crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -7298,7 +7473,13 @@ mod funded_creation_tests {
             generated::AnchorEnforcement::Required as i32,
             "the rehydrated posture is DERIVED (canonical REQUIRED), never read from the row"
         );
-        assert_eq!(v.policy_digest.to_vec(), vec![0x5Au8; 32]);
+        assert_eq!(
+            v.policy_digest.to_vec(),
+            dsm::ccb::dlv_policy_digest(
+                &dsm::ccb::ReleasePolicy::beta_owner_local_full_close(),
+                &dsm::ccb::FeePolicy::new(30).expect("fee")
+            )
+        );
         assert_eq!((v.reserve_a, v.reserve_b), (10_000, 5_000));
         assert_eq!(v.current_sequence, 0, "sequence comes from the leaves");
         // Owner is checked DURING rehydration, so a rebuilt vault is
@@ -7378,7 +7559,7 @@ mod funded_creation_tests {
 
         let req = || generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -7482,7 +7663,7 @@ mod funded_creation_tests {
         // behind it. It must refuse, naming the inconsistency, and move nothing.
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
@@ -7540,7 +7721,7 @@ mod funded_creation_tests {
 
         let req = generated::DlvInstantiateV1 {
             spec: Some(generated::DlvSpecV1 {
-                policy_digest: vec![0x5Au8; 32],
+                policy_digest: Vec::new(),
                 fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
                 anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                 ..Default::default()
