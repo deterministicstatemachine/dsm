@@ -919,6 +919,14 @@ pub enum VaultReserveMutation {
         /// The vault's pair + fee; `{input, output}` must BE this pair, and the
         /// vault-state leaf at `new_sequence` is derived from it.
         pair: VaultStatePair,
+        /// `CCB(V_n)` of the parent vault state this settlement consumes —
+        /// UNSIGNED metadata, bound by the signed operation's `parent_binding`:
+        /// `advance` requires `vault_state_commitment(parent_state) ==
+        /// parent_binding`, and requires the state's leaf-visible members
+        /// (vault, generation, both reserves, pair, fee, owner) to equal the
+        /// leaves and pair it is about to consume. The head holds no `V_n`; it
+        /// holds the leaves `V_n` commits, and this is how the two are tied.
+        parent_state: Vec<u8>,
     },
     /// `DlvClose`: the COMPLETE remaining reserve set — both legs of the pair,
     /// exactly, at exactly `parent_sequence` — returns to `balances` atomically,
@@ -2094,9 +2102,10 @@ impl DeviceState {
             parent_sequence,
             new_sequence,
             pair,
+            parent_state,
         }) = &reserve_mutation
         {
-            match &operation {
+            let signed_parent_binding: [u8; 32] = match &operation {
                 Operation::DlvOwnerApplyV2 {
                     vault_id: op_vault,
                     parent_sequence: op_parent,
@@ -2105,6 +2114,7 @@ impl DeviceState {
                     output_policy_commit: op_out_pc,
                     input_amount: op_in_amt,
                     output_amount: op_out_amt,
+                    parent_binding: op_parent_binding,
                     ..
                 } => {
                     // The SIGNED v2 operation states the complete reserve
@@ -2126,13 +2136,14 @@ impl DeviceState {
                              DlvOwnerApplyV2 (vault, legs, amounts or generation) — refusing",
                         ));
                     }
+                    *op_parent_binding
                 }
                 _ => {
                     return Err(DsmError::invalid_operation(
                         "advance: only an owner apply may apply a settlement to reserves",
                     ));
                 }
-            }
+            };
             if input_policy_commit == output_policy_commit {
                 return Err(DsmError::invalid_operation(
                     "advance: a settlement cannot name one asset on both legs",
@@ -2233,6 +2244,121 @@ impl DeviceState {
                 .get(&key_out)
                 .copied()
                 .unwrap_or_default();
+
+            // THE OWNER PROVES THE EXACT TRANSITION FROM THE STATE IT OWNS.
+            //
+            // Everything above checks shape and generation. Nothing above checks
+            // that the amounts are a trade this vault's curve produces, or that
+            // the parent the signed operation claims to consume is the state
+            // these leaves hold. The trader's receipt is a witness of what the
+            // trader committed; it is not evidence about the owner's reserves.
+            // So, from the head's own commitment outward:
+            //
+            //   authoritative parent vault state (the leaf at `parent_sequence`)
+            //     → committed pair + committed fee
+            //     → authoritative reserve_in / reserve_out (by ASSET IDENTITY:
+            //       the leaf of the input asset is the input reserve, never a
+            //       caller's "a"/"b" declaration)
+            //     → canonical constant_product_output(input)
+            //     → must equal the proposed output, exactly
+            //     → the signed parent_binding must name exactly this state.
+            //
+            // Reserves in pair order, for the leaf digest and the parent state.
+            let (cur_a, cur_b) = if *input_policy_commit == pair.a() {
+                (cur_in.amount, cur_out.amount)
+            } else {
+                (cur_out.amount, cur_in.amount)
+            };
+            // 1. The head's OWN vault-state leaf at `parent_sequence` commits
+            //    (pair, fee, both reserves). The pair and fee this mutation
+            //    carries, over the reserves this arm read, must reproduce it —
+            //    otherwise the curve below would run on a fee or reserves the
+            //    head never committed. No leaf ⇒ no committed state to consume;
+            //    refused, never synthesised.
+            {
+                let state_key = crate::dlv::vault_smt_leaf::compute_vault_smt_key(apply_vault);
+                let committed = crate::dlv::vault_smt_leaf::compute_vault_smt_value(
+                    *parent_sequence,
+                    &pair.reserves_digest(cur_a, cur_b),
+                );
+                match self.extra_leaves.get(&state_key) {
+                    Some(leaf) if *leaf == committed => {}
+                    Some(_) => {
+                        return Err(DsmError::invalid_operation(
+                            "advance: the pair, fee or reserves this settlement folds are not \
+                             what the vault's committed state leaf holds at the parent \
+                             generation — refusing",
+                        ))
+                    }
+                    None => {
+                        return Err(DsmError::invalid_operation(
+                            "advance: the vault has no committed state leaf to consume — \
+                             refusing",
+                        ))
+                    }
+                }
+            }
+            // 2. The signed `parent_binding` names the parent state, and that
+            //    state IS the one these leaves hold. `CCB(V_n)` rides the
+            //    mutation as unsigned bytes; the signature covers its commitment,
+            //    and every member the leaves can see must agree with the leaves.
+            {
+                let parent = crate::ccb::decode::decode_vault_state(parent_state).map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "advance: the settlement's parent vault state does not decode: {e}"
+                    ))
+                })?;
+                let c_n = crate::ccb::vault_state_commitment(&parent).map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "advance: the settlement's parent vault state does not commit: {e}"
+                    ))
+                })?;
+                if c_n != signed_parent_binding {
+                    return Err(DsmError::invalid_operation(
+                        "advance: the signed parent_binding does not name the parent vault \
+                         state this settlement supplies — refusing",
+                    ));
+                }
+                if parent.vault_id != *apply_vault
+                    || parent.generation != *parent_sequence
+                    || parent.reserve_a != cur_a
+                    || parent.reserve_b != cur_b
+                    || *parent.market_policy.token_a() != pair.a()
+                    || *parent.market_policy.token_b() != pair.b()
+                    || parent.fee_policy.fee_bps() != pair.fee_bps
+                    || parent.owner_device_id != self.devid
+                    || parent.owner_genesis_id != self.genesis
+                {
+                    return Err(DsmError::invalid_operation(
+                        "advance: the parent vault state the signed parent_binding names is \
+                         not the state these reserve leaves hold (vault, generation, reserves, \
+                         pair, fee or owner differ) — refusing",
+                    ));
+                }
+            }
+            // 3. THE CURVE. One implementation, shared with the trader's quote
+            //    and the economic verifier; exact equality, no band.
+            {
+                let simulated = crate::dlv::route_commit::constant_product_output(
+                    *input_amount,
+                    cur_in.amount,
+                    cur_out.amount,
+                    pair.fee_bps,
+                )
+                .ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: the settlement does not simulate against the reserves it \
+                         consumes (empty reserve, overflow or zero output) — refusing",
+                    )
+                })?;
+                if simulated != *output_amount {
+                    return Err(DsmError::invalid_operation(format!(
+                        "advance: the settlement's output is not what the vault's curve yields \
+                         from the reserves it consumes (curve {simulated}, proposed \
+                         {output_amount}) — refusing"
+                    )));
+                }
+            }
 
             let next_in = cur_in.amount.checked_add(*input_amount).ok_or_else(|| {
                 DsmError::invalid_operation("advance: settlement overflows the input reserve")
@@ -3014,6 +3140,56 @@ impl DeviceState {
             },
             new_root,
             proofs,
+        })
+    }
+
+    /// TEST-ONLY. The parent `VaultStateV2` this head holds for `vault_id`
+    /// under `pair` at the vault's current generation — reserves and
+    /// generation read from the head's own leaves, owner from the head's own
+    /// identity, and every member the leaves cannot see fixed to a structural
+    /// constant. Fixtures use it to name the exact state their owner apply
+    /// consumes (`parent_binding = vault_state_commitment(..)`, `parent_state
+    /// = encode()`). Production never calls this: the route names the parent
+    /// from the verified composition, and `advance` checks that against the
+    /// leaves either way.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn parent_vault_state_for_tests(
+        &self,
+        vault_id: &[u8; 32],
+        pair: &VaultStatePair,
+    ) -> Result<crate::ccb::VaultStateV2, DsmError> {
+        let leaf = |pc: &[u8; 32]| {
+            self.vault_reserves
+                .get(&crate::dlv::vault_reserve_leaf::vault_reserve_key(
+                    &self.genesis,
+                    &self.devid,
+                    vault_id,
+                    pc,
+                ))
+                .copied()
+                .unwrap_or_default()
+        };
+        let (a, b) = (leaf(&pair.a()), leaf(&pair.b()));
+        let ccb = |e: crate::ccb::CcbError| {
+            DsmError::invalid_operation(format!("test parent vault state: {e:?}"))
+        };
+        Ok(crate::ccb::VaultStateV2 {
+            owner_genesis_id: self.genesis,
+            owner_device_id: self.devid,
+            vault_id: *vault_id,
+            generation: a.sequence,
+            reserve_a: a.amount,
+            reserve_b: b.amount,
+            market_policy: crate::ccb::MarketPolicy::beta_constant_product(pair.a(), pair.b())
+                .map_err(ccb)?,
+            release_policy: crate::ccb::ReleasePolicy::beta_owner_local_full_close(),
+            fee_policy: crate::ccb::FeePolicy::new(pair.fee_bps).map_err(ccb)?,
+            encumbrances: crate::ccb::EncumbranceSet::empty(),
+            iteration_budget: None,
+            parent_state_commitment: [0u8; 32],
+            owner_authority_transition_digest: [0u8; 32],
+            storage_set: crate::ccb::StorageSetMembers::new(&[b"test-node"]).map_err(ccb)?,
+            quorum: 1,
         })
     }
 
@@ -6719,6 +6895,12 @@ mod tests {
             )
             .expect("fund")
             .new_device_state;
+        // Priced by the canonical curve from the reserves the head holds, and
+        // naming the head's own parent state — what `dlv.reconcile` supplies.
+        let out_amt = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        assert_eq!(out_amt, 453, "pin: 1 000 in against 10 000/5 000 at 30 bps");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
 
         let apply_op = |input: [u8; 32], output: [u8; 32], out_amt: u64| {
             sign_op(Operation::DlvOwnerApplyV2 {
@@ -6731,7 +6913,7 @@ mod tests {
                 output_policy_commit: output,
                 input_amount: 1_000,
                 output_amount: out_amt,
-                parent_binding: [0x23; 32],
+                parent_binding,
                 fee_bps: 30,
                 signature: vec![],
                 mode: TransactionMode::Bilateral,
@@ -6743,7 +6925,7 @@ mod tests {
         let err = funded.advance(
             rk,
             funded.devid,
-            apply_op(dbtc, rigb, 970),
+            apply_op(dbtc, rigb, out_amt),
             entropy(2),
             None,
             &[],
@@ -6755,10 +6937,11 @@ mod tests {
                 input_policy_commit: dbtc,
                 input_amount: 1_000,
                 output_policy_commit: rigb,
-                output_amount: 970,
+                output_amount: out_amt,
                 parent_sequence: 0,
                 new_sequence: 1,
                 pair,
+                parent_state: parent_state.clone(),
             }),
         );
         let err = format!("{}", err.expect_err("third asset"));
@@ -6773,7 +6956,7 @@ mod tests {
             .advance(
                 rk,
                 funded.devid,
-                apply_op(era, rigb, 970),
+                apply_op(era, rigb, out_amt),
                 entropy(3),
                 None,
                 &[],
@@ -6785,21 +6968,22 @@ mod tests {
                     input_policy_commit: era,
                     input_amount: 1_000,
                     output_policy_commit: rigb,
-                    output_amount: 970,
+                    output_amount: out_amt,
                     parent_sequence: 0,
                     new_sequence: 1,
                     pair,
+                    parent_state: parent_state.clone(),
                 }),
             )
             .expect("owner apply");
         let after = &out.new_device_state;
         assert_eq!(after.vault_reserve(&vault, &era), 11_000);
-        assert_eq!(after.vault_reserve(&vault, &rigb), 4_030);
+        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000 - out_amt);
         let proof = out.vault_state_proof.as_ref().expect("witness");
         assert_eq!(proof.sequence, 1, "the leaf advanced with the legs");
         assert_eq!(
             proof.reserves_digest,
-            pair.reserves_digest(11_000, 4_030),
+            pair.reserves_digest(11_000, 5_000 - out_amt),
             "the leaf's digest is the folded amounts, in canonical pair order"
         );
         verify_vault_smt_inclusion(
@@ -7071,6 +7255,7 @@ mod tests {
                 parent_sequence: 0,
                 new_sequence: 1,
                 pair: vault_pair(era, rigb),
+                parent_state: Vec::new(),
             }),
         );
         let err = format!("{}", err.expect_err("mutation/op mismatch must be refused"));
@@ -7086,17 +7271,21 @@ mod tests {
     fn a_v2_owner_apply_advances_when_mutation_equals_the_signed_operation() {
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let (funded, vault, rk, tip) = funded_for_close(0xCF, era, rigb, 10_000, 5_000);
+        let out_amt = crate::dlv::route_commit::constant_product_output(100, 10_000, 5_000, 30)
+            .expect("curve");
+        assert_eq!(out_amt, 49, "pin: 100 in against 10 000/5 000 at 30 bps");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, vault_pair(era, rigb));
         let op = sign_op(Operation::DlvOwnerApplyV2 {
             vault_id: vault.to_vec(),
             settlement_receipt_id: [0x21; 32],
             pending_pointer_x: [0x22; 32],
             parent_sequence: 0,
             new_sequence: 1,
-            parent_binding: [0x23; 32],
+            parent_binding,
             input_policy_commit: era,
             output_policy_commit: rigb,
             input_amount: 100,
-            output_amount: 90,
+            output_amount: out_amt,
             fee_bps: 30,
             signature: vec![],
             mode: TransactionMode::Unilateral,
@@ -7117,16 +7306,320 @@ mod tests {
                     input_policy_commit: era,
                     input_amount: 100,
                     output_policy_commit: rigb,
-                    output_amount: 90,
+                    output_amount: out_amt,
                     parent_sequence: 0,
                     new_sequence: 1,
                     pair: vault_pair(era, rigb),
+                    parent_state,
                 }),
             )
             .expect("a matching v2 apply advances")
             .new_device_state;
         assert_eq!(out.vault_reserve(&vault, &era), 10_100);
-        assert_eq!(out.vault_reserve(&vault, &rigb), 4_910);
+        assert_eq!(out.vault_reserve(&vault, &rigb), 5_000 - out_amt);
+    }
+
+    /// The head's OWN parent state for `vault` under `pair`: its commitment
+    /// (what the owner signs as `parent_binding`) and its bytes (what the
+    /// mutation carries). Exactly what `dlv.reconcile` derives from the
+    /// verified composition.
+    fn parent_of(head: &DeviceState, vault: [u8; 32], pair: VaultStatePair) -> ([u8; 32], Vec<u8>) {
+        let parent = head
+            .parent_vault_state_for_tests(&vault, &pair)
+            .expect("parent state");
+        (
+            crate::ccb::vault_state_commitment(&parent).expect("c_n"),
+            parent.encode().expect("ccb"),
+        )
+    }
+
+    /// A signed owner apply and its mutation, as one pair: `input_amount` of
+    /// `input` for `output_amount` of `output`, consuming generation 0 → 1
+    /// under `pair`, naming `parent_binding` and carrying `parent_state`.
+    #[allow(clippy::too_many_arguments)]
+    fn owner_apply_at(
+        vault: [u8; 32],
+        pair: VaultStatePair,
+        input: [u8; 32],
+        output: [u8; 32],
+        input_amount: u64,
+        output_amount: u64,
+        parent_binding: [u8; 32],
+        parent_state: Vec<u8>,
+    ) -> (Operation, VaultReserveMutation) {
+        let op = sign_op(Operation::DlvOwnerApplyV2 {
+            vault_id: vault.to_vec(),
+            settlement_receipt_id: [0x21; 32],
+            pending_pointer_x: [0x22; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_binding,
+            input_policy_commit: input,
+            output_policy_commit: output,
+            input_amount,
+            output_amount,
+            fee_bps: pair.fee_bps,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        });
+        let mutation = VaultReserveMutation::ApplySettlement {
+            vault_id: vault,
+            input_policy_commit: input,
+            input_amount,
+            output_policy_commit: output,
+            output_amount,
+            parent_sequence: 0,
+            new_sequence: 1,
+            pair,
+            parent_state,
+        };
+        (op, mutation)
+    }
+
+    fn try_owner_apply(
+        head: &DeviceState,
+        rk: [u8; 32],
+        tip: [u8; 32],
+        op: Operation,
+        mutation: VaultReserveMutation,
+    ) -> Result<AdvanceOutcome, DsmError> {
+        head.advance(
+            rk,
+            head.devid,
+            op,
+            entropy(2),
+            None,
+            &[],
+            Some(tip),
+            None,
+            None,
+            Some(mutation),
+        )
+    }
+
+    /// THE CURVE IS THE OWNER'S, NOT THE RECEIPT'S. An owner apply whose output
+    /// is one unit above OR below what the vault's own curve yields from the
+    /// reserves it consumes is refused by the core arm, and the root does not
+    /// move; the exact output advances. The trader's receipt witnesses what the
+    /// trader committed, never what the owner's reserves pay.
+    #[test]
+    fn an_owner_apply_off_the_curve_by_one_unit_either_way_is_refused_and_moves_nothing() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xE1, era, rigb, 10_000, 5_000);
+        let pair = vault_pair(era, rigb);
+        let exact = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
+        let root_before = funded.root();
+        for (name, out) in [
+            ("one above the curve", exact + 1),
+            ("one below the curve", exact - 1),
+        ] {
+            let (op, mutation) = owner_apply_at(
+                vault,
+                pair,
+                era,
+                rigb,
+                1_000,
+                out,
+                parent_binding,
+                parent_state.clone(),
+            );
+            let err = format!(
+                "{}",
+                try_owner_apply(&funded, rk, tip, op, mutation).expect_err(name)
+            );
+            assert!(
+                err.contains("not what the vault's curve yields"),
+                "{name}: the refusal must be the curve, got: {err}"
+            );
+            assert_eq!(funded.root(), root_before, "{name}: nothing moved");
+        }
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            era,
+            rigb,
+            1_000,
+            exact,
+            parent_binding,
+            parent_state,
+        );
+        let after = try_owner_apply(&funded, rk, tip, op, mutation)
+            .expect("the exact curve output advances")
+            .new_device_state;
+        assert_eq!(after.vault_reserve(&vault, &era), 11_000);
+        assert_eq!(after.vault_reserve(&vault, &rigb), 5_000 - exact);
+    }
+
+    /// RESERVE ORIENTATION IS BY ASSET IDENTITY. The input reserve is the leaf
+    /// of the asset the trader paid, never "reserve a" by pair order: selling
+    /// the pair's second asset into the vault is priced against (b → a), and
+    /// the (a → b) price for the same amount is refused for that direction.
+    #[test]
+    fn an_owner_apply_is_priced_by_the_input_assets_own_reserve_never_by_pair_order() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xE2, era, rigb, 10_000, 5_000);
+        let pair = vault_pair(era, rigb);
+        assert_eq!(
+            (pair.a(), pair.b()),
+            (era, rigb),
+            "era is the pair's first asset"
+        );
+        let b_to_a = crate::dlv::route_commit::constant_product_output(1_000, 5_000, 10_000, 30)
+            .expect("curve");
+        let a_to_b = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        assert_ne!(
+            b_to_a, a_to_b,
+            "the two directions must price differently for the test to bite"
+        );
+        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
+        // The wrong direction's price, for a rigb → era trade: refused.
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            rigb,
+            era,
+            1_000,
+            a_to_b,
+            parent_binding,
+            parent_state.clone(),
+        );
+        let err = format!(
+            "{}",
+            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("pair-order price")
+        );
+        assert!(
+            err.contains("not what the vault's curve yields"),
+            "got: {err}"
+        );
+        // The input asset's own reserve prices it: advances.
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            rigb,
+            era,
+            1_000,
+            b_to_a,
+            parent_binding,
+            parent_state,
+        );
+        let after = try_owner_apply(&funded, rk, tip, op, mutation)
+            .expect("priced by the input asset's reserve")
+            .new_device_state;
+        assert_eq!(after.vault_reserve(&vault, &rigb), 6_000);
+        assert_eq!(after.vault_reserve(&vault, &era), 10_000 - b_to_a);
+    }
+
+    /// THE FEE IS THE COMMITTED ONE. A mutation carrying a fee the head's
+    /// vault-state leaf never committed — even with amounts priced correctly
+    /// under that fee — is refused before the curve runs: the leaf at the
+    /// parent generation commits pair, fee and reserves together.
+    #[test]
+    fn an_owner_apply_under_a_fee_the_vault_never_committed_is_refused() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xE3, era, rigb, 10_000, 5_000);
+        let wrong_fee = VaultStatePair::new(era, rigb, 31).expect("pair");
+        let priced_under_wrong_fee =
+            crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 31)
+                .expect("curve");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, wrong_fee);
+        let root_before = funded.root();
+        let (op, mutation) = owner_apply_at(
+            vault,
+            wrong_fee,
+            era,
+            rigb,
+            1_000,
+            priced_under_wrong_fee,
+            parent_binding,
+            parent_state,
+        );
+        let err = format!(
+            "{}",
+            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("fee")
+        );
+        assert!(
+            err.contains("committed state leaf"),
+            "the refusal must be the head's own commitment, got: {err}"
+        );
+        assert_eq!(funded.root(), root_before);
+    }
+
+    /// THE SIGNED PARENT BINDING NAMES THE STATE THESE LEAVES HOLD. Two ways to
+    /// lie, each refused: a binding that does not commit the supplied parent
+    /// bytes at all, and a binding that commits a well-formed parent state whose
+    /// reserves are not the leaves (one unit more in reserve a). Nothing moves.
+    #[test]
+    fn an_owner_apply_whose_parent_binding_names_another_state_is_refused() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xE4, era, rigb, 10_000, 5_000);
+        let pair = vault_pair(era, rigb);
+        let exact = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
+        let root_before = funded.root();
+
+        // (a) a binding that is not the commitment of the supplied bytes.
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            era,
+            rigb,
+            1_000,
+            exact,
+            [0x23; 32],
+            parent_state.clone(),
+        );
+        let err = format!(
+            "{}",
+            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("free binding")
+        );
+        assert!(
+            err.contains("does not name the parent vault state"),
+            "got: {err}"
+        );
+        assert_eq!(funded.root(), root_before);
+
+        // (b) a binding that commits a state the leaves do not hold.
+        let mut other = funded
+            .parent_vault_state_for_tests(&vault, &pair)
+            .expect("parent state");
+        other.reserve_a += 1;
+        let other_c_n = crate::ccb::vault_state_commitment(&other).expect("c_n");
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            era,
+            rigb,
+            1_000,
+            exact,
+            other_c_n,
+            other.encode().expect("ccb"),
+        );
+        let err = format!(
+            "{}",
+            try_owner_apply(&funded, rk, tip, op, mutation).expect_err("other state")
+        );
+        assert!(
+            err.contains("not the state these reserve leaves hold"),
+            "got: {err}"
+        );
+        assert_eq!(funded.root(), root_before);
+
+        // Positive control: the real binding and bytes advance.
+        let (op, mutation) = owner_apply_at(
+            vault,
+            pair,
+            era,
+            rigb,
+            1_000,
+            exact,
+            parent_binding,
+            parent_state,
+        );
+        try_owner_apply(&funded, rk, tip, op, mutation).expect("the real parent advances");
     }
 
     /// THE CLOSE: the complete remaining reserve set returns to spendable
@@ -7224,6 +7717,9 @@ mod tests {
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let (funded, vault, rk, tip) = funded_for_close(0xD2, era, rigb, 10_000, 5_000);
         let pair = vault_pair(era, rigb);
+        let out_amt = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, pair);
         let apply = sign_op(Operation::DlvOwnerApplyV2 {
             vault_id: vault.to_vec(),
             settlement_receipt_id: [0x77; 32],
@@ -7233,8 +7729,8 @@ mod tests {
             input_policy_commit: era,
             output_policy_commit: rigb,
             input_amount: 1_000,
-            output_amount: 970,
-            parent_binding: [0x23; 32],
+            output_amount: out_amt,
+            parent_binding,
             fee_bps: 30,
             signature: Vec::new(),
             mode: TransactionMode::Bilateral,
@@ -7255,10 +7751,11 @@ mod tests {
                     input_policy_commit: era,
                     input_amount: 1_000,
                     output_policy_commit: rigb,
-                    output_amount: 970,
+                    output_amount: out_amt,
                     parent_sequence: 0,
                     new_sequence: 1,
                     pair,
+                    parent_state,
                 }),
             )
             .expect("settle")
@@ -7285,19 +7782,27 @@ mod tests {
             .advance(
                 rk,
                 traded.devid,
-                dlv_close_op(vault, era, 11_000, rigb, 4_030, 1, 2),
+                dlv_close_op(vault, era, 11_000, rigb, 5_000 - out_amt, 1, 2),
                 entropy(4),
                 None,
                 &[],
                 Some(tip),
                 None,
                 None,
-                Some(withdraw_mutation(vault, era, 11_000, rigb, 4_030, 1, 2)),
+                Some(withdraw_mutation(
+                    vault,
+                    era,
+                    11_000,
+                    rigb,
+                    5_000 - out_amt,
+                    1,
+                    2,
+                )),
             )
             .expect("close at the post-trade generation")
             .new_device_state;
         assert_eq!(after.balance(&era), free_a + 11_000);
-        assert_eq!(after.balance(&rigb), free_b + 4_030);
+        assert_eq!(after.balance(&rigb), free_b + 5_000 - out_amt);
         assert_eq!(after.vault_reserve_entry(&vault, &era).unwrap().sequence, 2);
     }
 

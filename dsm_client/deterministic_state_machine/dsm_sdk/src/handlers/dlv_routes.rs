@@ -1648,26 +1648,34 @@ impl AppRouterImpl {
         // `parent_state_commitment`. Any other composed generation means this
         // device's view cannot name the consumed parent — refuse rather than
         // guess.
-        let parent_binding: [u8; 32] = {
-            let composed = match compose_own_vault(&vault_id).await {
-                Ok(c) => c,
-                Err(e) => {
-                    return err(format!(
-                        "dlv.reconcile: cannot compose the vault to name the consumed parent                          state: {e}"
-                    ))
-                }
-            };
+        // THE AUTHORITATIVE PARENT STATE, from the verified composition: the
+        // baseline is presentation-verified against the owner's signed anchor,
+        // and every fold on the way to the frontier re-simulated its own trade,
+        // so the state at `parent_sequence` is this device's PROVEN view of the
+        // state this settlement consumed. Pair, fee, reserves and identity all
+        // come from it — never from the SQLite record (a cache), never from the
+        // receipt (the trader's witness of what the trader committed).
+        let composed = match compose_own_vault(&vault_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: cannot compose the vault to name the consumed parent \
+                     state: {e}"
+                ))
+            }
+        };
+        let parent_state: dsm::ccb::VaultStateV2 =
             if composed.sequence == receipt.trade.parent_sequence {
-                composed.c_n
-            } else if let Some((_, c_n)) = composed
-                .folded_parent_bindings
+                composed.state.clone()
+            } else if let Some(folded) = composed
+                .folded_parents
                 .iter()
-                .find(|(seq, _)| *seq == receipt.trade.parent_sequence)
+                .find(|f| f.generation == receipt.trade.parent_sequence)
             {
                 // The fold consumed this exact historical parent on the way
                 // to the frontier — an LP reconciling N generations back
                 // names it from the chain the composition itself verified.
-                *c_n
+                folded.state.clone()
             } else {
                 return err(format!(
                     "dlv.reconcile: the composed chain (frontier {}) never consumed \
@@ -1675,8 +1683,83 @@ impl AppRouterImpl {
                      settlement consumed; refusing",
                     composed.sequence, receipt.trade.parent_sequence,
                 ));
+            };
+        let parent_binding = match dsm::ccb::vault_state_commitment(&parent_state) {
+            Ok(c) => c,
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: the parent state does not commit: {e}"
+                ))
             }
         };
+        let parent_state_bytes = match parent_state.encode() {
+            Ok(b) => b,
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: the parent state does not encode: {e}"
+                ))
+            }
+        };
+        let fee_bps = parent_state.fee_policy.fee_bps();
+        let pair = match dsm::types::device_state::VaultStatePair::new(
+            *parent_state.market_policy.token_a(),
+            *parent_state.market_policy.token_b(),
+            fee_bps,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return err(format!(
+                    "dlv.reconcile: the parent state's pair is not canonical: {e}"
+                ))
+            }
+        };
+
+        // THE PRE-SIGN MIRROR of the core check — an early refusal, not an
+        // authority: `advance` re-derives every one of these facts from the
+        // leaves it consumes and would refuse the same fold after signing.
+        // Refusing HERE keeps the owner from ever signing arithmetic it has not
+        // checked. Same inputs as core, in the same order: the parent state's
+        // committed pair and fee, the reserve of the asset the trader paid as
+        // the input reserve (by asset identity, never by pair order), the one
+        // canonical curve, exact equality.
+        let (reserve_in, reserve_out) = if receipt.trade.input_policy_commit == pair.a()
+            && receipt.trade.output_policy_commit == pair.b()
+        {
+            (parent_state.reserve_a, parent_state.reserve_b)
+        } else if receipt.trade.input_policy_commit == pair.b()
+            && receipt.trade.output_policy_commit == pair.a()
+        {
+            (parent_state.reserve_b, parent_state.reserve_a)
+        } else {
+            return err(
+                "dlv.reconcile: the receipt's legs are not this vault's pair — refusing before \
+                 signing"
+                    .into(),
+            );
+        };
+        match crate::sdk::routing_path_sdk::constant_product_output(
+            receipt.trade.input_amount,
+            reserve_in,
+            reserve_out,
+            fee_bps,
+        ) {
+            Some(curve) if curve == receipt.trade.output_amount => {}
+            Some(curve) => {
+                return err(format!(
+                    "dlv.reconcile: the receipt's output is not what this vault's curve yields \
+                     from the parent state's reserves (curve {curve}, receipt {}) — refusing \
+                     before signing",
+                    receipt.trade.output_amount,
+                ))
+            }
+            None => {
+                return err(
+                    "dlv.reconcile: the receipt's trade does not simulate against the parent \
+                     state's reserves — refusing before signing"
+                        .into(),
+                )
+            }
+        }
         let op = dsm::types::operations::Operation::DlvOwnerApplyV2 {
             vault_id: vault_id.to_vec(),
             settlement_receipt_id: receipt.receipt_id,
@@ -1688,20 +1771,8 @@ impl AppRouterImpl {
             output_policy_commit: receipt.trade.output_policy_commit,
             input_amount: receipt.trade.input_amount,
             output_amount: receipt.trade.output_amount,
-            fee_bps: {
-                // The vault's fee comes from the owner's OWN record — never
-                // the receipt.
-                match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
-                    Ok(Some(rec)) => rec.fee_bps,
-                    Ok(None) => {
-                        return err(
-                            "dlv.reconcile: no local record of this vault — this device did                              not create it"
-                                .into(),
-                        )
-                    }
-                    Err(e) => return err(format!("dlv.reconcile: record lookup failed: {e}")),
-                }
-            },
+            // The parent state's committed fee — the same one the curve above ran on.
+            fee_bps,
             signature: Vec::new(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
@@ -1713,39 +1784,6 @@ impl AppRouterImpl {
             Err(e) => {
                 return err(format!(
                     "dlv.reconcile: failed to sign DlvOwnerApplyV2: {e}"
-                ))
-            }
-        };
-        // The vault's pair + fee come from the owner's OWN record of the vault it
-        // created — never from the receipt — so `advance` can derive the
-        // vault-state leaf at `new_sequence` and refuse a settlement naming an
-        // asset outside the pair. No record ⇒ this device did not create the
-        // vault ⇒ it cannot fold anything for it.
-        let record =
-            match crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id) {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    return err(
-                        "dlv.reconcile: no AMM vault record for this vault on this device — \
-                     only the creating owner can fold settlements"
-                            .into(),
-                    )
-                }
-                Err(e) => {
-                    return err(format!(
-                        "dlv.reconcile: reading the vault record failed: {e}"
-                    ))
-                }
-            };
-        let pair = match dsm::types::device_state::VaultStatePair::new(
-            record.policy_commit_a,
-            record.policy_commit_b,
-            record.fee_bps,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: vault record pair is not canonical: {e}"
                 ))
             }
         };
@@ -1766,6 +1804,7 @@ impl AppRouterImpl {
             parent_sequence: receipt.trade.parent_sequence,
             new_sequence: receipt.trade.new_sequence,
             pair,
+            parent_state: parent_state_bytes,
         };
 
         let reference_state = match self.core_sdk.get_current_state() {
@@ -2267,10 +2306,10 @@ impl AppRouterImpl {
             composed.c_n
         } else if composed.sequence == parent_sequence.saturating_add(1) {
             *composed
-                .folded_parent_bindings
+                .folded_parents
                 .iter()
-                .find(|(gen, _)| *gen == parent_sequence)
-                .map(|(_, c_n)| c_n)
+                .find(|f| f.generation == parent_sequence)
+                .map(|f| &f.c_n)
                 .ok_or_else(|| {
                     format!(
                         "resumed close: the composed state is at generation {} but names no \
@@ -5508,6 +5547,11 @@ mod funded_creation_tests {
         pc_in: &[u8; 32],
         pc_out: &[u8; 32],
         x: [u8; 32],
+        // What the receipt claims the vault paid. The owner's fold now prices
+        // every receipt by the vault's own curve, so a fixture that means to
+        // FOLD passes the curve's value and one that means to be REFUSED
+        // passes anything else.
+        output_amount: u64,
     ) -> dsm::dlv::settlement_receipt_leaf::SignedTraderSettlementReceipt {
         use dsm::core::bilateral_transaction_manager::{
             compute_smt_key, initial_chain_tip_from_device_ids,
@@ -5534,7 +5578,7 @@ mod funded_creation_tests {
         };
 
         let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, &x);
-        let (input_amount, output_amount) = (1_000u64, 500u64);
+        let input_amount = 1_000u64;
         let settle = sign(Operation::DlvSettle {
             vault_id: vault_id.to_vec(),
             owner_public_key: Vec::new(),
@@ -5691,7 +5735,8 @@ mod funded_creation_tests {
         owner_transfers(&owner_dev, &trader_b, &pc_a, 5_000);
 
         let x_a = [0xA0u8; 32];
-        let receipt_a = build_foreign_receipt(&trader_a, &vault_id, &pc_a, &pc_b, x_a);
+        let receipt_a =
+            build_foreign_receipt(&trader_a, &vault_id, &pc_a, &pc_b, x_a, curve_at_birth());
         owner_dev.enter();
         crate::runtime::get_runtime()
             .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt_a))
@@ -5734,7 +5779,8 @@ mod funded_creation_tests {
         // (a cross-partition race the slot-claim could not prevent). Its receipt is
         // fully valid and fetch-verifies — but reconcile must REFUSE it.
         let x_b = [0xB0u8; 32];
-        let receipt_b = build_foreign_receipt(&trader_b, &vault_id, &pc_a, &pc_b, x_b);
+        let receipt_b =
+            build_foreign_receipt(&trader_b, &vault_id, &pc_a, &pc_b, x_b, curve_at_birth());
         owner_dev.enter();
         assert_ne!(
             receipt_b.receipt_id, receipt_a.receipt_id,
@@ -5836,6 +5882,135 @@ mod funded_creation_tests {
         assert!(
             !loser_again.success,
             "the loser's replay must remain refused after the winner is committed"
+        );
+    }
+
+    /// What the vault created by these tests pays for 1 000 of A at birth:
+    /// 10 000/5 000 reserves at 30 bps, by the ONE canonical implementation.
+    fn curve_at_birth() -> u64 {
+        crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve")
+    }
+
+    /// THE PRE-SIGN MIRROR. A receipt priced one unit off the vault's own
+    /// curve is refused by `dlv.reconcile` BEFORE the owner signs anything:
+    /// the refusal is the route's own, it names the curve, and nothing durable
+    /// moves — root, both reserve leaves and the consume-once row are
+    /// untouched. A receipt priced exactly by the curve then folds. (The core
+    /// arm refuses the same fold after signing; this proves the owner never
+    /// signs it in the first place.)
+    #[test]
+    #[serial_test::serial]
+    fn a_receipt_priced_off_the_vaults_curve_is_refused_before_the_owner_signs() {
+        use prost::Message as _;
+
+        install_identity();
+        let owner_dev = participant("owner", 0x43);
+        let r = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(r, 20_000, 5_000);
+        // Fund an owner vault at generation 0.
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        let trader = participant("trader-off-curve", 0xC3);
+        owner_transfers(&owner_dev, &trader, &pc_a, 5_000);
+        let curve = curve_at_birth();
+        let root_before = r.core_sdk.device_head().expect("head").root();
+
+        // One unit above the curve: refused before signing, nothing moves.
+        let x_bad = [0xD0u8; 32];
+        let bad = build_foreign_receipt(&trader, &vault_id, &pc_a, &pc_b, x_bad, curve + 1);
+        owner_dev.enter();
+        crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&bad))
+            .expect("publish the off-curve receipt");
+        let res = reconcile(r, &vault_id, &x_bad);
+        assert!(!res.success, "an off-curve receipt must not fold");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(
+            msg.contains("refusing before signing") && msg.contains("curve"),
+            "the refusal must be the route's pre-sign curve check, got: {msg}"
+        );
+        let after = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            after.root(),
+            root_before,
+            "the refused fold left the root unchanged"
+        );
+        assert_eq!(
+            (
+                after.vault_reserve(&vault_id, &pc_a),
+                after.vault_reserve(&vault_id, &pc_b)
+            ),
+            (10_000, 5_000),
+            "the refused fold moved no reserve"
+        );
+        assert!(
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load claim")
+                .is_none(),
+            "the refused fold consumed nothing"
+        );
+
+        // Exactly the curve: folds, and the generation is consumed by it.
+        let x_good = [0xD1u8; 32];
+        let good = build_foreign_receipt(&trader, &vault_id, &pc_a, &pc_b, x_good, curve);
+        owner_dev.enter();
+        crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&good))
+            .expect("publish the curve-priced receipt");
+        let res = reconcile(r, &vault_id, &x_good);
+        assert!(
+            res.success,
+            "the curve-priced receipt folds: {:?}",
+            res.error_message
+        );
+        let after = r.core_sdk.device_head().expect("head");
+        assert_eq!(
+            (
+                after.vault_reserve(&vault_id, &pc_a),
+                after.vault_reserve(&vault_id, &pc_b)
+            ),
+            (11_000, 5_000 - curve)
+        );
+        assert_eq!(
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load claim")
+                .expect("generation 0 is consumed")
+                .source_commitment,
+            good.receipt_id
         );
     }
 

@@ -62,6 +62,38 @@ fn sign_with(kp: &SignatureKeyPair, op: &Operation) -> Vec<u8> {
     dsm::crypto::sphincs::sphincs_sign(&kp.secret_key, &payload).expect("sign")
 }
 
+/// What the vault's curve pays for 100 ERA into 100/100 reserves at 30 bps —
+/// the ONE canonical implementation; `advance` refuses any other output.
+fn curve_out() -> u64 {
+    dsm::dlv::route_commit::constant_product_output(100, 100, 100, 30).expect("curve")
+}
+
+/// The parent state the owner apply consumes, as the actor's head holds it at
+/// generation 0: signed commitment + bytes. `actor_head` is deterministic.
+fn parent() -> ([u8; 32], Vec<u8>) {
+    static PARENT: std::sync::OnceLock<([u8; 32], Vec<u8>)> = std::sync::OnceLock::new();
+    PARENT
+        .get_or_init(|| {
+            let state = actor_head()
+                .parent_vault_state_for_tests(&VAULT, &vault_pair())
+                .expect("parent state");
+            (
+                dsm::ccb::vault_state_commitment(&state).expect("c_n"),
+                state.encode().expect("ccb"),
+            )
+        })
+        .clone()
+}
+
+fn vault_pair() -> dsm::types::device_state::VaultStatePair {
+    let (lo, hi) = if era() < second_asset() {
+        (era(), second_asset())
+    } else {
+        (second_asset(), era())
+    };
+    dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
+}
+
 fn owner_apply_op() -> Operation {
     Operation::DlvOwnerApplyV2 {
         vault_id: VAULT.to_vec(),
@@ -72,8 +104,8 @@ fn owner_apply_op() -> Operation {
         input_policy_commit: era(),
         output_policy_commit: second_asset(),
         input_amount: 100,
-        output_amount: 60,
-        parent_binding: [0x23; 32],
+        output_amount: curve_out(),
+        parent_binding: parent().0,
         fee_bps: 30,
         signature: Vec::new(),
         mode: TransactionMode::Unilateral,
@@ -170,17 +202,11 @@ fn advance_with(
             input_policy_commit: era(),
             input_amount: 100,
             output_policy_commit: second_asset(),
-            output_amount: 60,
+            output_amount: curve_out(),
             parent_sequence: 0,
             new_sequence: 1,
-            pair: {
-                let (lo, hi) = if era() < second_asset() {
-                    (era(), second_asset())
-                } else {
-                    (second_asset(), era())
-                };
-                dsm::types::device_state::VaultStatePair::new(lo, hi, 30).expect("canonical pair")
-            },
+            pair: vault_pair(),
+            parent_state: parent().1,
         }),
     )
     .map(|o| o.new_device_state)
@@ -251,7 +277,7 @@ fn mutating_a_signed_field_invalidates_the_signature() {
     };
     let mut tampered = owner_apply_op();
     if let Operation::DlvOwnerApplyV2 { output_amount, .. } = &mut tampered {
-        *output_amount = 61; // was 60
+        *output_amount = curve_out() + 1;
     }
     let tampered = tampered.with_signature(signature.clone());
     let err = advance_with(&head, tampered).expect_err("field mutation must reject");
