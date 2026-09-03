@@ -1352,6 +1352,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             policy_commit_a     BLOB NOT NULL,
             policy_commit_b     BLOB NOT NULL,
             fee_bps             INTEGER NOT NULL,
+            -- DEPRECATION RESIDUE, scheduled for removal. Written with the
+            -- canonical ANCHOR_ENFORCEMENT_REQUIRED and read by no decision:
+            -- anchor binding is unconditional in the code that enforces it, so
+            -- this column could only ever have described a weaker posture than
+            -- the one in force. Do not add a reader.
             anchor_enforcement  INTEGER NOT NULL,
             policy_digest       BLOB NOT NULL,
             -- The canonical storage set this vault was born under: a LOCAL COPY of

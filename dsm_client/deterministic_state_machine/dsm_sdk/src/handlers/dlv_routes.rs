@@ -580,6 +580,36 @@ impl AppRouterImpl {
         // Both sides go through the one pair parser, so the ordering here and
         // the ordering a trader derives at quote time cannot disagree.
         if let Some((token_a, token_b)) = amm_pair.as_ref() {
+            // ANCHOR BINDING IS NOT A SETTING. `enforce_parent_binding` — the
+            // code that actually decides whether a hop's vault-state binding is
+            // accepted — has never consulted `anchor_enforcement`; it is
+            // unconditional. The selector was therefore a knob whose gate was
+            // already dead, and the one thing a dead knob can still do is be
+            // read back later as authority ("this vault was created Optional").
+            // It is retired here: the only posture a new AMM vault may be
+            // created under is the canonical REQUIRED one, so nothing
+            // downstream can ever be handed a weaker persisted value.
+            //
+            // SCOPED TO THE AMM BRANCH ON PURPOSE. `anchor_enforcement` reaches
+            // durable state only through `AmmVaultRecord`, which only this
+            // branch writes. A non-AMM or posted DLV never persists the field,
+            // and the shipping frontend's own non-AMM spec builders leave it
+            // unset — refusing those would remove a working capability to fence
+            // a column they do not touch.
+            //
+            // Unspecified (0) is refused with the rest: defaulting 0 into
+            // behaviour is exactly the repair that turns a missing field into
+            // permissive enforcement, and this is the last place a new 0 can
+            // enter the vault record.
+            if spec.anchor_enforcement != generated::AnchorEnforcement::Required as i32 {
+                return err(format!(
+                    "dlv.create: anchor binding is unconditional; an AMM vault's \
+                     spec.anchor_enforcement must be ANCHOR_ENFORCEMENT_REQUIRED ({}), got {} — \
+                     the selector is retired, not configurable",
+                    generated::AnchorEnforcement::Required as i32,
+                    spec.anchor_enforcement,
+                ));
+            }
             let pair = match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
                 Ok(p) => p,
                 Err(e) => return err(format!("dlv.create: vault pair is not canonical: {e}")),
@@ -806,21 +836,41 @@ impl AppRouterImpl {
             (Some((token_a, token_b)), Some(birth_set_id)) => {
                 match dsm::dlv::pair_identity::CanonicalPair::parse(token_a, token_b) {
                     Ok(pair) => {
-                        let owner = self.core_sdk.device_head();
+                        // NO HEAD, NO RECORD. This used to be
+                        // `.unwrap_or_default()` on both identity fields, which
+                        // WOULD have persisted a vault owned by 32 zero bytes:
+                        // an owner no presentation can prove, whose reserve
+                        // leaves live under a key space nothing derives, and
+                        // which every later gate — rehydration's owner check,
+                        // the composed-owner binding below — refuses. Today
+                        // `get_current_state()` errors earlier on a head-less
+                        // device, so this branch is defensive; it exists so the
+                        // fabrication cannot return if that ordering changes.
+                        let Some(owner) = self.core_sdk.device_head() else {
+                            return err(
+                                "dlv.create: no device head, so this vault's record would name a \
+                                 32-zero owner — an identity nothing can authenticate and no \
+                                 later gate can repair; refusing to create rather than persist it"
+                                    .into(),
+                            );
+                        };
                         let mut pd = [0u8; 32];
                         pd.copy_from_slice(&spec.policy_digest);
                         Some(
                             crate::storage::client_db::amm_vault_records::AmmVaultRecord {
                                 vault_id,
-                                owner_genesis: owner
-                                    .as_ref()
-                                    .map(|h| h.genesis())
-                                    .unwrap_or_default(),
-                                owner_devid: owner.as_ref().map(|h| h.devid()).unwrap_or_default(),
+                                owner_genesis: owner.genesis(),
+                                owner_devid: owner.devid(),
                                 policy_commit_a: pair.a(),
                                 policy_commit_b: pair.b(),
                                 fee_bps: amm_fee_bps,
-                                anchor_enforcement: spec.anchor_enforcement,
+                                // DEPRECATION RESIDUE. The column still
+                                // exists, so it is written with the one
+                                // posture the route accepts — never with a
+                                // caller-chosen value, and never with 0. No
+                                // decision reads it back; see the field's doc
+                                // on `AmmVaultRecord`.
+                                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
                                 policy_digest: pd,
                                 storage_set_id: birth_set_id,
                                 baseline_state_ccb: Vec::new(),
@@ -1050,12 +1100,12 @@ impl AppRouterImpl {
             }
         }
 
-        // Tier 2 Foundation: stamp the vault's `anchor_enforcement`
-        // policy from the spec.  This is the LOCAL authoritative copy
-        // consulted by the chunks #7 gate at routed-unlock time.  The
-        // proto value is passed through verbatim — the gate decodes it
-        // via `AnchorEnforcement::try_from` and falls back to
-        // `Unspecified` for unknown variants.
+        // `LimboVault.anchor_enforcement` is SEMANTICALLY DEAD and is stamped
+        // with the canonical REQUIRED posture only so the in-memory struct
+        // does not carry a 0 that a future reader could mistake for a choice.
+        // It is not persisted in `LimboVaultProto` (the decoder hardcodes 0),
+        // no gate consults it, and `enforce_parent_binding` is unconditional.
+        // Scheduled for removal with the `anchor_enforcement` column.
         //
         // Phase 13 follow-up: also stamp the vault's `policy_digest` from
         // the spec.  This is the canonical 32-byte CPTA anchor that the
@@ -1067,7 +1117,7 @@ impl AppRouterImpl {
         match dlv_manager.get_vault(&vault_id).await {
             Ok(vault_lock) => {
                 let mut vault = vault_lock.lock().await;
-                vault.anchor_enforcement = spec.anchor_enforcement;
+                vault.anchor_enforcement = generated::AnchorEnforcement::Required as i32;
                 // spec.policy_digest length is already validated as 32
                 // bytes at line 227-229; copy into a fixed array.  Skip
                 // stamping if the spec carried no digest (defensive — the
@@ -2587,14 +2637,11 @@ impl AppRouterImpl {
         // if the on-chain advance fails (in which case reserves were
         // never advanced — correct fail-closed).
         let dlv_manager = self.bitcoin_tap.dlv_manager();
-        // Tier 2 Foundation: track whether the anchor-enforcement gate
-        // bypassed verification because the vault's policy was Optional
-        // (with no fields supplied) or Unspecified.  Surfaced via log so
-        // callers can audit identity-binding posture.  The literal
-        // sentinel string `anchor_enforcement_bypassed_optional_vault`
-        // appears verbatim in this path so the regression guard finds it.
-        // Unused while the unlock fails closed; the posture logging it feeds
-        // returns with the settlement work.
+        // There is no anchor-enforcement bypass left to track. The per-vault
+        // selector is retired: binding is unconditional, so no vault can be in
+        // an Optional or Unspecified posture and there is no bypass to audit.
+        // (The sentinel string this comment used to pin for a regression guard
+        // had no guard left anywhere in the tree to find it.)
         #[allow(unused_mut, unused_variables)]
         // Populated by the AMM re-simulation arm below, from values live there.
         let mut settle_terms: Option<SettleTerms> = None;
@@ -2617,17 +2664,13 @@ impl AppRouterImpl {
             };
             let vault = vault_lock.lock().await;
 
-            // Tier 2 Foundation: anchor enforcement gate.  Verify the
-            // RouteCommit hop's vault state binding fields match the
-            // vault's COMPOSED current state (generation + reserves digest)
-            // per the vault's `anchor_enforcement` policy.
-            //
-            //   Required    => fields MUST be present and match → reject otherwise
-            //   Optional    => if fields present, must match; if absent,
-            //                  fall through with a flag so callers know
-            //                  identity-binding wasn't enforced
-            //   Unspecified => grandfathered; same behaviour as Optional
-            //                  with no enforcement
+            // ANCHOR BINDING GATE — UNCONDITIONAL. The RouteCommit hop's
+            // vault-state binding fields MUST be present and MUST match the
+            // vault's COMPOSED current state (generation + reserves digest);
+            // anything else is rejected. There is no per-vault posture. The
+            // Optional and Unspecified arms this comment used to describe were
+            // never consulted by `enforce_parent_binding`, which has always
+            // been unconditional, and the selector that named them is retired.
             //
             // RESERVES ARE COMPOSED FROM THE OWNER'S PROOF, never taken from
             // this device and never from a caller-supplied number.
@@ -3278,35 +3321,111 @@ fn build_vault_publication_artifacts(
     })
 }
 
-/// The object keys of a vault's CURRENT published baseline (birth at
-/// creation, terminal after close), derived from the record's own stored
-/// bytes. `None` when the record is absent or carries no baseline — which
-/// reads as "not published", failing closed.
-pub(crate) fn baseline_object_keys(vault_id: &[u8; 32]) -> Option<[String; 2]> {
+/// A vault's CURRENT published baseline (birth at creation, terminal after
+/// close) — the two stored blobs, checked against each other and against the
+/// vault they claim to describe.
+#[derive(Debug)]
+pub(crate) struct VerifiedBaseline {
+    /// `[CCB(V_n) object key, AnchorPresentationV3 object key]`.
+    pub keys: [String; 2],
+    /// `inner(DSM/anchor-presentation-v1, presentation bytes)` — the discovery
+    /// handle a routing advertisement carries. Produced HERE, so no caller
+    /// re-hashes the blob on its own and skips the checks below.
+    pub presentation_inner: [u8; 32],
+}
+
+/// THE SINGLE VERIFIED ACCESSOR for a vault's stored baseline blobs.
+///
+/// These two blobs used to be hashed into object keys after an `is_empty()`
+/// check and nothing else — and those keys are what decides FUNDED versus
+/// MARKET-ACTIVE, the boolean `route.publishRoutingAdvertisement` enforces. So
+/// a row carrying two well-formed blobs that belong to DIFFERENT vaults, or a
+/// presentation anchoring a different state than the CCB stored beside it,
+/// activated a vault whose birth proofs describe something else.
+///
+/// Two byte-equalities close that, and both are local and cheap — this runs
+/// inside the `listOwnedAmmVaults` loop, so it performs no P0–P6 walk, no
+/// `await` and no network read:
+///
+/// - the presentation's `state_commitment` must equal
+///   `inner(DSM/vault-state, baseline_state_ccb)`, which pairs the two blobs
+///   TO EACH OTHER (that inner digest is `c_n` by construction — the birth
+///   site stores exactly this value into the presentation);
+/// - the decoded state's `vault_id` must be THIS vault, which binds the
+///   verified pair to the vault being asked about.
+///
+/// WHAT THIS IS NOT — AND THE LIMIT IS THE POINT: it is TWO BYTE-EQUALITIES
+/// and it AUTHENTICATES NOTHING. No signature is checked here, so a
+/// presentation edited anywhere other than `state_commitment` still pairs and
+/// still passes. The presentation's P0–P6 authority chain is verified in
+/// `vault_state_composition`, the same way a stranger verifies it. This is the
+/// local coherence gate that stops a stale, cross-pasted or foreign row from
+/// becoming an activation, and it claims nothing beyond that.
+pub(crate) fn verified_baseline(vault_id: &[u8; 32]) -> Result<VerifiedBaseline, String> {
+    use prost::Message as _;
     let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
-        .ok()
-        .flatten()?;
+        .map_err(|e| format!("vault record read failed: {e}"))?
+        .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
     if record.baseline_state_ccb.is_empty() || record.baseline_presentation.is_empty() {
-        return None;
+        return Err(
+            "the vault record carries no birth state/presentation — reprovision (no legacy \
+             upgrade path exists)"
+                .to_string(),
+        );
     }
-    Some([
-        immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
-            &record.baseline_state_ccb,
-        ),
-        immutable_object_key(
+    let presentation =
+        crate::generated::AnchorPresentationV3::decode(record.baseline_presentation.as_slice())
+            .map_err(|e| format!("the stored birth presentation does not decode: {e}"))?;
+    let c_n = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
+        &record.baseline_state_ccb,
+    );
+    if presentation.state_commitment != c_n {
+        return Err(
+            "the stored birth presentation anchors a different state than the CCB stored beside \
+             it — the record's two baseline blobs do not belong together"
+                .to_string(),
+        );
+    }
+    let state = dsm::ccb::decode_vault_state(&record.baseline_state_ccb)
+        .map_err(|e| format!("the stored birth state does not decode: {e}"))?;
+    if state.vault_id != *vault_id {
+        return Err(format!(
+            "the stored birth state names vault {} — not this vault",
+            crate::util::text_id::encode_base32_crockford(&state.vault_id)
+        ));
+    }
+    Ok(VerifiedBaseline {
+        keys: [
+            immutable_object_key(
+                dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
+                &record.baseline_state_ccb,
+            ),
+            immutable_object_key(
+                dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+                &record.baseline_presentation,
+            ),
+        ],
+        presentation_inner: dsm::storage_object::immutable_inner(
             dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
             &record.baseline_presentation,
         ),
-    ])
+    })
 }
 
-/// `true` iff both objects of the vault's current baseline have reached
-/// quorum on the vault's storage set — the activation boundary: FUNDED
-/// locally is not MARKET-ACTIVE until this holds.
+/// `true` iff the vault's baseline VERIFIES and both of its objects have
+/// reached quorum on the vault's storage set — the activation boundary:
+/// FUNDED locally is not MARKET-ACTIVE until this holds.
 pub(crate) fn baseline_is_published(vault_id: &[u8; 32]) -> bool {
-    let Some(keys) = baseline_object_keys(vault_id) else {
-        return false;
+    let keys = match verified_baseline(vault_id) {
+        Ok(v) => v.keys,
+        Err(e) => {
+            log::warn!(
+                "[dlv] vault {} has no verified baseline; reporting it unpublished: {e}",
+                crate::util::text_id::encode_base32_crockford(vault_id)
+            );
+            return false;
+        }
     };
     keys.iter().all(|k| {
         crate::storage::client_db::frozen_publication_artifact::is_artifact_published(k)
@@ -3323,16 +3442,14 @@ async fn compose_own_vault(
     vault_id: &[u8; 32],
 ) -> Result<crate::sdk::vault_state_composition::ComposedVaultState, String> {
     use prost::Message as _;
+    // The blobs go through the ONE verified accessor first: the same pairing
+    // and the same vault-id binding the activation boolean gets, applied on the
+    // owner path too, ahead of composition's own P0-P6 authority verification.
+    // It also subsumes the emptiness check this function used to make.
+    verified_baseline(vault_id)?;
     let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
         .map_err(|e| format!("vault record read failed: {e}"))?
         .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
-    if record.baseline_state_ccb.is_empty() || record.baseline_presentation.is_empty() {
-        return Err(
-            "the vault record carries no birth state/presentation — reprovision (no legacy \
-             upgrade path exists)"
-                .to_string(),
-        );
-    }
     let presentation =
         crate::generated::AnchorPresentationV3::decode(record.baseline_presentation.as_slice())
             .map_err(|e| format!("stored birth presentation does not decode: {e}"))?;
@@ -3342,7 +3459,7 @@ async fn compose_own_vault(
         record.fee_bps,
     )
     .map_err(|e| format!("vault record pair is not canonical: {e}"))?;
-    crate::sdk::vault_state_composition::compose_vault_state(
+    let composed = crate::sdk::vault_state_composition::compose_vault_state(
         vault_id,
         &presentation,
         &record.baseline_state_ccb,
@@ -3351,7 +3468,43 @@ async fn compose_own_vault(
         pair.fee_bps(),
     )
     .await
-    .map_err(|e| format!("composition failed: {e}"))
+    .map_err(|e| format!("composition failed: {e}"))?;
+
+    // THE OWNER THE PRESENTATION PROVES vs THE OWNER THE ROW CLAIMS.
+    //
+    // `composed.owner_genesis` / `owner_devid` are not another local copy:
+    // they come out of the AUTHENTICATED presentation's P0–P6 chain and the
+    // signed state it anchors. The record's copies are a row. Composition
+    // returned them and nothing compared them, so a row naming a different
+    // owner composed happily and every caller spent the result as if the two
+    // identities agreed.
+    //
+    // DELIBERATELY NOT COMPARED AGAINST THE CURRENT DEVICE HEAD. The head is a
+    // third statement of the same fact, but it MOVES: a legitimate device
+    // rotation or re-root would make a vault this device really owns refuse to
+    // compose — and every production caller already checks the record's owner
+    // against the head through `rehydrate_amm_vault`. What was missing is
+    // exactly this: verified authority versus the local row.
+    if composed.owner_genesis != record.owner_genesis || composed.owner_devid != record.owner_devid
+    {
+        let which = match (
+            composed.owner_genesis != record.owner_genesis,
+            composed.owner_devid != record.owner_devid,
+        ) {
+            (true, true) => "genesis and devid",
+            (true, false) => "genesis",
+            _ => "devid",
+        };
+        return Err(format!(
+            "the vault's authenticated birth names owner {}/{} but its record claims {}/{} — \
+             the {which} disagree; refusing to compose",
+            crate::util::text_id::encode_base32_crockford(&composed.owner_genesis),
+            crate::util::text_id::encode_base32_crockford(&composed.owner_devid),
+            crate::util::text_id::encode_base32_crockford(&record.owner_genesis),
+            crate::util::text_id::encode_base32_crockford(&record.owner_devid),
+        ));
+    }
+    Ok(composed)
 }
 
 /// Everything `Operation::DlvSettle` must carry, captured from the hop that was
@@ -3700,7 +3853,7 @@ mod funded_creation_tests {
         assert_eq!(
             rec.anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
-            "enforcement must persist, or a restart silently downgrades the gate"
+            "the residue column carries only the canonical value; nothing reads it for a decision"
         );
         assert_eq!(rec.policy_digest.to_vec(), policy_digest);
 
@@ -3751,7 +3904,7 @@ mod funded_creation_tests {
         assert_eq!(
             v.anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
-            "a restart must not relax enforcement"
+            "the rehydrated posture is DERIVED (canonical REQUIRED), never read from the row"
         );
         assert_eq!(
             (v.reserve_a, v.reserve_b),
@@ -3904,6 +4057,283 @@ mod funded_creation_tests {
         );
     }
 
+    /// THE RETIRED SELECTOR. `anchor_enforcement` is no longer a posture a
+    /// creator may choose for an AMM vault: anchor binding is unconditional in
+    /// the code that enforces it, so the only thing a persisted non-`Required`
+    /// value could ever do is be read back as authority for something weaker.
+    ///
+    /// The refusals run FIRST and must move nothing; the POSITIVE CONTROL
+    /// afterwards proves the same request succeeds under the canonical
+    /// posture, so the refusals are attributable to the field and not to a
+    /// broken fixture.
+    #[test]
+    #[serial]
+    fn amm_dlv_create_refuses_every_posture_but_the_canonical_required_one() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let build = |anchor_enforcement: i32| generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: vec![0x5A; 32],
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let call = |req: generated::DlvInstantiateV1| {
+            crate::runtime::get_runtime().block_on(async {
+                r.invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(req.encode_to_vec()),
+                })
+                .await
+            })
+        };
+
+        for posture in [
+            generated::AnchorEnforcement::Unspecified as i32,
+            generated::AnchorEnforcement::Optional as i32,
+            99,
+        ] {
+            let res = call(build(posture));
+            assert!(
+                !res.success,
+                "anchor_enforcement={posture} must be refused, not accepted"
+            );
+            let msg = res.error_message.unwrap_or_default();
+            assert!(
+                msg.contains("the selector is retired"),
+                "the refusal must say the selector is retired: {msg}"
+            );
+        }
+        assert!(
+            crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+                .expect("records")
+                .is_empty(),
+            "a refused create must persist no vault record"
+        );
+
+        // POSITIVE CONTROL.
+        let res = call(build(generated::AnchorEnforcement::Required as i32));
+        assert!(
+            res.success,
+            "the canonical posture must still create: {:?}",
+            res.error_message
+        );
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("records")
+            .pop()
+            .expect("one vault");
+        assert_eq!(
+            rec.anchor_enforcement,
+            generated::AnchorEnforcement::Required as i32,
+            "the residue column carries only the canonical value — never a 0",
+        );
+        assert_ne!(
+            rec.owner_genesis, [0u8; 32],
+            "and the owner is a real identity, never the 32-zero default"
+        );
+    }
+
+    /// Read one vault record, or fail the test.
+    fn record_of(
+        vault_id: &[u8; 32],
+    ) -> crate::storage::client_db::amm_vault_records::AmmVaultRecord {
+        crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .expect("vault record read")
+            .expect("the vault has a record")
+    }
+
+    /// Write a whole record back — the TEST-ONLY writer, which is exactly the
+    /// tampering these tests need and production no longer has.
+    fn write_record(rec: &crate::storage::client_db::amm_vault_records::AmmVaultRecord) {
+        crate::storage::client_db::amm_vault_records::put_amm_vault_record(rec)
+            .expect("write the vault record");
+    }
+
+    /// THE BASELINE BINDING. The record's two birth blobs decide FUNDED versus
+    /// MARKET-ACTIVE, and they used to be hashed into object keys after an
+    /// `is_empty()` check and nothing else. Four rows that used to activate a
+    /// vault must not: either blob edited, the two cross-pasted from different
+    /// vaults, and a valid pair that describes SOMEONE ELSE'S vault.
+    ///
+    /// Every case is bracketed by a POSITIVE CONTROL — the untouched row
+    /// verifies and publishes — so a refusal is attributable to the mutation
+    /// and not to a broken fixture.
+    #[test]
+    #[serial]
+    fn a_tampered_or_cross_pasted_baseline_is_not_market_active() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let v1 = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let v2 = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 9_000, 4_000,
+        );
+        assert_ne!(v1, v2, "the fixture must produce two DISTINCT vaults");
+
+        let rec1 = record_of(&v1);
+        let rec2 = record_of(&v2);
+
+        // POSITIVE CONTROL.
+        assert!(
+            verified_baseline(&v1).is_ok(),
+            "a vault born through the real route must verify its own baseline"
+        );
+        assert!(
+            baseline_is_published(&v1),
+            "and it must be market-active before anything is mutated"
+        );
+
+        // (1) THE STATE BLOB EDITED. The presentation anchors `c_n` over the
+        // exact bytes, so any edit breaks the pairing.
+        let mut ccb_edited = rec1.clone();
+        let last = ccb_edited.baseline_state_ccb.len() - 1;
+        ccb_edited.baseline_state_ccb[last] ^= 0x01;
+        write_record(&ccb_edited);
+        let e = verified_baseline(&v1).expect_err("an edited state blob must not verify");
+        assert!(e.contains("do not belong together"), "{e}");
+        assert!(
+            !baseline_is_published(&v1),
+            "and the vault must fall back out of MARKET-ACTIVE"
+        );
+        write_record(&rec1);
+        assert!(verified_baseline(&v1).is_ok(), "restored");
+
+        // (2) THE PRESENTATION'S ANCHORED COMMITMENT EDITED. Rebuilt through
+        // the proto so the edit lands on exactly the field the pairing check
+        // reads, rather than on whichever field a blind byte happens to hit.
+        let mut pres_edited = rec1.clone();
+        {
+            let mut p = crate::generated::AnchorPresentationV3::decode(
+                rec1.baseline_presentation.as_slice(),
+            )
+            .expect("the stored presentation decodes");
+            p.state_commitment[0] ^= 0x01;
+            pres_edited.baseline_presentation = p.encode_to_vec();
+        }
+        write_record(&pres_edited);
+        let e = verified_baseline(&v1).expect_err("an edited presentation must not verify");
+        assert!(e.contains("do not belong together"), "{e}");
+        assert!(!baseline_is_published(&v1));
+        write_record(&rec1);
+        assert!(verified_baseline(&v1).is_ok(), "restored");
+
+        // (2b) AND ANY OTHER BYTE OF THE PRESENTATION. `verified_baseline`
+        // deliberately does NOT authenticate the presentation — the P0–P6
+        // walk in `vault_state_composition` does, and duplicating it here
+        // would put a signature verification inside the vault-list loop. What
+        // must still hold is that a tampered blob cannot be MARKET-ACTIVE: the
+        // object key is taken over the bytes, so an edited presentation names
+        // an object no member ever acked.
+        let mut byte_edited = rec1.clone();
+        let last = byte_edited.baseline_presentation.len() - 1;
+        byte_edited.baseline_presentation[last] ^= 0x01;
+        write_record(&byte_edited);
+        assert!(
+            !baseline_is_published(&v1),
+            "an edited presentation blob names an object the fleet never acked"
+        );
+        write_record(&rec1);
+        assert!(verified_baseline(&v1).is_ok(), "restored");
+
+        // (3) TWO VALID BLOBS, CROSS-PASTED. Both come from real births; they
+        // simply do not describe each other.
+        let mut cross = rec1.clone();
+        cross.baseline_presentation = rec2.baseline_presentation.clone();
+        write_record(&cross);
+        let e = verified_baseline(&v1).expect_err("cross-pasted blobs must not verify");
+        assert!(e.contains("do not belong together"), "{e}");
+        assert!(!baseline_is_published(&v1));
+
+        // (4) A VALID, SELF-CONSISTENT PAIR THAT NAMES ANOTHER VAULT. This is
+        // the case only the vault-id binding catches: the blobs agree with
+        // each other, so (1)–(3) all pass.
+        let mut foreign = rec1.clone();
+        foreign.baseline_state_ccb = rec2.baseline_state_ccb.clone();
+        foreign.baseline_presentation = rec2.baseline_presentation.clone();
+        write_record(&foreign);
+        let e = verified_baseline(&v1).expect_err("another vault's baseline must not verify here");
+        assert!(e.contains("not this vault"), "{e}");
+        assert!(!baseline_is_published(&v1));
+
+        write_record(&rec1);
+        assert!(
+            verified_baseline(&v1).is_ok() && baseline_is_published(&v1),
+            "the vault comes back exactly as it was once the row is restored"
+        );
+    }
+
+    /// THE OWNER BINDING. `compose_own_vault` returns an owner proven by the
+    /// presentation's P0–P6 chain and never compared it to anything, so a row
+    /// naming a different owner composed happily and every caller spent the
+    /// result as if the two identities agreed.
+    ///
+    /// The comparison is against the RECORD, not the device head: the head
+    /// moves under a legitimate rotation, and the record-vs-head check already
+    /// lives in `rehydrate_amm_vault`.
+    #[test]
+    #[serial]
+    fn composing_an_owner_vault_binds_the_proven_owner_to_the_row() {
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 50_000, 20_000);
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let rt = crate::runtime::get_runtime();
+
+        // POSITIVE CONTROL: the owner composes its own vault.
+        rt.block_on(compose_own_vault(&vault_id))
+            .expect("the owner must be able to compose its own vault");
+
+        let rec = record_of(&vault_id);
+
+        // THE DEVID the row claims is not the one the birth proves.
+        let mut forged_devid = rec.clone();
+        forged_devid.owner_devid = [0xEE; 32];
+        write_record(&forged_devid);
+        let e = rt
+            .block_on(compose_own_vault(&vault_id))
+            .expect_err("a row naming another devid must not compose");
+        assert!(
+            e.contains("the devid disagree"),
+            "the refusal must name WHICH pair disagreed: {e}"
+        );
+        write_record(&rec);
+        rt.block_on(compose_own_vault(&vault_id)).expect("restored");
+
+        // THE GENESIS the row claims is not the one the birth proves — the
+        // 32-zero owner a head-less create used to persist is this shape.
+        let mut zero_owner = rec.clone();
+        zero_owner.owner_genesis = [0u8; 32];
+        write_record(&zero_owner);
+        let e = rt
+            .block_on(compose_own_vault(&vault_id))
+            .expect_err("a row naming another genesis must not compose");
+        assert!(e.contains("the genesis disagree"), "{e}");
+        write_record(&rec);
+        rt.block_on(compose_own_vault(&vault_id))
+            .expect("restored again");
+    }
+
     /// PRODUCTION STARTUP: a funded vault survives losing the router entirely.
     ///
     /// The router and its `DLVManager` are DROPPED, and a fresh one is built
@@ -4012,7 +4442,7 @@ mod funded_creation_tests {
         assert_eq!(
             got.anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
-            "enforcement must survive; defaulting it trades under rules nobody chose",
+            "the posture is DERIVED (canonical REQUIRED); no row value can weaken it",
         );
 
         // Reading is not writing.
@@ -4754,6 +5184,7 @@ mod funded_creation_tests {
         assert_eq!(
             rebuilt[0].anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
+            "the rehydrated posture is DERIVED (canonical REQUIRED), never read from the row"
         );
 
         // (10) THE OWNER RECONCILES. Until now the trader's credit is final but
@@ -6865,7 +7296,7 @@ mod funded_creation_tests {
         assert_eq!(
             v.anchor_enforcement,
             generated::AnchorEnforcement::Required as i32,
-            "a restart must not relax enforcement"
+            "the rehydrated posture is DERIVED (canonical REQUIRED), never read from the row"
         );
         assert_eq!(v.policy_digest.to_vec(), vec![0x5Au8; 32]);
         assert_eq!((v.reserve_a, v.reserve_b), (10_000, 5_000));

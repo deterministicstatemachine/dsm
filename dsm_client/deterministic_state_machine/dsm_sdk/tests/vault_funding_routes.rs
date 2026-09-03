@@ -186,6 +186,10 @@ fn a_funding_leg_that_is_not_a_policy_commit_fails_closed() {
         let spec = generated::DlvSpecV1 {
             policy_digest: vec![0x11u8; 32],
             fulfillment_bytes: amm_fulfillment_bytes(&[0x11u8; 32], &[0x22u8; 32], 30),
+            // The canonical posture: an AMM create refuses any other, so this
+            // spec is well-formed on every axis except the one under test and
+            // the refusal it reads is the leg-identity guard's own.
+            anchor_enforcement: generated::AnchorEnforcement::Required as i32,
             ..Default::default()
         };
         let req = generated::DlvInstantiateV1 {
@@ -246,6 +250,9 @@ fn two_assets_sharing_a_ticker_are_not_interchangeable_at_the_route() {
     let spec = generated::DlvSpecV1 {
         policy_digest: vec![0x11u8; 32],
         fulfillment_bytes: amm_fulfillment_bytes(&era, &rigb_one, 30),
+        // The canonical posture, so the refusal below is the pair check and not
+        // the create-time selector gate.
+        anchor_enforcement: generated::AnchorEnforcement::Required as i32,
         ..Default::default()
     };
     let req = generated::DlvInstantiateV1 {
@@ -573,6 +580,11 @@ fn create_req_for_pair(a: &[u8; 32], b: &[u8; 32], fee_bps: u32) -> Vec<u8> {
     let spec = generated::DlvSpecV1 {
         policy_digest: vec![0x11u8; 32],
         fulfillment_bytes: amm_fulfillment_bytes(a, b, fee_bps),
+        // Every request built here is an AMM create, which requires the
+        // canonical posture. `..Default::default()` left this 0 and would make
+        // every one of these requests die at the selector gate — including the
+        // SUCCESSFUL creations this builder drives.
+        anchor_enforcement: generated::AnchorEnforcement::Required as i32,
         ..Default::default()
     };
     generated::DlvInstantiateV1 {
@@ -660,5 +672,14 @@ fn a_rooted_transferable_leg_passes_the_policy_gate() {
     assert!(
         !msg.contains("not rooted") && !msg.contains("market leg"),
         "a rooted transferable leg must pass the policy gate, got: {msg}"
+    );
+    // A NEGATIVE-ONLY assertion is voided by any new earlier gate: the request
+    // would die before the policy gate and still satisfy the two `!contains`
+    // above, silently crediting this control for work it never reached. Name
+    // the refusal it must actually get.
+    assert!(
+        msg.contains("to encumber") && msg.contains("admitted"),
+        "the control must reach the ADMITTED-BALANCE check — a refusal from any \
+         earlier gate would void it: {msg}"
     );
 }

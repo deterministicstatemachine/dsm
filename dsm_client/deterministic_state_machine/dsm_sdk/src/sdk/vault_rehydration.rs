@@ -46,7 +46,11 @@ pub(crate) struct RehydratedVault {
     /// from it and matched — a fee this device never committed cannot reach a
     /// quote. Foreign verification of the fee is the signed baseline's job.
     pub fee_bps: u32,
-    /// The enforcement mode the vault was created with — never a default.
+    /// DERIVED, DISPLAY-ONLY. Always the canonical `Required`: anchor binding
+    /// is unconditional in the code that enforces it, so there is no per-vault
+    /// posture to restore. The persisted column is NOT read to produce this —
+    /// that is the whole point of the retirement. Kept so the vault summary the
+    /// UI already renders does not change shape.
     pub anchor_enforcement: i32,
     pub policy_digest: [u8; 32],
     /// Read from the leaves, not from the record.
@@ -64,10 +68,6 @@ pub(crate) enum RehydrationError {
     /// it would produce a vault with no reserves rather than a wrong one — but
     /// naming the mismatch is more useful than reporting empty legs.
     OwnerMismatch,
-    /// This build does not recognise the stored enforcement mode. Refusing is
-    /// the whole point: falling back to a permissive default would drop a gate
-    /// the owner asked for.
-    UnknownAnchorEnforcement { stored: i32 },
     /// A leg of the pair has no reserve entry. A vault missing a side is not a
     /// funded vault, and treating the absence as zero would let it advertise
     /// and quote as if it were merely empty.
@@ -101,10 +101,6 @@ impl std::fmt::Display for RehydrationError {
                 f,
                 "vault record names a different owner than this device; its reserve leaves are not here"
             ),
-            RehydrationError::UnknownAnchorEnforcement { stored } => write!(
-                f,
-                "unknown anchor_enforcement {stored}; refusing rather than falling back to a permissive default"
-            ),
             RehydrationError::LegNotFunded { .. } => write!(
                 f,
                 "a leg of this vault has no reserve entry; an unfunded side is not a zero balance"
@@ -126,18 +122,6 @@ impl std::fmt::Display for RehydrationError {
 }
 
 impl std::error::Error for RehydrationError {}
-
-/// Known `AnchorEnforcement` values. Listed rather than range-checked so a value
-/// added to the proto but not handled here fails closed instead of silently
-/// becoming whatever the numeric neighbours mean.
-fn known_enforcement(v: i32) -> bool {
-    matches!(
-        v,
-        x if x == dsm::types::proto::AnchorEnforcement::Unspecified as i32
-            || x == dsm::types::proto::AnchorEnforcement::Optional as i32
-            || x == dsm::types::proto::AnchorEnforcement::Required as i32
-    )
-}
 
 /// Rebuild one vault from its record and the device head.
 ///
@@ -161,11 +145,8 @@ pub(crate) fn rehydrate_amm_vault(
     if record.owner_genesis != head.genesis() || record.owner_devid != head.devid() {
         return Err(RehydrationError::OwnerMismatch);
     }
-    if !known_enforcement(record.anchor_enforcement) {
-        return Err(RehydrationError::UnknownAnchorEnforcement {
-            stored: record.anchor_enforcement,
-        });
-    }
+    // `record.anchor_enforcement` is deliberately NOT read. It is deprecation
+    // residue; the posture below is a constant.
 
     // Absence is distinguished from zero. `vault_reserve` would answer 0 for
     // both, which is exactly the conflation that lets an unfunded vault look
@@ -237,7 +218,9 @@ pub(crate) fn rehydrate_amm_vault(
         vault_id: record.vault_id,
         pair,
         fee_bps: record.fee_bps,
-        anchor_enforcement: record.anchor_enforcement,
+        // DERIVED, never restored: binding is unconditional, so this is the
+        // only posture in force regardless of what the row holds.
+        anchor_enforcement: dsm::types::proto::AnchorEnforcement::Required as i32,
         policy_digest: record.policy_digest,
         // From the leaves. Both legs agree, checked above.
         current_sequence: leg_a.sequence,
@@ -632,24 +615,41 @@ mod tests {
         );
     }
 
-    /// An unrecognised enforcement mode refuses rather than defaulting. This is
-    /// the specific repair that must never happen: a permissive fallback drops a
-    /// gate the owner asked for.
+    /// THE COLUMN CANNOT WEAKEN THE POSTURE ANY MORE. `anchor_enforcement` is
+    /// deprecation residue: whatever a row holds — a permissive `Optional`, an
+    /// `Unspecified` 0, or a value no build knows — rehydration DERIVES the
+    /// canonical `Required` and never reads the column.
+    ///
+    /// The refusal this replaces was the honest answer while the value was
+    /// still consulted. Now that nothing consults it, refusing would only make
+    /// an edited row a denial-of-service on a real vault.
+    ///
+    /// POSITIVE CONTROL first, so the assertions below are attributable to the
+    /// mutation and not to a broken fixture.
     #[test]
     #[serial]
-    fn an_unknown_enforcement_mode_refuses_rather_than_defaulting() {
+    fn a_mutated_enforcement_column_cannot_weaken_the_derived_posture() {
         init_test_db();
-        let (mut record, head) = funded_and_advanced();
-        record.anchor_enforcement = 99;
-        let err = rehydrate_amm_vault(&record, &head).expect_err("must refuse");
-        assert_eq!(
-            err,
-            RehydrationError::UnknownAnchorEnforcement { stored: 99 }
-        );
-        assert!(
-            format!("{err}").contains("permissive default"),
-            "the message must name the repair being refused"
-        );
+        let (record, head) = funded_and_advanced();
+        let control = rehydrate_amm_vault(&record, &head).expect("the untouched row rehydrates");
+        assert_eq!(control.anchor_enforcement, REQUIRED);
+
+        for stored in [
+            dsm::types::proto::AnchorEnforcement::Unspecified as i32,
+            dsm::types::proto::AnchorEnforcement::Optional as i32,
+            99,
+            -7,
+        ] {
+            let mut mutated = record.clone();
+            mutated.anchor_enforcement = stored;
+            let out = rehydrate_amm_vault(&mutated, &head)
+                .expect("the column is residue; it must not decide anything");
+            assert_eq!(
+                out.anchor_enforcement, REQUIRED,
+                "a row holding {stored} must not weaken the derived posture"
+            );
+            assert_eq!(out, control, "and nothing else may move with it either");
+        }
     }
 
     /// A record whose pair is not canonical is not trusted.

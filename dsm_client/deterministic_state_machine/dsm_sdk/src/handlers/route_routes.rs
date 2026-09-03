@@ -560,20 +560,25 @@ impl AppRouterImpl {
 
         // The ad carries the DISCOVERY handle for the owner's verification
         // bundle: the inner digest of the exact presentation bytes the birth
-        // published (stored on the vault record). No record blob, no ad — a
-        // vault the trader cannot verify must not be discoverable.
-        let presentation_digest = {
-            if record.baseline_presentation.is_empty() {
-                return err(
-                    "route.publishRoutingAdvertisement: the vault record carries no birth \
-                     presentation — reprovision (no legacy upgrade path exists)"
-                        .into(),
-                );
+        // published. It is taken from the ONE verified accessor rather than
+        // re-hashed here from the record's bytes.
+        //
+        // THIS IS NOT AN INDEPENDENT GATE and must not be described as one.
+        // `baseline_is_published` above already routes through
+        // `verified_baseline`, so a record whose blobs do not pair, or that
+        // names another vault, is refused EARLIER — reverting this line changes
+        // no verdict, and a mutation test says so. What it buys is that the
+        // digest and the activation boolean come from ONE derivation of the
+        // record's blobs instead of two: a second local re-hash beside the
+        // checked one is the seam where the two drift apart later.
+        let presentation_digest = match crate::handlers::dlv_routes::verified_baseline(&vault_id) {
+            Ok(v) => v.presentation_inner,
+            Err(e) => {
+                return err(format!(
+                    "route.publishRoutingAdvertisement: this vault's stored birth baseline \
+                     does not verify ({e}) — refusing to advertise proofs a trader cannot use"
+                ))
             }
-            dsm::storage_object::immutable_inner(
-                dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
-                &record.baseline_presentation,
-            )
         };
 
         let publish_input = crate::sdk::routing_sdk::PublishRoutingAdInput {
@@ -1541,8 +1546,9 @@ mod stamping_tests {
         let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             &r, &pc_a, &pc_b, 10_000, 5_000,
         );
-        let keys = crate::handlers::dlv_routes::baseline_object_keys(&vault_id)
-            .expect("a born vault names its two baseline objects");
+        let keys = crate::handlers::dlv_routes::verified_baseline(&vault_id)
+            .expect("a born vault names its two baseline objects")
+            .keys;
         {
             let binding = crate::storage::client_db::get_connection().expect("conn");
             let conn = binding.lock().expect("lock");

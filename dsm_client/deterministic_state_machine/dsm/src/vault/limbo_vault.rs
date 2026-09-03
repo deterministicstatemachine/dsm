@@ -484,16 +484,20 @@ pub struct LimboVault {
     /// eventually disagree with nothing to say which was right. See
     /// `dsm_sdk::sdk::vault_rehydration`.
     pub current_sequence: u64,
-    /// Tier 2 Foundation: anchor-enforcement policy carried over from the
-    /// vault's `DlvSpecV1.anchor_enforcement` at creation time.  Stored as
-    /// `i32` to match the proto-generated `AnchorEnforcement` enum (0 =
-    /// `Unspecified`, 1 = `Optional`, 2 = `Required`).  The chunks #7 gate
-    /// uses this to decide whether `RouteCommitHop` anchor binding fields
-    /// are mandatory, accepted-if-present, or grandfathered.
+    /// DEPRECATION RESIDUE — SEMANTICALLY DEAD. Do not read this for any
+    /// decision, and do not add a reader. SCHEDULED FOR REMOVAL together with
+    /// the `amm_vault_records.anchor_enforcement` column.
     ///
-    /// Not in `LimboVaultProto`; persisted in the canonical vault record
-    /// (`amm_vault_records`) and restored by `vault_rehydration`, which refuses
-    /// an unrecognised value rather than falling back to a permissive default.
+    /// It was meant to select whether a `RouteCommitHop`'s anchor binding
+    /// fields were mandatory, accepted-if-present or grandfathered. The code
+    /// that decides that — `route_commit_sdk::enforce_parent_binding` — is
+    /// UNCONDITIONAL and never consulted this, so the selector could only ever
+    /// have described a weaker posture than the one in force. AMM `dlv.create`
+    /// now refuses any spec that is not the canonical `Required`, and
+    /// `vault_rehydration` derives the posture instead of reading it back.
+    ///
+    /// It is not in `LimboVaultProto` either: the decoder hardcodes 0, so a
+    /// loaded vault has never carried a meaningful value here.
     pub anchor_enforcement: i32,
     /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
@@ -632,10 +636,9 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             // Tier 2 Foundation: domain-only; not persisted in the proto.
             // Loaded vaults start at 0 and advance through routed unlocks.
             current_sequence: 0,
-            // Tier 2 Foundation: domain-only; defaults to Unspecified when
-            // loaded from the proto (no anchor enforcement on legacy
-            // vaults).  Routed-unlock construction sites override this
-            // from `DlvSpecV1.anchor_enforcement`.
+            // Deprecation residue: not in the proto, and nothing reads it for
+            // a decision. The 0 here is NOT "no enforcement" — anchor binding
+            // is unconditional; see the field's doc.
             anchor_enforcement: 0,
             // Phase 13 follow-up: decode the persisted policy_digest if
             // present.  Length is strict-validated as 32 bytes; any
