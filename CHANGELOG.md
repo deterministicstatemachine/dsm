@@ -55,6 +55,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   `dlv.create` now derives it (leave the field empty) and refuses any other
   supplied value; the LiquidityScreen's "policy anchor" paste box is gone.
 
+### Security
+
+- **The owner's settlement fold proves the trade from the state it owns.**
+  `dlv.reconcile` used to copy `input_amount`/`output_amount` out of the
+  trader's receipt into the signed `DlvOwnerApplyV2` and fold them; the receipt
+  witnesses what the trader committed, not what the owner's reserves pay, and
+  nothing on the owner's side re-ran the curve. Now, in the core
+  `ApplySettlement` arm of `advance` (the security boundary, sufficient by
+  itself), the owner re-derives the transition from its own commitment: the
+  vault-state leaf at `parent_sequence` must commit exactly the pair, fee and
+  reserves being consumed; the signed `parent_binding` must be the commitment of
+  a parent `VaultStateV2` whose vault, generation, reserves, pair, fee and owner
+  equal those leaves; the input reserve is the leaf of the asset the trader
+  paid (by asset identity, never by pair order); and the ONE canonical
+  `constant_product_output` over those reserves must equal the proposed output
+  exactly. Any other fold is refused by name and moves nothing.
+  `VaultReserveMutation::ApplySettlement` gains `parent_state` (the parent
+  `CCB(V_n)` bytes, bound by the signed `parent_binding`). `dlv.reconcile`
+  mirrors the same check BEFORE signing, sourcing pair, fee, reserves and the
+  binding from the verified composition rather than the SQLite record, so the
+  owner never signs settlement arithmetic it has not checked. Every owner-apply
+  fixture that folded an off-curve literal is re-rooted to the curve. No
+  persisted format changes; no wipe: the vault-state leaf this relies on has
+  been required since the rehydration gate.
+
 ---
 
 ## [0.1.0-beta.3] — 2026-04-22
