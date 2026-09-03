@@ -1388,7 +1388,7 @@ impl DeviceState {
     /// what makes this the legitimate origin for a core test rather than a
     /// bypass: every gate `advance` owns still runs. It is not asserting that
     /// an unadmitted origin is acceptable;
-    /// `a_raw_funded_create_is_refused_without_an_attached_admission` pins
+    /// `a_funded_create_is_refused_without_its_own_attached_admission` pins
     /// that it is not.
     #[cfg(any(test, feature = "testing"))]
     #[allow(clippy::too_many_arguments)]
@@ -3922,6 +3922,114 @@ mod tests {
             signature: vec![],
             authority_policy: None,
         }
+    }
+
+    /// THE FUNDED-CREATE ACCEPTING FENCE, mutation-tested. A signed, funded
+    /// `DlvCreateFundedV2` is refused by the RAW `advance` unless a Prepared
+    /// DSM-backed admission bound to exactly its digest is attached — the
+    /// discipline every economically-originating operation crosses. The head
+    /// holds admitted value (a faucet claim, an admitted issuance) and, as an
+    /// admitted head does after `finish_admission`, carries no pending
+    /// admission: so the only thing missing is the fence's own precondition.
+    ///
+    /// MUTATION CONTROL: delete the `DlvCreateFundedV2` arm of the fence in
+    /// `advance` and the first assertion goes red by encumbering reserves the
+    /// economic lineage never saw.
+    #[test]
+    fn a_funded_create_is_refused_without_its_own_attached_admission() {
+        let (era, rigb) = (
+            crate::core::token::token_state_manager::era_policy_commit(),
+            pc(0xF0),
+        );
+        let dev = fresh_device(0xC7)
+            .admitted_faucet_claim(0, 0x71)
+            .expect("faucet claim")
+            .admitted_mint(rigb, 10, 0x72)
+            .expect("admitted issuance")
+            .with_pending_economic_admission(None);
+        let vault = [0x73u8; 32];
+        let (rk, tip) = self_loop(&dev);
+        let op = dlv_create_funded(vault, era, 60, rigb, 10);
+        let fund = || VaultReserveMutation::Fund {
+            vault_id: vault,
+            legs: vec![(era, 60), (rigb, 10)],
+            vault_sequence: 0,
+            pair: vault_pair(era, rigb),
+        };
+
+        // (1) No admission attached at all.
+        let err = format!(
+            "{}",
+            dev.advance(
+                rk,
+                dev.devid,
+                op.clone(),
+                entropy(1),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(fund()),
+            )
+            .expect_err("a raw funded create must not encumber reserves")
+        );
+        assert!(
+            err.contains("no pending economic admission"),
+            "the refusal is the fence's own, got: {err}"
+        );
+        assert_eq!(dev.vault_reserve(&vault, &era), 0, "nothing was encumbered");
+
+        // (2) An admission attached, but bound to a DIFFERENT operation.
+        let other = dlv_create_funded([0x74u8; 32], era, 60, rigb, 10);
+        let staged = dev.with_pending_economic_admission(Some(
+            crate::economic::admission::PendingEconomicAdmission::prepared(
+                crate::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                crate::economic::faucet::dsm_operation_digest(&other.to_bytes()),
+            ),
+        ));
+        let err = format!(
+            "{}",
+            staged
+                .advance(
+                    rk,
+                    staged.devid,
+                    op.clone(),
+                    entropy(2),
+                    None,
+                    &[],
+                    Some(tip),
+                    None,
+                    None,
+                    Some(fund()),
+                )
+                .expect_err("an admission for another operation authorizes nothing here")
+        );
+        assert!(
+            err.contains("digest does not match"),
+            "the refusal names the digest binding, got: {err}"
+        );
+
+        // (3) POSITIVE CONTROL: the same create, with ITS OWN admission, lands.
+        let funded = dev
+            .advance_admitted(
+                rk,
+                dev.devid,
+                op,
+                entropy(3),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(fund()),
+            )
+            .expect("the admitted create is accepted")
+            .new_device_state;
+        assert_eq!(funded.vault_reserve(&vault, &era), 60);
+        assert_eq!(funded.vault_reserve(&vault, &rigb), 10);
     }
 
     /// USER MODEL, TEST 1 — `100 ERA -> lock 60 into a DLV -> spendable is 40,

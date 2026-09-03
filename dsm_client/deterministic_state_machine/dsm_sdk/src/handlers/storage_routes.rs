@@ -3803,6 +3803,45 @@ mod tests {
         proposal: crate::storage::client_db::sender_proposal::SenderOnlineProposal,
     }
 
+    /// The process authenticated as ANOTHER device for the duration of one
+    /// register request, restored on drop. A register member attributes a
+    /// claim to the device that authenticated the request; a test that has a
+    /// second party claim must make that party the caller, exactly as a second
+    /// handset would be — never present its envelope from the first party's
+    /// session and rely on a lenient double.
+    struct AsDevice {
+        saved: Option<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
+    }
+
+    impl AsDevice {
+        fn enter(device_id: [u8; 32], public_key: Vec<u8>) -> Self {
+            use crate::sdk::app_state::AppState;
+            let saved = match (
+                AppState::get_device_id(),
+                AppState::get_public_key(),
+                AppState::get_genesis_hash(),
+                AppState::get_device_tree_root(),
+            ) {
+                (Some(d), Some(p), Some(g), Some(r)) => Some((d, p, g, r.to_vec())),
+                _ => None,
+            };
+            let genesis = AppState::get_genesis_hash().unwrap_or_else(|| vec![0u8; 32]);
+            let root = AppState::get_device_tree_root()
+                .map(|r| r.to_vec())
+                .unwrap_or_else(|| vec![0u8; 32]);
+            AppState::set_identity_info(device_id.to_vec(), public_key, genesis, root);
+            Self { saved }
+        }
+    }
+
+    impl Drop for AsDevice {
+        fn drop(&mut self) {
+            if let Some((d, p, g, r)) = self.saved.take() {
+                crate::sdk::app_state::AppState::set_identity_info(d, p, g, r);
+            }
+        }
+    }
+
     /// One submitted step on the sender with its frozen A-side evidence, and
     /// the honest countersigned receipt the recipient would hold for it.
     fn seed_submitted_step() -> SeededStep {
@@ -4008,9 +4047,13 @@ mod tests {
         .expect("claim body");
         let claim = dsm::economic::claim_envelope::sign_economic_root_claim(&body, b_ak_sk)
             .expect("sign claim");
-        crate::sdk::economic_registers::register_economic_root(&set, &claim)
-            .await
-            .expect("register recipient root");
+        {
+            // The recipient registers its own root from ITS session.
+            let _as_recipient = AsDevice::enter(recipient_devid, b_ak_pk.to_vec());
+            crate::sdk::economic_registers::register_economic_root(&set, &claim)
+                .await
+                .expect("register recipient root");
+        }
         (inner, guard)
     }
 
@@ -4421,9 +4464,12 @@ mod tests {
         .unwrap();
         let claim =
             dsm::economic::claim_envelope::sign_economic_root_claim(&body, &st.b_ak_sk).unwrap();
-        crate::sdk::economic_registers::register_economic_root(&set, &claim)
-            .await
-            .unwrap();
+        {
+            let _as_recipient = AsDevice::enter(st.b, st.b_ak_pk.clone());
+            crate::sdk::economic_registers::register_economic_root(&set, &claim)
+                .await
+                .unwrap();
+        }
 
         let good =
             delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));

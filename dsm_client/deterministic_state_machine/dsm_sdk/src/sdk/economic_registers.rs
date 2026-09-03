@@ -162,21 +162,25 @@ fn count_claim(
     }
 }
 
-/// Claim one faucet ticket with the FROZEN envelope bytes.
+/// Claim one faucet ticket with the FROZEN envelope bytes, at the members of
+/// `set` serving `network_id` — the network whose canonical faucet the ticket
+/// belongs to.
 pub async fn claim_faucet_ticket(
     set: &StorageSet,
+    network_id: &[u8],
     frozen_envelope: &[u8],
 ) -> Result<ClaimedCell, RegisterError> {
     let digest = faucet_claim_evidence_addr(frozen_envelope);
-    let fanout = crate::sdk::storage_io::submit_faucet_ticket_claim(set, frozen_envelope)
-        .await
-        .map_err(|e| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: {
-                let _ = e;
-                set.len() as u32
-            },
-        })?;
+    let fanout =
+        crate::sdk::storage_io::submit_faucet_ticket_claim(set, network_id, frozen_envelope)
+            .await
+            .map_err(|e| RegisterError::StorageUnavailable {
+                accepted: 0,
+                total: {
+                    let _ = e;
+                    set.len() as u32
+                },
+            })?;
     count_claim(&fanout, &digest, set.quorum())
 }
 
