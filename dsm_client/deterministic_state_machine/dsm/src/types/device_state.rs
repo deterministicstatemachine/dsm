@@ -2263,9 +2263,9 @@ impl DeviceState {
         // (the leaves exist) nor withdrawn (both are already zero) again.
         //
         // The signed `DlvClose` operation binds the WHOLE transition; the
-        // mutation is checked against it FIELD FOR FIELD before anything moves.
-        // (`ApplySettlement` never cross-checked op vs mutation — this arm does
-        // not repeat that.)
+        // mutation is checked against it FIELD FOR FIELD before anything moves,
+        // the same discipline the `ApplySettlement` arm above applies to
+        // `DlvOwnerApplyV2`.
         if let Some(VaultReserveMutation::Withdraw {
             vault_id: close_vault,
             legs: close_legs,
@@ -3032,6 +3032,14 @@ impl DeviceState {
     ///
     /// Pure: on `Err` nothing is mutated. Fails closed when the vault cannot pay
     /// the output.
+    ///
+    /// TEST-ONLY, like its two siblings `fund_vault_reserves` and
+    /// `withdraw_vault_reserves`. Production folds a settlement inside the
+    /// `ApplySettlement` arm of `advance`, which verifies the owner's signed
+    /// `DlvOwnerApplyV2` first; this entry point moves reserves with no
+    /// operation and no signature behind it, so it must not exist in a
+    /// shipping build. It was the last unfenced one of the three.
+    #[cfg(any(test, feature = "testing"))]
     pub fn apply_settlement_to_reserves(
         &self,
         vault_id: &[u8; 32],
