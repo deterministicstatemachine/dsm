@@ -358,9 +358,11 @@ internal class SoFiTestContext(
             .setContent(ByteString.copyFrom(content))
             // The state-identity cut replaced the per-hop anchor fields
             // with one mandatory `parent_binding` (the parent state's c_n),
-            // enforced unconditionally at the routed-unlock gate; this
-            // policy field no longer gates that check.
-            .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_OPTIONAL)
+            // enforced unconditionally at the routed-unlock gate. The selector
+            // is now retired: an AMM `dlv.create` refuses anything but the
+            // canonical REQUIRED, so OPTIONAL here would fail every on-device
+            // vault creation in this harness.
+            .setAnchorEnforcement(AnchorEnforcement.ANCHOR_ENFORCEMENT_REQUIRED)
             .build()
         val req = DlvInstantiateV1.newBuilder()
             .setSpec(spec)
