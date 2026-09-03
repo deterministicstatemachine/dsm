@@ -49,11 +49,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   remove. Beta runs on `dsm-testnet` with no production user state, so the
   remedy is the same wipe as above.
 
-  Alongside it, `DlvSpecV1.policy_digest` changes meaning and contract: it is the
-  vault's DLV-POLICY digest — a derived view of the release and fee policy the
-  creator-signed vault state already commits — not a CPTA/token anchor. An AMM
-  `dlv.create` now derives it (leave the field empty) and refuses any other
-  supplied value; the LiquidityScreen's "policy anchor" paste box is gone.
+  Alongside it, `DlvSpecV1.policy_digest` changes meaning and contract for AMM
+  DLVs: it is the AMM DLV-policy digest - a derived view of the release and fee
+  policy the creator-signed vault state already commits - not a CPTA/token
+  anchor. AMM `dlv.create` now derives it (leave the field empty) and refuses
+  any other supplied value; the LiquidityScreen's "policy anchor" paste box is
+  gone. Non-AMM DLVs have no `ReleasePolicy`/`FeePolicy` object to derive from,
+  so their supplied 32-byte digest remains caller-supplied but creator-signed.
+  That non-AMM semantic gap is follow-up debt, not solved in this release.
 
 ### Security
 

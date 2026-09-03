@@ -499,14 +499,20 @@ pub struct LimboVault {
     /// It is not in `LimboVaultProto` either: the decoder hardcodes 0, so a
     /// loaded vault has never carried a meaningful value here.
     pub anchor_enforcement: i32,
-    /// THE DLV-POLICY DIGEST — the vault's behavioural-policy identity, and a
+    /// THE DLV-POLICY DIGEST - the vault's behavioural-policy identity, and a
     /// creator-SIGNED one: it is folded into `parameters_hash`, so `verify`
-    /// refuses a vault whose digest was altered after birth. For an AMM vault
-    /// it is `dsm::ccb::dlv_policy_digest(release_policy, fee_policy)`, a
+    /// refuses a vault whose digest was altered after birth. For an AMM DLV it
+    /// is `dsm::ccb::dlv_policy_digest(release_policy, fee_policy)`, a
     /// deterministic view of the two DLV-layer members the signed
-    /// `VaultStateV2` already commits — never the pair's CPTA commits, which
-    /// are the token layer and stay independent. `dlv.create` DERIVES it; a
-    /// supplied value that does not match is refused.
+    /// `VaultStateV2` already commits - never the pair's CPTA commits, which
+    /// are the token layer and stay independent. AMM `dlv.create` DERIVES it;
+    /// a supplied value that does not match is refused.
+    ///
+    /// Non-AMM DLVs have no `ReleasePolicy`/`FeePolicy` object to derive from,
+    /// so their supplied 32-byte digest remains caller-supplied but
+    /// creator-signed. Tightening that non-AMM meaning is follow-up semantic
+    /// debt; this change only makes the existing bytes covered by the creator
+    /// signature.
     ///
     /// Historical: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
@@ -1046,8 +1052,10 @@ impl LimboVault {
         intended_recipient: Option<Vec<u8>>, // Kyber public key for access control (if Some)
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
         reference_state_hash: &[u8; 32],
-        // The DLV-policy digest, signed with the rest of the parameters. `None`
-        // only for a vault that has no DLV-layer policy object (non-AMM).
+        // The DLV-policy digest, signed with the rest of the parameters. AMM
+        // callers pass the derived ReleasePolicy/FeePolicy digest; non-AMM
+        // callers still supply their 32 bytes because no such authority object
+        // exists yet. That non-AMM meaning is follow-up semantic debt.
         policy_digest: Option<[u8; 32]>,
     ) -> Result<LimboVaultDraft, DsmError> {
         // dBTC bearer-fungibility guard (see
@@ -1176,8 +1184,8 @@ impl LimboVault {
         // salted-BLAKE3 32 bytes).
         parameters.extend_from_slice(&commitment);
         // The DLV-policy digest, presence-tagged so "absent" and "32 zero
-        // bytes" are different preimages. Folding it here is what makes the
-        // vault's policy identity creator-signed rather than a free field.
+        // bytes" are different preimages. Folding it here makes AMM-derived
+        // bytes, and today's non-AMM caller-supplied bytes, creator-signed.
         fold_policy_digest(&mut parameters, policy_digest.as_ref());
 
         let parameters_hash =
