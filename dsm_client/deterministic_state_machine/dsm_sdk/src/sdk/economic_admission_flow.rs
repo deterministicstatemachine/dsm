@@ -769,6 +769,78 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
     Ok((outcome, admitted))
 }
 
+/// Whether a counterparty can ever be asked to verify this leaf's inclusion.
+///
+/// Vault reserves fund a trader's settle (0x0026) and settlement receipts
+/// fund an owner's apply (0x0027), so both are cited BY ANOTHER DEVICE and
+/// need a portable path. A balance leaf is this device's own spendable state
+/// and a consumed-source leaf its own spend marker: no evidence type asks a
+/// stranger to prove either, and each path costs 8 KiB, so publishing them
+/// would grow every admission by that much to prove something nothing reads.
+fn leaf_is_externally_citable(state: &dsm::economic::state::EconomicLeafState) -> bool {
+    use dsm::economic::state::EconomicLeafState as L;
+    match state {
+        L::VaultReserve(_) | L::SettlementReceipt(_) => true,
+        L::Balance(_) | L::ConsumedSource(_) => false,
+    }
+}
+
+/// The artifact proving every externally citable leaf this transition wrote,
+/// or `None` when it wrote none. See the call site for why it is built there.
+fn economic_proof_artifact_for(
+    tree: &EconomicSmt,
+    witness: &EconomicTransitionWitness,
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    validated: &ValidatedEconomicRoot,
+) -> Result<Option<(String, Vec<u8>, &'static str)>, DsmError> {
+    use dsm::economic::proof_artifact::{EconomicProofArtifact, EconomicProofLeaf};
+    let root = validated.economic_root();
+    if tree.root() != root {
+        // Unreachable by construction — the same tree produced this root —
+        // and stated as a refusal rather than trusted, because a proof taken
+        // from a tree that is not the registered one is the exact defect
+        // this object exists to make impossible.
+        return Err(DsmError::invalid_operation(
+            "economic proof: the producer tree is not the tree whose root was registered",
+        ));
+    }
+    let mut leaves = Vec::new();
+    for m in &witness.mutations {
+        let Some(state) = &m.post_state else { continue };
+        if !leaf_is_externally_citable(state) {
+            continue;
+        }
+        let key = m
+            .leaf_key(genesis, devid)
+            .map_err(|e| storage_err("economic proof leaf key", e))?;
+        leaves.push(EconomicProofLeaf {
+            state: state.clone(),
+            siblings: Box::new(tree.siblings(&key)),
+        });
+    }
+    if leaves.is_empty() {
+        return Ok(None);
+    }
+    let artifact = EconomicProofArtifact::new(
+        *genesis,
+        *devid,
+        validated.economic_position(),
+        root,
+        leaves,
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("economic proof: {e}")))?;
+    let bytes = artifact.encode();
+    Ok(Some((
+        crate::sdk::economic_registers::immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &bytes,
+        ),
+        bytes,
+        "economic-proof-artifact",
+    )))
+}
+
 /// Everything after local acceptance. Separated so recovery re-enters here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_admission(
@@ -783,7 +855,7 @@ pub(crate) async fn finish_admission(
     mut pending: PendingEconomicAdmission,
     // Frozen only in the ADMIT transaction (the RELEASE object): nothing
     // here may reach the network before ECON_ADMITTED.
-    post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+    mut post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<AdmittedOutcome, DsmError> {
     let head = core
         .device_head()
@@ -937,9 +1009,30 @@ pub(crate) async fn finish_admission(
                 }
             }
         }
-        let _ = &tree;
         cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect()
     };
+
+    // ── THE INCLUSION PROOF for the leaves this transition wrote ─────────
+    //
+    // The register publishes WHICH root this device committed at this
+    // position; it says nothing about which leaves that root commits. Every
+    // counterparty that must cite one of our leaves — a trader proving our
+    // vault reserves, an owner proving our settlement receipt — needs the
+    // leaf and its path, and could not get them.
+    //
+    // Built HERE, from `tree`, which IS the post-transition tree the write
+    // set advanced and whose root was just registered. That is the whole
+    // one-snapshot guarantee: there is no second read, no rebuild and no
+    // window in which the tree could move between naming the root and
+    // taking the paths. The equality below states it rather than assuming
+    // it, and `EconomicProofArtifact::new` re-derives every path against
+    // that same root before the bytes exist.
+    if let Some(proof) =
+        economic_proof_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)?
+    {
+        post_admit_artifacts.push(proof);
+    }
+
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
         new_validated.economic_position(),

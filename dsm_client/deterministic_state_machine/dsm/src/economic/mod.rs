@@ -66,6 +66,7 @@ pub mod lineage;
 pub mod mutation;
 pub mod peer_acceptance;
 pub mod peer_lineage;
+pub mod proof_artifact;
 pub mod provenance;
 pub mod register;
 pub mod release;

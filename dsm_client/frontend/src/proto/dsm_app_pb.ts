@@ -8755,6 +8755,132 @@ export class SettlementPaymentEvidenceV1 extends Message<SettlementPaymentEviden
 }
 
 /**
+ * THE GENERIC ECONOMIC-INCLUSION PROOF — transport proto, no CCB class,
+ * frozen under namespace DSM/economic-proof-artifact/v1.
+ *
+ * One artifact carries one publisher, ONE named economic position and root,
+ * and one or more exact economic leaves each with its 256-sibling inclusion
+ * path. Every leaf and every path in an artifact comes from the SAME
+ * validated snapshot: a reader that recomputes them must derive the one
+ * named root, so a mixed-snapshot artifact cannot verify.
+ *
+ * The artifact does not assert its own validity and carries no signature.
+ * Authority over `economic_root` at `economic_position` belongs to the
+ * publisher's write-once register cell, which a reader resolves
+ * independently; this object only lets that reader see WHICH leaves that
+ * root commits. Anything that points at an artifact — a routing
+ * advertisement, an evidence descriptor — is a locator, never a warrant.
+ *
+ * @generated from message dsm.EconomicProofLeafV1
+ */
+export class EconomicProofLeafV1 extends Message<EconomicProofLeafV1> {
+  /**
+   * Exact `EconomicLeafState` CCB bytes. The reader derives the leaf key
+   * from the state's own class and the publisher's coordinates, never from
+   * a supplied key.
+   *
+   * @generated from field: bytes state_ccb = 1;
+   */
+  stateCcb = new Uint8Array(0);
+
+  /**
+   * Exactly 256, leaf-to-root.
+   *
+   * @generated from field: repeated bytes siblings = 2;
+   */
+  siblings: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<EconomicProofLeafV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EconomicProofLeafV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "state_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EconomicProofLeafV1 {
+    return new EconomicProofLeafV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EconomicProofLeafV1 {
+    return new EconomicProofLeafV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EconomicProofLeafV1 {
+    return new EconomicProofLeafV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EconomicProofLeafV1 | PlainMessage<EconomicProofLeafV1> | undefined, b: EconomicProofLeafV1 | PlainMessage<EconomicProofLeafV1> | undefined): boolean {
+    return proto3.util.equals(EconomicProofLeafV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.EconomicProofArtifactV1
+ */
+export class EconomicProofArtifactV1 extends Message<EconomicProofArtifactV1> {
+  /**
+   * @generated from field: bytes publisher_genesis = 1;
+   */
+  publisherGenesis = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes publisher_devid = 2;
+   */
+  publisherDevid = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 economic_position = 3;
+   */
+  economicPosition = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes economic_root = 4;
+   */
+  economicRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.EconomicProofLeafV1 leaves = 5;
+   */
+  leaves: EconomicProofLeafV1[] = [];
+
+  constructor(data?: PartialMessage<EconomicProofArtifactV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EconomicProofArtifactV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "publisher_genesis", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "publisher_devid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "economic_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "economic_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "leaves", kind: "message", T: EconomicProofLeafV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EconomicProofArtifactV1 {
+    return new EconomicProofArtifactV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EconomicProofArtifactV1 {
+    return new EconomicProofArtifactV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EconomicProofArtifactV1 {
+    return new EconomicProofArtifactV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EconomicProofArtifactV1 | PlainMessage<EconomicProofArtifactV1> | undefined, b: EconomicProofArtifactV1 | PlainMessage<EconomicProofArtifactV1> | undefined): boolean {
+    return proto3.util.equals(EconomicProofArtifactV1, a, b);
+  }
+}
+
+/**
  * Step 2: the 0x0029 (AuthorizedIssuance) evidence bundle — transport proto,
  * no CCB class, frozen at `issuance_authorization_addr` under namespace
  * DSM/issuance-authorization-evidence/v1.
