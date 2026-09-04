@@ -104,6 +104,7 @@ pub mod dlv_pre_commitment_sdk;
 pub mod dlv_receipt_sdk;
 pub mod identity_presentation;
 pub mod posted_dlv_sdk;
+pub mod reserve_consumption_producer;
 pub mod route_commit_sdk;
 pub mod routing_path_sdk;
 pub mod routing_sdk;

@@ -173,6 +173,10 @@ struct Fixture {
     slot_envelope: Vec<u8>,
     evidence_bytes: Vec<u8>,
     evidence_addr: [u8; 32],
+    /// The owner's generic inclusion proof, and its address — what the bundle
+    /// names instead of carrying leaves of its own.
+    proof_bytes: Vec<u8>,
+    proof_addr: [u8; 32],
     settle: Operation,
     witness: EconomicTransitionWitness,
 }
@@ -182,6 +186,41 @@ fn sibling_array(tree: &EconomicSmt, key: &[u8; 32]) -> Box<[[u8; 32]; ECONOMIC_
     let mut out = Box::new([[0u8; 32]; ECONOMIC_SMT_HEIGHT]);
     out.copy_from_slice(&v);
     out
+}
+
+/// The owner's generic inclusion proof for a set of reserve legs, and its
+/// inner content address — the ONE proof source the 0x0026 bundle names.
+fn owner_proof(
+    tree: &EconomicSmt,
+    g: &[u8; 32],
+    devid: &[u8; 32],
+    position: u64,
+    legs: &[EconomicVaultReserveState],
+) -> (Vec<u8>, [u8; 32]) {
+    let leaves = legs
+        .iter()
+        .map(|l| {
+            let state = EconomicLeafState::VaultReserve(l.clone());
+            dsm::economic::proof_artifact::EconomicProofLeaf {
+                siblings: sibling_array(tree, &state.leaf_key(g, devid)),
+                state,
+            }
+        })
+        .collect();
+    let artifact = dsm::economic::proof_artifact::EconomicProofArtifact::new(
+        *g,
+        *devid,
+        position,
+        tree.root(),
+        leaves,
+    )
+    .expect("the owner's proof artifact builds");
+    let bytes = artifact.encode();
+    let addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+        &bytes,
+    );
+    (bytes, addr)
 }
 
 fn fixture() -> Fixture {
@@ -280,19 +319,19 @@ fn fixture() -> Fixture {
     )
     .expect("sign slot claim");
 
-    // The evidence bundle: exact CCB(V_n), the vault-bound authority
-    // evidence, and both proven reserve pre-leaves.
+    // The owner's generic proof, and the bundle that NAMES it: exact
+    // CCB(V_n), the vault-bound authority evidence, one address.
+    let (proof_bytes, proof_addr) = owner_proof(
+        &owner_tree,
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[leg_a.clone(), leg_b.clone()],
+    );
     let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
         exact_vault_state_ccb: vn.encode().expect("vn encode"),
         owner_authority_evidence: ow.authority_evidence.clone(),
-        reserve_a_state: EconomicLeafState::VaultReserve(reserve_a.0.clone())
-            .encode()
-            .expect("leg a encode"),
-        reserve_a_siblings: reserve_a.1.iter().map(|s| s.to_vec()).collect(),
-        reserve_b_state: EconomicLeafState::VaultReserve(reserve_b.0.clone())
-            .encode()
-            .expect("leg b encode"),
-        reserve_b_siblings: reserve_b.1.iter().map(|s| s.to_vec()).collect(),
+        economic_proof_addr: proof_addr.to_vec(),
     };
     let evidence_bytes = evidence.encode_to_vec();
     let evidence_addr = dsm::storage_object::immutable_inner(
@@ -379,6 +418,8 @@ fn fixture() -> Fixture {
         slot_envelope,
         evidence_bytes,
         evidence_addr,
+        proof_bytes,
+        proof_addr,
         settle,
         witness,
     }
@@ -389,8 +430,10 @@ fn fixture() -> Fixture {
 /// closed.
 struct SettleResolver {
     owner_root: [u8; 32],
-    evidence_addr: [u8; 32],
-    evidence_bytes: Vec<u8>,
+    /// Every immutable object this fixture publishes, by inner address: the
+    /// evidence bundle and the owner's proof artifact. Anything else fails
+    /// closed, so a test that expects a fetch to miss gets a miss.
+    objects: Vec<([u8; 32], Vec<u8>)>,
     slot_envelope: Option<Vec<u8>>,
 }
 
@@ -478,10 +521,9 @@ impl ProvenanceResolver for SettleResolver {
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
-        if *addr == self.evidence_addr {
-            Ok(self.evidence_bytes.clone())
-        } else {
-            Err(PeerLineageFailure::Incomplete("unknown address".into()))
+        match self.objects.iter().find(|(a, _)| a == addr) {
+            Some((_, bytes)) => Ok(bytes.clone()),
+            None => Err(PeerLineageFailure::Incomplete("unknown address".into())),
         }
     }
 
@@ -498,8 +540,10 @@ impl ProvenanceResolver for SettleResolver {
 fn resolver_for(fx: &Fixture) -> SettleResolver {
     SettleResolver {
         owner_root: fx.owner_root,
-        evidence_addr: fx.evidence_addr,
-        evidence_bytes: fx.evidence_bytes.clone(),
+        objects: vec![
+            (fx.evidence_addr, fx.evidence_bytes.clone()),
+            (fx.proof_addr, fx.proof_bytes.clone()),
+        ],
         slot_envelope: Some(fx.slot_envelope.clone()),
     }
 }
@@ -620,12 +664,13 @@ fn an_unresolvable_owner_lineage_fails_closed_as_incomplete() {
     ctx.verified_operation = Some(&fx.settle);
     let mut r = resolver_for(&fx);
     r.owner_root = [0xAB; 32]; // resolvable, but the reserve proofs will fail
-    expect_reserve_refusal(
-        &fx,
-        &r,
-        &ctx,
-        "does not prove into the owner's validated root",
-    );
+                               // The proposition is unchanged — a root the reserve proofs do not belong
+                               // to funds nothing — but the refusal now arrives EARLIER and names the
+                               // coordinate rather than the symptom. The artifact declares which root it
+                               // proves into, so a root the arm derived that disagrees is rejected before
+                               // a single path is recomputed; the old message came from discovering the
+                               // mismatch one leaf at a time.
+    expect_reserve_refusal(&fx, &r, &ctx, "names a different economic root");
 }
 
 #[test]
@@ -636,7 +681,8 @@ fn tampered_evidence_bytes_are_refused_by_address() {
     let mut tampered = fx.evidence_bytes.clone();
     let n = tampered.len();
     tampered[n - 1] ^= 0xFF;
-    r.evidence_bytes = tampered;
+    r.objects.retain(|(a, _)| *a != fx.evidence_addr);
+    r.objects.push((fx.evidence_addr, tampered));
     expect_reserve_refusal(
         &fx,
         &r,
@@ -821,9 +867,6 @@ fn an_insufficient_output_reserve_is_refused() {
             state.leaf_value().expect("leaf value"),
         );
     }
-    let key_of = |l: &EconomicVaultReserveState| {
-        EconomicLeafState::VaultReserve(l.clone()).leaf_key(&ow.g, &ow.devid)
-    };
     let c_n = vault_state_commitment(&vn).expect("c_n");
     // The settle now binds the poor state's identity, so the bundle and the
     // op stay mutually consistent up to the sufficiency clause.
@@ -831,23 +874,17 @@ fn an_insufficient_output_reserve_is_refused() {
     if let Operation::DlvSettle { parent_binding, .. } = &mut op {
         *parent_binding = c_n;
     }
+    let (proof_bytes, proof_addr) = owner_proof(
+        &owner_tree,
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[leg_a.clone(), leg_b.clone()],
+    );
     let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
         exact_vault_state_ccb: vn.encode().expect("vn encode"),
         owner_authority_evidence: ow.authority_evidence.clone(),
-        reserve_a_state: EconomicLeafState::VaultReserve(leg_a.clone())
-            .encode()
-            .expect("leg a"),
-        reserve_a_siblings: sibling_array(&owner_tree, &key_of(&leg_a))
-            .iter()
-            .map(|s| s.to_vec())
-            .collect(),
-        reserve_b_state: EconomicLeafState::VaultReserve(leg_b.clone())
-            .encode()
-            .expect("leg b"),
-        reserve_b_siblings: sibling_array(&owner_tree, &key_of(&leg_b))
-            .iter()
-            .map(|s| s.to_vec())
-            .collect(),
+        economic_proof_addr: proof_addr.to_vec(),
     };
     let evidence_bytes = evidence.encode_to_vec();
     let evidence_addr = dsm::storage_object::immutable_inner(
@@ -890,8 +927,7 @@ fn an_insufficient_output_reserve_is_refused() {
     .expect("witness");
     let resolver = SettleResolver {
         owner_root: owner_tree.root(),
-        evidence_addr,
-        evidence_bytes,
+        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
         slot_envelope: Some(fx.slot_envelope.clone()),
     };
     let mut ctx = ctx_for(&fx);
@@ -902,6 +938,174 @@ fn an_insufficient_output_reserve_is_refused() {
             "expected the sufficiency refusal, got: {m}"
         ),
         other => panic!("expected the sufficiency refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_artifact_proving_another_generation_selects_nothing() {
+    // THE SELECTION CONTROL. A valid proof by the same owner, of the same
+    // vault, at a DIFFERENT generation is a valid proof of something else.
+    // The arm selects by exact vault and exact generation, so it finds no
+    // legs at all rather than the nearest usable pair — a settlement is never
+    // funded by evidence about another state.
+    let fx = fixture();
+    let ow = owner();
+    let mut owner_tree = EconomicSmt::new();
+    let mut leg_a = fx.reserve_a.0.clone();
+    let mut leg_b = fx.reserve_b.0.clone();
+    leg_a.vault_sequence += 1;
+    leg_b.vault_sequence += 1;
+    for l in [&leg_a, &leg_b] {
+        let state = EconomicLeafState::VaultReserve(l.clone());
+        owner_tree.insert(
+            state.leaf_key(&ow.g, &ow.devid),
+            state.leaf_value().expect("leaf value"),
+        );
+    }
+    let (proof_bytes, proof_addr) = owner_proof(
+        &owner_tree,
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[leg_a.clone(), leg_b.clone()],
+    );
+    let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
+        exact_vault_state_ccb: fx.vn.encode().expect("vn encode"),
+        owner_authority_evidence: ow.authority_evidence.clone(),
+        economic_proof_addr: proof_addr.to_vec(),
+    };
+    let evidence_bytes = evidence.encode_to_vec();
+    let evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &evidence_bytes,
+    );
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G_TRADER, &DEV_TRADER),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &fx.settle,
+        &G_TRADER,
+        &DEV_TRADER,
+        &[0xEE; 32],
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: OWNER_POSITION,
+            reserve_consumption_evidence_addr: evidence_addr,
+        },
+    )
+    .expect("builds");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        [0xEE; 32],
+        dsm::economic::faucet::dsm_operation_digest(&fx.settle.to_bytes()),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("witness");
+    let resolver = SettleResolver {
+        owner_root: owner_tree.root(),
+        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
+        slot_envelope: Some(fx.slot_envelope.clone()),
+    };
+    match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
+        Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
+            m.contains("not the pair this settlement consumes"),
+            "expected the selection refusal, got: {m}"
+        ),
+        other => panic!("expected the selection refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn proven_leaves_that_disagree_with_v_n_are_refused() {
+    // THE AMOUNT CONTROL. The artifact here is honest in every structural
+    // sense — a real tree, real paths, verifying against the root the arm
+    // derives — and it proves a reserve the vault state does not state. Two
+    // representations of one fact may not disagree, so the arm refuses even
+    // though nothing about the proof itself is malformed.
+    let fx = fixture();
+    let ow = owner();
+    let mut owner_tree = EconomicSmt::new();
+    let mut leg_a = fx.reserve_a.0.clone();
+    leg_a.amount += 1; // one unit more than V_n states
+    let leg_b = fx.reserve_b.0.clone();
+    for l in [&leg_a, &leg_b] {
+        let state = EconomicLeafState::VaultReserve(l.clone());
+        owner_tree.insert(
+            state.leaf_key(&ow.g, &ow.devid),
+            state.leaf_value().expect("leaf value"),
+        );
+    }
+    let (proof_bytes, proof_addr) = owner_proof(
+        &owner_tree,
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[leg_a.clone(), leg_b.clone()],
+    );
+    let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
+        exact_vault_state_ccb: fx.vn.encode().expect("vn encode"),
+        owner_authority_evidence: ow.authority_evidence.clone(),
+        economic_proof_addr: proof_addr.to_vec(),
+    };
+    let evidence_bytes = evidence.encode_to_vec();
+    let evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &evidence_bytes,
+    );
+    // The trader witness, singly sourced from the new evidence address.
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G_TRADER, &DEV_TRADER),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &fx.settle,
+        &G_TRADER,
+        &DEV_TRADER,
+        &[0xEE; 32],
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: OWNER_POSITION,
+            reserve_consumption_evidence_addr: evidence_addr,
+        },
+    )
+    .expect("builds");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        [0xEE; 32],
+        dsm::economic::faucet::dsm_operation_digest(&fx.settle.to_bytes()),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("witness");
+    let resolver = SettleResolver {
+        owner_root: owner_tree.root(),
+        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
+        slot_envelope: Some(fx.slot_envelope.clone()),
+    };
+    match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
+        Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
+            m.contains("disagree with V_n's reserves"),
+            "expected the disagreement refusal, got: {m}"
+        ),
+        other => panic!("expected the disagreement refusal, got {other:?}"),
     }
 }
 

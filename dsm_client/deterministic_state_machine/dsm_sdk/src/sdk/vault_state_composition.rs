@@ -145,6 +145,17 @@ pub(crate) struct ComposedVaultState {
     pub owner_devid: [u8; 32],
     pub owner_genesis: [u8; 32],
     pub owner_public_key: Vec<u8>,
+    /// `AuthorityEvidenceV1` bytes for this vault's owner, re-encoded from
+    /// the SAME six values the presentation just authenticated.
+    ///
+    /// Not a second owner-authority format and not a second authentication:
+    /// `AnchorPresentationV3` fields 4–9 ARE `AuthorityEvidenceV1` fields
+    /// 1–6, and `verify_anchor_presentation` resolved them through the same
+    /// resolver at the same position (`V_n.owner_authority_transition_digest`)
+    /// that `verify_authority_evidence` uses. Carried from here so a consumer
+    /// takes the bytes that were checked, rather than re-fetching an object
+    /// that could differ from the one this composition trusted.
+    pub owner_authority_evidence: Vec<u8>,
     /// `storage_set_id = H_dom(DSM/storage-set, CCB(S))` over the state's OWN
     /// storage-set member list — a derived view of a `V_n` field, never a
     /// second source. Consumers resolve it through their local catalog.
@@ -241,6 +252,21 @@ pub(crate) async fn compose_vault_state(
     // ── The baseline: one authenticated object. ──────────────────────────
     let verified = verify_anchor_presentation(presentation, vn_bytes)
         .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?;
+    // The authority half of the object just authenticated, in the shape a
+    // consumer of `verify_authority_evidence` takes. Same six values, same
+    // position, same resolver — see the field's doc.
+    let owner_authority_evidence = {
+        use prost::Message as _;
+        crate::generated::AuthorityEvidenceV1 {
+            genesis_params_ccb: presentation.genesis_params_ccb.clone(),
+            delegations: presentation.delegations.clone(),
+            transitions: presentation.transitions.clone(),
+            inclusion_proof: presentation.inclusion_proof.clone(),
+            ak_public_key: presentation.ak_public_key.clone(),
+            atta: presentation.atta.clone(),
+        }
+        .encode_to_vec()
+    };
     let baseline_state = verified.state;
     let baseline_c_n = verified.c_n;
     let owner = verified.owner;
@@ -580,6 +606,7 @@ pub(crate) async fn compose_vault_state(
         owner_devid: owner.device_id,
         owner_genesis: cursor_state.owner_genesis_id,
         owner_public_key: owner.ak_pk,
+        owner_authority_evidence,
         storage_set_id,
         c_n: cursor_c_n,
         folded_parents,
