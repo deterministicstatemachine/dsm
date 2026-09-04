@@ -45,7 +45,7 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
     let (outcome, admitted) = admitted_self_loop_operation(
         &core,
         burn_op(40),
-        burn_delta(40),
+        vec![burn_delta(40)],
         |_| {
             Ok((
                 dsm::economic::write_set::CreditSourceFacts::None,
@@ -113,7 +113,7 @@ async fn a_stale_admission_snapshot_is_refused_not_committed() {
     let err = core
         .faucet_claim_advance(
             burn_op(1),
-            &burn_delta(1),
+            std::slice::from_ref(&burn_delta(1)),
             stale,
             |_| unreachable!("build must not run for a refused admission"),
             &[0u8; 32],
@@ -183,7 +183,7 @@ async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
     let (_o, a2) = admitted_self_loop_operation(
         &core,
         burn_op(10),
-        burn_delta(10),
+        vec![burn_delta(10)],
         |_| {
             Ok((
                 dsm::economic::write_set::CreditSourceFacts::None,
@@ -198,7 +198,7 @@ async fn sequential_admissions_stay_monotonic_across_operation_kinds() {
     let (_o, a3) = admitted_self_loop_operation(
         &core,
         burn_op(20),
-        burn_delta(20),
+        vec![burn_delta(20)],
         |_| {
             Ok((
                 dsm::economic::write_set::CreditSourceFacts::None,
@@ -815,7 +815,7 @@ async fn a_failed_issuance_evidence_build_leaves_no_trace() {
     let refused = admitted_self_loop_operation(
         &core,
         mint,
-        delta,
+        vec![delta],
         |_| {
             Err(dsm::types::error::DsmError::invalid_operation(
                 "TEST: evidence construction failed",
@@ -986,7 +986,7 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
     // impossible, so finish dies AFTER the staged commit.
     crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
     crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
-    let refused = admitted_self_loop_operation(&core, mint, delta.clone(), facts, None).await;
+    let refused = admitted_self_loop_operation(&core, mint, vec![delta.clone()], facts, None).await;
     let seam_err = refused
         .as_ref()
         .err()

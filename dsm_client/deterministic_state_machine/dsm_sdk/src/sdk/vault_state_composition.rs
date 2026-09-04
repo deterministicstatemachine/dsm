@@ -156,6 +156,16 @@ pub(crate) struct ComposedVaultState {
     /// takes the bytes that were checked, rather than re-fetching an object
     /// that could differ from the one this composition trusted.
     pub owner_authority_evidence: Vec<u8>,
+    /// The advertisement's reserve-proof locator, when this composition came
+    /// from a discovered vault: the artifact's content address and the
+    /// economic position whose registered root it names.
+    ///
+    /// Untrusted, and only a locator. A consumer hands it to the verifier,
+    /// which resolves the position's root from the owner's own register cell
+    /// and re-derives every path — so a wrong value can only make a lookup
+    /// fail. `None` for an owner-side composition, which reads no
+    /// advertisement.
+    pub economic_proof: Option<([u8; 32], u64)>,
     /// `storage_set_id = H_dom(DSM/storage-set, CCB(S))` over the state's OWN
     /// storage-set member list — a derived view of a `V_n` field, never a
     /// second source. Consumers resolve it through their local catalog.
@@ -607,6 +617,9 @@ pub(crate) async fn compose_vault_state(
         owner_genesis: cursor_state.owner_genesis_id,
         owner_public_key: owner.ak_pk,
         owner_authority_evidence,
+        // Filled by `compose_discovered_vault`, which is the only path that
+        // reads an advertisement at all.
+        economic_proof: None,
         storage_set_id,
         c_n: cursor_c_n,
         folded_parents,
@@ -667,7 +680,7 @@ pub(crate) async fn compose_discovered_vault(
         .ok_or_else(|| {
             CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
         })?;
-    compose_vault_state(
+    let mut composed = compose_vault_state(
         vault_id,
         &presentation,
         &vn_bytes,
@@ -675,7 +688,14 @@ pub(crate) async fn compose_discovered_vault(
         token_b,
         fee_bps,
     )
-    .await
+    .await?;
+    // The locator the advertisement carried, passed through untouched. Both
+    // halves or neither: a 32-byte address is the only shape a consumer can
+    // use, and half a locator is not a smaller locator.
+    composed.economic_proof = <[u8; 32]>::try_from(ad.economic_proof_addr.as_slice())
+        .ok()
+        .map(|addr| (addr, ad.economic_proof_position));
+    Ok(composed)
 }
 
 #[cfg(test)]

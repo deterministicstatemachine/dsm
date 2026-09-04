@@ -1698,7 +1698,7 @@ impl AppRouterImpl {
                     match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
                         &self.core_sdk,
                         create_op,
-                        deltas[0].clone(),
+                        vec![deltas[0].clone()],
                         |_| {
                             Ok((
                                 dsm::economic::write_set::CreditSourceFacts::None,
@@ -2108,7 +2108,7 @@ impl AppRouterImpl {
         let outcome = match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
             &self.core_sdk,
             op,
-            delta,
+            vec![delta],
             // Runs once the TARGET POSITION is fixed — the same coordinate the
             // admission seam CAS-checks — and before anything durable. The
             // body binds this issuance to that write-once register cell and to
@@ -2261,7 +2261,7 @@ impl AppRouterImpl {
         let outcome = match crate::sdk::economic_admission_flow::admitted_self_loop_operation(
             &self.core_sdk,
             op,
-            deltas[0].clone(),
+            vec![deltas[0].clone()],
             |_| {
                 Ok((
                     dsm::economic::write_set::CreditSourceFacts::None,

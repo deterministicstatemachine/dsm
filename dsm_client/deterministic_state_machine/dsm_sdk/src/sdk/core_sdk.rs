@@ -292,7 +292,7 @@ impl CoreSDK {
     pub(crate) fn faucet_claim_advance(
         &self,
         operation: dsm::types::operations::Operation,
-        delta: &dsm::types::device_state::BalanceDelta,
+        deltas: &[dsm::types::device_state::BalanceDelta],
         prepared: dsm::economic::admission::PendingEconomicAdmission,
         build: impl FnOnce(
             &dsm::types::device_state::RelationshipChainState,
@@ -337,7 +337,7 @@ impl CoreSDK {
             rel_key,
             dev_id,
             operation,
-            std::slice::from_ref(delta),
+            deltas,
             Some(init_tip),
             None,
             None,

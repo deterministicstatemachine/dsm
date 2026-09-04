@@ -532,7 +532,7 @@ pub(crate) async fn stage_admission(
 pub(crate) async fn admitted_self_loop_operation(
     core: &CoreSDK,
     operation: Operation,
-    delta: dsm::types::device_state::BalanceDelta,
+    deltas: Vec<dsm::types::device_state::BalanceDelta>,
     facts_for_position: impl FnOnce(
         u64,
     ) -> Result<
@@ -564,7 +564,7 @@ pub(crate) async fn admitted_self_loop_operation(
     let mut built: Option<DsmAdmissionParts> = None;
     let (outcome, pending) = core.faucet_claim_advance(
         operation.clone(),
-        &delta,
+        &deltas,
         prepared,
         |chain_state| {
             let parts = build_dsm_admission(
