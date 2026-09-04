@@ -1247,6 +1247,38 @@ message SettlementPaymentEvidenceV1 {
   repeated bytes receipt_siblings = 2 [(dsm_fixed_len)=32];
 }
 
+// THE GENERIC ECONOMIC-INCLUSION PROOF — transport proto, no CCB class,
+// frozen under namespace DSM/economic-proof-artifact/v1.
+//
+// One artifact carries one publisher, ONE named economic position and root,
+// and one or more exact economic leaves each with its 256-sibling inclusion
+// path. Every leaf and every path in an artifact comes from the SAME
+// validated snapshot: a reader that recomputes them must derive the one
+// named root, so a mixed-snapshot artifact cannot verify.
+//
+// The artifact does not assert its own validity and carries no signature.
+// Authority over `economic_root` at `economic_position` belongs to the
+// publisher's write-once register cell, which a reader resolves
+// independently; this object only lets that reader see WHICH leaves that
+// root commits. Anything that points at an artifact — a routing
+// advertisement, an evidence descriptor — is a locator, never a warrant.
+message EconomicProofLeafV1 {
+  // Exact `EconomicLeafState` CCB bytes. The reader derives the leaf key
+  // from the state's own class and the publisher's coordinates, never from
+  // a supplied key.
+  bytes state_ccb         = 1 [(dsm_max_len)=4096];
+  // Exactly 256, leaf-to-root.
+  repeated bytes siblings = 2 [(dsm_fixed_len)=32];
+}
+
+message EconomicProofArtifactV1 {
+  bytes publisher_genesis  = 1 [(dsm_fixed_len)=32];
+  bytes publisher_devid    = 2 [(dsm_fixed_len)=32];
+  uint64 economic_position = 3;
+  bytes economic_root      = 4 [(dsm_fixed_len)=32];
+  repeated EconomicProofLeafV1 leaves = 5;
+}
+
 // Step 2: the 0x0029 (AuthorizedIssuance) evidence bundle — transport proto,
 // no CCB class, frozen at `issuance_authorization_addr` under namespace
 // DSM/issuance-authorization-evidence/v1.

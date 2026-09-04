@@ -6172,6 +6172,157 @@ mod funded_creation_tests {
         );
     }
 
+    /// THE TRANSPORT, END TO END, ON A REAL ADMISSION.
+    ///
+    /// A device's register cell publishes WHICH root it committed at a
+    /// position. It never published which leaves that root commits, so every
+    /// counterparty that must cite one — a trader proving these reserves —
+    /// had nothing to fetch. An admitted funded create now publishes an
+    /// inclusion proof for the externally citable leaves it wrote, and a
+    /// reader holding only the publisher's coordinates, position and root
+    /// recomputes them.
+    ///
+    /// What is proven here is the reader's side: the artifact is fetched by
+    /// content address, re-hashed to that address by the fetch, and then
+    /// every leaf key, commitment and path is recomputed against the root the
+    /// READER names. The address is a locator; naming a different position or
+    /// root refuses the same bytes.
+    #[test]
+    #[serial_test::serial]
+    fn an_admitted_create_publishes_an_inclusion_proof_a_stranger_can_verify() {
+        use prost::Message as _;
+
+        install_identity();
+        let owner_dev = participant("owner", 0x47);
+        let r = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(r, 20_000, 5_000);
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.create".to_string(),
+                args: pack(create.encode_to_vec()),
+            })
+            .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        // What a stranger would establish for itself from the register.
+        let validated =
+            crate::sdk::economic_admission_flow::validated_root_or_activate(&r.core_sdk)
+                .expect("the create admitted a root");
+        let head = r.core_sdk.device_head().expect("head");
+        let (genesis, devid) = (head.genesis(), head.devid());
+
+        // The artifact reached the fleet under its own namespace.
+        let published: Vec<Vec<u8>> = crate::sdk::storage_io::fake_fleet::put_log()
+            .into_iter()
+            .filter(|(_, key, _)| key.starts_with("immutable::DSM/economic-proof-artifact/v1::"))
+            .filter_map(|(_, key, _)| crate::sdk::storage_io::fake_fleet::any_member_holding(&key))
+            .collect();
+        assert!(
+            !published.is_empty(),
+            "the admitted create must publish an inclusion proof for the reserves it wrote"
+        );
+        let bytes = published.last().expect("one artifact").clone();
+        let addr = dsm::storage_object::immutable_inner(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &bytes,
+        );
+
+        // THE READER. Fetch by address, verify against coordinates it named.
+        let artifact = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::economic_registers::fetch_verified_economic_proof(
+                    &addr,
+                    &genesis,
+                    &devid,
+                    validated.economic_position(),
+                    &validated.economic_root(),
+                ),
+            )
+            .expect("a stranger verifies the artifact against the registered root");
+
+        // Both reserve legs are provable, at the create's vault generation.
+        let mut proven: Vec<([u8; 32], u64, u64)> = artifact
+            .states()
+            .filter_map(|s| match s {
+                dsm::economic::state::EconomicLeafState::VaultReserve(v) => {
+                    assert_eq!(v.vault_id, vault_id);
+                    Some((v.policy_commit, v.amount, v.vault_sequence))
+                }
+                _ => None,
+            })
+            .collect();
+        proven.sort();
+        let mut want = vec![(pc_a, 10_000u64, 0u64), (pc_b, 5_000u64, 0u64)];
+        want.sort();
+        assert_eq!(
+            proven, want,
+            "both reserve legs are provable at generation 0"
+        );
+
+        // Balance leaves are NOT carried: no evidence type asks a stranger to
+        // prove one, and each path would add 8 KiB to every admission.
+        assert!(
+            artifact
+                .states()
+                .all(|s| !matches!(s, dsm::economic::state::EconomicLeafState::Balance(_))),
+            "balance leaves are the device's own state and are deliberately not published"
+        );
+
+        // THE LOCATOR IS NOT A WARRANT. The same bytes, read at a position or
+        // a root the reader did not establish, are refused.
+        for (name, position, root) in [
+            (
+                "a position the reader did not establish",
+                validated.economic_position() + 1,
+                validated.economic_root(),
+            ),
+            (
+                "a root the reader did not establish",
+                validated.economic_position(),
+                [0x99u8; 32],
+            ),
+        ] {
+            let e = crate::runtime::get_runtime()
+                .block_on(
+                    crate::sdk::economic_registers::fetch_verified_economic_proof(
+                        &addr, &genesis, &devid, position, &root,
+                    ),
+                )
+                .expect_err(name);
+            assert!(
+                format!("{e}").contains("economic proof artifact"),
+                "{name}: {e}"
+            );
+        }
+    }
+
     /// One trader's full production settle against `vault_id` at generation
     /// `seq`, whose reserves the trader believes to be `(ra, rb)`: mirror the
     /// vault, bind a hop to `(seq, reserves_digest, anchor_digest)`, sign the

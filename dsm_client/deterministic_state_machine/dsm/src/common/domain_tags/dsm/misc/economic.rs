@@ -128,6 +128,15 @@ pub const TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: TaggedHashDomain
 /// witness). Transport proto — no CCB class.
 pub const TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-settlement-payment-evidence/v1");
+/// Immutable namespace for the GENERIC economic-inclusion proof
+/// (`EconomicProofArtifactV1`: a publisher, one named economic position and
+/// root, and one or more exact economic leaves with their 256-sibling paths).
+/// Transport proto — no CCB class. Distinct from the two semantic evidence
+/// namespaces above: those state WHY a credit is funded, this one only shows
+/// which leaves a validated root commits, and both directions of a settlement
+/// use the same object.
+pub const TAG_DSM_ECONOMIC_PROOF_ARTIFACT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-proof-artifact/v1");
 pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
 
