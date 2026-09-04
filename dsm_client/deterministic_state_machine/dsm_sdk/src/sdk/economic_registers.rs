@@ -790,6 +790,42 @@ pub(crate) fn economic_root_path(k_root: &[u8; 32]) -> String {
 /// The republish-sweep object key for an immutable blob:
 /// `immutable::{namespace}::{addr_b32}`. Same shape `dlv_routes` uses, so the
 /// one generic sweep carries faucet evidence too.
+/// Fetch an economic proof artifact by content address and verify it against
+/// coordinates the caller established INDEPENDENTLY — the publisher's
+/// write-once register cell at that position, read at quorum.
+///
+/// The address is a locator and nothing more. Wherever it came from (a
+/// routing advertisement, an evidence descriptor, a peer message) has no
+/// bearing on what the artifact proves: the bytes are re-hashed to the
+/// requested identity by the fetch, and then every leaf key, leaf commitment
+/// and inclusion path is recomputed against the root the CALLER named. An
+/// artifact naming any other publisher, position or root is refused.
+pub(crate) async fn fetch_verified_economic_proof(
+    inner_addr: &[u8; 32],
+    publisher_genesis: &[u8; 32],
+    publisher_devid: &[u8; 32],
+    position: u64,
+    root: &[u8; 32],
+) -> Result<dsm::economic::proof_artifact::EconomicProofArtifact, DsmError> {
+    let payload = crate::sdk::storage_io::fetch_immutable_payload(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+        inner_addr,
+    )
+    .await?
+    .ok_or_else(|| {
+        DsmError::storage(
+            "economic proof artifact is not published".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    let artifact = dsm::economic::proof_artifact::decode_economic_proof_artifact(&payload)
+        .map_err(|e| DsmError::verification(format!("economic proof artifact: {e}")))?;
+    artifact
+        .verify_against(publisher_genesis, publisher_devid, position, root)
+        .map_err(|e| DsmError::verification(format!("economic proof artifact: {e}")))?;
+    Ok(artifact)
+}
+
 pub(crate) fn immutable_object_key(
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
     payload: &[u8],
