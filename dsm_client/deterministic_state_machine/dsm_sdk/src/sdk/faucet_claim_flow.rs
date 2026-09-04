@@ -191,7 +191,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
     let mut built = None;
     let (_outcome, pending) = core.faucet_claim_advance(
         op.clone(),
-        &delta,
+        std::slice::from_ref(&delta),
         prepared,
         |chain_state| {
             let parts = build_dsm_admission(
