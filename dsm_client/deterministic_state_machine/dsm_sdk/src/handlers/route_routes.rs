@@ -557,17 +557,17 @@ impl AppRouterImpl {
             }
         }
 
-        // THE ADVERTISED POLICY DIGEST COMES FROM THE RECORD, NOT THE REQUEST.
-        // The record's `policy_digest` is the DLV-policy digest `dlv.create`
+        // THE ADVERTISED AMM DLV-POLICY DIGEST COMES FROM THE RECORD, NOT THE REQUEST.
+        // The record's `policy_digest` is the AMM DLV-policy digest `dlv.create`
         // derived and signed; a caller may leave the field empty or repeat that
         // value, but the ad never carries a digest the vault does not have.
         let unlock_digest: [u8; 32] = record.policy_digest;
         if !req.unlock_spec_digest.is_empty() && req.unlock_spec_digest.as_slice() != unlock_digest
         {
             return err(
-                "route.publishRoutingAdvertisement: unlock_spec_digest is not this vault's \
-                 DLV-policy digest — it is derived from the vault record, never chosen; leave it \
-                 empty or supply the record's value"
+                    "route.publishRoutingAdvertisement: unlock_spec_digest is not this AMM vault's \
+                     DLV-policy digest — it is derived from the vault record, never chosen; leave it \
+                     empty or supply the record's value"
                     .into(),
             );
         }
@@ -1724,14 +1724,15 @@ mod stamping_tests {
     ///
     /// So: publish through the route, then read the same pair BOTH ways, and
     /// require the records to be identical.
-    /// THE ADVERTISED POLICY DIGEST IS THE RECORD'S, NEVER THE REQUEST'S. An
-    /// empty request field is filled from the record — the DLV-policy digest
-    /// `dlv.create` derived and signed; a request naming any other digest is
-    /// refused by name; a request repeating the record's value is accepted
-    /// (the positive control).
+    /// THE ADVERTISED AMM DLV-POLICY DIGEST IS THE RECORD'S, NEVER THE
+    /// REQUEST'S. An
+    /// empty request field is filled from the record — the AMM DLV-policy
+    /// digest `dlv.create` derived and signed; a request naming any other
+    /// digest is refused by name; a request repeating the record's value is
+    /// accepted (the positive control).
     #[test]
     #[serial]
-    fn the_advertised_policy_digest_is_the_records_never_the_requests() {
+    fn the_advertised_amm_policy_digest_is_the_records_never_the_requests() {
         use crate::bridge::{AppInvoke, AppRouter};
         let (r, _fleet) = funded_router();
         let a = crate::economic_fixtures::mint_asset(&r, "AAA", 0, 50_000);
@@ -1776,7 +1777,7 @@ mod stamping_tests {
         assert!(!res.success, "a chosen unlock_spec_digest must be refused");
         let msg = res.error_message.unwrap_or_default();
         assert!(
-            msg.contains("not this vault's DLV-policy digest"),
+            msg.contains("not this AMM vault's DLV-policy digest"),
             "the refusal names the derivation, got: {msg}"
         );
 

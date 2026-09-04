@@ -68,7 +68,6 @@ impl DLVManager {
 
     /// Prepare a secret-free vault draft.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn prepare_vault(
         &self,
         creator_public_key: &[u8],
