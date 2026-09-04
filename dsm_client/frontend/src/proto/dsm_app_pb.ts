@@ -8652,24 +8652,15 @@ export class ReserveConsumptionEvidenceV1 extends Message<ReserveConsumptionEvid
   ownerAuthorityEvidence = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes reserve_a_state = 3;
+   * Inner content identity of the owner's `EconomicProofArtifactV1` — the
+   * same addressing every object in the evidence DAG uses. The arm fetches
+   * it, re-hashes it to this address, and verifies it against the owner,
+   * position and root the arm itself derived; this field locates the proof
+   * and confers nothing.
+   *
+   * @generated from field: bytes economic_proof_addr = 7;
    */
-  reserveAState = new Uint8Array(0);
-
-  /**
-   * @generated from field: repeated bytes reserve_a_siblings = 4;
-   */
-  reserveASiblings: Uint8Array[] = [];
-
-  /**
-   * @generated from field: bytes reserve_b_state = 5;
-   */
-  reserveBState = new Uint8Array(0);
-
-  /**
-   * @generated from field: repeated bytes reserve_b_siblings = 6;
-   */
-  reserveBSiblings: Uint8Array[] = [];
+  economicProofAddr = new Uint8Array(0);
 
   constructor(data?: PartialMessage<ReserveConsumptionEvidenceV1>) {
     super();
@@ -8681,10 +8672,7 @@ export class ReserveConsumptionEvidenceV1 extends Message<ReserveConsumptionEvid
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "exact_vault_state_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "owner_authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "reserve_a_state", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "reserve_a_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
-    { no: 5, name: "reserve_b_state", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "reserve_b_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 7, name: "economic_proof_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReserveConsumptionEvidenceV1 {
