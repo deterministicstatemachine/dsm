@@ -1235,10 +1235,19 @@ message SignedAuthorityObjectV1 {
 message ReserveConsumptionEvidenceV1 {
   bytes exact_vault_state_ccb       = 1 [(dsm_max_len)=65535];
   bytes owner_authority_evidence    = 2 [(dsm_max_len)=1048576];
-  bytes reserve_a_state             = 3 [(dsm_max_len)=4096];
-  repeated bytes reserve_a_siblings = 4 [(dsm_fixed_len)=32];
-  bytes reserve_b_state             = 5 [(dsm_max_len)=4096];
-  repeated bytes reserve_b_siblings = 6 [(dsm_fixed_len)=32];
+  // The reserve leaves and their inclusion paths used to be carried here, a
+  // second representation of what the generic `EconomicProofArtifactV1`
+  // already proves. The bundle now NAMES that artifact instead, so there is
+  // one proof source for both directions of a settlement and no way for two
+  // copies to disagree.
+  reserved 3, 4, 5, 6;
+  reserved "reserve_a_state", "reserve_a_siblings", "reserve_b_state", "reserve_b_siblings";
+  // Inner content identity of the owner's `EconomicProofArtifactV1` — the
+  // same addressing every object in the evidence DAG uses. The arm fetches
+  // it, re-hashes it to this address, and verifies it against the owner,
+  // position and root the arm itself derived; this field locates the proof
+  // and confers nothing.
+  bytes economic_proof_addr         = 7 [(dsm_fixed_len)=32];
 }
 
 // 3.6 PR4: the 0x0027 (ValidatedDlvSettlementPayment) evidence bundle —

@@ -100,6 +100,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   position can only make a lookup fail, never make one succeed against a root
   the owner did not register.
 
+### Changed
+
+- **The 0x0026 reserve-consumption evidence bundle names the generic proof
+  artifact instead of carrying its own leaves.**
+  `ReserveConsumptionEvidenceV1` dropped `reserve_a_state`,
+  `reserve_a_siblings`, `reserve_b_state` and `reserve_b_siblings` (fields 3–6,
+  now reserved) in favour of `economic_proof_addr`. The verifier fetches that
+  artifact, re-hashes it to the named address, verifies it against the owner,
+  economic position and validated root the verifier itself derived, and then
+  selects exactly the two reserve leaves for this vault at this generation.
+
+  Carrying the leaves in the bundle was a second representation of what the
+  artifact already proves, and two representations of one fact can disagree.
+  No migration is needed and no state is affected: nothing had ever produced
+  one of these bundles, so none exist.
+
 ---
 
 ## [0.1.0-beta.3] — 2026-04-22

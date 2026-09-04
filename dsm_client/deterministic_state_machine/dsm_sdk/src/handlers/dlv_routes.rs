@@ -6538,6 +6538,415 @@ mod funded_creation_tests {
         }
     }
 
+    /// THE 0x0026 BUNDLE, BUILT BY A TRADER AND ACCEPTED BY THE PRODUCTION
+    /// VERIFIER.
+    ///
+    /// Everything the bundle needs comes from material the trader
+    /// authenticated for itself: `CCB(V_n)` re-encoded from the composition
+    /// whose commitment the settle names, the owner's authority evidence as
+    /// the composition's own anchor presentation resolved it, and the address
+    /// of the owner's generic proof artifact located through the
+    /// advertisement. The bundle carries NO leaves of its own — the artifact
+    /// is the one proof source — and the verifier fetches it, re-hashes it,
+    /// and checks it against the owner, position and root the verifier
+    /// derived.
+    ///
+    /// The credit is then driven through the REAL write-set builder from the
+    /// trader's REAL admitted pre-state, so the producer is not a helper
+    /// nothing consumes.
+    ///
+    /// The mutation arms each break a different binding, and each must fail
+    /// for its own reason: the artifact address, the economic position, the
+    /// reserve generation, the vault identity, and the owner authority.
+    #[test]
+    #[serial]
+    fn a_trader_builds_a_reserve_consumption_bundle_the_production_verifier_accepts() {
+        use dsm::economic::provenance::{verify_transition_provenance, ProvenanceContext};
+        use dsm::economic::witness::EconomicTransitionWitness;
+        use dsm::economic::write_set::{build_write_set, CreditSourceFacts};
+        use prost::Message as _;
+
+        install_identity();
+        let owner_dev = participant("owner", 0x4B);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: "sofi/spec/0026".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // ── TRADER: own device, own database, no record of this vault ───────
+        let trader_dev = participant("trader", 0x5B);
+        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        assert!(
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .is_none(),
+            "the trader holds no record of the owner's vault"
+        );
+        let res = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "route.syncVaultsForPair".to_string(),
+                    args: pack(
+                        generated::RoutingPairRequest {
+                            token_a: pc_a.to_vec(),
+                            token_b: pc_b.to_vec(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        });
+        assert!(res.success, "sync failed: {:?}", res.error_message);
+
+        // The vault, composed from storage; and the locator, from the ad.
+        let composed = composed_frontier(&vault_id, &pc_a, &pc_b);
+        let ads = crate::runtime::get_runtime()
+            .block_on(crate::sdk::routing_sdk::load_all_advertisements_for_pair(
+                &pc_a, &pc_b,
+            ))
+            .expect("ads load");
+        let ad = ads
+            .into_iter()
+            .find(|a| a.advertisement.vault_id == vault_id.to_vec())
+            .expect("the trader finds the vault through storage alone")
+            .advertisement;
+        let proof_addr: [u8; 32] = ad
+            .economic_proof_addr
+            .as_slice()
+            .try_into()
+            .expect("the ad carries the locator");
+        let owner_position = ad.economic_proof_position;
+
+        // THE BUNDLE.
+        let bundle = crate::sdk::reserve_consumption_producer::build_reserve_consumption_bundle(
+            &composed,
+            &proof_addr,
+        )
+        .expect("the trader builds the 0x0026 bundle");
+        let network_id =
+            crate::sdk::economic_admission_flow::committed_network_id().expect("network id");
+        let set = crate::sdk::economic_admission_flow::canonical_set(&network_id).expect("set");
+        let publish_immutable =
+            |bytes: &[u8], tag: dsm::crypto::domain::TaggedHashDomain<'static>| {
+                let outer = dsm::storage_object::immutable_addr(tag, bytes);
+                let ns = String::from_utf8_lossy(tag.source_bytes()).to_string();
+                let b32 = crate::util::text_id::encode_base32_crockford(&outer);
+                crate::runtime::get_runtime()
+                    .block_on(crate::sdk::storage_io::put_immutable_to_all_members(
+                        &set, &ns, bytes, &b32,
+                    ))
+                    .expect("publish immutable");
+            };
+        publish_immutable(
+            &bundle.bytes,
+            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        );
+
+        // The trade, signed for real: a RouteCommit bound to the composed
+        // parent, its external commitment published, and the settlement slot
+        // claimed through the production first-writer register.
+        let input: u64 = 1_000;
+        let output = crate::sdk::routing_path_sdk::constant_product_output(
+            input,
+            composed.reserves_a,
+            composed.reserves_b,
+            30,
+        )
+        .expect("curve");
+        let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
+        let trader_pk = trader_dev.ak_pk.clone();
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x26; 32],
+            total_fee_bps: 30,
+            initiator_public_key: trader_pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (output as u128).to_be_bytes().to_vec(),
+                fee_bps: 30,
+                parent_binding: composed.c_n.to_vec(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&trader_sk, &canonical).expect("sign rc");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &trader_pk,
+                    &trader_sk,
+                    "0026-bundle",
+                ),
+            )
+            .expect("publish anchor + pointers");
+        // The slot, through the production first-writer path: the envelope is
+        // frozen and persisted locally, then submitted — no hand-signed claim.
+        let frozen = crate::sdk::settlement_slot::frozen_claim_envelope(
+            &vault_id,
+            composed.sequence,
+            &x,
+            &composed.storage_set_id,
+            &composed.c_n,
+        )
+        .expect("freeze the slot claim");
+        crate::runtime::get_runtime()
+            .block_on(crate::sdk::settlement_slot::claim_settlement_slot(
+                &set,
+                &frozen,
+                &vault_id,
+                composed.sequence,
+                &x,
+            ))
+            .expect("claim the settlement slot");
+
+        let settle = {
+            let unsigned = dsm::types::operations::Operation::DlvSettle {
+                vault_id: vault_id.to_vec(),
+                owner_public_key: composed.owner_public_key.clone(),
+                owner_devid: composed.owner_devid,
+                owner_genesis: composed.owner_genesis,
+                input_policy_commit: pc_a,
+                output_policy_commit: pc_b,
+                parent_sequence: composed.sequence,
+                parent_binding: composed.c_n,
+                route_commit_bytes: rc.encode_to_vec(),
+                external_commitment_x: x,
+                input_amount: input,
+                output_amount: output,
+                fee_bps: 30,
+                sigma: [0u8; 32],
+                settler_public_key: trader_pk.clone(),
+                settler_devid: trader_dev.device_id,
+                settlement_receipt_id: dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
+                    &vault_id, &x,
+                ),
+                signature: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            };
+            trader
+                .core_sdk
+                .sign_operation_sphincs(unsigned)
+                .expect("sign the settle")
+        };
+
+        // ── THE REAL WRITE-SET BUILDER, from the REAL admitted pre-state ────
+        let validated =
+            crate::sdk::economic_admission_flow::validated_root_or_activate(&trader.core_sdk)
+                .expect("the trader has an admitted root");
+        let head = trader.core_sdk.device_head().expect("head");
+        let (g, d) = (head.genesis(), head.devid());
+        let facts = |addr: [u8; 32], position: u64| CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: position,
+            reserve_consumption_evidence_addr: addr,
+        };
+        let build = |addr: [u8; 32], position: u64| {
+            let (mut tree, pre) =
+                crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated)
+                    .expect("producer pre-state");
+            let pre_root = tree.root();
+            let built = build_write_set(
+                &settle,
+                &g,
+                &d,
+                &[0x26; 32],
+                &pre.as_write_set_pre_state(),
+                &mut tree,
+                &facts(addr, position),
+            )
+            .expect("the settle write set builds from the trader's admitted pre-state");
+            EconomicTransitionWitness::new(
+                pre_root,
+                built.post_root,
+                [0x26; 32],
+                dsm::economic::faucet::dsm_operation_digest(&settle.to_bytes()),
+                built.mutations,
+                built.credit_sources,
+            )
+            .expect("witness")
+        };
+
+        // ── THE PRODUCTION VERIFIER ─────────────────────────────────────────
+        // One runtime context for the whole verification: the live resolver
+        // reads registers and immutable objects through it, so the resolver,
+        // every publish and every verify happen inside it rather than nesting
+        // block_on calls.
+        let ns_evidence = String::from_utf8_lossy(
+            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE.source_bytes(),
+        )
+        .to_string();
+        crate::runtime::get_runtime().block_on(async {
+            let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+                set: &set,
+                runtime: tokio::runtime::Handle::current(),
+                expected_network_id: network_id.clone(),
+            };
+            let ctx = ProvenanceContext {
+                genesis: &g,
+                device_id: &d,
+                economic_position: validated.economic_position() + 1,
+                network_id: &network_id,
+                proven_ak: &trader_pk,
+                canonical_storage_set_id: set.id(),
+                substrate_b_pair: None,
+                verified_operation: Some(&settle),
+            };
+            let verify = |w: &EconomicTransitionWitness| {
+                tokio::task::block_in_place(|| verify_transition_provenance(w, &resolver, &ctx))
+                    .map_err(|e| format!("{e:?}"))
+            };
+            let funded = verify(&build(bundle.addr, owner_position))
+                .expect("the production 0x0026 verifier accepts the trader-built bundle");
+            assert_eq!(funded.len(), 1, "exactly one funded credit");
+            assert_eq!(funded[0].policy_commit, pc_b);
+            assert_eq!(funded[0].amount, output);
+
+            // Publish a variant bundle and return the address that names it.
+            let publish_variant = |bytes: Vec<u8>| {
+                let ns = ns_evidence.clone();
+                let set = &set;
+                async move {
+                    let outer = dsm::storage_object::immutable_addr(
+                        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+                        &bytes,
+                    );
+                    let b32 = crate::util::text_id::encode_base32_crockford(&outer);
+                    crate::sdk::storage_io::put_immutable_to_all_members(set, &ns, &bytes, &b32)
+                        .await
+                        .expect("publish variant");
+                    dsm::storage_object::immutable_inner(
+                        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+                        &bytes,
+                    )
+                }
+            };
+            let decoded = |b: &[u8]| {
+                generated::ReserveConsumptionEvidenceV1::decode(b).expect("bundle decodes")
+            };
+
+            // ── MUTATION ARMS, each breaking a different binding ────────────
+            // (1) the artifact address: a bundle naming another proof.
+            let mut b = decoded(&bundle.bytes);
+            b.economic_proof_addr = vec![0x99; 32];
+            let addr = publish_variant(b.encode_to_vec()).await;
+            let e = verify(&build(addr, owner_position)).expect_err("another artifact");
+            assert!(
+                e.contains("immutable object not found"),
+                "arm 1 must fail because the named proof does not exist, got: {e}"
+            );
+
+            // (2) the economic position: the right artifact, wrong position.
+            let e = verify(&build(bundle.addr, owner_position + 1)).expect_err("position");
+            assert!(
+                e.contains("names economic position"),
+                "arm 2 must fail on the artifact's own position binding, got: {e}"
+            );
+
+            // (3) the owner authority.
+            let mut b = decoded(&bundle.bytes);
+            b.owner_authority_evidence = Vec::new();
+            let addr = publish_variant(b.encode_to_vec()).await;
+            let e = verify(&build(addr, owner_position)).expect_err("authority");
+            assert!(
+                e.contains("vault-bound owner authority"),
+                "arm 3 must fail on the owner's authority evidence, got: {e}"
+            );
+
+            // (4) the vault identity and (5) the reserve generation. Both stop
+            // hashing to the settle's parent_binding, which is the binding
+            // that makes a valid proof of some OTHER state useless here.
+            for (name, mutate) in [
+                (
+                    "another vault",
+                    Box::new(|v: &mut dsm::ccb::VaultStateV2| v.vault_id = [0x77; 32])
+                        as Box<dyn Fn(&mut dsm::ccb::VaultStateV2)>,
+                ),
+                (
+                    "another generation",
+                    Box::new(|v: &mut dsm::ccb::VaultStateV2| v.generation += 1),
+                ),
+            ] {
+                let mut vn = composed.state.clone();
+                mutate(&mut vn);
+                let mut b = decoded(&bundle.bytes);
+                b.exact_vault_state_ccb = vn.encode().expect("encode");
+                let addr = publish_variant(b.encode_to_vec()).await;
+                let e = verify(&build(addr, owner_position)).expect_err(name);
+                assert!(
+                    e.contains("does not hash to the settle's parent binding"),
+                    "the {name} arm must fail on the parent binding, got: {e}"
+                );
+            }
+
+            // The honest bundle still funds, so every refusal above is the
+            // mutation and not the setup decaying.
+            assert!(verify(&build(bundle.addr, owner_position)).is_ok());
+        });
+    }
+
     /// One trader's full production settle against `vault_id` at generation
     /// `seq`, whose reserves the trader believes to be `(ra, rb)`: mirror the
     /// vault, bind a hop to `(seq, reserves_digest, anchor_digest)`, sign the

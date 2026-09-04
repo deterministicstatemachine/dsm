@@ -2,14 +2,19 @@
 
 //! The 0x0026 evidence bundle: strict decode of `ReserveConsumptionEvidenceV1`
 //! (transport proto, no CCB class — the faucet-claim/settlement-slot
-//! precedent). The bundle carries INCLUSION MATERIAL, not conclusions: the
-//! verifier re-hashes `CCB(V_n)` against the settle's `parent_binding`,
-//! replays the owner's vault-bound authority evidence, and proves both
-//! reserve pre-leaves against the independently derived
-//! `ValidatedEconomicRoot(owner_economic_position)`.
+//! precedent).
+//!
+//! The bundle carries the material only the OWNER's side can supply, and it
+//! carries no proof of its own. Two of the three fields are exact bytes the
+//! arm re-hashes; the third NAMES the owner's generic
+//! `EconomicProofArtifactV1`, which the arm fetches and verifies against the
+//! owner, economic position and validated root it derived for itself.
+//!
+//! The reserve leaves and their 256-sibling paths used to live here. Carrying
+//! them was a second representation of a fact the artifact already proves, and
+//! two representations of one fact can disagree; the bundle now points at the
+//! one proof source both directions of a settlement share.
 
-use crate::economic::state::{EconomicLeafState, EconomicVaultReserveState};
-use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::types::proto as generated;
 use prost::Message;
 
@@ -23,14 +28,12 @@ pub struct ReserveConsumptionEvidence {
     /// `AuthorityEvidenceV1` bytes for the owner at the VAULT-BOUND
     /// authority position (`V_n.owner_authority_transition_digest`).
     pub owner_authority_evidence: Vec<u8>,
-    pub reserve_a: EconomicVaultReserveState,
-    pub reserve_a_siblings: Box<[[u8; 32]; ECONOMIC_SMT_HEIGHT]>,
-    pub reserve_b: EconomicVaultReserveState,
-    pub reserve_b_siblings: Box<[[u8; 32]; ECONOMIC_SMT_HEIGHT]>,
+    /// Inner content identity of the owner's `EconomicProofArtifactV1`, which
+    /// proves the vault's reserve leaves under the owner's registered root.
+    pub economic_proof_addr: [u8; 32],
 }
 
-/// Strict decode: canonical re-encode equality, exactly 256 fixed 32-byte
-/// siblings per leg, both leaf states decode as vault reserves.
+/// Strict decode: canonical re-encode equality, a 32-byte proof address.
 pub fn decode_reserve_consumption_evidence(
     bytes: &[u8],
 ) -> Result<ReserveConsumptionEvidence, String> {
@@ -42,36 +45,16 @@ pub fn decode_reserve_consumption_evidence(
     if ev.encode_to_vec() != bytes {
         return Err("evidence bundle is not canonical".into());
     }
-    let siblings =
-        |v: &[Vec<u8>], leg: &str| -> Result<Box<[[u8; 32]; ECONOMIC_SMT_HEIGHT]>, String> {
-            if v.len() != ECONOMIC_SMT_HEIGHT {
-                return Err(format!(
-                "reserve {leg} witness must carry exactly {ECONOMIC_SMT_HEIGHT} siblings, got {}",
-                v.len()
-            ));
-            }
-            let mut out = Box::new([[0u8; 32]; ECONOMIC_SMT_HEIGHT]);
-            for (i, s) in v.iter().enumerate() {
-                out[i] = s
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| format!("reserve {leg} sibling {i} is not 32 bytes"))?;
-            }
-            Ok(out)
-        };
-    let reserve = |bytes: &[u8], leg: &str| -> Result<EconomicVaultReserveState, String> {
-        match crate::economic::decode::decode_leaf_state(bytes) {
-            Ok(EconomicLeafState::VaultReserve(r)) => Ok(r),
-            Ok(_) => Err(format!("reserve {leg} state is not a vault-reserve leaf")),
-            Err(e) => Err(format!("reserve {leg} state: {e}")),
-        }
-    };
+    let economic_proof_addr: [u8; 32] =
+        ev.economic_proof_addr.as_slice().try_into().map_err(|_| {
+            format!(
+                "the economic proof address must be 32 bytes, got {}",
+                ev.economic_proof_addr.len()
+            )
+        })?;
     Ok(ReserveConsumptionEvidence {
         exact_vault_state_ccb: ev.exact_vault_state_ccb.clone(),
         owner_authority_evidence: ev.owner_authority_evidence.clone(),
-        reserve_a: reserve(&ev.reserve_a_state, "a")?,
-        reserve_a_siblings: siblings(&ev.reserve_a_siblings, "a")?,
-        reserve_b: reserve(&ev.reserve_b_state, "b")?,
-        reserve_b_siblings: siblings(&ev.reserve_b_siblings, "b")?,
+        economic_proof_addr,
     })
 }

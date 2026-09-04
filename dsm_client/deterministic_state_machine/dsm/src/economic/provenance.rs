@@ -1077,37 +1077,69 @@ pub fn verify_credit_source(
                 .validated_peer_transition(owner_genesis, owner_devid, d.owner_economic_position)
                 .map_err(ProvenanceError::OwnerLineage)?;
             let owner_root = owner.validated_root.economic_root();
-            // Both reserve pre-leaves proven INCLUDED under the owner's root.
-            let reserve_of = |leg: &crate::economic::state::EconomicVaultReserveState,
-                              siblings: &[[u8; 32]; crate::economic::tree::ECONOMIC_SMT_HEIGHT]|
-             -> Result<([u8; 32], u64), ProvenanceError> {
-                if leg.vault_id != vault || leg.vault_sequence != *parent_sequence {
-                    return Err(invalid(
-                        "a carried reserve leaf names a different vault or generation".into(),
-                    ));
-                }
-                let state = crate::economic::state::EconomicLeafState::VaultReserve(leg.clone());
-                let key = state.leaf_key(owner_genesis, owner_devid);
-                let value = state
-                    .leaf_value()
-                    .map_err(|e| invalid(format!("reserve leaf value: {e}")))?;
-                let derived = crate::economic::tree::root_from_path(
-                    &key,
-                    &crate::economic::tree::leaf_node(&key, Some(&value)),
-                    siblings,
-                );
-                if derived != owner_root {
-                    return Err(invalid(
-                        "a reserve leaf does not prove into the owner's validated root".into(),
-                    ));
-                }
-                Ok((leg.policy_commit, leg.amount))
-            };
-            let (pc_a, amount_a) = reserve_of(&ev.reserve_a, &ev.reserve_a_siblings)?;
-            let (pc_b, amount_b) = reserve_of(&ev.reserve_b, &ev.reserve_b_siblings)?;
+            // THE PROOF SOURCE IS THE GENERIC ARTIFACT — one object, shared
+            // by both directions of a settlement, rather than a second copy
+            // of the same leaves inside this bundle. Fetched by the INNER
+            // content identity like every object in this DAG, re-hashed to
+            // the address the bundle names, and then verified against the
+            // owner, position and root THIS ARM derived. Nothing a locator
+            // said is an input to that check.
+            let proof_bytes = resolver
+                .immutable_evidence(
+                    crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+                    &ev.economic_proof_addr,
+                )
+                .map_err(ProvenanceError::OwnerLineage)?;
+            if crate::storage_object::immutable_inner(
+                crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+                &proof_bytes,
+            ) != ev.economic_proof_addr
+            {
+                return Err(invalid(
+                    "economic proof bytes do not hash to the bundle's address".into(),
+                ));
+            }
+            let artifact =
+                crate::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
+                    .map_err(invalid)?;
+            artifact
+                .verify_against(
+                    owner_genesis,
+                    owner_devid,
+                    d.owner_economic_position,
+                    &owner_root,
+                )
+                .map_err(invalid)?;
+            // EXACTLY the two leaves this settlement consumes: this vault, at
+            // the generation it names. An artifact proving a different
+            // generation, or another vault of the same owner, is a valid proof
+            // of something else — it says nothing about this trade, so the
+            // selection is an equality on both coordinates and a count, never
+            // a search for something usable.
+            let mut legs: Vec<&crate::economic::state::EconomicVaultReserveState> = artifact
+                .states()
+                .filter_map(|s| match s {
+                    crate::economic::state::EconomicLeafState::VaultReserve(v)
+                        if v.vault_id == vault && v.vault_sequence == *parent_sequence =>
+                    {
+                        Some(v)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if legs.len() != 2 {
+                return Err(invalid(format!(
+                    "the owner's proof carries {} reserve leaves for this vault at generation \
+                     {parent_sequence}, not the pair this settlement consumes",
+                    legs.len()
+                )));
+            }
+            legs.sort_by_key(|l| l.policy_commit);
+            let (pc_a, amount_a) = (legs[0].policy_commit, legs[0].amount);
+            let (pc_b, amount_b) = (legs[1].policy_commit, legs[1].amount);
             if pc_a != *lo || pc_b != *hi {
                 return Err(invalid(
-                    "the carried reserve legs are not V_n's pair in canonical order".into(),
+                    "the proven reserve legs are not V_n's pair in canonical order".into(),
                 ));
             }
             // The PROVEN leaves must equal V_n's own reserve statement — the
