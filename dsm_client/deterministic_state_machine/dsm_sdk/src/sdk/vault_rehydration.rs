@@ -511,6 +511,7 @@ mod tests {
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
             vault_post_proto: Vec::new(),
+            economic_proof: None,
         };
         (record, head)
     }
@@ -872,6 +873,7 @@ mod tests {
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
             vault_post_proto: Vec::new(),
+            economic_proof: None,
         };
         assert_eq!(
             rehydrate_amm_vault(&record, &head),

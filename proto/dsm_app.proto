@@ -1866,6 +1866,19 @@ message RoutingVaultAdvertisementV1 {
   // P0–P6 and the c_n it carries resolves the exact `CCB(V_n)` bytes. A
   // trader quotes against NOTHING from this ad — reserves here are hints.
   bytes  anchor_presentation_digest = 19 [(dsm_fixed_len)=32];
+  // WHERE THE OWNER'S RESERVE PROOF LIVES: the content address of the
+  // `EconomicProofArtifactV1` published by the admission that wrote this
+  // vault's reserve leaves, and the economic position whose registered root
+  // it names.
+  //
+  // A LOCATOR, on an ad that authenticates nothing and is unsigned. A reader
+  // resolves the position's root from the owner's own write-once register
+  // cell and re-derives every inclusion path against it, so a wrong address
+  // or position here can only make the lookup FAIL — never succeed against a
+  // root the owner did not register — and the reserve amounts it yields are
+  // re-checked against the composed `V_n` afterwards.
+  bytes  economic_proof_addr      = 15 [(dsm_fixed_len)=32];
+  uint64 economic_proof_position  = 16;
 }
 
 // Typed request for `dlv.unlockRouted` — the routed atomic-unlock

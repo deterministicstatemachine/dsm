@@ -607,6 +607,12 @@ impl AppRouterImpl {
             owner_public_key: &req.owner_public_key,
             vault_proto_bytes: &req.vault_proto_bytes,
             anchor_presentation_digest: presentation_digest,
+            // THE RESERVE-PROOF LOCATOR, from the vault's own record — the
+            // same place the policy digest and the baseline come from, and
+            // never from the request. The ad authenticates nothing, so this
+            // only tells a trader WHERE to look; what it finds is checked
+            // against the owner's registered root, not against this ad.
+            economic_proof: record.economic_proof.map(|l| (l.addr, l.position)),
         };
         if let Err(e) = crate::sdk::routing_sdk::publish_active_advertisement(publish_input).await {
             return err(format!(

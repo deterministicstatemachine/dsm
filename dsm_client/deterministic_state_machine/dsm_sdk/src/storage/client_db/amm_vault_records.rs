@@ -75,6 +75,23 @@ pub struct AmmVaultRecord {
     /// publishing survives a restart without consulting the in-memory
     /// DLVManager. Empty means the producer never ran; consumers fail closed.
     pub vault_post_proto: Vec<u8>,
+    /// WHERE THIS VAULT'S RESERVE PROOF LIVES — the content address of the
+    /// `EconomicProofArtifactV1` the admitted create published, and the
+    /// economic position whose registered root it names.
+    ///
+    /// A LOCATOR, on the way in and on the way out. A reader resolves the
+    /// position's root from the publisher's own register cell and re-derives
+    /// every inclusion path, so a wrong address or position here can only make
+    /// a lookup fail; it can never make one succeed against a root the owner
+    /// did not register. `None` when the create published no artifact.
+    pub economic_proof: Option<EconomicProofLocator>,
+}
+
+/// The two halves of a reserve-proof locator; only ever present together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EconomicProofLocator {
+    pub addr: [u8; 32],
+    pub position: u64,
 }
 
 /// TEST-ONLY full-row writer.
@@ -142,6 +159,38 @@ pub fn update_baseline_with_conn(
     Ok(())
 }
 
+/// Stamp this vault's reserve-proof locator onto its record. Runs once, at
+/// `dlv.create`, after the admitted create published the artifact — the
+/// earliest point at which both halves exist. Refuses a zero address so an
+/// absent locator can never be written as a present one.
+pub fn update_economic_proof_locator(
+    vault_id: &[u8; 32],
+    locator: &EconomicProofLocator,
+) -> Result<()> {
+    if locator.addr == [0u8; 32] {
+        anyhow::bail!("refusing to stamp a zero economic-proof address");
+    }
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in update_economic_proof_locator, recovering");
+        poisoned.into_inner()
+    });
+    let changed = conn.execute(
+        "UPDATE amm_vault_records
+            SET economic_proof_addr = ?2, economic_proof_position = ?3
+          WHERE vault_id = ?1",
+        params![
+            vault_id.as_slice(),
+            locator.addr.as_slice(),
+            locator.position as i64
+        ],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("economic-proof locator stamp touched {changed} rows for one vault id");
+    }
+    Ok(())
+}
+
 /// Stamp the vault's frozen `VaultPostProto` bytes onto its record. Runs once,
 /// at `dlv.create`, after the vault is finalized and its enforcement/policy
 /// digest are stamped — the earliest point at which the bytes are final.
@@ -181,7 +230,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         .query_row(
             "SELECT vault_id, owner_genesis, owner_devid, policy_commit_a, policy_commit_b,
                     fee_bps, anchor_enforcement, policy_digest, storage_set_id,
-                    baseline_state_ccb, baseline_presentation, vault_post_proto
+                    baseline_state_ccb, baseline_presentation, vault_post_proto,
+                    economic_proof_addr, economic_proof_position
              FROM amm_vault_records WHERE vault_id = ?1",
             params![vault_id.as_slice()],
             |r| {
@@ -198,6 +248,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
                     r.get::<_, Vec<u8>>(9)?,
                     r.get::<_, Vec<u8>>(10)?,
                     r.get::<_, Vec<u8>>(11)?,
+                    r.get::<_, Vec<u8>>(12)?,
+                    r.get::<_, i64>(13)?,
                 ))
             },
         )
@@ -215,6 +267,8 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         baseline_state_ccb,
         baseline_presentation,
         vault_post_proto,
+        proof_addr,
+        proof_position,
     )) = row
     else {
         return Ok(None);
@@ -229,6 +283,20 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
     else {
         return Ok(None);
     };
+    // Both halves or neither: a present address with an unreadable width is a
+    // corrupt row, not a vault without a locator, so the whole record is
+    // dropped exactly as a bad policy commit drops it.
+    let economic_proof = if proof_addr.is_empty() {
+        None
+    } else {
+        let Some(addr) = fixed32(proof_addr) else {
+            return Ok(None);
+        };
+        Some(EconomicProofLocator {
+            addr,
+            position: proof_position as u64,
+        })
+    };
     Ok(Some(AmmVaultRecord {
         vault_id,
         owner_genesis,
@@ -242,6 +310,7 @@ pub fn get_amm_vault_record(vault_id: &[u8; 32]) -> Result<Option<AmmVaultRecord
         baseline_state_ccb,
         baseline_presentation,
         vault_post_proto,
+        economic_proof,
     }))
 }
 
@@ -305,6 +374,7 @@ mod tests {
             baseline_state_ccb: Vec::new(),
             baseline_presentation: Vec::new(),
             vault_post_proto: vec![0xC3; 48],
+            economic_proof: None,
         }
     }
 

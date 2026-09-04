@@ -10728,6 +10728,28 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
    */
   anchorPresentationDigest = new Uint8Array(0);
 
+  /**
+   * WHERE THE OWNER'S RESERVE PROOF LIVES: the content address of the
+   * `EconomicProofArtifactV1` published by the admission that wrote this
+   * vault's reserve leaves, and the economic position whose registered root
+   * it names.
+   *
+   * A LOCATOR, on an ad that authenticates nothing and is unsigned. A reader
+   * resolves the position's root from the owner's own write-once register
+   * cell and re-derives every inclusion path against it, so a wrong address
+   * or position here can only make the lookup FAIL — never succeed against a
+   * root the owner did not register — and the reserve amounts it yields are
+   * re-checked against the composed `V_n` afterwards.
+   *
+   * @generated from field: bytes economic_proof_addr = 15;
+   */
+  economicProofAddr = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 economic_proof_position = 16;
+   */
+  economicProofPosition = protoInt64.zero;
+
   constructor(data?: PartialMessage<RoutingVaultAdvertisementV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -10751,6 +10773,8 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
     { no: 13, name: "lifecycle_state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "updated_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 19, name: "anchor_presentation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "economic_proof_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 16, name: "economic_proof_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RoutingVaultAdvertisementV1 {

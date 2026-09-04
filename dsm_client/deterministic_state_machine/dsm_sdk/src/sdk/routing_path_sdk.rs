@@ -606,6 +606,8 @@ mod tests {
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
             updated_state_number: state_number,
             anchor_presentation_digest: vec![0u8; 32],
+            economic_proof_addr: Vec::new(),
+            economic_proof_position: 0,
         }
     }
 
@@ -742,6 +744,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &good_proto,
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish good");
@@ -757,6 +760,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &bad_proto,
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish bad");

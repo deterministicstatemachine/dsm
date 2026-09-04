@@ -66,6 +66,11 @@ pub(crate) fn committed_network_id() -> Result<Vec<u8>, DsmError> {
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedOutcome {
     pub economic_position: u64,
+    /// Content address of the `EconomicProofArtifactV1` this admission
+    /// published, when its transition wrote a leaf a counterparty can be asked
+    /// to verify. `None` means the transition wrote none — not that publishing
+    /// failed, which is an error rather than an absence.
+    pub economic_proof_addr: Option<[u8; 32]>,
 }
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
@@ -1027,11 +1032,18 @@ pub(crate) async fn finish_admission(
     // taking the paths. The equality below states it rather than assuming
     // it, and `EconomicProofArtifact::new` re-derives every path against
     // that same root before the bytes exist.
-    if let Some(proof) =
-        economic_proof_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)?
-    {
-        post_admit_artifacts.push(proof);
-    }
+    let economic_proof_addr =
+        match economic_proof_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)? {
+            Some((key, bytes, purpose)) => {
+                let addr = dsm::storage_object::immutable_inner(
+                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+                    &bytes,
+                );
+                post_admit_artifacts.push((key, bytes, purpose));
+                Some(addr)
+            }
+            None => None,
+        };
 
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
@@ -1056,6 +1068,7 @@ pub(crate) async fn finish_admission(
 
     Ok(AdmittedOutcome {
         economic_position: new_validated.economic_position(),
+        economic_proof_addr,
     })
 }
 

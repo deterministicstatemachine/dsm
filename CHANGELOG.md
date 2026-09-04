@@ -83,6 +83,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   persisted format changes; no wipe: the vault-state leaf this relies on has
   been required since the rehydration gate.
 
+- **Client database schema 12 → 13: the AMM vault record gains a reserve-proof
+  locator, and beta does not migrate.** `amm_vault_records` now carries
+  `economic_proof_addr` and `economic_proof_position` — the content address of
+  the `EconomicProofArtifactV1` the admitted create publishes for the vault's
+  reserve leaves, and the economic position whose registered root that proof
+  names. `CREATE TABLE IF NOT EXISTS` does not add columns to an existing file,
+  so an older database is structurally invalid and `enforce_schema_version`
+  refuses it by design: wipe the app database and re-provision from the wallet
+  seed. Beta runs on `dsm-testnet` with no production user state.
+
+  The routing advertisement carries the same pair, which is what lets a trader
+  find the proof at all. Both are LOCATORS on an unsigned object: a reader
+  resolves the position's root from the owner's own write-once register cell
+  and recomputes every inclusion path against it, so a wrong address or
+  position can only make a lookup fail, never make one succeed against a root
+  the owner did not register.
+
 ---
 
 ## [0.1.0-beta.3] — 2026-04-22

@@ -931,6 +931,11 @@ impl AppRouterImpl {
                                 // Stamped after finalize + policy stamping below,
                                 // the earliest point at which the bytes are final.
                                 vault_post_proto: Vec::new(),
+                                // Stamped after the admitted create publishes
+                                // the artifact — it does not exist yet, and a
+                                // placeholder would be a locator pointing
+                                // nowhere.
+                                economic_proof: None,
                             },
                         )
                     }
@@ -1068,20 +1073,53 @@ impl AppRouterImpl {
                 // birth objects are still signed off this advance's own root
                 // and frozen in its transaction — the difference is that the
                 // economic transition is now real rather than head-only.
-                if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_create_funded(
-                    &self.core_sdk,
-                    op,
-                    rel_key,
-                    actor,
-                    init_tip,
-                    funding_mutation,
-                    display_name_for,
-                    build,
-                    write,
-                )
-                .await
+                let admitted =
+                    match crate::sdk::economic_admission_flow::admitted_dlv_create_funded(
+                        &self.core_sdk,
+                        op,
+                        rel_key,
+                        actor,
+                        init_tip,
+                        funding_mutation,
+                        display_name_for,
+                        build,
+                        write,
+                    )
+                    .await
+                    {
+                        Ok((_outcome, admitted)) => admitted,
+                        Err(e) => return err(format!("dlv.create: funded creation failed: {e}")),
+                    };
+                // THE LOCATOR, stamped once the thing it points at exists. The
+                // admitted create published an inclusion proof for the reserve
+                // leaves it just wrote; the address and the position whose
+                // registered root it names are what a trader needs to find it,
+                // and the routing advertisement carries them from here.
+                //
+                // A funded create ALWAYS writes two reserve leaves, so the
+                // artifact is always published: its absence is a contradiction
+                // between this route and the producer, not a vault without a
+                // proof, and is refused rather than left to surface later as an
+                // unexplained missing locator.
+                let Some(proof_addr) = admitted.economic_proof_addr else {
+                    return err(
+                        "dlv.create: the admitted creation published no reserve-proof artifact — \
+                         refusing to leave the vault without a locator"
+                            .into(),
+                    );
+                };
+                if let Err(e) =
+                    crate::storage::client_db::amm_vault_records::update_economic_proof_locator(
+                        &vault_id,
+                        &crate::storage::client_db::amm_vault_records::EconomicProofLocator {
+                            addr: proof_addr,
+                            position: admitted.economic_position,
+                        },
+                    )
                 {
-                    return err(format!("dlv.create: funded creation failed: {e}"));
+                    return err(format!(
+                        "dlv.create: stamping the reserve-proof locator: {e}"
+                    ));
                 }
             }
             // A non-AMM vault: the plain advance, nothing to freeze.
@@ -6320,6 +6358,183 @@ mod funded_creation_tests {
                 format!("{e}").contains("economic proof artifact"),
                 "{name}: {e}"
             );
+        }
+    }
+
+    /// THE LOCATOR, END TO END, ACROSS TWO DEVICES.
+    ///
+    /// The owner's admitted create publishes an inclusion proof for the reserve
+    /// leaves it wrote, and stamps WHERE it lives onto the vault record; the
+    /// advertisement carries that address and the economic position whose
+    /// registered root the proof names. A trader on its own device, holding no
+    /// record of this vault, reads the advertisement and turns that untrusted
+    /// pair into VERIFIED reserve leaves — resolving the position's root from
+    /// the owner's own register cell and recomputing every path against it.
+    ///
+    /// Before this, both halves of the trader's 0x0026 evidence had no source:
+    /// the 256-sibling paths existed only inside the owner's tree, and nothing
+    /// mapped a vault to its owner's economic position.
+    ///
+    /// The last two arms are the point of an unsigned advertisement: a locator
+    /// naming another position, or another artifact, FAILS. It cannot yield
+    /// leaves under a root the owner did not register.
+    #[test]
+    #[serial]
+    fn a_trader_turns_the_advertised_locator_into_verified_owner_reserves() {
+        use prost::Message as _;
+
+        install_identity();
+        let owner_dev = participant("owner", 0x49);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 20_000, 5_000);
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let rec = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault");
+        let vault_id = rec.vault_id;
+
+        // (1) The create stamped the locator onto the record.
+        let locator = rec
+            .economic_proof
+            .expect("the admitted create stamps where its reserve proof lives");
+        assert_ne!(locator.addr, [0u8; 32]);
+        let (owner_genesis, owner_devid) = (rec.owner_genesis, rec.owner_devid);
+
+        // (2) The advertisement carries it.
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: "sofi/spec/locator".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+
+        // ── TRADER: its own device, no record of this vault ──────────────────
+        let trader_dev = participant("trader", 0x59);
+        trader_dev.enter();
+        assert!(
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .is_none(),
+            "the trader holds no record of the owner's vault"
+        );
+        let ads = crate::runtime::get_runtime()
+            .block_on(crate::sdk::routing_sdk::load_all_advertisements_for_pair(
+                &pc_a, &pc_b,
+            ))
+            .expect("advertisements load");
+        let ad = ads
+            .into_iter()
+            .find(|a| a.advertisement.vault_id == vault_id.to_vec())
+            .expect("the trader finds the vault through storage alone")
+            .advertisement;
+        let advertised_addr: [u8; 32] = ad
+            .economic_proof_addr
+            .as_slice()
+            .try_into()
+            .expect("the ad carries a 32-byte reserve-proof address");
+        assert_eq!(
+            advertised_addr, locator.addr,
+            "the ad carries the record's locator"
+        );
+        assert_eq!(ad.economic_proof_position, locator.position);
+
+        // (3) THE READ. The untrusted pair becomes verified leaves.
+        let network_id =
+            crate::sdk::economic_admission_flow::committed_network_id().expect("network id");
+        let set = crate::sdk::economic_admission_flow::canonical_set(&network_id).expect("set");
+        let leaves = crate::runtime::get_runtime()
+            .block_on(async {
+                crate::sdk::economic_registers::verified_owner_reserve_leaves(
+                    &set,
+                    &network_id,
+                    &owner_genesis,
+                    &owner_devid,
+                    &vault_id,
+                    &advertised_addr,
+                    ad.economic_proof_position,
+                )
+            })
+            .expect("a trader verifies the owner's reserve leaves from the advertised locator");
+        let mut got: Vec<([u8; 32], u64, u64)> = leaves
+            .iter()
+            .map(|l| (l.policy_commit, l.amount, l.vault_sequence))
+            .collect();
+        got.sort();
+        let mut want = vec![(pc_a, 10_000u64, 0u64), (pc_b, 5_000u64, 0u64)];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "both reserve legs, at the create's vault generation"
+        );
+
+        // (4) A LOCATOR IS NOT A WARRANT. A different position, or a different
+        // artifact, cannot produce leaves under a root the owner registered.
+        let network_id2 =
+            crate::sdk::economic_admission_flow::committed_network_id().expect("network id");
+        let set2 = crate::sdk::economic_admission_flow::canonical_set(&network_id2).expect("set");
+        for (name, addr, position) in [
+            (
+                "another position",
+                advertised_addr,
+                ad.economic_proof_position + 1,
+            ),
+            ("another artifact", [0x99u8; 32], ad.economic_proof_position),
+        ] {
+            let e = crate::runtime::get_runtime().block_on(async {
+                crate::sdk::economic_registers::verified_owner_reserve_leaves(
+                    &set2,
+                    &network_id2,
+                    &owner_genesis,
+                    &owner_devid,
+                    &vault_id,
+                    &addr,
+                    position,
+                )
+            });
+            assert!(e.is_err(), "{name} must not yield verified leaves");
         }
     }
 

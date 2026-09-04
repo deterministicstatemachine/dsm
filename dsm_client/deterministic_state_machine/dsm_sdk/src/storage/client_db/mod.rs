@@ -433,7 +433,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// DAG only); `recipient_outbound_reply` gains `held` (the B→A release is
 /// frozen at accept and promoted to deliverable in the terminal admission
 /// transaction — ECON_ADMITTED releases it atomically).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 12;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 13;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -1377,6 +1377,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- in-memory DLVManager. Empty means the producer never ran: the
             -- ad publisher fails closed rather than re-deriving.
             vault_post_proto       BLOB NOT NULL DEFAULT X'',
+            -- WHERE THE OWNER'S ECONOMIC RESERVE PROOF LIVES. The admitted
+            -- funded create publishes an `EconomicProofArtifactV1` proving the
+            -- vault's reserve leaves under the owner's registered economic
+            -- root; these two carry its content address and the position that
+            -- root sits at, so the routing advertisement can hand a trader a
+            -- LOCATOR. Untrusted on the way out and on the way back: a reader
+            -- resolves the position's root from the register itself and
+            -- re-derives every path, so a wrong value here can only fail.
+            -- Empty address means the create predates the artifact or its
+            -- publication never ran; consumers fail closed rather than guess.
+            economic_proof_addr     BLOB NOT NULL DEFAULT X'',
+            economic_proof_position INTEGER NOT NULL DEFAULT 0,
             created_at          INTEGER NOT NULL
         );
 
