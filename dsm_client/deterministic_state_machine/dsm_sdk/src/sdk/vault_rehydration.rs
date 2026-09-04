@@ -81,12 +81,13 @@ pub(crate) enum RehydrationError {
     /// and every settlement, so its absence means these legs were not produced
     /// by a vault transition — there is nothing to check the record against.
     VaultStateLeafMissing,
-    /// The record's `policy_digest` is not the DLV-policy digest derived from
-    /// the vault's release and fee policy. The digest is a deterministic view of
-    /// the two DLV-layer members the creator-signed `VaultStateV2` commits;
-    /// `dlv.create` derives it and persists only that value, so a row carrying
-    /// anything else was not written by the producer. (The fee itself was
-    /// already checked against the root-committed leaf above.)
+    /// The AMM record's `policy_digest` is not the AMM DLV-policy digest
+    /// derived from the vault's release and fee policy. The digest is a
+    /// deterministic view of the two DLV-layer members the creator-signed
+    /// `VaultStateV2` commits; AMM `dlv.create` derives it and persists only
+    /// that value, so a row carrying anything else was not written by the AMM
+    /// producer. (The fee itself was already checked against the root-committed
+    /// leaf above.)
     PolicyDigestNotDerived,
     /// The record disagrees with the vault-state leaf this device wrote. The
     /// leaf folds the pair, the fee and both reserves at this generation into
@@ -122,7 +123,7 @@ impl std::fmt::Display for RehydrationError {
             ),
             RehydrationError::PolicyDigestNotDerived => write!(
                 f,
-                "the vault record's policy_digest is not the DLV-policy digest derived from its release and fee policy; the digest is derived, never stored on trust"
+                "the AMM vault record's policy_digest is not the AMM DLV-policy digest derived from its release and fee policy; the digest is derived, never stored on trust"
             ),
             RehydrationError::RecordDisagreesWithRoot => write!(
                 f,

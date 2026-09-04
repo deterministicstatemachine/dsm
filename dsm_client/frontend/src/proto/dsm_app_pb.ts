@@ -6651,15 +6651,17 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
   entryHeader?: Uint8Array;
 
   /**
-   * The vault's DLV-POLICY digest — its behavioural-policy identity, NOT a
+   * The vault's DLV-POLICY digest - its behavioural-policy identity, NOT a
    * CPTA/token anchor (the pair's two CPTA commits are separate, independent
-   * token-policy authorities carried by the AMM predicate). For an AMM vault
+   * token-policy authorities carried by the AMM predicate). For an AMM DLV
    * it is BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)),
    * a deterministic view of the two DLV-layer members the creator-signed
    * VaultStateV2 commits; dlv.create derives it and folds it into the
-   * creator-signed parameters_hash. Re-used as the routing advertisement's
-   * `unlock_spec_digest`. Optional only because the field post-dates the
-   * proto; a vault without it cannot be advertised.
+   * creator-signed parameters_hash. Non-AMM DLVs have no ReleasePolicy/FeePolicy
+   * object to derive from; their supplied 32-byte digest remains caller-supplied
+   * but creator-signed, and tightening that meaning is follow-up semantic debt.
+   * Re-used as the routing advertisement's `unlock_spec_digest`. Optional only
+   * because the field post-dates the proto; a vault without it cannot be advertised.
    *
    * @generated from field: optional bytes policy_digest = 15;
    */
@@ -7741,9 +7743,12 @@ export class DlvSpecV1 extends Message<DlvSpecV1> {
   /**
    * The DLV-POLICY digest, NOT a CPTA anchor: the vault's own behavioural-
    * policy identity, distinct from the two token policies the AMM predicate
-   * names. For an AMM vault it is DERIVED by dlv.create —
-   * BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)) —
-   * so leave it EMPTY; a supplied value that is not the derivation is refused.
+   * names. For an AMM DLV it is DERIVED by dlv.create:
+   * BLAKE3("DSM/dlv-policy-digest", CCB(ReleasePolicy) || CCB(FeePolicy)).
+   * Leave it EMPTY for AMM creation; a supplied value that is not the derivation
+   * is refused. For non-AMM DLVs there is no ReleasePolicy/FeePolicy object, so
+   * the supplied 32-byte digest remains caller-supplied but creator-signed.
+   * That non-AMM meaning is follow-up semantic debt.
    *
    * @generated from field: bytes policy_digest = 1;
    */
@@ -10535,10 +10540,10 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   feeBps = 0;
 
   /**
-   * The vault's DLV-POLICY digest, echoed from the vault record (which
-   * holds the value dlv.create derived and the creator signed). The
-   * publisher fills it from the record; a caller may leave it empty or
-   * repeat the record's value, never choose one. Not a CPTA anchor.
+   * The AMM DLV-policy digest, echoed from the vault record (which holds the
+   * value dlv.create derived and the creator signed). The publisher fills it
+   * from the record; a caller may leave it empty or repeat the record's value,
+   * never choose one. Not a CPTA anchor.
    *
    * @generated from field: bytes unlock_spec_digest = 8;
    */
