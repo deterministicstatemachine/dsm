@@ -790,6 +790,63 @@ pub(crate) fn economic_root_path(k_root: &[u8; 32]) -> String {
 /// The republish-sweep object key for an immutable blob:
 /// `immutable::{namespace}::{addr_b32}`. Same shape `dlv_routes` uses, so the
 /// one generic sweep carries faucet evidence too.
+/// THE TRADER'S READ of a vault owner's reserve proof, from an untrusted
+/// locator to verified leaves.
+///
+/// The advertisement is unsigned and carries only `(addr, position)`. Neither
+/// is believed. The position's root is resolved from the OWNER's own
+/// write-once register cell by the same lineage walk a foreign verifier runs,
+/// the artifact is fetched by content address and re-hashed to it, and every
+/// leaf key, commitment and inclusion path is recomputed against that root. A
+/// locator naming the wrong position or a different artifact therefore fails;
+/// it can never yield leaves under a root the owner did not register.
+///
+/// Returns the vault-reserve leaves for `vault_id` only. A caller still has to
+/// decide whether the amounts are the ones it expects — this answers "what did
+/// the owner's registered root commit", never "is that the right state".
+pub(crate) fn verified_owner_reserve_leaves(
+    set: &StorageSet,
+    expected_network_id: &[u8],
+    owner_genesis: &[u8; 32],
+    owner_devid: &[u8; 32],
+    vault_id: &[u8; 32],
+    proof_addr: &[u8; 32],
+    economic_position: u64,
+) -> Result<Vec<dsm::economic::state::EconomicVaultReserveState>, DsmError> {
+    let resolver = LiveRegisterResolver {
+        set,
+        runtime: tokio::runtime::Handle::current(),
+        expected_network_id: expected_network_id.to_vec(),
+    };
+    let owner = resolver
+        .validated_peer_transition(owner_genesis, owner_devid, economic_position)
+        .map_err(|e| {
+            DsmError::verification(format!(
+                "owner reserve proof: the owner's economic lineage at position \
+                 {economic_position} does not validate: {e:?}"
+            ))
+        })?;
+    let root = owner.validated_root.economic_root();
+    let artifact = tokio::task::block_in_place(|| {
+        resolver.runtime.block_on(fetch_verified_economic_proof(
+            proof_addr,
+            owner_genesis,
+            owner_devid,
+            economic_position,
+            &root,
+        ))
+    })?;
+    Ok(artifact
+        .states()
+        .filter_map(|s| match s {
+            dsm::economic::state::EconomicLeafState::VaultReserve(v) if v.vault_id == *vault_id => {
+                Some(v.clone())
+            }
+            _ => None,
+        })
+        .collect())
+}
+
 /// Fetch an economic proof artifact by content address and verify it against
 /// coordinates the caller established INDEPENDENTLY — the publisher's
 /// write-once register cell at that position, read at quorum.

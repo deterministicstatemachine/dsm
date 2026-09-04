@@ -2303,6 +2303,7 @@ mod tests {
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
                 anchor_presentation_digest: [0u8; 32],
+                economic_proof: None,
             },
         )
         .await
@@ -2497,6 +2498,7 @@ mod tests {
                 owner_public_key: &bob.public_key,
                 vault_proto_bytes: &vault_proto_bytes,
                 anchor_presentation_digest: [0u8; 32],
+                economic_proof: None,
             },
         )
         .await
