@@ -112,6 +112,11 @@ pub(crate) struct PublishRoutingAdInput<'a> {
     /// discovery material for the trader's verification chain; the ad itself
     /// authenticates nothing.
     pub anchor_presentation_digest: [u8; 32],
+    /// The owner's reserve-proof locator: the artifact's content address and
+    /// the economic position whose registered root it names. `None` for a
+    /// vault whose record carries none; the ad then advertises no locator and
+    /// a trader that needs one fails closed rather than guessing.
+    pub economic_proof: Option<([u8; 32], u64)>,
 }
 
 /// Publish an active-state advertisement + the full vault proto mirror.
@@ -158,6 +163,11 @@ pub(crate) async fn publish_active_advertisement(
         lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
         updated_state_number: 1,
         anchor_presentation_digest: input.anchor_presentation_digest.to_vec(),
+        economic_proof_addr: input
+            .economic_proof
+            .map(|(addr, _)| addr.to_vec())
+            .unwrap_or_default(),
+        economic_proof_position: input.economic_proof.map(|(_, pos)| pos).unwrap_or(0),
     };
 
     BitcoinTapSdk::storage_put_bytes(&proto_key_str, input.vault_proto_bytes).await?;
@@ -489,6 +499,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish");
@@ -545,6 +556,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish");
@@ -618,6 +630,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &proto,
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish_active_advertisement");
@@ -684,6 +697,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &fake_vault_proto_bytes(0x02),
             anchor_presentation_digest: [0u8; 32],
+            economic_proof: None,
         })
         .await
         .expect("publish");
@@ -829,6 +843,8 @@ mod tests {
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
             updated_state_number: 5,
             anchor_presentation_digest: vec![0u8; 32],
+            economic_proof_addr: Vec::new(),
+            economic_proof_position: 0,
         };
         BitcoinTapSdk::storage_put_bytes(&proto_key_str, &proto)
             .await
