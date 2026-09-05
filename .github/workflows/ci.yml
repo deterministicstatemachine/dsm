@@ -110,6 +110,90 @@ jobs:
           cargo audit
 
   # --------------------------------------------------------------------------
+  # Storage node on POSTGRES — the backend the fleet actually deploys.
+  #
+  # The `rust` job above runs the storage node with
+  # `--no-default-features --features local-dev,strict`, i.e. SQLite. That
+  # meant the node's three write-once economic registers — settlement slot,
+  # faucet ticket, economic root — had their non-equivocation properties
+  # asserted only against a backend nobody deploys. A safety property is not
+  # proven on a backend that never executed it, so this job runs the node's
+  # DEFAULT features (`strict,postgres`) against a real server.
+  #
+  # The property tests refuse to run without `DSM_TEST_DATABASE_URL` rather
+  # than skipping, so a job that lost its service container fails loudly
+  # instead of reporting a green board that executed nothing.
+  #
+  # NOT enabled here: the legacy `DSM_RUN_DB_TESTS=1` suites
+  # (device_api, b0x, bytecommit_chain). Those skip themselves by default and
+  # do not pass against Postgres today; resurrecting them is separate work and
+  # would make this board red for reasons unrelated to the registers.
+  # --------------------------------------------------------------------------
+  storage-node-postgres:
+    name: Storage Node (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dsm_node_test
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container's first accept().
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install CI system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+
+      # The registers promise that an acknowledged claim survives a restart,
+      # and the node REFUSES to start on a server that cannot keep it. Show
+      # what this server reports so a future durability failure is diagnosable
+      # from the log rather than from a re-run.
+      - name: Report the server's durability posture
+        run: |
+          export PGPASSWORD=postgres
+          for setting in fsync full_page_writes synchronous_commit; do
+            printf '%s=%s\n' "$setting" \
+              "$(psql -h 127.0.0.1 -U postgres -d dsm_node_test -tAc "SHOW $setting")"
+          done
+
+      # --test-threads=1: every test shares ONE Postgres database, and
+      # `init_db`'s concurrent `CREATE TABLE IF NOT EXISTS` statements race
+      # each other on the system catalogs. Cells are keyed per test so tests
+      # never contend for one write-once row.
+      - name: Node board on Postgres
+        run: cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+
+      # A green board is not evidence that THESE tests ran: a renamed module
+      # or a dropped `#[cfg(test)]` would leave the board green and the
+      # registers unproven on the deployed backend. Count them.
+      - name: Prove the register properties executed on Postgres
+        run: |
+          set -o pipefail
+          cargo test --locked -p dsm_storage_node --release --lib -- --test-threads=1 \
+            db::write_once_properties db::pg::durable_posture_tests | tee registers.log
+          passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' registers.log | head -1)
+          echo "register/durability tests executed on Postgres: ${passed:-0}"
+          # May only grow. If a test is legitimately added, raise this floor in
+          # the same commit; if the count DROPS, the board stopped proving
+          # something it used to prove.
+          test "${passed:-0}" -ge 13
+
+  # --------------------------------------------------------------------------
   # Formal validation: TLA+ model checking + real-code bridge harness
   # --------------------------------------------------------------------------
   formal-validation:

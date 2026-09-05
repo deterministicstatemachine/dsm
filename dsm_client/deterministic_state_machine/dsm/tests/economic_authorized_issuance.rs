@@ -25,7 +25,7 @@ use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
 use dsm::economic::issuance::IssuanceAuthorizationBody;
 use dsm::economic::provenance::{
     verify_transition_provenance, FaucetTicketWin, PeerLineageFailure, ProvenanceContext,
-    ProvenanceError, ProvenanceResolver, SettlementSlotWin, ValidatedPeerTransition,
+    ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
@@ -129,14 +129,19 @@ impl ProvenanceResolver for IssuanceResolver {
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _t: u64) -> Option<FaucetTicketWin> {
         None
     }
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         _v: &[u8; 32],
         _p: u64,
         _s: &dsm::ccb::StorageSetMembers,
         _q: u32,
-    ) -> Option<SettlementSlotWin> {
-        None
+    ) -> dsm::economic::cell_observation::CellObservation {
+        // This fixture roots no settlement slots: it cannot observe the
+        // cell, which is not the same as observing it empty.
+        dsm::economic::cell_observation::CellObservation::Unavailable {
+            attributed: 0,
+            required: 2,
+        }
     }
     fn immutable_evidence(
         &self,

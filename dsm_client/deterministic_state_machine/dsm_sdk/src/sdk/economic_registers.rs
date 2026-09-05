@@ -248,29 +248,6 @@ pub async fn read_winning_faucet_ticket(
     read_cell_quorum(set, rows).await
 }
 
-/// The quorum winner for one settlement-slot cell, if established — the
-/// 0x0026 arm's liveness anchor for a settlement's exclusivity.
-pub async fn read_winning_settlement_slot(
-    set: &StorageSet,
-    vault_id: &[u8; 32],
-    parent_sequence: u64,
-) -> Result<Option<Vec<u8>>, RegisterError> {
-    let rows = crate::sdk::storage_io::read_settlement_slot_cell(set, vault_id, parent_sequence)
-        .await
-        .map_err(|_| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: set.len() as u32,
-        })?;
-    read_cell_quorum(set, rows).await
-}
-
-/// OBSERVE one settlement-slot cell at the quorum the vault's owner committed.
-///
-/// This is the frontier walk's edge source. A write-once cell is the only
-/// answer in this system whose omission is not expressible: a set listing can
-/// silently omit a key and no signature repairs that, but a cell either holds
-/// a value or does not, and q attributed members saying "nothing here" is a
-/// fact rather than an absence of one.
 /// Resolve the set a vault COMMITTED, fail-closed.
 ///
 /// The id is re-derived from the committed member ids and the catalog entry
@@ -290,6 +267,13 @@ fn resolve_committed_set(
     catalog.resolve(&id).cloned().ok_or_else(unavailable)
 }
 
+/// OBSERVE one settlement-slot cell at the quorum the vault's owner committed.
+///
+/// This is the frontier walk's edge source. A write-once cell is the only
+/// answer in this system whose omission is not expressible: a set listing can
+/// silently omit a key and no signature repairs that, but a cell either holds
+/// a value or does not, and q attributed members saying "nothing here" is a
+/// fact rather than an absence of one.
 pub async fn observe_settlement_slot_cell(
     set: &StorageSet,
     vault_id: &[u8; 32],
@@ -383,16 +367,23 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         })
     }
 
-    fn settlement_slot_cell(
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+    ) -> dsm::economic::cell_observation::CellObservation {
+        use dsm::economic::cell_observation::CellObservation;
         let v = *vault_id;
-        let set = resolve_committed_set(storage_set)
-            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        // A set this verifier cannot resolve is an inability to observe, not
+        // an observation. Same for a transport failure below.
+        let Ok(set) = resolve_committed_set(storage_set) else {
+            return CellObservation::Unavailable {
+                attributed: 0,
+                required: quorum,
+            };
+        };
         tokio::task::block_in_place(|| {
             self.runtime.block_on(observe_settlement_slot_cell(
                 &set,
@@ -401,13 +392,9 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
                 quorum,
             ))
         })
-        .map(|observation| match observation {
-            dsm::economic::cell_observation::CellObservation::Claimed(b) => Some(b),
-            _ => None,
-        })
-        .map_err(|e| match e {
-            RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
-            other => PeerLineageFailure::Incomplete(other.to_string()),
+        .unwrap_or(CellObservation::Unavailable {
+            attributed: 0,
+            required: quorum,
         })
     }
 
@@ -581,16 +568,16 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         )
     }
 
-    fn settlement_slot_cell(
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+    ) -> dsm::economic::cell_observation::CellObservation {
         // A register read, not an immutable object — nothing to record; the
         // q-durable closure covers content-addressed evidence only.
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_cell(
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_observation(
             self.inner,
             vault_id,
             parent_sequence,
@@ -661,34 +648,20 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         })
     }
 
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
-        // THE VAULT'S SET, resolved fail-closed from what it committed —
-        // never `self.set`, which is whatever fleet this verifier happens to
-        // be configured for and answers about a different register.
-        let set = resolve_committed_set(storage_set).ok()?;
-        let v = *vault_id;
-        let bytes = match tokio::task::block_in_place(|| {
-            self.runtime.block_on(observe_settlement_slot_cell(
-                &set,
-                &v,
-                parent_sequence,
-                quorum,
-            ))
-        })
-        .ok()?
-        {
-            dsm::economic::cell_observation::CellObservation::Claimed(b) => b,
-            _ => return None,
-        };
-        Some(dsm::economic::provenance::SettlementSlotWin {
-            envelope_bytes: bytes,
-        })
+    ) -> dsm::economic::cell_observation::CellObservation {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_observation(
+            self,
+            vault_id,
+            parent_sequence,
+            storage_set,
+            quorum,
+        )
     }
 
     fn immutable_evidence(
