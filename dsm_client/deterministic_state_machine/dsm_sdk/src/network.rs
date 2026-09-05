@@ -95,6 +95,16 @@ pub struct EnvConfig {
 pub struct NodeConfig {
     pub name: String,
     pub endpoint: String, // e.g., "http://10.0.0.5:8080"
+    /// The member's durable register incarnation, Base32-Crockford over 32
+    /// bytes, as that node reports it.
+    ///
+    /// REQUIRED, deliberately. A storage-set id is a function of
+    /// `(member_id, register_incarnation_id)` pairs, so a catalog that cannot
+    /// state a member's incarnation cannot resolve any set it belongs to —
+    /// and defaulting the field would resolve every set to whatever the
+    /// default hashed to. A config written before this field existed fails to
+    /// load, which is the reprovision.
+    pub register_incarnation: String,
 }
 
 pub struct NetworkConfigLoader;
@@ -176,14 +186,23 @@ impl NetworkConfigLoader {
             nodes: vec![
                 NodeConfig {
                     name: "test-1".into(),
+                    register_incarnation: crate::util::text_id::encode_base32_crockford(
+                        &[0xC1u8; 32],
+                    ),
                     endpoint: "http://127.0.0.1:8080".into(),
                 },
                 NodeConfig {
                     name: "test-2".into(),
+                    register_incarnation: crate::util::text_id::encode_base32_crockford(
+                        &[0xC2u8; 32],
+                    ),
                     endpoint: "http://127.0.0.1:8081".into(),
                 },
                 NodeConfig {
                     name: "test-3".into(),
+                    register_incarnation: crate::util::text_id::encode_base32_crockford(
+                        &[0xC3u8; 32],
+                    ),
                     endpoint: "http://127.0.0.1:8082".into(),
                 },
             ],
@@ -427,6 +446,12 @@ impl NodeRegistry {
         nodes.push(NodeConfig {
             name,
             endpoint: endpoint.to_string(),
+            // DISCOVERY IS NOT AUTHORITY. A node found at runtime has no
+            // known register incarnation, and inventing one would let
+            // discovery mint storage-set membership. The empty string fails
+            // `from_env_config` closed, so such a node can carry transport
+            // and never contribute to a set id.
+            register_incarnation: String::new(),
         });
         log::info!(
             "NodeRegistry: added endpoint {}, total={}",
@@ -683,10 +708,12 @@ ports = [8080, 8081]
 [[nodes]]
 name = "node-a"
 endpoint = "http://10.0.0.1:8080"
+register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 
 [[nodes]]
 name = "node-b"
 endpoint = "http://10.0.0.2:8081"
+register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#
         .to_string()
     }
@@ -710,6 +737,7 @@ lan_ip = ""
 [[nodes]]
 name = "n1"
 endpoint = "http://1.2.3.4:80"
+register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
         assert_eq!(cfg.protocol, "http");
@@ -745,6 +773,7 @@ dbtc_dust_floor_sats = 1000
 [[nodes]]
 name = "n1"
 endpoint = "http://10.0.0.5:9090"
+register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
         assert_eq!(
@@ -762,14 +791,17 @@ endpoint = "http://10.0.0.5:9090"
         let nodes = vec![
             NodeConfig {
                 name: "a".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://a".into(),
             },
             NodeConfig {
                 name: "b".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://b".into(),
             },
             NodeConfig {
                 name: "c".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://c".into(),
             },
         ];
@@ -788,6 +820,7 @@ endpoint = "http://10.0.0.5:9090"
     fn node_registry_add_and_remove() {
         let nodes = vec![NodeConfig {
             name: "a".into(),
+            register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
             endpoint: "http://a".into(),
         }];
         let reg = NodeRegistry::new(nodes, None);
@@ -813,10 +846,12 @@ endpoint = "http://10.0.0.5:9090"
         let nodes = vec![
             NodeConfig {
                 name: "a".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://a".into(),
             },
             NodeConfig {
                 name: "b".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://b".into(),
             },
         ];
@@ -835,6 +870,7 @@ endpoint = "http://10.0.0.5:9090"
     fn node_registry_clear_quarantine() {
         let nodes = vec![NodeConfig {
             name: "a".into(),
+            register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
             endpoint: "http://a".into(),
         }];
         let reg = NodeRegistry::new(nodes, None);
@@ -886,10 +922,12 @@ endpoint = "http://10.0.0.5:9090"
         let nodes = vec![
             NodeConfig {
                 name: "local".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://127.0.0.1:8080".into(),
             },
             NodeConfig {
                 name: "remote".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://10.0.0.5:9090".into(),
             },
         ];
@@ -911,6 +949,7 @@ endpoint = "http://10.0.0.5:9090"
             ports: vec![8080],
             nodes: vec![NodeConfig {
                 name: "n1".into(),
+                register_incarnation: crate::util::text_id::encode_base32_crockford(&[0x5C_u8; 32]),
                 endpoint: "http://10.0.0.1:8080".into(),
             }],
             mpc_genesis_url: None,

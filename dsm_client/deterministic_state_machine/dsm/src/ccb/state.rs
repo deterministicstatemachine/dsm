@@ -7,60 +7,127 @@ use super::{
     push_u32, push_u64, CcbError, CcbObject, FEE_DENOMINATOR,
 };
 
-/// `0x0002` schema 2 — the committed storage set, an ordinary CCB object.
+/// One committed set entry: a member, and the register incarnation that
+/// member was serving when the vault committed this set.
+///
+/// The pair is ONE authority fact — "this member, in this register
+/// incarnation" — so it is one object rather than two index-aligned arrays.
+/// `member_id` stays independently readable, because a resolver still needs
+/// it to find the member's endpoint; `register_incarnation_id` stays
+/// independently verifiable, because every read requires the responding
+/// member to echo the exact value committed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageSetEntry {
+    member_id: Vec<u8>,
+    register_incarnation_id: [u8; 32],
+}
+
+impl StorageSetEntry {
+    pub fn member_id(&self) -> &[u8] {
+        &self.member_id
+    }
+
+    pub fn register_incarnation_id(&self) -> [u8; 32] {
+        self.register_incarnation_id
+    }
+}
+
+/// `0x0002` schema 3 — the committed storage set, an ordinary CCB object.
 ///
 /// Schema 1 froze an envelope-less layout because deployed anchors committed
-/// set ids under it. The state-identity cut deletes those anchors, so the
-/// exception is gone and this class carries the §2.1 envelope like every
-/// other. The special-case warning that used to live here is deleted with the
-/// special case.
+/// set ids under it. The state-identity cut deleted those anchors, so schema 2
+/// carried the §2.1 envelope like every other class.
+///
+/// Schema 3 changes WHAT is committed, not just how. A set of bare node ids
+/// says only *which nodes*; a member that lost and rebuilt its register still
+/// satisfies it, and can then assert emptiness for a cell the real incarnation
+/// once held — an undetectable substitution, because owning the node identity
+/// was the whole test. An entry is now the pair, so the set id commits to
+/// *which durable register histories on those nodes*, and a rebuilt member
+/// cannot impersonate continuity merely by still holding its identity key.
+///
+/// Set ids therefore differ from schema-2 ones. That is the reprovision, and
+/// it is the point: an ambiguous authority encoding is not worth preserving.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageSetMembers {
-    members: Vec<Vec<u8>>,
+    entries: Vec<StorageSetEntry>,
 }
 
 impl CcbObject for StorageSetMembers {
     const CLASS: u16 = class::STORAGE_SET;
-    const SCHEMA: u16 = 2;
+    const SCHEMA: u16 = 3;
 }
 
 impl StorageSetMembers {
-    /// Sorts the ids and refuses an empty set, an empty id, or a duplicate.
+    /// Sorts by MEMBER ID and refuses an empty set, an empty member id, a
+    /// duplicate member id, or a zero incarnation.
     ///
-    /// Sorting is canonicalization the format calls for; refusing duplicates
-    /// is not. A duplicate is a producer bug, and collapsing it would map two
-    /// logical inputs onto one encoding.
-    pub fn new(member_ids: &[&[u8]]) -> Result<Self, CcbError> {
-        if member_ids.is_empty() || member_ids.iter().any(|id| id.is_empty()) {
+    /// Sorting is by `member_id` alone, never by the pair: sorting on the
+    /// whole entry would let one member appear twice under two incarnations
+    /// and still produce a strictly ascending list, which is exactly the
+    /// ambiguity this schema exists to remove. A duplicate member id is
+    /// therefore refused REGARDLESS of incarnation.
+    ///
+    /// An all-zero incarnation is refused because that is the value a member
+    /// has before it has ever established one; committing it would bind a
+    /// vault to "whatever this node had not yet decided".
+    pub fn new(entries: &[(&[u8], [u8; 32])]) -> Result<Self, CcbError> {
+        if entries.is_empty() || entries.iter().any(|(id, _)| id.is_empty()) {
             return Err(CcbError::EmptyStorageSetOrMember);
         }
-        let mut members: Vec<Vec<u8>> = member_ids.iter().map(|id| id.to_vec()).collect();
-        members.sort_unstable();
-        if members.windows(2).any(|w| w[0] == w[1]) {
+        if entries.iter().any(|(_, inc)| inc == &[0u8; 32]) {
+            return Err(CcbError::ZeroRegisterIncarnation);
+        }
+        let mut entries: Vec<StorageSetEntry> = entries
+            .iter()
+            .map(|(id, inc)| StorageSetEntry {
+                member_id: id.to_vec(),
+                register_incarnation_id: *inc,
+            })
+            .collect();
+        entries.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        if entries.windows(2).any(|w| w[0].member_id == w[1].member_id) {
             return Err(CcbError::DuplicateSetElement {
                 class: class::STORAGE_SET,
             });
         }
-        Ok(Self { members })
+        Ok(Self { entries })
     }
 
     pub fn len(&self) -> usize {
-        self.members.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
+        self.entries.is_empty()
     }
 
-    /// `envelope ‖ u32_be(count) ‖ for each id in ascending byte order:
-    /// u32_be(len) ‖ id`.
+    /// The committed entries, ascending by member id.
+    pub fn entries(&self) -> &[StorageSetEntry] {
+        &self.entries
+    }
+
+    /// The incarnation this set commits for `member_id`, if it is a member.
+    ///
+    /// A reader resolves an endpoint by member id and then requires THIS
+    /// value back from whatever answers there.
+    pub fn register_incarnation_of(&self, member_id: &[u8]) -> Option<[u8; 32]> {
+        self.entries
+            .iter()
+            .find(|e| e.member_id == member_id)
+            .map(|e| e.register_incarnation_id)
+    }
+
+    /// `envelope ‖ u32_be(count) ‖ for each entry in ascending member-id
+    /// order: u32_be(len) ‖ member_id ‖ register_incarnation_id`.
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<Self>(&mut out);
-        let count = u32::try_from(self.members.len()).map_err(|_| CcbError::LengthOverflow)?;
+        let count = u32::try_from(self.entries.len()).map_err(|_| CcbError::LengthOverflow)?;
         push_u32(&mut out, count);
-        for id in &self.members {
-            push_bytes(&mut out, id)?;
+        for e in &self.entries {
+            push_bytes(&mut out, &e.member_id)?;
+            push_digest32(&mut out, &e.register_incarnation_id);
         }
         Ok(out)
     }
@@ -290,10 +357,13 @@ pub struct VaultStateV2 {
 
 impl CcbObject for VaultStateV2 {
     const CLASS: u16 = class::VAULT_STATE_V2;
-    /// Schema 3. Schema 2 named field 13 but nested `0x0002`/`0x0005` at
-    /// schema 1; §2.7 nests by complete CCB, so its bytes differ from these
-    /// despite an identical field list.
-    const SCHEMA: u16 = 3;
+    /// Schema 4. The field list is unchanged from schema 3; field 14 now
+    /// nests `0x0002` at schema 3 (the storage set carries each member's
+    /// register incarnation), and §2.7 nests by complete CCB including the
+    /// nested schema version — so a nested bump propagates upward whether or
+    /// not this object's own fields moved. Schemas 1 and 2 are burned for the
+    /// same reason.
+    const SCHEMA: u16 = 4;
 }
 
 impl VaultStateV2 {

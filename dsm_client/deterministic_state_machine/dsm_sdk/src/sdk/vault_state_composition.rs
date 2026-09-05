@@ -829,8 +829,21 @@ mod tests {
             // through the local catalog and counts cells at THIS q — so the
             // fixture must commit the fleet these tests actually run against,
             // exactly as a real vault commits the fleet it was born under.
-            storage_set: StorageSetMembers::new(&[b"dsm-node-1", b"dsm-node-2", b"dsm-node-3"])
-                .expect("set"),
+            storage_set: StorageSetMembers::new(&[
+                (
+                    &b"dsm-node-1"[..],
+                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-1"),
+                ),
+                (
+                    &b"dsm-node-2"[..],
+                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-2"),
+                ),
+                (
+                    &b"dsm-node-3"[..],
+                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-3"),
+                ),
+            ])
+            .expect("set"),
             quorum: 2,
         };
         let ccb = state.encode().expect("encode");

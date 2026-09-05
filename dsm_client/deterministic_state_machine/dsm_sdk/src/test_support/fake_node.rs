@@ -400,8 +400,10 @@ pub fn point_env_config_at(endpoints: &[String]) {
         // never satisfy `resolve_root_register_profile` (economic admissions
         // fail closed on it).
         let n = i + 1;
+        let inc = crate::economic_fixtures::fixture_register_incarnation(&format!("dsm-node-{n}"));
         cfg_toml.push_str(&format!(
-            "\n[[nodes]]\nname = \"dsm-node-{n}\"\nendpoint = \"{ep}\"\n"
+            "\n[[nodes]]\nname = \"dsm-node-{n}\"\nendpoint = \"{ep}\"\n\
+             register_incarnation = \"{inc}\"\n"
         ));
     }
     std::fs::write(&cfg_path, cfg_toml).expect("write env config");

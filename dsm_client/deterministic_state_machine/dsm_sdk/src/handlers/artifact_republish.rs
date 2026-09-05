@@ -381,7 +381,12 @@ mod tests {
     #[serial]
     async fn an_unresolvable_frozen_set_is_held_and_sent_nowhere() {
         let _cat = init();
-        let foreign = crate::sdk::storage_set::compute_storage_set_id(&["c", "d", "e"]).unwrap();
+        let foreign = crate::sdk::storage_set::compute_storage_set_id(&[
+            ("c", [0xCC; 32]),
+            ("d", [0xDD; 32]),
+            ("e", [0xEE; 32]),
+        ])
+        .unwrap();
         let d = freeze(&foreign, "sofi/foreign/latest", b"bytes");
         assert_eq!(republish_unpublished_artifacts().await.unwrap(), 0);
         let row = fpa::get_artifact("sofi/foreign/latest", &d)

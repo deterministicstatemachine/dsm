@@ -203,6 +203,21 @@ pub trait ProvenanceResolver {
         quorum: u32,
     ) -> crate::economic::cell_observation::CellObservation;
 
+    /// The network's root-register set as the local catalog resolves it.
+    ///
+    /// CANDIDATE entries, never authority. A set id is now a function of
+    /// `(member_id, register_incarnation_id)` pairs, and an incarnation is a
+    /// runtime fact a member generates once — so the pairs cannot be a
+    /// constant and must come from somewhere. This is that somewhere, and it
+    /// is deliberately named a candidate: the caller re-derives the id from
+    /// these entries and refuses any membership that is not the network's
+    /// canonical list, so a catalog that offers the wrong set is caught
+    /// rather than believed.
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure>;
+
     /// Exact immutable bytes at `addr` under `namespace` — evidence the
     /// verifier itself checks (the resolver supplies bytes, never verdicts,
     /// so the acyclicity and verification stay in the verifier's hands).

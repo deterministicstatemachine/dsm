@@ -268,8 +268,12 @@ fn fixture() -> Fixture {
         iteration_budget: None,
         parent_state_commitment: [0x33; 32],
         owner_authority_transition_digest: ow.t0_digest,
-        storage_set: StorageSetMembers::new(&[b"dsm-node-1", b"dsm-node-2", b"dsm-node-3"])
-            .expect("set"),
+        storage_set: StorageSetMembers::new(&[
+            (&b"dsm-node-1"[..], [0xC1; 32]),
+            (&b"dsm-node-2"[..], [0xC2; 32]),
+            (&b"dsm-node-3"[..], [0xC3; 32]),
+        ])
+        .expect("set"),
         quorum: 2,
     };
     let c_n = vault_state_commitment(&vn).expect("c_n");
@@ -479,6 +483,13 @@ impl SettleResolver {
 }
 
 impl ProvenanceResolver for SettleResolver {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
@@ -638,6 +649,14 @@ fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
         observation: CellObservation,
     }
     impl ProvenanceResolver for Observing<'_> {
+        fn root_register_candidate_set(
+            &self,
+            _network_id: &[u8],
+        ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure>
+        {
+            Ok(crate::beta_candidate_set())
+        }
+
         fn validated_peer_transition(
             &self,
             g: &[u8; 32],
@@ -1425,4 +1444,19 @@ fn an_over_paying_trade_is_refused_by_re_simulation_alone() {
         ),
         other => panic!("expected the re-sim refusal, got {other:?}"),
     }
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+///
+/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
+/// a fixture cannot state one as a constant — it derives it the same way
+/// production does, from candidate entries the profile then checks.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }
