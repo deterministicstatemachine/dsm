@@ -18,3 +18,8 @@ mod sqlite;
 
 #[cfg(feature = "local-dev")]
 pub use sqlite::*;
+
+/// The write-once properties every one-shot register owes, stated once and
+/// run against whichever backend is compiled.
+#[cfg(test)]
+pub(crate) mod write_once_properties;

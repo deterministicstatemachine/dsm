@@ -19,7 +19,7 @@ use dsm::ccb::{
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
     verify_transition_provenance, FaucetTicketWin, PeerLineageFailure, ProvenanceContext,
-    ProvenanceError, ProvenanceResolver, SettlementSlotWin, ValidatedPeerTransition,
+    ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState, EconomicVaultReserveState};
 use dsm::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
@@ -502,19 +502,27 @@ impl ProvenanceResolver for SettleResolver {
         None
     }
 
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         _storage_set: &dsm::ccb::StorageSetMembers,
         _quorum: u32,
-    ) -> Option<SettlementSlotWin> {
-        if *vault_id == VAULT && parent_sequence == PARENT {
-            self.slot_envelope
-                .clone()
-                .map(|envelope_bytes| SettlementSlotWin { envelope_bytes })
-        } else {
-            None
+    ) -> dsm::economic::cell_observation::CellObservation {
+        use dsm::economic::cell_observation::CellObservation;
+        // The three answers this fixture can give, kept distinct because the
+        // arm now gives each a different verdict: a claim, a quorum of members
+        // reporting no claim, and a cell this fixture cannot speak for at all.
+        match (
+            &self.slot_envelope,
+            *vault_id == VAULT && parent_sequence == PARENT,
+        ) {
+            (Some(bytes), true) => CellObservation::Claimed(bytes.clone()),
+            (None, true) => CellObservation::EmptyAtQuorum,
+            _ => CellObservation::Unavailable {
+                attributed: 0,
+                required: 2,
+            },
         }
     }
 
@@ -595,9 +603,13 @@ fn a_real_settle_funds_through_every_conjunction() {
 // ── MC-SETTLE controls: one input mutated, one named refusal ───────────────
 
 #[test]
-fn a_missing_slot_winner_fails_closed() {
-    // MC-SETTLE: the slot register is the liveness anchor — no quorum winner,
-    // no funding.
+fn a_settle_whose_parent_was_never_claimed_is_refused_as_evidence() {
+    // MC-SETTLE: the slot register is the exclusivity anchor — no claim, no
+    // funding. A QUORUM SAYING THERE IS NO CLAIM is evidence, and what it
+    // establishes is that this settle never won the parent it names. That is
+    // an evidence verdict, not an outage: the refusal must be the invalid
+    // one, and the companion test below pins the outage case to the other
+    // branch of the taxonomy.
     let fx = fixture();
     let mut r = resolver_for(&fx);
     r.slot_envelope = None;
@@ -605,8 +617,96 @@ fn a_missing_slot_winner_fails_closed() {
         &fx,
         &r,
         &ctx_for(&fx),
-        "no quorum-agreed settlement-slot winner",
+        "no settlement-slot claim was established for this parent",
     );
+}
+
+#[test]
+fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
+    // THE TAXONOMY, END TO END. This file's own rule is that an outage
+    // retries and a forgery does not, and the slot read is where that rule
+    // was previously lost: every non-winner answer collapsed into one
+    // "no winner" verdict, so a network fault was reported as a forged credit
+    // and a genuine divergence in a WRITE-ONCE cell was reported as a network
+    // fault. Both now carry their own verdict, and neither is
+    // `DlvReserveConsumptionInvalid`.
+    use dsm::economic::cell_observation::CellObservation;
+
+    /// The honest fixture, with one substituted slot observation.
+    struct Observing<'a> {
+        inner: &'a SettleResolver,
+        observation: CellObservation,
+    }
+    impl ProvenanceResolver for Observing<'_> {
+        fn validated_peer_transition(
+            &self,
+            g: &[u8; 32],
+            d: &[u8; 32],
+            p: u64,
+        ) -> Result<ValidatedPeerTransition, dsm::economic::provenance::PeerLineageFailure>
+        {
+            self.inner.validated_peer_transition(g, d, p)
+        }
+        fn winning_faucet_ticket(
+            &self,
+            f: &[u8; 32],
+            i: u64,
+        ) -> Option<dsm::economic::provenance::FaucetTicketWin> {
+            self.inner.winning_faucet_ticket(f, i)
+        }
+        fn settlement_slot_observation(
+            &self,
+            _v: &[u8; 32],
+            _p: u64,
+            _s: &dsm::ccb::StorageSetMembers,
+            _q: u32,
+        ) -> CellObservation {
+            self.observation.clone()
+        }
+        fn immutable_evidence(
+            &self,
+            ns: dsm::crypto::domain::TaggedHashDomain<'static>,
+            addr: &[u8; 32],
+        ) -> Result<Vec<u8>, dsm::economic::provenance::PeerLineageFailure> {
+            self.inner.immutable_evidence(ns, addr)
+        }
+        fn anchored_policy_bytes(
+            &self,
+            pc: &[u8; 32],
+        ) -> Result<Vec<u8>, dsm::economic::provenance::PeerLineageFailure> {
+            self.inner.anchored_policy_bytes(pc)
+        }
+    }
+
+    let fx = fixture();
+    let base = resolver_for(&fx);
+
+    // An outage is RETRYABLE, never a forgery verdict.
+    let r = Observing {
+        inner: &base,
+        observation: CellObservation::Unavailable {
+            attributed: 1,
+            required: 2,
+        },
+    };
+    match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
+        Err(ProvenanceError::OwnerLineage(
+            dsm::economic::provenance::PeerLineageFailure::Incomplete(m),
+        )) => assert!(m.contains("answered the settlement-slot cell"), "got: {m}"),
+        other => panic!("an outage must be incomplete, got {other:?}"),
+    }
+
+    // A divergence in a write-once cell is a QUARANTINE.
+    let r = Observing {
+        inner: &base,
+        observation: CellObservation::Conflict { distinct: 2 },
+    };
+    match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
+        Err(ProvenanceError::OwnerLineage(
+            dsm::economic::provenance::PeerLineageFailure::Quarantined(m),
+        )) => assert!(m.contains("contradictory claims"), "got: {m}"),
+        other => panic!("a divergence must be quarantined, got {other:?}"),
+    }
 }
 
 #[test]

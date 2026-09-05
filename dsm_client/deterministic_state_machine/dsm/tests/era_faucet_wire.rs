@@ -138,14 +138,19 @@ impl ProvenanceResolver for OneTicket {
         })
     }
 
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
         _storage_set: &dsm::ccb::StorageSetMembers,
         _quorum: u32,
-    ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
-        None
+    ) -> dsm::economic::cell_observation::CellObservation {
+        // This fixture roots no settlement slots: it cannot observe the
+        // cell, which is not the same as observing it empty.
+        dsm::economic::cell_observation::CellObservation::Unavailable {
+            attributed: 0,
+            required: 2,
+        }
     }
 
     fn immutable_evidence(
@@ -372,14 +377,19 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
             None
         }
 
-        fn winning_settlement_slot_claim(
+        fn settlement_slot_observation(
             &self,
             _vault_id: &[u8; 32],
             _parent_sequence: u64,
             _storage_set: &dsm::ccb::StorageSetMembers,
             _quorum: u32,
-        ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
-            None
+        ) -> dsm::economic::cell_observation::CellObservation {
+            // This fixture roots no settlement slots: it cannot observe the
+            // cell, which is not the same as observing it empty.
+            dsm::economic::cell_observation::CellObservation::Unavailable {
+                attributed: 0,
+                required: 2,
+            }
         }
 
         fn immutable_evidence(

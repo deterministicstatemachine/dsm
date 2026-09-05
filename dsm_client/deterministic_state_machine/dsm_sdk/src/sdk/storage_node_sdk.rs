@@ -1018,9 +1018,21 @@ impl StorageNodeClient {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
         let status = response.status().as_u16();
+        let outcome = response
+            .headers()
+            .get("x-dsm-slot-outcome")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        // AN ABSENCE MUST BE ASSERTED. A bare 404 proves only that something
+        // in that process declined to serve the path — a route miss reaches
+        // the fallback, which still carries the identity echo — so emptiness
+        // is counted only when the member SAYS the cell is absent. Any other
+        // status, and any 404 without that assertion, answered nothing.
         if status == 404 {
-            // The member answered, and its answer is "no row".
-            return (MemberCellRead::Absent, echoed);
+            return match outcome.as_deref() {
+                Some("absent") => (MemberCellRead::Absent, echoed),
+                _ => (MemberCellRead::Unavailable, echoed),
+            };
         }
         if status != 200 {
             return (MemberCellRead::Unavailable, echoed);

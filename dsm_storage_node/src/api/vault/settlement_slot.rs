@@ -171,12 +171,26 @@ pub async fn get_claim(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             );
+            resp.headers_mut()
+                .insert(OUTCOME_HEADER, HeaderValue::from_static("held"));
             if let Ok(v) = HeaderValue::from_str(&text_id::encode_base32_crockford(&digest)) {
                 resp.headers_mut().insert(CLAIM_DIGEST_HEADER, v);
             }
             resp
         }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        // AN ABSENCE IS ASSERTED, NEVER INFERRED FROM A STATUS CODE. A bare
+        // 404 is something any part of this process can emit — a route miss
+        // reaches the router's fallback, which the outermost identity-echo
+        // layer still decorates — so a reader that took `404` for "no row"
+        // would accept a process-level miss as this member testifying that
+        // the cell is empty. The header is that testimony; the status alone
+        // is not. The write side has always worked this way.
+        Ok(None) => {
+            let mut resp = StatusCode::NOT_FOUND.into_response();
+            resp.headers_mut()
+                .insert(OUTCOME_HEADER, HeaderValue::from_static("absent"));
+            resp
+        }
         Err(e) => {
             log::warn!("settlement-slot get: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -184,21 +198,27 @@ pub async fn get_claim(
     }
 }
 
-#[cfg(all(test, feature = "local-dev"))]
+#[cfg(test)]
 mod tests {
-    //! Register properties on the SQLite backend: write-once in one atomic
-    //! transaction (concurrent racers → exactly one accepted), restart
-    //! persistence (a re-opened database still refuses B and re-acks A),
-    //! attribution and set enforcement at the endpoint.
+    //! Endpoint semantics for the settlement-slot register, ON WHICHEVER
+    //! BACKEND IS COMPILED: attribution (the body's claimant key must be the
+    //! authenticated caller), storage-set enforcement, and the outcome header
+    //! on accept / re-ack / refuse.
+    //!
+    //! The register's own write-once and restart properties are stated once
+    //! for all three one-shot registers in `crate::db::write_once_properties`,
+    //! not repeated here.
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
     use super::*;
     use crate::db;
+    use crate::db::write_once_properties::{test_pool, unique_key};
     use dsm::dlv::settlement_slot_claim::{
         claim_envelope_digest, sign_settlement_slot_claim, SettlementSlotClaimBody,
     };
 
-    fn body(pk: &[u8], set: [u8; 32], seq: u64, x: u8) -> SettlementSlotClaimBody {
+    fn body(vault: [u8; 32], pk: &[u8], set: [u8; 32], seq: u64, x: u8) -> SettlementSlotClaimBody {
         SettlementSlotClaimBody {
-            vault_id: [0x11; 32],
+            vault_id: vault,
             parent_sequence: seq,
             x: [x; 32],
             claimant_public_key: pk.to_vec(),
@@ -207,145 +227,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn write_once_first_bytes_win_identical_reack_different_refused() {
-        let pool = db::create_pool(":memory:", true).expect("pool");
-        db::init_db(&pool).await.expect("init");
-        let a = b"claim-A".to_vec();
-        let b = b"claim-B".to_vec();
-        let da = *blake3::hash(&a).as_bytes();
-        let db_ = *blake3::hash(&b).as_bytes();
-        let r1 = db::claim_settlement_slot(&pool, &[0x11; 32], 7, &a, &da, b"pkA", &[0x6B; 32])
-            .await
-            .unwrap();
-        assert_eq!(r1, db::SlotClaimOutcome::Accepted);
-        let r2 = db::claim_settlement_slot(&pool, &[0x11; 32], 7, &a, &da, b"pkA", &[0x6B; 32])
-            .await
-            .unwrap();
-        assert_eq!(
-            r2,
-            db::SlotClaimOutcome::AlreadyHeldIdentical,
-            "idempotent re-ack"
-        );
-        let r3 = db::claim_settlement_slot(&pool, &[0x11; 32], 7, &b, &db_, b"pkB", &[0x6B; 32])
-            .await
-            .unwrap();
-        assert_eq!(
-            r3,
-            db::SlotClaimOutcome::Refused {
-                held_digest: da.to_vec()
-            },
-            "different bytes for a held slot are refused with the held digest"
-        );
-        // Another slot is independent.
-        let r4 = db::claim_settlement_slot(&pool, &[0x11; 32], 8, &b, &db_, b"pkB", &[0x6B; 32])
-            .await
-            .unwrap();
-        assert_eq!(r4, db::SlotClaimOutcome::Accepted);
-        let held = db::get_settlement_slot_claim(&pool, &[0x11; 32], 7)
-            .await
-            .unwrap()
-            .expect("held");
-        assert_eq!(held.0, a);
-        assert_eq!(held.1, da.to_vec());
-    }
-
-    /// N racers with different bytes for one slot: exactly one accepted, every
-    /// other refused with the winner's digest. The write is one atomic
-    /// transaction over the unique key — never check-then-insert.
-    #[tokio::test]
-    async fn concurrent_racers_on_one_slot_yield_exactly_one_acceptance() {
-        let pool = db::create_pool(":memory:", true).expect("pool");
-        db::init_db(&pool).await.expect("init");
-        let mut handles = Vec::new();
-        for i in 0..16u8 {
-            let pool = pool.clone();
-            handles.push(tokio::spawn(async move {
-                let bytes = vec![i; 40];
-                let d = *blake3::hash(&bytes).as_bytes();
-                db::claim_settlement_slot(&pool, &[0x22; 32], 3, &bytes, &d, b"pk", &[0x6B; 32])
-                    .await
-                    .unwrap()
-            }));
-        }
-        let mut accepted = 0;
-        let mut refused_digests = std::collections::BTreeSet::new();
-        for h in handles {
-            match h.await.unwrap() {
-                db::SlotClaimOutcome::Accepted => accepted += 1,
-                db::SlotClaimOutcome::Refused { held_digest } => {
-                    refused_digests.insert(held_digest);
-                }
-                db::SlotClaimOutcome::AlreadyHeldIdentical => {
-                    panic!("distinct bytes cannot be identical")
-                }
-            }
-        }
-        assert_eq!(accepted, 1, "exactly one racer wins the slot");
-        assert_eq!(
-            refused_digests.len(),
-            1,
-            "every loser is refused with THE winner's digest"
-        );
-        let held = db::get_settlement_slot_claim(&pool, &[0x22; 32], 3)
-            .await
-            .unwrap()
-            .expect("held");
-        assert_eq!(refused_digests.into_iter().next().unwrap(), held.1);
-    }
-
-    /// Restart persistence: after the process (here: the connection) is
-    /// re-opened on the same file, A still holds and B is still refused.
-    #[tokio::test]
-    async fn a_held_claim_survives_reopening_the_database() {
-        let dir = std::env::temp_dir().join(format!(
-            "dsm-slot-register-{}",
-            text_id::encode_base32_crockford(&blake3::hash(b"restart").as_bytes()[..8])
-        ));
-        let _ = std::fs::remove_file(&dir);
-        let path = dir.to_string_lossy().to_string();
-        let a = b"claim-A".to_vec();
-        let da = *blake3::hash(&a).as_bytes();
-        {
-            let pool = db::create_pool(&path, true).expect("pool");
-            db::init_db(&pool).await.expect("init");
-            assert_eq!(
-                db::claim_settlement_slot(&pool, &[0x33; 32], 1, &a, &da, b"pkA", &[0x6B; 32])
-                    .await
-                    .unwrap(),
-                db::SlotClaimOutcome::Accepted
-            );
-        }
-        // "Restart": a fresh pool on the same file.
-        let pool = db::create_pool(&path, true).expect("pool");
-        db::init_db(&pool).await.expect("init");
-        let b = b"claim-B".to_vec();
-        let db_ = *blake3::hash(&b).as_bytes();
-        assert_eq!(
-            db::claim_settlement_slot(&pool, &[0x33; 32], 1, &b, &db_, b"pkB", &[0x6B; 32])
-                .await
-                .unwrap(),
-            db::SlotClaimOutcome::Refused {
-                held_digest: da.to_vec()
-            },
-            "B is still refused after restart"
-        );
-        assert_eq!(
-            db::claim_settlement_slot(&pool, &[0x33; 32], 1, &a, &da, b"pkA", &[0x6B; 32])
-                .await
-                .unwrap(),
-            db::SlotClaimOutcome::AlreadyHeldIdentical,
-            "A still re-acks after restart"
-        );
-        let _ = std::fs::remove_file(&path);
-    }
-
     /// Endpoint semantics: attribution (body key == caller key), set
     /// enforcement, and the outcome header on accept / re-ack / refuse.
     #[tokio::test]
     async fn endpoint_enforces_attribution_and_set_then_writes_once() {
         use crate::replication::{ReplicationConfig, ReplicationManager};
-        let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
+        let vault = unique_key(0x44);
+        let pool = Arc::new(test_pool());
         db::init_db(&pool).await.expect("init");
         let rm = Arc::new(
             ReplicationManager::new_for_tests(
@@ -373,7 +261,7 @@ mod tests {
             device_id: "dev".into(),
             public_key: pk.clone(),
         };
-        let env_a = sign_settlement_slot_claim(&body(&pk, set.id, 5, 0xA1), &sk).unwrap();
+        let env_a = sign_settlement_slot_claim(&body(vault, &pk, set.id, 5, 0xA1), &sk).unwrap();
 
         // Attribution: caller authenticated as pk2 cannot submit pk's claim.
         let stranger = DeviceContext {
@@ -392,7 +280,8 @@ mod tests {
         // Foreign set: refused before any write.
         let mut other = set.id;
         other[0] ^= 0xff;
-        let env_foreign = sign_settlement_slot_claim(&body(&pk, other, 5, 0xA1), &sk).unwrap();
+        let env_foreign =
+            sign_settlement_slot_claim(&body(vault, &pk, other, 5, 0xA1), &sk).unwrap();
         let r = post_claim(
             Extension(state.clone()),
             Extension(caller.clone()),
@@ -402,7 +291,7 @@ mod tests {
         assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(r.headers()[OUTCOME_HEADER], "foreign-set");
         assert!(
-            db::get_settlement_slot_claim(&state.db_pool, &[0x11; 32], 5)
+            db::get_settlement_slot_claim(&state.db_pool, &vault, 5)
                 .await
                 .unwrap()
                 .is_none(),
@@ -429,7 +318,7 @@ mod tests {
             device_id: "dev2".into(),
             public_key: pk2.clone(),
         };
-        let env_b = sign_settlement_slot_claim(&body(&pk2, set.id, 5, 0xB2), &sk2).unwrap();
+        let env_b = sign_settlement_slot_claim(&body(vault, &pk2, set.id, 5, 0xB2), &sk2).unwrap();
         let r = post_claim(
             Extension(state.clone()),
             Extension(caller2),

@@ -145,6 +145,17 @@ pub fn create_pool(database_url: &str, _lazy: bool) -> Result<DBPool> {
 
 // ===================== Schema Init =====================
 
+/// The SQLite backend's side of the durability gate.
+///
+/// Nothing to refuse: the claim transaction raises `synchronous` to FULL on
+/// the one connection this backend has (see `claim_settlement_slot`), and
+/// there is no server whose settings could defeat it. The function exists so
+/// the startup path is the same shape on both backends and cannot be wired on
+/// one and forgotten on the other.
+pub async fn require_durable_commit_posture(_pool: &DBPool) -> Result<()> {
+    Ok(())
+}
+
 /// Initialize database schema (SQLite version).
 pub async fn init_db(pool: &DBPool) -> Result<()> {
     with_conn(pool, |conn| {

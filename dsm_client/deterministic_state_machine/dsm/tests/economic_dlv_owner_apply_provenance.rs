@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
     verify_transition_provenance, FaucetTicketWin, PeerLineageFailure, ProvenanceContext,
-    ProvenanceError, ProvenanceResolver, SettlementSlotWin, ValidatedPeerTransition,
+    ProvenanceError, ProvenanceResolver, ValidatedPeerTransition,
 };
 use dsm::economic::state::{
     EconomicBalanceState, EconomicLeafState, EconomicSettlementReceiptState,
@@ -233,14 +233,19 @@ impl ProvenanceResolver for ApplyResolver {
         None
     }
 
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
         _storage_set: &dsm::ccb::StorageSetMembers,
         _quorum: u32,
-    ) -> Option<SettlementSlotWin> {
-        None
+    ) -> dsm::economic::cell_observation::CellObservation {
+        // This fixture roots no settlement slots: it cannot observe the
+        // cell, which is not the same as observing it empty.
+        dsm::economic::cell_observation::CellObservation::Unavailable {
+            attributed: 0,
+            required: 2,
+        }
     }
 
     fn immutable_evidence(
@@ -490,14 +495,19 @@ fn an_unresolvable_trader_lineage_fails_closed() {
         fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
             None
         }
-        fn winning_settlement_slot_claim(
+        fn settlement_slot_observation(
             &self,
             _v: &[u8; 32],
             _p: u64,
             _storage_set: &dsm::ccb::StorageSetMembers,
             _quorum: u32,
-        ) -> Option<SettlementSlotWin> {
-            None
+        ) -> dsm::economic::cell_observation::CellObservation {
+            // This fixture roots no settlement slots: it cannot observe the
+            // cell, which is not the same as observing it empty.
+            dsm::economic::cell_observation::CellObservation::Unavailable {
+                attributed: 0,
+                required: 2,
+            }
         }
         fn immutable_evidence(
             &self,
