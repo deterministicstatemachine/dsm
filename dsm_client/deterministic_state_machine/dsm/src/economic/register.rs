@@ -95,26 +95,44 @@ pub fn economic_root_register_key(
 pub struct RootRegisterProfile {
     pub quorum: u32,
     pub members: Vec<Vec<u8>>,
+    /// The PINNED set id this network's root register lives under.
+    ///
+    /// This is the authority commitment, and it is why the field exists. With
+    /// membership alone, the answer to "who chose the incarnation values the
+    /// set id was derived from?" is "the resolved catalog candidate" — the
+    /// catalog would be constrained to the right member ids and otherwise
+    /// believed. Pinning the digest makes the catalog's job resolution and
+    /// nothing else: it may say WHERE a member is reached and WHICH
+    /// incarnation it claims, and this value decides whether that is the
+    /// register this network actually commits to.
+    ///
+    /// Derived once, from the incarnations the real provisioned members
+    /// minted. It is not derivable from anything in this source tree, which
+    /// is the point.
+    pub storage_set_id: [u8; 32],
 }
 
 impl RootRegisterProfile {
-    /// Re-derive this profile's set id from CANDIDATE entries, refusing any
-    /// candidate whose membership is not exactly this network's.
+    /// Check a CANDIDATE set against this network's pinned commitment.
     ///
-    /// The set id is a function of `(member_id, register_incarnation_id)`
-    /// pairs, and a member's incarnation is a runtime fact — a value it
-    /// generates once and cannot re-derive from its identity key — so it
-    /// cannot be a constant here. A resolver supplies the candidate pairs;
-    /// this function is what stops the resolver from being believed.
+    /// Two conjuncts, in this order, and neither is sufficient alone:
     ///
-    /// A catalog entry is NEVER accepted merely for existing: the candidate's
-    /// member ids must equal this network's canonical members exactly, and
-    /// only then is the id computed from the canonical encoding of the pairs.
-    /// Endpoints are transport metadata and are not inputs.
-    pub fn derive_set_id(
+    /// 1. the candidate's member ids are exactly this network's members —
+    ///    a cheap, legible refusal that names what was wrong;
+    /// 2. the id RE-DERIVED from the candidate's `(member_id,
+    ///    register_incarnation_id)` pairs equals `storage_set_id`.
+    ///
+    /// Clause 2 is the one that makes the catalog non-authoritative. A member
+    /// that rebuilt its register still has the right id, so clause 1 passes;
+    /// its incarnation changed, so the re-derived digest does not match and
+    /// the set is refused. That is the substitution this exists to stop, and
+    /// it is refused rather than silently resolved to a different register.
+    ///
+    /// Endpoints are transport metadata and are not inputs to either clause.
+    pub fn verify_candidate(
         &self,
         candidate: &StorageSetMembers,
-    ) -> Result<[u8; 32], RegisterResolutionError> {
+    ) -> Result<(), RegisterResolutionError> {
         let mut want: Vec<&[u8]> = self.members.iter().map(|m| m.as_slice()).collect();
         want.sort_unstable();
         let got: Vec<&[u8]> = candidate.entries().iter().map(|e| e.member_id()).collect();
@@ -124,7 +142,15 @@ impl RootRegisterProfile {
                 got: got.iter().map(|m| m.to_vec()).collect(),
             });
         }
-        storage_set_id(candidate).map_err(RegisterResolutionError::ProfileNotDerivable)
+        let derived =
+            storage_set_id(candidate).map_err(RegisterResolutionError::ProfileNotDerivable)?;
+        if derived != self.storage_set_id {
+            return Err(RegisterResolutionError::SetIdIsNotThePinnedOne {
+                pinned: self.storage_set_id,
+                derived,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -142,6 +168,11 @@ pub enum RegisterResolutionError {
         expected: Vec<Vec<u8>>,
         got: Vec<Vec<u8>>,
     },
+    /// The candidate has this network's members, but the id re-derived from
+    /// its `(member, incarnation)` pairs is not the pinned one — the members
+    /// are right and at least one is not serving the register this network
+    /// committed to. A rebuilt or restored member lands here.
+    SetIdIsNotThePinnedOne { pinned: [u8; 32], derived: [u8; 32] },
     /// The trader's committed network is not the one being settled against.
     NetworkMismatch { claimed: Vec<u8>, expected: Vec<u8> },
     /// The profile resolved, but its set id could not be re-derived from the
@@ -170,6 +201,15 @@ impl core::fmt::Display for RegisterResolutionError {
                     .map(|m| String::from_utf8_lossy(m))
                     .collect::<Vec<_>>()
             ),
+            // The digests are carried on the variant rather than rendered
+            // here: this crate has no Base32-Crockford encoder (it lives in
+            // the SDK), and the repository forbids hex.
+            Self::SetIdIsNotThePinnedOne { .. } => write!(
+                f,
+                "the resolved register set has this network's members but does not derive the \
+                 pinned set id — a member is not serving the register history this network \
+                 committed to"
+            ),
             Self::NetworkMismatch { claimed, expected } => write!(
                 f,
                 "trader genesis commits network {:?} but this is network {:?} — a genesis \
@@ -186,18 +226,83 @@ impl core::fmt::Display for RegisterResolutionError {
 
 impl std::error::Error for RegisterResolutionError {}
 
-/// The beta fleet's member ids.
+/// The beta fleet's PINNED authority set: each member and the register
+/// incarnation it is serving.
 ///
-/// Member IDENTITIES live here and not in `dlv::beta_storage_profile`, which
-/// deliberately fixes cardinality and threshold only. Two modules asserting
-/// membership would be two places for the fleet to be described differently.
-const BETA_MEMBERS: [&[u8]; 3] = [b"dsm-node-1", b"dsm-node-2", b"dsm-node-3"];
+/// This is the network's root-register commitment, expressed as the pairs
+/// rather than as an opaque digest so it can be audited by reading it — the
+/// set id is derived from exactly these bytes, and `verify_candidate` refuses
+/// anything that does not re-derive to it.
+///
+/// The incarnations are NOT chosen here. Each is the value that member's own
+/// database minted on first boot, read from its startup log; nothing in this
+/// source tree can derive them, which is what makes the pin meaningful. A
+/// member that loses and rebuilds its register mints a different one, stops
+/// re-deriving this id, and is refused rather than silently substituted.
+///
+/// An all-zero incarnation is the value a node has before it has established
+/// one, and `StorageSetMembers::new` refuses it — so an UNPROVISIONED network
+/// fails closed here by construction rather than by anyone remembering to
+/// check.
+///
+/// Provisioned 2026-09-05 (UTC): each member's database was snapshotted for
+/// forensics, wiped, and booted on the merged register-incarnation binary
+/// (`f00d1e0c`); these are the values each node's `register_incarnation`
+/// row holds and each logged at that boot. Their Base32-Crockford
+/// renderings are pinned in `beta_root_register_pins_render_to_the_logged_values`.
+const BETA_ROOT_REGISTER_MEMBERS: [PinnedMember; 3] = [
+    (
+        b"dsm-node-1",
+        [
+            0x6F, 0x79, 0x83, 0xF1, 0x32, 0x13, 0x8A, 0xAC, 0xDC, 0xAB, 0x92, 0xFC, 0xF0, 0x8F,
+            0xFF, 0x74, 0xC3, 0xB7, 0xEB, 0xEF, 0xF5, 0x78, 0xAF, 0x59, 0xE1, 0x9D, 0x74, 0x86,
+            0x0C, 0x7E, 0xB6, 0xE8,
+        ],
+    ),
+    (
+        b"dsm-node-2",
+        [
+            0x89, 0x3F, 0x96, 0xC0, 0x64, 0xA0, 0x57, 0x9B, 0xDE, 0x28, 0xD2, 0x79, 0xCE, 0x7C,
+            0xC5, 0xF2, 0x41, 0xEE, 0x26, 0xFE, 0x13, 0x3D, 0x8C, 0x09, 0xD0, 0x1C, 0x4C, 0x20,
+            0xED, 0xB0, 0x90, 0xF8,
+        ],
+    ),
+    (
+        b"dsm-node-3",
+        [
+            0xDF, 0x07, 0x87, 0x2B, 0x8A, 0x3D, 0xB0, 0x60, 0x23, 0xC4, 0x57, 0x87, 0xBE, 0x85,
+            0x14, 0x42, 0xDC, 0x44, 0x09, 0x16, 0x7D, 0xAB, 0xBD, 0x40, 0x68, 0x07, 0x76, 0x14,
+            0x46, 0x6F, 0x46, 0x73,
+        ],
+    ),
+];
 
 /// The network the beta fleet serves. Matches the client database's
 /// `network_id` default. The real mainnet gets its OWN id (and with it a
 /// fresh, untouched faucet allocation) as a new profile at launch — nothing
 /// claimed under this network can validate there.
 const BETA_NETWORK_ID: &[u8] = b"dsm-testnet";
+
+/// One pinned entry: a member id and the register incarnation it serves.
+pub type PinnedMember = (&'static [u8], [u8; 32]);
+
+/// A network's PINNED root-register members, for callers that must construct
+/// or display the committed set — a catalog being provisioned, a fixture that
+/// has to resolve to the real register, an operator tool.
+///
+/// Public because it is a commitment, not a secret: it says which members and
+/// which register histories this network trusts, and anyone verifying a claim
+/// against this network needs to be able to check that.
+pub fn pinned_root_register_members(
+    network_id: &[u8],
+) -> Result<&'static [PinnedMember], RegisterResolutionError> {
+    if network_id != BETA_NETWORK_ID {
+        return Err(RegisterResolutionError::UnknownNetwork {
+            network_id: network_id.to_vec(),
+        });
+    }
+    Ok(&BETA_ROOT_REGISTER_MEMBERS)
+}
 
 /// Resolve the register for a network. Unknown network ⇒ fail closed.
 pub fn resolve_root_register_profile(
@@ -208,12 +313,23 @@ pub fn resolve_root_register_profile(
             network_id: network_id.to_vec(),
         });
     }
-    let members: Vec<Vec<u8>> = BETA_MEMBERS.iter().map(|m| m.to_vec()).collect();
+    // The pinned pairs are the ONE source: both the member list and the set id
+    // come from them, so the two cannot drift apart.
+    let pinned = StorageSetMembers::new(&BETA_ROOT_REGISTER_MEMBERS)
+        .map_err(RegisterResolutionError::ProfileNotDerivable)?;
+    let storage_set_id =
+        storage_set_id(&pinned).map_err(RegisterResolutionError::ProfileNotDerivable)?;
+    let members: Vec<Vec<u8>> = pinned
+        .entries()
+        .iter()
+        .map(|e| e.member_id().to_vec())
+        .collect();
     Ok(RootRegisterProfile {
         // Req 6.13's fixed three-member profile. Read from the DLV profile
         // module rather than restated, so the threshold has one home.
         quorum: crate::dlv::beta_storage_profile::SOFI_BETA_QUORUM,
         members,
+        storage_set_id,
     })
 }
 

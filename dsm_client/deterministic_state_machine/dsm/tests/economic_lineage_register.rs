@@ -63,9 +63,12 @@ fn the_beta_register_resolves_to_the_three_member_fleet_at_q_two() {
     // that rebuilt its register, changes the id rather than silently
     // resolving the old register.
     let candidate = beta_candidate_set();
+    p.verify_candidate(&candidate)
+        .expect("the pinned pairs verify against the pinned id");
     assert_eq!(
-        p.derive_set_id(&candidate).expect("canonical membership"),
-        dsm::ccb::storage_set_id(&candidate).unwrap()
+        p.storage_set_id,
+        dsm::ccb::storage_set_id(&candidate).unwrap(),
+        "the pinned id IS the digest of the pinned pairs — one source, not two"
     );
 }
 
@@ -82,7 +85,7 @@ fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
         (&b"attacker-node"[..], [0xC3; 32]),
     ])
     .expect("well-formed but wrong");
-    match p.derive_set_id(&impostor) {
+    match p.verify_candidate(&impostor) {
         Err(RegisterResolutionError::MembershipNotCanonical { .. }) => {}
         other => panic!("a foreign membership must be refused, got {other:?}"),
     }
@@ -95,7 +98,7 @@ fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
     ])
     .expect("well-formed but short");
     assert!(
-        p.derive_set_id(&short).is_err(),
+        p.verify_candidate(&short).is_err(),
         "a subset of the members is not the set"
     );
 }
@@ -106,24 +109,29 @@ fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
 #[test]
 fn one_member_rebuilding_its_register_changes_the_set_id() {
     let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
-    let before = p.derive_set_id(&beta_candidate_set()).expect("canonical");
+    p.verify_candidate(&beta_candidate_set())
+        .expect("the pinned set verifies");
 
-    let rebuilt = dsm::ccb::StorageSetMembers::new(&[
-        (&b"dsm-node-1"[..], [0xC1; 32]),
-        (&b"dsm-node-2"[..], [0xC2; 32]),
-        // node-3 lost its register and generated a new incarnation. Same
-        // node, same identity key, different durable history.
-        (&b"dsm-node-3"[..], [0x99; 32]),
-    ])
-    .expect("canonical membership, new incarnation");
-    let after = p
-        .derive_set_id(&rebuilt)
-        .expect("membership is still canonical");
+    // node-3 lost its register and minted a new incarnation. Same node, same
+    // identity key, canonical membership — and a different durable history.
+    let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+        .expect("beta network");
+    let mut rebuilt_pairs: Vec<(&[u8], [u8; 32])> = pinned.to_vec();
+    let last = rebuilt_pairs.len() - 1;
+    rebuilt_pairs[last].1 = [0x99; 32];
+    let rebuilt = dsm::ccb::StorageSetMembers::new(&rebuilt_pairs)
+        .expect("canonical membership, new incarnation");
 
-    assert_ne!(
-        before, after,
-        "a rebuilt register must not resolve to the set it used to serve"
-    );
+    match p.verify_candidate(&rebuilt) {
+        Err(RegisterResolutionError::SetIdIsNotThePinnedOne { pinned, derived }) => {
+            assert_eq!(pinned, p.storage_set_id);
+            assert_ne!(derived, pinned, "a rebuilt member derives a different id");
+        }
+        other => panic!(
+            "a member that rebuilt its register must be REFUSED against the pin, not \
+             silently resolved to a different register; got {other:?}"
+        ),
+    }
 }
 
 #[test]
@@ -177,8 +185,7 @@ fn a_signed_claim_round_trips_and_a_tampered_one_does_not() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .derive_set_id(&beta_candidate_set())
-        .expect("canonical membership");
+        .storage_set_id;
     let b = body(&pk, set);
     let envelope = sign_economic_root_claim(&b, &sk).expect("signable");
 
@@ -214,8 +221,7 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .derive_set_id(&beta_candidate_set())
-        .expect("canonical membership");
+        .storage_set_id;
     let at7 = body(&pk, set);
     let envelope = sign_economic_root_claim(&at7, &sk).expect("signable");
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
@@ -234,8 +240,7 @@ fn a_member_refuses_a_claim_that_is_not_the_callers() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .derive_set_id(&beta_candidate_set())
-        .expect("canonical membership");
+        .storage_set_id;
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
     let claim = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
 
@@ -326,8 +331,7 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
         admission_manifest_addr: [0xDD; 32],
         storage_set_id: resolve_root_register_profile(b"dsm-testnet")
             .unwrap()
-            .derive_set_id(&beta_candidate_set())
-            .expect("canonical membership"),
+            .storage_set_id,
     };
     assert_eq!(
         registered.register_key(),
@@ -358,8 +362,7 @@ fn a_decodable_but_noncanonical_envelope_is_refused() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .derive_set_id(&beta_candidate_set())
-        .expect("canonical membership");
+        .storage_set_id;
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
     assert!(decode_and_verify_economic_root_claim(&envelope).is_ok());
 
@@ -379,10 +382,9 @@ fn a_decodable_but_noncanonical_envelope_is_refused() {
 /// The beta fleet as a catalog resolves it: the network's canonical member
 /// ids paired with the register incarnations those members are serving.
 fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
-    dsm::ccb::StorageSetMembers::new(&[
-        (&b"dsm-node-1"[..], [0xC1; 32]),
-        (&b"dsm-node-2"[..], [0xC2; 32]),
-        (&b"dsm-node-3"[..], [0xC3; 32]),
-    ])
-    .expect("beta candidate set")
+    // Built from the network's PINNED pairs, so a fixture resolves to the
+    // real committed register rather than to values a fixture chose.
+    let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+        .expect("the beta network is known");
+    dsm::ccb::StorageSetMembers::new(pinned).expect("pinned beta set")
 }

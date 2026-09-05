@@ -29,14 +29,24 @@ custom_ca_certs = ["ca.crt"]
 # A name that merely describes the node ("us-west-1a-1") makes the client
 # compute a set id no node belongs to: every settlement-slot claim is refused as
 # a foreign set and no publication ever reaches quorum.
+#
+# `register_incarnation` is the register history that node is serving, as its
+# own database minted it at first boot and logged it. The set id is derived from
+# the (name, register_incarnation) pairs, and the network's root-register
+# profile PINS that id in core — so a node that rebuilt its register stops
+# resolving here rather than silently serving the register it used to.
+# Provisioned 2026-09-05; set id E05YS8101EJH33KY2CG625JJE8A0Z4GJNSEM335TX1XVTWM9RR8G.
 [[nodes]]
 name = "dsm-node-1"
 endpoint = "https://47.251.246.93:8080"
+register_incarnation = "DXWR7W9J2E5ASQ5BJBYF13ZZEK1VFTZFYNWAYPF1KNT8C33YPVM0"
 
 [[nodes]]
 name = "dsm-node-2"
 endpoint = "https://47.251.250.159:8080"
+register_incarnation = "H4ZSDG34M1BSQQH8T9WWWZ65Y90YW9QY2CYRR2EG3H621VDGJ3W0"
 
 [[nodes]]
 name = "dsm-node-3"
 endpoint = "https://47.251.88.58:8080"
+register_incarnation = "VW3REAWA7PR608Y4AY3VX18M8BE4828PFPNVTG380XV18HKF8SSG"
