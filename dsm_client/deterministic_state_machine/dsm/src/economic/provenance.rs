@@ -127,13 +127,6 @@ pub struct FaucetTicketWin {
     pub envelope_bytes: Vec<u8>,
 }
 
-/// The live-quorum answer for one settlement-slot cell: the exact v2 claim
-/// envelope bytes a quorum of the vault's birth set holds as the winner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettlementSlotWin {
-    pub envelope_bytes: Vec<u8>,
-}
-
 /// Why a peer's lineage could not be resolved to a validated transition.
 ///
 /// The taxonomy is load-bearing: a retry-able outage and an authenticated
@@ -197,17 +190,18 @@ pub trait ProvenanceResolver {
     /// claims were written to. The caller must have required that quorum to be
     /// canonical before calling.
     ///
-    /// `None` when no quorum-agreed winner exists for any reason — empty,
-    /// contested, or unreadable. The 0x0026 arm fails closed on all three,
-    /// which is why they are not distinguished here; a caller that must tell
-    /// them apart observes the cell directly.
-    fn winning_settlement_slot_claim(
+    /// Returns the OBSERVATION, not an `Option`. The four answers mean
+    /// different things and carry different verdicts — a divergence is a
+    /// quarantine, an outage is retryable, and neither is evidence that a
+    /// credit was forged — so there is deliberately no adapter here that
+    /// could turn `Conflict` into "no winner".
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Option<SettlementSlotWin>;
+    ) -> crate::economic::cell_observation::CellObservation;
 
     /// Exact immutable bytes at `addr` under `namespace` — evidence the
     /// verifier itself checks (the resolver supplies bytes, never verdicts,
@@ -1222,13 +1216,50 @@ pub fn verify_credit_source(
                 }
             }
             // ── 8. The quorum slot winner: exclusivity's liveness anchor ──
-            let win = resolver
-                .winning_settlement_slot_claim(&vault, *parent_sequence, &vn.storage_set, vn.quorum)
-                .ok_or_else(|| {
-                    invalid("no quorum-agreed settlement-slot winner for this parent".into())
-                })?;
+            // EVERY ANSWER MEANS SOMETHING DIFFERENT, and the verdicts differ.
+            // The taxonomy this file states — an outage retries, a forgery does
+            // not — is only true if it is preserved here: a divergence in a
+            // write-once cell is a QUARANTINE, an unreadable cell is
+            // RETRYABLE, and neither is evidence that this credit was forged.
+            // Collapsing them into "no winner" reports a network fault as a
+            // forgery and a forgery as a network fault.
+            let envelope_bytes = match resolver.settlement_slot_observation(
+                &vault,
+                *parent_sequence,
+                &vn.storage_set,
+                vn.quorum,
+            ) {
+                crate::economic::cell_observation::CellObservation::Claimed(bytes) => bytes,
+                crate::economic::cell_observation::CellObservation::Conflict { distinct } => {
+                    return Err(ProvenanceError::OwnerLineage(
+                        PeerLineageFailure::Quarantined(format!(
+                            "the settlement-slot cell for this parent holds {distinct} \
+                             contradictory claims"
+                        )),
+                    ))
+                }
+                crate::economic::cell_observation::CellObservation::Unavailable {
+                    attributed,
+                    required,
+                } => {
+                    return Err(ProvenanceError::OwnerLineage(
+                        PeerLineageFailure::Incomplete(format!(
+                            "only {attributed} of the vault's members answered the \
+                             settlement-slot cell ({required} required)"
+                        )),
+                    ))
+                }
+                // A quorum of members each said there is no claim here. That
+                // IS evidence, and it says this settle never won exclusivity
+                // over the parent it names.
+                crate::economic::cell_observation::CellObservation::EmptyAtQuorum => {
+                    return Err(invalid(
+                        "no settlement-slot claim was established for this parent".into(),
+                    ))
+                }
+            };
             let claim = crate::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(
-                &win.envelope_bytes,
+                &envelope_bytes,
             )
             .map_err(|e| invalid(format!("slot winner: {e}")))?;
             let vault_set_id = crate::ccb::storage_set_id(&vn.storage_set)

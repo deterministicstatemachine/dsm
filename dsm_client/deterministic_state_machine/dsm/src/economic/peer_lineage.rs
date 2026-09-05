@@ -71,16 +71,21 @@ pub trait PeerEvidenceFetcher {
         faucet_id: &[u8; 32],
         ticket_index: u64,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
-    /// The quorum-agreed winner bytes for one settlement-slot cell
-    /// `(vault_id, parent_sequence)`, read against the vault's COMMITTED set
-    /// and counted at its committed quorum — never the fetcher's own fleet.
-    fn settlement_slot_cell(
+    /// What the vault's COMMITTED set establishes about one settlement-slot
+    /// cell, counted at its committed quorum — never the fetcher's own fleet.
+    ///
+    /// Returns the observation itself, not an `Option` and not a `Result`: a
+    /// transport failure IS `Unavailable`, so there is no error channel a
+    /// caller could collapse and no `None` that could stand for four
+    /// different things. A caller that needs a narrower answer must match all
+    /// four arms and say what it does with each.
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+    ) -> crate::economic::cell_observation::CellObservation;
     /// Exact immutable bytes at `addr` under `namespace`.
     fn immutable(
         &self,
@@ -155,18 +160,15 @@ impl ProvenanceResolver for WalkingResolver<'_> {
             .map(|envelope_bytes| FaucetTicketWin { envelope_bytes })
     }
 
-    fn winning_settlement_slot_claim(
+    fn settlement_slot_observation(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> Option<crate::economic::provenance::SettlementSlotWin> {
+    ) -> crate::economic::cell_observation::CellObservation {
         self.fetcher
-            .settlement_slot_cell(vault_id, parent_sequence, storage_set, quorum)
-            .ok()
-            .flatten()
-            .map(|envelope_bytes| crate::economic::provenance::SettlementSlotWin { envelope_bytes })
+            .settlement_slot_observation(vault_id, parent_sequence, storage_set, quorum)
     }
 
     fn immutable_evidence(

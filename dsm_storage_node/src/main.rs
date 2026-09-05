@@ -408,6 +408,13 @@ async fn async_main() -> Result<()> {
     );
 
     info!("Initializing database schema...");
+    // A node that cannot keep an acknowledgement must not serve a register.
+    db::require_durable_commit_posture(&db_pool)
+        .await
+        .map_err(|e| {
+            log::error!("{e}");
+            e
+        })?;
     db::init_db(&db_pool)
         .await
         .context("failed to initialize database schema")?;

@@ -216,6 +216,150 @@ fn create_tls_connector() -> MakeRustlsConnect {
     MakeRustlsConnect::new(tls_config)
 }
 
+/// REFUSE TO RUN ON A SERVER THAT CANNOT KEEP WHAT IT ACKNOWLEDGES.
+///
+/// The one-shot registers are safe only because a member that acknowledged a
+/// claim still holds it after a restart. `SET LOCAL synchronous_commit = on`
+/// makes each claim transaction flush its own commit, but two server-level
+/// settings can defeat that no matter what a transaction asks for: `fsync`
+/// off means the server never flushes at all, and `full_page_writes` off can
+/// leave a torn page after a crash. Neither is something a claim can override,
+/// so a node that finds them refuses to start rather than serving a register
+/// whose acknowledgements it cannot keep.
+///
+/// This is a startup gate, not a warning: an acknowledgement is a promise, and
+/// a node that cannot keep it should not be part of a quorum.
+pub async fn require_durable_commit_posture(pool: &Pool) -> Result<()> {
+    let client = pool.get().await?;
+    let mut readings = Vec::with_capacity(REQUIRED_SERVER_SETTINGS.len());
+    for (setting, _) in REQUIRED_SERVER_SETTINGS {
+        let row = client.query_one(&format!("SHOW {setting}"), &[]).await?;
+        readings.push((*setting, row.get::<_, String>(0)));
+    }
+    check_durable_commit_posture(&readings)
+}
+
+/// The server-level settings a node must find before it will serve a
+/// register, and the value each must have.
+const REQUIRED_SERVER_SETTINGS: &[(&str, &str)] = &[("fsync", "on"), ("full_page_writes", "on")];
+
+/// The refusal DECISION, separated from the query so it can be tested in both
+/// directions. A gate whose only rejecting input needs a differently
+/// configured server is a gate no test ever exercises.
+fn check_durable_commit_posture(readings: &[(&str, String)]) -> Result<()> {
+    for (setting, required) in REQUIRED_SERVER_SETTINGS {
+        let Some((_, value)) = readings.iter().find(|(name, _)| name == setting) else {
+            anyhow::bail!(
+                "refusing to start: postgres did not report {setting}, so this node cannot \
+                 establish that an acknowledged claim survives a restart"
+            );
+        };
+        if !value.eq_ignore_ascii_case(required) {
+            anyhow::bail!(
+                "refusing to start: postgres reports {setting}={value}, but this node's \
+                 one-shot registers promise that an acknowledged claim survives a restart, \
+                 and {setting} must be {required} for that promise to hold"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod durable_posture_tests {
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
+    use super::*;
+
+    fn readings(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        pairs.iter().map(|(k, v)| (*k, (*v).to_string())).collect()
+    }
+
+    #[test]
+    fn a_fully_durable_server_is_accepted_in_any_letter_case() {
+        check_durable_commit_posture(&readings(&[("fsync", "on"), ("full_page_writes", "ON")]))
+            .expect("a server with both settings on is accepted");
+    }
+
+    #[test]
+    fn a_weaker_posture_is_refused_and_the_refusal_names_the_setting() {
+        for weak in ["off", "", "false"] {
+            let err = check_durable_commit_posture(&readings(&[
+                ("fsync", weak),
+                ("full_page_writes", "on"),
+            ]))
+            .expect_err("fsync must be on");
+            assert!(
+                err.to_string().contains("fsync"),
+                "names the setting: {err}"
+            );
+
+            let err = check_durable_commit_posture(&readings(&[
+                ("fsync", "on"),
+                ("full_page_writes", weak),
+            ]))
+            .expect_err("full_page_writes must be on");
+            assert!(
+                err.to_string().contains("full_page_writes"),
+                "names the setting: {err}"
+            );
+        }
+    }
+
+    /// A server that answers nothing for a required setting is refused too —
+    /// a missing reading is not a passing one.
+    #[test]
+    fn an_unreported_setting_is_refused_rather_than_assumed() {
+        let err = check_durable_commit_posture(&readings(&[("fsync", "on")]))
+            .expect_err("an unreported setting cannot be assumed durable");
+        assert!(err.to_string().contains("full_page_writes"), "{err}");
+    }
+
+    /// The claim transaction SETS its durability; it does not inherit it.
+    ///
+    /// Stated hostilely, because the passing version of this test is
+    /// worthless otherwise: the connection is first weakened at session level
+    /// (`synchronous_commit = off`), which the pool's `RecyclingMethod::Fast`
+    /// would carry to every later borrow of that connection, and the
+    /// transaction must still report `on`. Reading `on` off a server that was
+    /// already `on` would prove nothing.
+    #[tokio::test]
+    async fn a_claim_transaction_sets_its_own_durability_rather_than_inheriting_it() {
+        let pool = crate::db::write_once_properties::test_pool();
+        let mut client = pool.get().await.expect("client");
+        client
+            .batch_execute("SET synchronous_commit = off")
+            .await
+            .expect("weaken the session");
+        let weakened: String = client
+            .query_one("SHOW synchronous_commit", &[])
+            .await
+            .expect("show")
+            .get(0);
+        assert_eq!(weakened, "off", "the session really is weakened");
+
+        let tx = begin_durable_write(&mut client)
+            .await
+            .expect("durable write");
+        let inside: String = tx
+            .query_one("SHOW synchronous_commit", &[])
+            .await
+            .expect("show")
+            .get(0);
+        assert_eq!(
+            inside, "on",
+            "a claim transaction commits durably even on a connection whose session says otherwise"
+        );
+        tx.commit().await.expect("commit");
+
+        // Leave the borrowed connection as we found it: the pool does not
+        // reset session state between borrows.
+        client
+            .batch_execute("SET synchronous_commit = on")
+            .await
+            .expect("restore the session");
+    }
+}
+
 /// Initialize database schema for storage node.
 pub async fn init_db(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
@@ -833,13 +977,34 @@ pub enum SlotClaimOutcome {
     Refused { held_digest: Vec<u8> },
 }
 
+/// Begin a write transaction whose commit is durable BEFORE it is
+/// acknowledged.
+///
+/// DURABILITY IS SET HERE, NOT INHERITED. `SET LOCAL synchronous_commit = on`
+/// applies to this transaction only and does not depend on the server's
+/// default, the connection pool, or the image this node happens to run: a
+/// claim this node acknowledges has reached disk before the acknowledgement.
+/// An earlier doc-string credited "the pool's default", which set nothing —
+/// the guarantee was the upstream image's default and would have changed
+/// silently with it. `require_durable_commit_posture` additionally refuses to
+/// start a node whose server-level settings could defeat this.
+///
+/// Every one-shot register claim goes through this one function so the posture
+/// cannot hold for one register and silently lapse for another.
+async fn begin_durable_write(
+    client: &mut deadpool_postgres::Client,
+) -> Result<deadpool_postgres::Transaction<'_>> {
+    let tx = client.build_transaction().start().await?;
+    tx.batch_execute("SET LOCAL synchronous_commit = on")
+        .await?;
+    Ok(tx)
+}
+
 /// Write-once conditional acceptance for `(vault_id, parent_sequence)` in ONE
 /// atomic write transaction over the unique key: `INSERT … ON CONFLICT DO
 /// NOTHING`, then read the held row inside the same transaction. First bytes
 /// win; identical bytes re-ack; different bytes refuse. Never check-then-insert
-/// outside the transaction. Committed with the pool's default synchronous
-/// commit (fsync before ack) — a claim this node acknowledged survives its
-/// restart.
+/// outside the transaction. Commits durably — see [`begin_durable_write`].
 pub async fn claim_settlement_slot(
     pool: &Pool,
     vault_id: &[u8],
@@ -852,7 +1017,7 @@ pub async fn claim_settlement_slot(
     let seq_i64 = i64::try_from(parent_sequence)
         .map_err(|_| anyhow::anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
     let mut client = pool.get().await?;
-    let tx = client.build_transaction().start().await?;
+    let tx = begin_durable_write(&mut client).await?;
     let stmt = tx
         .prepare_cached(
             "INSERT INTO settlement_slot_claims
@@ -906,7 +1071,8 @@ pub enum OneShotOutcome {
 }
 
 /// Write-once acceptance for one faucet ticket — settlement-register
-/// discipline: insert-if-absent, same-tx read-back.
+/// discipline: insert-if-absent, same-tx read-back. Commits durably — see
+/// [`begin_durable_write`].
 pub async fn claim_faucet_ticket(
     pool: &Pool,
     faucet_id: &[u8],
@@ -919,7 +1085,7 @@ pub async fn claim_faucet_ticket(
     let idx_i64 = i64::try_from(ticket_index)
         .map_err(|_| anyhow::anyhow!("ticket_index {ticket_index} does not fit in i64"))?;
     let mut client = pool.get().await?;
-    let tx = client.build_transaction().start().await?;
+    let tx = begin_durable_write(&mut client).await?;
     let stmt = tx
         .prepare_cached(
             "INSERT INTO faucet_ticket_claims
@@ -982,7 +1148,8 @@ pub async fn get_faucet_ticket_claim(
     Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
-/// Write-once acceptance for one economic-root cell.
+/// Write-once acceptance for one economic-root cell — insert-if-absent,
+/// same-tx read-back. Commits durably — see [`begin_durable_write`].
 pub async fn claim_economic_root(
     pool: &Pool,
     k_root: &[u8],
@@ -992,7 +1159,7 @@ pub async fn claim_economic_root(
     storage_set_id: &[u8],
 ) -> Result<OneShotOutcome> {
     let mut client = pool.get().await?;
-    let tx = client.build_transaction().start().await?;
+    let tx = begin_durable_write(&mut client).await?;
     let stmt = tx
         .prepare_cached(
             "INSERT INTO economic_root_claims
