@@ -211,87 +211,25 @@ pub async fn register_economic_root(
     }
 }
 
-/// What a live quorum read established about ONE write-once register cell.
-///
-/// The three outcomes are genuinely different facts and must never collapse
-/// into one another. `EmptyAtQuorum` is a POSITIVE observation — q attributed
-/// members each answered "this cell holds nothing" — and it is the only thing
-/// that can establish a frontier. `NoQuorum` is the absence of an answer.
-/// Reporting the second as the first is precisely the omission defect the
-/// authenticated frontier exists to remove: a write-once cell cannot express
-/// omission, but a reader that treats silence as emptiness re-introduces it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CellObservation {
-    /// q attributed members returned byte-identical contents.
-    Winner(Vec<u8>),
-    /// q attributed members each returned NO value for this cell.
-    EmptyAtQuorum,
-    /// Fewer than q members gave an attributed answer either way — the read
-    /// establishes nothing, and the caller must fail closed.
-    NoQuorum { attributed: u32, required: u32 },
-}
-
-/// Observe one register cell under Req 15.8 counting: only members that echo
-/// their own id are counted, and only byte-identical values aggregate.
-/// Divergent non-identical values are reported so a caller that owns the cell
-/// can quarantine.
-///
-/// `quorum` is supplied by the caller rather than derived from the set,
-/// because the vault cells are counted at the quorum the OWNER committed in
-/// `V_n` (field 15) — a local majority-of-catalog rule is this verifier's
-/// opinion, not the vault's rule.
-async fn read_cell_quorum_at(
-    rows: Vec<(String, Option<String>, Option<Vec<u8>>)>,
-    quorum: u32,
-) -> Result<CellObservation, RegisterError> {
-    use std::collections::HashMap;
-    let mut counts: HashMap<Vec<u8>, u32> = HashMap::new();
-    let mut distinct = 0usize;
-    let mut attributed_total = 0u32;
-    let mut attributed_empty = 0u32;
-    for (member_id, echoed, bytes) in rows {
-        if echoed.as_deref() != Some(member_id.as_str()) {
-            continue;
-        }
-        attributed_total += 1;
-        match bytes {
-            Some(b) => {
-                let c = counts.entry(b).or_insert(0);
-                if *c == 0 {
-                    distinct += 1;
-                }
-                *c += 1;
-            }
-            None => attributed_empty += 1,
-        }
-    }
-    if let Some((bytes, _)) = counts.iter().find(|(_, c)| **c >= quorum) {
-        return Ok(CellObservation::Winner(bytes.clone()));
-    }
-    if distinct > 1 {
-        return Err(RegisterError::Conflict {
-            detail: format!("{distinct} distinct values observed for one write-once cell"),
-        });
-    }
-    if attributed_empty >= quorum {
-        return Ok(CellObservation::EmptyAtQuorum);
-    }
-    Ok(CellObservation::NoQuorum {
-        attributed: attributed_total,
-        required: quorum,
-    })
-}
-
 /// The quorum-agreed winner for one cell, or `None` when no winner is
-/// established. Callers that must distinguish "empty at quorum" from "no
-/// usable answer" use [`read_cell_quorum_at`] directly.
+/// established.
+///
+/// For the faucet-ticket and economic-root cells, whose callers act only on a
+/// winner. Anything else — an explicit empty at quorum, contradictory claims,
+/// or an unusable read — is `None` here, and a caller that must tell those
+/// apart uses [`dsm::economic::cell_observation::observe_cell`] directly, as
+/// the vault cells do.
 async fn read_cell_quorum(
     set: &StorageSet,
-    rows: Vec<(String, Option<String>, Option<Vec<u8>>)>,
+    reads: Vec<dsm::economic::cell_observation::MemberCellRead>,
 ) -> Result<Option<Vec<u8>>, RegisterError> {
-    match read_cell_quorum_at(rows, set.quorum()).await? {
-        CellObservation::Winner(b) => Ok(Some(b)),
-        CellObservation::EmptyAtQuorum | CellObservation::NoQuorum { .. } => Ok(None),
+    use dsm::economic::cell_observation::{observe_cell, CellObservation};
+    match observe_cell(&reads, set.quorum()) {
+        CellObservation::Claimed(b) => Ok(Some(b)),
+        CellObservation::Conflict { distinct } => Err(RegisterError::Conflict {
+            detail: format!("{distinct} distinct values observed for one write-once cell"),
+        }),
+        CellObservation::EmptyAtQuorum | CellObservation::Unavailable { .. } => Ok(None),
     }
 }
 
@@ -333,19 +271,38 @@ pub async fn read_winning_settlement_slot(
 /// silently omit a key and no signature repairs that, but a cell either holds
 /// a value or does not, and q attributed members saying "nothing here" is a
 /// fact rather than an absence of one.
+/// Resolve the set a vault COMMITTED, fail-closed.
+///
+/// The id is re-derived from the committed member ids and the catalog entry
+/// must reproduce it, so configuration only says WHERE to reach a member — it
+/// can never substitute a different set. A verifier's own default fleet is its
+/// opinion; the vault's signed state is the rule.
+fn resolve_committed_set(
+    storage_set: &dsm::ccb::StorageSetMembers,
+) -> Result<crate::sdk::storage_set::StorageSet, RegisterError> {
+    let unavailable = || RegisterError::StorageUnavailable {
+        accepted: 0,
+        total: storage_set.len() as u32,
+    };
+    let id = dsm::ccb::storage_set_id(storage_set).map_err(|_| unavailable())?;
+    let catalog =
+        crate::sdk::storage_set::StorageSetCatalog::from_env_config().map_err(|_| unavailable())?;
+    catalog.resolve(&id).cloned().ok_or_else(unavailable)
+}
+
 pub async fn observe_settlement_slot_cell(
     set: &StorageSet,
     vault_id: &[u8; 32],
     parent_sequence: u64,
     quorum: u32,
-) -> Result<CellObservation, RegisterError> {
+) -> Result<dsm::economic::cell_observation::CellObservation, RegisterError> {
     let rows = crate::sdk::storage_io::read_settlement_slot_cell(set, vault_id, parent_sequence)
         .await
         .map_err(|_| RegisterError::StorageUnavailable {
             accepted: 0,
             total: set.len() as u32,
         })?;
-    read_cell_quorum_at(rows, quorum).await
+    Ok(dsm::economic::cell_observation::observe_cell(&rows, quorum))
 }
 
 /// The quorum winner for one economic-root cell, if established. Used for
@@ -430,11 +387,23 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &dsm::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
         let v = *vault_id;
+        let set = resolve_committed_set(storage_set)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(read_winning_settlement_slot(self.set, &v, parent_sequence))
+            self.runtime.block_on(observe_settlement_slot_cell(
+                &set,
+                &v,
+                parent_sequence,
+                quorum,
+            ))
+        })
+        .map(|observation| match observation {
+            dsm::economic::cell_observation::CellObservation::Claimed(b) => Some(b),
+            _ => None,
         })
         .map_err(|e| match e {
             RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
@@ -616,6 +585,8 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &dsm::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
         // A register read, not an immutable object — nothing to record; the
         // q-durable closure covers content-addressed evidence only.
@@ -623,6 +594,8 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
             self.inner,
             vault_id,
             parent_sequence,
+            storage_set,
+            quorum,
         )
     }
 
@@ -692,15 +665,27 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &dsm::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
-        let set = self.set;
+        // THE VAULT'S SET, resolved fail-closed from what it committed —
+        // never `self.set`, which is whatever fleet this verifier happens to
+        // be configured for and answers about a different register.
+        let set = resolve_committed_set(storage_set).ok()?;
         let v = *vault_id;
-        let bytes = tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(read_winning_settlement_slot(set, &v, parent_sequence))
+        let bytes = match tokio::task::block_in_place(|| {
+            self.runtime.block_on(observe_settlement_slot_cell(
+                &set,
+                &v,
+                parent_sequence,
+                quorum,
+            ))
         })
-        .ok()
-        .flatten()?;
+        .ok()?
+        {
+            dsm::economic::cell_observation::CellObservation::Claimed(b) => b,
+            _ => return None,
+        };
         Some(dsm::economic::provenance::SettlementSlotWin {
             envelope_bytes: bytes,
         })
@@ -1023,53 +1008,109 @@ mod tests {
     async fn divergent_values_in_one_write_once_cell_are_a_conflict() {
         // Two attributed members holding DIFFERENT bytes for one cell is the
         // catastrophic case: quarantine, never hash-order, never overwrite.
+        use dsm::economic::cell_observation::MemberCellRead;
         let set = three_member_set();
-        let rows = vec![
-            (
-                "dsm-node-1".to_string(),
-                Some("dsm-node-1".to_string()),
-                Some(vec![1u8]),
-            ),
-            (
-                "dsm-node-2".to_string(),
-                Some("dsm-node-2".to_string()),
-                Some(vec![2u8]),
-            ),
-            (
-                "dsm-node-3".to_string(),
-                Some("dsm-node-3".to_string()),
-                None,
-            ),
+        let reads = vec![
+            MemberCellRead::Value(vec![1u8]),
+            MemberCellRead::Value(vec![2u8]),
+            MemberCellRead::Absent,
         ];
-        match read_cell_quorum(&set, rows).await {
+        match read_cell_quorum(&set, reads).await {
             Err(RegisterError::Conflict { .. }) => {}
             other => panic!("divergent cell not quarantined: {other:?}"),
         }
     }
 
+    /// CONFIGURATION LOCATES A MEMBER; IT NEVER SUBSTITUTES A SET.
+    ///
+    /// The committed set is resolved by RE-DERIVING its id from the member ids
+    /// a catalog entry lists and requiring that to reproduce the id the vault
+    /// signed. A catalog holding some other fleet therefore cannot answer for
+    /// this vault's register — it fails closed instead of quietly reading a
+    /// different one.
+    ///
+    /// In beta the configured fleet and every vault's birth set are the same
+    /// three members, so this is the property that is decidable today; the
+    /// behavioural difference only appears once a second set exists.
+    #[test]
+    fn a_committed_set_resolves_only_from_members_that_re_derive_its_id() {
+        let members = dsm::ccb::StorageSetMembers::new(&[
+            b"dsm-node-1".as_slice(),
+            b"dsm-node-2".as_slice(),
+            b"dsm-node-3".as_slice(),
+        ])
+        .expect("members");
+        let committed_id = dsm::ccb::storage_set_id(&members).expect("id");
+
+        let foreign = dsm::ccb::StorageSetMembers::new(&[
+            b"somebody-elses-node-1".as_slice(),
+            b"somebody-elses-node-2".as_slice(),
+            b"somebody-elses-node-3".as_slice(),
+        ])
+        .expect("members");
+        assert_ne!(
+            dsm::ccb::storage_set_id(&foreign).expect("id"),
+            committed_id,
+            "the two sets must differ for this to prove anything"
+        );
+
+        // A set whose members do not re-derive the committed id is refused,
+        // whatever the local catalog happens to contain.
+        assert!(
+            resolve_committed_set(&foreign).is_err(),
+            "a foreign set must not resolve"
+        );
+    }
+
+    /// ATTRIBUTION IS FOLDED INTO THE READ, and it is load-bearing in the
+    /// dangerous direction: an unattributed response must not be counted as an
+    /// ABSENCE, because a quorum of absences is the one observation a forward
+    /// lineage walk treats as terminal.
+    ///
+    /// The cell is empty here, so a correctly-echoing member says `Absent`. A
+    /// member whose response carries another id or none, and a member that is
+    /// down, each say nothing at all — and the observation is `Unavailable`
+    /// rather than an emptiness a walker would act on.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_unattributed_read_row_is_uncountable() {
-        // q identical values where one echo is wrong: only ONE countable row
-        // remains, so no winner is established — fail closed, not open.
+    async fn a_mis_echoed_or_failing_member_is_never_counted_as_an_absence() {
+        use dsm::economic::cell_observation::{observe_cell, CellObservation, MemberCellRead};
         let set = three_member_set();
-        let rows = vec![
-            (
-                "dsm-node-1".to_string(),
-                Some("dsm-node-1".to_string()),
-                Some(vec![9u8]),
+        crate::sdk::storage_io::fake_registers::reset();
+        crate::sdk::storage_io::fake_registers::set_echo(
+            "dsm-node-2",
+            Some("dsm-node-9".to_string()),
+        );
+        // And a member that is simply DOWN. An outage is the same kind of
+        // non-answer as a mis-echo: it must never become the absence a
+        // forward walk would read as a frontier.
+        crate::sdk::storage_io::fake_registers::fail_member("dsm-node-3", true);
+        let reads = crate::sdk::storage_io::fake_registers::read(
+            &set,
+            crate::sdk::storage_io::fake_registers::RegisterKind::EconomicRoot,
+            b"cell-key",
+        );
+        assert_eq!(
+            reads[0],
+            MemberCellRead::Absent,
+            "an attributed member with no row asserts absence"
+        );
+        assert_eq!(
+            reads[1],
+            MemberCellRead::Unavailable,
+            "a mis-echoed response is not an answer"
+        );
+        assert_eq!(
+            reads[2],
+            MemberCellRead::Unavailable,
+            "a member that is down is not an answer"
+        );
+        assert!(
+            matches!(
+                observe_cell(&reads, set.quorum()),
+                CellObservation::Unavailable { attributed: 1, .. }
             ),
-            (
-                "dsm-node-2".to_string(),
-                Some("dsm-node-9".to_string()),
-                Some(vec![9u8]),
-            ),
-            (
-                "dsm-node-3".to_string(),
-                Some("dsm-node-3".to_string()),
-                None,
-            ),
-        ];
-        let winner = read_cell_quorum(&set, rows).await.expect("no conflict");
-        assert!(winner.is_none(), "unattributed rows must be uncountable");
+            "one absence is short of quorum and the other two answered nothing"
+        );
+        crate::sdk::storage_io::fake_registers::reset();
     }
 }

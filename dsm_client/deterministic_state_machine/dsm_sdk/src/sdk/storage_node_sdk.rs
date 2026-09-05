@@ -986,26 +986,48 @@ impl StorageNodeClient {
         (result, echoed)
     }
 
-    /// GET a register cell's winner bytes. Returns `(bytes, echoed node id)` —
-    /// the echo is NORMATIVE for quorum reads: a response without it, or with
-    /// an id other than this member's, is uncountable.
-    pub async fn get_register_cell(&self, path: &str) -> (Option<Vec<u8>>, Option<String>) {
+    /// GET a register cell. Returns `(read, echoed node id)`.
+    ///
+    /// THE THREE-VALUED READ. An explicit `404` is this member ASSERTING the
+    /// cell holds nothing; every other unsuccessful outcome — transport error,
+    /// timeout, 5xx from a failing database, a body that will not read — is
+    /// [`MemberCellRead::Unavailable`] and supports no conclusion in either
+    /// direction. Collapsing those into "no value" let a quorum of broken
+    /// members manufacture an emptiness fact, which is the one observation a
+    /// forward lineage walk treats as terminal.
+    ///
+    /// The echo is NORMATIVE: a response without it, or with an id other than
+    /// this member's, is uncountable — the caller folds that into
+    /// `Unavailable` rather than counting it either way.
+    pub async fn get_register_cell(
+        &self,
+        path: &str,
+    ) -> (
+        dsm::economic::cell_observation::MemberCellRead,
+        Option<String>,
+    ) {
+        use dsm::economic::cell_observation::MemberCellRead;
         let url = format!("{base}{path}", base = self.node_info.url);
         let response = match self.client.get(&url).send().await {
             Ok(r) => r,
-            Err(_) => return (None, None),
+            Err(_) => return (MemberCellRead::Unavailable, None),
         };
         let echoed = response
             .headers()
             .get("x-dsm-node-id")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        if response.status().as_u16() != 200 {
-            return (None, echoed);
+        let status = response.status().as_u16();
+        if status == 404 {
+            // The member answered, and its answer is "no row".
+            return (MemberCellRead::Absent, echoed);
+        }
+        if status != 200 {
+            return (MemberCellRead::Unavailable, echoed);
         }
         match response.bytes().await {
-            Ok(b) => (Some(b.to_vec()), echoed),
-            Err(_) => (None, echoed),
+            Ok(b) => (MemberCellRead::Value(b.to_vec()), echoed),
+            Err(_) => (MemberCellRead::Unavailable, echoed),
         }
     }
 
@@ -1519,22 +1541,37 @@ impl StorageNodeSDK {
 
     /// Fan a register-cell GET out to every member. Returns one row per
     /// member: `(member_id, echoed node id, winner bytes if any)`.
+    /// One attributed read per COMMITTED MEMBER, in set order.
+    ///
+    /// Attribution is folded in here: a member whose response does not echo
+    /// that member's own id is `Unavailable`, never counted as a value and
+    /// never counted as an absence. A member this client cannot locate is
+    /// likewise `Unavailable` — configuration only tells us where to ask, and
+    /// failing to ask is not an answer.
     pub async fn read_register_cell(
         &self,
         set: &crate::sdk::storage_set::StorageSet,
         path: &str,
-    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
+        use dsm::economic::cell_observation::MemberCellRead;
         let mut rows = Vec::with_capacity(set.len());
         for member in set.members() {
             let client = self
                 .clients
                 .iter()
                 .find(|c| c.node_info.url == member.endpoint);
-            let (bytes, echoed) = match client {
-                None => (None, None),
-                Some(c) => c.get_register_cell(path).await,
+            let read = match client {
+                None => MemberCellRead::Unavailable,
+                Some(c) => {
+                    let (read, echoed) = c.get_register_cell(path).await;
+                    if echoed.as_deref() == Some(member.member_id.as_str()) {
+                        read
+                    } else {
+                        MemberCellRead::Unavailable
+                    }
+                }
             };
-            rows.push((member.member_id.clone(), echoed, bytes));
+            rows.push(read);
         }
         rows
     }

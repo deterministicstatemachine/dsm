@@ -86,14 +86,6 @@ pub fn sofi_beta_quorum_for(member_count: usize) -> Result<u32, NonconformantPro
     }
 }
 
-/// Whether `q` is the threshold Rev 15 fixes for a set of this size.
-///
-/// The verifier's side of the same rule: a consumer reading a committed `q` out
-/// of an anchor checks it here rather than recomputing a threshold of its own.
-pub fn is_conformant_commitment(member_count: usize, committed_q: u32) -> bool {
-    matches!(sofi_beta_quorum_for(member_count), Ok(q) if q == committed_q)
-}
-
 /// Single-node development threshold. **Never valid for a production anchor.**
 ///
 /// `#[cfg(test)]` on purpose, and narrower than it strictly needs to be: no
@@ -153,23 +145,21 @@ mod tests {
         }
     }
 
-    /// The verifier side agrees with the constructor side, and rejects a
-    /// committed `q` that is merely plausible for the set size.
+    /// The profile's threshold and the canonical rule verification now applies
+    /// agree where both are defined — the three-member fleet — and the
+    /// canonical rule is what a consumer actually calls.
     #[test]
-    fn a_committed_q_is_checked_against_the_profile_not_recomputed() {
-        assert!(is_conformant_commitment(3, 2));
-        assert!(
-            !is_conformant_commitment(3, 3),
-            "unanimity of three is not q"
+    fn the_profile_threshold_is_the_canonical_quorum_for_the_deployed_fleet() {
+        assert_eq!(
+            sofi_beta_quorum_for(SOFI_BETA_MEMBERS).expect("the deployed cardinality"),
+            crate::economic::cell_observation::canonical_quorum(SOFI_BETA_MEMBERS),
         );
-        assert!(
-            !is_conformant_commitment(3, 1),
-            "one-of-three is not q either"
-        );
-        assert!(
-            !is_conformant_commitment(5, 4),
-            "the superseded five-member profile is no longer conformant at any q"
-        );
+        crate::economic::cell_observation::require_canonical_quorum(3, 2)
+            .expect("the profile's own q is canonical");
+        for not_q in [1u32, 3] {
+            crate::economic::cell_observation::require_canonical_quorum(3, not_q)
+                .expect_err("only the canonical value is accepted");
+        }
     }
 
     /// The dev threshold is reachable only from test/demos builds, and is not

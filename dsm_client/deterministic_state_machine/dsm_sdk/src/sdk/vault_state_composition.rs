@@ -317,13 +317,14 @@ pub(crate) async fn compose_vault_state(
             "the vault's committed storage set is not resolvable from the local catalog".into(),
         )
     })?;
+    // THE COMMITTED QUORUM IS NOT OWNER POLICY. It must BE the canonical
+    // strict majority of the committed set. A weaker bound — non-zero and not
+    // larger than the set — accepted a signed `1-of-3`, under which two
+    // disjoint claims each reach quorum and different verifiers fold
+    // different chains. Exact equality removes the discretion entirely.
     let committed_quorum = baseline_state.quorum;
-    if committed_quorum == 0 || committed_quorum as usize > set.len() {
-        return Err(CompositionError::BindingEvidenceUnavailable(format!(
-            "the state commits q={committed_quorum} over a {}-member set",
-            set.len()
-        )));
-    }
+    dsm::economic::cell_observation::require_canonical_quorum(set.len(), committed_quorum)
+        .map_err(|e| CompositionError::BindingEvidenceUnavailable(e.to_string()))?;
 
     // ── THE WALK. Cursor = a full state + its commitment. ────────────────
     //
@@ -371,9 +372,12 @@ pub(crate) async fn compose_vault_state(
             ))
         })?;
         let winner_bytes = match observation {
-            // THE ONLY TERMINATION THAT ESTABLISHES A FRONTIER.
-            crate::sdk::economic_registers::CellObservation::EmptyAtQuorum => break,
-            crate::sdk::economic_registers::CellObservation::NoQuorum {
+            // THE ONLY TERMINATION THAT ESTABLISHES A FRONTIER: a quorum of
+            // members each EXPLICITLY reported no row. It means no quorum
+            // claim is observable now — never that this generation can never
+            // be claimed.
+            dsm::economic::cell_observation::CellObservation::EmptyAtQuorum => break,
+            dsm::economic::cell_observation::CellObservation::Unavailable {
                 attributed,
                 required,
             } => {
@@ -382,7 +386,13 @@ pub(crate) async fn compose_vault_state(
                     cursor_state.generation
                 )))
             }
-            crate::sdk::economic_registers::CellObservation::Winner(b) => b,
+            dsm::economic::cell_observation::CellObservation::Conflict { distinct } => {
+                return Err(CompositionError::BindingEvidenceUnavailable(format!(
+                    "the slot cell at generation {} holds {distinct} contradictory claims",
+                    cursor_state.generation
+                )))
+            }
+            dsm::economic::cell_observation::CellObservation::Claimed(b) => b,
         };
 
         // A claimed successor EXISTS. From here every failure is fail-closed:
@@ -400,6 +410,15 @@ pub(crate) async fn compose_vault_state(
         if claim.body.vault_id != *vault_id || claim.body.parent_sequence != cursor_state.generation
         {
             return Err(unavailable("its slot claim names a different cell"));
+        }
+        // AND IT WAS CLAIMED UNDER THIS VAULT'S SET. A member reconfigured
+        // into another set keeps serving rows written under the old one, so a
+        // stale cross-set envelope is reachable; the provenance arm refuses
+        // one and this walk must not fold what that arm would reject.
+        if claim.body.storage_set_id != storage_set_id {
+            return Err(unavailable(
+                "its slot claim was made under a different storage set",
+            ));
         }
         // The claim binds the exact parent STATE, not just the generation
         // number — the v2 body's whole purpose. A winner bound to a different

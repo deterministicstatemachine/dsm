@@ -237,6 +237,8 @@ impl ProvenanceResolver for ApplyResolver {
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<SettlementSlotWin> {
         None
     }
@@ -492,6 +494,8 @@ fn an_unresolvable_trader_lineage_fails_closed() {
             &self,
             _v: &[u8; 32],
             _p: u64,
+            _storage_set: &dsm::ccb::StorageSetMembers,
+            _quorum: u32,
         ) -> Option<SettlementSlotWin> {
             None
         }

@@ -188,14 +188,25 @@ pub trait ProvenanceResolver {
     ) -> Option<FaucetTicketWin>;
 
     /// The winning claim for one settlement slot `(vault_id,
-    /// parent_sequence)`, from a LIVE quorum read against the vault's birth
-    /// set — q members returning byte-identical winner bytes. `None` when no
-    /// quorum-agreed winner exists; the 0x0026 arm fails closed on it (the
-    /// slot register is the liveness anchor of a settlement's exclusivity).
+    /// parent_sequence)`, from a LIVE quorum read against THE SET THE VAULT
+    /// COMMITTED AT BIRTH, counted at the quorum it committed.
+    ///
+    /// The set is a parameter because the verifier's own configured fleet is
+    /// its opinion, not the vault's rule: a resolver holding some default set
+    /// would answer about a different register than the one this vault's
+    /// claims were written to. The caller must have required that quorum to be
+    /// canonical before calling.
+    ///
+    /// `None` when no quorum-agreed winner exists for any reason — empty,
+    /// contested, or unreadable. The 0x0026 arm fails closed on all three,
+    /// which is why they are not distinguished here; a caller that must tell
+    /// them apart observes the cell directly.
     fn winning_settlement_slot_claim(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &crate::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Option<SettlementSlotWin>;
 
     /// Exact immutable bytes at `addr` under `namespace` — evidence the
@@ -1043,6 +1054,16 @@ pub fn verify_credit_source(
             if vn.fee_policy.fee_bps() != *fee_bps {
                 return Err(invalid("the settle's fee is not V_n's fee".into()));
             }
+            // THE VAULT'S EXCLUSIVITY RULE, checked as soon as `V_n` is
+            // decoded and before anything downstream relies on it. The
+            // committed quorum must BE the canonical strict majority of the
+            // committed set: a smaller one lets two disjoint claims each reach
+            // quorum, which is two winners for one generation.
+            crate::economic::cell_observation::require_canonical_quorum(
+                vn.storage_set.len(),
+                vn.quorum,
+            )
+            .map_err(|e| invalid(format!("the vault's committed quorum: {e}")))?;
             // ── 4. THE TWO-AXIS OWNER JOIN ────────────────────────────────
             // Axis A: V_n itself names the owner identity.
             if vn.owner_genesis_id != *owner_genesis || vn.owner_device_id != *owner_devid {
@@ -1202,7 +1223,7 @@ pub fn verify_credit_source(
             }
             // ── 8. The quorum slot winner: exclusivity's liveness anchor ──
             let win = resolver
-                .winning_settlement_slot_claim(&vault, *parent_sequence)
+                .winning_settlement_slot_claim(&vault, *parent_sequence, &vn.storage_set, vn.quorum)
                 .ok_or_else(|| {
                     invalid("no quorum-agreed settlement-slot winner for this parent".into())
                 })?;

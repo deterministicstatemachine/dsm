@@ -378,6 +378,8 @@ impl ProvenanceResolver for OnePeer {
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
         None
     }
@@ -594,6 +596,8 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
             &self,
             _vault_id: &[u8; 32],
             _parent_sequence: u64,
+            _storage_set: &dsm::ccb::StorageSetMembers,
+            _quorum: u32,
         ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
             None
         }

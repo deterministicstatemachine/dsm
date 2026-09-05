@@ -326,7 +326,7 @@ pub(crate) async fn read_faucet_ticket_cell(
     set: &crate::sdk::storage_set::StorageSet,
     faucet_id: &[u8; 32],
     ticket_index: u64,
-) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
     #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
@@ -346,7 +346,7 @@ pub(crate) async fn read_faucet_ticket_cell(
 pub(crate) async fn read_economic_root_cell_rows(
     set: &crate::sdk::storage_set::StorageSet,
     k_root: &[u8; 32],
-) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
     #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_registers::read(
@@ -665,25 +665,35 @@ pub mod fake_registers {
         set: &StorageSet,
         kind: RegisterKind,
         key: &[u8],
-    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
+        use dsm::economic::cell_observation::MemberCellRead;
         with_state(|s| {
             set.members()
                 .iter()
                 .map(|member| {
+                    // A FAILING MEMBER DOES NOT ANSWER. It does not answer
+                    // "empty": modelling an outage as an absence would let a
+                    // fixture manufacture the one observation a forward walk
+                    // treats as terminal.
                     if s.failing.contains(&member.member_id) {
-                        return (member.member_id.clone(), None, None);
+                        return MemberCellRead::Unavailable;
                     }
                     let echoed = s
                         .echo_override
                         .get(&member.member_id)
                         .cloned()
                         .unwrap_or_else(|| Some(member.member_id.clone()));
-                    let bytes = s
+                    if echoed.as_deref() != Some(member.member_id.as_str()) {
+                        return MemberCellRead::Unavailable;
+                    }
+                    match s
                         .cells
                         .get(&(member.member_id.clone(), kind))
                         .and_then(|cells| cells.get(key))
-                        .map(|(b, _)| b.clone());
-                    (member.member_id.clone(), echoed, bytes)
+                    {
+                        Some((b, _)) => MemberCellRead::Value(b.clone()),
+                        None => MemberCellRead::Absent,
+                    }
                 })
                 .collect()
         })
@@ -696,7 +706,7 @@ pub(crate) async fn read_settlement_slot_cell(
     set: &crate::sdk::storage_set::StorageSet,
     vault_id: &[u8; 32],
     parent_sequence: u64,
-) -> Result<Vec<(String, Option<String>, Option<Vec<u8>>)>, DsmError> {
+) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
     #[cfg(any(test, feature = "test-utils"))]
     {
         Ok(fake_fleet::read_slot(set, vault_id, parent_sequence))
@@ -778,32 +788,36 @@ pub(crate) mod fake_fleet {
         set: &StorageSet,
         vault_id: &[u8; 32],
         parent_sequence: u64,
-    ) -> Vec<(String, Option<String>, Option<Vec<u8>>)> {
+    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
         let s = state();
+        use dsm::economic::cell_observation::MemberCellRead;
         set.members()
             .iter()
             .map(|member| {
-                // A FAILING MEMBER DOES NOT ANSWER — it does not answer
-                // "empty". The live reader gets `(member_id, None, None)` from
-                // an unreachable node because there is no response to echo an
-                // id, and an attributed empty is a POSITIVE claim that the
-                // cell holds nothing. Modelling a failure as an attributed
-                // empty would let a fixture manufacture frontiers out of
-                // silence — the exact defect the cell walk removes.
+                // A FAILING MEMBER DOES NOT ANSWER — and it does not answer
+                // "empty". An attributed absence is a POSITIVE claim that the
+                // cell holds nothing; modelling an outage as one would let a
+                // fixture manufacture frontiers out of silence, the exact
+                // defect this observation exists to remove.
                 if s.failing.contains(&member.member_id) {
-                    return (member.member_id.clone(), None, None);
+                    return MemberCellRead::Unavailable;
                 }
                 let echoed = s
                     .echo_override
                     .get(&member.member_id)
                     .cloned()
                     .unwrap_or_else(|| Some(member.member_id.clone()));
-                let bytes = s
+                if echoed.as_deref() != Some(member.member_id.as_str()) {
+                    return MemberCellRead::Unavailable;
+                }
+                match s
                     .registers
                     .get(&member.member_id)
                     .and_then(|cells| cells.get(&(*vault_id, parent_sequence)))
-                    .map(|(b, _)| b.clone());
-                (member.member_id.clone(), echoed, bytes)
+                {
+                    Some((b, _)) => MemberCellRead::Value(b.clone()),
+                    None => MemberCellRead::Absent,
+                }
             })
             .collect()
     }

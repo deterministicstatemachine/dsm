@@ -142,6 +142,8 @@ impl ProvenanceResolver for OneTicket {
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
         None
     }
@@ -374,6 +376,8 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
             &self,
             _vault_id: &[u8; 32],
             _parent_sequence: u64,
+            _storage_set: &dsm::ccb::StorageSetMembers,
+            _quorum: u32,
         ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
             None
         }
