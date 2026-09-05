@@ -135,7 +135,7 @@ fn canonical_set() -> StorageSet {
         .find(|s| {
             crate::sdk::storage_set::as_ccb_members(s)
                 .ok()
-                .and_then(|m| profile.derive_set_id(&m).ok())
+                .and_then(|m| profile.verify_candidate(&m).ok())
                 .is_some()
         })
         .cloned()

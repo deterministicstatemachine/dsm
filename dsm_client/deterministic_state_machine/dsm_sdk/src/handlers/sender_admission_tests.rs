@@ -79,7 +79,7 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
             .find(|s| {
                 crate::sdk::storage_set::as_ccb_members(s)
                     .ok()
-                    .and_then(|m| profile.derive_set_id(&m).ok())
+                    .and_then(|m| profile.verify_candidate(&m).ok())
                     .is_some()
             })
             .cloned()
@@ -667,7 +667,7 @@ async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
             .find(|s| {
                 crate::sdk::storage_set::as_ccb_members(s)
                     .ok()
-                    .and_then(|m| profile.derive_set_id(&m).ok())
+                    .and_then(|m| profile.verify_candidate(&m).ok())
                     .is_some()
             })
             .cloned()

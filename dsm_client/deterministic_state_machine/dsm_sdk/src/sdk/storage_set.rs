@@ -246,6 +246,59 @@ impl StorageSetCatalog {
 mod tests {
     use super::*;
 
+    /// THE PIN, RENDERED BACK TO WHAT THE NODES LOGGED. The byte values in
+    /// `dsm::economic::register` are the authority; this proves they are the
+    /// same values each provisioned member logged as
+    /// `register incarnation for node <id>: <Base32-Crockford>` at first boot,
+    /// so the pin cannot silently drift from what the fleet actually holds.
+    /// THE FLEET'S OWN DERIVATION, PINNED. Every provisioned member computed
+    /// this set id from its configured `[[storage_set.members]]` at restart and
+    /// logged `storage set configured: 3 members, id=<this>`. Core must
+    /// re-derive the same digest from the same pairs, or the pin and the fleet
+    /// name different registers.
+    #[test]
+    fn the_pinned_beta_set_id_is_the_one_every_provisioned_member_logged() {
+        let profile = dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
+            .expect("the beta network is provisioned");
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
+            "E05YS8101EJH33KY2CG625JJE8A0Z4GJNSEM335TX1XVTWM9RR8G",
+            "core's derivation must equal what dsm-node-1, -2 and -3 each logged"
+        );
+    }
+
+    #[test]
+    fn beta_root_register_pins_render_to_the_logged_values() {
+        let logged = [
+            (
+                "dsm-node-1",
+                "DXWR7W9J2E5ASQ5BJBYF13ZZEK1VFTZFYNWAYPF1KNT8C33YPVM0",
+            ),
+            (
+                "dsm-node-2",
+                "H4ZSDG34M1BSQQH8T9WWWZ65Y90YW9QY2CYRR2EG3H621VDGJ3W0",
+            ),
+            (
+                "dsm-node-3",
+                "VW3REAWA7PR608Y4AY3VX18M8BE4828PFPNVTG380XV18HKF8SSG",
+            ),
+        ];
+        let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+            .expect("beta network");
+        assert_eq!(pinned.len(), logged.len());
+        for (id, b32) in logged {
+            let (_, inc) = pinned
+                .iter()
+                .find(|(m, _)| *m == id.as_bytes())
+                .unwrap_or_else(|| panic!("{id} is pinned"));
+            assert_eq!(
+                crate::util::text_id::encode_base32_crockford(inc),
+                b32,
+                "{id}: the pinned bytes must render to what that node logged"
+            );
+        }
+    }
+
     fn m(id: &str, ep: &str) -> StorageMember {
         // A distinct incarnation per member id, so a test never accidentally
         // asserts over a set whose entries collide.

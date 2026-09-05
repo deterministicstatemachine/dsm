@@ -569,10 +569,9 @@ fn the_same_fixture_with_a_named_second_signer_verifies() {
 /// a fixture cannot state one as a constant — it derives it the same way
 /// production does, from candidate entries the profile then checks.
 fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
-    dsm::ccb::StorageSetMembers::new(&[
-        (&b"dsm-node-1"[..], [0xC1; 32]),
-        (&b"dsm-node-2"[..], [0xC2; 32]),
-        (&b"dsm-node-3"[..], [0xC3; 32]),
-    ])
-    .expect("beta candidate set")
+    // Built from the network's PINNED pairs, so a fixture resolves to the
+    // real committed register rather than to values a fixture chose.
+    let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+        .expect("the beta network is known");
+    dsm::ccb::StorageSetMembers::new(pinned).expect("pinned beta set")
 }
