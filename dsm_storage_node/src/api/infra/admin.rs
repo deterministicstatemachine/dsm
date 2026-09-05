@@ -206,10 +206,25 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
     }
 }
 
-pub fn router(state: Arc<AppState>) -> Router<()> {
+/// EVERY route the node serves under `/admin`, with the token check applied
+/// ONCE, to all of them.
+///
+/// The registry's update and seed endpoints used to be a second `/admin`
+/// router assembled next door and nested separately, and it carried no auth
+/// layer: `POST /admin/registry/seed` inserted a node into the registry, and
+/// `POST /admin/registry/update` added and pruned registry nodes, for anyone
+/// who could reach the port. The composition, not the discipline, is what
+/// failed — two sibling routers, one of which happened to be layered.
+///
+/// So the sub-routers below contribute ROUTES ONLY. They carry no `Extension`
+/// and no auth of their own, this function supplies both, and `main` mounts
+/// this one value. A new admin endpoint added to any of them is authenticated
+/// because there is no longer a path by which it could not be.
+pub fn admin_surface(state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/cleanup", post(cleanup_expired_handler))
         .route("/maintenance", post(maintenance_handler))
+        .merge(crate::api::registry::scaling::admin_routes())
         .layer(axum::middleware::from_fn(admin_auth))
         .layer(Extension(state))
 }
@@ -219,6 +234,124 @@ pub fn router(state: Arc<AppState>) -> Router<()> {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    /// EVERY `/admin` route refuses an unauthenticated caller, and lets an
+    /// authenticated one through.
+    ///
+    /// `/registry/seed` and `/registry/update` are the reason this test
+    /// exists: they were a second `/admin` router with no auth layer, so
+    /// anyone who could reach the port could insert a node into the registry
+    /// or trigger an add/prune pass over it. The negative half asserts the
+    /// refusal; the positive half asserts the layer is a token check and not
+    /// a blanket 401 — with the right token each request reaches its handler
+    /// and is answered on its own merits (400 here, because each of these
+    /// handlers validates its input before touching the database).
+    #[tokio::test]
+    async fn every_admin_route_refuses_an_unauthenticated_caller() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // Hermetic posture: a real token, and no debug escape hatch.
+        std::env::set_var(ADMIN_TOKEN_ENV, "test-admin-token");
+        std::env::remove_var(ADMIN_INSECURE_ENV);
+
+        // The auth layer refuses before any handler touches the database, and
+        // every authenticated request below is rejected by its handler on
+        // input validation, so this pool is never queried. It exists because
+        // `AppState` requires one — on either backend, without a server.
+        #[cfg(feature = "local-dev")]
+        let pool = db::create_pool(":memory:", true).expect("pool");
+        #[cfg(not(feature = "local-dev"))]
+        let pool =
+            db::create_pool("postgresql://127.0.0.1:5432/dsm-admin-auth-test", true).expect("pool");
+
+        let rm = Arc::new(
+            crate::replication::ReplicationManager::new_for_tests(
+                crate::replication::ReplicationConfig {
+                    replication_factor: 3,
+                    gossip_interval_ticks: 100,
+                    failure_timeout_ticks: 300,
+                    gossip_fanout: 3,
+                    max_concurrent_jobs: 10,
+                },
+                "n1".to_string(),
+                "http://localhost:8080".to_string(),
+            )
+            .expect("replication manager for tests"),
+        );
+        let state = Arc::new(AppState::new(
+            "n1".into(),
+            "127.0.0.1:1",
+            None,
+            Arc::new(pool),
+            rm,
+        ));
+        let app = Router::new().nest("/admin", admin_surface(state));
+
+        // Every route this node serves under /admin, and a body each handler
+        // will reject if — and only if — the request reaches it.
+        let routes = [
+            ("/admin/cleanup", ""),
+            ("/admin/maintenance", ""),
+            ("/admin/registry/seed", "short"),
+            ("/admin/registry/update", ""),
+        ];
+
+        for (path, body) in routes {
+            let unauthenticated = app
+                .clone()
+                .oneshot(Request::post(path).body(Body::from(body)).expect("request"))
+                .await
+                .expect("response");
+            assert_eq!(
+                unauthenticated.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must refuse a caller with no admin token"
+            );
+
+            let wrong_token = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header(ADMIN_TOKEN_HEADER, "not-the-token")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                wrong_token.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must refuse a caller with the wrong admin token"
+            );
+
+            let authenticated = app
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .header(ADMIN_TOKEN_HEADER, "test-admin-token")
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_ne!(
+                authenticated.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must ADMIT the holder of the token — a layer that \
+                 refuses everyone proves nothing about the one that refuses \
+                 strangers"
+            );
+            assert_eq!(
+                authenticated.status(),
+                StatusCode::BAD_REQUEST,
+                "{path} reached its handler and was rejected on its input"
+            );
+        }
+
+        std::env::remove_var(ADMIN_TOKEN_ENV);
+    }
 
     #[test]
     fn token_matches_equal() {

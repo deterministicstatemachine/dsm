@@ -309,12 +309,14 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     let discovery_router =
         api::registry::discovery::create_router(state.clone()).layer(public_rate_layer.clone());
 
-    // Admin endpoints (cleanup, etc.)
-    let admin_router = api::infra::admin::router(state.clone());
-    // Registry scaling admin endpoints (update trigger, seed)
-    let registry_admin_router = api::registry::scaling::admin_router(state.clone()); // Compose routes and layers, then install `state`.
-                                                                                     // Returning `Router<()>` here is important (see Axum docs).
-                                                                                     // Request metrics for Prometheus scraping
+    // EVERY `/admin` endpoint, assembled in one place behind one token check.
+    // Two sibling admin routers nested at the same path is how the registry's
+    // update and seed endpoints came to be reachable unauthenticated.
+    let admin_router = api::infra::admin::admin_surface(state.clone());
+
+    // Compose routes and layers, then install `state`.
+    // Returning `Router<()>` here is important (see Axum docs).
+    // Request metrics for Prometheus scraping
 
     Router::new()
         // Health check endpoint (lightweight, no DB access)
@@ -343,8 +345,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(drain_proof_router) // DrainProof & stake exit
         .merge(gossip_router) // Gossip protocol endpoints
         .merge(discovery_router) // Node discovery for SDK auto-discovery
-        .nest("/admin", admin_router) // Admin endpoints under /admin/*
-        .nest("/admin", registry_admin_router) // Registry update/seed under /admin/*
+        .nest("/admin", admin_router) // Every /admin/* endpoint, auth applied once
         .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
         .layer(ConcurrencyLimitLayer::new(config.concurrency_limit))
         .layer(TraceLayer::new_for_http())
