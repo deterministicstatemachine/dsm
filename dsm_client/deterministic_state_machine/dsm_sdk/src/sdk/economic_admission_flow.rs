@@ -92,7 +92,7 @@ pub(crate) fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
         StorageSetCatalog::from_env_config().map_err(|e| storage_err("load storage catalog", e))?;
     // The set id is a function of `(member_id, register_incarnation_id)`
     // pairs, so it cannot be asked for by name: the catalog offers candidates
-    // and `derive_set_id` refuses any whose membership is not this network's.
+    // and `verify_candidate` refuses any that does not re-derive the pinned id.
     // A member that rebuilt its register therefore stops resolving here
     // rather than silently serving the register it used to.
     catalog
@@ -101,7 +101,7 @@ pub(crate) fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
         .find(|s| {
             crate::sdk::storage_set::as_ccb_members(s)
                 .ok()
-                .and_then(|m| profile.derive_set_id(&m).ok())
+                .and_then(|m| profile.verify_candidate(&m).ok())
                 .is_some()
         })
         .cloned()

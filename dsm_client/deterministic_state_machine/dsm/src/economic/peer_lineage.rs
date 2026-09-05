@@ -378,14 +378,15 @@ fn walk_positions(
         let profile = resolve_for_trader(&facts.network_id, expected_network_id)
             .map_err(|e| invalid(format!("peer network refused: {e}")))?;
         // The id is re-derived from the resolved `(member, incarnation)`
-        // pairs, and `derive_set_id` refuses a candidate whose membership is
-        // not this network's. A member that rebuilt its register is a
+        // pairs, and `verify_candidate` refuses a candidate that does not
+        // re-derive this network's PINNED id. A member that rebuilt its register is a
         // different entry, so a claim written under the old incarnation no
         // longer names the set this network resolves to.
         let candidate = fetcher.root_register_candidate_set(&facts.network_id)?;
-        let expected_set_id = profile
-            .derive_set_id(&candidate)
+        profile
+            .verify_candidate(&candidate)
             .map_err(|e| invalid(format!("peer register set refused: {e}")))?;
+        let expected_set_id = profile.storage_set_id;
         if body.root_register_storage_set_id != expected_set_id {
             return Err(invalid(
                 "claim binds a register set that is not the canonical set of the peer's \

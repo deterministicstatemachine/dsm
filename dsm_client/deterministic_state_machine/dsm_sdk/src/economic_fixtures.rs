@@ -397,5 +397,20 @@ pub fn fixture_register_incarnation(member_id: &str) -> String {
 /// the vault's own storage set stops being resolvable — which is correct
 /// behaviour and a useless test failure.
 pub fn fixture_register_incarnation_bytes(member_id: &str) -> [u8; 32] {
-    *blake3::hash(format!("dsm-test-incarnation/{member_id}").as_bytes()).as_bytes()
+    // A PINNED member gets its pinned incarnation: a fixture fleet must
+    // resolve to the network's real committed register, or every economic
+    // path in the fixture fails closed for the right reason and the test
+    // proves nothing. Non-members (extra fake nodes) get a derived value —
+    // they cannot be in the pinned set by construction.
+    dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+        .ok()
+        .and_then(|pinned| {
+            pinned
+                .iter()
+                .find(|(id, _)| *id == member_id.as_bytes())
+                .map(|(_, inc)| *inc)
+        })
+        .unwrap_or_else(|| {
+            *blake3::hash(format!("dsm-test-incarnation/{member_id}").as_bytes()).as_bytes()
+        })
 }

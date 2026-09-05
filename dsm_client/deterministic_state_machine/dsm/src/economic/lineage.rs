@@ -579,11 +579,14 @@ pub fn advance_validated(
                 "the network's register set could not be resolved",
             ))
         })?;
-    let canonical_set = profile.derive_set_id(&candidate).map_err(|_| {
+    // The candidate must re-derive the network's PINNED set id. Membership
+    // alone would leave the incarnations to whatever the catalog offered.
+    profile.verify_candidate(&candidate).map_err(|_| {
         EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(
-            "resolved register membership is not the network's canonical membership",
+            "the resolved register set is not this network's pinned register",
         ))
     })?;
+    let canonical_set = profile.storage_set_id;
     let ctx = ProvenanceContext {
         genesis,
         device_id,

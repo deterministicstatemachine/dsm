@@ -358,14 +358,14 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         // The catalog holds sets, not networks: find the one whose membership
-        // IS this network's, and let `derive_set_id` be the thing that decides
+        // IS this network's PINNED register, and let `verify_candidate` decide
         // whether it really is.
         let candidate = catalog
             .sets()
             .iter()
             .find_map(|s| {
                 let members = crate::sdk::storage_set::as_ccb_members(s).ok()?;
-                profile.derive_set_id(&members).ok().map(|_| members)
+                profile.verify_candidate(&members).ok().map(|()| members)
             })
             .ok_or_else(|| {
                 PeerLineageFailure::Incomplete(
@@ -673,14 +673,14 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         // The catalog holds sets, not networks: find the one whose membership
-        // IS this network's, and let `derive_set_id` be the thing that decides
+        // IS this network's PINNED register, and let `verify_candidate` decide
         // whether it really is.
         let candidate = catalog
             .sets()
             .iter()
             .find_map(|s| {
                 let members = crate::sdk::storage_set::as_ccb_members(s).ok()?;
-                profile.derive_set_id(&members).ok().map(|_| members)
+                profile.verify_candidate(&members).ok().map(|()| members)
             })
             .ok_or_else(|| {
                 PeerLineageFailure::Incomplete(
