@@ -148,7 +148,17 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
+      # TWO names, ONE database, and they are not redundant:
+      #   DSM_TEST_DATABASE_URL is what the write-once register properties
+      #   read. On a Postgres build its ABSENCE makes them fail rather than
+      #   skip, which is the whole point of this job.
+      #   DSM_DATABASE_URL is the node's own config variable, which
+      #   `build_app_for_tests` and the integration suites read. On a Postgres
+      #   build its default is a placeholder host that was never meant to
+      #   resolve ("callers must supply DSM_DATABASE_URL"), so the suites that
+      #   build a real app need it pointed at this container.
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
+      DSM_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test
     steps:
       - uses: actions/checkout@v7
 
