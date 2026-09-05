@@ -48,12 +48,18 @@ pub fn create_router(state: Arc<AppState>) -> Router<()> {
         .layer(Extension(state))
 }
 
-/// Admin router for registry update trigger.
-pub fn admin_router(state: Arc<AppState>) -> Router<()> {
+/// The registry's admin ROUTES — deliberately no layers.
+///
+/// These mutate the node registry: `seed` inserts a node, `update` adds and
+/// prunes them. They are merged into `api::infra::admin::admin_surface`,
+/// which supplies the admin-token check and the `AppState` extension. This
+/// function must not grow layers of its own: the point of returning bare
+/// routes is that there is exactly one place where `/admin` gets its auth,
+/// and it cannot be bypassed by mounting this router somewhere else.
+pub fn admin_routes() -> Router<()> {
     Router::new()
         .route("/registry/update", post(trigger_registry_update))
         .route("/registry/seed", post(seed_registry_node))
-        .layer(Extension(state))
 }
 
 /// Submit an UpSignalV3. Domain: "DSM/signal/up\0".
