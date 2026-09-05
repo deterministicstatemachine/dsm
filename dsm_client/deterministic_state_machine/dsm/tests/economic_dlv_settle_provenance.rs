@@ -506,6 +506,8 @@ impl ProvenanceResolver for SettleResolver {
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<SettlementSlotWin> {
         if *vault_id == VAULT && parent_sequence == PARENT {
             self.slot_envelope
@@ -629,6 +631,124 @@ fn a_slot_winner_binding_a_different_parent_state_is_refused() {
         .expect("sign divergent claim"),
     );
     expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "slot winner does not bind");
+}
+
+#[test]
+fn a_slot_winner_claimed_under_another_storage_set_is_refused() {
+    // THE SET IS THE VAULT'S, NOT THE READER'S. A member reconfigured into a
+    // different set keeps serving rows written under the old one, so a
+    // cross-set envelope is reachable — and a claim that was not made under
+    // the set `V_n` commits established exclusivity in some other register.
+    let fx = fixture();
+    let k = keys();
+    let mut r = resolver_for(&fx);
+    r.slot_envelope = Some(
+        dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
+            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
+                vault_id: VAULT,
+                parent_sequence: PARENT,
+                x: fx.x,
+                claimant_public_key: k.trader_pk.clone(),
+                // Well-formed, correctly signed, right cell, right parent —
+                // and a foreign set.
+                storage_set_id: [0x5E; 32],
+                parent_binding_c_n: fx.c_n,
+            },
+            &k.trader_sk,
+        )
+        .expect("sign foreign-set claim"),
+    );
+    expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "slot winner does not bind");
+}
+
+#[test]
+fn a_noncanonical_committed_quorum_is_refused_before_the_cell_is_read() {
+    // 1-of-3 is what makes two winners arithmetically possible. The committed
+    // quorum must BE the canonical strict majority of the committed set, and
+    // the arm refuses a nonconformant one before it reads anything — so a
+    // resolver that would have answered cannot make the vault usable.
+    let fx = fixture();
+    let ow = owner();
+    let mut vn = fx.vn.clone();
+    vn.quorum = 1;
+    let c_n = vault_state_commitment(&vn).expect("c_n");
+    let mut op = fx.settle.clone();
+    if let Operation::DlvSettle { parent_binding, .. } = &mut op {
+        *parent_binding = c_n;
+    }
+    let (proof_bytes, proof_addr) = owner_proof(
+        &{
+            let mut t = EconomicSmt::new();
+            for l in [&fx.reserve_a.0, &fx.reserve_b.0] {
+                let st = EconomicLeafState::VaultReserve(l.clone());
+                t.insert(
+                    st.leaf_key(&ow.g, &ow.devid),
+                    st.leaf_value().expect("leaf value"),
+                );
+            }
+            t
+        },
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[fx.reserve_a.0.clone(), fx.reserve_b.0.clone()],
+    );
+    let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
+        exact_vault_state_ccb: vn.encode().expect("vn encode"),
+        owner_authority_evidence: ow.authority_evidence.clone(),
+        economic_proof_addr: proof_addr.to_vec(),
+    };
+    let evidence_bytes = evidence.encode_to_vec();
+    let evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &evidence_bytes,
+    );
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G_TRADER, &DEV_TRADER),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &op,
+        &G_TRADER,
+        &DEV_TRADER,
+        &[0xEE; 32],
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: OWNER_POSITION,
+            reserve_consumption_evidence_addr: evidence_addr,
+        },
+    )
+    .expect("builds");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        [0xEE; 32],
+        dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("witness");
+    let resolver = SettleResolver {
+        owner_root: fx.owner_root,
+        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
+        slot_envelope: Some(fx.slot_envelope.clone()),
+    };
+    let mut ctx = ctx_for(&fx);
+    ctx.verified_operation = Some(&op);
+    match verify_transition_provenance(&witness, &resolver, &ctx) {
+        Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
+            m.contains("committed quorum"),
+            "expected the canonical-quorum refusal, got: {m}"
+        ),
+        other => panic!("expected the canonical-quorum refusal, got {other:?}"),
+    }
 }
 
 #[test]

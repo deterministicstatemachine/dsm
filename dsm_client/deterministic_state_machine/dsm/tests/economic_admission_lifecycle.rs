@@ -318,6 +318,8 @@ impl ProvenanceResolver for OneTicket {
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
         None
     }
@@ -707,6 +709,8 @@ impl ProvenanceResolver for MarketRooted {
         &self,
         _vault_id: &[u8; 32],
         _parent_sequence: u64,
+        _storage_set: &dsm::ccb::StorageSetMembers,
+        _quorum: u32,
     ) -> Option<dsm::economic::provenance::SettlementSlotWin> {
         None
     }

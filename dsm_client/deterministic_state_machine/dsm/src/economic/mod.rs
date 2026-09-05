@@ -53,6 +53,7 @@
 
 pub mod admission;
 pub mod authority_evidence;
+pub mod cell_observation;
 pub mod claim;
 pub mod claim_envelope;
 pub mod classifier;
