@@ -129,7 +129,13 @@ impl ProvenanceResolver for IssuanceResolver {
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _t: u64) -> Option<FaucetTicketWin> {
         None
     }
-    fn winning_settlement_slot_claim(&self, _v: &[u8; 32], _p: u64) -> Option<SettlementSlotWin> {
+    fn winning_settlement_slot_claim(
+        &self,
+        _v: &[u8; 32],
+        _p: u64,
+        _s: &dsm::ccb::StorageSetMembers,
+        _q: u32,
+    ) -> Option<SettlementSlotWin> {
         None
     }
     fn immutable_evidence(

@@ -72,11 +72,14 @@ pub trait PeerEvidenceFetcher {
         ticket_index: u64,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
     /// The quorum-agreed winner bytes for one settlement-slot cell
-    /// `(vault_id, parent_sequence)`.
+    /// `(vault_id, parent_sequence)`, read against the vault's COMMITTED set
+    /// and counted at its committed quorum — never the fetcher's own fleet.
     fn settlement_slot_cell(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &crate::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
     /// Exact immutable bytes at `addr` under `namespace`.
     fn immutable(
@@ -156,9 +159,11 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
+        storage_set: &crate::ccb::StorageSetMembers,
+        quorum: u32,
     ) -> Option<crate::economic::provenance::SettlementSlotWin> {
         self.fetcher
-            .settlement_slot_cell(vault_id, parent_sequence)
+            .settlement_slot_cell(vault_id, parent_sequence, storage_set, quorum)
             .ok()
             .flatten()
             .map(|envelope_bytes| crate::economic::provenance::SettlementSlotWin { envelope_bytes })

@@ -42,6 +42,7 @@ use axum::Router;
 use tower::ServiceExt;
 use tower_http::limit::RequestBodyLimitLayer;
 
+use dsm::economic::cell_observation::MemberCellRead;
 use dsm::economic::claim::EconomicRootClaimBody;
 use dsm::economic::claim_envelope::{
     economic_root_claim_envelope_digest, sign_economic_root_claim,
@@ -568,26 +569,49 @@ async fn a_member_that_answers_nothing_is_unattributed_on_both_sides() {
                         .get("x-dsm-node-id")
                         .and_then(|v| v.to_str().ok())
                         .map(|s| s.to_string());
+                    // THE REAL NODE'S THREE ANSWERS, classified exactly as the
+                    // client classifies them: 200 carries the row, 404 is this
+                    // member ASSERTING there is none, and anything else — plus
+                    // any response this reader cannot attribute — answered
+                    // nothing at all.
                     let status = resp.status().as_u16();
-                    let bytes = if status == 200 {
-                        Some(
+                    let attributed = echoed.as_deref() == Some(sm.member_id.as_str());
+                    let read = if !attributed {
+                        MemberCellRead::Unavailable
+                    } else if status == 200 {
+                        MemberCellRead::Value(
                             axum::body::to_bytes(resp.into_body(), 1024 * 1024)
                                 .await
                                 .expect("body")
                                 .to_vec(),
                         )
+                    } else if status == 404 {
+                        MemberCellRead::Absent
                     } else {
-                        None
+                        MemberCellRead::Unavailable
                     };
-                    real_rows.push((sm.member_id.clone(), echoed, bytes));
+                    real_rows.push(read);
                 }
-                None => real_rows.push((sm.member_id.clone(), None, None)),
+                // A member this reader cannot reach did not answer.
+                None => real_rows.push(MemberCellRead::Unavailable),
             }
         }
         let fake_rows = fake_registers::read(&set, register.kind(), &key.1);
         assert_eq!(real_rows, fake_rows, "read rows, down member unattributed");
-        assert_eq!(real_rows[0].2.as_deref(), Some(env.as_slice()));
-        assert_eq!(real_rows[2], ("dsm-node-3".to_string(), None, None));
+        assert_eq!(real_rows[0], MemberCellRead::Value(env.clone()));
+        // AND A MEMBER THAT DID NOT ANSWER IS NOT AN ABSENCE. `dsm-node-3` is
+        // unreachable here; classifying that as "no row" is what let a quorum
+        // of broken members manufacture an emptiness, so the real node and the
+        // fake must agree that silence is `Unavailable` and nothing else.
+        assert_eq!(
+            real_rows[2],
+            MemberCellRead::Unavailable,
+            "an unreachable member answers nothing, never an absence"
+        );
+        assert!(
+            !matches!(real_rows[2], MemberCellRead::Absent),
+            "silence must never be counted as an absence"
+        );
         fake_registers::fail_member("dsm-node-3", false);
     }
 }
