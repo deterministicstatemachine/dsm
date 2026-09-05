@@ -342,6 +342,39 @@ impl LiveRegisterResolver<'_> {
 }
 
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'_> {
+    /// The network's root-register set as THIS device's catalog resolves it.
+    ///
+    /// Candidates, not authority: the caller re-derives the id from these
+    /// pairs and refuses a membership that is not the network's canonical
+    /// one, so a locally misconfigured or hostile catalog is caught rather
+    /// than believed. A member that rebuilt its register appears here under a
+    /// new incarnation and therefore changes the id it can serve.
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        let profile = dsm::economic::register::resolve_root_register_profile(network_id)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        // The catalog holds sets, not networks: find the one whose membership
+        // IS this network's, and let `derive_set_id` be the thing that decides
+        // whether it really is.
+        let candidate = catalog
+            .sets()
+            .iter()
+            .find_map(|s| {
+                let members = crate::sdk::storage_set::as_ccb_members(s).ok()?;
+                profile.derive_set_id(&members).ok().map(|_| members)
+            })
+            .ok_or_else(|| {
+                PeerLineageFailure::Incomplete(
+                    "no configured storage set has this network's canonical membership".into(),
+                )
+            })?;
+        Ok(candidate)
+    }
+
     fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
         let k = *k_root;
         tokio::task::block_in_place(|| self.runtime.block_on(read_economic_root_cell(self.set, &k)))
@@ -552,6 +585,15 @@ impl<'a> RecordingResolver<'a> {
 }
 
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> {
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::root_register_candidate_set(
+            self.inner, network_id,
+        )
+    }
+
     fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
         dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, k_root)
     }
@@ -615,6 +657,39 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
+    /// The network's root-register set as THIS device's catalog resolves it.
+    ///
+    /// Candidates, not authority: the caller re-derives the id from these
+    /// pairs and refuses a membership that is not the network's canonical
+    /// one, so a locally misconfigured or hostile catalog is caught rather
+    /// than believed. A member that rebuilt its register appears here under a
+    /// new incarnation and therefore changes the id it can serve.
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        let profile = dsm::economic::register::resolve_root_register_profile(network_id)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        // The catalog holds sets, not networks: find the one whose membership
+        // IS this network's, and let `derive_set_id` be the thing that decides
+        // whether it really is.
+        let candidate = catalog
+            .sets()
+            .iter()
+            .find_map(|s| {
+                let members = crate::sdk::storage_set::as_ccb_members(s).ok()?;
+                profile.derive_set_id(&members).ok().map(|_| members)
+            })
+            .ok_or_else(|| {
+                PeerLineageFailure::Incomplete(
+                    "no configured storage set has this network's canonical membership".into(),
+                )
+            })?;
+        Ok(candidate)
+    }
+
     fn validated_peer_transition(
         &self,
         peer_genesis: &[u8; 32],
@@ -867,6 +942,7 @@ mod tests {
         StorageSet::new(
             (1..=3)
                 .map(|i| StorageMember {
+                    register_incarnation_id: [0xC0 | i as u8; 32],
                     member_id: format!("dsm-node-{i}"),
                     endpoint: format!("http://127.0.0.1:808{i}"),
                 })
@@ -1008,17 +1084,17 @@ mod tests {
     #[test]
     fn a_committed_set_resolves_only_from_members_that_re_derive_its_id() {
         let members = dsm::ccb::StorageSetMembers::new(&[
-            b"dsm-node-1".as_slice(),
-            b"dsm-node-2".as_slice(),
-            b"dsm-node-3".as_slice(),
+            (b"dsm-node-1".as_slice(), [0xC0; 32]),
+            (b"dsm-node-2".as_slice(), [0xC1; 32]),
+            (b"dsm-node-3".as_slice(), [0xC2; 32]),
         ])
         .expect("members");
         let committed_id = dsm::ccb::storage_set_id(&members).expect("id");
 
         let foreign = dsm::ccb::StorageSetMembers::new(&[
-            b"somebody-elses-node-1".as_slice(),
-            b"somebody-elses-node-2".as_slice(),
-            b"somebody-elses-node-3".as_slice(),
+            (b"somebody-elses-node-1".as_slice(), [0xC0; 32]),
+            (b"somebody-elses-node-2".as_slice(), [0xC1; 32]),
+            (b"somebody-elses-node-3".as_slice(), [0xC2; 32]),
         ])
         .expect("members");
         assert_ne!(

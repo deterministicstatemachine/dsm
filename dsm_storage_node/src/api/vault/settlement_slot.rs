@@ -65,6 +65,14 @@ use dsm_sdk::util::text_id;
 const MAX_CLAIM_BYTES: usize = 160 * 1024;
 
 pub const OUTCOME_HEADER: &str = "x-dsm-slot-outcome";
+/// The register incarnation this node is serving, Base32-Crockford.
+///
+/// Echoed on EVERY register read. A reader that committed a different
+/// incarnation for this member counts the answer as `Unavailable` — never as
+/// a value and never as an absence — because a rebuilt register can honestly
+/// report "nothing here" for a cell the incarnation the vault committed once
+/// held, and node identity alone cannot tell the two apart.
+pub const INCARNATION_HEADER: &str = "x-dsm-register-incarnation";
 pub const HELD_DIGEST_HEADER: &str = "x-dsm-slot-held-digest";
 pub const CLAIM_DIGEST_HEADER: &str = "x-dsm-slot-digest";
 
@@ -164,6 +172,22 @@ pub async fn get_claim(
     if vault_id.len() != 32 {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    // The incarnation is stamped on EVERY answer this handler gives, held or
+    // absent alike. Stamping only the "held" case would leave the dangerous
+    // one — a rebuilt member reporting emptiness — indistinguishable from the
+    // real member reporting it.
+    let incarnation = state
+        .storage_set
+        .as_ref()
+        .map(|set| text_id::encode_base32_crockford(&set.own_incarnation));
+    let stamp = |resp: &mut Response| {
+        if let Some(v) = incarnation
+            .as_deref()
+            .and_then(|s| HeaderValue::from_str(s).ok())
+        {
+            resp.headers_mut().insert(INCARNATION_HEADER, v);
+        }
+    };
     match db::get_settlement_slot_claim(&state.db_pool, &vault_id, parent_sequence).await {
         Ok(Some((bytes, digest))) => {
             let mut resp = (StatusCode::OK, bytes).into_response();
@@ -176,6 +200,7 @@ pub async fn get_claim(
             if let Ok(v) = HeaderValue::from_str(&text_id::encode_base32_crockford(&digest)) {
                 resp.headers_mut().insert(CLAIM_DIGEST_HEADER, v);
             }
+            stamp(&mut resp);
             resp
         }
         // AN ABSENCE IS ASSERTED, NEVER INFERRED FROM A STATUS CODE. A bare
@@ -189,6 +214,7 @@ pub async fn get_claim(
             let mut resp = StatusCode::NOT_FOUND.into_response();
             resp.headers_mut()
                 .insert(OUTCOME_HEADER, HeaderValue::from_static("absent"));
+            stamp(&mut resp);
             resp
         }
         Err(e) => {
@@ -227,6 +253,86 @@ mod tests {
         }
     }
 
+    /// EVERY ANSWER CARRIES THE INCARNATION, held and absent alike.
+    ///
+    /// The absent case is the one that matters: a member that rebuilt its
+    /// register answers "nothing here" perfectly honestly, and a reader that
+    /// could not tell which register history said so would count that as
+    /// emptiness for a cell the committed incarnation once held. Stamping
+    /// only the `held` answer would leave exactly that case unmarked.
+    #[tokio::test]
+    async fn every_read_answer_names_the_register_incarnation_serving_it() {
+        use crate::replication::{ReplicationConfig, ReplicationManager};
+        let vault = unique_key(0x55);
+        let pool = Arc::new(test_pool());
+        db::init_db(&pool).await.expect("init");
+        let rm = Arc::new(
+            ReplicationManager::new_for_tests(
+                ReplicationConfig {
+                    replication_factor: 3,
+                    gossip_interval_ticks: 100,
+                    failure_timeout_ticks: 300,
+                    gossip_fanout: 3,
+                    max_concurrent_jobs: 10,
+                },
+                "n1".to_string(),
+                "http://localhost:8080".to_string(),
+            )
+            .expect("replication manager for tests"),
+        );
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
+        let expected = dsm_sdk::util::text_id::encode_base32_crockford(&[0xC1u8; 32]);
+        let state = Arc::new(
+            AppState::new("n1".into(), "127.0.0.1:1", None, pool, rm).with_storage_set(set),
+        );
+
+        // ABSENT: the cell has never been claimed.
+        let r = get_claim(
+            Extension(state.clone()),
+            axum::extract::Path((text_id::encode_base32_crockford(&vault), 9u64)),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(r.headers()[OUTCOME_HEADER], "absent");
+        assert_eq!(
+            r.headers()[INCARNATION_HEADER],
+            expected.as_str(),
+            "an absence must say WHICH register history is asserting it"
+        );
+
+        // HELD: the same stamp, on the other branch.
+        let claim = b"claim-bytes".to_vec();
+        let digest = *blake3::hash(&claim).as_bytes();
+        db::claim_settlement_slot(
+            &state.db_pool,
+            &vault,
+            9,
+            &claim,
+            &digest,
+            b"pk",
+            &[0x6B; 32],
+        )
+        .await
+        .expect("claim");
+        let r = get_claim(
+            Extension(state.clone()),
+            axum::extract::Path((text_id::encode_base32_crockford(&vault), 9u64)),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()[OUTCOME_HEADER], "held");
+        assert_eq!(r.headers()[INCARNATION_HEADER], expected.as_str());
+    }
+
     /// Endpoint semantics: attribution (body key == caller key), set
     /// enforcement, and the outcome header on accept / re-ack / refuse.
     #[tokio::test]
@@ -249,8 +355,16 @@ mod tests {
             )
             .expect("replication manager for tests"),
         );
-        let set =
-            crate::NodeStorageSet::new(vec!["n1".into(), "n2".into(), "n3".into()], "n1").unwrap();
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
         let state = Arc::new(
             AppState::new("n1".into(), "127.0.0.1:1", None, pool, rm).with_storage_set(set.clone()),
         );

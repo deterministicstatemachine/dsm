@@ -57,8 +57,8 @@ struct ServerConfig {
     hsts_max_age: Option<u64>,
     database_url: String,
     seed_peers: Vec<String>,
-    /// `[storage_set] members` — configured member ids of this node's set.
-    storage_set_members: Vec<String>,
+    /// `[[storage_set.members]]` — each member's id and register incarnation.
+    storage_set_members: Vec<(String, [u8; 32])>,
     /// The DSM network this node serves (`node.network_id`). Gates the ERA
     /// faucet-ticket register — its canonical identity is network-scoped, so
     /// no network means the register is inactive (fail closed, like an
@@ -121,16 +121,53 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .filter_map(|v| v.into_string().ok())
         .collect();
 
-    // The canonical storage set this node is a member of ([storage_set]
-    // members = ["id-1", "id-2", "id-3"]). Absent = the settlement-slot
-    // register is inactive (fail closed); present but not containing this
-    // node's own id = misconfiguration, refused at startup.
-    let storage_set_members: Vec<String> = settings
+    // The canonical storage set this node is a member of:
+    //
+    //     [[storage_set.members]]
+    //     id = "dsm-node-1"
+    //     register_incarnation = "<Base32-Crockford of 32 bytes>"
+    //
+    // Absent = the settlement-slot register is inactive (fail closed);
+    // present but not containing this node's own id = misconfiguration,
+    // refused at startup. The incarnation is REQUIRED per member: a set id is
+    // a function of `(member_id, register_incarnation)` pairs, so a member
+    // whose incarnation the config cannot state is a member no set id can be
+    // derived over. A malformed entry refuses rather than defaulting, because
+    // a defaulted incarnation would resolve every set to whatever the default
+    // hashed to.
+    let storage_set_members: Vec<(String, [u8; 32])> = settings
         .get_array("storage_set.members")
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|v| v.into_string().ok())
-        .collect();
+        .map(|v| {
+            let t = v
+                .into_table()
+                .map_err(|e| anyhow::anyhow!("[[storage_set.members]] is not a table: {e}"))?;
+            let id = t
+                .get("id")
+                .and_then(|v| v.clone().into_string().ok())
+                .ok_or_else(|| anyhow::anyhow!("[[storage_set.members]] is missing `id`"))?;
+            let inc_text = t
+                .get("register_incarnation")
+                .and_then(|v| v.clone().into_string().ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "[[storage_set.members]] {id:?} is missing `register_incarnation`"
+                    )
+                })?;
+            let raw = text_id::decode_base32_crockford(&inc_text).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[[storage_set.members]] {id:?} register_incarnation is not Base32-Crockford"
+                )
+            })?;
+            let inc: [u8; 32] = raw.try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "[[storage_set.members]] {id:?} register_incarnation is not 32 bytes"
+                )
+            })?;
+            Ok((id, inc))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     // The DSM network this node serves. NOT defaulted: the ERA faucet
     // identity is era_faucet_id(network_id), so a defaulted network would let
@@ -483,14 +520,32 @@ async fn async_main() -> Result<()> {
         db_pool.clone(),
         replication_manager,
     );
+    // ESTABLISHED AND LOGGED UNCONDITIONALLY, before any set is considered.
+    //
+    // The incarnation is a property of this node's register, not of its
+    // membership in a set, and an operator cannot write `[[storage_set.members]]`
+    // for this node without knowing the value. Establishing it only when a set
+    // is already configured would be a bootstrap that never starts: no set
+    // means no incarnation, no incarnation means no set can be written.
+    let own_incarnation = db::register_incarnation(&db_pool)
+        .await
+        .context("failed to establish this node's register incarnation")?;
+    log::info!(
+        "register incarnation for node {}: {}",
+        server_config.node_id,
+        text_id::encode_base32_crockford(&own_incarnation)
+    );
     if !server_config.storage_set_members.is_empty() {
+        // Config states what the set COMMITTED; the database states what this
+        // node can still speak for. `NodeStorageSet` refuses when they differ.
         let set = dsm_storage_node::NodeStorageSet::new(
             server_config.storage_set_members.clone(),
             &server_config.node_id,
+            own_incarnation,
         )?;
         log::info!(
             "storage set configured: {} members, id={}",
-            set.member_ids.len(),
+            set.members.len(),
             text_id::encode_base32_crockford(&set.id)
         );
         state = state.with_storage_set(set);

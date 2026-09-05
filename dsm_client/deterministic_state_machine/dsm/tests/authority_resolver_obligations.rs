@@ -453,7 +453,12 @@ fn two_individually_valid_halves_do_not_join() {
         iteration_budget: None,
         parent_state_commitment: [0x44; 32],
         owner_authority_transition_digest: position,
-        storage_set: StorageSetMembers::new(&[b"n1", b"n2", b"n3"]).expect("fixture"),
+        storage_set: StorageSetMembers::new(&[
+            (&b"n1"[..], [0xB1; 32]),
+            (&b"n2"[..], [0xB2; 32]),
+            (&b"n3"[..], [0xB3; 32]),
+        ])
+        .expect("fixture"),
         quorum: 4,
     };
     let vn_bytes = state.encode().expect("fixture");

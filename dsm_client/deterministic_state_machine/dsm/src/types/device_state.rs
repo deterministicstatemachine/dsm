@@ -3188,7 +3188,8 @@ impl DeviceState {
             iteration_budget: None,
             parent_state_commitment: [0u8; 32],
             owner_authority_transition_digest: [0u8; 32],
-            storage_set: crate::ccb::StorageSetMembers::new(&[b"test-node"]).map_err(ccb)?,
+            storage_set: crate::ccb::StorageSetMembers::new(&[(&b"test-node"[..], [0xD1; 32])])
+                .map_err(ccb)?,
             quorum: 1,
         })
     }

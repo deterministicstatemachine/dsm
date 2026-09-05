@@ -30,11 +30,17 @@
 
 use dsm::types::error::DsmError;
 
-/// One member of a storage set: its protocol identity and its current
-/// transport endpoint. `endpoint` is metadata; only `member_id` is hashed.
+/// One member of a storage set: its protocol identity, the register
+/// incarnation it is serving, and its current transport endpoint.
+///
+/// `endpoint` is transport metadata and is NOT hashed. The pair
+/// `(member_id, register_incarnation_id)` is: a member that lost and rebuilt
+/// its register is a different entry, so it resolves to a different set id
+/// and cannot serve a vault that committed the old one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMember {
     pub member_id: String,
+    pub register_incarnation_id: [u8; 32],
     pub endpoint: String,
 }
 
@@ -58,11 +64,29 @@ pub struct StorageSet {
 /// Validity conditions live in the encoder too: at least one member, no empty
 /// id, no duplicate. Duplicates are refused rather than collapsed, since
 /// collapsing would map two logical inputs onto one encoding.
-pub fn compute_storage_set_id(member_ids: &[&str]) -> Result<[u8; 32], DsmError> {
-    let ids: Vec<&[u8]> = member_ids.iter().map(|s| s.as_bytes()).collect();
-    let members = dsm::ccb::StorageSetMembers::new(&ids)
+pub fn compute_storage_set_id(entries: &[(&str, [u8; 32])]) -> Result<[u8; 32], DsmError> {
+    let pairs: Vec<(&[u8], [u8; 32])> = entries
+        .iter()
+        .map(|(id, inc)| (id.as_bytes(), *inc))
+        .collect();
+    let members = dsm::ccb::StorageSetMembers::new(&pairs)
         .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))?;
     dsm::ccb::storage_set_id(&members)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))
+}
+
+/// This set's members as the CCB object a verifier re-derives an id from.
+///
+/// Handed to callers that must prove a resolved set IS the one an authority
+/// named — they recompute the id from these pairs rather than believing the
+/// catalog.
+pub fn as_ccb_members(set: &StorageSet) -> Result<dsm::ccb::StorageSetMembers, DsmError> {
+    let pairs: Vec<(&[u8], [u8; 32])> = set
+        .members()
+        .iter()
+        .map(|m| (m.member_id.as_bytes(), m.register_incarnation_id))
+        .collect();
+    dsm::ccb::StorageSetMembers::new(&pairs)
         .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))
 }
 
@@ -91,8 +115,11 @@ impl StorageSet {
                 ));
             }
         }
-        let ids: Vec<&str> = members.iter().map(|m| m.member_id.as_str()).collect();
-        let id = compute_storage_set_id(&ids)?;
+        let entries: Vec<(&str, [u8; 32])> = members
+            .iter()
+            .map(|m| (m.member_id.as_str(), m.register_incarnation_id))
+            .collect();
+        let id = compute_storage_set_id(&entries)?;
         Ok(Self { id, members })
     }
 
@@ -157,11 +184,31 @@ impl StorageSetCatalog {
         let members: Vec<StorageMember> = env
             .nodes
             .into_iter()
-            .map(|n| StorageMember {
-                member_id: n.name,
-                endpoint: n.endpoint,
+            .map(|n| {
+                // Fail closed: a member whose incarnation the config cannot
+                // state is a member no set id can be derived over. Decoding
+                // the wrong width is the same failure as omitting it.
+                let raw = crate::util::text_id::decode_base32_crockford(&n.register_incarnation)
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(format!(
+                            "storage set: member {:?} has a register_incarnation that is not \
+                             Base32-Crockford",
+                            n.name
+                        ))
+                    })?;
+                let register_incarnation_id: [u8; 32] = raw.try_into().map_err(|_| {
+                    DsmError::invalid_operation(format!(
+                        "storage set: member {:?} has a register_incarnation that is not 32 bytes",
+                        n.name
+                    ))
+                })?;
+                Ok(StorageMember {
+                    member_id: n.name,
+                    register_incarnation_id,
+                    endpoint: n.endpoint,
+                })
             })
-            .collect();
+            .collect::<Result<_, DsmError>>()?;
         let set = StorageSet::new(members)?;
         Self::new(vec![set])
     }
@@ -171,8 +218,12 @@ impl StorageSetCatalog {
     /// re-hashing the entry's member ids, not by trusting a stored id.
     pub fn resolve(&self, storage_set_id: &[u8; 32]) -> Option<&StorageSet> {
         self.sets.iter().find(|s| {
-            let ids: Vec<&str> = s.members().iter().map(|m| m.member_id.as_str()).collect();
-            compute_storage_set_id(&ids).ok().as_ref() == Some(storage_set_id)
+            let entries: Vec<(&str, [u8; 32])> = s
+                .members()
+                .iter()
+                .map(|m| (m.member_id.as_str(), m.register_incarnation_id))
+                .collect();
+            compute_storage_set_id(&entries).ok().as_ref() == Some(storage_set_id)
         })
     }
 
@@ -196,29 +247,42 @@ mod tests {
     use super::*;
 
     fn m(id: &str, ep: &str) -> StorageMember {
+        // A distinct incarnation per member id, so a test never accidentally
+        // asserts over a set whose entries collide.
+        let mut inc = [0u8; 32];
+        inc[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
+        inc[31] = 0xA7;
         StorageMember {
             member_id: id.to_string(),
+            register_incarnation_id: inc,
             endpoint: ep.to_string(),
         }
     }
 
+    fn e(id: &str) -> (&str, [u8; 32]) {
+        let mut inc = [0u8; 32];
+        inc[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
+        inc[31] = 0xA7;
+        (id, inc)
+    }
+
     #[test]
     fn set_id_is_order_independent_and_length_prefixed() {
-        let a = compute_storage_set_id(&["n1", "n2", "n3"]).unwrap();
-        let b = compute_storage_set_id(&["n3", "n1", "n2"]).unwrap();
+        let a = compute_storage_set_id(&[e("n1"), e("n2"), e("n3")]).unwrap();
+        let b = compute_storage_set_id(&[e("n3"), e("n1"), e("n2")]).unwrap();
         assert_eq!(a, b, "order-independent");
         // Length-prefixing: ["ab","c"] and ["a","bc"] concatenate to the same
         // bytes; they must NOT hash the same.
-        let x = compute_storage_set_id(&["ab", "c"]).unwrap();
-        let y = compute_storage_set_id(&["a", "bc"]).unwrap();
+        let x = compute_storage_set_id(&[e("ab"), e("c")]).unwrap();
+        let y = compute_storage_set_id(&[e("a"), e("bc")]).unwrap();
         assert_ne!(x, y, "variable-length ids cannot be re-split");
         assert!(
-            compute_storage_set_id(&["n1", "n1"]).is_err(),
+            compute_storage_set_id(&[e("n1"), e("n1")]).is_err(),
             "duplicate refused"
         );
         assert!(compute_storage_set_id(&[]).is_err(), "empty refused");
         assert!(
-            compute_storage_set_id(&["", "n1"]).is_err(),
+            compute_storage_set_id(&[e(""), e("n1")]).is_err(),
             "empty id refused"
         );
     }
@@ -252,7 +316,7 @@ mod tests {
         .unwrap();
         let cat = StorageSetCatalog::new(vec![s.clone()]).unwrap();
         assert!(cat.resolve(&s.id()).is_some());
-        let foreign = compute_storage_set_id(&["c", "d", "e"]).unwrap();
+        let foreign = compute_storage_set_id(&[e("c"), e("d"), e("e")]).unwrap();
         assert!(
             cat.resolve(&foreign).is_none(),
             "an unknown set resolves to nothing"

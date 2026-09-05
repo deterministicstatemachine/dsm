@@ -122,6 +122,13 @@ struct OneTicket {
     envelope: Vec<u8>,
 }
 impl ProvenanceResolver for OneTicket {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         _g: &[u8; 32],
@@ -363,6 +370,14 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
     let fx = fixture(1);
     struct Nothing;
     impl ProvenanceResolver for Nothing {
+        fn root_register_candidate_set(
+            &self,
+            _network_id: &[u8],
+        ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure>
+        {
+            Ok(crate::beta_candidate_set())
+        }
+
         fn validated_peer_transition(
             &self,
             _g: &[u8; 32],
@@ -611,4 +626,19 @@ fn the_ticket_model_has_no_shared_state_idioms() {
              global-head design is creeping back"
         );
     }
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+///
+/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
+/// a fixture cannot state one as a constant — it derives it the same way
+/// production does, from candidate entries the profile then checks.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }

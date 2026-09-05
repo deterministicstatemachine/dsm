@@ -98,8 +98,10 @@ pub(crate) fn install_canonical_fleet() -> FleetGuard {
         "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\nports = [8080]\n",
     );
     for i in 1..=3 {
+        let inc = crate::economic_fixtures::fixture_register_incarnation(&format!("dsm-node-{i}"));
         cfg.push_str(&format!(
-            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n"
+            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n\
+             register_incarnation = \"{inc}\"\n"
         ));
     }
     std::fs::write(&cfg_path, cfg).expect("write env config");
@@ -128,7 +130,14 @@ fn canonical_set() -> StorageSet {
     let profile = dsm::economic::register::resolve_root_register_profile(NETWORK).expect("profile");
     StorageSetCatalog::from_env_config()
         .expect("catalog")
-        .resolve(&profile.storage_set_id)
+        .sets()
+        .iter()
+        .find(|s| {
+            crate::sdk::storage_set::as_ccb_members(s)
+                .ok()
+                .and_then(|m| profile.derive_set_id(&m).ok())
+                .is_some()
+        })
         .cloned()
         .expect("canonical set resolvable in test mode")
 }

@@ -417,6 +417,7 @@ mod tests {
         StorageSet::new(
             (1..=3)
                 .map(|i| StorageMember {
+                    register_incarnation_id: [0xC0 | i as u8; 32],
                     member_id: format!("test-{i}"),
                     endpoint: format!("http://127.0.0.1:808{i}"),
                 })

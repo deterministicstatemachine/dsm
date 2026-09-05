@@ -84,21 +84,22 @@ openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
 # Generate a random PostgreSQL password (shared across all nodes for simplicity)
 PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
 
-# ----- The canonical storage set -----
-# Every node must be handed the SAME member list: the set id is derived by
-# hashing the sorted ids, so a node configured with a different list computes a
-# different id and refuses claims for the set its peers belong to. Built once,
-# here, and substituted into every bundle unchanged.
+# ----- The canonical storage set: PHASE 1 LEAVES IT UNSET -----
+# A set member is `(id, register_incarnation)`, and the incarnation is minted by
+# the node itself on first boot into its own database — never derivable from the
+# node id or its keys, because a node that kept its key but lost its register
+# must come back as a DIFFERENT member. This generator therefore cannot know the
+# member list, and inventing one would produce a fleet whose configured
+# incarnations no node actually holds; every node would refuse to start.
 #
-# These ids are also the client's contract: the member ids must equal the
-# `[[nodes]] name` entries in the client env config, because that is what the
-# client hashes to name the set a vault is born under.
-STORAGE_SET_MEMBERS=""
-for i in $(seq 1 "${N}"); do
-    [ -n "${STORAGE_SET_MEMBERS}" ] && STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}, "
-    STORAGE_SET_MEMBERS="${STORAGE_SET_MEMBERS}\"dsm-node-${i}\""
-done
-echo "Canonical storage set (${N} members): ${STORAGE_SET_MEMBERS}"
+# So these bundles ship with `[storage_set]` commented out (register INACTIVE,
+# every claim refused — the correct state for a fleet that has not agreed on a
+# set yet). Boot them, collect each node's logged
+# `register incarnation for node <id>: <Base32-Crockford>`, write the full member
+# list into every node config AND the client env config, then restart.
+echo "Storage set: NOT configured by this generator (phase 1)."
+echo "  Boot the fleet, collect each node's logged register incarnation, then"
+echo "  write [[storage_set.members]] into every node config and restart."
 
 # ----- Per-Node Bundles -----
 for i in $(seq 1 "${N}"); do
@@ -146,8 +147,7 @@ EXTEOF
     DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
-    sed -e "s|members = \[\"__STORAGE_SET_MEMBERS__\"\]|members = [${STORAGE_SET_MEMBERS}]|g" \
-        -e "s|__NODE_ID__|${NODE_ID}|g" \
+    sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \

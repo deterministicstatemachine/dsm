@@ -268,8 +268,16 @@ mod tests {
     async fn endpoint_enforces_coordinates_attribution_and_writes_once() {
         let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
         db::init_db(&pool).await.expect("init");
-        let set =
-            crate::NodeStorageSet::new(vec!["n1".into(), "n2".into(), "n3".into()], "n1").unwrap();
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
         let state = state_with(pool.clone(), Some(set.clone()), true);
 
         let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
@@ -369,8 +377,16 @@ mod tests {
     async fn poisoned_ticket_does_not_brick_the_faucet() {
         let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
         db::init_db(&pool).await.expect("init");
-        let set =
-            crate::NodeStorageSet::new(vec!["n1".into(), "n2".into(), "n3".into()], "n1").unwrap();
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
         let state = state_with(pool.clone(), Some(set.clone()), true);
         let canonical = era_faucet_id(NETWORK);
 
@@ -416,8 +432,16 @@ mod tests {
     async fn unconfigured_node_refuses_rather_than_defaulting() {
         let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
         db::init_db(&pool).await.expect("init");
-        let set =
-            crate::NodeStorageSet::new(vec!["n1".into(), "n2".into(), "n3".into()], "n1").unwrap();
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
 
         let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();
         let devid = [0x81; 32];

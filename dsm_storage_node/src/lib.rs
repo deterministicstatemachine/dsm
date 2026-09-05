@@ -41,27 +41,65 @@ pub struct AppState {
 /// This node's view of the canonical storage set it belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeStorageSet {
-    /// `dsm_sdk::sdk::storage_set::compute_storage_set_id` over `member_ids`.
+    /// `compute_storage_set_id` over the `(member_id, incarnation)` pairs.
     pub id: [u8; 32],
-    /// The configured protocol identities of every member (this node's own
-    /// `node.id` string must be among them).
-    pub member_ids: Vec<String>,
+    /// Every member's configured protocol identity paired with the register
+    /// incarnation it is serving. This node's own `node.id` must be among
+    /// them, and its configured incarnation must be the one this node's
+    /// database actually holds.
+    pub members: Vec<(String, [u8; 32])>,
+    /// This node's own register incarnation — the value it echoes on every
+    /// register read so a reader can tell it apart from a rebuilt member
+    /// wearing the same node id.
+    pub own_incarnation: [u8; 32],
 }
 
 impl NodeStorageSet {
-    /// Build from configured member ids; refuses an empty set, duplicate ids,
-    /// or a set that does not contain `own_node_id` — a node that would
-    /// acknowledge claims for a set it is not a member of is misconfigured.
-    pub fn new(member_ids: Vec<String>, own_node_id: &str) -> anyhow::Result<Self> {
-        if !member_ids.iter().any(|m| m == own_node_id) {
+    /// Build from configured members; refuses an empty set, duplicate ids, a
+    /// set that does not contain `own_node_id` — a node that would
+    /// acknowledge claims for a set it is not a member of is misconfigured —
+    /// and, decisively, a configured incarnation for THIS node that is not
+    /// the one its database holds.
+    ///
+    /// That last refusal is the point of the whole mechanism. A node that
+    /// lost and rebuilt its register comes back with a new incarnation; if it
+    /// were allowed to keep serving the configured old one it would be
+    /// asserting a register history it no longer has. Refusing at startup
+    /// makes the discontinuity loud, at the one moment an operator is looking,
+    /// instead of silent at read time.
+    pub fn new(
+        members: Vec<(String, [u8; 32])>,
+        own_node_id: &str,
+        own_incarnation: [u8; 32],
+    ) -> anyhow::Result<Self> {
+        let Some((_, configured_own)) = members.iter().find(|(m, _)| m == own_node_id) else {
             anyhow::bail!(
                 "storage_set.members does not contain this node's own id {own_node_id:?}"
             );
+        };
+        if *configured_own != own_incarnation {
+            anyhow::bail!(
+                "storage_set.members lists a register incarnation for this node ({}) that is \
+                 not the one this node's database holds ({}) — this node's register was \
+                 rebuilt or restored, so it is no longer the member the configured set names",
+                dsm_sdk::util::text_id::encode_base32_crockford(configured_own),
+                dsm_sdk::util::text_id::encode_base32_crockford(&own_incarnation)
+            );
         }
-        let refs: Vec<&str> = member_ids.iter().map(|s| s.as_str()).collect();
-        let id = dsm_sdk::sdk::storage_set::compute_storage_set_id(&refs)
+        let entries: Vec<(&str, [u8; 32])> =
+            members.iter().map(|(m, i)| (m.as_str(), *i)).collect();
+        let id = dsm_sdk::sdk::storage_set::compute_storage_set_id(&entries)
             .map_err(|e| anyhow::anyhow!("storage_set.members: {e}"))?;
-        Ok(Self { id, member_ids })
+        Ok(Self {
+            id,
+            members,
+            own_incarnation,
+        })
+    }
+
+    /// The configured member ids, for logging and endpoint resolution.
+    pub fn member_ids(&self) -> impl Iterator<Item = &str> {
+        self.members.iter().map(|(m, _)| m.as_str())
     }
 }
 
@@ -204,4 +242,78 @@ pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
     Ok(axum::Router::new()
         .merge(api::registry::core::create_router(state_arc.clone()))
         .layer(Extension(state_arc)))
+}
+
+#[cfg(test)]
+mod storage_set_tests {
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
+    use super::NodeStorageSet;
+
+    fn members() -> Vec<(String, [u8; 32])> {
+        vec![
+            ("n1".into(), [0xC1; 32]),
+            ("n2".into(), [0xC2; 32]),
+            ("n3".into(), [0xC3; 32]),
+        ]
+    }
+
+    /// THE REFUSAL THIS MECHANISM EXISTS FOR.
+    ///
+    /// A node that lost and rebuilt its register still owns its identity key
+    /// and its configured id, so every check that looks at identity alone
+    /// passes. What it no longer has is the register history the set names.
+    /// Startup is where that becomes loud: the configured incarnation is what
+    /// the set committed, this node's database is what it can still speak
+    /// for, and serving the set while those disagree would be asserting a
+    /// history it does not have.
+    #[test]
+    fn a_node_whose_register_was_rebuilt_refuses_to_serve_the_configured_set() {
+        let err = NodeStorageSet::new(members(), "n1", [0x99; 32])
+            .expect_err("a rebuilt register must refuse the configured set");
+        let text = err.to_string();
+        assert!(
+            text.contains("rebuilt or restored"),
+            "the refusal must say WHY, got: {text}"
+        );
+
+        // The same node, still serving the incarnation the set committed, is
+        // fine — so the refusal is about the register history, not about
+        // being strict.
+        assert!(NodeStorageSet::new(members(), "n1", [0xC1; 32]).is_ok());
+    }
+
+    #[test]
+    fn a_set_that_does_not_name_this_node_is_refused() {
+        let err = NodeStorageSet::new(members(), "n4", [0xC4; 32])
+            .expect_err("a node must be a member of the set it serves");
+        assert!(err
+            .to_string()
+            .contains("does not contain this node's own id"));
+    }
+
+    /// The incarnation is an INPUT to the id, not a label beside it: the same
+    /// three node ids under a different incarnation are a different set, so a
+    /// rebuilt member cannot resolve to the set it used to serve.
+    #[test]
+    fn one_members_incarnation_changes_the_whole_set_id() {
+        let before = NodeStorageSet::new(members(), "n1", [0xC1; 32]).unwrap();
+        let mut rebuilt = members();
+        rebuilt[2] = ("n3".into(), [0x77; 32]);
+        let after = NodeStorageSet::new(rebuilt, "n1", [0xC1; 32]).unwrap();
+        assert_ne!(
+            before.id, after.id,
+            "a member's new register incarnation must change the set id"
+        );
+    }
+
+    /// Ordering is by MEMBER ID, never by the pair — so the id does not
+    /// depend on how the operator happened to list the members.
+    #[test]
+    fn the_set_id_does_not_depend_on_configuration_order() {
+        let a = NodeStorageSet::new(members(), "n1", [0xC1; 32]).unwrap();
+        let mut reversed = members();
+        reversed.reverse();
+        let b = NodeStorageSet::new(reversed, "n1", [0xC1; 32]).unwrap();
+        assert_eq!(a.id, b.id);
+    }
 }

@@ -55,8 +55,8 @@ pub use devtree::{
 };
 pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
 pub use state::{
-    EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetMembers,
-    VaultStateV2,
+    EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetEntry,
+    StorageSetMembers, VaultStateV2,
 };
 
 /// Object-class discriminants, from the single namespace of registry §3.
@@ -201,7 +201,17 @@ pub mod schema {
     pub const BURNED: &[(u16, u16)] = &[
         (super::class::VAULT_STATE_V2, 1),
         (super::class::VAULT_STATE_V2, 2),
+        // Schema 3 nested `0x0002` at schema 2, i.e. a storage set of bare
+        // member ids. The register-incarnation cut makes field 14 a set of
+        // `(member_id, register_incarnation_id)` pairs, and §2.7 nests by
+        // complete CCB — so the enclosing bytes differ even though the field
+        // list did not move.
+        (super::class::VAULT_STATE_V2, 3),
         (super::class::STORAGE_SET, 1),
+        // A set of bare member ids says only WHICH NODES a vault trusts. A
+        // member that rebuilt its register still satisfied it, which is the
+        // ambiguity schema 3 removes.
+        (super::class::STORAGE_SET, 2),
         (super::class::ENCUMBRANCE_CLAIM, 1),
         (super::class::ENCUMBRANCE_SET, 1),
     ];
@@ -255,6 +265,10 @@ pub enum CcbError {
     DuplicateSetElement { class: u16 },
     /// A storage set had no members, or a member id was empty.
     EmptyStorageSetOrMember,
+    /// A storage-set entry carried an all-zero register incarnation — the
+    /// value a member has before it has established one. Committing it would
+    /// bind a vault to an incarnation the member had not yet decided.
+    ZeroRegisterIncarnation,
     /// `token_a_policy_commit` was not strictly less than `token_b`.
     TokenPairNotStrictlyOrdered,
     /// `fee_bps` was at or above the denominator.
@@ -336,6 +350,11 @@ impl core::fmt::Display for CcbError {
             CcbError::EmptyStorageSetOrMember => {
                 write!(f, "storage set: at least one member, and no empty member id")
             }
+            CcbError::ZeroRegisterIncarnation => write!(
+                f,
+                "storage set: a member's register incarnation is all zero, which is the \
+                 value it has before establishing one"
+            ),
             CcbError::TokenPairNotStrictlyOrdered => write!(
                 f,
                 "market policy: token_a must be strictly less than token_b; \
@@ -560,11 +579,15 @@ pub fn parent_state_commitment_for_successor_of(
 
 /// `storage_set_id = H_dom(DSM/storage-set, CCB(S))`.
 ///
-/// An ordinary CCB object under an ordinary domain. Both halves changed with
-/// the cut: the frozen envelope-less layout became `0x0002` schema 2, and the
-/// `DSM/storage-set/v1` tag that named it is burned in favour of the
-/// normative `DSM/storage-set`. Set ids therefore differ from the deployed
-/// ones, which is the reprovision rather than a regression.
+/// An ordinary CCB object under an ordinary domain, over the canonical
+/// ordered list of `(member_id, register_incarnation_id)` pairs.
+///
+/// The id is therefore not merely *which nodes* a vault trusts, but *which
+/// durable register histories on those nodes*. That is the whole authority
+/// commitment: a member that rebuilt its register is a different entry, so it
+/// resolves to a different set id and cannot serve the vault that committed
+/// the old one. Set ids differ from schema-2 ones, which is the reprovision
+/// rather than a regression.
 pub fn storage_set_id(members: &StorageSetMembers) -> Result<[u8; 32], CcbError> {
     let body = members.encode()?;
     let mut h: Hasher = dsm_domain_hasher(TAG_DSM_STORAGE_SET);
@@ -609,7 +632,7 @@ mod dlv_policy_digest_tests {
             iteration_budget: None,
             parent_state_commitment: [0; 32],
             owner_authority_transition_digest: [0; 32],
-            storage_set: StorageSetMembers::new(&[&[9u8; 32][..]]).expect("set"),
+            storage_set: StorageSetMembers::new(&[(&[9u8; 32][..], [0xE1; 32])]).expect("set"),
             quorum: 1,
         };
         let sa =

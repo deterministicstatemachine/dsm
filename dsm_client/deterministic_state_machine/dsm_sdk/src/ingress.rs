@@ -1072,6 +1072,7 @@ allow_localhost = true
 [[nodes]]
 name = "test-1"
 endpoint = "http://127.0.0.1:8080"
+register_incarnation = "BHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE5RQ2WBHE0"
 "#;
         std::fs::write(&path, body).expect("write env config");
         path.to_string_lossy().to_string()

@@ -93,9 +93,39 @@ pub fn economic_root_register_key(
 /// one network's register into another's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootRegisterProfile {
-    pub storage_set_id: [u8; 32],
     pub quorum: u32,
     pub members: Vec<Vec<u8>>,
+}
+
+impl RootRegisterProfile {
+    /// Re-derive this profile's set id from CANDIDATE entries, refusing any
+    /// candidate whose membership is not exactly this network's.
+    ///
+    /// The set id is a function of `(member_id, register_incarnation_id)`
+    /// pairs, and a member's incarnation is a runtime fact — a value it
+    /// generates once and cannot re-derive from its identity key — so it
+    /// cannot be a constant here. A resolver supplies the candidate pairs;
+    /// this function is what stops the resolver from being believed.
+    ///
+    /// A catalog entry is NEVER accepted merely for existing: the candidate's
+    /// member ids must equal this network's canonical members exactly, and
+    /// only then is the id computed from the canonical encoding of the pairs.
+    /// Endpoints are transport metadata and are not inputs.
+    pub fn derive_set_id(
+        &self,
+        candidate: &StorageSetMembers,
+    ) -> Result<[u8; 32], RegisterResolutionError> {
+        let mut want: Vec<&[u8]> = self.members.iter().map(|m| m.as_slice()).collect();
+        want.sort_unstable();
+        let got: Vec<&[u8]> = candidate.entries().iter().map(|e| e.member_id()).collect();
+        if got != want {
+            return Err(RegisterResolutionError::MembershipNotCanonical {
+                expected: self.members.clone(),
+                got: got.iter().map(|m| m.to_vec()).collect(),
+            });
+        }
+        storage_set_id(candidate).map_err(RegisterResolutionError::ProfileNotDerivable)
+    }
 }
 
 /// Why a register could not be resolved. Every variant is **fail-closed**:
@@ -106,6 +136,12 @@ pub enum RegisterResolutionError {
     /// with a default — a default register is a register an attacker can
     /// steer traffic into.
     UnknownNetwork { network_id: Vec<u8> },
+    /// A resolver offered a candidate set whose membership is not this
+    /// network's. The catalog resolves a set; it never chooses one.
+    MembershipNotCanonical {
+        expected: Vec<Vec<u8>>,
+        got: Vec<Vec<u8>>,
+    },
     /// The trader's committed network is not the one being settled against.
     NetworkMismatch { claimed: Vec<u8>, expected: Vec<u8> },
     /// The profile resolved, but its set id could not be re-derived from the
@@ -121,6 +157,18 @@ impl core::fmt::Display for RegisterResolutionError {
                 "no root-register profile for network {:?} — fail closed; a default register \
                  is one an attacker can steer traffic into",
                 String::from_utf8_lossy(network_id)
+            ),
+            Self::MembershipNotCanonical { expected, got } => write!(
+                f,
+                "resolved root-register membership {:?} is not this network's canonical \
+                 membership {:?} — the catalog resolves a set, it never chooses one",
+                got.iter()
+                    .map(|m| String::from_utf8_lossy(m))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|m| String::from_utf8_lossy(m))
+                    .collect::<Vec<_>>()
             ),
             Self::NetworkMismatch { claimed, expected } => write!(
                 f,
@@ -160,12 +208,8 @@ pub fn resolve_root_register_profile(
             network_id: network_id.to_vec(),
         });
     }
-    let set = StorageSetMembers::new(&BETA_MEMBERS)
-        .map_err(RegisterResolutionError::ProfileNotDerivable)?;
     let members: Vec<Vec<u8>> = BETA_MEMBERS.iter().map(|m| m.to_vec()).collect();
-    let id = storage_set_id(&set).map_err(RegisterResolutionError::ProfileNotDerivable)?;
     Ok(RootRegisterProfile {
-        storage_set_id: id,
         // Req 6.13's fixed three-member profile. Read from the DLV profile
         // module rather than restated, so the threshold has one home.
         quorum: crate::dlv::beta_storage_profile::SOFI_BETA_QUORUM,

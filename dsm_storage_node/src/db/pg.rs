@@ -360,12 +360,53 @@ mod durable_posture_tests {
     }
 }
 
+/// This node's durable REGISTER INCARNATION: the identity of its register
+/// history, not of the node.
+///
+/// Generated once, from the OS random source, and stored only here. It is
+/// deliberately not derivable from the node's signing key, its id, or any
+/// seed — a node that still holds its identity key but lost its register
+/// database MUST come back with a different incarnation, because that is the
+/// fact a vault needs to know. Otherwise a rebuilt member can assert "no
+/// claim here" for a cell the real incarnation once held, and owning the
+/// identity key would be the whole test.
+///
+/// Write-once with a same-transaction read-back, like the registers it
+/// speaks for: two racing callers agree on one value rather than each
+/// minting one.
+pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
+    let fresh: [u8; 32] = rand::random();
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    tx.execute(
+        "INSERT INTO register_incarnation (only_row, incarnation) VALUES (1, $1)
+         ON CONFLICT (only_row) DO NOTHING",
+        &[&fresh.as_slice()],
+    )
+    .await?;
+    let row = tx
+        .query_one(
+            "SELECT incarnation FROM register_incarnation WHERE only_row = 1",
+            &[],
+        )
+        .await?;
+    let held: Vec<u8> = row.get(0);
+    tx.commit().await?;
+    held.try_into()
+        .map_err(|_| anyhow!("stored register incarnation is not 32 bytes"))
+}
+
 /// Initialize database schema for storage node.
 pub async fn init_db(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
     client
         .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS dlv_slots (
+            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
+                    only_row    SMALLINT PRIMARY KEY CHECK (only_row = 1),
+                    incarnation BYTEA NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS dlv_slots (
                     dlv_id         BYTEA PRIMARY KEY,
                     capacity_bytes BIGINT NOT NULL,
                     used_bytes     BIGINT NOT NULL DEFAULT 0,

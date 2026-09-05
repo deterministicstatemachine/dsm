@@ -58,12 +58,72 @@ fn the_beta_register_resolves_to_the_three_member_fleet_at_q_two() {
     let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
     assert_eq!(p.members.len(), 3);
     assert_eq!(p.quorum, 2);
-    // The set id is a re-derivation over the members, not a constant somebody
-    // typed — so a member list that drifts changes the id rather than silently
+    // The set id is a re-derivation over `(member, incarnation)` pairs, not a
+    // constant somebody typed — so a member list that drifts, or a member
+    // that rebuilt its register, changes the id rather than silently
     // resolving the old register.
-    let members: Vec<&[u8]> = p.members.iter().map(|m| m.as_slice()).collect();
-    let set = dsm::ccb::StorageSetMembers::new(&members).expect("valid set");
-    assert_eq!(p.storage_set_id, dsm::ccb::storage_set_id(&set).unwrap());
+    let candidate = beta_candidate_set();
+    assert_eq!(
+        p.derive_set_id(&candidate).expect("canonical membership"),
+        dsm::ccb::storage_set_id(&candidate).unwrap()
+    );
+}
+
+/// THE CATALOG RESOLVES A SET; IT NEVER CHOOSES ONE. A candidate whose
+/// membership is not this network's is refused before any id is computed,
+/// so a local catalog cannot steer a claim into a register of its own.
+#[test]
+fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
+    let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
+
+    let impostor = dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"attacker-node"[..], [0xC3; 32]),
+    ])
+    .expect("well-formed but wrong");
+    match p.derive_set_id(&impostor) {
+        Err(RegisterResolutionError::MembershipNotCanonical { .. }) => {}
+        other => panic!("a foreign membership must be refused, got {other:?}"),
+    }
+
+    // A SHORT set is refused too: a quorum argument over two of the three
+    // members is not this network's register.
+    let short = dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+    ])
+    .expect("well-formed but short");
+    assert!(
+        p.derive_set_id(&short).is_err(),
+        "a subset of the members is not the set"
+    );
+}
+
+/// The incarnation is an INPUT to the id, which is the whole point: the same
+/// three nodes, one of them having rebuilt its register, resolve to a
+/// different set and therefore cannot serve a claim bound to the old one.
+#[test]
+fn one_member_rebuilding_its_register_changes_the_set_id() {
+    let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
+    let before = p.derive_set_id(&beta_candidate_set()).expect("canonical");
+
+    let rebuilt = dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        // node-3 lost its register and generated a new incarnation. Same
+        // node, same identity key, different durable history.
+        (&b"dsm-node-3"[..], [0x99; 32]),
+    ])
+    .expect("canonical membership, new incarnation");
+    let after = p
+        .derive_set_id(&rebuilt)
+        .expect("membership is still canonical");
+
+    assert_ne!(
+        before, after,
+        "a rebuilt register must not resolve to the set it used to serve"
+    );
 }
 
 #[test]
@@ -117,7 +177,8 @@ fn a_signed_claim_round_trips_and_a_tampered_one_does_not() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .storage_set_id;
+        .derive_set_id(&beta_candidate_set())
+        .expect("canonical membership");
     let b = body(&pk, set);
     let envelope = sign_economic_root_claim(&b, &sk).expect("signable");
 
@@ -153,7 +214,8 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .storage_set_id;
+        .derive_set_id(&beta_candidate_set())
+        .expect("canonical membership");
     let at7 = body(&pk, set);
     let envelope = sign_economic_root_claim(&at7, &sk).expect("signable");
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
@@ -172,7 +234,8 @@ fn a_member_refuses_a_claim_that_is_not_the_callers() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .storage_set_id;
+        .derive_set_id(&beta_candidate_set())
+        .expect("canonical membership");
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
     let claim = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
 
@@ -263,7 +326,8 @@ fn registering_an_arbitrary_root_yields_nothing_validated() {
         admission_manifest_addr: [0xDD; 32],
         storage_set_id: resolve_root_register_profile(b"dsm-testnet")
             .unwrap()
-            .storage_set_id,
+            .derive_set_id(&beta_candidate_set())
+            .expect("canonical membership"),
     };
     assert_eq!(
         registered.register_key(),
@@ -294,7 +358,8 @@ fn a_decodable_but_noncanonical_envelope_is_refused() {
     let (pk, sk) = keypair();
     let set = resolve_root_register_profile(b"dsm-testnet")
         .unwrap()
-        .storage_set_id;
+        .derive_set_id(&beta_candidate_set())
+        .expect("canonical membership");
     let envelope = sign_economic_root_claim(&body(&pk, set), &sk).expect("signable");
     assert!(decode_and_verify_economic_root_claim(&envelope).is_ok());
 
@@ -309,4 +374,15 @@ fn a_decodable_but_noncanonical_envelope_is_refused() {
         ),
         other => panic!("a non-canonical envelope must be refused, got {other:?}"),
     }
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }

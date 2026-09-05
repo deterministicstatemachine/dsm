@@ -74,7 +74,14 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
             dsm::economic::register::resolve_root_register_profile(NETWORK).expect("profile");
         let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .expect("catalog")
-            .resolve(&profile.storage_set_id)
+            .sets()
+            .iter()
+            .find(|s| {
+                crate::sdk::storage_set::as_ccb_members(s)
+                    .ok()
+                    .and_then(|m| profile.derive_set_id(&m).ok())
+                    .is_some()
+            })
             .cloned()
             .expect("canonical set");
         let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
@@ -655,7 +662,14 @@ async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
             dsm::economic::register::resolve_root_register_profile(NETWORK).expect("profile");
         let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
             .expect("catalog")
-            .resolve(&profile.storage_set_id)
+            .sets()
+            .iter()
+            .find(|s| {
+                crate::sdk::storage_set::as_ccb_members(s)
+                    .ok()
+                    .and_then(|m| profile.derive_set_id(&m).ok())
+                    .is_some()
+            })
             .cloned()
             .expect("canonical set");
         let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
