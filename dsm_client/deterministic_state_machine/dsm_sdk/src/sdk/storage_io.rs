@@ -422,6 +422,10 @@ pub mod fake_registers {
         cells: HashMap<(String, RegisterKind), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
         failing: HashSet<String>,
         echo_override: HashMap<String, Option<String>>,
+        /// What a member echoes as its REGISTER INCARNATION, when it is not
+        /// the one the set committed. `None` models a member that answers
+        /// without saying which register it is serving.
+        incarnation_override: HashMap<String, Option<[u8; 32]>>,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -454,6 +458,19 @@ pub mod fake_registers {
     pub fn set_echo(member_id: &str, echo: Option<String>) {
         with_state(|s| {
             s.echo_override.insert(member_id.to_string(), echo);
+        })
+    }
+
+    /// Model a member that is no longer serving the register the set
+    /// committed — a lost-and-rebuilt database, or a restore from a snapshot.
+    ///
+    /// The member keeps its id and answers perfectly honestly; what changed is
+    /// which durable register history is answering. `None` models a member
+    /// that will not say which register it is serving at all.
+    pub fn set_register_incarnation(member_id: &str, incarnation: Option<[u8; 32]>) {
+        with_state(|s| {
+            s.incarnation_override
+                .insert(member_id.to_string(), incarnation);
         })
     }
 
@@ -683,7 +700,19 @@ pub mod fake_registers {
                         .get(&member.member_id)
                         .cloned()
                         .unwrap_or_else(|| Some(member.member_id.clone()));
-                    if echoed.as_deref() != Some(member.member_id.as_str()) {
+                    // BOTH halves of the echo, exactly as the live client
+                    // folds them (`storage_node_sdk::answer_counts_for`): a
+                    // member that rebuilt its register still answers with its
+                    // own id, so identity alone cannot tell it apart from the
+                    // member the vault committed.
+                    let echoed_incarnation = s
+                        .incarnation_override
+                        .get(&member.member_id)
+                        .copied()
+                        .unwrap_or(Some(member.register_incarnation_id));
+                    if echoed.as_deref() != Some(member.member_id.as_str())
+                        || echoed_incarnation != Some(member.register_incarnation_id)
+                    {
                         return MemberCellRead::Unavailable;
                     }
                     match s

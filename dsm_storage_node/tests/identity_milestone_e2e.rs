@@ -110,7 +110,14 @@ async fn the_milestone_path_works_end_to_end_with_no_legacy_anywhere() {
         iteration_budget: None,
         parent_state_commitment: dsm::ccb::genesis_parent_commitment(&[0x55; 32]),
         owner_authority_transition_digest: t0.digest(),
-        storage_set: StorageSetMembers::new(&[b"n1", b"n2", b"n3", b"n4", b"n5"]).expect("set"),
+        storage_set: StorageSetMembers::new(&[
+            (&b"n1"[..], [0xE1; 32]),
+            (&b"n2"[..], [0xE2; 32]),
+            (&b"n3"[..], [0xE3; 32]),
+            (&b"n4"[..], [0xE4; 32]),
+            (&b"n5"[..], [0xE5; 32]),
+        ])
+        .expect("set"),
         quorum: 4,
     };
     let ccb = state.encode().expect("encodes");

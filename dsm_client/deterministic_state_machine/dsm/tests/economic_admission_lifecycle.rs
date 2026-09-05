@@ -217,7 +217,8 @@ const SUBSTRATE_ADDR: [u8; 32] = [0xA4; 32];
 fn canonical_set_id() -> [u8; 32] {
     dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
         .expect("beta profile")
-        .storage_set_id
+        .derive_set_id(&beta_candidate_set())
+        .expect("canonical membership")
 }
 
 struct FaucetFixture {
@@ -298,6 +299,13 @@ struct OneTicket {
     envelope: Vec<u8>,
 }
 impl ProvenanceResolver for OneTicket {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         _g: &[u8; 32],
@@ -695,6 +703,13 @@ struct MarketRooted {
 }
 
 impl ProvenanceResolver for MarketRooted {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         _peer_genesis: &[u8; 32],
@@ -954,4 +969,19 @@ fn policy_bytes_that_do_not_hash_to_the_leg_are_refused() {
         msg.contains("do not hash to the committed leg"),
         "the refusal is the hash binding, got: {msg}"
     );
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+///
+/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
+/// a fixture cannot state one as a constant — it derives it the same way
+/// production does, from candidate entries the profile then checks.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }

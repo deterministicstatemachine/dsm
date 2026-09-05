@@ -97,8 +97,13 @@ async fn real_member(id: &str, set_members: &[&str], network: Option<&[u8]>) -> 
     );
     let mut state = AppState::new(id.to_string(), &endpoint, None, pool.clone(), rm);
     if !set_members.is_empty() {
-        let ids: Vec<String> = set_members.iter().map(|s| s.to_string()).collect();
-        state = state.with_storage_set(NodeStorageSet::new(ids, id).expect("node set"));
+        let members: Vec<(String, [u8; 32])> = set_members
+            .iter()
+            .map(|s| (s.to_string(), member_incarnation(s)))
+            .collect();
+        state = state.with_storage_set(
+            NodeStorageSet::new(members, id, member_incarnation(id)).expect("node set"),
+        );
     }
     if let Some(n) = network {
         state = state.with_network_id(n.to_vec());
@@ -114,6 +119,16 @@ async fn real_member(id: &str, set_members: &[&str], network: Option<&[u8]>) -> 
         pool,
         router,
     }
+}
+
+/// A member's register incarnation, derived from its id so the node side and
+/// the client side agree without a fixture having to thread the value.
+///
+/// Production derives nothing: a node's incarnation is random at first init
+/// and stored only in its own database. This is a test standing in for "what
+/// that node reported to the operator who wrote the catalog".
+fn member_incarnation(member_id: &str) -> [u8; 32] {
+    *blake3::hash(format!("test-incarnation/{member_id}").as_bytes()).as_bytes()
 }
 
 /// The canonical three-member fleet, every member configured for the same set
@@ -133,6 +148,7 @@ fn client_set(members: &[RealMember]) -> StorageSet {
             .iter()
             .map(|m| StorageMember {
                 member_id: m.id.clone(),
+                register_incarnation_id: member_incarnation(&m.id),
                 endpoint: m.endpoint.clone(),
             })
             .collect(),

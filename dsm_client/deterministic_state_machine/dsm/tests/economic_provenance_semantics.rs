@@ -33,6 +33,13 @@ const VAULT: [u8; 32] = [0xCC; 32];
 
 struct NoPeers;
 impl ProvenanceResolver for NoPeers {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         _g: &[u8; 32],
@@ -376,4 +383,19 @@ fn a_transition_with_no_credits_needs_no_provenance() {
             .expect("a pure debit is funded by nothing")
             .is_empty()
     );
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+///
+/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
+/// a fixture cannot state one as a constant — it derives it the same way
+/// production does, from candidate entries the profile then checks.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }

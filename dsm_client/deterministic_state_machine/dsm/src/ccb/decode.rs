@@ -302,13 +302,20 @@ pub fn decode_vault_state(bytes: &[u8]) -> Result<VaultStateV2, DecodeError> {
     // 14 StorageSet.
     c.envelope(class::STORAGE_SET, StorageSetMembers::SCHEMA)?;
     let member_count = c.u32()?;
-    let mut members: Vec<Vec<u8>> = Vec::new();
+    let mut entries: Vec<(Vec<u8>, [u8; 32])> = Vec::new();
     for _ in 0..member_count {
         let len = c.u32()? as usize;
-        members.push(c.take(len)?.to_vec());
+        let member_id = c.take(len)?.to_vec();
+        // The incarnation is part of the entry, not a trailing array: a
+        // truncated stream fails here rather than producing a set whose
+        // members have lost their incarnations.
+        entries.push((member_id, c.digest32()?));
     }
-    let member_refs: Vec<&[u8]> = members.iter().map(|m| m.as_slice()).collect();
-    let storage_set = StorageSetMembers::new(&member_refs).map_err(invalid)?;
+    let entry_refs: Vec<(&[u8], [u8; 32])> = entries
+        .iter()
+        .map(|(id, inc)| (id.as_slice(), *inc))
+        .collect();
+    let storage_set = StorageSetMembers::new(&entry_refs).map_err(invalid)?;
 
     let quorum = c.u32()?; // 15
 

@@ -628,6 +628,46 @@ impl std::fmt::Display for StorageNodeError {
 
 impl std::error::Error for StorageNodeError {}
 
+/// What a member said about ITSELF alongside a register answer.
+///
+/// Both halves are required for the answer to count. `node_id` says which
+/// member replied; `register_incarnation` says which durable register history
+/// that member is serving. A vault commits the pair at birth, so a member
+/// that still owns its identity key but rebuilt its register no longer
+/// matches, and its answers stop counting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberEcho {
+    pub node_id: Option<String>,
+    pub register_incarnation: Option<[u8; 32]>,
+}
+
+/// Whether an answer can be counted for the member the set committed.
+///
+/// BOTH halves must match, and a failure of either is `Unavailable` — never
+/// an absence and never a value:
+///
+/// | echoed | verdict |
+/// |---|---|
+/// | member A, incarnation X (the committed pair) | may count |
+/// | member A, incarnation Y | unavailable — this is A, but not the register history the vault named |
+/// | member B, incarnation X | unavailable — attribution failure |
+/// | either half missing | unavailable — an answer about nobody |
+///
+/// The second row is the one this exists for. A member that lost and rebuilt
+/// its register can honestly report "nothing here" for a cell the committed
+/// incarnation once held, and node identity alone cannot tell that apart from
+/// the real member reporting the same thing. Counting it as emptiness is the
+/// undetectable substitution. It is also NOT a forgery — the node is not
+/// lying, it simply is no longer the member this vault committed — which is
+/// why the verdict is `Unavailable` and not an invalid-credit finding.
+pub fn answer_counts_for(
+    echoed: &MemberEcho,
+    member: &crate::sdk::storage_set::StorageMember,
+) -> bool {
+    echoed.node_id.as_deref() == Some(member.member_id.as_str())
+        && echoed.register_incarnation == Some(member.register_incarnation_id)
+}
+
 impl StorageNodeClient {
     pub async fn new(config: StorageNodeConfig) -> Result<Self, StorageNodeError> {
         let client = build_ca_aware_client();
@@ -996,27 +1036,33 @@ impl StorageNodeClient {
     /// members manufacture an emptiness fact, which is the one observation a
     /// forward lineage walk treats as terminal.
     ///
-    /// The echo is NORMATIVE: a response without it, or with an id other than
-    /// this member's, is uncountable — the caller folds that into
-    /// `Unavailable` rather than counting it either way.
+    /// The echo is NORMATIVE, and it has TWO halves: a response without the
+    /// member's own node id, or without the register incarnation that member
+    /// is serving, is uncountable — the caller folds either into
+    /// `Unavailable` rather than counting it as a value or as an absence.
     pub async fn get_register_cell(
         &self,
         path: &str,
-    ) -> (
-        dsm::economic::cell_observation::MemberCellRead,
-        Option<String>,
-    ) {
+    ) -> (dsm::economic::cell_observation::MemberCellRead, MemberEcho) {
         use dsm::economic::cell_observation::MemberCellRead;
         let url = format!("{base}{path}", base = self.node_info.url);
         let response = match self.client.get(&url).send().await {
             Ok(r) => r,
-            Err(_) => return (MemberCellRead::Unavailable, None),
+            Err(_) => return (MemberCellRead::Unavailable, MemberEcho::default()),
         };
-        let echoed = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+        let echoed = MemberEcho {
+            node_id: response
+                .headers()
+                .get("x-dsm-node-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            register_incarnation: response
+                .headers()
+                .get("x-dsm-register-incarnation")
+                .and_then(|v| v.to_str().ok())
+                .and_then(crate::util::text_id::decode_base32_crockford)
+                .and_then(|raw| <[u8; 32]>::try_from(raw).ok()),
+        };
         let status = response.status().as_u16();
         let outcome = response
             .headers()
@@ -1576,7 +1622,7 @@ impl StorageNodeSDK {
                 None => MemberCellRead::Unavailable,
                 Some(c) => {
                     let (read, echoed) = c.get_register_cell(path).await;
-                    if echoed.as_deref() == Some(member.member_id.as_str()) {
+                    if answer_counts_for(&echoed, member) {
                         read
                     } else {
                         MemberCellRead::Unavailable
@@ -5508,5 +5554,60 @@ mod tests {
         let (s2, p2) = StorageNodeSDK::build_initial_device_tree_payload([0x02u8; 32]).unwrap();
         assert_ne!(s1.root_hash, s2.root_hash);
         assert_ne!(p1, p2);
+    }
+}
+
+#[cfg(test)]
+mod member_echo_tests {
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
+    use super::{answer_counts_for, MemberEcho};
+    use crate::sdk::storage_set::StorageMember;
+
+    fn committed() -> StorageMember {
+        StorageMember {
+            member_id: "dsm-node-1".into(),
+            register_incarnation_id: [0xC1; 32],
+            endpoint: "http://n1.example".into(),
+        }
+    }
+
+    fn echo(node_id: Option<&str>, incarnation: Option<[u8; 32]>) -> MemberEcho {
+        MemberEcho {
+            node_id: node_id.map(|s| s.to_string()),
+            register_incarnation: incarnation,
+        }
+    }
+
+    /// The whole matrix, one case per row of the contract.
+    #[test]
+    fn only_the_committed_member_in_its_committed_incarnation_counts() {
+        let m = committed();
+
+        assert!(
+            answer_counts_for(&echo(Some("dsm-node-1"), Some([0xC1; 32])), &m),
+            "the committed pair counts"
+        );
+
+        assert!(
+            !answer_counts_for(&echo(Some("dsm-node-1"), Some([0x99; 32])), &m),
+            "SAME NODE, REBUILT REGISTER: this is the substitution the pair \
+             exists to catch — it must not count, in either direction"
+        );
+
+        assert!(
+            !answer_counts_for(&echo(Some("dsm-node-2"), Some([0xC1; 32])), &m),
+            "another member answering for this one is an attribution failure"
+        );
+
+        assert!(
+            !answer_counts_for(&echo(None, Some([0xC1; 32])), &m),
+            "an answer that names no member is an answer about nobody"
+        );
+        assert!(
+            !answer_counts_for(&echo(Some("dsm-node-1"), None), &m),
+            "a member that will not say which register it is serving has not \
+             answered the question that matters"
+        );
+        assert!(!answer_counts_for(&echo(None, None), &m), "no echo at all");
     }
 }

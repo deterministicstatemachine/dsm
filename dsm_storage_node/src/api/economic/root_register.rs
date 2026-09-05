@@ -230,8 +230,16 @@ mod tests {
     async fn endpoint_recomputes_the_cell_and_enforces_three_way_attribution() {
         let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
         db::init_db(&pool).await.expect("init");
-        let set =
-            crate::NodeStorageSet::new(vec!["n1".into(), "n2".into(), "n3".into()], "n1").unwrap();
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
         let state = test_state(pool.clone(), set.clone());
 
         let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().unwrap();

@@ -52,13 +52,15 @@ mod indep {
         [u32be(v.len() as u32), v.to_vec()].concat()
     }
 
-    /// §5.2 frozen layout: no envelope, count then bare length-prefixed ids in
-    /// ascending raw-byte order.
-    pub fn storage_set(mut ids: Vec<Vec<u8>>) -> Vec<u8> {
-        ids.sort();
-        let mut out = [envelope(0x0002, 2), u32be(ids.len() as u32)].concat();
-        for id in ids {
+    /// Schema 3: envelope, count, then for each entry in ascending MEMBER-ID
+    /// order a length-prefixed member id followed by its 32-byte register
+    /// incarnation. Sorted by member id only — never by the pair.
+    pub fn storage_set(mut entries: Vec<(Vec<u8>, [u8; 32])>) -> Vec<u8> {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out = [envelope(0x0002, 3), u32be(entries.len() as u32)].concat();
+        for (id, incarnation) in entries {
             out.extend(bytes_field(&id));
+            out.extend_from_slice(&incarnation);
         }
         out
     }
@@ -132,7 +134,7 @@ mod indep {
             Some(v) => [vec![0x01], u64be(v)].concat(),
         };
         [
-            envelope(0x0001, 3),
+            envelope(0x0001, 4),
             g_o.to_vec(),
             d_o.to_vec(),
             vault_id.to_vec(),
@@ -272,12 +274,15 @@ fn parse_vault_state(bytes: &[u8]) -> ParsedVaultState {
     // from the registry alone that this field starts at a count — the
     // discriminant says so, like every other nested member.
     assert_eq!(c.u16(), 0x0002, "field 14 must be a StorageSet envelope");
-    assert_eq!(c.u16(), 2, "storage-set schema 1 is burned");
+    assert_eq!(c.u16(), 3, "storage-set schemas 1 and 2 are burned");
     let member_count = c.u32();
     let mut storage_members = Vec::new();
     for _ in 0..member_count {
         let len = c.u32() as usize;
         storage_members.push(c.take(len).to_vec());
+        // The incarnation is part of the entry; skipping it here would leave
+        // the cursor mid-entry and field 15 would not read as `q`.
+        let _incarnation = c.take(32);
     }
 
     let quorum = c.u32(); // 15
@@ -306,12 +311,16 @@ fn d(b: u8) -> [u8; 32] {
 const VAULT_ID: [u8; 32] = [0x7E; 32];
 const TOKEN_A: [u8; 32] = [0x11; 32];
 const TOKEN_B: [u8; 32] = [0x22; 32];
-const MEMBERS: [&[u8]; 5] = [
-    b"dsm-node-3",
-    b"dsm-node-1",
-    b"dsm-node-5",
-    b"dsm-node-2",
-    b"dsm-node-4",
+/// Deliberately unsorted, and the incarnations deliberately do NOT ascend
+/// with the member ids: the canonical order is by MEMBER ID alone, so a test
+/// whose incarnations happened to sort the same way would not detect an
+/// encoder that sorted by the pair.
+const MEMBERS: [(&[u8], [u8; 32]); 5] = [
+    (b"dsm-node-3", [0x31; 32]),
+    (b"dsm-node-1", [0x95; 32]),
+    (b"dsm-node-5", [0x07; 32]),
+    (b"dsm-node-2", [0xF2; 32]),
+    (b"dsm-node-4", [0x64; 32]),
 ];
 
 fn beta_set() -> StorageSetMembers {
@@ -359,7 +368,12 @@ fn indep_state_bytes(
         beta,
         h_n,
         d(0xA3),
-        indep::storage_set(MEMBERS.iter().map(|m| m.to_vec()).collect()),
+        indep::storage_set(
+            MEMBERS
+                .iter()
+                .map(|(id, inc)| (id.to_vec(), *inc))
+                .collect(),
+        ),
         4,
     )
 }
@@ -452,7 +466,7 @@ fn the_storage_set_nests_with_an_envelope_and_still_ends_exactly_at_the_quorum_f
         "the layout must consume exactly its bytes"
     );
     assert_eq!(parsed.class, 0x0001);
-    assert_eq!(parsed.schema, 3, "schemas 1 and 2 are burned");
+    assert_eq!(parsed.schema, 4, "schemas 1, 2 and 3 are burned");
     assert_eq!(parsed.generation, 7);
     assert_eq!(parsed.reserve_a, 4_242);
     assert_eq!(parsed.reserve_b, 8_888);
@@ -465,7 +479,7 @@ fn the_storage_set_nests_with_an_envelope_and_still_ends_exactly_at_the_quorum_f
         "field 15 must read as q, not as set bytes"
     );
 
-    let mut expected: Vec<Vec<u8>> = MEMBERS.iter().map(|m| m.to_vec()).collect();
+    let mut expected: Vec<Vec<u8>> = MEMBERS.iter().map(|(id, _)| id.to_vec()).collect();
     expected.sort();
     assert_eq!(parsed.storage_members, expected);
 
@@ -521,16 +535,20 @@ fn the_storage_set_id_is_the_ccb_construction_and_not_the_burned_one() {
     let members = beta_set();
     let via_ccb = storage_set_id(&members).expect("id");
 
-    let mut ids: Vec<Vec<u8>> = MEMBERS.iter().map(|m| m.to_vec()).collect();
-    ids.sort();
+    let mut entries: Vec<(Vec<u8>, [u8; 32])> = MEMBERS
+        .iter()
+        .map(|(id, inc)| (id.to_vec(), *inc))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // New: H(DSM/storage-set ‖ 0x00 ‖ envelope ‖ count ‖ (len ‖ id)*).
+    // New: H(DSM/storage-set ‖ 0x00 ‖ envelope ‖ count ‖ (len ‖ id ‖ inc)*).
     let mut preimage = b"DSM/storage-set".to_vec();
     preimage.push(0x00);
-    preimage.extend(indep::envelope(0x0002, 2));
-    preimage.extend(indep::u32be(ids.len() as u32));
-    for id in &ids {
+    preimage.extend(indep::envelope(0x0002, 3));
+    preimage.extend(indep::u32be(entries.len() as u32));
+    for (id, inc) in &entries {
         preimage.extend(indep::bytes_field(id));
+        preimage.extend_from_slice(inc);
     }
     let expected: [u8; 32] = *blake3::hash(&preimage).as_bytes();
     assert_eq!(via_ccb, expected, "the CCB construction fixes these bytes");
@@ -538,14 +556,30 @@ fn the_storage_set_id_is_the_ccb_construction_and_not_the_burned_one() {
     // Burned: the old tag over the envelope-less layout.
     let mut burned = b"DSM/storage-set/v1".to_vec();
     burned.push(0x00);
-    burned.extend(indep::u32be(ids.len() as u32));
-    for id in &ids {
+    burned.extend(indep::u32be(entries.len() as u32));
+    for (id, _) in &entries {
         burned.extend(indep::bytes_field(id));
     }
     let burned_id: [u8; 32] = *blake3::hash(&burned).as_bytes();
     assert_ne!(
         via_ccb, burned_id,
         "equality here would mean the frozen layout survived the cut"
+    );
+
+    // Schema 2 is burned too, and it is the near miss that matters: the same
+    // members without their incarnations. Equality here would mean the
+    // incarnation is not actually an input to the id.
+    let mut ids_only = b"DSM/storage-set".to_vec();
+    ids_only.push(0x00);
+    ids_only.extend(indep::envelope(0x0002, 2));
+    ids_only.extend(indep::u32be(entries.len() as u32));
+    for (id, _) in &entries {
+        ids_only.extend(indep::bytes_field(id));
+    }
+    assert_ne!(
+        via_ccb,
+        *blake3::hash(&ids_only).as_bytes(),
+        "the incarnation must be an input, not decoration"
     );
 }
 
@@ -583,8 +617,8 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
 
     // Registry §3, the live column.
     let expected: &[(u16, u16)] = &[
-        (0x0001, 3),
-        (0x0002, 2),
+        (0x0001, 4),
+        (0x0002, 3),
         (0x0004, 2),
         (0x0005, 2),
         (0x0007, 1),
@@ -625,7 +659,7 @@ fn a_nested_schema_bump_changes_the_enclosing_encoding() {
     // The same fields, with field 14 written at the burned storage-set schema
     // and nothing else changed.
     let mut forged = produced.clone();
-    let needle = indep::envelope(0x0002, 2);
+    let needle = indep::envelope(0x0002, 3);
     let at = forged
         .windows(needle.len())
         .position(|w| w == needle.as_slice())
@@ -736,13 +770,23 @@ fn invalid_inputs_are_refused_rather_than_normalized() {
         "one below is the legal maximum"
     );
     assert!(
-        StorageSetMembers::new(&[b"a", b"a"]).is_err(),
+        StorageSetMembers::new(&[(&b"a"[..], [1; 32]), (&b"a"[..], [1; 32])]).is_err(),
         "a duplicate member is refused, not collapsed"
+    );
+    assert!(
+        StorageSetMembers::new(&[(&b"a"[..], [1; 32]), (&b"a"[..], [2; 32])]).is_err(),
+        "one member under two incarnations is refused REGARDLESS of incarnation — \
+         sorting by the pair would have let this through as strictly ascending"
     );
     assert!(StorageSetMembers::new(&[]).is_err(), "an empty set");
     assert!(
-        StorageSetMembers::new(&[b""]).is_err(),
+        StorageSetMembers::new(&[(&b""[..], [1; 32])]).is_err(),
         "an empty member id"
+    );
+    assert!(
+        StorageSetMembers::new(&[(&b"a"[..], [0; 32])]).is_err(),
+        "an all-zero incarnation is the value a member has before it has \
+         established one, and is not committable"
     );
 
     let claim = EncumbranceClaim {
@@ -802,7 +846,12 @@ fn a_populated_encumbrance_set_agrees_and_is_ordered_by_element_encoding() {
         None,
         h0,
         d(0xA3),
-        indep::storage_set(MEMBERS.iter().map(|m| m.to_vec()).collect()),
+        indep::storage_set(
+            MEMBERS
+                .iter()
+                .map(|(id, inc)| (id.to_vec(), *inc))
+                .collect(),
+        ),
         4,
     );
     assert_eq!(produced, expected, "populated set must match byte for byte");

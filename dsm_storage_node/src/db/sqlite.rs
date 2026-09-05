@@ -156,11 +156,53 @@ pub async fn require_durable_commit_posture(_pool: &DBPool) -> Result<()> {
     Ok(())
 }
 
+/// This node's durable REGISTER INCARNATION: the identity of its register
+/// history, not of the node.
+///
+/// Generated once, from the OS random source, and stored only here. It is
+/// deliberately not derivable from the node's signing key, its id, or any
+/// seed — a node that still holds its identity key but lost its register
+/// database MUST come back with a different incarnation, because that is the
+/// fact a vault needs to know. Otherwise a rebuilt member can assert "no
+/// claim here" for a cell the real incarnation once held, and owning the
+/// identity key would be the whole test.
+///
+/// Write-once with a same-transaction read-back, like the registers it
+/// speaks for: two racing callers agree on one value rather than each
+/// minting one.
+pub async fn register_incarnation(pool: &DBPool) -> Result<[u8; 32]> {
+    let fresh: [u8; 32] = rand::random();
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO register_incarnation (only_row, incarnation) VALUES (1, ?1)",
+            params![fresh.to_vec()],
+        )?;
+        let held: Vec<u8> = tx.query_row(
+            "SELECT incarnation FROM register_incarnation WHERE only_row = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        let held: [u8; 32] = held
+            .try_into()
+            .map_err(|_| anyhow!("stored register incarnation is not 32 bytes"))?;
+        Ok(held)
+    })
+    .await
+}
+
 /// Initialize database schema (SQLite version).
 pub async fn init_db(pool: &DBPool) -> Result<()> {
     with_conn(pool, |conn| {
         conn.execute_batch(
-            r#"CREATE TABLE IF NOT EXISTS dlv_slots (
+            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
+                    only_row    INTEGER PRIMARY KEY CHECK (only_row = 1),
+                    incarnation BLOB NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS dlv_slots (
                     dlv_id         BLOB PRIMARY KEY,
                     capacity_bytes INTEGER NOT NULL,
                     used_bytes     INTEGER NOT NULL DEFAULT 0,

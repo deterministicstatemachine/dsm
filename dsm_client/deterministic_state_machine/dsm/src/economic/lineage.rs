@@ -559,16 +559,31 @@ pub fn advance_validated(
     // The canonical register set for the claimant's network, resolved
     // FAIL-CLOSED: an unknown network refuses rather than defaulting, and a
     // winning claim naming any other set is foreign whatever its bytes say.
-    let canonical_set = crate::economic::register::resolve_root_register_profile(network_id)
-        .map_err(|e| {
+    let profile =
+        crate::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
             EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(match e {
                 crate::economic::register::RegisterResolutionError::UnknownNetwork { .. } => {
                     "no register profile for the claimant's network"
                 }
                 _ => "register profile not derivable",
             }))
-        })?
-        .storage_set_id;
+        })?;
+    // The set id is a function of `(member_id, register_incarnation_id)`
+    // pairs, so it is re-derived from what the resolver offers and refused
+    // unless the membership is exactly this network's. The resolver supplies
+    // candidates; this is where they stop being taken on trust.
+    let candidate = resolver
+        .root_register_candidate_set(network_id)
+        .map_err(|_| {
+            EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(
+                "the network's register set could not be resolved",
+            ))
+        })?;
+    let canonical_set = profile.derive_set_id(&candidate).map_err(|_| {
+        EconomicValidationError::Provenance(ProvenanceError::FaucetWinnerInvalid(
+            "resolved register membership is not the network's canonical membership",
+        ))
+    })?;
     let ctx = ProvenanceContext {
         genesis,
         device_id,

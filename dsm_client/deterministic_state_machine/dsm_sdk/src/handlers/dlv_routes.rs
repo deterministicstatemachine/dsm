@@ -3360,12 +3360,12 @@ fn build_vault_publication_artifacts(
              device's catalog",
         )
     })?;
-    let member_ids: Vec<&[u8]> = set
+    let entries: Vec<(&[u8], [u8; 32])> = set
         .members()
         .iter()
-        .map(|m| m.member_id.as_bytes())
+        .map(|m| (m.member_id.as_bytes(), m.register_incarnation_id))
         .collect();
-    let storage_set = StorageSetMembers::new(&member_ids)
+    let storage_set = StorageSetMembers::new(&entries)
         .map_err(|e| DsmError::invalid_operation(format!("vault publication: set members: {e}")))?;
     if dsm::ccb::storage_set_id(&storage_set)
         .map_err(|e| DsmError::invalid_operation(format!("vault publication: set id: {e}")))?

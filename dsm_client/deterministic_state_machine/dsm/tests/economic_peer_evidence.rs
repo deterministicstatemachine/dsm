@@ -362,6 +362,13 @@ struct OnePeer {
     vpt: ValidatedPeerTransition,
 }
 impl ProvenanceResolver for OnePeer {
+    fn root_register_candidate_set(
+        &self,
+        _network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure> {
+        Ok(crate::beta_candidate_set())
+    }
+
     fn validated_peer_transition(
         &self,
         _g: &[u8; 32],
@@ -585,6 +592,14 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
         vpt: ValidatedPeerTransition,
     }
     impl ProvenanceResolver for WrongBytes {
+        fn root_register_candidate_set(
+            &self,
+            _network_id: &[u8],
+        ) -> Result<dsm::ccb::StorageSetMembers, dsm::economic::provenance::PeerLineageFailure>
+        {
+            Ok(crate::beta_candidate_set())
+        }
+
         fn validated_peer_transition(
             &self,
             _g: &[u8; 32],
@@ -647,4 +662,19 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
         other => panic!("expected Invalid addr mismatch, got {other:?}"),
     }
     let _ = acceptance_evidence_addr(b"anchor the helper in this file");
+}
+
+/// The beta fleet as a catalog resolves it: the network's canonical member
+/// ids paired with the register incarnations those members are serving.
+///
+/// A set id is a function of `(member_id, register_incarnation_id)` pairs, so
+/// a fixture cannot state one as a constant — it derives it the same way
+/// production does, from candidate entries the profile then checks.
+fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
+    dsm::ccb::StorageSetMembers::new(&[
+        (&b"dsm-node-1"[..], [0xC1; 32]),
+        (&b"dsm-node-2"[..], [0xC2; 32]),
+        (&b"dsm-node-3"[..], [0xC3; 32]),
+    ])
+    .expect("beta candidate set")
 }

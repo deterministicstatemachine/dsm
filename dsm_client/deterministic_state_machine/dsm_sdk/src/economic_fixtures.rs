@@ -66,8 +66,10 @@ pub fn install_canonical_fleet() -> FleetGuard {
         "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\nports = [8080]\n",
     );
     for i in 1..=3 {
+        let inc = fixture_register_incarnation(&format!("dsm-node-{i}"));
         cfg.push_str(&format!(
-            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n"
+            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n\
+             register_incarnation = \"{inc}\"\n"
         ));
     }
     std::fs::write(&cfg_path, cfg).expect("write env config");
@@ -376,4 +378,24 @@ pub fn pending_state(
         .device_head()
         .and_then(|h| h.pending_economic_admission().cloned())
         .map(|p| p.state)
+}
+
+/// A test fleet member's register incarnation, derived from its name so every
+/// fixture and every assertion agree without threading the value.
+///
+/// Production derives nothing: a node's incarnation is random at its first
+/// init and lives only in its own database. This stands in for "the value
+/// that node reported to whoever wrote the catalog".
+pub fn fixture_register_incarnation(member_id: &str) -> String {
+    crate::util::text_id::encode_base32_crockford(&fixture_register_incarnation_bytes(member_id))
+}
+
+/// The same value as bytes, for fixtures that build the COMMITTED set.
+///
+/// One derivation for both sides on purpose: a committed set whose
+/// incarnations differ from the catalog's resolves to a different set id, and
+/// the vault's own storage set stops being resolvable — which is correct
+/// behaviour and a useless test failure.
+pub fn fixture_register_incarnation_bytes(member_id: &str) -> [u8; 32] {
+    *blake3::hash(format!("dsm-test-incarnation/{member_id}").as_bytes()).as_bytes()
 }

@@ -86,6 +86,12 @@ pub trait PeerEvidenceFetcher {
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
     ) -> crate::economic::cell_observation::CellObservation;
+    /// The network's root-register set as the local catalog resolves it —
+    /// CANDIDATE entries the caller must re-derive and check, never authority.
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure>;
     /// Exact immutable bytes at `addr` under `namespace`.
     fn immutable(
         &self,
@@ -169,6 +175,13 @@ impl ProvenanceResolver for WalkingResolver<'_> {
     ) -> crate::economic::cell_observation::CellObservation {
         self.fetcher
             .settlement_slot_observation(vault_id, parent_sequence, storage_set, quorum)
+    }
+
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
+        self.fetcher.root_register_candidate_set(network_id)
     }
 
     fn immutable_evidence(
@@ -364,7 +377,16 @@ fn walk_positions(
         // canonical set — never sourced from transfer metadata or contacts.
         let profile = resolve_for_trader(&facts.network_id, expected_network_id)
             .map_err(|e| invalid(format!("peer network refused: {e}")))?;
-        if body.root_register_storage_set_id != profile.storage_set_id {
+        // The id is re-derived from the resolved `(member, incarnation)`
+        // pairs, and `derive_set_id` refuses a candidate whose membership is
+        // not this network's. A member that rebuilt its register is a
+        // different entry, so a claim written under the old incarnation no
+        // longer names the set this network resolves to.
+        let candidate = fetcher.root_register_candidate_set(&facts.network_id)?;
+        let expected_set_id = profile
+            .derive_set_id(&candidate)
+            .map_err(|e| invalid(format!("peer register set refused: {e}")))?;
+        if body.root_register_storage_set_id != expected_set_id {
             return Err(invalid(
                 "claim binds a register set that is not the canonical set of the peer's \
                  committed network",
