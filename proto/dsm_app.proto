@@ -1728,6 +1728,43 @@ message ReadBindingResponseV1 {
   bytes  register_incarnation  = 4 [(dsm_fixed_len)=32];
 }
 
+// ── Def 6.14: the complete immutable SettlementBundle a QuorumBind binds ──
+//
+// Canon(B) is the canonical encoding of SettlementBundleV1 (vault_transitions
+// sorted by vault_id). b = H(DSM/settlement-bundle || Canon(B)); the content
+// address is immutable_addr(DSM/settlement-bundle, Canon(B)). K(B) is derived
+// ONLY from these bytes: one resource key k_v = H(DSM/binding-keyset || c_n)
+// per transition (Def 6.17). Req 6.15: B carries everything needed to verify
+// the route and recover the DLV decision without a fresh constructor signature.
+message VaultTransitionV1 {
+  bytes  vault_id                = 1 [(dsm_fixed_len)=32];
+  uint64 parent_generation       = 2;
+  // c_n = H(DSM/vault-state, CCB(V_n)); commits vault_id, reserves, pair, policy.
+  bytes  parent_state_commitment = 3 [(dsm_fixed_len)=32];
+  bytes  parent_reserves_digest  = 4 [(dsm_fixed_len)=32];
+  // The exact committed DLV successor for this vault.
+  bytes  successor_ccb           = 5 [(dsm_fixed_len)=32];
+  // Canonical reserve-delta encoding for this transition.
+  bytes  reserve_deltas          = 6;
+  // History-bound witnesses proving the parent binding.
+  repeated bytes witnesses       = 7;
+}
+
+message SettlementBundleV1 {
+  uint32 version                 = 1;
+  bytes  storage_set_id          = 2 [(dsm_fixed_len)=32];
+  uint32 q                       = 3;
+  bytes  intent_commitment       = 4 [(dsm_fixed_len)=32];  // I
+  bytes  route_set_commitment    = 5 [(dsm_fixed_len)=32];  // X
+  bytes  selected_route          = 6;                        // canonical selected route
+  bytes  trader_parent           = 7 [(dsm_fixed_len)=32];   // exact sovereign parent
+  bytes  trader_successor        = 8 [(dsm_fixed_len)=32];   // exact bilateral successor
+  repeated VaultTransitionV1 vault_transitions = 9;          // {Tv}, sorted by vault_id
+  repeated bytes proof_material  = 10;                        // {Pv}
+  repeated bytes bundle_signatures = 11;
+  bytes  recovery_material       = 12;
+}
+
 // A trader's claim on one cell of the economic root register: the write-once
 // value at K_root = H("DSM/trader-economic-root-register-key/v1" || 0x00 || G
 // || DevID || u64_be(economic_position)).

@@ -79,6 +79,16 @@ pub const TAG_DSM_VAULT_STATE_ANCHOR_V3: TaggedHashDomain<'static> =
 /// Req 15.2's idempotence meaningful rather than accidental.
 pub const TAG_DSM_STORAGE_OBJECT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-object");
+/// `k_v = H_dom(DSM/binding-keyset, c_n)` — one settlement resource key from a
+/// vault's committed parent state (Def 6.17). The vault id is NOT restated:
+/// c_n commits it, so supplying both would admit a disagreeing pair.
+pub const TAG_DSM_BINDING_KEYSET: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/binding-keyset");
+/// `b = H_dom(DSM/settlement-bundle, Canon(B))` — the immutable settlement
+/// bundle identity (Def 6.14/6.19). Its content address is
+/// `immutable_addr(TAG_DSM_SETTLEMENT_BUNDLE, Canon(B))`.
+pub const TAG_DSM_SETTLEMENT_BUNDLE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/settlement-bundle");
 
 // --- Device Tree root progression (area 8 / registry §5.16–§5.18). Each
 // object has TWO domains over ONE preimage per registry §2.9: an identity
