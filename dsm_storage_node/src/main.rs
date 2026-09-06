@@ -321,6 +321,12 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // every response is NORMATIVE for these registers: quorum reads count a
     // response only when the echo equals the member queried. Assembled by
     // the library so the conformance suite drives exactly what is served.
+    // Generic conditional binding (Rev 15 §15.5): application-blind
+    // CompareExchangeMany behind device auth, ReadBinding public.
+    let generic_binding_write_router =
+        dsm_storage_node::generic_binding_write_router(state.clone());
+    let generic_binding_read_router = dsm_storage_node::generic_binding_read_router(state.clone())
+        .layer(public_rate_layer.clone());
     let economic_register_write_router =
         dsm_storage_node::economic_register_write_router(state.clone());
     let economic_register_read_router =
@@ -373,6 +379,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(dlv_slot_router)
         .merge(slot_claim_write_router)
         .merge(economic_register_write_router)
+        .merge(generic_binding_write_router)
+        .merge(generic_binding_read_router)
         .merge(slot_claim_read_router)
         .merge(economic_register_read_router)
         .merge(recovery_capsule_router)
@@ -530,6 +538,7 @@ async fn async_main() -> Result<()> {
     let own_incarnation = db::register_incarnation(&db_pool)
         .await
         .context("failed to establish this node's register incarnation")?;
+    state = state.with_register_incarnation(own_incarnation);
     log::info!(
         "register incarnation for node {}: {}",
         server_config.node_id,

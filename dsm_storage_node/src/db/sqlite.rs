@@ -193,11 +193,140 @@ pub async fn register_incarnation(pool: &DBPool) -> Result<[u8; 32]> {
     .await
 }
 
+// ===================== Generic conditional binding (Rev 15 §15.5) =====================
+
+use super::binding::{decide_compare_exchange, CasOutcome, Replacement, StoredBinding};
+
+/// One `binding_records` row as SQLite returns it, before it is decoded into a
+/// [`StoredBinding`]: `(record_bytes, record_digest, round_counter, proposer_id)`.
+type BindingRow = (Vec<u8>, Vec<u8>, i64, Vec<u8>);
+
+fn read_held(
+    conn: &rusqlite::Connection,
+    keys: &[[u8; 32]],
+) -> Result<std::collections::BTreeMap<[u8; 32], StoredBinding>> {
+    let mut held = std::collections::BTreeMap::new();
+    let mut stmt = conn.prepare_cached(
+        "SELECT record_bytes, record_digest, round_counter, proposer_id
+           FROM binding_records WHERE key = ?1",
+    )?;
+    for k in keys {
+        let row: Option<BindingRow> = stmt
+            .query_row(params![k.to_vec()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?;
+        if let Some((record_bytes, record_digest, counter, proposer_id)) = row {
+            held.insert(
+                *k,
+                StoredBinding {
+                    key: *k,
+                    record_bytes,
+                    record_digest: record_digest
+                        .try_into()
+                        .map_err(|_| anyhow!("stored binding digest is not 32 bytes"))?,
+                    round: dsm::storage::binding_record::Round {
+                        counter: u64::try_from(counter)
+                            .map_err(|_| anyhow!("stored round counter is negative"))?,
+                        proposer_id: proposer_id
+                            .try_into()
+                            .map_err(|_| anyhow!("stored proposer id is not 32 bytes"))?,
+                    },
+                },
+            );
+        }
+    }
+    Ok(held)
+}
+
+/// `CompareExchangeMany` at ONE member (Req 15.6): all named keys change to
+/// the replacement or none do, decided by the shared
+/// [`decide_compare_exchange`] inside one durable transaction. The single
+/// connection behind `with_conn` serialises exchanges, so overlapping key
+/// sets cannot interleave.
+pub async fn compare_exchange_many(
+    pool: &DBPool,
+    keys: &[[u8; 32]],
+    expected_digest: &[u8; 32],
+    replacement_bytes: &[u8],
+    replacement_digest: &[u8; 32],
+    replacement_round: dsm::storage::binding_record::Round,
+) -> Result<CasOutcome> {
+    dsm::storage::binding_record::validate_key_set(keys)
+        .map_err(|e| anyhow!("compare_exchange_many: {e}"))?;
+    let keys = keys.to_vec();
+    let expected = *expected_digest;
+    let bytes = replacement_bytes.to_vec();
+    let digest = *replacement_digest;
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        let held = read_held(&tx, &keys)?;
+        let outcome = decide_compare_exchange(
+            &keys,
+            &held,
+            &expected,
+            &Replacement {
+                bytes: &bytes,
+                digest,
+                round: replacement_round,
+            },
+        );
+        if let CasOutcome::Applied { .. } = &outcome {
+            let counter_i64 = i64::try_from(replacement_round.counter)
+                .map_err(|_| anyhow!("round counter does not fit in i64"))?;
+            for k in &keys {
+                tx.execute(
+                    "INSERT INTO binding_records
+                       (key, record_bytes, record_digest, round_counter, proposer_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(key) DO UPDATE SET
+                       record_bytes = excluded.record_bytes,
+                       record_digest = excluded.record_digest,
+                       round_counter = excluded.round_counter,
+                       proposer_id = excluded.proposer_id",
+                    params![
+                        k.to_vec(),
+                        bytes,
+                        digest.to_vec(),
+                        counter_i64,
+                        replacement_round.proposer_id.to_vec()
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// `ReadBinding` at one member: what it holds for each key, in key order,
+/// `None` where it holds nothing. Absence is this member's assertion.
+pub async fn read_bindings(pool: &DBPool, keys: &[[u8; 32]]) -> Result<Vec<Option<StoredBinding>>> {
+    dsm::storage::binding_record::validate_key_set(keys)
+        .map_err(|e| anyhow!("read_bindings: {e}"))?;
+    let keys = keys.to_vec();
+    with_conn(pool, move |conn| {
+        let mut held = read_held(conn, &keys)?;
+        Ok(keys.iter().map(|k| held.remove(k)).collect())
+    })
+    .await
+}
+
 /// Initialize database schema (SQLite version).
 pub async fn init_db(pool: &DBPool) -> Result<()> {
     with_conn(pool, |conn| {
         conn.execute_batch(
-            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
+            r#"CREATE TABLE IF NOT EXISTS binding_records (
+                    key           BLOB PRIMARY KEY,
+                    record_bytes  BLOB NOT NULL,
+                    record_digest BLOB NOT NULL,
+                    round_counter INTEGER NOT NULL,
+                    proposer_id   BLOB NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS register_incarnation (
                     only_row    INTEGER PRIMARY KEY CHECK (only_row = 1),
                     incarnation BLOB NOT NULL
                 );

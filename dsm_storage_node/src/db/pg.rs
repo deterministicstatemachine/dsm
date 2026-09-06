@@ -396,12 +396,159 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("stored register incarnation is not 32 bytes"))
 }
 
+// ===================== Generic conditional binding (Rev 15 §15.5) =====================
+
+use super::binding::{decide_compare_exchange, CasOutcome, Replacement, StoredBinding};
+
+fn row_to_binding(row: &tokio_postgres::Row) -> Result<StoredBinding> {
+    let key: Vec<u8> = row.get(0);
+    let record_bytes: Vec<u8> = row.get(1);
+    let record_digest: Vec<u8> = row.get(2);
+    let round_counter: i64 = row.get(3);
+    let proposer_id: Vec<u8> = row.get(4);
+    Ok(StoredBinding {
+        key: key
+            .try_into()
+            .map_err(|_| anyhow!("stored binding key is not 32 bytes"))?,
+        record_bytes,
+        record_digest: record_digest
+            .try_into()
+            .map_err(|_| anyhow!("stored binding digest is not 32 bytes"))?,
+        round: dsm::storage::binding_record::Round {
+            counter: u64::try_from(round_counter)
+                .map_err(|_| anyhow!("stored round counter is negative"))?,
+            proposer_id: proposer_id
+                .try_into()
+                .map_err(|_| anyhow!("stored proposer id is not 32 bytes"))?,
+        },
+    })
+}
+
+/// `CompareExchangeMany` at ONE member (Req 15.6): every named key changes to
+/// the replacement record or none does, decided by [`decide_compare_exchange`]
+/// inside one durable transaction. This member knows nothing of `q`, contacts
+/// no peer, and decides nothing about what the record means.
+///
+/// Concurrency: a transaction-scoped advisory lock is taken per key, in the
+/// caller-supplied strictly ascending key order, so two exchanges over
+/// overlapping key sets serialise instead of deadlocking or interleaving.
+/// Absent keys cannot be row-locked, which is why the lock is advisory.
+#[allow(clippy::too_many_arguments)]
+pub async fn compare_exchange_many(
+    pool: &Pool,
+    keys: &[[u8; 32]],
+    expected_digest: &[u8; 32],
+    replacement_bytes: &[u8],
+    replacement_digest: &[u8; 32],
+    replacement_round: dsm::storage::binding_record::Round,
+) -> Result<CasOutcome> {
+    dsm::storage::binding_record::validate_key_set(keys)
+        .map_err(|e| anyhow!("compare_exchange_many: {e}"))?;
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    // The lock id is the key's leading eight bytes as a signed 64-bit
+    // integer. Keys are 32-byte digests, so those bytes are uniformly
+    // distributed and a collision between distinct keys is negligible; and a
+    // collision would only serialise two exchanges that did not need it,
+    // never let two interleave. Computed here rather than in SQL so no text
+    // cast is involved.
+    for k in keys {
+        let lock_id = i64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&lock_id])
+            .await?;
+    }
+    let key_vecs: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+    let rows = tx
+        .query(
+            "SELECT key, record_bytes, record_digest, round_counter, proposer_id
+               FROM binding_records WHERE key = ANY($1)",
+            &[&key_vecs],
+        )
+        .await?;
+    let mut held = std::collections::BTreeMap::new();
+    for r in &rows {
+        let b = row_to_binding(r)?;
+        held.insert(b.key, b);
+    }
+    let outcome = decide_compare_exchange(
+        keys,
+        &held,
+        expected_digest,
+        &Replacement {
+            bytes: replacement_bytes,
+            digest: *replacement_digest,
+            round: replacement_round,
+        },
+    );
+    if let CasOutcome::Applied { .. } = &outcome {
+        let counter_i64 = i64::try_from(replacement_round.counter)
+            .map_err(|_| anyhow!("round counter does not fit in i64"))?;
+        let stmt = tx
+            .prepare_cached(
+                "INSERT INTO binding_records
+                   (key, record_bytes, record_digest, round_counter, proposer_id)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (key) DO UPDATE SET
+                   record_bytes = EXCLUDED.record_bytes,
+                   record_digest = EXCLUDED.record_digest,
+                   round_counter = EXCLUDED.round_counter,
+                   proposer_id = EXCLUDED.proposer_id",
+            )
+            .await?;
+        for k in keys {
+            tx.execute(
+                &stmt,
+                &[
+                    &k.as_slice(),
+                    &replacement_bytes,
+                    &replacement_digest.as_slice(),
+                    &counter_i64,
+                    &replacement_round.proposer_id.as_slice(),
+                ],
+            )
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// `ReadBinding` at one member: what it holds for each key, in key order,
+/// `None` where it holds nothing. Absence is this member's assertion.
+pub async fn read_bindings(pool: &Pool, keys: &[[u8; 32]]) -> Result<Vec<Option<StoredBinding>>> {
+    dsm::storage::binding_record::validate_key_set(keys)
+        .map_err(|e| anyhow!("read_bindings: {e}"))?;
+    let client = pool.get().await?;
+    let key_vecs: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
+    let rows = client
+        .query(
+            "SELECT key, record_bytes, record_digest, round_counter, proposer_id
+               FROM binding_records WHERE key = ANY($1)",
+            &[&key_vecs],
+        )
+        .await?;
+    let mut held = std::collections::BTreeMap::new();
+    for r in &rows {
+        let b = row_to_binding(r)?;
+        held.insert(b.key, b);
+    }
+    Ok(keys.iter().map(|k| held.remove(k)).collect())
+}
+
 /// Initialize database schema for storage node.
 pub async fn init_db(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
     client
         .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
+            r#"CREATE TABLE IF NOT EXISTS binding_records (
+                    key           BYTEA PRIMARY KEY,
+                    record_bytes  BYTEA NOT NULL,
+                    record_digest BYTEA NOT NULL,
+                    round_counter BIGINT NOT NULL,
+                    proposer_id   BYTEA NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS register_incarnation (
                     only_row    SMALLINT PRIMARY KEY CHECK (only_row = 1),
                     incarnation BYTEA NOT NULL
                 );
