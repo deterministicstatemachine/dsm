@@ -206,6 +206,54 @@ pub async fn run_fenced<T: BindingTransport + ?Sized>(
     result
 }
 
+/// The result of trying to resume one fence on restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FenceRecovery {
+    pub trader_chain_id: [u8; 32],
+    pub trader_parent_state_commitment: [u8; 32],
+    pub tx_id: [u8; 32],
+    /// Whether this pass drove the fence to a terminal outcome. A fence whose
+    /// bundle could not be retrieved yet stays unresolved (`false`) and the
+    /// parent stays fenced for a later pass.
+    pub resolved: bool,
+}
+
+/// Restore every unresolved trader-parent fence to a terminal outcome before
+/// the recovered trader chain may advance (Req 16.5, §22 #14).
+///
+/// On restart this is the canonical entry point: it loads every locally frozen
+/// transaction whose fence is not terminal and hands each to `resume_one`,
+/// which reconstructs the transaction from the fence's stored storage set and
+/// immutable bundle address (catalog resolution + `GetImmutable` + `run_fenced`,
+/// supplied by the settle path in PR 5) and returns whether it reached a
+/// terminal outcome. A fence whose bundle is not yet retrievable is left fenced
+/// and surfaced as unresolved, so the parent cannot advance until a later pass
+/// resolves it. One worker per fence, in insertion order.
+pub async fn recover_unresolved_fences<F, Fut>(resume_one: F) -> anyhow::Result<Vec<FenceRecovery>>
+where
+    F: Fn(crate::storage::client_db::trader_parent_fence::TraderFence) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    use crate::storage::client_db::trader_parent_fence as fdb;
+    let fences = fdb::list_unresolved_fences()?;
+    let mut out = Vec::with_capacity(fences.len());
+    for fence in fences {
+        let key = (
+            fence.trader_chain_id,
+            fence.trader_parent_state_commitment,
+            fence.tx_id,
+        );
+        let resolved = resume_one(fence).await;
+        out.push(FenceRecovery {
+            trader_chain_id: key.0,
+            trader_parent_state_commitment: key.1,
+            tx_id: key.2,
+            resolved,
+        });
+    }
+    Ok(out)
+}
+
 /// Drive one transaction to a terminal [`Outcome`], authenticating every answer
 /// and backing off between ballots. `max_ballots` bounds recovery attempts for
 /// this call; exhausting it is not ABORT — the transaction stays recoverable.
@@ -604,6 +652,63 @@ mod tests {
         assert_eq!(
             fdb::active_verdict(&[0x11; 32], &[0x22; 32]).unwrap(),
             FenceVerdict::PermitsOnly(succ)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn restart_recovery_resumes_each_fence_and_leaves_the_unretrievable_ones_fenced() {
+        init_db();
+        // Two unresolved fences on DIFFERENT parents (both can be unresolved at
+        // once). One bundle is retrievable on restart; the other is not.
+        let f1 = fdb::TraderFence {
+            trader_chain_id: [0x11; 32],
+            trader_parent_state_commitment: [0xA1; 32],
+            tx_id: [1; 32],
+            ballot: 1,
+            storage_set_id: [0x6B; 32],
+            value_addr: [0x01; 32],
+            state: dsm::dlv::trader_fence::FenceState::Fenced,
+            insertion_ordinal: 0,
+        };
+        let mut f2 = f1.clone();
+        f2.trader_parent_state_commitment = [0xA2; 32];
+        f2.tx_id = [2; 32];
+        f2.value_addr = [0x02; 32];
+        fdb::place_fence(&f1).unwrap();
+        fdb::place_fence(&f2).unwrap();
+
+        // resume_one: the first fence's bundle is retrievable, so it resolves to
+        // a terminal outcome; the second's is not, so it is left fenced.
+        let recoveries = recover_unresolved_fences(|f| async move {
+            if f.tx_id == [1; 32] {
+                fdb::record_event(
+                    &f.trader_chain_id,
+                    &f.trader_parent_state_commitment,
+                    &f.tx_id,
+                    &FenceEvent::Aborted,
+                    None,
+                )
+                .unwrap();
+                true
+            } else {
+                false
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(recoveries.len(), 2);
+        assert!(recoveries.iter().any(|r| r.tx_id == [1; 32] && r.resolved));
+        assert!(recoveries.iter().any(|r| r.tx_id == [2; 32] && !r.resolved));
+        // After the pass, only the un-retrievable fence remains — its parent
+        // stays fenced until a later pass.
+        let remaining = fdb::list_unresolved_fences().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].tx_id, [2; 32]);
+        assert_eq!(
+            fdb::active_verdict(&[0x11; 32], &[0xA2; 32]).unwrap(),
+            FenceVerdict::BlocksAllSuccessors
         );
     }
 }

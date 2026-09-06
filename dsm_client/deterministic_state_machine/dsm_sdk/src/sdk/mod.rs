@@ -74,6 +74,7 @@ pub mod token_sdk;
 pub mod token_state;
 pub mod unilateral_ops_sdk;
 // Storage-node client wrapper and discovery (dev-only)
+pub mod binding_http_transport; // concrete HTTP BindingTransport over the generic endpoints (Req 15.8)
 #[cfg(feature = "dev-discovery")]
 pub mod discovery;
 #[cfg(target_os = "android")]
