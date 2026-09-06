@@ -22,7 +22,7 @@ tokio-rustls = "0.26"
 # `from_pem_reader`, etc.) on `rustls::pki_types::CertificateDer` and friends.
 rustls-pki-types = { version = "1", features = ["alloc"] }
 tower = { version = "0.5", features = ["limit", "timeout"] }
-tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "metrics"] }
+tower-http = { version = "0.7", features = ["trace", "set-header", "limit", "metrics"] }
 
 # Error handling
 thiserror = "2.0.18"
