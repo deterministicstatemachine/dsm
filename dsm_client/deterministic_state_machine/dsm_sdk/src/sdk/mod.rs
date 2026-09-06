@@ -80,6 +80,7 @@ pub mod discovery;
 #[cfg(target_os = "android")]
 pub mod preview;
 pub mod quorum_bind_runner; // thin async Class K runner over the sans-IO QuorumBind engine
+pub mod settlement_resume; // 5b: restart reconstruction for a fenced settlement (Req 16.5)
 pub mod storage_io;
 pub mod storage_node_health;
 pub mod storage_node_sdk;
