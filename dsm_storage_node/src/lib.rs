@@ -20,6 +20,13 @@ use replication::StorageNodeId;
 #[derive(Clone)]
 pub struct AppState {
     pub node_id: StorageNodeId,
+    /// The protocol identity EXACTLY as configured (`[node] id`) — the string
+    /// a client's catalog names, the value the identity echo layer emits, and
+    /// therefore the `member_id` every generic-binding answer carries. Kept
+    /// beside the canonical 32-byte `node_id` because the two are different
+    /// facts: one is how peers address this node, the other is who a quorum
+    /// counts.
+    pub configured_member_id: String,
     pub hsts_max_age: Option<u64>,
     pub db_pool: Arc<db::DBPool>,
     pub replication_manager: Arc<replication::ReplicationManager>,
@@ -29,6 +36,11 @@ pub struct AppState {
     /// it). `None` = not configured: the settlement-slot register refuses every
     /// claim (fail closed) rather than accepting claims for an unknown set.
     pub storage_set: Option<Arc<NodeStorageSet>>,
+    /// The register incarnation THIS node is serving — minted once into its
+    /// own database at first boot, established before anything is served.
+    /// Stamped on every generic-binding answer so a caller can tell this
+    /// register history from a rebuilt one wearing the same node id.
+    pub own_register_incarnation: Option<[u8; 32]>,
     /// The DSM network this node serves (`node.network_id` in config). Gates
     /// the ERA faucet-ticket register: the canonical faucet identity is
     /// NETWORK-SCOPED (`era_faucet_id(network_id)`), so a node that does not
@@ -117,15 +129,18 @@ impl AppState {
         db_pool: Arc<db::DBPool>,
         replication_manager: Arc<replication::ReplicationManager>,
     ) -> Self {
+        let configured_member_id = node_id_input.clone();
         let node_id =
             StorageNodeId::from_base32_or_derive(&node_id_input, address_or_seed.as_bytes());
         Self {
             node_id,
+            configured_member_id,
             hsts_max_age,
             db_pool,
             replication_manager,
             current_tick: Arc::new(AtomicI64::new(0)),
             storage_set: None,
+            own_register_incarnation: None,
             network_id: None,
         }
     }
@@ -133,6 +148,12 @@ impl AppState {
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
     pub fn with_network_id(mut self, network_id: Vec<u8>) -> Self {
         self.network_id = Some(Arc::new(network_id));
+        self
+    }
+
+    /// Record the register incarnation this node established at startup.
+    pub fn with_register_incarnation(mut self, incarnation: [u8; 32]) -> Self {
+        self.own_register_incarnation = Some(incarnation);
         self
     }
 
@@ -159,6 +180,27 @@ pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> 
             auth::device_auth,
         ))
         .layer(Extension(state))
+}
+
+/// The write half of the generic conditional-binding interface (Rev 15
+/// §15.5): `CompareExchangeMany` behind device auth. The node relates the
+/// caller to nothing — there is no claimant in a generic record — device
+/// auth only says a registered device is writing.
+pub fn generic_binding_write_router(state: Arc<AppState>) -> axum::Router<()> {
+    let auth_state = Arc::new(auth::AuthState {
+        db_pool: state.db_pool.clone(),
+    });
+    api::storage::binding::create_write_router()
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            auth::device_auth,
+        ))
+        .layer(Extension(state))
+}
+
+/// The public read half of the same interface: `ReadBinding`.
+pub fn generic_binding_read_router(state: Arc<AppState>) -> axum::Router<()> {
+    api::storage::binding::create_read_router(state)
 }
 
 /// The public READ half of the same two registers. The binary rate-limits it;

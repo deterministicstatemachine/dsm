@@ -1653,6 +1653,81 @@ message SettlementSlotClaimV2 {
   bytes  signature               = 2 [(dsm_max_len)=65535];
 }
 
+// ── Generic conditional-binding interface (SoFi Rev 15 §15.5, Def 6.20) ──
+//
+// The node-side binding interface is APPLICATION-BLIND. A member holds at most
+// one opaque generic binding record per resource key and applies a
+// replacement to a whole strictly-sorted key set atomically or not at all
+// (Req 15.6). It inspects ONLY the generic storage fields — schema, round
+// ordering, the exact expected digest of the prior record set, and key-set
+// equality (Req 15.7). It never decodes the value at `value_addr` and attaches
+// no settlement, vault, claimant, or economic meaning to any field (§22 #12).
+// Class K — never the node — decides what a record means (§15.6).
+message GenericBindingRecordV1 {
+  uint32 schema        = 1;
+  // round = (counter, proposer_id), ordered lexicographically. `counter` is a
+  // proposer-local persisted monotonic integer — never a timestamp. A
+  // recovering proposer chooses a round strictly greater than every round it
+  // must supersede (Def 6.20).
+  uint64 round_counter = 2;
+  bytes  proposer_id   = 3 [(dsm_fixed_len)=32];
+  bytes  tx_id         = 4 [(dsm_fixed_len)=32];
+  // H(DSM/binding-record-set-keys || sorted keys). The node requires it to
+  // equal the digest of the request's own key set (key-set equality).
+  bytes  keyset_digest = 5 [(dsm_fixed_len)=32];
+  bytes  value_digest  = 6 [(dsm_fixed_len)=32];
+  bytes  value_addr    = 7 [(dsm_fixed_len)=32];
+  // Opaque to the node. Class K assigns meaning (prepared / accepted / …).
+  uint32 status        = 8;
+}
+
+message CompareExchangeManyRequestV1 {
+  // Strictly sorted, distinct, opaque 32-byte resource keys.
+  repeated bytes keys                = 1 [(dsm_fixed_len)=32];
+  // Digest of the EXACT prior generic record set over `keys` (absent cells
+  // included as absent). The empty set has a defined digest so a first writer
+  // can exchange from nothing.
+  bytes  expected_digest             = 2 [(dsm_fixed_len)=32];
+  GenericBindingRecordV1 replacement = 3;
+}
+
+message CompareExchangeManyResponseV1 {
+  enum Outcome {
+    APPLIED                  = 0;
+    EXPECTATION_MISMATCH     = 1;
+    UNAVAILABLE              = 2;
+    INVALID_STORAGE_ENCODING = 3;
+  }
+  Outcome outcome              = 1;
+  // Digest of the record set over `keys` AFTER this call — what a caller
+  // must present as `expected_digest` next time.
+  bytes   resulting_digest     = 2 [(dsm_fixed_len)=32];
+  bytes   member_id            = 3 [(dsm_max_len)=256];
+  // The register incarnation this member is serving. A write acknowledgement
+  // counts toward a quorum only when BOTH member_id and register_incarnation
+  // equal what the caller committed — the same rule the read side applies.
+  bytes   register_incarnation = 4 [(dsm_fixed_len)=32];
+}
+
+message ReadBindingRequestV1 {
+  repeated bytes keys = 1 [(dsm_fixed_len)=32];
+}
+
+// One cell of the answer. `record` is absent when the member holds nothing
+// for `key`; absence is an assertion by the member, never an inference.
+message BindingCellV1 {
+  bytes key                     = 1 [(dsm_fixed_len)=32];
+  GenericBindingRecordV1 record = 2;
+}
+
+message ReadBindingResponseV1 {
+  repeated BindingCellV1 cells = 1;
+  // Digest of the exact current record set over the requested keys.
+  bytes  set_digest            = 2 [(dsm_fixed_len)=32];
+  bytes  member_id             = 3 [(dsm_max_len)=256];
+  bytes  register_incarnation  = 4 [(dsm_fixed_len)=32];
+}
+
 // A trader's claim on one cell of the economic root register: the write-once
 // value at K_root = H("DSM/trader-economic-root-register-key/v1" || 0x00 || G
 // || DevID || u64_be(economic_position)).

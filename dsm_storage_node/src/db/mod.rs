@@ -7,6 +7,10 @@
 //!
 //! Feature flag `local-dev` switches the implementation at compile time.
 
+/// The generic conditional-binding decision, one rule for both backends.
+pub mod binding;
+pub use binding::{CasOutcome, StoredBinding};
+
 #[cfg(not(feature = "local-dev"))]
 mod pg;
 
@@ -23,3 +27,8 @@ pub use sqlite::*;
 /// run against whichever backend is compiled.
 #[cfg(test)]
 pub(crate) mod write_once_properties;
+
+/// The generic conditional-binding properties, run against whichever
+/// backend is compiled.
+#[cfg(test)]
+pub(crate) mod binding_properties;

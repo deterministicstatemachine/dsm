@@ -195,13 +195,13 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p dsm_storage_node --release --lib -- --test-threads=1 \
-            db::write_once_properties db::pg::durable_posture_tests | tee registers.log
+            db::write_once_properties db::binding_properties db::pg::durable_posture_tests | tee registers.log
           passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' registers.log | head -1)
           echo "register/durability tests executed on Postgres: ${passed:-0}"
           # May only grow. If a test is legitimately added, raise this floor in
           # the same commit; if the count DROPS, the board stopped proving
           # something it used to prove.
-          test "${passed:-0}" -ge 13
+          test "${passed:-0}" -ge 18
 
   # --------------------------------------------------------------------------
   # Formal validation: TLA+ model checking + real-code bridge harness
