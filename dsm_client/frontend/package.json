@@ -88,8 +88,8 @@
     "typescript": "^5.4.0",
     "webpack": "^5.107.2",
     "webpack-bundle-analyzer": "^5.3.0",
-    "webpack-cli": "^7.1.0",
-    "webpack-dev-server": "^5.2.5"
+    "webpack-cli": "^7.2.1",
+    "webpack-dev-server": "^6.0.0"
   },
   "overrides": {
     "minimatch": ">=10.0.0",
