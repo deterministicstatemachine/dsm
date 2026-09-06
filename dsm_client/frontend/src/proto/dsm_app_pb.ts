@@ -10091,6 +10091,602 @@ export class SettlementSlotClaimV2 extends Message<SettlementSlotClaimV2> {
 }
 
 /**
+ * ── Generic conditional-binding interface (SoFi Rev 15 §15.5, Def 6.20) ──
+ *
+ * The node-side binding interface is APPLICATION-BLIND. A member holds at most
+ * one opaque generic binding record per resource key and applies a
+ * replacement to a whole strictly-sorted key set atomically or not at all
+ * (Req 15.6). It inspects ONLY the generic storage fields — schema, round
+ * ordering, the exact expected digest of the prior record set, and key-set
+ * equality (Req 15.7). It never decodes the value at `value_addr` and attaches
+ * no settlement, vault, claimant, or economic meaning to any field (§22 #12).
+ * Class K — never the node — decides what a record means (§15.6).
+ *
+ * @generated from message dsm.GenericBindingRecordV1
+ */
+export class GenericBindingRecordV1 extends Message<GenericBindingRecordV1> {
+  /**
+   * @generated from field: uint32 schema = 1;
+   */
+  schema = 0;
+
+  /**
+   * round = (counter, proposer_id), ordered lexicographically. `counter` is a
+   * proposer-local persisted monotonic integer — never a timestamp. A
+   * recovering proposer chooses a round strictly greater than every round it
+   * must supersede (Def 6.20).
+   *
+   * @generated from field: uint64 round_counter = 2;
+   */
+  roundCounter = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes proposer_id = 3;
+   */
+  proposerId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes tx_id = 4;
+   */
+  txId = new Uint8Array(0);
+
+  /**
+   * H(DSM/binding-record-set-keys || sorted keys). The node requires it to
+   * equal the digest of the request's own key set (key-set equality).
+   *
+   * @generated from field: bytes keyset_digest = 5;
+   */
+  keysetDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes value_digest = 6;
+   */
+  valueDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes value_addr = 7;
+   */
+  valueAddr = new Uint8Array(0);
+
+  /**
+   * Opaque to the node. Class K assigns meaning (prepared / accepted / …).
+   *
+   * @generated from field: uint32 status = 8;
+   */
+  status = 0;
+
+  constructor(data?: PartialMessage<GenericBindingRecordV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.GenericBindingRecordV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "schema", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "round_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "proposer_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "tx_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "keyset_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "value_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "value_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "status", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GenericBindingRecordV1 {
+    return new GenericBindingRecordV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GenericBindingRecordV1 {
+    return new GenericBindingRecordV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GenericBindingRecordV1 {
+    return new GenericBindingRecordV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GenericBindingRecordV1 | PlainMessage<GenericBindingRecordV1> | undefined, b: GenericBindingRecordV1 | PlainMessage<GenericBindingRecordV1> | undefined): boolean {
+    return proto3.util.equals(GenericBindingRecordV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.CompareExchangeManyRequestV1
+ */
+export class CompareExchangeManyRequestV1 extends Message<CompareExchangeManyRequestV1> {
+  /**
+   * Strictly sorted, distinct, opaque 32-byte resource keys.
+   *
+   * @generated from field: repeated bytes keys = 1;
+   */
+  keys: Uint8Array[] = [];
+
+  /**
+   * Digest of the EXACT prior generic record set over `keys` (absent cells
+   * included as absent). The empty set has a defined digest so a first writer
+   * can exchange from nothing.
+   *
+   * @generated from field: bytes expected_digest = 2;
+   */
+  expectedDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.GenericBindingRecordV1 replacement = 3;
+   */
+  replacement?: GenericBindingRecordV1;
+
+  constructor(data?: PartialMessage<CompareExchangeManyRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CompareExchangeManyRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "keys", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 2, name: "expected_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "replacement", kind: "message", T: GenericBindingRecordV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CompareExchangeManyRequestV1 {
+    return new CompareExchangeManyRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CompareExchangeManyRequestV1 {
+    return new CompareExchangeManyRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CompareExchangeManyRequestV1 {
+    return new CompareExchangeManyRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CompareExchangeManyRequestV1 | PlainMessage<CompareExchangeManyRequestV1> | undefined, b: CompareExchangeManyRequestV1 | PlainMessage<CompareExchangeManyRequestV1> | undefined): boolean {
+    return proto3.util.equals(CompareExchangeManyRequestV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.CompareExchangeManyResponseV1
+ */
+export class CompareExchangeManyResponseV1 extends Message<CompareExchangeManyResponseV1> {
+  /**
+   * @generated from field: dsm.CompareExchangeManyResponseV1.Outcome outcome = 1;
+   */
+  outcome = CompareExchangeManyResponseV1_Outcome.APPLIED;
+
+  /**
+   * Digest of the record set over `keys` AFTER this call — what a caller
+   * must present as `expected_digest` next time.
+   *
+   * @generated from field: bytes resulting_digest = 2;
+   */
+  resultingDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes member_id = 3;
+   */
+  memberId = new Uint8Array(0);
+
+  /**
+   * The register incarnation this member is serving. A write acknowledgement
+   * counts toward a quorum only when BOTH member_id and register_incarnation
+   * equal what the caller committed — the same rule the read side applies.
+   *
+   * @generated from field: bytes register_incarnation = 4;
+   */
+  registerIncarnation = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CompareExchangeManyResponseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CompareExchangeManyResponseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "outcome", kind: "enum", T: proto3.getEnumType(CompareExchangeManyResponseV1_Outcome) },
+    { no: 2, name: "resulting_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "register_incarnation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CompareExchangeManyResponseV1 {
+    return new CompareExchangeManyResponseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CompareExchangeManyResponseV1 {
+    return new CompareExchangeManyResponseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CompareExchangeManyResponseV1 {
+    return new CompareExchangeManyResponseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CompareExchangeManyResponseV1 | PlainMessage<CompareExchangeManyResponseV1> | undefined, b: CompareExchangeManyResponseV1 | PlainMessage<CompareExchangeManyResponseV1> | undefined): boolean {
+    return proto3.util.equals(CompareExchangeManyResponseV1, a, b);
+  }
+}
+
+/**
+ * @generated from enum dsm.CompareExchangeManyResponseV1.Outcome
+ */
+export enum CompareExchangeManyResponseV1_Outcome {
+  /**
+   * @generated from enum value: APPLIED = 0;
+   */
+  APPLIED = 0,
+
+  /**
+   * @generated from enum value: EXPECTATION_MISMATCH = 1;
+   */
+  EXPECTATION_MISMATCH = 1,
+
+  /**
+   * @generated from enum value: UNAVAILABLE = 2;
+   */
+  UNAVAILABLE = 2,
+
+  /**
+   * @generated from enum value: INVALID_STORAGE_ENCODING = 3;
+   */
+  INVALID_STORAGE_ENCODING = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(CompareExchangeManyResponseV1_Outcome)
+proto3.util.setEnumType(CompareExchangeManyResponseV1_Outcome, "dsm.CompareExchangeManyResponseV1.Outcome", [
+  { no: 0, name: "APPLIED" },
+  { no: 1, name: "EXPECTATION_MISMATCH" },
+  { no: 2, name: "UNAVAILABLE" },
+  { no: 3, name: "INVALID_STORAGE_ENCODING" },
+]);
+
+/**
+ * @generated from message dsm.ReadBindingRequestV1
+ */
+export class ReadBindingRequestV1 extends Message<ReadBindingRequestV1> {
+  /**
+   * @generated from field: repeated bytes keys = 1;
+   */
+  keys: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<ReadBindingRequestV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReadBindingRequestV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "keys", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReadBindingRequestV1 {
+    return new ReadBindingRequestV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReadBindingRequestV1 {
+    return new ReadBindingRequestV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReadBindingRequestV1 {
+    return new ReadBindingRequestV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReadBindingRequestV1 | PlainMessage<ReadBindingRequestV1> | undefined, b: ReadBindingRequestV1 | PlainMessage<ReadBindingRequestV1> | undefined): boolean {
+    return proto3.util.equals(ReadBindingRequestV1, a, b);
+  }
+}
+
+/**
+ * One cell of the answer. `record` is absent when the member holds nothing
+ * for `key`; absence is an assertion by the member, never an inference.
+ *
+ * @generated from message dsm.BindingCellV1
+ */
+export class BindingCellV1 extends Message<BindingCellV1> {
+  /**
+   * @generated from field: bytes key = 1;
+   */
+  key = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.GenericBindingRecordV1 record = 2;
+   */
+  record?: GenericBindingRecordV1;
+
+  constructor(data?: PartialMessage<BindingCellV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BindingCellV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "record", kind: "message", T: GenericBindingRecordV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BindingCellV1 {
+    return new BindingCellV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BindingCellV1 {
+    return new BindingCellV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BindingCellV1 {
+    return new BindingCellV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BindingCellV1 | PlainMessage<BindingCellV1> | undefined, b: BindingCellV1 | PlainMessage<BindingCellV1> | undefined): boolean {
+    return proto3.util.equals(BindingCellV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ReadBindingResponseV1
+ */
+export class ReadBindingResponseV1 extends Message<ReadBindingResponseV1> {
+  /**
+   * @generated from field: repeated dsm.BindingCellV1 cells = 1;
+   */
+  cells: BindingCellV1[] = [];
+
+  /**
+   * Digest of the exact current record set over the requested keys.
+   *
+   * @generated from field: bytes set_digest = 2;
+   */
+  setDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes member_id = 3;
+   */
+  memberId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes register_incarnation = 4;
+   */
+  registerIncarnation = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<ReadBindingResponseV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ReadBindingResponseV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "cells", kind: "message", T: BindingCellV1, repeated: true },
+    { no: 2, name: "set_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "member_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "register_incarnation", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReadBindingResponseV1 {
+    return new ReadBindingResponseV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ReadBindingResponseV1 {
+    return new ReadBindingResponseV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ReadBindingResponseV1 {
+    return new ReadBindingResponseV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ReadBindingResponseV1 | PlainMessage<ReadBindingResponseV1> | undefined, b: ReadBindingResponseV1 | PlainMessage<ReadBindingResponseV1> | undefined): boolean {
+    return proto3.util.equals(ReadBindingResponseV1, a, b);
+  }
+}
+
+/**
+ * ── Def 6.14: the complete immutable SettlementBundle a QuorumBind binds ──
+ *
+ * Canon(B) is the canonical encoding of SettlementBundleV1 (vault_transitions
+ * sorted by vault_id). b = H(DSM/settlement-bundle || Canon(B)); the content
+ * address is immutable_addr(DSM/settlement-bundle, Canon(B)). K(B) is derived
+ * ONLY from these bytes: one resource key k_v = H(DSM/binding-keyset || c_n)
+ * per transition (Def 6.17). Req 6.15: B carries everything needed to verify
+ * the route and recover the DLV decision without a fresh constructor signature.
+ *
+ * @generated from message dsm.VaultTransitionV1
+ */
+export class VaultTransitionV1 extends Message<VaultTransitionV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 parent_generation = 2;
+   */
+  parentGeneration = protoInt64.zero;
+
+  /**
+   * c_n = H(DSM/vault-state, CCB(V_n)); commits vault_id, reserves, pair, policy.
+   *
+   * @generated from field: bytes parent_state_commitment = 3;
+   */
+  parentStateCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes parent_reserves_digest = 4;
+   */
+  parentReservesDigest = new Uint8Array(0);
+
+  /**
+   * The exact committed DLV successor for this vault.
+   *
+   * @generated from field: bytes successor_ccb = 5;
+   */
+  successorCcb = new Uint8Array(0);
+
+  /**
+   * Canonical reserve-delta encoding for this transition.
+   *
+   * @generated from field: bytes reserve_deltas = 6;
+   */
+  reserveDeltas = new Uint8Array(0);
+
+  /**
+   * History-bound witnesses proving the parent binding.
+   *
+   * @generated from field: repeated bytes witnesses = 7;
+   */
+  witnesses: Uint8Array[] = [];
+
+  constructor(data?: PartialMessage<VaultTransitionV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultTransitionV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "parent_generation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "parent_state_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "parent_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "successor_ccb", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "reserve_deltas", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "witnesses", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultTransitionV1 {
+    return new VaultTransitionV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultTransitionV1 {
+    return new VaultTransitionV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultTransitionV1 {
+    return new VaultTransitionV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultTransitionV1 | PlainMessage<VaultTransitionV1> | undefined, b: VaultTransitionV1 | PlainMessage<VaultTransitionV1> | undefined): boolean {
+    return proto3.util.equals(VaultTransitionV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SettlementBundleV1
+ */
+export class SettlementBundleV1 extends Message<SettlementBundleV1> {
+  /**
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * @generated from field: bytes storage_set_id = 2;
+   */
+  storageSetId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 q = 3;
+   */
+  q = 0;
+
+  /**
+   * I
+   *
+   * @generated from field: bytes intent_commitment = 4;
+   */
+  intentCommitment = new Uint8Array(0);
+
+  /**
+   * X
+   *
+   * @generated from field: bytes route_set_commitment = 5;
+   */
+  routeSetCommitment = new Uint8Array(0);
+
+  /**
+   * canonical selected route
+   *
+   * @generated from field: bytes selected_route = 6;
+   */
+  selectedRoute = new Uint8Array(0);
+
+  /**
+   * exact sovereign parent
+   *
+   * @generated from field: bytes trader_parent = 7;
+   */
+  traderParent = new Uint8Array(0);
+
+  /**
+   * exact bilateral successor
+   *
+   * @generated from field: bytes trader_successor = 8;
+   */
+  traderSuccessor = new Uint8Array(0);
+
+  /**
+   * {Tv}, sorted by vault_id
+   *
+   * @generated from field: repeated dsm.VaultTransitionV1 vault_transitions = 9;
+   */
+  vaultTransitions: VaultTransitionV1[] = [];
+
+  /**
+   * {Pv}
+   *
+   * @generated from field: repeated bytes proof_material = 10;
+   */
+  proofMaterial: Uint8Array[] = [];
+
+  /**
+   * @generated from field: repeated bytes bundle_signatures = 11;
+   */
+  bundleSignatures: Uint8Array[] = [];
+
+  /**
+   * @generated from field: bytes recovery_material = 12;
+   */
+  recoveryMaterial = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SettlementBundleV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SettlementBundleV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "storage_set_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "q", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "intent_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "route_set_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "selected_route", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "trader_parent", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "trader_successor", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "vault_transitions", kind: "message", T: VaultTransitionV1, repeated: true },
+    { no: 10, name: "proof_material", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 11, name: "bundle_signatures", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 12, name: "recovery_material", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SettlementBundleV1 {
+    return new SettlementBundleV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SettlementBundleV1 {
+    return new SettlementBundleV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SettlementBundleV1 {
+    return new SettlementBundleV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SettlementBundleV1 | PlainMessage<SettlementBundleV1> | undefined, b: SettlementBundleV1 | PlainMessage<SettlementBundleV1> | undefined): boolean {
+    return proto3.util.equals(SettlementBundleV1, a, b);
+  }
+}
+
+/**
  * A trader's claim on one cell of the economic root register: the write-once
  * value at K_root = H("DSM/trader-economic-root-register-key/v1" || 0x00 || G
  * || DevID || u64_be(economic_position)).
