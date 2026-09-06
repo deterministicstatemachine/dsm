@@ -72,7 +72,7 @@ pub const OUTCOME_HEADER: &str = "x-dsm-slot-outcome";
 /// a value and never as an absence — because a rebuilt register can honestly
 /// report "nothing here" for a cell the incarnation the vault committed once
 /// held, and node identity alone cannot tell the two apart.
-pub const INCARNATION_HEADER: &str = "x-dsm-register-incarnation";
+pub use crate::api::storage::binding::INCARNATION_HEADER;
 pub const HELD_DIGEST_HEADER: &str = "x-dsm-slot-held-digest";
 pub const CLAIM_DIGEST_HEADER: &str = "x-dsm-slot-digest";
 

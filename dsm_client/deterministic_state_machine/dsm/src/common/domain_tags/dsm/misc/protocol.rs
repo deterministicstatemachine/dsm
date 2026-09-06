@@ -126,6 +126,23 @@ pub const TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2: TaggedHashDomain<'static> =
 /// both the layout and its tag go.
 pub const TAG_DSM_STORAGE_SET: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/storage-set");
+/// One generic binding record (SoFi Rev 15 Def 6.20): the digest a member
+/// reports and a Class K driver compares. Over the record's canonical
+/// protobuf bytes — the node hashes what it stores, never a decoded view.
+pub const TAG_DSM_BINDING_RECORD: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/binding-record");
+/// The exact prior record SET over a sorted key set — `expected_digest` in
+/// CompareExchangeMany (§15.5). Absent cells are part of the preimage as
+/// absences, so "nothing held" has a defined digest a first writer can
+/// exchange from.
+pub const TAG_DSM_BINDING_RECORD_SET: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/binding-record-set");
+/// The sorted key set itself — `keyset_digest` inside a record, which the
+/// node requires to equal the digest of the request's own keys (Req 15.7).
+/// Distinct from `DSM/binding-keyset`, which derives ONE resource key from a
+/// vault parent (Def 6.17); this digests a set of such keys.
+pub const TAG_DSM_BINDING_RECORD_SET_KEYS: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/binding-record-set-keys");
 /// Immutable namespace for a published `AnchorPresentationV3` — the owner's
 /// complete verification bundle for one vault state (proto bytes as payload).
 /// The object is pure transport: every claim inside is re-derived by the
