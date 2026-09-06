@@ -52,6 +52,7 @@ pub mod settlement_slot_claim_local; // this device's frozen slot-claim envelope
 mod system_peers;
 pub mod token_registry;
 mod tokens;
+pub mod trader_parent_fence; // Req 6.23 durable initiating-trader parent fence (namespaced)
 mod transactions;
 pub mod types;
 pub mod vault_generation_consumption;
@@ -595,6 +596,25 @@ fn create_schema(conn: &Connection) -> Result<()> {
             pointer_bytes     BLOB NOT NULL,
             storage_set_id    BLOB NOT NULL,
             UNIQUE (vault_id, parent_sequence)
+        );
+
+        -- Req 6.23: the initiating-trader parent fence. Written BEFORE the
+        -- first mutating QuorumBind op; restored before post-restart bilateral
+        -- advancement. One row per (trader parent, attempt); at most one is
+        -- unresolved for a parent at a time.
+        CREATE TABLE IF NOT EXISTS trader_parent_fence(
+            insertion_ordinal              INTEGER PRIMARY KEY AUTOINCREMENT,
+            trader_chain_id                BLOB NOT NULL,
+            trader_parent_state_commitment BLOB NOT NULL,
+            tx_id                          BLOB NOT NULL,
+            ballot                         INTEGER NOT NULL,
+            storage_set_id                 BLOB NOT NULL,
+            value_addr                     BLOB NOT NULL,
+            state                          TEXT NOT NULL CHECK (state IN
+                                             ('fenced','committed_awaiting_acceptance',
+                                              'released','released_no_advance')),
+            permitted_successor            BLOB,
+            UNIQUE (trader_chain_id, trader_parent_state_commitment, tx_id)
         );
 
         CREATE TABLE IF NOT EXISTS settlement_slot_claim_local(

@@ -117,8 +117,93 @@ fn counts_for(
 pub enum RunError {
     /// The recovery-ballot budget was exhausted before a terminal outcome. The
     /// transaction is INDETERMINATE if it mutated; the caller keeps the
-    /// trader-parent fence and may resume recovery later (PR 3).
+    /// trader-parent fence and may resume recovery later.
     Unresolved { mutated: bool },
+    /// The trader-parent fence could not be durably persisted, so the
+    /// transaction never began (Req 6.23 (1)). Nothing mutated.
+    FenceNotPersisted,
+}
+
+/// The identity of the initiating-trader parent fence for a transaction
+/// (Req 6.23): the trader's own chain and parent state, plus which DLV
+/// transaction fenced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FenceKey {
+    pub trader_chain_id: [u8; 32],
+    pub trader_parent_state_commitment: [u8; 32],
+    pub tx_id: [u8; 32],
+}
+
+/// Drive a transaction UNDER its trader-parent fence (Req 6.23).
+///
+/// 1. The fence is placed durably BEFORE the first mutating op — if it cannot
+///    be persisted the transaction does not begin ((1)).
+/// 2. The transaction is driven to a terminal outcome (or a lost one).
+/// 3. The outcome is recorded against the fence: `COMMITTED` fixes the exact
+///    permitted `trader_successor` ((4)); `ABORTED`/`CONFLICT_FINAL` release
+///    without advancing ((3)); an unresolved run keeps the parent fenced as
+///    INDETERMINATE (Req 16.4) with the ballot persisted so restart never
+///    reuses one.
+///
+/// This records the DLV outcome only. Releasing a committed fence requires the
+/// exact successor to be accepted through ordinary DSM bilateral advancement
+/// ((4)); the caller does that with
+/// [`crate::storage::client_db::trader_parent_fence::record_event`] and a
+/// [`dsm::dlv::trader_fence::FenceEvent::SuccessorAccepted`] afterwards.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_fenced<T: BindingTransport + ?Sized>(
+    engine: &mut QuorumBind,
+    members: &[CommittedMember],
+    keys: &[[u8; 32]],
+    transport: &T,
+    backoff: Backoff,
+    max_ballots: u32,
+    fence: FenceKey,
+    trader_successor: [u8; 32],
+    storage_set_id: [u8; 32],
+    value_addr: [u8; 32],
+) -> Result<Outcome, RunError> {
+    use crate::storage::client_db::trader_parent_fence as fdb;
+    use dsm::dlv::trader_fence::{FenceEvent, FenceState};
+
+    // (1) Place the fence before any mutating op. If it can't persist, refuse
+    // to begin.
+    let placed = fdb::TraderFence {
+        trader_chain_id: fence.trader_chain_id,
+        trader_parent_state_commitment: fence.trader_parent_state_commitment,
+        tx_id: fence.tx_id,
+        ballot: engine.ballot(),
+        storage_set_id,
+        value_addr,
+        state: FenceState::Fenced,
+        insertion_ordinal: 0,
+    };
+    if fdb::place_fence(&placed).is_err() {
+        return Err(RunError::FenceNotPersisted);
+    }
+
+    // (2) Drive.
+    let result = run(engine, members, keys, transport, backoff, max_ballots).await;
+
+    // (3) Record the outcome against the fence, persisting the final ballot.
+    let event = match &result {
+        Ok(Outcome::Committed) => FenceEvent::Committed {
+            successor: trader_successor,
+        },
+        // Neither ABORTED nor a storage-INVALID proposal chose a value; both
+        // release the parent without advancing.
+        Ok(Outcome::Aborted) | Ok(Outcome::Invalid) => FenceEvent::Aborted,
+        Ok(Outcome::ConflictFinal { .. }) => FenceEvent::ConflictFinal,
+        Err(_) => FenceEvent::Indeterminate,
+    };
+    let _ = fdb::record_event(
+        &fence.trader_chain_id,
+        &fence.trader_parent_state_commitment,
+        &fence.tx_id,
+        &event,
+        Some(engine.ballot()),
+    );
+    result
 }
 
 /// Drive one transaction to a terminal [`Outcome`], authenticating every answer
@@ -212,7 +297,10 @@ pub async fn run<T: BindingTransport + ?Sized>(
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
-    use dsm::dlv::quorum_bind::{strict_majority, BindingTransaction};
+    use dsm::dlv::quorum_bind::{strict_majority, BindingTransaction, BINDING_STATUS_ACCEPTED};
+    use dsm::dlv::trader_fence::{FenceEvent, FenceVerdict};
+    use crate::storage::client_db::trader_parent_fence as fdb;
+    use serial_test::serial;
     use dsm::storage::binding_record::{record_digest_of_bytes, record_set_digest, Round, SetCell};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -238,6 +326,11 @@ mod tests {
         cells: Mutex<Vec<BTreeMap<[u8; 32], (Vec<u8>, Round)>>>,
         members: Vec<CommittedMember>,
         wrong_incarnation_for: Vec<usize>,
+        /// When set, an ACCEPT still lands in the cells but its response is
+        /// lost, and every later op goes dark — modelling a COMMIT response
+        /// lost after the value was already chosen.
+        hide_accepts: Mutex<bool>,
+        dark: Mutex<bool>,
     }
 
     impl MockTransport {
@@ -246,6 +339,8 @@ mod tests {
                 cells: Mutex::new(vec![BTreeMap::new(); n]),
                 members: members(n as u8),
                 wrong_incarnation_for: Vec::new(),
+                hide_accepts: Mutex::new(false),
+                dark: Mutex::new(false),
             }
         }
         fn echo(&self, ix: usize) -> (Option<Vec<u8>>, Option<[u8; 32]>) {
@@ -261,6 +356,14 @@ mod tests {
     #[async_trait]
     impl BindingTransport for MockTransport {
         async fn read_binding(&self, ix: usize, keys: &[[u8; 32]]) -> TransportRead {
+            let (id, inc) = self.echo(ix);
+            if *self.dark.lock().unwrap() {
+                return TransportRead {
+                    echoed_member_id: id,
+                    echoed_incarnation: inc,
+                    records: None,
+                };
+            }
             let cells = self.cells.lock().unwrap();
             let recs = keys
                 .iter()
@@ -270,7 +373,6 @@ mod tests {
                         .map(|(b, _)| BindingRecord::decode_canonical(b).unwrap())
                 })
                 .collect();
-            let (id, inc) = self.echo(ix);
             TransportRead {
                 echoed_member_id: id,
                 echoed_incarnation: inc,
@@ -285,10 +387,10 @@ mod tests {
             repl: &[u8],
         ) -> TransportCas {
             let repl_rec = BindingRecord::decode_canonical(repl).unwrap();
+            let (id, inc) = self.echo(ix);
             let mut cells = self.cells.lock().unwrap();
             let held: Vec<Option<(Vec<u8>, Round)>> =
                 keys.iter().map(|k| cells[ix].get(k).cloned()).collect();
-            let (id, inc) = self.echo(ix);
             let outcome = if held
                 .iter()
                 .all(|h| h.as_ref().is_some_and(|(b, _)| b == repl))
@@ -316,6 +418,20 @@ mod tests {
                     CasOutcome::Applied
                 }
             };
+            // A landed ACCEPT whose response is hidden: the value is chosen on
+            // the member, but the client never hears it, and everything goes
+            // dark from here.
+            if repl_rec.status == BINDING_STATUS_ACCEPTED
+                && outcome == CasOutcome::Applied
+                && *self.hide_accepts.lock().unwrap()
+            {
+                *self.dark.lock().unwrap() = true;
+                return TransportCas {
+                    echoed_member_id: id,
+                    echoed_incarnation: inc,
+                    outcome: None,
+                };
+            }
             TransportCas {
                 echoed_member_id: id,
                 echoed_incarnation: inc,
@@ -371,5 +487,123 @@ mod tests {
         )
         .await;
         assert_eq!(out, Err(RunError::Unresolved { mutated: false }));
+    }
+
+    fn fence_key() -> FenceKey {
+        FenceKey {
+            trader_chain_id: [0x11; 32],
+            trader_parent_state_commitment: [0x22; 32],
+            tx_id: [9; 32],
+        }
+    }
+
+    fn init_db() {
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn run_fenced_commits_and_the_fence_permits_only_that_successor() {
+        init_db();
+        let t = MockTransport::new(3);
+        let mut engine = QuorumBind::begin(tx(3)).unwrap();
+        let succ = [0xAA; 32];
+        let out = run_fenced(
+            &mut engine,
+            &members(3),
+            &[key(1)],
+            &t,
+            Backoff::default(),
+            10,
+            fence_key(),
+            succ,
+            [0x6B; 32],
+            [10; 32],
+        )
+        .await;
+        assert_eq!(out, Ok(Outcome::Committed));
+        // The committed fence permits ONLY the exact successor, until it is
+        // accepted through ordinary DSM bilateral advancement.
+        assert_eq!(
+            fdb::active_verdict(&[0x11; 32], &[0x22; 32]).unwrap(),
+            FenceVerdict::PermitsOnly(succ)
+        );
+        fdb::record_event(
+            &[0x11; 32],
+            &[0x22; 32],
+            &[9; 32],
+            &FenceEvent::SuccessorAccepted { successor: succ },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fdb::active_verdict(&[0x11; 32], &[0x22; 32]).unwrap(),
+            FenceVerdict::Clear
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn bind_indeterminate_a_lost_commit_stays_fenced_and_recovery_discovers_the_value() {
+        init_db();
+        // Run 1: the accepts land on a quorum, but their responses are lost and
+        // the transport goes dark. The runner cannot confirm, so it reports the
+        // transaction unresolved and the fence stays FENCED (Req 16.4).
+        let t = MockTransport::new(3);
+        *t.hide_accepts.lock().unwrap() = true;
+        let mut engine = QuorumBind::begin(tx(3)).unwrap();
+        let succ = [0xAA; 32];
+        let out = run_fenced(
+            &mut engine,
+            &members(3),
+            &[key(1)],
+            &t,
+            Backoff::default(),
+            3,
+            fence_key(),
+            succ,
+            [0x6B; 32],
+            [10; 32],
+        )
+        .await;
+        assert_eq!(out, Err(RunError::Unresolved { mutated: true }));
+        assert_eq!(
+            fdb::active_verdict(&[0x11; 32], &[0x22; 32]).unwrap(),
+            FenceVerdict::BlocksAllSuccessors,
+            "a lost commit keeps the parent fenced; a fresh intent cannot pass"
+        );
+        // The value IS chosen on the members even though the client never heard.
+        let unresolved = fdb::list_unresolved_fences().unwrap();
+        assert_eq!(unresolved.len(), 1);
+
+        // Restart recovery: a fresh Class K instance for the SAME transaction,
+        // resuming above the persisted ballot, discovers the chosen value and
+        // reaches COMMITTED — completion, not a second value.
+        *t.dark.lock().unwrap() = false;
+        *t.hide_accepts.lock().unwrap() = false;
+        let mut resumed = QuorumBind::begin(BindingTransaction {
+            base_ballot: unresolved[0].ballot,
+            ..tx(3)
+        })
+        .unwrap();
+        let out2 = run_fenced(
+            &mut resumed,
+            &members(3),
+            &[key(1)],
+            &t,
+            Backoff::default(),
+            10,
+            fence_key(),
+            succ,
+            [0x6B; 32],
+            [10; 32],
+        )
+        .await;
+        assert_eq!(out2, Ok(Outcome::Committed));
+        assert_eq!(
+            fdb::active_verdict(&[0x11; 32], &[0x22; 32]).unwrap(),
+            FenceVerdict::PermitsOnly(succ)
+        );
     }
 }
