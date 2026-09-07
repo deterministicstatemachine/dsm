@@ -400,34 +400,28 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         })
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> dsm::economic::cell_observation::CellObservation {
-        use dsm::economic::cell_observation::CellObservation;
-        let v = *vault_id;
-        // A set this verifier cannot resolve is an inability to observe, not
-        // an observation. Same for a transport failure below.
+    ) -> dsm::dlv::binding_observation::BindingObservation {
+        use dsm::dlv::binding_observation::BindingObservation;
+        let k = *resource_key;
+        // A set this verifier cannot resolve is an INABILITY TO OBSERVE, not an
+        // observation. Same for a transport failure below. Neither is ever
+        // allowed to become "this parent is free".
         let Ok(set) = resolve_committed_set(storage_set) else {
-            return CellObservation::Unavailable {
+            return BindingObservation::Unavailable {
                 attributed: 0,
                 required: quorum,
             };
         };
         tokio::task::block_in_place(|| {
-            self.runtime.block_on(observe_settlement_slot_cell(
-                &set,
-                &v,
-                parent_sequence,
-                quorum,
-            ))
-        })
-        .unwrap_or(CellObservation::Unavailable {
-            attributed: 0,
-            required: quorum,
+            self.runtime
+                .block_on(crate::sdk::binding_occupancy::observe_key_at_set(
+                    &set, &k, quorum,
+                ))
         })
     }
 
@@ -610,19 +604,22 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         )
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> dsm::economic::cell_observation::CellObservation {
-        // A register read, not an immutable object — nothing to record; the
-        // q-durable closure covers content-addressed evidence only.
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_observation(
+    ) -> dsm::dlv::binding_observation::BindingObservation {
+        // A register read, not an immutable object — nothing to record here;
+        // the q-durable closure covers content-addressed evidence only.
+        //
+        // The BUNDLE the record names is a different matter: the verifier
+        // fetches it through `immutable`, so it DOES enter the recorded
+        // closure. That is an improvement over the old slot claim, whose bytes
+        // travelled inline in the register read and were never recorded.
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::parent_binding_observation(
             self.inner,
-            vault_id,
-            parent_sequence,
+            resource_key,
             storage_set,
             quorum,
         )
@@ -723,17 +720,15 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         })
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &dsm::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> dsm::economic::cell_observation::CellObservation {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::settlement_slot_observation(
+    ) -> dsm::dlv::binding_observation::BindingObservation {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::parent_binding_observation(
             self,
-            vault_id,
-            parent_sequence,
+            resource_key,
             storage_set,
             quorum,
         )

@@ -2938,11 +2938,37 @@ impl AppRouterImpl {
                             errors.push(format!("artifact republish sweep failed: {e}"));
                         }
                     }
-                    // A vault close that was interrupted between its claim and
-                    // its canonical commit: re-establish the storage-set
-                    // invariant, re-run the claim with the SAME frozen bytes,
-                    // and finish (or abandon). Never infers closure — the
-                    // canonical state decides.
+                    // RESTART RECOVERY FOR UNRESOLVED BINDINGS (Req 16.5).
+                    // THE one mechanism that re-drives a QuorumBind transaction:
+                    // every unresolved trader-parent fence is reconstructed from
+                    // its persisted record, resumed ABOVE its persisted ballot,
+                    // and driven to a terminal outcome. It runs HERE — after the
+                    // client DB, device identity, storage-set catalog and
+                    // transport are all up, and BEFORE the close-intent pass
+                    // below, which finalizes whatever this resolved.
+                    //
+                    // A fence that cannot be resolved because the fleet is
+                    // unreachable STAYS INTACT and is retried on a later sync.
+                    // It is never turned into "the parent is free".
+                    match crate::sdk::settlement_resume::recover_all().await {
+                        Ok(unresolved) => {
+                            if unresolved > 0 {
+                                log::info!(
+                                    "[storage.sync] {unresolved} binding(s) still unresolved; \
+                                     they stay fenced and retry on a later sync"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("[storage.sync] binding recovery sweep errored: {e}");
+                            errors.push(format!("binding recovery failed: {e}"));
+                        }
+                    }
+                    // A vault close that was interrupted between its binding and
+                    // its canonical commit. It no longer re-drives the binding —
+                    // recovery above owns that — and only finalizes the local
+                    // terminal state. Never infers closure: the canonical state
+                    // decides.
                     match self.resume_close_intents().await {
                         Ok(n) => pushed += n,
                         Err(e) => {

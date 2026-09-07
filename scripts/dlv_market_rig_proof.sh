@@ -154,25 +154,100 @@ echo; echo "== storage fleet: witness chain =="
 check "receipted pointers cover generations 1..N exactly" "$RGENS" "$(python3 -c "print(\",\".join(map(str,range(1,$N+1))))")"
 [ "$UNRCT" -ge 1 ] && ok "refused attempt left an UNRECEIPTED pointer only ($UNRCT), no receipt, no value" || bad "expected at least one unreceipted (refused) pointer, got $UNRCT"
 
-echo; echo "== settlement-slot register: one claim with quorum per consumed parent =="
-QUORUM=2   # 2 of the 3-node canonical set
-for p in $(seq 0 $((N-1))); do
-  DIGESTS=""
-  for ip in $NODES; do
-    d="$(curl -sk --max-time 10 -o /dev/null -D - "https://$ip:8080/api/v2/settlement-slot/$VID_B32/$p" \
-         | awk 'BEGIN{IGNORECASE=1} /^x-dsm-slot-digest:/{print $2}' | tr -d "\r")"
-    [ -n "$d" ] && DIGESTS="$DIGESTS$d\n"
-  done
-  # How many nodes hold the most-common digest, and does any OTHER digest also reach quorum?
-  TALLY="$(printf "%b" "$DIGESTS" | grep -c . || true)"
-  TOP="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')"
-  SECOND="$(printf "%b" "$DIGESTS" | sort | uniq -c | sort -rn | sed -n 2p | awk '{print $1}')"
-  TOP="${TOP:-0}"; SECOND="${SECOND:-0}"
-  [ "$TOP" -ge "$QUORUM" ] && ok "parent $p: one claim holds quorum ($TOP/$TALLY nodes)" \
-                           || bad "parent $p: no claim reached quorum ($TOP/$TALLY)"
-  [ "$SECOND" -lt "$QUORUM" ] && ok "parent $p: no conflicting claim reached quorum (runner-up $SECOND)" \
-                              || bad "parent $p: TWO claims reached quorum — exclusivity broken"
-done
+# The vault's pair, in full — the probe composes the vault the way a stranger
+# does, so it needs the same (token_a, token_b, fee) tuple a quote carries. The
+# prefixes used elsewhere in this script identify the legs; these are the whole
+# policy commits, read from the LP's own head rather than hardcoded.
+read -r LEG_A_PC LEG_B_PC <<<"$(python3 - "$OUT/lp.db" <<'EOF'
+import sqlite3,sys; sys.path.insert(0,'scripts'); from dsm_head_decode import decode
+b=decode(sqlite3.connect(sys.argv[1]).execute("SELECT head_bytes FROM bcr_device_heads").fetchone()[0])['balances']
+print([k for k in b if k.startswith('DX7JKWDQ')][0], [k for k in b if k.startswith('NW9MKEFN')][0])
+EOF
+)"
+# The AMM fee this rig's vault was created with.
+FEE_BPS=30
+
+echo; echo "== binding register: one binding-final bundle per consumed parent =="
+# THE PROBE RUNS THE PRODUCTION OBSERVER, and this script asserts its output.
+#
+# This block used to read /api/v2/settlement-slot/{vault}/{seq} and tally
+# digests across nodes against a hardcoded QUORUM=2. That endpoint is no longer
+# the authoritative occupancy mechanism, and re-implementing its replacement
+# here would be worse than porting it: "chosen at a key" would exist twice, in
+# two languages, and the copy with no BindingRecord type — the one with the
+# hardcoded quorum — would decide whether a live proof passes.
+#
+# So `dlv_binding_probe` composes the vault the way any third party does, asks
+# the same client-side observation the composer and the verifier ask, and emits
+# key=value lines. Everything below is an assertion on those lines. If Class K's
+# notion of chosen changes, this gate changes with it, because it IS that code.
+PROBE="$HERE/../dsm_client/deterministic_state_machine/target/release/dlv_binding_probe"
+if [ ! -x "$PROBE" ]; then
+  bad "dlv_binding_probe is not built — cargo build -p dsm_sdk --release --bin dlv_binding_probe"
+else
+  PROBE_OUT="$OUT/binding_probe.txt"
+  if ! "$PROBE" "$VID_B32" "$LEG_A_PC" "$LEG_B_PC" "$FEE_BPS" > "$PROBE_OUT" 2> "$OUT/binding_probe.err"; then
+    bad "the binding probe could not ask: $(cat "$OUT/binding_probe.err")"
+  else
+    # One record per generation. A CONSUMED parent must be BOUND_FINAL by a
+    # bundle that names it; the FRONTIER must not be bound by anyone.
+    python3 - "$PROBE_OUT" "$N" <<'PYEOF'
+import sys
+rows, cur = [], None
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if line.startswith("== generation="):
+        cur = {"generation": int(line.split("generation=")[1].split()[0]),
+               "role": line.split("role=")[1].strip()}
+        rows.append(cur)
+    elif "=" in line and cur is not None:
+        k, v = line.split("=", 1)
+        cur[k] = v
+fails = []
+consumed = [r for r in rows if r["role"] == "consumed"]
+frontier = [r for r in rows if r["role"] == "frontier"]
+for r in consumed:
+    g = r["generation"]
+    if r.get("verdict") != "BOUND_FINAL":
+        fails.append(f"parent {g}: verdict={r.get('verdict')} (expected BOUND_FINAL)")
+        continue
+    # A chosen value is q members holding ONE bundle's accepted record at ONE
+    # round. The probe reports the holder count the observer counted; a second
+    # chosen value would have surfaced as verdict=CONFLICT, which is why there
+    # is no separate "no rival reached quorum" tally to run here.
+    if int(r.get("holders", 0)) < 1:
+        fails.append(f"parent {g}: no holders reported")
+    for field in ("tx_id", "value_digest", "value_addr", "resource_key"):
+        if not r.get(field):
+            fails.append(f"parent {g}: probe omitted {field}")
+    # THE APPLICATION-BLIND REGISTER: a member never inspects the value it
+    # holds, so a record can name a bundle that does not name this parent.
+    if r.get("bundle_parent_matches") != "true":
+        fails.append(f"parent {g}: the bound bundle does not name this parent "
+                     f"({r.get('detail','no detail')})")
+if len(consumed) != int(sys.argv[2]):
+    fails.append(f"expected {sys.argv[2]} consumed parents, probe reported {len(consumed)}")
+if len(frontier) != 1:
+    fails.append(f"expected exactly one frontier row, got {len(frontier)}")
+elif frontier[0].get("verdict") not in ("FREE",):
+    fails.append(f"frontier generation {frontier[0]['generation']}: verdict="
+                 f"{frontier[0].get('verdict')} (expected FREE)")
+for f in fails:
+    print("FAIL " + f)
+if not fails:
+    for r in consumed:
+        print(f"OK parent {r['generation']}: one binding-final bundle "
+              f"({r['holders']} holders), and it names this parent")
+    print(f"OK frontier generation {frontier[0]['generation']} is free")
+sys.exit(1 if fails else 0)
+PYEOF
+    if [ $? -eq 0 ]; then
+      ok "every consumed parent is bound by one bundle that names it; the frontier is free"
+    else
+      bad "the binding register does not agree with the composed history"
+    fi
+  fi
+fi
 
 if [ "$CLOSED" = 1 ]; then
   echo; echo "== closed vault: terminal state and its published proof set =="

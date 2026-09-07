@@ -26,7 +26,9 @@
 //! key does not restate the vault id — supplying both would admit a disagreeing
 //! pair. No I/O, no clock.
 
-use crate::common::domain_tags::{TAG_DSM_BINDING_KEYSET, TAG_DSM_SETTLEMENT_BUNDLE};
+use crate::common::domain_tags::{
+    TAG_DSM_BINDING_KEYSET, TAG_DSM_DLV_CLOSE_COMMIT, TAG_DSM_SETTLEMENT_BUNDLE,
+};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::storage_object::{immutable_addr, immutable_inner};
 use crate::types::proto as generated;
@@ -52,6 +54,9 @@ pub enum BundleError {
     DuplicateResourceKey,
     /// The bytes decode but do not re-encode to themselves.
     Noncanonical,
+    /// A close transition rides beside another transition. A bundle is either a
+    /// market bundle or a single owner-close; see [`shape`].
+    MixedShape { transitions: usize },
 }
 
 impl core::fmt::Display for BundleError {
@@ -69,6 +74,10 @@ impl core::fmt::Display for BundleError {
                 write!(f, "two vaults share a committed parent state (c_n)")
             }
             BundleError::Noncanonical => write!(f, "settlement bundle bytes are not canonical"),
+            BundleError::MixedShape { transitions } => write!(
+                f,
+                "a close transition rides in a {transitions}-transition bundle; a close is alone"
+            ),
         }
     }
 }
@@ -104,7 +113,78 @@ pub fn validate(b: &generated::SettlementBundleV1) -> Result<(), BundleError> {
             return Err(BundleError::TransitionsNotSorted { at: i });
         }
     }
+    shape_of(b)?;
     Ok(())
+}
+
+/// The two shapes a bundle may take. Determined entirely by CONTENT — a
+/// declared `kind` field would be a second statement of what `successor_ccb`
+/// already fixes, and two statements can disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleShape {
+    /// One or more market transitions and no close.
+    Market,
+    /// Exactly one transition, and it is an owner close.
+    OwnerClose,
+}
+
+/// Is this transition an owner close? `x_close` is a public derivation anyone
+/// can recompute, so this is a DISCRIMINATOR and never an authorization — what
+/// makes a close real is the owner signature over its exact successor
+/// ([`crate::dlv::close_authorization`]).
+pub fn is_close_transition(t: &generated::VaultTransitionV1) -> bool {
+    let (Ok(vault), Ok(successor)) = (
+        need32("vault_id", &t.vault_id),
+        need32("successor_ccb", &t.successor_ccb),
+    ) else {
+        return false;
+    };
+    successor == close_slot_commitment(&vault, t.parent_generation)
+}
+
+/// Fields are already width- and order-checked by the caller.
+fn shape_of(b: &generated::SettlementBundleV1) -> Result<BundleShape, BundleError> {
+    let closes = b
+        .vault_transitions
+        .iter()
+        .filter(|t| is_close_transition(t))
+        .count();
+    if closes == 0 {
+        return Ok(BundleShape::Market);
+    }
+    // A CLOSE IS ALONE. `bundle_signatures[0]` authorizes ONE close successor,
+    // and in a mixed bundle there is no deterministic signature-to-transition
+    // mapping — so a genuine close signature for V1 would ride beside a market
+    // leg on V2 that nothing authorized. Rather than invent a mapping, the
+    // canonical layer removes the class: a mixed bundle cannot be encoded,
+    // stored, fetched, or bound.
+    if closes == b.vault_transitions.len() && closes == 1 {
+        return Ok(BundleShape::OwnerClose);
+    }
+    Err(BundleError::MixedShape {
+        transitions: b.vault_transitions.len(),
+    })
+}
+
+/// The bundle's shape, after full validation.
+pub fn shape(b: &generated::SettlementBundleV1) -> Result<BundleShape, BundleError> {
+    validate(b)?;
+    shape_of(b)
+}
+
+/// The deterministic `x` a CLOSE commits its parent generation to:
+/// `H_dom(DSM/dlv-close-commit, vault_id ‖ u64_be(parent_sequence))`.
+///
+/// Recomputable by anyone, and that is fine: it tells a composer WHICH KIND of
+/// consumer owns a generation, nothing about who authorized it. A stranger can
+/// compute this value and bind a bundle carrying it; the result must be a
+/// refusal to fold, never a vault that appears closed. See
+/// [`crate::dlv::close_authorization`] for the proof that does the work.
+pub fn close_slot_commitment(vault_id: &[u8; 32], parent_sequence: u64) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_DLV_CLOSE_COMMIT);
+    h.update(vault_id);
+    h.update(&parent_sequence.to_be_bytes());
+    *h.finalize().as_bytes()
 }
 
 /// `Canon(B)` — the canonical bytes. The bundle must be well-formed and must
@@ -201,6 +281,69 @@ mod tests {
             bundle_signatures: vec![b"sig".to_vec()],
             recovery_material: b"recovery".to_vec(),
         }
+    }
+
+    /// A transition whose successor IS the public close derivation.
+    fn close_transition(vault: u8, c_n: u8, gen: u64) -> generated::VaultTransitionV1 {
+        let mut t = transition(vault, c_n);
+        t.parent_generation = gen;
+        t.successor_ccb = close_slot_commitment(&[vault; 32], gen).to_vec();
+        t
+    }
+
+    #[test]
+    fn a_bundle_with_no_close_transition_is_a_market_bundle() {
+        let b = bundle(vec![transition(1, 0x11), transition(2, 0x22)]);
+        assert_eq!(shape(&b), Ok(BundleShape::Market));
+    }
+
+    #[test]
+    fn a_lone_close_transition_is_an_owner_close_bundle() {
+        let b = bundle(vec![close_transition(1, 0x11, 3)]);
+        assert_eq!(shape(&b), Ok(BundleShape::OwnerClose));
+    }
+
+    /// THE BAN. A genuine owner close of V1 must not be able to carry a market
+    /// leg on V2: `bundle_signatures[0]` authorizes one successor, and in a
+    /// mixed bundle there is no deterministic mapping from that signature to a
+    /// transition — so V2 would fold on a signature that never named it.
+    /// Refused at the CANONICAL layer, so such a bundle cannot even be encoded.
+    #[test]
+    fn a_close_riding_beside_a_market_leg_is_refused_by_the_canonical_layer() {
+        let mixed = bundle(vec![close_transition(1, 0x11, 3), transition(2, 0x22)]);
+        assert_eq!(
+            shape(&mixed),
+            Err(BundleError::MixedShape { transitions: 2 })
+        );
+        assert_eq!(
+            canon(&mixed),
+            Err(BundleError::MixedShape { transitions: 2 })
+        );
+        // And therefore it has no identity and no key set either.
+        assert!(key_set(&mixed).is_err());
+    }
+
+    /// Two closes together are refused for the same reason as a close beside a
+    /// market leg: one signature, two successors.
+    #[test]
+    fn two_closes_in_one_bundle_are_refused() {
+        let two = bundle(vec![
+            close_transition(1, 0x11, 3),
+            close_transition(2, 0x22, 3),
+        ]);
+        assert_eq!(canon(&two), Err(BundleError::MixedShape { transitions: 2 }));
+    }
+
+    /// The discriminator binds the generation as well as the vault, so a close
+    /// value computed for another generation does not read as a close here.
+    #[test]
+    fn the_close_discriminator_is_bound_to_vault_and_generation() {
+        let mut t = transition(1, 0x11);
+        t.parent_generation = 3;
+        t.successor_ccb = close_slot_commitment(&[1; 32], 4).to_vec();
+        assert!(!is_close_transition(&t));
+        t.successor_ccb = close_slot_commitment(&[2; 32], 3).to_vec();
+        assert!(!is_close_transition(&t));
     }
 
     #[test]

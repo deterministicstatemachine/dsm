@@ -190,18 +190,27 @@ pub trait ProvenanceResolver {
     /// claims were written to. The caller must have required that quorum to be
     /// canonical before calling.
     ///
-    /// Returns the OBSERVATION, not an `Option`. The four answers mean
+    /// Returns the OBSERVATION, not an `Option`. The five answers mean
     /// different things and carry different verdicts — a divergence is a
-    /// quarantine, an outage is retryable, and neither is evidence that a
-    /// credit was forged — so there is deliberately no adapter here that
-    /// could turn `Conflict` into "no winner".
-    fn settlement_slot_observation(
+    /// quarantine, an outage and an undecided binding are retryable, and none
+    /// of them is evidence that a credit was forged — so there is deliberately
+    /// no adapter here that could turn `Conflict` into "no winner".
+    ///
+    /// `resource_key` is the ONLY coordinate, and the caller derives it:
+    /// `k_v = H(DSM/binding-keyset ‖ c_n)`, where `c_n` already commits the
+    /// vault id and the generation. Passing those separately would admit a
+    /// triple that disagrees with itself, and would let a resolver answer
+    /// about a different key than the verifier asked about.
+    ///
+    /// This returns the RECORD's value identity, never the bundle bytes. The
+    /// verifier fetches those itself through `immutable_evidence` and re-hashes
+    /// them, so the resolver supplies bytes and never verdicts.
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> crate::economic::cell_observation::CellObservation;
+    ) -> crate::dlv::binding_observation::BindingObservation;
 
     /// The network's root-register set as the local catalog resolves it.
     ///
@@ -1230,73 +1239,144 @@ pub fn verify_credit_source(
                     ))
                 }
             }
-            // ── 8. The quorum slot winner: exclusivity's liveness anchor ──
+            // ── 8. THE BINDING: exclusivity's liveness anchor ────────────
             // EVERY ANSWER MEANS SOMETHING DIFFERENT, and the verdicts differ.
             // The taxonomy this file states — an outage retries, a forgery does
-            // not — is only true if it is preserved here: a divergence in a
-            // write-once cell is a QUARANTINE, an unreadable cell is
-            // RETRYABLE, and neither is evidence that this credit was forged.
-            // Collapsing them into "no winner" reports a network fault as a
-            // forgery and a forgery as a network fault.
-            let envelope_bytes = match resolver.settlement_slot_observation(
-                &vault,
-                *parent_sequence,
-                &vn.storage_set,
-                vn.quorum,
-            ) {
-                crate::economic::cell_observation::CellObservation::Claimed(bytes) => bytes,
-                crate::economic::cell_observation::CellObservation::Conflict { distinct } => {
+            // not — is only true if it is preserved here: a divergence is a
+            // QUARANTINE, an unreadable or undecided key is RETRYABLE, and
+            // neither is evidence that this credit was forged. Collapsing them
+            // into "no winner" reports a network fault as a forgery and a
+            // forgery as a network fault.
+            //
+            // The key is derived HERE, from the parent state this settle names,
+            // so the resolver cannot answer about a different key than the one
+            // under validation.
+            let k_v = crate::dlv::settlement_bundle::resource_key(parent_binding);
+            let chosen = match resolver.parent_binding_observation(&k_v, &vn.storage_set, vn.quorum)
+            {
+                crate::dlv::binding_observation::BindingObservation::BoundFinal(c) => c,
+                crate::dlv::binding_observation::BindingObservation::Conflict { distinct } => {
                     return Err(ProvenanceError::OwnerLineage(
                         PeerLineageFailure::Quarantined(format!(
-                            "the settlement-slot cell for this parent holds {distinct} \
-                             contradictory claims"
+                            "the binding key for this parent holds {distinct} chosen values"
                         )),
                     ))
                 }
-                crate::economic::cell_observation::CellObservation::Unavailable {
+                crate::dlv::binding_observation::BindingObservation::Unavailable {
                     attributed,
                     required,
                 } => {
                     return Err(ProvenanceError::OwnerLineage(
                         PeerLineageFailure::Incomplete(format!(
                             "only {attributed} of the vault's members answered the \
-                             settlement-slot cell ({required} required)"
+                             binding key ({required} required)"
                         )),
                     ))
                 }
-                // A quorum of members each said there is no claim here. That
-                // IS evidence, and it says this settle never won exclusivity
-                // over the parent it names.
-                crate::economic::cell_observation::CellObservation::EmptyAtQuorum => {
-                    return Err(invalid(
-                        "no settlement-slot claim was established for this parent".into(),
+                // THE ARM THAT IS EASY TO GET BACKWARDS. A promise in flight, or
+                // an accepted record held by fewer members than THIS reader's
+                // quorum, is not a forgery: two quorums intersect, but one READ
+                // need not see the intersection, so a value already chosen
+                // behind a down member lands here. Mapping it to Invalid would
+                // make every concurrent settle permanently invalid.
+                crate::dlv::binding_observation::BindingObservation::Undetermined {
+                    attributed,
+                    ..
+                } => {
+                    return Err(ProvenanceError::OwnerLineage(
+                        PeerLineageFailure::Incomplete(format!(
+                            "the binding for this parent is not yet decided \
+                             ({attributed} members answered)"
+                        )),
                     ))
                 }
+                // A quorum of members each explicitly hold NOTHING at this key.
+                // That IS evidence, and it says this settle never won
+                // exclusivity over the parent it names.
+                crate::dlv::binding_observation::BindingObservation::Free => {
+                    return Err(invalid("no binding was established for this parent".into()))
+                }
             };
-            let claim = crate::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(
-                &envelope_bytes,
-            )
-            .map_err(|e| invalid(format!("slot winner: {e}")))?;
-            let vault_set_id = crate::ccb::storage_set_id(&vn.storage_set)
-                .map_err(|e| invalid(format!("V_n storage set: {e}")))?;
-            if claim.body.vault_id != vault
-                || claim.body.parent_sequence != *parent_sequence
-                || claim.body.x != d.x
-                || claim.body.parent_binding_c_n != *parent_binding
-                || claim.body.storage_set_id != vault_set_id
+            // The record's two identity fields must agree with each other
+            // before either is used to fetch anything.
+            if crate::storage_object::immutable_addr_from_inner(
+                crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+                &chosen.value_digest,
+            ) != chosen.value_addr
             {
                 return Err(invalid(
-                    "the slot winner does not bind this settle's coordinates and parent state"
-                        .into(),
+                    "the bound record's digest and address disagree".into(),
                 ));
             }
-            // Claimant == RouteCommit author == the identity under
-            // validation: exclusivity was won by the same trader whose
-            // signed quote and signed settle this is.
-            if claim.body.claimant_public_key != hop.initiator_public_key
-                || claim.body.claimant_public_key.as_slice() != ctx.proven_ak
+            // The bundle, by the record's own value identity — BYTES, re-hashed
+            // here. The resolver never gets to assert what the bundle says.
+            //
+            // Evidence locality: the resolver fetches through its own configured
+            // fleet, while the bundle was written to the VAULT's committed set.
+            // In the beta deployment those are the same members. If they can
+            // diverge, this fetch is looking at the wrong fleet — which is why a
+            // miss is Incomplete (retryable), never Invalid.
+            let bundle_bytes = resolver
+                .immutable_evidence(
+                    crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+                    &chosen.value_digest,
+                )
+                .map_err(ProvenanceError::OwnerLineage)?;
+            let bundle = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
+                .map_err(|e| invalid(format!("bound bundle: {e}")))?;
+            let bundle_canon = crate::dlv::settlement_bundle::canon(&bundle)
+                .map_err(|e| invalid(format!("bound bundle: {e}")))?;
+            if crate::dlv::settlement_bundle::bundle_digest(&bundle_canon) != chosen.value_digest
+                || crate::dlv::settlement_bundle::bundle_addr(&bundle_canon) != chosen.value_addr
             {
-                return Err(invalid("the slot winner is not the settling trader".into()));
+                return Err(invalid(
+                    "the bound bundle does not hash to the record's identity".into(),
+                ));
+            }
+            // Bound under THIS vault's set, at THIS vault's q. `V_n` is
+            // authoritative, so the bundle's restatement must AGREE with it and
+            // is never consumed in its place.
+            let vault_set_id = crate::ccb::storage_set_id(&vn.storage_set)
+                .map_err(|e| invalid(format!("V_n storage set: {e}")))?;
+            if bundle.storage_set_id != vault_set_id || bundle.q != vn.quorum {
+                return Err(invalid(
+                    "the bound bundle was bound under a different storage set or quorum".into(),
+                ));
+            }
+            // AND IT NAMES THIS SETTLE'S PARENT. The register is
+            // application-blind (§22 #12) and never inspects the value it
+            // holds, so a proposer can bind a bundle at k(c_n) whose
+            // transitions name some other parent. Nothing above catches that.
+            let transition = bundle
+                .vault_transitions
+                .iter()
+                .find(|t| t.vault_id == vault)
+                .ok_or_else(|| invalid("the bound bundle consumes no leg of this vault".into()))?;
+            if transition.parent_state_commitment != *parent_binding
+                || transition.parent_generation != *parent_sequence
+            {
+                return Err(invalid(
+                    "the bound bundle does not name this settle's parent state".into(),
+                ));
+            }
+            // THE TRADE IDENTITY. Replaces the old claim's `x` equality.
+            if bundle.route_set_commitment != d.x {
+                return Err(invalid(
+                    "the bound bundle commits a different route set than this settle".into(),
+                ));
+            }
+            // AUTHORSHIP, without a claimant field to read. A SettlementBundle
+            // has none, and it does not need one: the bundle commits X, section
+            // 7 recomputed X from the RouteCommit's own bytes, that RouteCommit
+            // carries the initiator's signature, and section 1 established the
+            // settler IS `ctx.proven_ak`. So WHO pushed the bytes into the
+            // register is irrelevant — a third party binding this bundle binds
+            // THIS trade, to this trader. That content chain is strictly
+            // stronger than a self-asserted claimant field.
+            if hop.initiator_public_key.as_slice() != ctx.proven_ak {
+                return Err(invalid(
+                    "the bound route was not signed by the settling trader".into(),
+                ));
             }
             FundedCredit {
                 source_id: dlv_reserve_consumption_source_id(&vault, *parent_sequence, &d.x),

@@ -17,7 +17,7 @@ ambiguity.** Substrate classes are marked as such in §3 and are excluded from �
 accounting; they neither gate nor are gated by finding 7.
 
 This document supplies the framework, the namespace and a complete gap inventory. It does not
-make Rev 15's commitments independently derivable, because two of its twenty-one live
+make Rev 15's commitments independently derivable, because two of its twenty-two live
 object classes still have no contents in the specification — see §4, §6 and the §6a audit.
 Finding 7 closes when those are resolved by the normative amendments listed in §7, not when
 this document merges.
@@ -269,8 +269,8 @@ storage address, a resource key or an authority check appears here.
 
 | Class | Object | Schema | Commitment it feeds | Status |
 |---|---|---|---|---|
-| `0x0001` | `VaultStateV2` (`V_n`) | **3** | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined; schemas 1 and 2 **burned** |
-| `0x0002` | `StorageSet` (`S`) | **2** | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined; schema 1 **burned** |
+| `0x0001` | `VaultStateV2` (`V_n`) | **4** | `c_n = H(DSM/vault-state ‖ CCB)` | §5.1 defined; schemas 1, 2 and 3 **burned** |
+| `0x0002` | `StorageSet` (`S`) | **3** | `storage_set_id = H(DSM/storage-set ‖ CCB)` | §5.2 defined; schemas 1 and 2 **burned** |
 | `0x0004` | `EncumbranceClaim` (`e_j`) | **2** | `e_j = H(DSM/enc-claim ‖ …)` | §5.3 defined; schema 1 **burned** |
 | `0x0005` | `EncumbranceSet` (`{e_j}`) | **2** | nested in `0x0001`; `EC_v` **deleted** | §5.3 defined; schema 1 **burned** |
 | `0x0006` | `FulfillmentMechanism` (`M`) | 1 | `M = H(DSM/fulfillment ‖ c_0 ‖ CCB(B_M))`, signed as `CCB(M)` | **partial — §6** |
@@ -281,10 +281,10 @@ storage address, a resource key or an authority check appears here.
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
 | `0x000C` | `RouteSet` (`R`) | **2** | nested in `0x0017` | §5.14 defined; schema 1 **burned** |
 | `0x000D` | `Route` (`r_i`) | **2** | set element of `0x000C` | §5.13 defined; schema 1 **burned** |
-| `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.6 partial |
-| `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.6 partial |
-| `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000E` | **blocked, see §6** |
-| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | §5.7 partial |
+| `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | **§5.19 A-stage frozen; market encoding blocked on 2c-B** |
+| `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
+| `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
+| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-B/2c-C/2c-D** |
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
@@ -294,6 +294,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0018` | **substrate** `GenesisParamsV3` | 1 | `G = H(DSM/genesis/v3 ‖ CCB)` | §5.15 defined |
 | `0x0019` | **substrate** `RootProgressionDelegation` (`D_i`) | 1 | `del_i = H(DSM/devtree-delegation ‖ CCB)`, and the GRK-signed bytes | §5.16 defined |
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
+| `0x0033` | `MarketTerms` | 1 | nested in `0x000E` | **§5.20 A-stage frozen; encoding blocked on 2c-B field 6** |
 
 `0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
 and §6a finding 3 established there is no such object. Re-using that number for
@@ -301,13 +302,16 @@ and §6a finding 3 established there is no such object. Re-using that number for
 identity does not become vacant just because it never received a field table. `0x0003` is
 **burned**: it was briefly assigned to a `StorageMemberId`
 object class before members were settled as bare `bytes` under §2.2 — a set of primitives needs no
-element class (§2.4), so there is nothing for the number to name. Per §2.8 a retired class number is
-never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
+element class (§2.4), so there was nothing for the number to name. Schema 3 makes the element a
+`(member_id, register_incarnation_id)` tuple, which §2.4 does not cover — but §5.2 declares that
+tuple's `enc(entry)` inline, so it still needs no class of its own. Per §2.8 a retired class number
+is never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
-**Burned schema versions.** `0x0002`, `0x0004`, `0x0005`, `0x000C`, `0x000D`, `0x0015`, `0x0016`
-and `0x0017` have schema 1 burned by the state/route identity cut. `0x0001` has schemas **1 and 2**
-burned. They are recorded so their numbers are never re-assigned; no production path decodes or
-emits them.
+**Burned schema versions.** `0x0004`, `0x0005`, `0x000C`, `0x000D`, `0x0015`, `0x0016` and
+`0x0017` have schema 1 burned by the state/route identity cut. `0x0002` has schemas **1 and 2**
+burned, and `0x0001` has schemas **1, 2 and 3** — the second bump on each is the
+register-incarnation cut (§5.1, §5.2). They are recorded so their numbers are never re-assigned; no
+production path decodes or emits them.
 
 **Schema bumps are transitive, because nesting is by complete CCB.** §2.7 emits a nested object as
 its full CCB *including its own class and schema version*, so changing a nested object's schema
@@ -318,14 +322,20 @@ judgement call:
 ```
 0x0002 StorageSet   1→2 ─┐
 0x0005 EncumbranceSet 1→2─┴─► 0x0001 VaultStateV2  2→3   (fields 14 and 10)
+0x0002 StorageSet   2→3 ────► 0x0001 VaultStateV2  3→4   (field 14, register incarnations)
 0x0015 Allocation   1→2 ─┐
 0x0016 AllocBundle  1→2 ─┴─► 0x000D Route          1→2   (leg elements)
                              └─► 0x000C RouteSet    1→2   (set elements)
                                   └─► 0x0017 Q      already 2, unmerged — defined against RouteSet 2
 ```
 
-`0x0001` reaching schema 3 is the notable one: schema 2 shipped on `main` and is burned without ever
-having been the live form for a full release. That is the rule working, not the rule failing — an
+The `2→3 ► 3→4` row is the rule demonstrated in production rather than in prospect: making a
+storage set commit register incarnations changed `0x0002`'s bytes, which changed every `V_n`
+nesting it. It is also why amendment 2c-A's `0x000F` field 2 nests `0x0001` **schema 4** — freezing
+a new class against a burned nested schema would ship a non-conformant nesting on day one.
+
+`0x0001` reaching schema 4 is the notable one: schema 3 is burned without ever having been the live
+form for a full release, as schema 2 was before it. That is the rule working, not the rule failing — an
 object whose nested members changed is a different object, and pretending otherwise is exactly the
 silent-divergence §2.8 exists to prevent.
 
@@ -364,36 +374,39 @@ authority, which the area 8 semantics forbid.
 **This registry does not complete every field table, and says so rather than inventing the
 missing ones.**
 
-Of the **twenty-one live** object classes above — `0x0014` is burned and not counted:
+Of the **twenty-two live** object classes above — `0x0014` is burned and not counted, and
+`0x0033` `MarketTerms` was added by amendment 2c-A:
 
-- **15 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
-  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x0013`, `0x0015`, `0x0016`,
-  `0x0017`.
-- **4 are partial** — `0x0006`, `0x000E`, `0x000F`, `0x0011` — where the specification fixes
-  the field order or names the members but leaves types or a nested class open.
-- **2 are blocked** — `0x0010` `DlvProofMaterial` and `0x0012` `TradeDigest`, both genuinely
-  unspecified in Rev 15 and both belonging to amendment 2c.
+- **17 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x000F`, `0x0010`, `0x0013`,
+  `0x0015`, `0x0016`, `0x0017`.
+- **2 are A-stage frozen** — `0x000E` and `0x0033`. Every field number, type, ordering and
+  presence rule is permanent and the `b` derivation is final, but a market bundle cannot be
+  encoded until 2c-B supplies `MarketTerms` field 6's nested class. The owner-close shape is
+  fully constructible today.
+- **1 is partial** — `0x0006`, where the specification fixes the preimage but `0x0008` is
+  still open.
+- **2 are blocked** — `0x0011` `TraderAcceptance` and `0x0012` `TradeDigest`, both belonging to
+  the remaining 2c sub-amendments.
 
 The blocked ones are blocked because the specification names them without ever enumerating
-their contents: `P_M` is "the bounded market-fulfillment policy" and nothing more. Writing a
-field table for those would settle protocol in this document exactly as writing an encoder
-first would settle it in Rust. §6 states precisely what each one needs.
+their contents. Writing a field table for those would settle protocol in this document exactly as
+writing an encoder first would settle it in Rust. §6 states precisely what each one needs.
 
-The framework in §2 and the namespace in §3 are complete and are **not** blocked on §6. They
-can be reviewed, merged, and implemented against for the ten specified objects immediately.
+The framework in §2 and the namespace in §3 are complete and are **not** blocked on §6.
 
 **Substrate classes are outside this count.** `0x0018`–`0x001A` are DSM substrate, fully specified
-in §5.15–§5.17, and they do not enter the twenty-one live Rev 15 classes above. Finding 7 closes on
+in §5.15–§5.17, and they do not enter the twenty-two live Rev 15 classes above. Finding 7 closes on
 the Rev 15 amendments in §7 alone; nothing about the substrate classes advances or delays it. The
 direction of independence runs both ways — the substrate objects are derivable now, whether or not
-`0x0010` and `0x0012` ever are.
+`0x0011` and `0x0012` ever are.
 
 ## 5. Field tables
 
 *(Sections 5.1–5.8 follow the framework above. Objects marked blocked in §3 carry only their
 class assignment until §6 is resolved.)*
 
-### 5.1 `VaultStateV2` — class `0x0001`, schema 3
+### 5.1 `VaultStateV2` — class `0x0001`, schema 4
 
 The fifteen members of the Def 4.1 tuple, numbered in the order that definition states them.
 `c_n = H(DSM/vault-state ‖ CCB(V_n))`, and `h_n` — field 12 — is `c_{n-1}` for `n > 0` and the
@@ -414,7 +427,7 @@ domain-separated genesis value at `n = 0`.
 | 11 | `iteration_budget` (`β`) | optional `u64` | §2.3 presence marker; absent is the common case |
 | 12 | `parent_state_commitment` (`h_n`) | `digest32` | `c_{n-1}`, or the genesis value at `n = 0` |
 | 13 | `owner_authority_transition_digest` (`r_o`) | `digest32` | `t_j = H_dom(DSM/devtree-transition, CCB(T_j))` — the `0x001A` transition under which the owner asserts the device authority signing for this vault |
-| 14 | `storage_set` (`S`) | nested `0x0002` schema 2 | inline by value; an ordinary CCB object (§5.2) |
+| 14 | `storage_set` (`S`) | nested `0x0002` schema 3 | inline by value; an ordinary CCB object (§5.2) |
 | 15 | `quorum` (`q`) | `u32` | the fixed threshold; validity is `q` conformant for `|S|` per the beta profile |
 
 Reserve ordering follows the token pair in `P_M`: field 5 is the leg whose policy commitment is
@@ -436,22 +449,59 @@ authority position cannot disagree: they are one commitment. Semantics, publicat
 verification staging are in
 [`docs/plans/2026-08-23-sofi-authority-position-commitment.md`](../plans/2026-08-23-sofi-authority-position-commitment.md).
 
-**Schemas 1 and 2 are burned.** Schema 1 carried the undefined `owner_root`. Schema 2 defined field
-13 but nested `0x0002` schema 1 and `0x0005` schema 1, so its bytes differ from schema 3's even
-though its field *list* is identical — §2.7 nests by complete CCB, including the nested schema
-version. Schema 3 is the only decodable form.
+**Schemas 1, 2 and 3 are burned.** Schema 1 carried the undefined `owner_root`. Schema 2 defined
+field 13 but nested `0x0002` schema 1 and `0x0005` schema 1, so its bytes differ from schema 3's
+even though its field *list* is identical — §2.7 nests by complete CCB, including the nested schema
+version. **Schema 3 is burned for the same reason one bump later:** it nested `0x0002` schema 2, a
+storage set of bare member ids, and the register-incarnation cut makes field 14 a set of
+`(member_id, register_incarnation_id)` pairs. The field list did not move; the enclosing bytes did.
+Schema 4 is the only decodable form.
 
-### 5.2 `StorageSet` — class `0x0002`, schema 2
+This is the §2.8 propagation rule demonstrated in production rather than hypothetically, and it is
+why amendment 2c-A's `0x000F` field 2 nests `0x0001` **schema 4**: freezing a new class against a
+burned nested schema would ship a non-conformant nesting on day one.
+
+### 5.2 `StorageSet` — class `0x0002`, schema 3
 
 `storage_set_id = H_dom(DSM/storage-set, CCB(S))`, an ordinary CCB object with no exceptions.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `members` | set of `bytes` | §2.4 ordering over `enc(e)`; each member is a UTF-8 identity string |
+| 1 | `entries` | set of `(member_id: bytes, register_incarnation_id: digest32)` | ordered by `member_id` **alone**, never by the pair — see below |
 
-An empty id, a duplicate id and an empty set are each invalid.
+**The element encoding is declared here, because §2.4 does not cover it.** §2.4 defines `enc(e)`
+for an object class (complete CCB) and for a primitive (§2.2), and a tuple is neither. For this
+field:
 
-**Schema 1 is burned — this was the registry's largest explicit legacy encoding.** It froze the
+```text
+enc(entry) = u32_be(len(member_id)) ‖ member_id ‖ register_incarnation_id
+```
+
+— the two primitive encodings concatenated, with no element envelope, because the pair has no
+object class of its own. The whole field is therefore
+
+```text
+u32_be(count) ‖ enc(entry_1) ‖ … ‖ enc(entry_count)
+```
+
+An empty set, an empty `member_id`, a duplicate `member_id` and an all-zero
+`register_incarnation_id` are each invalid.
+
+**Ordering is by `member_id` alone, and this is a deliberate departure from §2.4's default.**
+Sorting on the whole entry would let one member appear twice under two incarnations and still
+produce a strictly ascending list — exactly the ambiguity schema 3 exists to remove. A duplicate
+`member_id` is therefore refused *regardless of incarnation*.
+
+An all-zero incarnation is refused because that is the value a member holds before it has
+established one; committing it would bind a vault to "whatever this node had not yet decided".
+
+**Schemas 1 and 2 are burned.** Schema 2 is burned by the register-incarnation cut: a set of bare
+member ids says only *which nodes* a vault trusts, and a member that rebuilt its register still
+satisfied it. Schema 3 commits which register histories the set trusts, so field 1 is a set of
+`(member_id, register_incarnation_id)` pairs rather than bare identity strings. That bump forced
+`0x0001` from schema 3 to schema 4 (§5.1).
+
+**Schema 1 is burned too — it was the registry's largest explicit legacy encoding.** It froze the
 shipping `sdk/storage_set.rs` layout: no §2.1 envelope, bare length-prefixed elements instead of
 `enc(e)`, and a preimage beginning with the domain tag rather than
 `u16_be(class) ‖ u16_be(version)`. It said of itself that it "must not be 'cleaned up'".
@@ -464,8 +514,8 @@ after its reason has gone would be legacy preserved by habit — while this docu
 anywhere.
 
 Class `0x0003` remains burned: it was briefly assigned to a `StorageMemberId` object before members
-were settled as bare strings, and schema 2 does not revive it — members are `bytes` under §2.2, and
-a set of primitives needs no element class (§2.4).
+were settled as bare strings, and schema 3 does not revive it — the element is now a tuple whose
+`enc(entry)` this section declares inline, so it needs no class of its own.
 
 ### 5.3 `EncumbranceClaim` — class `0x0004`, schema 2
 
@@ -862,6 +912,147 @@ differ per vault and `V_n` has no other field forcing it to.
 `j = 0`,** because both denote the same thing: the position before `T_0`. `act(D_0)` means
 "effective from the start of the chain", which is exactly `T_0`'s predecessor.
 
+---
+
+*Sections 5.19–5.22 are frozen by
+[amendment 2c-A](amendment-2c-a-bundle-and-transition.md), which carries the reasoning, the
+seven owner rulings and the full verification obligations. This registry supplies their bytes.*
+
+### 5.19 `SettlementBundle` — class `0x000E`, schema 1
+
+`b = H_dom(DSM/settlement-bundle, CCB(SettlementBundle))`, and `tx_id = value_digest = b`.
+
+> **A-stage: the derivation is final; complete market instantiation is not.** A market bundle
+> carries mandatory `MarketTerms.recovery_material` (§5.20 field 6), whose nested class is fixed by
+> **2c-B**. No conforming market producer may emit `B` or compute a final market `b` until then.
+> The **owner-close** shape carries no `MarketTerms` and is fully constructible today.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `market_terms` | optional nested `0x0033` schema 1 | §2.3 presence marker always emitted; present **iff** Market. This is the bundle-shape discriminator |
+| 2 | `transitions` (`{T_v}`) | set of `0x000F` schema 1 | §2.4 over complete element CCB; duplicates invalid; **beta cardinality exactly 1** |
+
+**Shape rule.**
+
+```text
+Market:      market_terms PRESENT, |{T_v}| == 1 (beta), every T_v.close_authorization ABSENT
+OwnerClose:  market_terms ABSENT, |{T_v}| == 1, that T_v.close_authorization PRESENT
+otherwise:   INVALID
+```
+
+The discriminator is field 1, so a decoder knows the shape immediately after the first field and
+never has to inspect a later transition to decide whether an earlier optional field was legal.
+
+**No `storage_set_id`, no `q`, no `vault_id`.** Binding authority comes from the authenticated
+consumed parent: resolve `T_v.parent_binding = c_n` to `V_n`, then `S = V_n.storage_set` and
+`q = V_n.quorum` (fields 14 and 15). Bundle validity separately requires
+`V_{n+1}.storage_set == V_n.storage_set` and `V_{n+1}.quorum == V_n.quorum`. The proposed successor
+is never authoritative for its own quorum. `vault_id` lives inside the nested `V_n`/`V_{n+1}`, where
+it is authoritative, and is not restated beside a commitment that already commits it.
+
+**Vault uniqueness** holds without a carried identifier: `k_v = H_dom(DSM/binding-keyset,
+T_v.parent_binding)`, `K(B)` admits no duplicate `k_v` (Def 6.17), and §18.5 says a
+bound-but-unrealized market settlement does not advance the parent — so two transitions on one DLV
+would claim the same `c_n` and collide.
+
+**A first ship, not a burn.** `0x000E` never had a defined CCB schema; the shipping implementation
+hashes protobuf bytes, which §2.10 says is never a CCB blob. No current identifier is a conformant
+`b`.
+
+### 5.20 `MarketTerms` — class `0x0033`, schema 1
+
+Everything a market settlement has and an owner close does not. Nested by value in `0x000E` field 1
+and never separately content-addressed, so it adds **no entry to §15.8's canonical immutable-object
+inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `TradeIntent`.
+
+> **A-stage: field numbers, ordering, meanings and mandatoriness are frozen. Encoding closure is
+> NOT claimed**, because field 6 is a mandatory nested object whose class and schema are 2c-B's.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `intent` | nested `0x000B` schema 1 | the complete `TradeIntent`; `I = H_dom(DSM/intent, CCB(field 1))` is **derived, never carried** |
+| 2 | `route_set_commitment` (`X`) | `digest32` | `H_dom(DSM/route-set, CCB(Q))` |
+| 3 | `selected_route` (`r`) | nested `0x000D` schema 2 | the complete executed route, inline by value |
+| 4 | `trader_parent` | `digest32` | exact ordinary-DSM bilateral parent-state commitment |
+| 5 | `trader_successor` | `digest32` | exact prepared `C_dsm+` |
+| 6 | `recovery_material` | **mandatory** nested; class and schema fixed by **2c-B** | non-secret canonical material reconstructing exactly `trader_parent → trader_successor` |
+
+**Field 6 is mandatory, not optional-with-a-rule.** A market settle is not reconstructible from
+`C_dsm+` alone — the route-commit preimage, signature material and entropy are not
+composer-derivable — so a market bundle that became binding-final without it would be
+unrecoverable after a crash. Placing the optionality at the subobject boundary makes a market
+bundle without recovery material **unencodable** rather than merely invalid. An owner close has no
+`MarketTerms` and therefore no such slot.
+
+**`I` is the object, not a digest**, because a `digest32` has no `token_in`, `amount_in`, `min_out`
+or `max_fee`, and the route-satisfaction predicate must be discharged from the bundle. `I` and `X`
+are never aliases: they commit different objects under different domains.
+
+**`0x0033` comes from a namespace audit.** `0x0001`–`0x0030` is contiguously allocated or reserved
+with no usable vacancy (`0x0003` and `0x0014` burned; `0x002A`–`0x002F` structurally reserved);
+`0x0031` and `0x0032` are claimed by amendment 2c for 2c-B and 2c-D. The registry §3 table is
+**behind the shipped code** for the economic classes in `0x001B`–`0x0030`; recording those is
+2c-C's mandate.
+
+### 5.21 `ConsumedDlvTransition` — class `0x000F`, schema 1
+
+Def 6.14's prose governs: the parent side is the exact `c_n` and nothing else — no vault
+identifier, parent generation, `h_n` or parent reserves digest, because each is a field of `V_n`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `parent_binding` (`c_n`) | `digest32` | the exact consumed DLV state commitment |
+| 2 | `successor` (`V_{n+1}`) | nested `0x0001` schema 4 | the **complete proposed successor state**; `c_{n+1} = H_dom(DSM/vault-state, CCB(field 2))` is derived |
+| 3 | `proof_material` (`P_v`) | optional nested `0x0010` schema 1 | §2.3; absent throughout the beta profile |
+| 4 | `close_authorization` | optional `bytes` | present **iff** owner close; a signature over the canonical DSM close-operation preimage (2c-B) |
+
+Never carry both field 2 and a separate `c_{n+1}` digest.
+
+**The parent/successor asymmetry is deliberate.** The parent is referenced because it already
+exists as realized authoritative state, is independently authenticated, and is the input to `k_v`.
+The successor is *completely specified before binding but is not yet authoritative realized state*
+— `B` commits a proposed exact successor, and realization decides whether it becomes economic
+state. A digest-only successor would send a verifier to fetch a preimage that no authoritative
+source publishes before realization.
+
+**Reserve deltas are not carried.** `V_n` and `V_{n+1}` each commit their own reserves, so the
+movement is their difference; the route's `Allocation.delta_in`/`delta_out` already states the
+quantities once.
+
+**Structural checks 2c-A owns**, computable from the bundle plus the authenticated parent:
+
+```text
+V_{n+1}.parent_state_commitment == T_v.parent_binding     (no fetch — field 12 of 0x0001)
+V_{n+1}.generation              == V_n.generation + 1
+V_{n+1}.storage_set             == V_n.storage_set
+V_{n+1}.quorum                  == V_n.quorum
+OwnerClose: V_{n+1}.reserve_a == 0 and V_{n+1}.reserve_b == 0
+```
+
+The full `ValidDlvSuccessor(V_n, V_{n+1}, operation)` relation — every preserved field, every
+permitted mutation — is **2c-C's**. Constant-product re-simulation proves reserve arithmetic and
+nothing else; field 13 `owner_authority_transition_digest`, for instance, is invariant across a
+market successor and no arithmetic check would notice it moving.
+
+**Field 4 is the per-transition authorization marker, not the bundle-shape discriminator** (that is
+`0x000E` field 1). Validity requires the two to agree. §2.9 is not violated: field 4 signs a
+*foreign* object, so the ordering is total — sign the operation, encode `T_v`, encode `B`, compute
+`b`. Only the signature is carried; the operation is reconstructed from `V_n` and `V_{n+1}`.
+
+### 5.22 `DlvProofMaterial` — class `0x0010`, schema 1
+
+**Zero fields.** For beta's only declared pricing family — `CONSTANT_PRODUCT_EXACT_INPUT`,
+`family_version = 1` — a verifier holding the authenticated `V_n`, the complete `V_{n+1}`, the
+selected route and its `Allocation` already has every fact. No irreducible witness material
+remains, and none is manufactured to populate the type.
+
+The bare envelope is 4 bytes and is defined, but beta always encodes `0x000F` field 3 as absent, so
+it never appears on the wire.
+
+**A future proof form does not come free.** A nested object's complete CCB includes its schema
+version, so `0x0010` schema 2 forces a `0x000F` bump, which forces a `0x000E` bump. Field 3 buys a
+permanently assigned slot and semantic role, not immunity from enclosing-schema propagation.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -870,22 +1061,36 @@ writing an encoder.**
 
 | Class | Object | What the specification says | What is missing |
 |---|---|---|---|
-| `0x0010` | `DlvProofMaterial` `P_v` | "proof material required to verify and later compose that DLV continuation" | the entire contents; likely a witness family rather than a flat record |
 | `0x0012` | `TradeDigest` | commits the pair, executed amounts, the parent identity `c_n` of every participating DLV, fees, and `X` | the component types and the ordering of the multi-valued ones. Participating vault identifiers are **not** components: each `c_n` commits its own `vault_id` |
 
-Two of these have partial tables in §5 rather than none:
+`0x0010` `DlvProofMaterial` left this table at amendment 2c-A: for beta's only declared pricing
+family nothing irreducible remains, so §5.22 defines it with **zero fields** rather than inventing
+a witness record. `0x000F` `ConsumedDlvTransition` left it too, fully defined at §5.21.
+
+One class has a partial table in §5, two are frozen only to A-stage, and one more is blocked:
 
 - `0x0006` `FulfillmentMechanism` is fixed as a preimage —
   `M = H(DSM/fulfillment ‖ c_0 ‖ CCB(B_M))` — so its field order is known and only `0x0008`
   blocks it. Two operands were removed for the same reason, one amendment apart: `Canon(P_M)` by
   the Def 5.2 amendment, and `vault_id` by the state-identity cut. Both are members of `V_0`, and
   `c_0` commits the complete canonical `V_0`, so each was an alias rather than a binding.
-- `0x000E` `SettlementBundle` and `0x000F` `ConsumedDlvTransition` have their members named by
-  Def 6.14 and the prose that follows it, and block on the types of those members plus
-  `0x0010`.
+- `0x000E` `SettlementBundle` (§5.19) and `0x0033` `MarketTerms` (§5.20) are **A-stage frozen** by
+  amendment 2c-A: every field number, type, ordering and presence rule is permanent, and the
+  identity derivation `b = H_dom(DSM/settlement-bundle, CCB)` is final. They remain
+  **encoding-blocked for exactly one reason**:
+
+  ```text
+  0x000E and 0x0033
+      remain encoding-blocked only because
+      MarketTerms field 6 requires 2c-B's canonical recovery class
+  ```
+
+  Because field 6 is mandatory, a conforming market producer cannot emit `B` or compute a final
+  market `b` until 2c-B lands. The **owner-close** shape carries no `MarketTerms` and is fully
+  constructible today. Nothing else about either object is open.
 - `0x0011` `TraderAcceptance` blocks on the encoding of `(C_T^+, σ_T^+)`, which is ordinary DSM
   successor material rather than a SoFi object, and therefore needs a decision about whether
-  the DSM core encoding is referenced or restated.
+  the DSM core encoding is referenced or restated. Owned by **2c-B/2c-C/2c-D**.
 
 ## 6a. Amendment 2b — opening object audit
 
@@ -1080,11 +1285,28 @@ In order, and not combined:
    An accidental transport field must not become canonical merely because it exists in
    protobuf.
 
-   **2c. Settlement and evidence profile.** `DlvProofMaterial` `0x0010`, finishing
-   `ConsumedDlvTransition` `0x000F`, `SettlementBundle` `0x000E`, `TraderAcceptance` `0x0011`.
-   Needs the route and bundle identity from 2b. `TraderAcceptance` derives from Rev 15, not
-   from the current receipt object — the bespoke `post_root` receipt is the thing being
-   replaced.
+   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A is written.**
+   `DlvProofMaterial` `0x0010`, finishing `ConsumedDlvTransition` `0x000F`, `SettlementBundle`
+   `0x000E`, the new `MarketTerms` `0x0033`, and `TraderAcceptance` `0x0011`. Needs the route and
+   bundle identity from 2b.
+   `TraderAcceptance` derives from Rev 15, not from the current receipt object — the bespoke
+   `post_root` receipt is the thing being replaced.
+
+   Review established that 2c cannot be one amendment; the decomposition and its dependency
+   argument are in
+   [`amendment-2c-settlement-and-evidence-profile.md`](amendment-2c-settlement-and-evidence-profile.md).
+
+   - **2c-A — WRITTEN.** [`amendment-2c-a-bundle-and-transition.md`](amendment-2c-a-bundle-and-transition.md).
+     `0x000F` and `0x0010` fully defined (§5.21, §5.22); `0x000E` and the new `MarketTerms`
+     `0x0033` **A-stage frozen** (§5.19, §5.20); `b`'s derivation fixed; `0x000B` given its
+     satisfaction predicate. **The owner-close shape is fully constructible; a conforming market
+     `b` is not, until 2c-B.**
+   - **2c-B.** The substrate accepted-successor / recovery preimage class — the sole remaining
+     blocker on complete market `Canon(B)`.
+   - **2c-C.** Economic substrate closure: the namespace record (this §3 table is behind the
+     shipped code for `0x001B`–`0x0030`), plus the transitive verification closure, including
+     `ValidDlvSuccessor(V_n, V_{n+1}, operation)`.
+   - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
    `(C_T^+, σ_T^+)`. The repository's `CanonicalEncode` trait is described as the single
@@ -1142,5 +1364,6 @@ CCB(V_n))` is computable and therefore so is `h_n = c_{n-1}`. What remains befor
 be *implemented* is step 3 of this list, not another normative amendment: an encoder that emits
 `CCB(VaultStateV2)` and is checked against an independent one.
 
-The five still-blocked classes — `0x000C`, `0x000D`, `0x0010`, `0x0012`, `0x0014` — belong to
-the routing and settlement amendments and do not gate Anchor V2.
+The two still-blocked classes — `0x0011` and `0x0012` — belong to the remaining settlement
+sub-amendments and do not gate Anchor V2. (`0x000C`, `0x000D` and `0x0010` are now defined, and
+`0x0014` is burned.)
