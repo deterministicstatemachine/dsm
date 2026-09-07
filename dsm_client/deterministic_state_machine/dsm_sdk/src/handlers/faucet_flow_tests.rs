@@ -115,6 +115,13 @@ pub(crate) fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     client_db::reset_database_for_tests();
     client_db::init_database().expect("init db");
     crate::sdk::storage_io::fake_registers::reset();
+    // The binding register is a THIRD process-global store, alongside the object
+    // fleet and the economic-root registers. It must be reset here for the same
+    // reason they are: a previous test's records — or worse, a stale
+    // (member_id, incarnation) echo — make a later vault's binding key answer
+    // for the wrong fleet, and `ensure_registered` will not correct an entry
+    // that already exists.
+    crate::sdk::binding_fleet_double::reset_all();
     let (public_key, devid, genesis) = install_testnet_identity(seed);
     let core =
         CoreSDK::new_with_device(DeviceInfo::new(devid, public_key.clone())).expect("core sdk");

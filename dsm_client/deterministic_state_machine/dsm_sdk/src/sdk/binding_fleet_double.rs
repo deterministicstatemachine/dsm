@@ -116,38 +116,88 @@ fn endpoint_of(member_id: &str) -> Option<String> {
         .map(|(ep, _)| ep.clone())
 }
 
+/// Resolve a committed member id to its endpoint, or PANIC.
+///
+/// Every id-keyed control below goes through this, and it is deliberately loud.
+/// An injection that names a member the fleet does not know is not a no-op —
+/// it is a test that passes for the wrong reason, because the failure it was
+/// supposed to inject never happened. The old fake fleet's controls were
+/// silent, and this double registers members lazily on first use, so a control
+/// called before the first binding op would quietly do nothing.
+fn require_endpoint(member_id: &str, control: &str) -> String {
+    endpoint_of(member_id).unwrap_or_else(|| {
+        panic!(
+            "binding_fleet_double::{control}: no member {member_id:?} is registered. \
+             Register the set (reset_with / ensure_registered) before injecting, or the \
+             injection silently does nothing and the test proves nothing."
+        )
+    })
+}
+
 /// Take a member offline BY COMMITTED MEMBER ID.
 ///
 /// Tests name members the way the vault's committed set does (`dsm-node-1`),
 /// not by endpoint. Resolving through the echo table keeps every migrated call
 /// site a literal substitution for its `fake_fleet` original, and keeps the
-/// endpoint mapping out of the tests — a hardcoded endpoint that matches no
-/// member is an injection that silently does nothing.
+/// endpoint mapping out of the tests.
 pub fn fail_member_id(member_id: &str) {
-    if let Some(ep) = endpoint_of(member_id) {
-        fail_member(&ep);
-    }
+    fail_member(&require_endpoint(member_id, "fail_member_id"));
 }
 
 /// Bring a member back online by committed member id.
 pub fn heal_member_id(member_id: &str) {
-    if let Some(ep) = endpoint_of(member_id) {
-        heal_member(&ep);
-    }
+    heal_member(&require_endpoint(member_id, "heal_member_id"));
 }
 
 /// Serve reads but refuse every CAS, by committed member id.
 pub fn refuse_writes_id(member_id: &str) {
-    if let Some(ep) = endpoint_of(member_id) {
-        state().refuse_writes.insert(ep);
-    }
+    let ep = require_endpoint(member_id, "refuse_writes_id");
+    state().refuse_writes.insert(ep);
 }
 
 /// Accept CAS again, by committed member id.
 pub fn accept_writes_id(member_id: &str) {
-    if let Some(ep) = endpoint_of(member_id) {
-        state().refuse_writes.remove(&ep);
-    }
+    let ep = require_endpoint(member_id, "accept_writes_id");
+    state().refuse_writes.remove(&ep);
+}
+
+/// The endpoint a committed member id maps to — for the one control that must
+/// name an endpoint rather than a member: making a member answer under ANOTHER
+/// member's identity.
+pub fn endpoint_for_member(member_id: &str) -> Option<String> {
+    endpoint_of(member_id)
+}
+
+/// Register a storage set's members so id-keyed controls resolve BEFORE the
+/// first binding op. The transport registers lazily, which is fine for a bind
+/// but too late for an injection.
+pub fn register_set(set: &crate::sdk::storage_set::StorageSet) {
+    let tuples: Vec<(String, Vec<u8>, [u8; 32])> = set
+        .members()
+        .iter()
+        .map(|m| {
+            (
+                m.endpoint.clone(),
+                m.member_id.as_bytes().to_vec(),
+                m.register_incarnation_id,
+            )
+        })
+        .collect();
+    ensure_registered(&tuples);
+}
+
+/// Undo a [`set_echo`] impersonation: make `endpoint` echo `member_id` and
+/// `incarnation` again.
+///
+/// It takes the endpoint explicitly BECAUSE the impersonation it undoes has
+/// already broken the id -> endpoint lookup: after `set_echo`, the echo table
+/// no longer maps that endpoint to its true member, so resolving by member id
+/// here would silently find nothing and restore nothing.
+pub fn restore_echo(endpoint: &str, member_id: &str, incarnation: [u8; 32]) {
+    state().echo.insert(
+        endpoint.to_string(),
+        (member_id.as_bytes().to_vec(), incarnation),
+    );
 }
 
 /// Every CAS the fleet was asked to perform, applied or not, in order.

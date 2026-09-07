@@ -208,7 +208,6 @@ mod live {
     }
 }
 
-#[cfg(not(any(test, feature = "test-utils")))]
 pub use live::{recover_all, resume_one};
 
 #[cfg(test)]

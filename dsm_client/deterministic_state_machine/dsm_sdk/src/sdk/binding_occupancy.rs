@@ -78,6 +78,222 @@ fn as32(v: &[u8]) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(v).ok()
 }
 
+/// ── THE HARDWARE-PROOF SURFACE ───────────────────────────────────────────────
+///
+/// One narrow `pub` entry point for the live rig gate, and nothing more.
+///
+/// The rig used to reconstruct quorum semantics in shell — tally digests across
+/// nodes, compare counts to a hardcoded `QUORUM=2`. That is a SECOND
+/// implementation of the decision this protocol turns on, in a language with no
+/// type for a `BindingRecord`, and it can drift from Class K silently. So the
+/// probe runs the PRODUCTION path — the same attribution rule, the same
+/// [`observe_single_key`], the same bundle resolution — and the script asserts
+/// its output instead of deriving its own verdict.
+///
+/// Deliberately narrow: this exposes ONE question about ONE parent. The rest of
+/// this module stays `pub(crate)`, because a tooling requirement is not a reason
+/// to make composition internals public.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindingProbe {
+    pub resource_key: [u8; 32],
+    pub verdict: &'static str,
+    pub tx_id: Option<[u8; 32]>,
+    pub value_digest: Option<[u8; 32]>,
+    pub value_addr: Option<[u8; 32]>,
+    pub round_counter: Option<u64>,
+    pub round_proposer: Option<[u8; 32]>,
+    pub holders: Option<u32>,
+    /// Whether the bound bundle actually names this vault at this parent. Only
+    /// meaningful when the verdict is `BOUND_FINAL`; `None` otherwise.
+    pub bundle_parent_matches: Option<bool>,
+    pub detail: Option<String>,
+}
+
+/// Probe one vault parent through the production observer.
+pub async fn probe_parent_binding(
+    set: &StorageSet,
+    vault_id: &[u8; 32],
+    generation: u64,
+    parent_c_n: &[u8; 32],
+    storage_set_id: &[u8; 32],
+    committed_quorum: u32,
+) -> BindingProbe {
+    let resource_key = settlement_bundle::resource_key(parent_c_n);
+    let observation = observe_parent_key(set, parent_c_n, committed_quorum).await;
+    let mut probe = BindingProbe {
+        resource_key,
+        verdict: match &observation {
+            BindingObservation::Free => "FREE",
+            BindingObservation::BoundFinal(_) => "BOUND_FINAL",
+            BindingObservation::Conflict { .. } => "CONFLICT",
+            BindingObservation::Undetermined { .. } => "UNDETERMINED",
+            BindingObservation::Unavailable { .. } => "UNAVAILABLE",
+        },
+        tx_id: None,
+        value_digest: None,
+        value_addr: None,
+        round_counter: None,
+        round_proposer: None,
+        holders: None,
+        bundle_parent_matches: None,
+        detail: None,
+    };
+    if let BindingObservation::BoundFinal(c) = &observation {
+        probe.tx_id = Some(c.tx_id);
+        probe.value_digest = Some(c.value_digest);
+        probe.value_addr = Some(c.value_addr);
+        probe.round_counter = Some(c.round.counter);
+        probe.round_proposer = Some(c.round.proposer_id);
+        probe.holders = Some(c.holders);
+        // The same resolution the walk performs: fetch, re-hash, and check the
+        // bundle against THIS parent. A chosen value whose bundle names another
+        // parent is exactly what an application-blind register permits.
+        match observe_parent_binding(
+            set,
+            vault_id,
+            generation,
+            parent_c_n,
+            storage_set_id,
+            committed_quorum,
+        )
+        .await
+        {
+            ParentOccupancy::BoundBy(_) => probe.bundle_parent_matches = Some(true),
+            ParentOccupancy::Unresolvable(why) => {
+                probe.bundle_parent_matches = Some(false);
+                probe.detail = Some(why);
+            }
+            // Unreachable: the key was BoundFinal a moment ago. Report rather
+            // than assert — a race here is information, not a panic.
+            ParentOccupancy::Free => {
+                probe.bundle_parent_matches = Some(false);
+                probe.detail = Some("the key became free between reads".into());
+            }
+        }
+    }
+    probe
+}
+
+impl BindingProbe {
+    /// One `key=value` per line — the shape the rig script asserts against.
+    pub fn render(&self, parent_c_n: &[u8; 32]) -> String {
+        let b32 = crate::util::text_id::encode_base32_crockford;
+        let mut out = String::new();
+        out.push_str(&format!("parent_c_n={}\n", b32(parent_c_n)));
+        out.push_str(&format!("resource_key={}\n", b32(&self.resource_key)));
+        out.push_str(&format!("verdict={}\n", self.verdict));
+        if let Some(v) = self.tx_id {
+            out.push_str(&format!("tx_id={}\n", b32(&v)));
+        }
+        if let Some(v) = self.value_digest {
+            out.push_str(&format!("value_digest={}\n", b32(&v)));
+        }
+        if let Some(v) = self.value_addr {
+            out.push_str(&format!("value_addr={}\n", b32(&v)));
+        }
+        if let Some(v) = self.round_counter {
+            out.push_str(&format!("round_counter={v}\n"));
+        }
+        if let Some(v) = self.round_proposer {
+            out.push_str(&format!("round_proposer={}\n", b32(&v)));
+        }
+        if let Some(v) = self.holders {
+            out.push_str(&format!("holders={v}\n"));
+        }
+        if let Some(v) = self.bundle_parent_matches {
+            out.push_str(&format!("bundle_parent_matches={v}\n"));
+        }
+        if let Some(d) = &self.detail {
+            out.push_str(&format!("detail={d}\n"));
+        }
+        out
+    }
+}
+
+/// Probe EVERY parent this vault's composition consumed, plus its frontier.
+///
+/// One call, because the c_n values a rig would otherwise have to supply are
+/// exactly what the composition already computed — and re-deriving them in a
+/// shell or Python harness would mean re-implementing `H_dom(DSM/vault-state,
+/// CCB(V_n))` outside the code that defines it.
+///
+/// This is the whole public surface the hardware proof needs: it composes the
+/// vault the way any third party does, then asks the production observer about
+/// each parent. `compose_discovered_vault` and `ComposedVaultState` stay
+/// `pub(crate)`.
+pub async fn probe_vault_bindings(
+    vault_id: &[u8; 32],
+    token_a: &[u8; 32],
+    token_b: &[u8; 32],
+    fee_bps: u32,
+) -> Result<Vec<(u64, [u8; 32], BindingProbe)>, String> {
+    let composed = crate::sdk::vault_state_composition::compose_discovered_vault(
+        vault_id, token_a, token_b, fee_bps,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let catalog = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+        .map_err(|e| format!("storage catalog: {e}"))?;
+    let set = catalog
+        .resolve(&composed.storage_set_id)
+        .cloned()
+        .ok_or_else(|| "the vault's committed storage set does not resolve here".to_string())?;
+    let quorum = set.quorum();
+    let mut out = Vec::new();
+    // Every CONSUMED parent: each must be bound, by a bundle that names it.
+    for folded in &composed.folded_parents {
+        let probe = probe_parent_binding(
+            &set,
+            vault_id,
+            folded.generation,
+            &folded.c_n,
+            &composed.storage_set_id,
+            quorum,
+        )
+        .await;
+        out.push((folded.generation, folded.c_n, probe));
+    }
+    // And the FRONTIER, which is normally free — the proof that exclusivity
+    // stopped where the composition says it stopped, rather than the walk
+    // simply having run out of evidence.
+    let probe = probe_parent_binding(
+        &set,
+        vault_id,
+        composed.sequence,
+        &composed.c_n,
+        &composed.storage_set_id,
+        quorum,
+    )
+    .await;
+    out.push((composed.sequence, composed.c_n, probe));
+    Ok(out)
+}
+
+/// Read an already-derived resource key at every committed member and classify
+/// it at `quorum`.
+///
+/// The key is a parameter rather than a `c_n`, because the core provenance arm
+/// derives it from the parent state IT is validating — a resolver that
+/// re-derived the key could answer about a different one than the verifier
+/// asked about.
+pub(crate) async fn observe_key_at_set(
+    set: &StorageSet,
+    key: &[u8; 32],
+    committed_quorum: u32,
+) -> BindingObservation {
+    let members: Vec<dsm::dlv::quorum_bind::CommittedMember> = set
+        .members()
+        .iter()
+        .map(|m| dsm::dlv::quorum_bind::CommittedMember {
+            member_id: m.member_id.as_bytes().to_vec(),
+            register_incarnation: m.register_incarnation_id,
+        })
+        .collect();
+    let transport = binding_transport(set);
+    let reads = read_binding_attributed(&members, &[*key], transport.as_ref()).await;
+    observe_single_key(&reads, committed_quorum)
+}
+
 /// Read `k(c_n)` at every committed member and classify it at the vault's
 /// committed `q`.
 ///
@@ -88,18 +304,12 @@ pub(crate) async fn observe_parent_key(
     parent_c_n: &[u8; 32],
     committed_quorum: u32,
 ) -> BindingObservation {
-    let key = settlement_bundle::resource_key(parent_c_n);
-    let members: Vec<dsm::dlv::quorum_bind::CommittedMember> = set
-        .members()
-        .iter()
-        .map(|m| dsm::dlv::quorum_bind::CommittedMember {
-            member_id: m.member_id.as_bytes().to_vec(),
-            register_incarnation: m.register_incarnation_id,
-        })
-        .collect();
-    let transport = binding_transport(set);
-    let reads = read_binding_attributed(&members, &[key], transport.as_ref()).await;
-    observe_single_key(&reads, committed_quorum)
+    observe_key_at_set(
+        set,
+        &settlement_bundle::resource_key(parent_c_n),
+        committed_quorum,
+    )
+    .await
 }
 
 /// Occupancy of one vault parent, with the owning bundle resolved and bound to

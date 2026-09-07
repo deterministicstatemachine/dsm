@@ -92,6 +92,12 @@ pub fn close_bundle(
     c_n: [u8; 32],
     parent_reserves_digest: [u8; 32],
     x_close: [u8; 32],
+    // The owner's authorization over the EXACT release successor — the
+    // signature over the canonical `Operation::DlvClose` this close realizes.
+    // A close bundle without it is refused by every composer, because
+    // `x_close` is a public derivation and proves nothing about who authored
+    // the close.
+    owner_authorization: Vec<u8>,
 ) -> pb::SettlementBundleV1 {
     pb::SettlementBundleV1 {
         version: settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
@@ -112,7 +118,7 @@ pub fn close_bundle(
             witnesses: Vec::new(),
         }],
         proof_material: Vec::new(),
-        bundle_signatures: Vec::new(),
+        bundle_signatures: vec![owner_authorization],
         recovery_material: Vec::new(),
     }
 }

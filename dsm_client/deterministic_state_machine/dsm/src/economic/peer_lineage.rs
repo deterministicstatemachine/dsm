@@ -71,21 +71,24 @@ pub trait PeerEvidenceFetcher {
         faucet_id: &[u8; 32],
         ticket_index: u64,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
-    /// What the vault's COMMITTED set establishes about one settlement-slot
-    /// cell, counted at its committed quorum — never the fetcher's own fleet.
+    /// What the vault's COMMITTED set establishes about the binding of one DLV
+    /// parent state, counted at its committed quorum — never the fetcher's own
+    /// fleet.
+    ///
+    /// `resource_key` is `k_v = H(DSM/binding-keyset ‖ c_n)` and is the only
+    /// coordinate: `c_n` already commits the vault id and the generation.
     ///
     /// Returns the observation itself, not an `Option` and not a `Result`: a
     /// transport failure IS `Unavailable`, so there is no error channel a
-    /// caller could collapse and no `None` that could stand for four
-    /// different things. A caller that needs a narrower answer must match all
-    /// four arms and say what it does with each.
-    fn settlement_slot_observation(
+    /// caller could collapse and no `None` that could stand for five different
+    /// things. A caller that needs a narrower answer must match all five arms
+    /// and say what it does with each.
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> crate::economic::cell_observation::CellObservation;
+    ) -> crate::dlv::binding_observation::BindingObservation;
     /// The network's root-register set as the local catalog resolves it —
     /// CANDIDATE entries the caller must re-derive and check, never authority.
     fn root_register_candidate_set(
@@ -166,15 +169,14 @@ impl ProvenanceResolver for WalkingResolver<'_> {
             .map(|envelope_bytes| FaucetTicketWin { envelope_bytes })
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         storage_set: &crate::ccb::StorageSetMembers,
         quorum: u32,
-    ) -> crate::economic::cell_observation::CellObservation {
+    ) -> crate::dlv::binding_observation::BindingObservation {
         self.fetcher
-            .settlement_slot_observation(vault_id, parent_sequence, storage_set, quorum)
+            .parent_binding_observation(resource_key, storage_set, quorum)
     }
 
     fn root_register_candidate_set(
