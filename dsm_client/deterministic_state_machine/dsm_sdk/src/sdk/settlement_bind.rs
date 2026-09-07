@@ -35,8 +35,15 @@ pub enum BindError {
     Bundle,
     /// A fixed-width bundle field is not 32 bytes.
     BadField,
-    /// The immutable bundle could not be stored.
+    /// The immutable bundle could not be stored at all (no usable member SDK).
     PutImmutable,
+    /// The bundle reached fewer than `q` ATTRIBUTABLE members of the committed
+    /// set, so it is not durably published and the transaction must not begin.
+    PublicationNotDurable {
+        accepted: u32,
+        required: u32,
+        total: u32,
+    },
     /// The transaction profile is invalid (q not the strict majority).
     Profile,
     /// The fence could not be persisted, so the transaction did not begin.
@@ -66,15 +73,53 @@ fn committed_members(set: &StorageSet) -> Vec<CommittedMember> {
         .collect()
 }
 
+/// Publish `B` to the committed set, and REQUIRE a quorum of attributable
+/// acceptances before the caller is allowed to mutate anything.
+///
+/// Req 6.15 puts the bundle in the store before the first mutating binding op
+/// so recovery can always fetch it. The ordering alone is not the requirement:
+/// a fan-out where every member refused still *returns*, and the two facts
+///
+/// ```text
+/// the SDK invocation succeeded
+/// enough committed members actually accepted B
+/// ```
+///
+/// are different. Collapsing them — which `.map(|_| ())` used to do — lets a
+/// 413, a 401 or an unreachable fleet read as success, after which the fence is
+/// placed and the register driven against a `value_addr` NO member holds. The
+/// bundle is then unfetchable, `settlement_resume` can never complete, and the
+/// DLV parent stays fenced forever. That is a far worse state than refusing.
+///
+/// `accepted` is already the ATTRIBUTABLE count on both paths: the production
+/// fan-out counts a 2xx only when the member echoes its own configured id
+/// (Req 15.8), and the fleet double applies the same echo rule. So the
+/// threshold is the vault's committed `q` — never a hardcoded majority, and
+/// never the locally configured fleet size.
 async fn put_bundle(set: &StorageSet, canon: &[u8], addr: [u8; 32]) -> Result<(), BindError> {
     let ns =
         String::from_utf8_lossy(dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE.source_bytes())
             .to_string();
     let addr_b32 = crate::util::text_id::encode_base32_crockford(&addr);
-    crate::sdk::storage_io::put_immutable_to_all_members(set, &ns, canon, &addr_b32)
+    let fanout = crate::sdk::storage_io::put_immutable_to_all_members(set, &ns, canon, &addr_b32)
         .await
-        .map(|_| ())
-        .map_err(|_| BindError::PutImmutable)
+        .map_err(|_| BindError::PutImmutable)?;
+    let required = set.quorum();
+    if fanout.accepted < required {
+        log::warn!(
+            "[settle] bundle publication not durable: {}/{} attributable acceptances, {} required; \
+             refusing BEFORE any fence or binding round",
+            fanout.accepted,
+            fanout.total,
+            required
+        );
+        return Err(BindError::PublicationNotDurable {
+            accepted: fanout.accepted,
+            required,
+            total: fanout.total,
+        });
+    }
+    Ok(())
 }
 
 /// Build the minimal owner-close `SettlementBundle` (5c-1). A close consumes one
@@ -264,12 +309,144 @@ mod tests {
         crate::storage::client_db::init_database().expect("init");
     }
 
+    /// Reset BOTH doubles. `binding_fleet_double::reset_with` clears only the
+    /// register; the immutable puts go through `storage_io::fake_fleet`, whose
+    /// injected failures and echo overrides are process-global and would
+    /// otherwise leak into the next test under `--test-threads=1`.
+    fn reset_fleets(set: &StorageSet) {
+        binding_fleet_double::reset_with(&fleet_tuples(set));
+        crate::sdk::storage_io::fake_fleet::reset();
+    }
+
+    /// No fence row for this parent, and no binding record anywhere: the
+    /// transaction must be refused BEFORE either mutation.
+    fn assert_nothing_mutated(chain: &[u8; 32], parent: &[u8; 32]) {
+        assert_eq!(
+            crate::storage::client_db::trader_parent_fence::active_verdict(chain, parent).unwrap(),
+            FenceVerdict::Clear,
+            "a fence row was written despite a non-durable publication"
+        );
+        assert!(
+            binding_fleet_double::cas_log().is_empty(),
+            "a binding round was driven despite a non-durable publication"
+        );
+    }
+
+    /// n=3, q=2. Drive `bind_settlement` with `accepted` members attributable
+    /// and return the result.
+    async fn bind_with_accepted(
+        set: &StorageSet,
+        bundle: &pb::SettlementBundleV1,
+        make_unattributable: &[&str],
+        fail: &[&str],
+    ) -> Result<Result<Outcome, RunError>, BindError> {
+        for id in fail {
+            crate::sdk::storage_io::fake_fleet::fail_member(id);
+        }
+        for id in make_unattributable {
+            // The HTTP call SUCCEEDS and the member stores the bytes; it just
+            // does not echo its own id, so the acceptance is not attributable.
+            crate::sdk::storage_io::fake_fleet::set_echo(id, Some("someone-else"));
+        }
+        bind_settlement(set, [7; 32], bundle, [0x11; 32], [0xA1; 32]).await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn zero_of_three_accepted_refuses_before_any_fence_or_bind() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let bundle = a_bundle(&set, 0xAA);
+        let res = bind_with_accepted(&set, &bundle, &[], &["n0", "n1", "n2"]).await;
+        // THE FORBIDDEN STATE FIRST: whatever the return value, nothing may have
+        // been mutated. A mutation that removes the gate must fail HERE.
+        assert_nothing_mutated(&[0x11; 32], &[0xA1; 32]);
+        assert_eq!(
+            res.unwrap_err(),
+            BindError::PublicationNotDurable {
+                accepted: 0,
+                required: 2,
+                total: 3
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn one_of_three_accepted_refuses_before_any_fence_or_bind() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let bundle = a_bundle(&set, 0xAA);
+        let res = bind_with_accepted(&set, &bundle, &[], &["n1", "n2"]).await;
+        // THE FORBIDDEN STATE FIRST: whatever the return value, nothing may have
+        // been mutated. A mutation that removes the gate must fail HERE.
+        assert_nothing_mutated(&[0x11; 32], &[0xA1; 32]);
+        assert_eq!(
+            res.unwrap_err(),
+            BindError::PublicationNotDurable {
+                accepted: 1,
+                required: 2,
+                total: 3
+            }
+        );
+    }
+
+    /// THE CASE `.map(|_| ())` HID: every HTTP call returns normally and every
+    /// member stores the bytes, but none is attributable, so the publication is
+    /// worth nothing. It must read exactly like 0/3.
+    #[tokio::test]
+    #[serial]
+    async fn transport_succeeds_but_no_member_is_attributable_refuses() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let bundle = a_bundle(&set, 0xAA);
+        let res = bind_with_accepted(&set, &bundle, &["n0", "n1", "n2"], &[]).await;
+        // THE FORBIDDEN STATE FIRST: whatever the return value, nothing may have
+        // been mutated. A mutation that removes the gate must fail HERE.
+        assert_nothing_mutated(&[0x11; 32], &[0xA1; 32]);
+        assert_eq!(
+            res.unwrap_err(),
+            BindError::PublicationNotDurable {
+                accepted: 0,
+                required: 2,
+                total: 3
+            }
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn two_of_three_accepted_is_a_quorum_and_proceeds() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let bundle = a_bundle(&set, 0xAA);
+        let out = bind_with_accepted(&set, &bundle, &[], &["n2"])
+            .await
+            .unwrap();
+        assert_eq!(out, Ok(Outcome::Committed));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn three_of_three_accepted_proceeds() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let bundle = a_bundle(&set, 0xAA);
+        let out = bind_with_accepted(&set, &bundle, &[], &[]).await.unwrap();
+        assert_eq!(out, Ok(Outcome::Committed));
+    }
+
     #[tokio::test]
     #[serial]
     async fn bind_settlement_commits_and_fences_the_parent_on_the_successor() {
         init_db();
         let set = test_set(3);
-        binding_fleet_double::reset_with(&fleet_tuples(&set));
+        reset_fleets(&set);
         let bundle = a_bundle(&set, 0xAA);
         let out = bind_settlement(&set, [7; 32], &bundle, [0x11; 32], [0xA1; 32])
             .await
@@ -289,7 +466,7 @@ mod tests {
     async fn a_second_bundle_over_the_same_vault_parent_conflicts() {
         init_db();
         let set = test_set(3);
-        binding_fleet_double::reset_with(&fleet_tuples(&set));
+        reset_fleets(&set);
         // First bundle over vault/c_n 0xAA commits.
         let first = a_bundle(&set, 0xAA);
         assert_eq!(
