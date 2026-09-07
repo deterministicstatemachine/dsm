@@ -245,15 +245,32 @@ pub fn active_verdict(
     )
 }
 
-/// Every fence that has not reached a terminal state, oldest first — the work
-/// list restart recovery must restore and drive to terminal before the trader
-/// chain advances (Req 16.5).
-pub fn list_unresolved_fences() -> Result<Vec<TraderFence>> {
+/// The fences whose BINDING transaction is still unresolved, oldest first — the
+/// work list restart recovery re-drives through QuorumBind (Req 16.5).
+///
+/// `committed_awaiting_acceptance` is deliberately NOT in this list, and the
+/// distinction is the whole point of the name:
+///
+/// ```text
+/// Fenced                      QuorumBind outcome unresolved
+///                             -> a recovery worker must re-drive the binding
+/// CommittedAwaitingAcceptance QuorumBind already COMMITTED — terminal here.
+///                             Only ordinary-DSM acceptance of the exact
+///                             permitted successor remains, which QuorumBind
+///                             cannot supply and must not be asked for.
+/// Released / ReleasedNoAdvance nothing left
+/// ```
+///
+/// Handing a committed fence back to the binding driver re-runs a full Paxos
+/// round for a decision that is already made: it re-commits, burns a ballot,
+/// and re-fetches the bundle — once per completed settlement, on every sync,
+/// forever. Acceptance is owned by a separate continuation path.
+pub fn list_binding_recovery_fences() -> Result<Vec<TraderFence>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM trader_parent_fence
-          WHERE state IN ('fenced','committed_awaiting_acceptance')
+          WHERE state = 'fenced'
           ORDER BY insertion_ordinal ASC"
     ))?;
     let rows = stmt
@@ -373,11 +390,61 @@ mod tests {
         );
         // Restart recovery finds it, with the bumped ballot and the recovery
         // inputs it needs.
-        let open = list_unresolved_fences().unwrap();
+        let open = list_binding_recovery_fences().unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].ballot, 2);
         assert_eq!(open[0].value_addr, [0x7C; 32]);
         assert_eq!(open[0].storage_set_id, [0x6B; 32]);
+    }
+
+    /// A COMMITTED fence is terminal for QuorumBind and must never be handed
+    /// back to the binding driver.
+    ///
+    /// Re-driving one re-runs a full Paxos round for a decision already made:
+    /// it re-commits, burns a ballot, and re-fetches the bundle — once per
+    /// completed settlement, on every sync, forever. What is actually
+    /// outstanding is ordinary-DSM acceptance, which QuorumBind cannot supply.
+    #[test]
+    #[serial]
+    fn a_committed_fence_is_not_binding_recovery_work() {
+        init();
+        place_fence(&fence(1)).unwrap();
+        record_event(
+            &CHAIN,
+            &PARENT,
+            &[1; 32],
+            &FenceEvent::Committed {
+                successor: [0xAA; 32],
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            list_binding_recovery_fences().unwrap().is_empty(),
+            "a committed fence has no binding left to recover"
+        );
+        // But it is STILL an advancement constraint, and still discoverable —
+        // the acceptance continuation and the close-resume identity check both
+        // read this row.
+        assert_eq!(
+            active_verdict(&CHAIN, &PARENT).unwrap(),
+            FenceVerdict::PermitsOnly([0xAA; 32]),
+            "and it still permits only the exact committed successor"
+        );
+        assert!(active_fence(&CHAIN, &PARENT).unwrap().is_some());
+    }
+
+    /// The positive control: an unresolved BINDING is still recovery work, so
+    /// the narrowing above did not simply empty the list.
+    #[test]
+    #[serial]
+    fn a_fenced_row_is_still_binding_recovery_work() {
+        init();
+        place_fence(&fence(1)).unwrap();
+        record_event(&CHAIN, &PARENT, &[1; 32], &FenceEvent::Indeterminate, None).unwrap();
+        let work = list_binding_recovery_fences().unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].tx_id, [1; 32]);
     }
 
     #[test]
@@ -390,7 +457,7 @@ mod tests {
             active_verdict(&CHAIN, &PARENT).unwrap(),
             FenceVerdict::Clear
         );
-        assert!(list_unresolved_fences().unwrap().is_empty());
+        assert!(list_binding_recovery_fences().unwrap().is_empty());
     }
 
     #[test]

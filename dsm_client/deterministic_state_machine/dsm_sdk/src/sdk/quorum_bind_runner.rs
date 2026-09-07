@@ -316,7 +316,7 @@ where
     Fut: std::future::Future<Output = bool>,
 {
     use crate::storage::client_db::trader_parent_fence as fdb;
-    let fences = fdb::list_unresolved_fences()?;
+    let fences = fdb::list_binding_recovery_fences()?;
     let mut out = Vec::with_capacity(fences.len());
     for fence in fences {
         let key = (
@@ -692,7 +692,7 @@ mod tests {
             "a lost commit keeps the parent fenced; a fresh intent cannot pass"
         );
         // The value IS chosen on the members even though the client never heard.
-        let unresolved = fdb::list_unresolved_fences().unwrap();
+        let unresolved = fdb::list_binding_recovery_fences().unwrap();
         assert_eq!(unresolved.len(), 1);
 
         // Restart recovery: a fresh Class K instance for the SAME transaction,
@@ -773,7 +773,7 @@ mod tests {
         assert!(recoveries.iter().any(|r| r.tx_id == [2; 32] && !r.resolved));
         // After the pass, only the un-retrievable fence remains — its parent
         // stays fenced until a later pass.
-        let remaining = fdb::list_unresolved_fences().unwrap();
+        let remaining = fdb::list_binding_recovery_fences().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].tx_id, [2; 32]);
         assert_eq!(
