@@ -88,6 +88,47 @@ pub(crate) struct FoldedParent {
     /// `vault_state_commitment(&state)`, computed by the walk.
     pub c_n: [u8; 32],
     pub state: VaultStateV2,
+    /// `b` of the binding-final bundle that owned this parent and whose
+    /// successor this walk realized. Every fold now has one.
+    pub bound_by: [u8; 32],
+    /// Which KIND of consumer owned it. A resumed close must be able to tell
+    /// its own fold from a market settle that landed at the same generation.
+    pub bound_kind: dsm::dlv::settlement_bundle::BundleShape,
+}
+
+/// What the binding register — plus this device's own fence table — says about
+/// the REALIZED frontier `c_n`, at the moment of this walk.
+///
+/// Only these three are reachable: `Conflict`, `Undetermined` and `Unavailable`
+/// never return a composition at all, they fail closed as
+/// [`CompositionError::BindingEvidenceUnavailable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FrontierBinding {
+    /// `q` attributed members hold nothing at `k(c_n)`: the parent is available
+    /// to a competing candidate right now.
+    Free,
+    /// A binding-final bundle owns `c_n` and this walk did NOT realize its
+    /// successor. The state, reserves and `c_n` reported alongside this ARE the
+    /// realized frontier — and quoting, pointer-publishing or binding against
+    /// that `c_n` will lose at bind time.
+    BoundUnrealized {
+        bundle_digest: [u8; 32],
+        /// The X this walk already verified out of the bound bundle, so a
+        /// settle can tell ITS OWN trade's bundle from a stranger's without
+        /// re-fetching bytes the walk just read.
+        route_set_commitment: [u8; 32],
+    },
+    /// CLIENT-LOCAL, never register evidence and never published: THIS device
+    /// holds an unresolved DLV transaction over this exact parent. The register
+    /// may well say `Free` — the transaction's outcome simply is not known
+    /// here. Nothing on this device may advance the parent (Req 6.23 (2));
+    /// other devices are unaffected.
+    ///
+    /// Well-defined for the owner's OWN close only: `dlv_close` fences on
+    /// `(vault_id, c_n)`, while a market settle fences the TRADER's chain, so
+    /// the walk cannot see a foreign trader's in-flight bind through this table
+    /// — that is exactly what the register's `Undetermined` answer is for.
+    LocallyFenced { tx_id: [u8; 32] },
 }
 
 /// Result of composing pending pointers onto a presentation-verified
@@ -160,6 +201,11 @@ pub(crate) struct ComposedVaultState {
     /// storage-set member list — a derived view of a `V_n` field, never a
     /// second source. Consumers resolve it through their local catalog.
     pub storage_set_id: [u8; 32],
+    /// Whether the realized frontier above is also FREE to be bound by a new
+    /// candidate. A caller that stamps `c_n` as a hop's parent binding, or
+    /// publishes a pointer against it, must consult this: a bound parent
+    /// produces a quote that is guaranteed to lose.
+    pub frontier_binding: FrontierBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,276 +374,185 @@ pub(crate) async fn compose_vault_state(
 
     // ── THE WALK. Cursor = a full state + its commitment. ────────────────
     //
-    // The edge source is the settlement-slot REGISTER CELL, read live at the
-    // owner-committed quorum — not a prefix listing. That inversion is the
-    // whole point: a set query's exhaustiveness is unfalsifiable, so a member
-    // that omits a key produces an answer indistinguishable from a shorter
-    // chain, and no signature repairs it. A write-once cell's answer is
-    // bounded, and omission is not expressible in it: the cell either holds a
-    // claim or it does not, and q attributed members saying "nothing here" is
-    // a positive fact.
+    // The edge source is BINDING OCCUPANCY at `k_v = H(DSM/binding-keyset ‖
+    // c_n)`, read live at the owner-committed quorum — not a prefix listing.
+    // That inversion is the whole point: a set query's exhaustiveness is
+    // unfalsifiable, so a member that omits a key produces an answer
+    // indistinguishable from a shorter chain, and no signature repairs it. A
+    // binding key's answer is bounded, and omission is not expressible in it.
     //
-    // So each generation asks exactly one question — "is there a claimed
-    // successor to THIS state?" — and only three answers exist:
+    // WHAT THIS WALK NOW KEEPS SEPARATE. Occupancy and realization used to be
+    // one fact, because a write-once slot could only be claimed by the party
+    // that settled it. They are not one fact:
     //
-    //   empty at quorum   -> the chain ends here; this is the frontier
-    //   winner at quorum  -> verify its settlement and fold, or fail closed
-    //   anything else     -> DLV_BINDING_EVIDENCE_UNAVAILABLE
+    //   binding occupancy = this parent is no longer available to a rival
+    //   realized frontier = this successor actually became economic state
+    //
+    // For an owner CLOSE they still coincide — the successor is fully
+    // determined and pre-authorized, so binding finality realizes it (Req
+    // 6.30). For a MARKET bundle they deliberately do not: a bound bundle
+    // whose trade has not settled leaves the OLD reserves as the last realized
+    // state while the parent stays blocked. So each generation has FOUR
+    // outcomes, not three:
+    //
+    //   free at quorum      -> the chain ends here; this is the frontier
+    //   bound + realized    -> fold and continue
+    //   bound + not settled -> the chain ends here, and the frontier is BOUND
+    //   anything else       -> DLV_BINDING_EVIDENCE_UNAVAILABLE
     let mut cursor_state = baseline_state;
     let mut cursor_c_n = baseline_c_n;
     let mut chain_len: usize = 0;
     let mut folded_parents: Vec<FoldedParent> = Vec::new();
+    let frontier_binding: FrontierBinding;
     loop {
         // Saturation is NOT a frontier. A walk that stops because it ran out
         // of budget has established nothing about maximality, and reporting
         // "frontier at 64" would be the omission defect wearing a local name.
         if chain_len >= MAX_PENDING_CHAIN_DEPTH {
             return Err(CompositionError::BindingEvidenceUnavailable(format!(
-                "walk saturated at depth {MAX_PENDING_CHAIN_DEPTH} without reaching an empty slot                  cell"
+                "walk saturated at depth {MAX_PENDING_CHAIN_DEPTH} without reaching a free parent"
             )));
         }
-        let observation = crate::sdk::economic_registers::observe_settlement_slot_cell(
+        let bound = match crate::sdk::binding_occupancy::observe_parent_binding(
             &set,
             vault_id,
             cursor_state.generation,
+            &cursor_c_n,
+            &storage_set_id,
             committed_quorum,
         )
         .await
-        .map_err(|e| {
-            // A divergent write-once cell is a network fault, never something
-            // to pick a side of.
-            CompositionError::BindingEvidenceUnavailable(format!(
-                "settlement-slot cell at generation {}: {e}",
-                cursor_state.generation
-            ))
-        })?;
-        let winner_bytes = match observation {
-            // THE ONLY TERMINATION THAT ESTABLISHES A FRONTIER: a quorum of
-            // members each EXPLICITLY reported no row. It means no quorum
-            // claim is observable now — never that this generation can never
-            // be claimed.
-            dsm::economic::cell_observation::CellObservation::EmptyAtQuorum => break,
-            dsm::economic::cell_observation::CellObservation::Unavailable {
-                attributed,
-                required,
-            } => {
+        {
+            // THE ONLY TERMINATION THAT ESTABLISHES A FREE FRONTIER: a quorum
+            // of members each EXPLICITLY hold nothing at this key. It says no
+            // binding is observable now — never that this parent can never be
+            // bound.
+            //
+            // Then, and ONLY then, overlay this device's own unresolved work.
+            // That overlay is CLIENT-LOCAL and never published: the register
+            // may honestly say Free while this Class K holds a transaction
+            // over the same parent whose outcome it does not yet know.
+            crate::sdk::binding_occupancy::ParentOccupancy::Free => {
+                frontier_binding = local_fence_overlay(vault_id, &cursor_c_n)?;
+                break;
+            }
+            crate::sdk::binding_occupancy::ParentOccupancy::Unresolvable(why) => {
                 return Err(CompositionError::BindingEvidenceUnavailable(format!(
-                    "only {attributed} attributed member(s) answered the slot cell at generation {} ({required} required)",
+                    "binding at generation {}: {why}",
                     cursor_state.generation
                 )))
             }
-            dsm::economic::cell_observation::CellObservation::Conflict { distinct } => {
-                return Err(CompositionError::BindingEvidenceUnavailable(format!(
-                    "the slot cell at generation {} holds {distinct} contradictory claims",
-                    cursor_state.generation
-                )))
-            }
-            dsm::economic::cell_observation::CellObservation::Claimed(b) => b,
+            crate::sdk::binding_occupancy::ParentOccupancy::BoundBy(b) => b,
         };
 
-        // A claimed successor EXISTS. From here every failure is fail-closed:
-        // the network has told us this generation is not the end, so we may
-        // not report it as one because a second artifact is missing.
+        // A binding-final bundle OWNS this parent. From here every failure is
+        // fail-closed: the network has told us this generation is not the end,
+        // so we may not report it as one because a second artifact is missing.
+        //
+        // `observe_parent_binding` has already established that the bytes
+        // re-hash to the record's identity, that the bundle names this storage
+        // set and this q, and that its transition for THIS vault names this
+        // generation and this exact `c_n`.
         let unavailable = |what: &str| {
             CompositionError::BindingEvidenceUnavailable(format!(
-                "generation {} has a quorum-established successor but {what}",
-                cursor_state.generation
+                "generation {} is bound by {} but {what}",
+                cursor_state.generation,
+                crate::util::text_id::encode_base32_crockford(&bound.bundle_digest)
             ))
         };
-        let claim =
-            dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(&winner_bytes)
-                .map_err(|e| unavailable(&format!("its slot claim does not verify: {e}")))?;
-        if claim.body.vault_id != *vault_id || claim.body.parent_sequence != cursor_state.generation
-        {
-            return Err(unavailable("its slot claim names a different cell"));
-        }
-        // AND IT WAS CLAIMED UNDER THIS VAULT'S SET. A member reconfigured
-        // into another set keeps serving rows written under the old one, so a
-        // stale cross-set envelope is reachable; the provenance arm refuses
-        // one and this walk must not fold what that arm would reject.
-        if claim.body.storage_set_id != storage_set_id {
-            return Err(unavailable(
-                "its slot claim was made under a different storage set",
-            ));
-        }
-        // The claim binds the exact parent STATE, not just the generation
-        // number — the v2 body's whole purpose. A winner bound to a different
-        // c_n means our baseline and the network disagree about what this
-        // generation IS, which is a divergence to report, never to fold past.
-        if claim.body.parent_binding_c_n != cursor_c_n {
-            return Err(unavailable("its slot claim binds a different parent state"));
-        }
-        let x = claim.body.x;
+        let Some(transition) = bound.transition() else {
+            return Err(unavailable("its bundle lost the transition it named"));
+        };
 
-        // A CLOSE CONSUMES THIS CELL TOO. Close and settle contend for one
-        // slot per generation by design, so "a winner exists" does not mean
-        // "a trade happened" — the owner may have retired the vault here.
-        //
-        // A close needs no receipt and no RouteCommit: its successor is fully
-        // determined (both reserves to zero at parent+1), so there is no
-        // amount to witness. What it does need is proof the OWNER did it. The
-        // close's `x` is a public derivation anyone can recompute, so the `x`
-        // alone proves nothing; the claim on it signed by the owner's
-        // P0–P6-proven authority key is what a stranger cannot forge. A
-        // stranger who claims this cell with the close `x` therefore does not
-        // produce a vault that looks closed — they produce a generation
-        // consumed by something unverifiable, which fails closed below.
-        if x == dsm::dlv::settlement_slot_claim::close_slot_commitment(
-            vault_id,
-            cursor_state.generation,
-        ) {
-            if claim.body.claimant_public_key != owner.ak_pk {
-                return Err(unavailable(
-                    "its close slot was claimed by someone other than the vault owner",
-                ));
+        // Discriminate on SHAPE FIRST. A close bundle's `route_set_commitment`
+        // is 32 zero bytes, so reading X before this branch would silently
+        // compute an all-zero commitment.
+        let next_state = match bound.shape {
+            // ── CLOSE: binding-final ⇒ REALIZE IMMEDIATELY (Req 6.30). ─────
+            // The successor is fully determined — both reserves to zero at
+            // parent+1 — so there is no amount to witness and no second
+            // artifact to wait for. What must be proven is WHO authorized it:
+            // `x_close` is a public derivation anyone can recompute, so the
+            // shape is a DISCRIMINATOR and never an authorization. The proof
+            // is the owner's signature over the exact release successor,
+            // rebuilt here from the frontier this walk is standing on.
+            dsm::dlv::settlement_bundle::BundleShape::OwnerClose => {
+                let successor = dsm::dlv::close_authorization::CloseSuccessor {
+                    vault_id: *vault_id,
+                    leg_a_policy_commit: pc_a,
+                    leg_a_amount: cursor_state.reserve_a,
+                    leg_b_policy_commit: pc_b,
+                    leg_b_amount: cursor_state.reserve_b,
+                    parent_sequence: cursor_state.generation,
+                    fee_bps,
+                };
+                dsm::dlv::close_authorization::verify_close_authorization(
+                    &bound.bundle,
+                    &successor,
+                    &owner.ak_pk,
+                )
+                .map_err(|e| {
+                    unavailable(&format!(
+                        "its close is not authorized by the vault owner: {e}"
+                    ))
+                })?;
+                let mut next = cursor_state.clone();
+                next.generation = cursor_state.generation.saturating_add(1);
+                next.reserve_a = 0;
+                next.reserve_b = 0;
+                next.parent_state_commitment = cursor_c_n;
+                next
             }
-            let mut next_state = cursor_state.clone();
-            next_state.generation = cursor_state.generation.saturating_add(1);
-            next_state.reserve_a = 0;
-            next_state.reserve_b = 0;
-            next_state.parent_state_commitment = cursor_c_n;
-            let next_c_n = vault_state_commitment(&next_state)
-                .map_err(|e| unavailable(&format!("its terminal state does not encode: {e}")))?;
-            folded_parents.push(FoldedParent {
-                generation: cursor_state.generation,
-                c_n: cursor_c_n,
-                state: cursor_state.clone(),
-            });
-            cursor_state = next_state;
-            cursor_c_n = next_c_n;
-            chain_len += 1;
-            continue;
-        }
 
-        // THE RECEIPT GATE. Everything below this line moves someone's
-        // liquidity, so nothing below it runs until the settlement is
-        // witnessed. The receipt is the only artifact here that cannot be
-        // produced without settling: it carries an inclusion path for a leaf
-        // the trader's own settling advance wrote into its own device root.
-        //
-        // Under the cell walk a missing receipt is no longer "inert". It was,
-        // when a self-signed pointer was the only evidence an edge existed —
-        // anyone could publish one, so concluding anything from its presence
-        // handed out free liquidity suppression. A quorum-established slot
-        // winner is a different fact: the network serialized this generation
-        // to this claimant. We cannot validate the edge without the receipt
-        // and we may not pretend the edge is absent, so the vault leaves
-        // routing until the evidence appears. A claimant who wins a slot and
-        // never settles can hold a vault here; that liveness cost is the
-        // honest price of not manufacturing maximality.
-        let receipt = match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(
-            vault_id, &x,
-        )
-        .await
-        {
-            Some(r) => r,
-            None => return Err(unavailable("its settlement receipt is not available")),
+            // ── MARKET: binding-final alone MUST NOT realize. ──────────────
+            // ###################################################################
+            // # TEMPORARY SCAFFOLDING (5c-1). DELETED IN 5c-2.
+            // # Realization keeps the PRE-BUNDLE evidence gate verbatim:
+            // # receipt + published RouteCommit (X recomputed from its own
+            // # bytes) + routed-unlock eligibility + hop parent binding +
+            // # exact constant-product re-simulation.
+            // # 5c-2 REPLACES this whole call with the Rev-15 rule — the exact
+            // # bundled trader successor accepted under ordinary DSM AND `A_B`
+            // # verified — at which point X, the receipt and the RouteCommit
+            // # stop being the realization source and become bundle-internal
+            // # proof material.
+            // ###################################################################
+            dsm::dlv::settlement_bundle::BundleShape::Market => {
+                let x = <[u8; 32]>::try_from(bound.bundle.route_set_commitment.as_slice())
+                    .map_err(|_| unavailable("its route-set commitment is not 32 bytes"))?;
+                match realize_market_successor_5c1(
+                    vault_id,
+                    &x,
+                    &cursor_state,
+                    &cursor_c_n,
+                    &pc_a,
+                    &pc_b,
+                    fee_bps,
+                )
+                .await
+                {
+                    // The evidence is present and it agrees.
+                    MarketRealization::Realized(next) => *next,
+                    // Evidence ABSENT — the trade has not settled yet. THE NEW
+                    // STATE, and the reason this walk needed a fourth outcome:
+                    // the realized frontier is THIS generation, and it is
+                    // occupied. Strictly more informative than the old
+                    // fail-closed, which could not tell "not yet" from "wrong".
+                    // `dlv_reconcile` legitimately runs from here.
+                    MarketRealization::Absent(_) => {
+                        frontier_binding = FrontierBinding::BoundUnrealized {
+                            bundle_digest: bound.bundle_digest,
+                            route_set_commitment: x,
+                        };
+                        break;
+                    }
+                    // Evidence PRESENT and it CONTRADICTS the bundle. A
+                    // divergence is never an absence.
+                    MarketRealization::Contradicts(why) => return Err(unavailable(&why)),
+                }
+            }
         };
-        // The receipt must describe the step this cell claims. It is fetched
-        // by (vault, x) and x came from the authenticated winner, so it is
-        // already bound to this trade; this pins the generations it moves
-        // between.
-        if receipt.trade.parent_sequence != cursor_state.generation
-            || receipt.trade.new_sequence != cursor_state.generation.saturating_add(1)
-        {
-            return Err(unavailable(
-                "its receipt witnesses a different generation step",
-            ));
-        }
-        let new_sequence = receipt.trade.new_sequence;
-        // Fetch the full signed RouteCommit paired with X.
-        let rc_key = external_commitment_rc_key(&x);
-        let rc_bytes = BitcoinTapSdk::storage_get_bytes(&rc_key)
-            .await
-            .map_err(|_| unavailable("its RouteCommit is not published"))?;
-        let rc = generated::RouteCommitV1::decode(rc_bytes.as_slice())
-            .map_err(|_| unavailable("its RouteCommit does not decode"))?;
-        // Storage keys are untrusted labels, so X is RECOMPUTED from the
-        // RouteCommit bytes and required to equal the one the winner named.
-        if compute_external_commitment(&rc) != x {
-            return Err(unavailable(
-                "its RouteCommit does not recompute the claimed X",
-            ));
-        }
-        // Enforce routed-unlock eligibility gate:
-        //   1) initiator SPHINCS+ signature valid over canonical RC bytes
-        //   2) this vault is present in the route
-        //   3) external commitment anchor for X is visible
-        let hop = verify_route_commit_unlock_eligibility(&rc_bytes, vault_id)
-            .await
-            .map_err(|_| unavailable("its RouteCommit fails routed-unlock eligibility"))?;
-        // THE PARENT BINDING. The hop must name the c_n of the exact cursor
-        // state it consumes — one byte-equality that pins the generation, the
-        // reserves, the pair, the fee and the authority position all at once,
-        // because they are members of the identified V_n. A hop bound to any
-        // other state (stale, future, fabricated) was signed against a
-        // different parent and folding it would diverge from the canonical
-        // chain. Mandatory: an unbound hop is skipped, never tolerated.
-        if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice()
-        {
-            return Err(unavailable("its hop is bound to a different parent state"));
-        }
-        // Decode the hop's input/output amounts.
-        if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
-            return Err(unavailable("its hop amounts are malformed"));
-        }
-        let mut in_buf = [0u8; 16];
-        in_buf.copy_from_slice(&hop.input_amount_u128);
-        let mut out_buf = [0u8; 16];
-        out_buf.copy_from_slice(&hop.expected_output_amount_u128);
-        // The wire carries 16-byte big-endian amounts; base units are u64. The
-        // narrowing happens HERE, once, checked — an amount that does not fit
-        // is a malformed hop, not a value to truncate.
-        let (Ok(input_amount), Ok(expected_output)) = (
-            u64::try_from(u128::from_be_bytes(in_buf)),
-            u64::try_from(u128::from_be_bytes(out_buf)),
-        ) else {
-            return Err(unavailable("its hop amounts do not fit u64"));
-        };
-        // Determine trade direction against the state's own canonical pair.
-        let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
-        let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
-        if !input_is_a && !input_is_b {
-            return Err(unavailable("its hop trades a different pair"));
-        }
-        let (cursor_in, cursor_out) = if input_is_a {
-            (cursor_state.reserve_a, cursor_state.reserve_b)
-        } else {
-            (cursor_state.reserve_b, cursor_state.reserve_a)
-        };
-        // Re-simulate against the cursor.  The composer demands the
-        // simulated output equals the trader's claimed expected_output
-        // — anything else means the trade settled against a different
-        // baseline and folding it is unsafe.
-        let simulated = constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
-            .ok_or_else(|| unavailable("its trade does not re-simulate against this state"))?;
-        if simulated != expected_output {
-            return Err(unavailable(
-                "its claimed output is not what this state's curve yields",
-            ));
-        }
-        // Construct the successor state: generation advanced, reserves moved,
-        // predecessor edge set to the consumed state's identity, and EVERY
-        // other field — pair, fee, release policy, encumbrances, authority
-        // position, storage set, quorum — copied byte-for-byte. Saturating-sub
-        // on the output side defends against malformed RCs; the re-sim above
-        // should already exclude these, but defense-in-depth is cheap.
-        let (new_a, new_b) = if input_is_a {
-            (
-                cursor_state.reserve_a.saturating_add(input_amount),
-                cursor_state.reserve_b.saturating_sub(expected_output),
-            )
-        } else {
-            (
-                cursor_state.reserve_a.saturating_sub(expected_output),
-                cursor_state.reserve_b.saturating_add(input_amount),
-            )
-        };
-        let mut next_state = cursor_state.clone();
-        next_state.generation = new_sequence;
-        next_state.reserve_a = new_a;
-        next_state.reserve_b = new_b;
-        next_state.parent_state_commitment = cursor_c_n;
+
         let next_c_n = match vault_state_commitment(&next_state) {
             Ok(c) => c,
             Err(e) => {
@@ -611,7 +566,10 @@ pub(crate) async fn compose_vault_state(
             generation: cursor_state.generation,
             c_n: cursor_c_n,
             state: cursor_state.clone(),
+            bound_by: bound.bundle_digest,
+            bound_kind: bound.shape,
         });
+        let _ = transition;
         cursor_state = next_state;
         cursor_c_n = next_c_n;
         chain_len += 1;
@@ -630,7 +588,194 @@ pub(crate) async fn compose_vault_state(
         c_n: cursor_c_n,
         folded_parents,
         state: cursor_state,
+        frontier_binding,
     })
+}
+
+/// This device's own unresolved work over a parent the register says is FREE.
+///
+/// Consulted ONLY at the point the walk breaks. Earlier generations already
+/// folded, so a stale fence there is moot — and a fence that blocks a
+/// generation the register has already moved past would be pure noise.
+///
+/// Deliberately NOT a fail-closed. `dlv_reconcile` and `finish_prepared_close`
+/// legitimately compose while this device's own close is in flight, and
+/// refusing here would deadlock exactly the recovery paths that exist to
+/// resolve it. What it does instead is REPORT, so a caller that would advance
+/// the parent can decline while a caller that is recovering it can proceed.
+fn local_fence_overlay(
+    vault_id: &[u8; 32],
+    cursor_c_n: &[u8; 32],
+) -> Result<FrontierBinding, CompositionError> {
+    match crate::storage::client_db::trader_parent_fence::active_fence(vault_id, cursor_c_n) {
+        Ok(None) => Ok(FrontierBinding::Free),
+        Ok(Some(f)) => Ok(FrontierBinding::LocallyFenced { tx_id: f.tx_id }),
+        // An unreadable local fence table is not evidence that nothing is in
+        // flight. Fail closed rather than report a parent free on the strength
+        // of a database error.
+        Err(e) => Err(CompositionError::BindingEvidenceUnavailable(format!(
+            "the local trader-parent fence table is unreadable: {e}"
+        ))),
+    }
+}
+
+/// Whether a bound MARKET bundle's successor has actually become economic
+/// state, and if so what that successor is.
+///
+/// Three outcomes, and the split between the last two is the whole point:
+/// under the write-once slot every market failure collapsed into one
+/// fail-closed verdict, because a claimed slot with no receipt was
+/// indistinguishable from a claimed slot with a wrong one. "Bound but not yet
+/// settled" is now a FACT the walk can report.
+///
+/// ###################################################################
+/// # TEMPORARY SCAFFOLDING (5c-1). DELETED IN 5c-2.
+/// # This is the PRE-BUNDLE evidence gate, kept verbatim so successful market
+/// # trades keep advancing reserves while the acceptance seam is unfinished.
+/// # 5c-2 replaces the whole function with the Rev-15 rule: the exact bundled
+/// # trader successor accepted under ordinary DSM advancement AND `A_B`
+/// # verified. Do not grow new dependencies on it.
+/// ###################################################################
+enum MarketRealization {
+    /// The evidence is present and agrees. Fold this successor.
+    Realized(Box<VaultStateV2>),
+    /// The evidence is ABSENT — the trade has not settled yet. Not an error.
+    Absent(String),
+    /// The evidence is PRESENT and CONTRADICTS the bundle. A divergence is
+    /// never an absence, and this must fail closed.
+    Contradicts(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn realize_market_successor_5c1(
+    vault_id: &[u8; 32],
+    x: &[u8; 32],
+    cursor_state: &VaultStateV2,
+    cursor_c_n: &[u8; 32],
+    pc_a: &[u8; 32],
+    pc_b: &[u8; 32],
+    fee_bps: u32,
+) -> MarketRealization {
+    // THE RECEIPT GATE. Everything below this line moves someone's liquidity,
+    // so nothing below it runs until the settlement is witnessed. The receipt
+    // is the only artifact here that cannot be produced without settling: it
+    // carries an inclusion path for a leaf the trader's own settling advance
+    // wrote into its own device root.
+    //
+    // A missing receipt is ABSENCE, not contradiction. The bundle is bound, so
+    // the parent is consumed and the vault leaves routing — but the trade has
+    // simply not landed yet, and a later walk will fold it.
+    let Some(receipt) =
+        crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, x).await
+    else {
+        return MarketRealization::Absent("its settlement receipt is not available".into());
+    };
+    // The receipt must describe the step this bundle claims. It is fetched by
+    // (vault, x) and x came from the bound bundle, so it is already tied to
+    // this trade; this pins the generations it moves between. A receipt for a
+    // DIFFERENT step is a divergence, not an absence.
+    if receipt.trade.parent_sequence != cursor_state.generation
+        || receipt.trade.new_sequence != cursor_state.generation.saturating_add(1)
+    {
+        return MarketRealization::Contradicts(
+            "its receipt witnesses a different generation step".into(),
+        );
+    }
+    let new_sequence = receipt.trade.new_sequence;
+    // Fetch the full signed RouteCommit paired with X.
+    let rc_key = external_commitment_rc_key(x);
+    let Ok(rc_bytes) = BitcoinTapSdk::storage_get_bytes(&rc_key).await else {
+        return MarketRealization::Absent("its RouteCommit is not published".into());
+    };
+    let Ok(rc) = generated::RouteCommitV1::decode(rc_bytes.as_slice()) else {
+        return MarketRealization::Contradicts("its RouteCommit does not decode".into());
+    };
+    // Storage keys are untrusted labels, so X is RECOMPUTED from the
+    // RouteCommit bytes and required to equal the one the bundle commits.
+    if compute_external_commitment(&rc) != *x {
+        return MarketRealization::Contradicts(
+            "its RouteCommit does not recompute the bundle's X".into(),
+        );
+    }
+    // Routed-unlock eligibility: initiator signature over canonical RC bytes,
+    // this vault present in the route, and the anchor for X visible.
+    let Ok(hop) = verify_route_commit_unlock_eligibility(&rc_bytes, vault_id).await else {
+        return MarketRealization::Contradicts(
+            "its RouteCommit fails routed-unlock eligibility".into(),
+        );
+    };
+    // THE PARENT BINDING. The hop must name the c_n of the exact cursor state
+    // it consumes — one byte-equality that pins the generation, the reserves,
+    // the pair, the fee and the authority position at once, because they are
+    // members of the identified V_n.
+    if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice() {
+        return MarketRealization::Contradicts(
+            "its hop is bound to a different parent state".into(),
+        );
+    }
+    if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
+        return MarketRealization::Contradicts("its hop amounts are malformed".into());
+    }
+    let mut in_buf = [0u8; 16];
+    in_buf.copy_from_slice(&hop.input_amount_u128);
+    let mut out_buf = [0u8; 16];
+    out_buf.copy_from_slice(&hop.expected_output_amount_u128);
+    // The wire carries 16-byte big-endian amounts; base units are u64. The
+    // narrowing happens HERE, once, checked — an amount that does not fit is a
+    // malformed hop, not a value to truncate.
+    let (Ok(input_amount), Ok(expected_output)) = (
+        u64::try_from(u128::from_be_bytes(in_buf)),
+        u64::try_from(u128::from_be_bytes(out_buf)),
+    ) else {
+        return MarketRealization::Contradicts("its hop amounts do not fit u64".into());
+    };
+    // Direction against the state's own canonical pair.
+    let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
+    let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
+    if !input_is_a && !input_is_b {
+        return MarketRealization::Contradicts("its hop trades a different pair".into());
+    }
+    let (cursor_in, cursor_out) = if input_is_a {
+        (cursor_state.reserve_a, cursor_state.reserve_b)
+    } else {
+        (cursor_state.reserve_b, cursor_state.reserve_a)
+    };
+    // Re-simulate against the cursor. The composer demands the simulated output
+    // equals the trader's claimed expected_output — anything else means the
+    // trade settled against a different baseline and folding it is unsafe.
+    let Some(simulated) = constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
+    else {
+        return MarketRealization::Contradicts(
+            "its trade does not re-simulate against this state".into(),
+        );
+    };
+    if simulated != expected_output {
+        return MarketRealization::Contradicts(
+            "its claimed output is not what this state's curve yields".into(),
+        );
+    }
+    // Construct the successor: generation advanced, reserves moved, predecessor
+    // edge set to the consumed state's identity, and EVERY other field — pair,
+    // fee, release policy, encumbrances, authority position, storage set,
+    // quorum — copied byte-for-byte. Saturating arithmetic is defense in depth;
+    // the re-simulation above should already exclude these.
+    let (new_a, new_b) = if input_is_a {
+        (
+            cursor_state.reserve_a.saturating_add(input_amount),
+            cursor_state.reserve_b.saturating_sub(expected_output),
+        )
+    } else {
+        (
+            cursor_state.reserve_a.saturating_sub(expected_output),
+            cursor_state.reserve_b.saturating_add(input_amount),
+        )
+    };
+    let mut next = cursor_state.clone();
+    next.generation = new_sequence;
+    next.reserve_a = new_a;
+    next.reserve_b = new_b;
+    next.parent_state_commitment = *cursor_c_n;
+    MarketRealization::Realized(Box::new(next))
 }
 
 /// Compose a DISCOVERED vault from its published artifacts alone.
@@ -756,6 +901,17 @@ mod tests {
     fn fleet() -> crate::handlers::faucet_flow_tests::FleetGuard {
         let guard = crate::handlers::faucet_flow_tests::install_canonical_fleet();
         crate::sdk::storage_io::fake_fleet::reset();
+        // The binding double is a process-global too, and the board runs
+        // --test-threads=1, so a leaked record makes failures order-dependent.
+        crate::sdk::binding_fleet_double::reset_all();
+        // Register the canonical fleet NOW, so an id-keyed injection made
+        // before the first binding op resolves. The transport registers
+        // lazily, which is too late for a control.
+        if let Ok(catalog) = crate::sdk::storage_set::StorageSetCatalog::from_env_config() {
+            if let Some(set) = catalog.sole_set() {
+                crate::sdk::binding_fleet_double::register_set(set);
+            }
+        }
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
         guard
     }
@@ -768,33 +924,86 @@ mod tests {
             .clone()
     }
 
-    /// Win the settlement slot at `(vault_id, parent_sequence)` for the trade
-    /// named by `x`, binding the exact parent state `parent_c_n`.
+    /// Bind the vault parent `parent_c_n` to the trade named by `x`, through
+    /// the PRODUCTION driver.
     ///
     /// This is what makes a successor edge EXIST for the walk. Publishing a
-    /// receipt and a RouteCommit no longer creates an edge on its own: the
-    /// network has to have serialized the generation to this claimant.
+    /// receipt and a RouteCommit no longer creates an edge on its own: a
+    /// binding-final bundle has to own the parent.
+    ///
+    /// It drives `bind_settlement` rather than writing a record directly, so
+    /// these tests exercise the real Class K decision — including the fact that
+    /// a second candidate over the same parent loses.
     async fn win_slot(
         vault_id: &[u8; 32],
         parent_sequence: u64,
         x: &[u8; 32],
         parent_c_n: &[u8; 32],
         claimant_pk: &[u8],
-        claimant_sk: &[u8],
     ) {
         let set = fleet_set();
-        let body = dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-            vault_id: *vault_id,
-            parent_sequence,
-            x: *x,
-            claimant_public_key: claimant_pk.to_vec(),
-            storage_set_id: set.id(),
-            parent_binding_c_n: *parent_c_n,
-        };
-        let envelope =
-            dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(&body, claimant_sk)
-                .expect("sign slot claim");
-        crate::sdk::storage_io::fake_fleet::claim(&set, &envelope);
+        let bundle = market_bundle_for_tests(&set, vault_id, parent_sequence, parent_c_n, x);
+        let out = crate::sdk::settlement_bind::bind_settlement(
+            &set,
+            proposer_for(claimant_pk),
+            &bundle,
+            *vault_id,
+            *parent_c_n,
+        )
+        .await
+        .expect("drive the bind");
+        assert_eq!(
+            out,
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed),
+            "the fixture's bind must commit"
+        );
+    }
+
+    /// A DETERMINISTIC per-claimant proposer id. `local_proposer_id` reads the
+    /// app's genesis hash, which these tests do not set — and two claimants
+    /// sharing a proposer would collide on rounds, so a contention test would
+    /// pass for the wrong reason.
+    fn proposer_for(claimant_pk: &[u8]) -> [u8; 32] {
+        let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+            dsm::common::domain_tags::TAG_DSM_BINDING_KEYSET,
+        );
+        h.update(b"test-proposer");
+        h.update(claimant_pk);
+        *h.finalize().as_bytes()
+    }
+
+    /// The market bundle a fixture binds: its `route_set_commitment` IS the
+    /// trade's `x`, which is what the walk reads back to locate the receipt and
+    /// the RouteCommit.
+    fn market_bundle_for_tests(
+        set: &crate::sdk::storage_set::StorageSet,
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        parent_c_n: &[u8; 32],
+        x: &[u8; 32],
+    ) -> generated::SettlementBundleV1 {
+        generated::SettlementBundleV1 {
+            version: dsm::dlv::settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
+            storage_set_id: set.id().to_vec(),
+            q: set.quorum(),
+            intent_commitment: x.to_vec(),
+            route_set_commitment: x.to_vec(),
+            selected_route: b"route".to_vec(),
+            trader_parent: parent_c_n.to_vec(),
+            trader_successor: x.to_vec(),
+            vault_transitions: vec![generated::VaultTransitionV1 {
+                vault_id: vault_id.to_vec(),
+                parent_generation: parent_sequence,
+                parent_state_commitment: parent_c_n.to_vec(),
+                parent_reserves_digest: [0x0A; 32].to_vec(),
+                successor_ccb: x.to_vec(),
+                reserve_deltas: Vec::new(),
+                witnesses: Vec::new(),
+            }],
+            proof_material: Vec::new(),
+            bundle_signatures: Vec::new(),
+            recovery_material: Vec::new(),
+        }
     }
 
     /// Build the owner's `V_0` for a fixture vault, its `CCB(V_0)` bytes, its
@@ -1088,7 +1297,7 @@ mod tests {
         publish_receipt(vault_id, &trade, &pk, &sk).await;
         // THE EDGE. Publishing evidence no longer makes a successor exist —
         // the network must have serialized this generation to this claimant.
-        win_slot(vault_id, parent_sequence, &x, parent_binding, &pk, &sk).await;
+        win_slot(vault_id, parent_sequence, &x, parent_binding, &pk).await;
         (new_a, new_b)
     }
 
@@ -1131,8 +1340,8 @@ mod tests {
         let _fleet = fleet();
         let vault_id = vid(0x0D);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
+        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-2");
+        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -1141,15 +1350,15 @@ mod tests {
             panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
         };
         assert!(
-            detail.contains("attributed member"),
+            detail.contains("answered the binding key"),
             "the refusal names the counting failure: {detail}"
         );
 
         // Positive control: heal the members and the SAME vault composes to a
         // frontier, so the refusal above is the quorum rule and not a broken
         // fixture.
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-3");
+        crate::sdk::binding_fleet_double::heal_member_id("dsm-node-2");
+        crate::sdk::binding_fleet_double::heal_member_id("dsm-node-3");
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
@@ -1165,8 +1374,13 @@ mod tests {
         let _fleet = fleet();
         let vault_id = vid(0x0E);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
-        crate::sdk::storage_io::fake_fleet::set_echo("dsm-node-2", Some("dsm-node-1"));
+        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
+        // node-2 answers naming node-1. That defeats BOTH halves of the
+        // attribution rule — the id and the register incarnation — so it is
+        // uncountable, and two honest answers cannot be reached.
+        let impostor = crate::sdk::binding_fleet_double::endpoint_for_member("dsm-node-2")
+            .expect("node-2 is registered");
+        crate::sdk::binding_fleet_double::set_echo(&impostor, b"dsm-node-1".to_vec(), [1; 32]);
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -1177,38 +1391,60 @@ mod tests {
         ));
 
         // Positive control: the SAME two members, honestly attributed, reach q.
-        crate::sdk::storage_io::fake_fleet::set_echo("dsm-node-2", Some("dsm-node-2"));
+        crate::sdk::binding_fleet_double::restore_echo(
+            &impostor,
+            "dsm-node-2",
+            crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-2"),
+        );
         compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect("composes when both answers are attributable");
     }
 
-    /// Members holding DIFFERENT values for one write-once cell is a network
-    /// fault, never something to pick a side of.
+    /// A key with NO CHOSEN VALUE is neither a frontier nor an edge.
+    ///
+    /// The old test forced two claimants onto one write-once cell. That state
+    /// is unreachable through the driver here, and saying otherwise would be a
+    /// test pretending the driver did something it structurally cannot: with
+    /// n=3 and q=2, failing two members means no quorum forms AT ALL, so no
+    /// single-member accept can be left behind.
+    ///
+    /// The reachable — and more accurate — hostile state is UNDETERMINED: an
+    /// accepted record held below this reader's quorum, with no absence quorum
+    /// either. The verdict is the same fail-closed, and the premise is honest.
+    /// Reading it as "free" would let a composer walk straight past a bind that
+    /// is still in flight.
     #[tokio::test]
-    async fn a_divergent_write_once_cell_fails_closed() {
+    async fn a_key_with_no_chosen_value_is_neither_a_frontier_nor_an_edge() {
         let _fleet = fleet();
         let vault_id = vid(0x0F);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (pk1, sk1) = trader();
-        let (pk2, sk2) = trader();
-        // One claimant lands on node-1 only; a different one on node-2 only.
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-3");
-        win_slot(&vault_id, 0, &x_seed(0x1A), &c0, &pk1, &sk1).await;
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
-        win_slot(&vault_id, 0, &x_seed(0x1B), &c0, &pk2, &sk2).await;
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-3");
+        // ONE member holds an accepted record; ONE is unreachable; the third
+        // holds nothing. Attributed = 2 = q, but neither a chosen value nor a
+        // quorum of explicit absences exists.
+        crate::sdk::binding_fleet_double::plant_committed(
+            &["dsm-node-1"],
+            &[dsm::dlv::settlement_bundle::resource_key(&c0)],
+            [0xAB; 32],
+            [0xAB; 32],
+            [0xCD; 32],
+            dsm::storage::binding_record::Round {
+                counter: 21,
+                proposer_id: [0x7B; 32],
+            },
+        );
+        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
-            .expect_err("a divergent cell is not a frontier and not an edge");
-        assert!(matches!(
-            err,
-            CompositionError::BindingEvidenceUnavailable(_)
-        ));
+            .expect_err("an undecided key is not a frontier and not an edge");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("not yet decided"),
+            "the refusal names the undecided binding: {detail}"
+        );
     }
 
     /// The presentation authenticates a state; handing the composer the bytes
@@ -1325,17 +1561,19 @@ mod tests {
         assert_eq!(composed.state.quorum, state.quorum);
     }
 
-    /// THE OWNER'S RULING (2026-08-29), pinned.
+    /// A BOUND generation whose trade has not settled is not a failure and not
+    /// a frontier that anyone may build on: it is the realized frontier, MARKED
+    /// BOUND.
     ///
-    /// A quorum-established slot winner whose settlement receipt is missing is
-    /// NOT a frontier. The network has already said this generation has a
-    /// claimed successor; reporting it as the end of the chain because a
-    /// second artifact is absent would make the cell walk decorative. It
-    /// fails closed, and an adversary who wins a slot and never settles holds
-    /// the vault here — an accepted liveness cost, never permission to
-    /// manufacture maximality.
+    /// This is the behaviour the occupancy/realization split exists to produce.
+    /// Under the write-once slot the walk could not tell "claimed, not settled
+    /// yet" from "claimed, evidence wrong", so both fail-closed and the vault
+    /// became uncomposable — which took `dlv_reconcile`, the very path that
+    /// resolves it, down with it. Now the walk reports both facts at once: the
+    /// reserves are unchanged (nothing realized) AND the parent is occupied
+    /// (nobody may quote against it).
     #[tokio::test]
-    async fn a_claimed_generation_without_its_receipt_fails_closed() {
+    async fn a_bound_generation_without_its_receipt_is_the_frontier_and_is_marked_bound() {
         let _fleet = fleet();
         let vault_id = vid(0x07);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
@@ -1353,19 +1591,37 @@ mod tests {
         )
         .await;
         publish_extcommit(&x, &pk).await;
-        // Slot won, RC published and valid — but NO receipt was ever written.
-        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
+        // Bound, RC published and valid — but NO receipt was ever written.
+        win_slot(&vault_id, 0, &x, &c0, &pk).await;
 
-        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-            .await
-            .expect_err("a claimed successor without evidence is not a frontier");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
-        };
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("a bound-but-unsettled parent still composes");
+
+        // NOTHING REALIZED. The reserves and the generation are the baseline's.
+        assert_eq!(composed.sequence, 0, "no successor became economic state");
+        assert_eq!(composed.reserves_a, 1_000_000);
+        assert_eq!(composed.reserves_b, 500_000);
+        assert_eq!(composed.c_n, c0);
         assert!(
-            detail.contains("receipt"),
-            "the refusal names the missing evidence: {detail}"
+            composed.folded_parents.is_empty(),
+            "an unrealized bundle folds nothing"
         );
+
+        // AND THE PARENT IS OCCUPIED, naming the trade that owns it — so a
+        // caller can tell its OWN trade's bundle from a stranger's without
+        // re-fetching the bytes this walk already read.
+        match composed.frontier_binding {
+            FrontierBinding::BoundUnrealized {
+                route_set_commitment,
+                ..
+            } => assert_eq!(
+                route_set_commitment, x,
+                "the reported X is the bound bundle's own"
+            ),
+            other => panic!("expected BoundUnrealized, got {other:?}"),
+        }
     }
 
     /// A pointer creates no edge. Under the cell walk a self-signed pointer
@@ -1395,22 +1651,249 @@ mod tests {
         assert_eq!(composed.c_n, c0);
     }
 
-    /// A slot winner that binds a parent state OTHER than the cursor's `c_n`
-    /// means the network and this verifier disagree about what the generation
-    /// IS. Fail closed — never fold past it, never call it a frontier.
+    /// A STRANGER CANNOT CLOSE SOMEBODY ELSE'S VAULT.
+    ///
+    /// `x_close = close_slot_commitment(vault, gen)` is a PUBLIC derivation and
+    /// the binding register is application-blind by design (§22 #12), so anyone
+    /// can build a close-shaped bundle naming a victim's vault at its current
+    /// `c_n` and bind it. The register will accept it — that is not its job.
+    ///
+    /// What stops the composer folding that vault to zero is the owner's
+    /// signature over the exact release successor. This is the mutation control
+    /// for that gate: it reproduces the forbidden STATE (a bound close-shaped
+    /// bundle from a non-owner) and asserts the vault does NOT die.
     #[tokio::test]
-    async fn a_winner_binding_a_different_parent_state_fails_closed() {
+    async fn a_stranger_cannot_close_a_vault_by_binding_a_close_shaped_bundle() {
+        let _fleet = fleet();
+        let vault_id = vid(0x1B);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let set = fleet_set();
+
+        // A stranger's key, and a close-shaped bundle for the victim's vault at
+        // its real current parent — every input to it is public.
+        let (_stranger_pk, stranger_sk) = trader();
+        let successor = dsm::dlv::close_authorization::CloseSuccessor {
+            vault_id,
+            leg_a_policy_commit: TOKEN_A,
+            leg_a_amount: 1_000_000,
+            leg_b_policy_commit: TOKEN_B,
+            leg_b_amount: 500_000,
+            parent_sequence: 0,
+            fee_bps: FEE_BPS,
+        };
+        let forged =
+            dsm::dlv::close_authorization::sign_close_authorization(&successor, &stranger_sk)
+                .expect("a stranger can always sign SOMETHING");
+        let bundle = crate::sdk::settlement_bind::close_bundle(
+            set.id(),
+            set.quorum(),
+            vault_id,
+            0,
+            c0,
+            [0x0A; 32],
+            dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
+            forged,
+        );
+        let out =
+            crate::sdk::settlement_bind::bind_settlement(&set, [0x9E; 32], &bundle, vault_id, c0)
+                .await
+                .expect("drive the bind");
+        assert_eq!(
+            out,
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed),
+            "THE REGISTER ACCEPTS IT — it is application-blind, and that is the \
+             premise of this test, not a defect"
+        );
+
+        // AND THE VAULT DOES NOT DIE. The composer refuses rather than folding
+        // to the terminal zero-reserve state.
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a close nobody authorized must not compose as a closed vault");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("not authorized by the vault owner"),
+            "the refusal names the missing authorization: {detail}"
+        );
+    }
+
+    /// AUTHORIZATION BEFORE OCCUPANCY — the ordering is the safety property.
+    ///
+    /// The signature alone is not enough; WHEN it is checked decides whether a
+    /// failure is recoverable. `dlv_close` signs with the device's CURRENT
+    /// authority key, while every composer verifies under the authority the
+    /// vault's PARENT committed. Those can differ — a rotated or delegated
+    /// owner authority — and the two orderings then diverge sharply:
+    ///
+    ///   authorize, then bind  -> refusal. Nothing was consumed; the parent is
+    ///                            still free and a correctly-authorized close
+    ///                            can still happen.
+    ///   bind, then authorize  -> the bind SUCCEEDS (the register is
+    ///                            application-blind), the parent is consumed,
+    ///                            and no composer will ever realize it. The
+    ///                            vault is permanently occupied and unclosable
+    ///                            — a liveness failure reachable only AFTER
+    ///                            winning contention, with no error at the
+    ///                            point of failure.
+    ///
+    /// This pins both halves. It is the control for the preflight in
+    /// `dlv.close`, which runs `verify_close_authorization` BEFORE the first
+    /// mutating binding op precisely to keep the second row unreachable.
+    #[tokio::test]
+    async fn an_unauthorized_close_must_be_refused_before_it_reaches_occupancy() {
+        let _fleet = fleet();
+        let vault_id = vid(0x1C);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let set = fleet_set();
+
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("the fresh vault composes");
+        assert_eq!(composed.frontier_binding, FrontierBinding::Free);
+
+        // A signer that does NOT satisfy the authority this parent committed —
+        // what a rotated owner authority looks like to the composer.
+        let (_other_pk, other_sk) = trader();
+        let successor = dsm::dlv::close_authorization::CloseSuccessor {
+            vault_id,
+            leg_a_policy_commit: TOKEN_A,
+            leg_a_amount: 1_000_000,
+            leg_b_policy_commit: TOKEN_B,
+            leg_b_amount: 500_000,
+            parent_sequence: 0,
+            fee_bps: FEE_BPS,
+        };
+        let sig = dsm::dlv::close_authorization::sign_close_authorization(&successor, &other_sk)
+            .expect("sign");
+        let bundle = crate::sdk::settlement_bind::close_bundle(
+            set.id(),
+            set.quorum(),
+            vault_id,
+            0,
+            c0,
+            [0x0A; 32],
+            dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
+            sig,
+        );
+
+        // ── ORDER 1: authorize first. This is what `dlv.close` does. ─────────
+        assert!(
+            dsm::dlv::close_authorization::verify_close_authorization(
+                &bundle,
+                &successor,
+                &composed.owner_public_key,
+            )
+            .is_err(),
+            "the preflight must refuse a close the parent's authority did not sign"
+        );
+        // Nothing was bound, because the refusal came first.
+        let after =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("still composes");
+        assert_eq!(
+            after.frontier_binding,
+            FrontierBinding::Free,
+            "a refused close must consume NOTHING — the parent stays available"
+        );
+        assert_eq!(
+            (after.sequence, after.reserves_a, after.reserves_b),
+            (0, 1_000_000, 500_000)
+        );
+
+        // ── ORDER 2: bind first, and see what the preflight prevents. ────────
+        // This is the mutation, performed by construction rather than by
+        // editing the gate out: the register accepts the bundle because it does
+        // not inspect values, so occupancy is consumed by a close that can
+        // never be realized.
+        assert_eq!(
+            crate::sdk::settlement_bind::bind_settlement(&set, [0x9C; 32], &bundle, vault_id, c0)
+                .await
+                .expect("drive the bind"),
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed),
+            "the application-blind register accepts it — that is the premise"
+        );
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("and now nothing can realize it");
+        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
+            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        };
+        assert!(
+            detail.contains("not authorized by the vault owner"),
+            "the vault is now occupied by an unrealizable close: {detail}"
+        );
+        // THE PERMANENT BRICK: the parent is taken, so even a correctly
+        // authorized close can no longer bind it. This is the state the
+        // preflight's ordering exists to keep unreachable.
+        let ordered = crate::sdk::settlement_bind::bind_settlement(
+            &set,
+            [0x9D; 32],
+            &crate::sdk::settlement_bind::close_bundle(
+                set.id(),
+                set.quorum(),
+                vault_id,
+                0,
+                c0,
+                [0x0A; 32],
+                dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
+                b"a properly authorized signature".to_vec(),
+            ),
+            vault_id,
+            c0,
+        )
+        .await
+        .expect("drive the second bind");
+        assert!(
+            !matches!(ordered, Ok(dsm::dlv::quorum_bind::Outcome::Committed)),
+            "a later, correctly authorized close cannot take a parent that is already \
+             consumed — the vault is permanently unclosable, which is exactly what \
+             authorizing before binding prevents"
+        );
+    }
+
+    /// A bundle bound at a key it DOES NOT NAME is a divergence.
+    ///
+    /// `K(B)` is derived from `parent_state_commitment`, so the production
+    /// driver structurally cannot put a bundle at a key its own transitions
+    /// contradict — only a hand-built key set can, and the node is
+    /// application-blind (§22 #12) and would accept one. So this plants the
+    /// record directly: that is the honest way to reach a state the driver
+    /// cannot produce, and the walk's parent check is the ONLY thing standing
+    /// between it and a fold.
+    #[tokio::test]
+    async fn a_bundle_bound_at_a_key_it_does_not_name_fails_closed() {
         let _fleet = fleet();
         let vault_id = vid(0x10);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let stale = [0xEEu8; 32];
         assert_ne!(stale, c0);
-        let (pk, sk) = trader();
-        win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk, &sk).await;
+        let (pk, _sk) = trader();
+        // A perfectly well-formed bundle — for a DIFFERENT parent.
+        win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk).await;
+        // Now plant its committed record at THIS parent's key, which is what
+        // an application-blind register permits.
+        let set = fleet_set();
+        let bundle = market_bundle_for_tests(&set, &vault_id, 0, &stale, &x_seed(0x10));
+        let canon = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon");
+        crate::sdk::binding_fleet_double::plant_committed(
+            &["dsm-node-1", "dsm-node-2"],
+            &[dsm::dlv::settlement_bundle::resource_key(&c0)],
+            dsm::dlv::settlement_bundle::bundle_digest(&canon),
+            dsm::dlv::settlement_bundle::bundle_digest(&canon),
+            dsm::dlv::settlement_bundle::bundle_addr(&canon),
+            dsm::storage::binding_record::Round {
+                counter: 41,
+                proposer_id: [0x7C; 32],
+            },
+        );
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
-            .expect_err("a winner bound elsewhere is a divergence");
+            .expect_err("a bundle bound elsewhere is a divergence");
         let CompositionError::BindingEvidenceUnavailable(detail) = err else {
             panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
         };
@@ -1451,7 +1934,7 @@ mod tests {
         let trade = settled_trade(&x, 0, true, 10_000, out);
         publish_receipt(&vault_id, &trade, &pk, &sk).await;
         // The SLOT binds the true parent; only the hop is stale.
-        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
+        win_slot(&vault_id, 0, &x, &c0, &pk).await;
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -1489,7 +1972,7 @@ mod tests {
         // The receipt witnesses a step from generation 5, not from 0.
         let witnessed = settled_trade(&x, 5, true, 10, 3);
         publish_receipt(&vault_id, &witnessed, &pk, &sk).await;
-        win_slot(&vault_id, 0, &x, &c0, &pk, &sk).await;
+        win_slot(&vault_id, 0, &x, &c0, &pk).await;
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await

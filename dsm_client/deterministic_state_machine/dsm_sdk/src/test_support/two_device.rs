@@ -406,6 +406,10 @@ impl Pair {
         // suite-ordered test dies on a register CONFLICT (different bytes,
         // same K_root) that no single-test run can reproduce.
         crate::sdk::storage_io::fake_registers::reset();
+        // Same reasoning for the binding register: a process-global store whose
+        // stale member echoes would make a later vault's key answer for the
+        // wrong fleet.
+        crate::sdk::binding_fleet_double::reset_all();
         let nodes: Vec<FakeB0xNode> = (0..3).map(|_| FakeB0xNode::spawn()).collect();
         let endpoints: Vec<String> = nodes.iter().map(|n| n.endpoint.clone()).collect();
         crate::test_support::fake_node::point_env_config_at(&endpoints);

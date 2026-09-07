@@ -484,6 +484,19 @@ pub(crate) async fn publish_route_anchor_with_pointers(
             errors.push(PublishPointerError::HopParentNotCurrent { hop_index });
             continue;
         }
+        // AND THE PARENT MUST STILL BE AVAILABLE. Naming the right c_n is not
+        // enough once occupancy is a separate fact from realization: a parent
+        // can be the realized frontier AND already bound by a trade that has
+        // not settled. A pointer published against it advertises a trade that
+        // can never be witnessed, because the settle will lose the bind.
+        //
+        // "Occupied" is precisely "not current" for this publisher's purpose,
+        // so it reuses the existing variant rather than inventing a second way
+        // to say the same thing to the same caller.
+        if composed.frontier_binding != crate::sdk::vault_state_composition::FrontierBinding::Free {
+            errors.push(PublishPointerError::HopParentNotCurrent { hop_index });
+            continue;
+        }
         let parent_sequence = composed.sequence;
         let new_sequence = match parent_sequence.checked_add(1) {
             Some(v) => v,

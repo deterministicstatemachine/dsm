@@ -381,16 +381,15 @@ impl ProvenanceResolver for OnePeer {
         None
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        _vault_id: &[u8; 32],
-        _parent_sequence: u64,
+        _resource_key: &[u8; 32],
         _storage_set: &dsm::ccb::StorageSetMembers,
         _quorum: u32,
-    ) -> dsm::economic::cell_observation::CellObservation {
-        // This fixture roots no settlement slots: it cannot observe the
-        // cell, which is not the same as observing it empty.
-        dsm::economic::cell_observation::CellObservation::Unavailable {
+    ) -> dsm::dlv::binding_observation::BindingObservation {
+        // This fixture roots no bindings: it cannot observe the key, which is
+        // not the same as observing it free.
+        dsm::dlv::binding_observation::BindingObservation::Unavailable {
             attributed: 0,
             required: 2,
         }
@@ -612,16 +611,15 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
             None
         }
 
-        fn settlement_slot_observation(
+        fn parent_binding_observation(
             &self,
-            _vault_id: &[u8; 32],
-            _parent_sequence: u64,
+            _resource_key: &[u8; 32],
             _storage_set: &dsm::ccb::StorageSetMembers,
             _quorum: u32,
-        ) -> dsm::economic::cell_observation::CellObservation {
-            // This fixture roots no settlement slots: it cannot observe the
-            // cell, which is not the same as observing it empty.
-            dsm::economic::cell_observation::CellObservation::Unavailable {
+        ) -> dsm::dlv::binding_observation::BindingObservation {
+            // This fixture roots no bindings: it cannot observe the key, which
+            // is not the same as observing it free.
+            dsm::dlv::binding_observation::BindingObservation::Unavailable {
                 attributed: 0,
                 required: 2,
             }

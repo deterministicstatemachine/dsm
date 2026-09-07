@@ -6,6 +6,8 @@
 //! state; each submodule is a self-contained crypto primitive.
 
 pub mod beta_storage_profile; // the deployed three-member beta profile Ã¢ÂÂ fixed, not a formula
+pub mod binding_observation; // what a set of binding reads establishes about ONE resource key
+pub mod close_authorization; // the owner signature over the exact DLV release successor
 pub mod controller_rotation;
 pub mod pair_identity;
 pub mod quorum_bind; // Def 6.21 Ã¢ÂÂ Class K sans-IO quorum-binding decision engine

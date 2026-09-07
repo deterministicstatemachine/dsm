@@ -45,6 +45,7 @@
 //! `ABORTED` is reachable only when no value is chosen anywhere — never from
 //! elapsed time.
 
+use crate::dlv::binding_observation;
 use crate::storage::binding_record::{
     keyset_digest, record_set_digest, validate_key_set, BindingEncodingError, BindingRecord, Round,
     SetCell, BINDING_RECORD_SCHEMA_V1,
@@ -527,54 +528,25 @@ impl QuorumBind {
         self.read_digest.fill(None);
     }
 
+    /// Fold this round's read answers into the evidence the decision rule
+    /// consumes. The per-key tally itself lives in
+    /// [`crate::dlv::binding_observation::tally_key`] and is shared with every
+    /// observer, so a proposer and a composer cannot drift on what "chosen"
+    /// means. All this adds is `highest_is_ours`, which only a proposer can
+    /// answer.
     fn fold_reads(&self) -> ReadEvidence {
-        let n = self.tx.members.len();
-        let mut per_member: Vec<Option<Vec<Option<BindingRecord>>>> = vec![None; n];
-        let mut attributed = 0u32;
-        for (ix, ans) in self.read_answers.iter().enumerate() {
-            if let Some(MemberRead::Records(recs)) = ans {
-                if recs.len() == self.tx.keys.len() {
-                    attributed += 1;
-                    per_member[ix] = Some(recs.clone());
-                }
-            }
-        }
+        let (per_member, attributed) =
+            binding_observation::attributed_records(&self.read_answers, self.tx.keys.len());
         let mut keys = Vec::with_capacity(self.tx.keys.len());
         let mut max_ballot = 0u64;
         for ki in 0..self.tx.keys.len() {
-            // Highest ACCEPTED record for this key, and the highest ballot of
-            // ANY record (accept or promise) so our next ballot clears it.
-            let mut highest_accept: Option<BindingRecord> = None;
-            for recs in per_member.iter().flatten() {
-                if let Some(rec) = &recs[ki] {
-                    max_ballot = max_ballot.max(rec.round.counter / 2);
-                    if rec.status == BINDING_STATUS_ACCEPTED {
-                        match &highest_accept {
-                            Some(h) if h.round >= rec.round => {}
-                            _ => highest_accept = Some(rec.clone()),
-                        }
-                    }
-                }
-            }
-            // Chosen at a key = q members hold an ACCEPTED record at exactly the
-            // same round (one round ⇒ one proposer ⇒ one value).
-            let holders_at_highest = match &highest_accept {
-                None => 0,
-                Some(h) => per_member
-                    .iter()
-                    .flatten()
-                    .filter(|recs| {
-                        recs[ki].as_ref().is_some_and(|r| {
-                            r.status == BINDING_STATUS_ACCEPTED && r.round == h.round
-                        })
-                    })
-                    .count() as u32,
-            };
-            let ours = highest_accept.as_ref().map(|h| self.is_ours(h));
+            let t = binding_observation::tally_key(&per_member, ki, self.tx.quorum);
+            max_ballot = max_ballot.max(t.max_ballot);
+            let highest_is_ours = t.highest_accept.as_ref().is_some_and(|h| self.is_ours(h));
             keys.push(KeyView {
-                highest_accept,
-                holders_at_highest,
-                highest_is_ours: ours.unwrap_or(false),
+                highest_accept: t.highest_accept,
+                holders_at_highest: t.holders_at_highest,
+                highest_is_ours,
             });
         }
         ReadEvidence {

@@ -170,7 +170,10 @@ struct Fixture {
     ),
     route_commit_bytes: Vec<u8>,
     x: [u8; 32],
-    slot_envelope: Vec<u8>,
+    /// `Canon(B)` of the bundle bound at `k(c_n)`, plus its two identities.
+    bundle_bytes: Vec<u8>,
+    bundle_digest: [u8; 32],
+    bundle_addr: [u8; 32],
     evidence_bytes: Vec<u8>,
     evidence_addr: [u8; 32],
     /// The owner's generic inclusion proof, and its address — what the bundle
@@ -179,6 +182,39 @@ struct Fixture {
     proof_addr: [u8; 32],
     settle: Operation,
     witness: EconomicTransitionWitness,
+}
+
+/// A market settlement bundle over this vault's parent — the object the binding
+/// register's chosen record names. Its `route_set_commitment` IS the settle's
+/// `x`, which is what ties the binding to this trade.
+fn market_bundle(
+    storage_set_id: [u8; 32],
+    x: [u8; 32],
+    c_n: [u8; 32],
+    output: u64,
+) -> dsm::types::proto::SettlementBundleV1 {
+    dsm::types::proto::SettlementBundleV1 {
+        version: dsm::dlv::settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
+        storage_set_id: storage_set_id.to_vec(),
+        q: 2,
+        intent_commitment: vec![0x1D; 32],
+        route_set_commitment: x.to_vec(),
+        selected_route: b"route".to_vec(),
+        trader_parent: c_n.to_vec(),
+        trader_successor: vec![0xBB; 32],
+        vault_transitions: vec![dsm::types::proto::VaultTransitionV1 {
+            vault_id: VAULT.to_vec(),
+            parent_generation: PARENT,
+            parent_state_commitment: c_n.to_vec(),
+            parent_reserves_digest: vec![0x0A; 32],
+            successor_ccb: vec![0x5C; 32],
+            reserve_deltas: output.to_be_bytes().to_vec(),
+            witnesses: vec![],
+        }],
+        proof_material: vec![],
+        bundle_signatures: vec![],
+        recovery_material: b"r".to_vec(),
+    }
 }
 
 fn sibling_array(tree: &EconomicSmt, key: &[u8; 32]) -> Box<[[u8; 32]; ECONOMIC_SMT_HEIGHT]> {
@@ -309,19 +345,14 @@ fn fixture() -> Fixture {
     let x = dsm::dlv::route_commit::compute_external_commitment(&rc);
     let route_commit_bytes = rc.encode_to_vec();
 
-    // The v2 slot winner: keyed by name, bound to the state.
-    let slot_envelope = dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
-        &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-            vault_id: VAULT,
-            parent_sequence: PARENT,
-            x,
-            claimant_public_key: k.trader_pk.clone(),
-            storage_set_id: vault_set_id,
-            parent_binding_c_n: c_n,
-        },
-        &k.trader_sk,
-    )
-    .expect("sign slot claim");
+    // THE BOUND BUNDLE. It replaces the v2 slot winner: the register holds a
+    // record naming this bundle's identity, and the arm re-hashes the bytes
+    // itself. Note there is no claimant field to forge or to check — authorship
+    // now travels through X -> RouteCommit -> initiator signature.
+    let bundle = market_bundle(vault_set_id, x, c_n, output);
+    let bundle_bytes = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon bundle");
+    let bundle_digest = dsm::dlv::settlement_bundle::bundle_digest(&bundle_bytes);
+    let bundle_addr = dsm::dlv::settlement_bundle::bundle_addr(&bundle_bytes);
 
     // The owner's generic proof, and the bundle that NAMES it: exact
     // CCB(V_n), the vault-bound authority evidence, one address.
@@ -419,7 +450,9 @@ fn fixture() -> Fixture {
         reserve_b,
         route_commit_bytes,
         x,
-        slot_envelope,
+        bundle_bytes,
+        bundle_digest,
+        bundle_addr,
         evidence_bytes,
         evidence_addr,
         proof_bytes,
@@ -438,7 +471,14 @@ struct SettleResolver {
     /// evidence bundle and the owner's proof artifact. Anything else fails
     /// closed, so a test that expects a fetch to miss gets a miss.
     objects: Vec<([u8; 32], Vec<u8>)>,
-    slot_envelope: Option<Vec<u8>>,
+    /// The one resource key this fixture speaks for: `k(c_n)` of the vault
+    /// parent under test. A settle naming a different parent derives a
+    /// different key and gets `Unavailable` — which is exactly the coordinate
+    /// check the old claim body needed a dedicated field for.
+    key: [u8; 32],
+    /// The record the binding register holds at `key`, as its two identity
+    /// fields. `None` means a quorum of members each hold NOTHING there.
+    bound: Option<([u8; 32], [u8; 32])>,
 }
 
 impl SettleResolver {
@@ -513,24 +553,36 @@ impl ProvenanceResolver for SettleResolver {
         None
     }
 
-    fn settlement_slot_observation(
+    fn parent_binding_observation(
         &self,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
+        resource_key: &[u8; 32],
         _storage_set: &dsm::ccb::StorageSetMembers,
         _quorum: u32,
-    ) -> dsm::economic::cell_observation::CellObservation {
-        use dsm::economic::cell_observation::CellObservation;
-        // The three answers this fixture can give, kept distinct because the
-        // arm now gives each a different verdict: a claim, a quorum of members
-        // reporting no claim, and a cell this fixture cannot speak for at all.
-        match (
-            &self.slot_envelope,
-            *vault_id == VAULT && parent_sequence == PARENT,
-        ) {
-            (Some(bytes), true) => CellObservation::Claimed(bytes.clone()),
-            (None, true) => CellObservation::EmptyAtQuorum,
-            _ => CellObservation::Unavailable {
+    ) -> dsm::dlv::binding_observation::BindingObservation {
+        use dsm::dlv::binding_observation::{BindingObservation, ChosenBinding};
+        // The answers this fixture can give, kept distinct because the arm
+        // gives each a different verdict: a chosen binding, a quorum of members
+        // each holding nothing, and a key this fixture cannot speak for.
+        //
+        // The key is derived from `c_n` by the ARM, so a settle naming a
+        // different parent asks about a different key and gets Unavailable —
+        // which is exactly the coordinate check the old claim body needed a
+        // field for.
+        match (self.bound, *resource_key == self.key) {
+            (Some((value_digest, value_addr)), true) => {
+                BindingObservation::BoundFinal(ChosenBinding {
+                    tx_id: value_digest,
+                    value_digest,
+                    value_addr,
+                    round: dsm::storage::binding_record::Round {
+                        counter: 21,
+                        proposer_id: [0x7B; 32],
+                    },
+                    holders: 2,
+                })
+            }
+            (None, true) => BindingObservation::Free,
+            _ => BindingObservation::Unavailable {
                 attributed: 0,
                 required: 2,
             },
@@ -558,14 +610,31 @@ impl ProvenanceResolver for SettleResolver {
     }
 }
 
+/// Bind `bundle` at this fixture's key: publish its canonical bytes and point
+/// the register's chosen record at them. The register is application-blind, so
+/// ANY well-formed bundle can be bound here — which is precisely why the arm
+/// must check the bundle against the parent itself.
+fn bind_bundle(r: &mut SettleResolver, bundle: &dsm::types::proto::SettlementBundleV1) {
+    let bytes = dsm::dlv::settlement_bundle::canon(bundle).expect("canon");
+    let digest = dsm::dlv::settlement_bundle::bundle_digest(&bytes);
+    let addr = dsm::dlv::settlement_bundle::bundle_addr(&bytes);
+    r.objects.retain(|(a, _)| *a != digest);
+    r.objects.push((digest, bytes));
+    r.bound = Some((digest, addr));
+}
+
 fn resolver_for(fx: &Fixture) -> SettleResolver {
     SettleResolver {
         owner_root: fx.owner_root,
         objects: vec![
             (fx.evidence_addr, fx.evidence_bytes.clone()),
             (fx.proof_addr, fx.proof_bytes.clone()),
+            // The arm fetches the bound bundle by its INNER digest and
+            // re-hashes it, so the fixture must serve the real bytes.
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
         ],
-        slot_envelope: Some(fx.slot_envelope.clone()),
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
     }
 }
 
@@ -623,30 +692,33 @@ fn a_settle_whose_parent_was_never_claimed_is_refused_as_evidence() {
     // branch of the taxonomy.
     let fx = fixture();
     let mut r = resolver_for(&fx);
-    r.slot_envelope = None;
+    r.bound = None;
     expect_reserve_refusal(
         &fx,
         &r,
         &ctx_for(&fx),
-        "no settlement-slot claim was established for this parent",
+        "no binding was established for this parent",
     );
 }
 
 #[test]
-fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
-    // THE TAXONOMY, END TO END. This file's own rule is that an outage
-    // retries and a forgery does not, and the slot read is where that rule
-    // was previously lost: every non-winner answer collapsed into one
-    // "no winner" verdict, so a network fault was reported as a forged credit
-    // and a genuine divergence in a WRITE-ONCE cell was reported as a network
-    // fault. Both now carry their own verdict, and neither is
-    // `DlvReserveConsumptionInvalid`.
-    use dsm::economic::cell_observation::CellObservation;
+fn an_unreadable_or_undecided_binding_is_retryable_and_a_divergent_one_is_quarantined() {
+    // THE TAXONOMY, END TO END. This file's own rule is that an outage retries
+    // and a forgery does not, and the register read is where that rule was
+    // previously lost: every non-winner answer collapsed into one "no winner"
+    // verdict, so a network fault was reported as a forged credit and a genuine
+    // divergence was reported as a network fault.
+    //
+    // The binding register adds a FIFTH answer the write-once cell could not
+    // express, and it is the one that is easy to get backwards — see the
+    // Undetermined case below. Each of the four non-chosen answers now carries
+    // its own verdict, and none of them is DlvReserveConsumptionInvalid.
+    use dsm::dlv::binding_observation::BindingObservation;
 
-    /// The honest fixture, with one substituted slot observation.
+    /// The honest fixture, with one substituted binding observation.
     struct Observing<'a> {
         inner: &'a SettleResolver,
-        observation: CellObservation,
+        observation: BindingObservation,
     }
     impl ProvenanceResolver for Observing<'_> {
         fn root_register_candidate_set(
@@ -673,13 +745,12 @@ fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
         ) -> Option<dsm::economic::provenance::FaucetTicketWin> {
             self.inner.winning_faucet_ticket(f, i)
         }
-        fn settlement_slot_observation(
+        fn parent_binding_observation(
             &self,
-            _v: &[u8; 32],
-            _p: u64,
+            _k: &[u8; 32],
             _s: &dsm::ccb::StorageSetMembers,
             _q: u32,
-        ) -> CellObservation {
+        ) -> BindingObservation {
             self.observation.clone()
         }
         fn immutable_evidence(
@@ -703,7 +774,7 @@ fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
     // An outage is RETRYABLE, never a forgery verdict.
     let r = Observing {
         inner: &base,
-        observation: CellObservation::Unavailable {
+        observation: BindingObservation::Unavailable {
             attributed: 1,
             required: 2,
         },
@@ -711,73 +782,80 @@ fn an_unobservable_slot_cell_is_retryable_and_a_divergent_one_is_quarantined() {
     match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
         Err(ProvenanceError::OwnerLineage(
             dsm::economic::provenance::PeerLineageFailure::Incomplete(m),
-        )) => assert!(m.contains("answered the settlement-slot cell"), "got: {m}"),
+        )) => assert!(m.contains("answered the binding key"), "got: {m}"),
         other => panic!("an outage must be incomplete, got {other:?}"),
     }
 
-    // A divergence in a write-once cell is a QUARANTINE.
+    // THE NEW ARM, AND THE ONE THAT IS EASY TO GET BACKWARDS. A promise in
+    // flight, or an accepted record held by fewer members than THIS reader's
+    // quorum, is NOT a forgery: two quorums intersect, but one READ need not
+    // see the intersection, so a value already chosen behind a down member
+    // lands here. Mapping it to Invalid would make every concurrent settle
+    // permanently invalid — the credit could never become valid later, because
+    // Invalid is a terminal verdict and Incomplete is not.
     let r = Observing {
         inner: &base,
-        observation: CellObservation::Conflict { distinct: 2 },
+        observation: BindingObservation::Undetermined {
+            attributed: 2,
+            highest_round: None,
+        },
+    };
+    match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
+        Err(ProvenanceError::OwnerLineage(
+            dsm::economic::provenance::PeerLineageFailure::Incomplete(m),
+        )) => assert!(m.contains("not yet decided"), "got: {m}"),
+        other => panic!("an undecided binding must be incomplete, got {other:?}"),
+    }
+
+    // A divergence — two chosen values on one key — is a QUARANTINE.
+    let r = Observing {
+        inner: &base,
+        observation: BindingObservation::Conflict { distinct: 2 },
     };
     match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
         Err(ProvenanceError::OwnerLineage(
             dsm::economic::provenance::PeerLineageFailure::Quarantined(m),
-        )) => assert!(m.contains("contradictory claims"), "got: {m}"),
+        )) => assert!(m.contains("chosen values"), "got: {m}"),
         other => panic!("a divergence must be quarantined, got {other:?}"),
     }
 }
 
 #[test]
-fn a_slot_winner_binding_a_different_parent_state_is_refused() {
-    // MC-SETTLE-6 — the PR2 companion control: nodes accept any well-formed
-    // claim, so the ARM is what refuses a winner bound to a different c_n.
+fn a_bound_bundle_naming_a_different_parent_state_is_refused() {
+    // MC-SETTLE-6 — the Class N companion control. The binding register is
+    // APPLICATION-BLIND (§22 #12): a member never inspects the value it holds,
+    // so a proposer can bind, at k(c_n), a bundle whose transitions name some
+    // other parent. Nothing in the read catches that; the ARM is what refuses.
     let fx = fixture();
-    let k = keys();
     let mut r = resolver_for(&fx);
-    r.slot_envelope = Some(
-        dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
-            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-                vault_id: VAULT,
-                parent_sequence: PARENT,
-                x: fx.x,
-                claimant_public_key: k.trader_pk.clone(),
-                storage_set_id: fx.vault_set_id,
-                parent_binding_c_n: [0xDD; 32],
-            },
-            &k.trader_sk,
-        )
-        .expect("sign divergent claim"),
+    let mut divergent = market_bundle(fx.vault_set_id, fx.x, fx.c_n, fx.output);
+    divergent.vault_transitions[0].parent_state_commitment = vec![0xDD; 32];
+    bind_bundle(&mut r, &divergent);
+    expect_reserve_refusal(
+        &fx,
+        &r,
+        &ctx_for(&fx),
+        "does not name this settle's parent state",
     );
-    expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "slot winner does not bind");
 }
 
 #[test]
-fn a_slot_winner_claimed_under_another_storage_set_is_refused() {
+fn a_bundle_bound_under_another_storage_set_is_refused() {
     // THE SET IS THE VAULT'S, NOT THE READER'S. A member reconfigured into a
     // different set keeps serving rows written under the old one, so a
-    // cross-set envelope is reachable — and a claim that was not made under
-    // the set `V_n` commits established exclusivity in some other register.
+    // cross-set bundle is reachable — and one bound under a set `V_n` does not
+    // commit established exclusivity in some other register entirely.
     let fx = fixture();
-    let k = keys();
     let mut r = resolver_for(&fx);
-    r.slot_envelope = Some(
-        dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
-            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-                vault_id: VAULT,
-                parent_sequence: PARENT,
-                x: fx.x,
-                claimant_public_key: k.trader_pk.clone(),
-                // Well-formed, correctly signed, right cell, right parent —
-                // and a foreign set.
-                storage_set_id: [0x5E; 32],
-                parent_binding_c_n: fx.c_n,
-            },
-            &k.trader_sk,
-        )
-        .expect("sign foreign-set claim"),
+    // Well-formed, right vault, right parent, right X — and a foreign set.
+    let foreign = market_bundle([0x5E; 32], fx.x, fx.c_n, fx.output);
+    bind_bundle(&mut r, &foreign);
+    expect_reserve_refusal(
+        &fx,
+        &r,
+        &ctx_for(&fx),
+        "bound under a different storage set",
     );
-    expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "slot winner does not bind");
 }
 
 #[test]
@@ -856,8 +934,13 @@ fn a_noncanonical_committed_quorum_is_refused_before_the_cell_is_read() {
     .expect("witness");
     let resolver = SettleResolver {
         owner_root: fx.owner_root,
-        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
-        slot_envelope: Some(fx.slot_envelope.clone()),
+        objects: vec![
+            (evidence_addr, evidence_bytes),
+            (proof_addr, proof_bytes),
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
+        ],
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
     };
     let mut ctx = ctx_for(&fx);
     ctx.verified_operation = Some(&op);
@@ -871,28 +954,23 @@ fn a_noncanonical_committed_quorum_is_refused_before_the_cell_is_read() {
 }
 
 #[test]
-fn a_slot_winner_by_a_different_claimant_is_refused() {
-    // MC-SETTLE-5: claimant == RouteCommit author == the trader under
-    // validation. A rival's winning claim funds nothing for THIS trader.
+fn a_bundle_committing_another_route_set_is_refused() {
+    // MC-SETTLE-5, restated for a bundle. The old claim carried a
+    // `claimant_public_key`, and the arm required it to equal the RouteCommit
+    // author and the settling trader. A SettlementBundle has no claimant field
+    // and does not need one: authorship travels as a CONTENT chain — the bundle
+    // commits X, section 7 recomputes X from the RouteCommit's own bytes, and
+    // that RouteCommit carries the initiator's signature.
+    //
+    // So the thing a rival cannot do is bind a bundle that commits THIS trade.
+    // A rival's bundle commits a different X, and that is what is refused here.
+    // WHO pushed the bytes into the register is genuinely irrelevant, which is
+    // strictly stronger than trusting a self-asserted claimant field.
     let fx = fixture();
-    let (rival_pk, rival_sk) =
-        dsm::crypto::sphincs::generate_sphincs_keypair().expect("rival keypair");
     let mut r = resolver_for(&fx);
-    r.slot_envelope = Some(
-        dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
-            &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-                vault_id: VAULT,
-                parent_sequence: PARENT,
-                x: fx.x,
-                claimant_public_key: rival_pk,
-                storage_set_id: fx.vault_set_id,
-                parent_binding_c_n: fx.c_n,
-            },
-            &rival_sk,
-        )
-        .expect("sign rival claim"),
-    );
-    expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "not the settling trader");
+    let rival = market_bundle(fx.vault_set_id, [0xA1; 32], fx.c_n, fx.output);
+    bind_bundle(&mut r, &rival);
+    expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "commits a different route set");
 }
 
 #[test]
@@ -1166,8 +1244,13 @@ fn an_insufficient_output_reserve_is_refused() {
     .expect("witness");
     let resolver = SettleResolver {
         owner_root: owner_tree.root(),
-        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
-        slot_envelope: Some(fx.slot_envelope.clone()),
+        objects: vec![
+            (evidence_addr, evidence_bytes),
+            (proof_addr, proof_bytes),
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
+        ],
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
     };
     let mut ctx = ctx_for(&fx);
     ctx.verified_operation = Some(&op);
@@ -1252,8 +1335,13 @@ fn an_artifact_proving_another_generation_selects_nothing() {
     .expect("witness");
     let resolver = SettleResolver {
         owner_root: owner_tree.root(),
-        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
-        slot_envelope: Some(fx.slot_envelope.clone()),
+        objects: vec![
+            (evidence_addr, evidence_bytes),
+            (proof_addr, proof_bytes),
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
+        ],
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
     };
     match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
         Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
@@ -1336,8 +1424,13 @@ fn proven_leaves_that_disagree_with_v_n_are_refused() {
     .expect("witness");
     let resolver = SettleResolver {
         owner_root: owner_tree.root(),
-        objects: vec![(evidence_addr, evidence_bytes), (proof_addr, proof_bytes)],
-        slot_envelope: Some(fx.slot_envelope.clone()),
+        objects: vec![
+            (evidence_addr, evidence_bytes),
+            (proof_addr, proof_bytes),
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
+        ],
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
     };
     match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
         Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
@@ -1386,18 +1479,9 @@ fn an_over_paying_trade_is_refused_by_re_simulation_alone() {
         *output_amount = inflated;
         *settlement_receipt_id = receipt_id;
     }
-    let slot_envelope = dsm::dlv::settlement_slot_claim::sign_settlement_slot_claim(
-        &dsm::dlv::settlement_slot_claim::SettlementSlotClaimBody {
-            vault_id: VAULT,
-            parent_sequence: PARENT,
-            x,
-            claimant_public_key: k.trader_pk.clone(),
-            storage_set_id: fx.vault_set_id,
-            parent_binding_c_n: fx.c_n,
-        },
-        &k.trader_sk,
-    )
-    .expect("sign slot claim");
+    // The binding must name the INFLATED trade's X, so the arm reaches the
+    // re-simulation check rather than refusing on the route set first.
+    let inflated_bundle = market_bundle(fx.vault_set_id, x, fx.c_n, inflated);
     let _ = ow;
 
     // Rebuild the trader witness for the inflated op.
@@ -1434,7 +1518,7 @@ fn an_over_paying_trade_is_refused_by_re_simulation_alone() {
     )
     .expect("witness");
     let mut resolver = resolver_for(&fx);
-    resolver.slot_envelope = Some(slot_envelope);
+    bind_bundle(&mut resolver, &inflated_bundle);
     let mut ctx = ctx_for(&fx);
     ctx.verified_operation = Some(&op);
     match verify_transition_provenance(&witness, &resolver, &ctx) {

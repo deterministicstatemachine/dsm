@@ -958,22 +958,45 @@ impl AppRouterImpl {
                             composed.sequence,
                         );
                     }
-                    // A composed state that reaches this arm is a FRONTIER for
-                    // the read that produced it: the walk terminated on an
-                    // empty settlement-slot cell at the owner-committed
-                    // quorum. Every other terminal — short quorum, divergent
-                    // cell, a claimed successor whose settlement evidence is
-                    // missing, depth saturation — failed closed as
-                    // `BindingEvidenceUnavailable` and never got here, so this
-                    // arm no longer needs a saturation drop of its own.
+                    // A composed state that reaches this arm is the REALIZED
+                    // frontier for the read that produced it. Every ambiguous
+                    // terminal — short quorum, a divergent key, an undecided
+                    // binding, depth saturation — failed closed as
+                    // `BindingEvidenceUnavailable` and never got here.
                     //
-                    // The old "no parent-in-flight drop" reasoning is likewise
-                    // retired with the pointer fold: a self-signed pointer used
-                    // to be the only evidence an edge existed, so acting on its
-                    // bare presence would have handed liquidity suppression to
-                    // anyone for one storage write. The edge source is now a
-                    // quorum-established slot winner, which nobody can forge
-                    // into existence.
+                    // But realized is not the same as AVAILABLE. Since the
+                    // occupancy/realization split, the walk can legitimately
+                    // return a frontier whose parent is already bound by a
+                    // trade that has not settled yet. Quoting against such a
+                    // parent manufactures an unsettleable quote: this arm
+                    // stamps `composed.c_n` as the hop's parent binding a few
+                    // lines below, and a bound parent loses at bind time with
+                    // ConflictFinal — after the taker has already committed to
+                    // a route. Dropping the candidate costs one quote; not
+                    // dropping it costs a failed settlement.
+                    //
+                    // A LOCALLY-FENCED parent is dropped for the same reason
+                    // and a different one: this device holds an unresolved
+                    // transaction over it, so quoting it would race our own
+                    // recovery.
+                    //
+                    // The old "no parent-in-flight drop" reasoning is retired
+                    // with the pointer fold: a self-signed pointer used to be
+                    // the only evidence an edge existed, so acting on its bare
+                    // presence handed liquidity suppression to anyone for one
+                    // storage write. Occupancy is now established by the
+                    // binding register, which nobody can forge into existence.
+                    if composed.frontier_binding
+                        != crate::sdk::vault_state_composition::FrontierBinding::Free
+                    {
+                        log::info!(
+                            "[route.findAndBindBestPath] dropping {}: its parent is not free \
+                             ({:?}) — a quote against a bound parent cannot settle",
+                            crate::util::text_id::encode_base32_crockford(&vid),
+                            composed.frontier_binding,
+                        );
+                        continue;
+                    }
 
                     // Replace the ad's reserves with the composed values
                     // so the downstream path search builds AMM edges
