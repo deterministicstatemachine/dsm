@@ -1,5 +1,160 @@
 # 5c-2 — Market realization: the trader-acceptance artifact `TA_B`
 
+> ## OPEN GATE — prove the ~50 KB owner-close bundle survives every real path
+>
+> A fully pinned owner-close `SettlementBundle` under 2c-A is **50,330 bytes**, almost entirely
+> because `0x000F` field 4 carries a SPHINCS+ **SPX256f** signature of **49,856 bytes**
+> (`dsm/src/crypto/sphincs.rs:19`, asserted `:1552`; `sphincs_sign` pins SPX256f at `:1152`).
+> A market bundle has no such field and is far smaller.
+>
+> This does **not** invalidate 2c-A — carrying the exact owner authorization is the right design,
+> and the size must not be reduced by weakening authorization semantics. But **owner-close
+> implementation is not routine until every actual configured path is shown to carry it.** DSM has
+> already hit an HTTP 413 once, so limits in this stack are real. The question is DSM's configured
+> path, never generic web capacity.
+>
+> ```text
+> owner-close CCB ~ 50,330 bytes
+>         v  verify EVERY hop that actually carries B:
+>     PutImmutable request/body limit
+>     Class N immutable-object size limit
+>     HTTP / reverse-proxy limit          (nginx default client_max_body_size is 1 MB)
+>     client persistence / blob limit
+>     recovery fetch path
+>     BLE / USB / offline framing, IF B traverses it
+>     q-replication batching limit
+>     any Base32-Crockford encoding hop   (~1.6x -> ~80 KB on the wire)
+> ```
+>
+> ### GATE RESULT — 2026-09-07: **PASS WITH DEPLOYMENT CONTROL OWED.** 10.4x margin at the
+> repository and configuration level. Not architecture work; the residue is validation.
+>
+> ```text
+> BINDING LIMIT   512 KiB = 524,288 B   device_auth body buffer
+>                                       dsm_storage_node/src/auth/mod.rs:224-228
+>                                       (hardcoded; http.body_limit_bytes cannot reach it)
+> owner-close B        50,330 B   =  9.6% of the cap
+> headroom            473,958 B   =  10.42x
+> ```
+>
+> | hop | limit | verdict |
+> |---|---|---|
+> | `device_auth` body buffer (**binding**) | 524,288 | passes |
+> | `RequestBodyLimitLayer` (outer) | 1,048,576 | passes |
+> | `MAX_IMMUTABLE_PAYLOAD_BYTES` (inner) | 1,048,576 | passes |
+> | reverse proxy | **none exists** — TLS terminates in-process, `8080` published directly | n/a |
+> | Postgres `BYTEA` / SQLite `BLOB` | 1 GB / 1e9 | passes |
+> | client HTTP put/fetch | no body, response or timeout cap configured | passes |
+> | client persistence | bundle is **never** stored locally — fence table is 32-byte digests | n/a |
+> | Class N binding register | **digests only** (~180 B regardless of bundle size) | n/a |
+> | BLE / USB | **not traversed** by a settlement bundle | n/a |
+> | q-replication | sequential per-member PUT; each measured alone, never aggregate | passes |
+>
+> **Two hypotheses tested and both negative — record them so they are not re-raised.**
+> *Base32 inflation does not occur:* the body is raw `application/octet-stream`; Base32 Crockford is
+> applied only to the 32-byte address (`storage_node_sdk.rs:832-833`). Wire size is 50,330, not
+> ~80,530. *The register is not implicated:* `BindingRecord` is seven fixed-width fields
+> (`dsm/src/storage/binding_record.rs:96-104`); the bundle is referenced by `value_addr` and never
+> carried inline.
+>
+> **~50 KB is already routine on this exact path.** The close flow persists and PUTs two comparable
+> objects *before* the bundle exists: `dlv_close_intent.op_bytes` (the signed `Operation::DlvClose`,
+> embedding a 49,856-byte signature) and `pointer_bytes` (`VaultPendingPointerV1` with its own
+> publisher signature), the latter HTTP-PUT to every node (`dlv_routes.rs:2621-2666`).
+>
+> **The prior 413 was a different route, and its lesson is preserved.** `b0x` envelope cap is
+> 131,072 (`b0x.rs:32`); it was overrun at 168,400 bytes by a cached per-relationship state that
+> embedded a 49,856-byte SPHINCS+ signature. It was fixed by **shrinking the payload**, not raising
+> the cap (`bcr.rs:87-92`). A settlement bundle does not traverse `b0x` — but if one ever were
+> routed there the margin would be 2.60x, and a second signature in the same envelope would break
+> it. **Do not route a bundle onto `b0x`.**
+>
+> ### The defect this trace exposed is the more consequential finding
+>
+> It sits at the durability-before-binding seam, where a failure is far harder to recover from than
+> any payload-size problem.
+>
+> `settlement_bind.rs:74-77` writes `put_immutable_to_all_members(...).await.map(|_| ())`. The inner
+> call returns `Ok(KeyedPutFanout)` whenever the SDK could be *constructed*; per-member outcomes
+> live in `fanout.accepted`, which is **discarded**. So **0 of 3 members accepting — a 413, a 401,
+> an unreachable fleet — still returns `Ok`**, the bind proceeds, and the fence is placed against a
+> `value_addr` no member holds. `settlement_resume`'s fetch can then never succeed and the parent
+> stays fenced forever.
+>
+> Req 6.15's **ordering** (PutImmutable before the first mutating op) is enforced; its **success**
+> is not. The caller erases the distinction between two different facts:
+>
+> ```text
+> SDK invocation succeeded
+>         vs
+> enough committed Class N members actually accepted B
+> ```
+>
+> The pathological sequence the current code permits:
+>
+> ```text
+> immutable PUT attempted -> 0 members accept B -> outer fn still returns Ok
+>   -> fence placed / QuorumBind proceeds -> binding names value_addr
+>   -> B unavailable from the committed storage set
+>   -> recovery cannot obtain the exact bound object -> fence cannot complete normally
+> ```
+>
+> **The normative rule for the fix — not merely `accepted > 0`.** The threshold derives from the
+> protocol, since the invariant is quorum-durable publication before binding mutation:
+>
+> ```text
+> accepted attributable members >= q      for the EXACT committed storage set
+> otherwise: reject BEFORE the first occupancy mutation
+> ```
+>
+> **Boundary tests to pin, at beta `n=3, q=2`:**
+>
+> ```text
+> 0 / 3 accepted  -> refuse before bind
+> 1 / 3 accepted  -> refuse before bind
+> 2 / 3 accepted  -> publication prerequisite satisfied
+> 3 / 3 accepted  -> publication prerequisite satisfied
+> ```
+>
+> Plus the case that names the semantic hole `.map(|_| ())` hides: **every HTTP call returned
+> normally, and every member rejected the PUT.** That must refuse.
+>
+> **Fix this regardless of the size margin** — the margin is only load-bearing because the client
+> currently cannot observe the put failing at all.
+>
+> ### CAVEAT 2 — what is asserted from source rather than measured
+>
+> - The live `node.toml` on the three ECS boxes was not read. This cannot flip the verdict — the
+>   binding 512 KiB is hardcoded in the binary and `http.body_limit_bytes` can only tighten a
+>   looser outer hop — but it is an assertion, not an observation.
+> - **No positive control was run.** Nothing has PUT a real ~50 KB bundle at a live node. Given
+>   that this repo's own 413 was discovered in production rather than in review, one
+>   `curl --data-binary @50k.bin .../api/v2/immutable/put` expecting 201 is worth doing before the
+>   owner-close path is treated as proven.
+> - No test pins a ~50 KB body through the fully-layered router. That is a coverage gap, not a
+>   failing limit.
+>
+> ### Work order set by the owner, 2026-09-07
+>
+> ```text
+> 1. Fix/pin immutable publication success semantics   (accepted >= q, before any mutation)
+> 2. Live positive control: PUT a real ~50 KB immutable object, expect 201;
+>    and read the deployed node.toml on the three ECS boxes
+> 3. 2c-B -- still the normative dependency blocking complete market Canon(B)
+>    and the first conformant market b
+> 4. 2c-C / 2c-D and the 5c-2 conformance work
+> ```
+>
+> **Nothing in this trace justifies redesigning `close_authorization` or shrinking the canonical
+> bundle.** Items 1 and 2 are validation and a bug fix; the amendment stands.
+
+> **Corrected by [amendment 2c-A](../papers/amendment-2c-a-bundle-and-transition.md), 2026-09-07.**
+> This plan predates the canonical bundle shape. Under 2c-A there is **no `successor_ccb`, no
+> `reserve_deltas`, and no bundle-level `proof_material` or `bundle_signatures`**; the bundle is
+> `{market_terms?, transitions}`, a transition carries the complete nested `V_{n+1}`, `P_v` nests
+> inside its transition, and the shape discriminator is `market_terms` presence. Inline
+> `Corrected by 2c-A` notes mark each affected passage. **Where the two disagree, 2c-A governs.**
+
 Status: APPROVED, implementation starting 2026-09-07. Follows 5c-1
 (`docs/plans/2026-09-06-5c-1-binding-occupancy-cutover.md`).
 
@@ -61,9 +216,9 @@ coherent architecture; 5d (deleting the old register from the storage node) and
    it consumes, marked in code for wholesale deletion.
 2. **The market bundle's placeholder `trader_successor`**, which currently
    carries the trade identity `X` because there was no successor commitment to
-   name. It becomes the real thing here — and the close/market discriminator
-   must be checked against that change, since a close is identified by its
-   transition's `successor_ccb`.
+   name. It becomes the real thing here. *Corrected by 2c-A: the close/market
+   discriminator is `market_terms` presence, so the trader coordinates exist only
+   in the market shape and this change cannot disturb close identification.*
 3. **The trader-parent fence has no release producer.** `SuccessorAccepted`'s
    only non-definition use is inside `mod tests`. Every committed market settle
    therefore leaves a `committed_awaiting_acceptance` row that nothing releases,
@@ -249,7 +404,8 @@ the one question in 5c-2 worth getting exactly right.
   settle fences the trader's chain. Changing that key changes what
   `local_fence_overlay` and the resumed-close identity check can see.
 - **The fence release call site is obvious once the outcome is captured**:
-  immediately after the settle advance, `record_event(.., SuccessorAccepted { successor })`
+  `record_event(.., SuccessorAccepted { successor })` — **but see the single normative ordering
+  below: this is emitted only AFTER `TA_B` verifies, never beside `AdvanceOutcome`**
   with `successor == C_dsm+ == bundle.trader_successor`.
 - **The owner side is a single substitution point.** `dlv_reconcile`'s only
   evidence input is `fetch_verified_receipt` (`dlv_routes.rs:1633`); every
@@ -343,21 +499,40 @@ gate, most become *bundle-internal* rather than disappearing: the RouteCommit is
 already inside `B.selected_route` (so the network fetch dies), X-recompute and
 routed-unlock eligibility become internal consistency checks, the hop parent
 binding and pair/amount checks survive, and the constant-product re-simulation
-moves onto bundled `reserve_deltas` + `proof_material`. The one genuine deletion
+moves onto the authenticated `V_n` and the inline `V_{n+1}` (*2c-A removed `reserve_deltas`; the
+movement is their difference*). **X-recompute does NOT become bundle-internal** — it needs `Q`,
+which 2c-A ruling 2 places in the Def 14.2 receipt publication set, so it stays a Tier-3 obligation
+of the Req 14.5 verifier. The one genuine deletion
 is successor *construction*: the walk currently derives the successor locally and
-must instead **read `transition.successor_ccb`** — the largest semantic inversion
+must instead **read `T_v.successor`** — the largest semantic inversion
 in the change. The walk already binds `transition` and throws it away
 (`let _ = transition;`).
 
-**Populate for real** — `trader_successor` (f8), `successor_ccb`,
-`reserve_deltas`, and `proof_material`, at `dlv_routes.rs:3229-3260` plus five
-fixture sites (`vault_state_composition.rs:978`, `dlv_routes.rs:7017`/`:8130`,
-`binding_occupancy.rs:479`, `settlement_bind.rs:242`) that must move in lockstep
-or the tests keep asserting the placeholder shape. `intent_commitment` is
-currently aliased to `X` — two distinct spec objects sharing one value.
+**Populate for real** — the whole `market_terms` subobject plus `T_v.successor`, at
+`dlv_routes.rs:3229-3260` plus five fixture sites (`vault_state_composition.rs:978`,
+`dlv_routes.rs:7017`/`:8130`, `binding_occupancy.rs:479`, `settlement_bind.rs:242`)
+that must move in lockstep or the tests keep asserting the placeholder shape.
 
-**Wire the missing producer** — `SuccessorAccepted`, immediately after the settle
-advance, once `AdvanceOutcome` is captured.
+*Corrected by 2c-A: there is no `successor_ccb`, no `reserve_deltas` and no bundle-level
+`proof_material`. `intent_commitment` becomes the nested `TradeIntent` object rather than a digest
+aliased to `X` — two distinct spec objects that were sharing one value.*
+
+**Wire the missing producer** — `SuccessorAccepted`. Capturing `AdvanceOutcome` is what makes
+the successor *nameable*; it is **not** the release point. The single normative ordering, and the
+only one in this document:
+
+```text
+advance exact successor
+  -> finish / validate economic admission
+  -> construct + verify TA_B
+  -> SuccessorAccepted / fence release
+  -> realize
+  -> publish the Def 14.2 receipt
+```
+
+Releasing on `Committed`, or beside `AdvanceOutcome`, makes a different continuation creatable
+from the fenced parent. An earlier draft of this plan said "immediately after the settle advance";
+that instruction is **deleted**, not softened.
 
 **Provenance** — the arm validates occupancy, bundle identity/scoping, parent
 naming, trade identity and authorship. It does **not** validate realization, and
@@ -378,11 +553,27 @@ script's frontier assertion is already wrong** — `verdict not in ("FREE",)`
 mis-fails a legitimately `BoundUnrealized` frontier. That is a bug in my C3 rig
 port, independent of 5c-2.
 
-**No break in the close discriminator.** It reads `t.successor_ccb`, never
-`b.trader_successor`, and a real market `successor_ccb = H_dom(DSM/vault-state, …)`
-cannot collide with `H_dom(DSM/dlv-close-commit, …)` without a second preimage.
-`key_set` is derived purely from `parent_state_commitment`, so resumption is
-byte-identical across the change. One asymmetry to state explicitly: `close_bundle`
+> **Superseded by 2c-A's close/market ruling.** The paragraph below described the discriminator
+> as a recomputed `successor_ccb` and noted that `close_bundle` writes `x_close` into both
+> successor fields. Neither survives.
+
+**The close discriminator is `market_terms` presence, and the close shape is outside 5c-2's
+scope.** Under 2c-A a close bundle carries no `market_terms` — hence no trader coordinates, no
+intent, no route and no recovery material — so `permits_successor` no longer means two different
+things by shape, because the close shape has no trader successor to permit. `key_set` is still
+derived purely from `parent_binding`, so resumption is byte-identical across the change and both
+shapes still contend on the identical `k_v`.
+
+**One live deviation this exposes, with an owner.** Req 6.30 gives owner close *"no owner-side
+analogue of the Requirement 6.23 trader-parent fence"*, yet the shipped code writes a
+`trader_parent_fence` row for **every** close. **Removing it is owned by the 5c-2 implementation
+commit that consumes the 2c-A bundle shape** — that commit already rewrites `bind_settlement`'s
+fence call for the market path, so the close call site is open on the same line of the same
+function. (2c-A itself is a normative document with no implementation phase.) The close path keeps
+whatever local durability resume needs; what it must stop doing is claiming a Req 6.23
+trader-parent fence it has no trader chain for.
+
+*Historical text follows.* One asymmetry stated at the time: `close_bundle`
 writes `x_close` into *both* successor fields, so after 5c-2 the market shape
 carries a real `C_T^+` in field 8 while the close shape carries a public
 derivation — `permits_successor` then means two different things by shape.
@@ -431,15 +622,28 @@ would be incoherent. **Spec first, encoder second**: define the normative CCB
 shape, then implement it; do not let the Rust encoder define the protocol by
 accident. Keep `P_v` **minimal and non-redundant** — nothing already committed by
 `V_n`, `T_v`, the selected route or `X` may be repeated for convenience, and
-reserve/input/output values derivable from the authenticated parent plus
-`reserve_deltas` do not belong in it. Preserve the boundary: `T_v` carries the
-complete DLV successor, exact reserve deltas and required witnesses; `P_v`
+reserve/input/output values derivable from the authenticated parent plus the
+successor do not belong in it.
+
+> **Amended by 2c-A.** This ruling originally read *"`T_v` carries the complete DLV successor,
+> **exact reserve deltas** and required witnesses."* The deltas are removed: `T_v.parent_binding →
+> V_n` and the inline `T_v.successor = V_{n+1}` each commit their own reserves, so the movement is
+> their difference, and a carried copy would be a third independently encodable statement of it
+> (the route's `Allocation.delta_in`/`delta_out` is the second). The ruling's *purpose* is better
+> served, not weakened — the continuation is now carried complete rather than by digest.
+> `0x0010 DlvProofMaterial` was settled by 2c-A with **zero fields** for the beta pricing family,
+> and `P_v` nests inside its own `T_v` rather than sitting parallel to `{T_v}`. Preserve the boundary: `T_v` carries the
+complete DLV successor and required witnesses; `P_v`
 carries only the irreducible witness material a foreign Class K verifier needs to
 re-check the exact selected continuation. The target property: a third party can
 verify from `authenticated parent + selected route/X + T_v + P_v + TA_B` with no
 constructor-local state and no live RouteCommit fetch.
 
 ## Owner amendments to the plan (2026-09-07, second pass)
+
+> **Field-path shorthand.** Below, `B.trader_parent` / `B.trader_successor` abbreviate
+> `B.market_terms.trader_parent` / `B.market_terms.trader_successor` under 2c-A. They are members
+> of `MarketTerms`, and an owner close has neither.
 
 **A. Two coordinate systems, never aliases.** The map found that
 `bundle.trader_parent` is currently the *vault's* `c_n` and the market fence is
@@ -473,7 +677,8 @@ path**, not a second QuorumBind resume. On startup/sync, for each
 the permitted successor — if the trader chain is still at `B.trader_parent`,
 resume/commit only `B.trader_successor`; if it already sits at that exact
 successor, continue from there — then resume economic admission, construct and
-verify `TA_B`, publish the evidence/receipt, and release the fence. Reuse the
+verify `TA_B`, release the fence, realize, and only then publish the Def 14.2
+receipt (ordering corrected per amendment D). Reuse the
 existing `resume_pending_admission` rather than inventing another durability
 protocol.
 
@@ -594,10 +799,10 @@ Every placeholder replaced, in the right coordinate system (A):
 ```
 B.trader_parent      = exact ordinary-DSM trader relationship parent
 B.trader_successor   = exact prepared C_dsm+
-B.intent_commitment  = the real I, never X
-T_v.successor_ccb    = the real c_{n+1}
-T_v.reserve_deltas   = populated
-B.proof_material     = P_v per Step 1
+B.market_terms.intent            = the real TradeIntent OBJECT; I is derived
+T_v.successor                    = the complete canonical V_{n+1}; c_{n+1} derived
+T_v.proof_material               = P_v per Step 1 (absent in the beta profile)
+T_v.close_authorization          = ABSENT for every market transition
 B.recovery_material  = per Step 1
 K(B)                 = STILL derived from the DLV parent c_n
 ```
@@ -650,7 +855,7 @@ Delete `MarketRealization` / `realize_market_successor_5c1` and its walk arm. Th
 walk resolves `ta_B` through the discovery edge, verifies `TA_B` **through the
 economic-admission validity path** (C), requires it to match the bundle's exact
 trader parent/successor and `(b, X)`, and then **reads** the successor from
-`transition.successor_ccb` instead of constructing it. `BoundUnrealized` survives
+`T_v.successor` (the complete nested `V_{n+1}`) instead of constructing it. `BoundUnrealized` survives
 as the normal mid-flight state.
 
 **The discovery edge tells a verifier WHERE TO LOOK, never WHAT IS TRUE.** A
@@ -722,12 +927,18 @@ but not yet admitted" is a state that must not exist.
 2. admission staged       -> before the DSM successor commits
 3. DSM successor committed-> before finish_admission completes
 4. validated admission    -> before TA_B
-5. TA_B verified          -> before receipt / fence release
+5. TA_B verified          -> before fence release / realize / receipt
 ```
 
 **Encoding determinism** (I): two independently constructed bundles for the same
-settlement must be byte-identical, including the zero-material `P_v` case and a
-multi-vault bundle.
+settlement must be byte-identical, including the zero-material `P_v` case.
+
+> **Corrected by 2c-A ruling 3.** This originally also demanded a multi-vault bundle vector. Beta
+> fixes `|{T_v}| = 1`, which forces single-hop / fanout-1, so a multi-vault bundle is **not a valid
+> beta bundle** and cannot be a beta conformance vector — retained only as a labelled future
+> non-beta encoding exercise. Note also that "same market settlement" means the same exact prepared
+> trader successor and the same exact canonical recovery material, not merely the same economic
+> trade; recovery material is not composer-derivable.
 
 **Mutation controls**, each reproducing the forbidden state:
 1. Drop the `TA_B` verification → a bound-but-unaccepted bundle folds reserves.

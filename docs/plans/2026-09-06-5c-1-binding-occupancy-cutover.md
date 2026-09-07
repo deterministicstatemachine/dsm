@@ -3,6 +3,14 @@
 Status: COMPLETE — C1 `89c3e5fc`, C2 `989e787c`, C3 `9461cf9f`, gitignore fix `87fda1fc`,
 all on `feat/quorumbind-settle-cutover` (unmerged by design until 5c-2 + old-register excision).
 
+> **SUPERSEDED IN PART BY AMENDMENT 2c-A — read this as a historical record, not an instruction.**
+> The wire shape described throughout — `bundle_signatures`, `successor_ccb`, `reserve_deltas`,
+> and `close_slot_commitment` as the close/market discriminator — is **replaced** by
+> [`docs/papers/amendment-2c-a-bundle-and-transition.md`](../papers/amendment-2c-a-bundle-and-transition.md).
+> Under 2c-A the bundle is `{market_terms?, transitions}`, a transition carries the complete
+> nested `V_{n+1}`, and the shape discriminator is `market_terms` presence. Read this document to
+> understand why the shipped code looks the way it does. **Where the two disagree, 2c-A governs.**
+
 Paths below are relative to `dsm_client/deterministic_state_machine/` unless stated.
 
 ---
@@ -305,7 +313,7 @@ then every `dsm` integration suite carrying a stub impl (`economic_dlv_settle_pr
 
 Nineteen `funded_creation_tests` traverse the walk, settle, or close path and all must be re-run, not just the two known failures. **`lp_offline_market_advances_three_generations_and_lp_reconciles_each_once` (`:7162`) is the highest-value regression test in the cut** — it drives three consecutive generations through both the settle path and the walk, so it is the one test that would catch an `Undetermined`/`Free` confusion a single-generation test cannot.
 
-**Mutation controls** (repo rule: every security gate is mutation-tested, and a mutation that stays green is a finding about the test). Two are mandatory here, and each must reproduce the forbidden *state*, not merely break liveness:
+**Mutation controls** (repo rule: every security gate is mutation-tested, and a mutation that stays green is a finding about the test). Three are mandatory here, and each must reproduce the forbidden *state*, not merely break liveness:
 
 1. **Close authorization.** Drop the `DlvClose` signature verification from the walk, have a non-owner bind a close-shaped bundle over a funded vault, and watch a named test observe reserves folded to zero. Restore. A second control on the same gate: keep the verification but let the reconstruction ignore one bound field (e.g. `leg_b_amount`), then replay a genuine owner signature from a *different* close onto this transition — it must still be refused.
 2. **`Undetermined` is not `Free`.** Map `Undetermined → Free` in the walk and watch a named test compose past a generation whose bind is mid-flight. Restore.
@@ -334,6 +342,12 @@ Deliberately carried into 5c-2, each marked in-code with an unmissable `5c-2:` c
 ---
 
 # C3 amendments from the adversarial map (post-approval, verified from source)
+
+> **LANDED, and superseded in part by 2c-A — same footing as the section above.** This is a
+> top-level heading, so the banner at the head of this document does not reach it. Item 5 below
+> describes a close bundle whose `route_set_commitment` is 32 zero bytes and whose only X is its
+> transition's `successor_ccb`. **2c-A abolishes both:** an owner close carries no `market_terms`,
+> hence no `X` at all, and there is no `successor_ccb` field. Where the two disagree, 2c-A governs.
 
 A 5-agent map plus an adversarial critic swept the whole repo — not just the four files the
 plan named. It found eleven things the plan got wrong or missed. Three change scope.
