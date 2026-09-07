@@ -198,15 +198,17 @@ pub fn get_fence(
     )
 }
 
-/// THE ADVANCEMENT GATE (Req 6.23 (2),(4)). The verdict a caller consults
-/// before creating a trader successor from this parent: the verdict of the one
-/// unresolved fence for the parent, or [`FenceVerdict::Clear`] if none is
-/// unresolved. A fresh intent or nonce cannot change this answer — the fence is
-/// keyed on the parent, not the intent.
-pub fn active_verdict(
+/// The one UNRESOLVED fence for a parent, if any — the row behind
+/// [`active_verdict`].
+///
+/// The walk needs the `tx_id` as well as the verdict: a composer that finds its
+/// own close in flight over the parent it is standing on must be able to say
+/// WHICH transaction holds it, so it can tell its own prepared close from
+/// somebody else's and resume rather than abandon.
+pub fn active_fence(
     trader_chain_id: &[u8; 32],
     trader_parent_state_commitment: &[u8; 32],
-) -> Result<FenceVerdict> {
+) -> Result<Option<TraderFence>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
@@ -225,7 +227,22 @@ pub fn active_verdict(
             |r| row_to_fence(r).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into())),
         )
         .optional()?;
-    Ok(row.map_or(FenceVerdict::Clear, |f| verdict(&f.state)))
+    Ok(row)
+}
+
+/// THE ADVANCEMENT GATE (Req 6.23 (2),(4)). The verdict a caller consults
+/// before creating a trader successor from this parent: the verdict of the one
+/// unresolved fence for the parent, or [`FenceVerdict::Clear`] if none is
+/// unresolved. A fresh intent or nonce cannot change this answer — the fence is
+/// keyed on the parent, not the intent.
+pub fn active_verdict(
+    trader_chain_id: &[u8; 32],
+    trader_parent_state_commitment: &[u8; 32],
+) -> Result<FenceVerdict> {
+    Ok(
+        active_fence(trader_chain_id, trader_parent_state_commitment)?
+            .map_or(FenceVerdict::Clear, |f| verdict(&f.state)),
+    )
 }
 
 /// Every fence that has not reached a terminal state, oldest first — the work

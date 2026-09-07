@@ -119,12 +119,14 @@ pub fn reconstruct(
 
 // ───────────────────────── async wrapper ─────────────────────────
 
-#[cfg(not(any(test, feature = "test-utils")))]
+// NOT cfg'd out of test builds. It reaches the fleet through the shared
+// `binding_transport` factory, which is itself cfg-split — so restart recovery
+// is exercisable under the deterministic double instead of being pinned to
+// HTTP and therefore untestable.
 mod live {
     use super::*;
+    use crate::sdk::quorum_bind_runner::{binding_transport, run_fenced, Backoff, FenceKey};
     use dsm::dlv::quorum_bind::QuorumBind;
-    use crate::sdk::binding_http_transport::{HttpBindingTransport, MemberEndpoint};
-    use crate::sdk::quorum_bind_runner::{run_fenced, Backoff, FenceKey};
     use crate::sdk::storage_set::StorageSetCatalog;
     use dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE;
 
@@ -173,15 +175,7 @@ mod live {
             return false;
         };
 
-        let endpoints: Vec<MemberEndpoint> = set
-            .members()
-            .iter()
-            .map(|m| MemberEndpoint {
-                endpoint: m.endpoint.clone(),
-                auth: crate::sdk::storage_io::resolve_storage_auth(&m.endpoint),
-            })
-            .collect();
-        let transport = HttpBindingTransport::new(endpoints);
+        let transport = binding_transport(&set);
         let Ok(mut engine) = QuorumBind::begin(r.transaction) else {
             return false;
         };
@@ -194,7 +188,7 @@ mod live {
             &mut engine,
             &members,
             &r.keys,
-            &transport,
+            transport.as_ref(),
             Backoff::default(),
             MAX_BALLOTS,
             fence_key,

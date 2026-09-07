@@ -74,12 +74,16 @@ pub mod token_sdk;
 pub mod token_state;
 pub mod unilateral_ops_sdk;
 // Storage-node client wrapper and discovery (dev-only)
+#[cfg(any(test, feature = "test-utils"))]
+pub mod binding_fleet_double; // test-only in-process fleet for the generic binding register
 pub mod binding_http_transport; // concrete HTTP BindingTransport over the generic endpoints (Req 15.8)
+pub mod binding_occupancy; // 5c-1: is a DLV parent still available to a competing candidate?
 #[cfg(feature = "dev-discovery")]
 pub mod discovery;
 #[cfg(target_os = "android")]
 pub mod preview;
 pub mod quorum_bind_runner; // thin async Class K runner over the sans-IO QuorumBind engine
+pub mod settlement_bind; // 5c-1: the settle-side QuorumBind driver (build B, PutImmutable, run_fenced)
 pub mod settlement_resume; // 5b: restart reconstruction for a fenced settlement (Req 16.5)
 pub mod storage_io;
 pub mod storage_node_health;

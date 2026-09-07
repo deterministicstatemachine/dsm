@@ -112,6 +112,87 @@ fn counts_for(
         && echoed_incarnation == Some(member.register_incarnation)
 }
 
+/// Turn one transport answer into a countable [`MemberRead`]. An answer that
+/// does not name BOTH the committed member id and the committed register
+/// incarnation is `Unavailable` — never an empty read, which would be evidence.
+fn attribute_read(member: &CommittedMember, r: TransportRead) -> MemberRead {
+    match r.records {
+        Some(recs) if counts_for(member, r.echoed_member_id.as_deref(), r.echoed_incarnation) => {
+            MemberRead::Records(recs)
+        }
+        _ => MemberRead::Unavailable,
+    }
+}
+
+/// Read `keys` at EVERY committed member and attribute each answer.
+///
+/// This is the observer's half of the runner: the same fan-out and the same
+/// attribution rule the proposer uses, with no engine and no writes. Sharing
+/// [`attribute_read`] is the point — an observer with its own attribution rule
+/// could count an answer the proposer would refuse.
+///
+/// Every member is asked, not just `q` of them: a transaction that committed
+/// with exactly `q` holders needs the full fan-out to find them.
+pub(crate) async fn read_binding_attributed<T: BindingTransport + ?Sized>(
+    members: &[CommittedMember],
+    keys: &[[u8; 32]],
+    transport: &T,
+) -> Vec<Option<MemberRead>> {
+    let mut out = Vec::with_capacity(members.len());
+    for (ix, member) in members.iter().enumerate() {
+        let r = transport.read_binding(ix, keys).await;
+        out.push(Some(attribute_read(member, r)));
+    }
+    out
+}
+
+/// The binding transport for a committed storage set. Live speaks HTTP; tests
+/// drive the deterministic in-process fleet.
+///
+/// One factory, so the driver, the restart resume and the observer all reach
+/// the same fleet. They previously each built their own, which left restart
+/// resume pinned to HTTP and therefore untestable under the double.
+pub(crate) fn binding_transport(
+    set: &crate::sdk::storage_set::StorageSet,
+) -> Box<dyn BindingTransport + Send + Sync> {
+    let eps: Vec<crate::sdk::binding_http_transport::MemberEndpoint> = set
+        .members()
+        .iter()
+        .map(|m| crate::sdk::binding_http_transport::MemberEndpoint {
+            endpoint: m.endpoint.clone(),
+            #[cfg(not(any(test, feature = "test-utils")))]
+            auth: crate::sdk::storage_io::resolve_storage_auth(&m.endpoint),
+            #[cfg(any(test, feature = "test-utils"))]
+            auth: None,
+        })
+        .collect();
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        // Attribute this set's members so a path that never touches the fleet
+        // directly still reaches quorum. Additive: held records and injected
+        // member failures are preserved.
+        let tuples: Vec<(String, Vec<u8>, [u8; 32])> = set
+            .members()
+            .iter()
+            .map(|m| {
+                (
+                    m.endpoint.clone(),
+                    m.member_id.as_bytes().to_vec(),
+                    m.register_incarnation_id,
+                )
+            })
+            .collect();
+        crate::sdk::binding_fleet_double::ensure_registered(&tuples);
+        Box::new(crate::sdk::binding_fleet_double::FakeBindingTransport::new(
+            eps,
+        ))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        Box::new(crate::sdk::binding_http_transport::HttpBindingTransport::new(eps))
+    }
+}
+
 /// Why the runner stopped without a terminal outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunError {
@@ -274,18 +355,7 @@ pub async fn run<T: BindingTransport + ?Sized>(
                     match op {
                         MemberOp::Read { member_ix } => {
                             let r = transport.read_binding(member_ix, keys).await;
-                            let answer = match r.records {
-                                Some(recs)
-                                    if counts_for(
-                                        &members[member_ix],
-                                        r.echoed_member_id.as_deref(),
-                                        r.echoed_incarnation,
-                                    ) =>
-                                {
-                                    MemberRead::Records(recs)
-                                }
-                                _ => MemberRead::Unavailable,
-                            };
+                            let answer = attribute_read(&members[member_ix], r);
                             engine.deliver_read(member_ix, answer);
                         }
                         MemberOp::CompareExchange {
