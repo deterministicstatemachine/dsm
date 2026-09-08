@@ -206,6 +206,18 @@ registry that kept old schemas readable would be a coexistence plan, which beta 
 valid CCB blob. `0xFF00`–`0xFFFF` are reserved for experimental and test object classes and
 must never appear in a production commitment.
 
+**Every reserved value appears in this registry (amendment 2c-C1 ruling D).** RESERVED is an
+allocation state in its own right — it is not "unallocated", not a class, and not burned. Every
+`u16` protected by the implementation's reserved-value guard MUST appear in §3 as reserved,
+carrying any named reservation purpose. Reserved entries receive no §5 field table and have no
+schema. Promoting a reserved value into a class is a normative change to this registry and must
+ship with the corresponding code change and collision test. A number defended only in code is a
+number this registry cannot keep from being reallocated by accident.
+
+The reserved set is exactly `0x002A`–`0x002F`, six values, and §3 carries all six. `0x0032` is
+**not** reserved — it is unallocated, held in prose for amendment 2c-D, and it receives a row when
+that amendment allocates it.
+
 ### 2.9 Signatures are not fields
 
 A signature over an object is **never** a field of that object's CCB. The CCB *is* the signed
@@ -296,6 +308,28 @@ storage address, a resource key or an authority check appears here.
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
 | `0x0031` | **substrate** `DsmSuccessorEvidence` | 1 | `evidence_addr = H(DSM/economic-dsm-successor-evidence/v1 ‖ CCB)`; nested in `0x0033` | §5.23 defined |
 | `0x0033` | `MarketTerms` | 1 | nested in `0x000E` | §5.20 defined |
+| `0x001B` | **substrate** `EconomicRootClaimBody` | 1 | signed over `H_dom(DSM/economic-root-claim-sign/v1, CCB)` | §5.24 defined |
+| `0x001C` | **substrate** `EconomicAdmissionManifest` | 1 | inner `H_dom(N, P)`; named by `0x001B` field 5 | §5.25 defined |
+| `0x001D` | **substrate** `EconomicTransitionWitness` | 1 | inner identity; named by `0x001C` field 2 | §5.26 defined |
+| `0x001E` | **substrate** `EconomicLeafMutation` | 1 | nested in `0x001D` | §5.27 defined |
+| `0x001F` | **substrate** `EconomicBalanceState` | 1 | leaf state; nested in `0x001E` | §5.28 defined |
+| `0x0020` | **substrate** `EconomicVaultReserveState` | 1 | leaf state; nested in `0x001E` | §5.29 defined |
+| `0x0021` | **substrate** `EconomicSettlementReceiptState` | 1 | leaf state; nested in `0x001E` | §5.30 defined |
+| `0x0022` | **substrate** `EconomicConsumedSourceState` | 1 | leaf state; nested in `0x001E` | §5.31 defined |
+| `0x0023` | **substrate** `CreditSourceAuthorizedIssuance` | 1 | credit arm; nested in `0x001D` | §5.33 defined |
+| `0x0024` | **substrate** `CreditSourceSameTransitionMove` | 1 | credit arm; nested in `0x001D` | §5.34 defined |
+| `0x0025` | **substrate** `CreditSourceValidatedPeerDebit` | 1 | credit arm; nested in `0x001D` | §5.35 defined |
+| `0x0026` | **substrate** `CreditSourceDlvReserveConsumption` | **2** | credit arm; nested in `0x001D` | §5.36 defined; schema 1 **burned** |
+| `0x0027` | **substrate** `CreditSourceValidatedDlvSettlementPayment` | **2** | credit arm; nested in `0x001D` | §5.37 defined; schema 1 **burned** |
+| `0x0028` | **substrate** `CreditSourceVerifiedOfflineReentry` | 1 | credit arm; nested in `0x001D` | §5.38 **STRUCTURALLY FROZEN — BLOCKED ON `0x002D` — BETA REFUSED** |
+| `0x0029` | **substrate** `IssuanceAuthorizationBody` | 1 | addressed by `0x0023` field 2 | §5.32 defined |
+| `0x0030` | **substrate** `CreditSourceValidatedFaucetDistribution` | 1 | credit arm; nested in `0x001D` | §5.39 defined |
+| `0x002A` | **RESERVED** — `OfflineLoadBoundaryBody` | — | — | no field table; no schema |
+| `0x002B` | **RESERVED** — `OfflineUnloadBoundaryBody` | — | — | no field table; no schema |
+| `0x002C` | **RESERVED** — `OfflineSpendStepEvidence` | — | — | no field table; no schema |
+| `0x002D` | **RESERVED** — `OfflineBranchEvidence`; held for the class `0x0028` field 4 addresses | — | — | `0x0028` stays BETA REFUSED until this is promoted and given a preimage |
+| `0x002E` | **RESERVED** — `PortableAnchorEnrollmentBody` | — | — | no field table; no schema |
+| `0x002F` | **RESERVED** — `PortableHardwareEnrollmentBody` | — | — | no field table; no schema |
 
 `0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
 and §6a finding 3 established there is no such object. Re-using that number for
@@ -313,6 +347,17 @@ is never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 burned, and `0x0001` has schemas **1, 2 and 3** — the second bump on each is the
 register-incarnation cut (§5.1, §5.2). They are recorded so their numbers are never re-assigned; no
 production path decodes or emits them.
+
+`0x0026` and `0x0027` have **schema 1 burned** by the peer economic-position cut (owner ruling
+2026-08-28): schema 1 carried no locator for the peer's validated economic ancestry, and no producer
+ever shipped it. **These two rows are the first place that burn is written down.** The shipping
+implementation declares it only in a comment beside the class constants; its machine-readable burn
+table does not carry either pair, so schema-1 bytes are refused as an *unknown* schema rather than a
+*burned* one. Decoding is safe either way — no schema-1 bytes are accepted on any path — but §2.8's
+never-re-assign guarantee rests on the burn table, and a later cut that bumps `0x0026` to schema 3
+would find no record that schema 1 was ever spent. Recording the two pairs in that table, and a test
+that distinguishes the two refusal reasons, are owed by the first implementation change that adopts
+amendment 2c-C1.
 
 **Schema bumps are transitive, because nesting is by complete CCB.** §2.7 emits a nested object as
 its full CCB *including its own class and schema version*, so changing a nested object's schema
@@ -340,9 +385,15 @@ form for a full release, as schema 2 was before it. That is the rule working, no
 object whose nested members changed is a different object, and pretending otherwise is exactly the
 silent-divergence §2.8 exists to prevent.
 
-`0x0018`–`0x001A` are **DSM substrate**, not Rev 15 objects. They are allocated from this table
-because the namespace is single and indivisible (§2.8), and they carry the same immutability rules
-as every other assignment. They are excluded from §4's count and closure criteria.
+`0x0018`–`0x001A`, `0x001B`–`0x0030` and `0x0031` are **DSM substrate**, not Rev 15 objects. They
+are allocated from this table because the namespace is single and indivisible (§2.8), and they carry
+the same immutability rules as every other assignment. They are excluded from §4's count and closure
+criteria.
+
+The economic block `0x001B`–`0x0030` was absorbed by amendment 2c-C1. Sixteen classes shipped in the
+implementation while appearing in no row of this registry — and a namespace the registry cannot see
+is a namespace that can be reallocated by accident, which is precisely what §2.8 exists to prevent.
+Their field tables are §5.24–§5.39.
 
 ### 3.1 Declared enumerations
 
@@ -374,6 +425,12 @@ authority, which the area 8 semantics forbid.
 
 **This registry does not complete every field table, and says so rather than inventing the
 missing ones.**
+
+**The counts below did not move when amendment 2c-C1 absorbed `0x001B`–`0x0030`.** All sixteen of
+those classes are substrate, excluded from the Rev 15 closure count exactly as `0x0018`–`0x001A` and
+`0x0031` are, and the six `0x002A`–`0x002F` entries are reserved rather than classes. Absorbing them
+closed a namespace gap; it did not add Rev 15 objects, so a reader should not expect the totals here
+to change.
 
 Of the **twenty-two live** object classes above — `0x0014` is burned and not counted, and
 `0x0033` `MarketTerms` was added by amendment 2c-A:
@@ -994,9 +1051,10 @@ are never aliases: they commit different objects under different domains.
 
 **`0x0033` comes from a namespace audit.** `0x0001`–`0x0030` is contiguously allocated or reserved
 with no usable vacancy (`0x0003` and `0x0014` burned; `0x002A`–`0x002F` structurally reserved);
-`0x0031` and `0x0032` are claimed by amendment 2c for 2c-B and 2c-D. The registry §3 table is
-**behind the shipped code** for the economic classes in `0x001B`–`0x0030`; recording those is
-2c-C's mandate.
+`0x0031` and `0x0032` are claimed by amendment 2c for 2c-B and 2c-D. The registry §3 table was
+**behind the shipped code** for the economic classes in `0x001B`–`0x0030` when this audit ran;
+amendment 2c-C1 has since recorded all sixteen, with the six reserved numbers, so §3 and the
+implementation now agree across the whole block.
 
 ### 5.21 `ConsumedDlvTransition` — class `0x000F`, schema 1
 
@@ -1094,6 +1152,245 @@ contradiction; an implementation that conflates them produces different bytes fo
 encoding-level conjunct on `operation_bytes` **before** the chain-tip equalities against
 `B.market_terms.trader_successor` and `.trader_parent`. 2c-B states both, in that order, and
 performs no other cross-object comparison — everything further is `ValidDlvSuccessor`, owned by 2c-C.
+
+### 5.24 `EconomicRootClaimBody` — class `0x001B`, schema 1
+
+Signed. Per §2.9 the signature is **not** a field: it travels in the protobuf carrier
+`EconomicRootClaimV1 { body_ccb, claimant_signature }` over
+`m = H_dom(DSM/economic-root-claim-sign/v1, CCB)`. Protobuf is carrier only — the signed preimage is
+the domain hash of the CCB, never the transport bytes (§2.10).
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `trader_genesis` | `digest32` | |
+| 2 | `trader_devid` | `digest32` | |
+| 3 | `economic_position` | `u64` | |
+| 4 | `post_economic_root` | `digest32` | |
+| 5 | `admission_manifest_addr` | `digest32` | the only edge from a claim into its evidence DAG; equals `0x001C`'s inner identity |
+| 6 | `root_register_storage_set_id` | `digest32` | a member of the **signed** body, not transport context — a claim cannot be replayed against a different register set |
+| 7 | `signature_alg` | `u16` enum | must be a declared `signature_alg`; beta declares only `0x0001 SPHINCS_PLUS_SPX256F` |
+| 8 | `claimant_public_key` | `bytes` | length must equal the declared algorithm's public-key length — 64 for `0x0001` |
+
+242 bytes at `signature_alg = 0x0001`.
+
+### 5.25 `EconomicAdmissionManifest` — class `0x001C`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `authority_position` | `digest32` | a transition digest, never a counter |
+| 2 | `transition_witness_addr` | `digest32` | inner identity of `0x001D` |
+| 3 | `authority_evidence_addr` | `digest32` | |
+| 4 | `substrate_dsm_successor` | optional `digest32` | **mutually exclusive with field 5** |
+| 5 | `substrate_offline_boundary` | optional `digest32` | **mutually exclusive with field 4** |
+| 6 | `provenance_evidence_addrs` | set of `digest32` | §2.4 count prefix; sorted ascending by the raw 32 bytes; duplicates invalid |
+
+**The two-slot positional union, declared here because §2.3 speaks about one optional at a time and
+says nothing across fields.** Both presence markers are always emitted, so field positions never
+shift, and **exactly one** of fields 4 and 5 is present:
+
+```text
+DsmSuccessor     0x01 ‖ <32>   0x00
+OfflineBoundary  0x00          0x01 ‖ <32>
+both present     INVALID
+neither present  INVALID
+```
+
+The two arms are byte-distinct at the same length. A decoder refuses any marker byte other than
+`0x00`/`0x01`, and refuses both-present and neither-present.
+
+138 + 32·n bytes.
+
+### 5.26 `EconomicTransitionWitness` — class `0x001D`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `pre_economic_root` | `digest32` | |
+| 2 | `post_economic_root` | `digest32` | must equal the root the mutations derive |
+| 3 | `economic_operation_id` | `digest32` | |
+| 4 | `operation_digest` | `digest32` | binds the witness to the local acceptance |
+| 5 | `mutations` | sequence of nested `0x001E` | §2.5 count prefix; **count ≥ 1** |
+| 6 | `credit_sources` | sequence of nested union `{0x0023, 0x0024, 0x0025, 0x0026 s2, 0x0027 s2, 0x0028, 0x0030}` | §2.5 count prefix; **strictly ascending by `credit_mutation_index`** |
+
+**Field 6's ordering predicate is declared here, because §2.4 cannot state it.** §2.4 orders a set
+ascending by `enc(e)`, and `enc(e)` for a credit source begins `u16 class ‖ u16 schema`, so `enc(e)`
+order is *(class, schema, index…)* — which differs from index order whenever two elements have
+different classes. Field 6 is therefore a §2.5 **sequence** whose order is constrained by this table
+rather than by the framework: strictly ascending `credit_mutation_index`, which also forbids
+duplicates without needing set semantics.
+
+**Field 6's element type is a union of seven classes**, discriminated by the §2.1 envelope exactly as
+§2.5's heterogeneous-sequence rule intends — no in-band tag.
+
+### 5.27 `EconomicLeafMutation` — class `0x001E`, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `pre_state` | optional nested union `{0x001F, 0x0020, 0x0021, 0x0022}` | |
+| 2 | `post_state` | optional nested union `{0x001F, 0x0020, 0x0021, 0x0022}` | **not both absent** |
+| 3 | `siblings` | **exactly 256 × `digest32`, no count prefix** — 8192 raw bytes | declared here; see below |
+
+The three legal combinations are *(absent, present)* insert, *(present, present)* update, and
+*(present, absent)* delete. Where both are present their **position material must agree** — the class
+and identifying digests of a leaf cannot change under a mutation of that leaf.
+
+**Field 3's encoding is declared here, because §2.2 has no array type and both §2.4 and §2.5 mandate
+a `u32_BE` count.** The count is not carried because it is not free: it is fixed at 256 by the tree
+the proof is against. Emitting it would be a second, settable statement of a constant — the alias
+pattern this registry removes. A decoder reads exactly 256 digests and never reads a count; any other
+length is invalid. This is the same in-table mechanism §5.2 uses for its tuple element, and it needs
+no §2 change.
+
+### 5.28 `EconomicBalanceState` — class `0x001F`, schema 1
+
+44 bytes. Envelope plus scalars: no optionals, no sets, no sequences, no nesting.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `policy_commit` | `digest32` | |
+| 2 | `amount` | `u64` | **must be non-zero** — enforced in both the constructor and the encoder |
+
+### 5.29 `EconomicVaultReserveState` — class `0x0020`, schema 1
+
+84 bytes.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `vault_id` | `digest32` | |
+| 2 | `policy_commit` | `digest32` | |
+| 3 | `amount` | `u64` | **zero is legal and meaningful** — the terminal drained-vault state |
+| 4 | `vault_sequence` | `u64` | |
+
+**The `0x001F`/`0x0020` zero asymmetry is real and load-bearing, and this registry states it rather
+than normalising it.** A zero *balance* is leaf-**absent**: it has no canonical bytes, so encoding one
+would create a second representation of absence. A zero *reserve* is leaf-**present** at a stated
+`vault_sequence`: it is the terminal state of a closed vault, and erasing it would erase the fact
+that the vault was drained rather than never funded.
+
+### 5.30 `EconomicSettlementReceiptState` — class `0x0021`, schema 1
+
+196 bytes.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `vault_id` | `digest32` | |
+| 2 | `receipt_id` | `digest32` | **derived, not chosen** — must equal `derive_receipt_id(vault_id, x)` |
+| 3 | `x` | `digest32` | |
+| 4 | `parent_sequence` | `u64` | |
+| 5 | `new_sequence` | `u64` | must equal `parent_sequence + 1` |
+| 6 | `input_policy_commit` | `digest32` | **must differ from field 8** |
+| 7 | `input_amount` | `u64` | must be non-zero |
+| 8 | `output_policy_commit` | `digest32` | **must differ from field 6** |
+| 9 | `output_amount` | `u64` | must be non-zero |
+
+### 5.31 `EconomicConsumedSourceState` — class `0x0022`, schema 1
+
+68 bytes.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `source_id` | `digest32` | |
+| 2 | `consumer_economic_operation_id` | `digest32` | attribution — what turns a bare "spent" flag into a statement of *who* spent it |
+
+### 5.32 `IssuanceAuthorizationBody` — class `0x0029`, schema 1
+
+148 bytes.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `policy_commit` | `digest32` | |
+| 2 | `issuer_genesis` | `digest32` | |
+| 3 | `issuer_devid` | `digest32` | |
+| 4 | `issuer_economic_position` | `u64` | |
+| 5 | `recipient_operation_digest` | `digest32` | |
+| 6 | `amount` | `u64` | **valid domain `1 ..= 2^64 − 1`; zero is invalid** (amendment 2c-C1 ruling C) |
+
+### 5.33–5.39 the credit sources — classes `0x0023`–`0x0028` and `0x0030`
+
+Seven arms, discriminated by the §2.1 envelope class — there is no in-band tag. Field 1 of every arm
+is `credit_mutation_index : u32`, the index into the enclosing witness's `mutations` sequence, and
+the enclosing `0x001D` field 6 requires those indices to be strictly ascending across the sequence.
+
+Every `*_addr` field below carries the **inner** identity `H_dom(N, P)`, never the outer
+storage-object address (amendment 2c-C1 ruling A).
+
+**§5.33 — `0x0023 CreditSourceAuthorizedIssuance`**, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `issuance_authorization_addr` | `digest32` | addresses `0x0029` |
+
+**§5.34 — `0x0024 CreditSourceSameTransitionMove`**, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | **must differ from field 2** |
+| 2 | `debit_mutation_index` | `u32` | a transition cannot fund itself from itself |
+
+**§5.35 — `0x0025 CreditSourceValidatedPeerDebit`**, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `peer_genesis` | `digest32` | |
+| 3 | `peer_devid` | `digest32` | |
+| 4 | `peer_economic_position` | `u64` | **untrusted locator** — the verifier derives the position independently |
+| 5 | `peer_debit_mutation_index` | `u32` | indexes the **peer's** witness, not this one |
+| 6 | `acceptance_evidence_addr` | `digest32` | |
+
+**§5.36 — `0x0026 CreditSourceDlvReserveConsumption`**, **schema 2** (schema 1 burned)
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `vault_id` | `digest32` | |
+| 3 | `parent_sequence` | `u64` | |
+| 4 | `x` | `digest32` | |
+| 5 | `owner_economic_position` | `u64` | **the schema-2 field** — an untrusted locator |
+| 6 | `reserve_consumption_evidence_addr` | `digest32` | |
+
+**§5.37 — `0x0027 CreditSourceValidatedDlvSettlementPayment`**, **schema 2** (schema 1 burned)
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `vault_id` | `digest32` | |
+| 3 | `settlement_receipt_id` | `digest32` | |
+| 4 | `parent_sequence` | `u64` | |
+| 5 | `trader_genesis` | `digest32` | |
+| 6 | `trader_devid` | `digest32` | |
+| 7 | `trader_economic_position` | `u64` | **the schema-2 field** — an untrusted locator |
+| 8 | `payment_evidence_addr` | `digest32` | |
+
+**Two schema-2 arms, one reason.** Both carry a peer/owner `*_economic_position` that schema 1 did
+not, and both are labelled **untrusted locators**: they say where to start looking, never what is
+true. The verifier derives the position independently. That is the same locator-not-authority
+distinction amendment 2c-A applied to `trader_parent`.
+
+**§5.38 — `0x0028 CreditSourceVerifiedOfflineReentry`**, schema 1 —
+**STRUCTURALLY FROZEN — BLOCKED ON `0x002D` — BETA REFUSED**
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `prior_boundary_id` | `digest32` | **must differ from field 3** |
+| 3 | `unload_boundary_id` | `digest32` | |
+| 4 | `branch_evidence_addr` | `digest32` | **no defined preimage** — addresses reserved class `0x002D` |
+
+The field table is frozen and the class is refused in beta. Field 4 addresses a class that does not
+exist: `0x002D` is reserved, has no field table and no preimage, so nothing a verifier could fetch at
+that address has defined bytes. Freezing the structure is what lets the number and the field list
+stop moving; refusing the arm is what keeps an undefined edge out of production. `0x0028` leaves this
+state only when `0x002D` is promoted to a class with a preimage — a normative registry change.
+
+**§5.39 — `0x0030 CreditSourceValidatedFaucetDistribution`**, schema 1
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `credit_mutation_index` | `u32` | |
+| 2 | `faucet_id` | `digest32` | must equal the derived canonical faucet identity |
+| 3 | `ticket_index` | `u64` | |
+| 4 | `faucet_claim_evidence_addr` | `digest32` | **inner form** per ruling A — the shipped code emits the outer form and must change |
 
 ## 6. Blocked objects — what each one needs
 
@@ -1346,12 +1643,19 @@ In order, and not combined:
      causes.
    - **2c-C — DECOMPOSED into C1–C4.**
      [`amendment-2c-c-verification-closure-decomposition.md`](amendment-2c-c-verification-closure-decomposition.md).
-     Economic substrate closure: the namespace record (this §3 table is behind the shipped code for
-     `0x001B`–`0x0030`), plus the transitive verification closure, including
-     `ValidDlvSuccessor(V_n, V_{n+1}, operation)`. A source audit found ~26 open decisions and §2
-     framework extensions required before the economic classes can be expressed, so it ships as
-     **C1** framework + namespace, **C2** verification substrate (addressing, SMT, quorum, P0–P6),
-     **C3** `ValidDlvSuccessor`, **C4** the `TA_B` closure walk.
+     Economic substrate closure: the namespace record, plus the transitive verification closure,
+     including `ValidDlvSuccessor(V_n, V_{n+1}, operation)`. A source audit found ~26 open decisions
+     across four dimensions separable in fact, so it ships as **C1** framework + namespace, **C2**
+     verification substrate (addressing, SMT, quorum, P0–P6), **C3** `ValidDlvSuccessor`, **C4** the
+     `TA_B` closure walk. (The decomposition also gave "§2 framework extensions required" as a third
+     ground; C1 retracts that — §5.2's precedent lets a field table declare an encoding §2 does not
+     supply, and no §2 change was needed.)
+   - **2c-C1 — WRITTEN.** [`amendment-2c-c1-framework-and-namespace.md`](amendment-2c-c1-framework-and-namespace.md).
+     Absorbs `0x001B`–`0x0030` into §3 with field tables §5.24–§5.39, and records the six reserved
+     numbers `0x002A`–`0x002F`. Four rulings: the canonical **inner** identity form, `0x0028`
+     structurally frozen and beta-refused pending `0x002D`, `0x0029` field 6 admitting no zero, and
+     every reserved value appearing in this registry. **Encoding closure for fifteen of the sixteen**
+     — `0x0028` is the exception. Verification closure remains C2/C3/C4's.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
