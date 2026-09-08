@@ -222,3 +222,52 @@ cargo run -p dsm_vertical_validation -- implementation-traces
 ```
 
 Tip: if the state space is large, shrink constants in `DSM.cfg` (fewer devices, smaller payloads).
+
+## DSM_EconRegisterObservation.tla — the economic register, observed concurrently
+
+The write-once economic register read under concurrency: competing claimants,
+member outage, register **rebuild**, and a **non-atomic read round** whose
+samples interleave with all of them.
+
+Owns the *behavioural* half of the frozen `observe_cell` semantics
+(`dsm/src/economic/cell_observation.rs:122-175`). The *algebraic* half — that
+the canonical quorum is the strict majority, and that `2q > n` forces any two
+qualifying quorums to intersect — is a universal statement over all `n` and
+lives in `lean4/DSMEconomicSmtSeparation.lean` §10. Neither restates the other.
+`Quorum` is a CONSTANT here, exactly as `observe_cell` takes it as an argument;
+there is deliberately no operator computing a quorum from `Cardinality(Member)`,
+because a local majority-of-catalog rule is the verifier's opinion, not the
+vault's.
+
+What TLC uniquely buys is the **round**: what can happen to the register between
+sampling one member and the next, and what a reader may conclude across a
+sequence of rounds. `NoEmptyAtQuorumAfterClaimed` is the statement only a model
+checker can make — a cell observed `Claimed` is never later observed empty,
+across every interleaving of claims, outages and rebuilds.
+
+### Deliberate falsifications — now machine-gated
+
+Each config below models a **real shipped defect** and must violate the named
+invariant. These are no longer asserted in this table and checked by nobody:
+`TlaSpec::expect_violation` inverts the verdict, and the run passes only if TLC
+reports *exactly* that invariant. Three ways to fail — no violation at all (the
+invariant is decoration), the wrong invariant (the config is not modelling what
+it claims), or a TLC error.
+
+| Config | Models | Must violate |
+|---|---|---|
+| `_FlattenCollapse` | `peer_lineage.rs:165-169` `.ok().flatten()` — a quarantined write-once cell delivered as emptiness | `EmptinessIsGrounded` |
+| `_UnavailableIsNone` | `economic_registers.rs:232` `Unavailable => Ok(None)` | `EmptinessIsGrounded` |
+| `_ErrorIsEmpty` | the historical defect `cell_observation.rs` exists to remove: an unusable answer classified as "no value" | `EmptyAtQuorumIsWitnessed` |
+| `_NoIncarnationEcho` | attribution on node id alone — the live economic read path before the incarnation header was stamped | `EmptyAtQuorumIsWitnessed` |
+| `_Reachability` | **non-vacuity**: `Conflict` must be REACHABLE from two claimants racing one write-once cell, with no misbehaviour. Without it the configs above could pass for the wrong reason | `ConflictUnreachable` |
+
+Mutation-controlled: neutering `_FlattenCollapse` back to the faithful consumer
+makes the gate report
+
+```
+FAILED [expected-to-fail] ...
+  ERROR: falsification config must violate EmptinessIsGrounded,
+         but saw no violation at all — the invariant is decoration
+```
+

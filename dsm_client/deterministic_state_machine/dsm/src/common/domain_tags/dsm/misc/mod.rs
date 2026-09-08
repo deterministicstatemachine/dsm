@@ -126,4 +126,27 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_TOKEN_OP,
     TAG_DSM_TRANSITION,
     TAG_DSM_WAL_KEY_CTX,
+    // Test, benchmark and trace fixtures (misc/testing.rs). That module is
+    // NOT cfg(test)-gated, so these compile into production builds and share
+    // the one domain namespace: a fixture colliding with a protocol tag would
+    // be a real defect, and until now no test could see one.
+    TAG_DSM_BENCH,
+    TAG_DSM_TAG,
+    TAG_DSM_TAG1,
+    TAG_DSM_TAG2,
+    TAG_DSM_TAG_A,
+    TAG_DSM_TAG_B,
+    TAG_DSM_TEST,
+    TAG_DSM_TEST_CHILD,
+    TAG_DSM_TEST_COMMIT,
+    TAG_DSM_TEST_CSPRNG_NEXT,
+    TAG_DSM_TEST_CSPRNG_SEED,
+    TAG_DSM_TEST_DEVICE,
+    TAG_DSM_TEST_ENTITY_ID,
+    TAG_DSM_TEST_ENTROPY,
+    TAG_DSM_TEST_NEXT_TIP,
+    TAG_DSM_TEST_PARENT,
+    TAG_DSM_TEST_TIP,
+    TAG_DSM_TRACE_DEVICE,
+    TAG_DSM_TRACE_GENESIS,
 ];

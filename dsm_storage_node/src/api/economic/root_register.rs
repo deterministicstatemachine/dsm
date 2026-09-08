@@ -31,6 +31,7 @@ use axum::{
 };
 use std::sync::Arc;
 
+use crate::api::economic::cell_read_response;
 use crate::auth::DeviceContext;
 use crate::db;
 use crate::AppState;
@@ -159,20 +160,21 @@ pub async fn get_claim(
     }
     match db::get_economic_root_claim(&state.db_pool, &k_root).await {
         Ok(Some((bytes, digest))) => {
-            let mut resp = (StatusCode::OK, bytes).into_response();
-            resp.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
+            let mut resp = cell_read_response(&state, StatusCode::OK, Some(bytes), false);
             if let Ok(v) = HeaderValue::from_str(&text_id::encode_base32_crockford(&digest)) {
                 resp.headers_mut().insert(CLAIM_DIGEST_HEADER, v);
             }
             resp
         }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        // An absence is ASSERTED, and carries the incarnation like every other
+        // answer. A bare 404 answered nothing.
+        Ok(None) => cell_read_response(&state, StatusCode::NOT_FOUND, None, true),
         Err(e) => {
             log::warn!("economic-root read failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            // No outcome assertion: a failure is not an absence. The
+            // incarnation is still stamped so the answer is at least
+            // attributable to this member.
+            cell_read_response(&state, StatusCode::INTERNAL_SERVER_ERROR, None, false)
         }
     }
 }
@@ -180,6 +182,7 @@ pub async fn get_claim(
 #[cfg(all(test, feature = "local-dev"))]
 mod tests {
     //! K_root recomputation, three-way attribution, and write-once semantics.
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
     use super::*;
     use crate::db;
     use crate::replication::{ReplicationConfig, ReplicationManager};
@@ -202,7 +205,12 @@ mod tests {
             )
             .expect("replication manager for tests"),
         );
-        Arc::new(AppState::new("n1".into(), "127.0.0.1:1", None, pool, rm).with_storage_set(set))
+        let own = set.own_incarnation;
+        Arc::new(
+            AppState::new("n1".into(), "127.0.0.1:1", None, pool, rm)
+                .with_storage_set(set)
+                .with_register_incarnation(own),
+        )
     }
 
     fn claim(pk: &[u8], devid: [u8; 32], set: [u8; 32], position: u64) -> EconomicRootClaimBody {
@@ -318,5 +326,74 @@ mod tests {
         let env4 = sign_economic_root_claim(&body4, &sk).unwrap();
         let r = post_claim(Extension(state), Extension(caller), Bytes::from(env4)).await;
         assert_eq!(r.headers()[OUTCOME_HEADER], "accepted");
+    }
+
+    /// THE READ ANSWER MUST BE COUNTABLE.
+    ///
+    /// A client counts a member's answer only when the echoed node id AND the
+    /// echoed register incarnation both match the member the vault committed
+    /// (`storage_node_sdk::answer_counts_for`), and it counts a 404 as an
+    /// absence only when the response ASSERTS one. This endpoint previously
+    /// stamped neither, so on the live path every economic-root read was
+    /// uncountable and the observation degraded to `Unavailable` for every
+    /// member — which then met `read_cell_quorum`'s `Unavailable => Ok(None)`
+    /// and `winning_faucet_ticket`'s `.ok().flatten()`, delivering a
+    /// quorum-unavailable read to the verifier as emptiness.
+    ///
+    /// The incarnation is asserted on BOTH branches. Stamping only the held
+    /// case would leave the dangerous one — a rebuilt member reporting
+    /// emptiness — indistinguishable from the real member reporting it.
+    #[tokio::test]
+    async fn a_read_answer_carries_the_incarnation_and_asserts_its_absence() {
+        let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
+        db::init_db(&pool).await.expect("init");
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
+        let state = test_state(pool, set);
+        let expected = text_id::encode_base32_crockford(&[0xC1u8; 32]);
+        let k_root = text_id::encode_base32_crockford(&[0x7A; 32]);
+
+        // ABSENT: never claimed. The 404 must SAY so, and say who says it.
+        let r = get_claim(Extension(state.clone()), Path(k_root.clone())).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            r.headers()[crate::api::economic::SLOT_OUTCOME_HEADER],
+            "absent",
+            "a bare 404 answered nothing; an absence must be asserted"
+        );
+        assert_eq!(
+            r.headers()[crate::api::economic::INCARNATION_HEADER],
+            expected.as_str(),
+            "an absence must say WHICH register history is asserting it"
+        );
+
+        // HELD: the same stamp on the other branch.
+        let claim_bytes = b"economic-root-claim".to_vec();
+        let digest = *blake3::hash(&claim_bytes).as_bytes();
+        db::claim_economic_root(
+            &state.db_pool,
+            &[0x7A; 32],
+            &claim_bytes,
+            &digest,
+            b"pk",
+            &[0x6B; 32],
+        )
+        .await
+        .expect("claim");
+        let r = get_claim(Extension(state.clone()), Path(k_root)).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()[crate::api::economic::INCARNATION_HEADER],
+            expected.as_str()
+        );
+        assert!(r.headers().contains_key(CLAIM_DIGEST_HEADER));
     }
 }

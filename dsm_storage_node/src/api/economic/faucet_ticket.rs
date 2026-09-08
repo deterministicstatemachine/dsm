@@ -35,6 +35,7 @@ use axum::{
 };
 use std::sync::Arc;
 
+use crate::api::economic::cell_read_response;
 use crate::auth::DeviceContext;
 use crate::db;
 use crate::AppState;
@@ -177,20 +178,19 @@ pub async fn get_claim(
     }
     match db::get_faucet_ticket_claim(&state.db_pool, &faucet_id, ticket_index).await {
         Ok(Some((bytes, digest))) => {
-            let mut resp = (StatusCode::OK, bytes).into_response();
-            resp.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_static("application/octet-stream"),
-            );
+            let mut resp = cell_read_response(&state, StatusCode::OK, Some(bytes), false);
             if let Ok(v) = HeaderValue::from_str(&text_id::encode_base32_crockford(&digest)) {
                 resp.headers_mut().insert(CLAIM_DIGEST_HEADER, v);
             }
             resp
         }
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        // An absence is ASSERTED, and carries the incarnation like every other
+        // answer. A bare 404 answered nothing.
+        Ok(None) => cell_read_response(&state, StatusCode::NOT_FOUND, None, true),
         Err(e) => {
             log::warn!("faucet-ticket read failed: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            // No outcome assertion: a failure is not an absence.
+            cell_read_response(&state, StatusCode::INTERNAL_SERVER_ERROR, None, false)
         }
     }
 }
@@ -198,6 +198,7 @@ pub async fn get_claim(
 #[cfg(all(test, feature = "local-dev"))]
 mod tests {
     //! Coordinate validity, attribution, write-once semantics — and THE
+    #![allow(clippy::disallowed_methods)] // unwrap/expect acceptable in deterministic tests
     //! availability property the ticket model exists for: a poisoned ticket
     //! costs exactly that ticket.
     use super::*;
@@ -230,7 +231,8 @@ mod tests {
         );
         let mut st = AppState::new("n1".into(), "127.0.0.1:1", None, pool, rm);
         if let Some(s) = set {
-            st = st.with_storage_set(s);
+            let own = s.own_incarnation;
+            st = st.with_storage_set(s).with_register_incarnation(own);
         }
         if network {
             st = st.with_network_id(NETWORK.to_vec());
@@ -499,5 +501,68 @@ mod tests {
             }
         }
         assert_eq!(accepted, 1, "exactly one racer may win a ticket");
+    }
+
+    /// THE READ ANSWER MUST BE COUNTABLE — the faucet-ticket half.
+    ///
+    /// Same contract as the economic-root register: a client counts an answer
+    /// only when the echoed node id AND register incarnation match the
+    /// committed member, and counts a 404 as an absence only when it is
+    /// ASSERTED. This endpoint stamped neither, and `winning_faucet_ticket`
+    /// (dsm/src/economic/peer_lineage.rs:165-169) then folds the result with
+    /// `.ok().flatten()` — so an unattributable read arrived at the walker as
+    /// `None`, indistinguishable from "no such ticket".
+    #[tokio::test]
+    async fn a_read_answer_carries_the_incarnation_and_asserts_its_absence() {
+        let pool = Arc::new(db::create_pool(":memory:", true).expect("pool"));
+        db::init_db(&pool).await.expect("init");
+        let set = crate::NodeStorageSet::new(
+            vec![
+                ("n1".into(), [0xC1; 32]),
+                ("n2".into(), [0xC2; 32]),
+                ("n3".into(), [0xC3; 32]),
+            ],
+            "n1",
+            [0xC1; 32],
+        )
+        .unwrap();
+        let state = state_with(pool, Some(set), true);
+        let expected = text_id::encode_base32_crockford(&[0xC1u8; 32]);
+        let faucet_b32 = text_id::encode_base32_crockford(&[0x5F; 32]);
+
+        // ABSENT: no such ticket. The 404 must SAY so, and say who says it.
+        let r = get_claim(Extension(state.clone()), Path((faucet_b32.clone(), 7u64))).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            r.headers()[crate::api::economic::SLOT_OUTCOME_HEADER],
+            "absent",
+            "a bare 404 answered nothing; an absence must be asserted"
+        );
+        assert_eq!(
+            r.headers()[crate::api::economic::INCARNATION_HEADER],
+            expected.as_str(),
+            "an absence must say WHICH register history is asserting it"
+        );
+
+        // HELD: the same stamp on the other branch.
+        let claim_bytes = b"faucet-ticket-claim".to_vec();
+        let digest = *blake3::hash(&claim_bytes).as_bytes();
+        db::claim_faucet_ticket(
+            &state.db_pool,
+            &[0x5F; 32],
+            7,
+            &claim_bytes,
+            &digest,
+            b"pk",
+            &[0x6B; 32],
+        )
+        .await
+        .expect("claim");
+        let r = get_claim(Extension(state.clone()), Path((faucet_b32, 7u64))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()[crate::api::economic::INCARNATION_HEADER],
+            expected.as_str()
+        );
     }
 }
