@@ -196,7 +196,7 @@ mod tests {
                 let Some(bend) = after.find('"') else {
                     continue;
                 };
-                out.push((name, after[..bend].as_bytes().to_vec()));
+                out.push((name, after.as_bytes()[..bend].to_vec()));
             }
         }
 
@@ -313,7 +313,7 @@ mod tests {
 
         for tag in required {
             assert!(
-                registered.contains(&tag.to_vec()),
+                registered.contains(*tag),
                 "{} is not in all_tags(), so no uniqueness or prefix-freedom \
                  check covers it",
                 String::from_utf8_lossy(tag)
