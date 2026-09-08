@@ -106,3 +106,45 @@ invariants, verifies that relationship scoping plus the bilateral
 single-receiver topology make same-parent multi-receiver forks unconstructible
 in online DSM, and demonstrates by deliberate falsification that guard-family
 well formedness and that structure are load bearing."
+
+## The economic verification substrate (amendment 2c-C2)
+
+A later milestone adds coverage for the **economic** tree and register, which is
+a third structure — neither the relationship SMT nor the device SMT.
+
+```text
+lean4/DSMEconomicSmtSeparation.lean   the ALGEBRAIC obligations:
+                                      tagged-encoding injectivity in
+                                      (tag, message), per-key byte-layer input
+                                      injectivity, pairwise domain
+                                      non-aliasing, ABSENT_LEAF separation,
+                                      map/tree/root non-interference, and
+                                      quorum intersection over qualifying
+                                      quorums
+
+tla/DSM_EconRegisterObservation.tla   the CONCURRENT half: write-once cells,
+                                      two-axis attribution, non-atomic read
+                                      rounds, register rebuild, and the
+                                      four-valued observation
+```
+
+Neither restates the other, and the split is deliberate: `2q > n` is a universal
+statement over all `n` that TLC cannot express, while "a cell observed Claimed
+is never later observed empty across every interleaving" is a statement about
+rounds that Lean is the wrong tool for.
+
+**Boundary, stated as plainly as the ones above.** Formal coverage establishes
+the stated properties of the normative economic-SMT and economic-register
+**models**. It does **not** constitute a machine-checked refinement proof that
+the shipping Rust implements those models. Implementation correspondence is
+supported separately by conformance vectors, source-level invariants, tests, and
+deliberate falsification controls.
+
+**And the Lean module is not "axiom-free" without qualification.** The quorum
+results are. The hash and non-aliasing results rest on a symbolic abstraction
+declared in that module's header, with the adequacy bridge resting on a *local*
+collision hypothesis and — for the zero-sentinel obligation only — a *local*
+preimage hypothesis. Neither is a global claim about BLAKE3: a universal
+"distinct preimages give distinct 256-bit outputs" is false by pigeonhole, and
+"no populated economic preimage produces the all-zero digest" is not implied by
+preimage resistance.

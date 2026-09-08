@@ -564,19 +564,59 @@ prove; real implementation safety reduces to the ordinary collision-resistance a
 obligations are about **domain separation and non-aliasing**, which is what the construction
 actually relies on and what a model can actually discharge.
 
-`DSMNonInterference.lean` proves leaf-key injectivity for the **relationship** SMT. That is
-**precedent and reusable structure, not proof of these obligations** — and it is worth naming
-because obligation 1 is exactly the property it establishes for a different tree. An implementer who
-sees the existing proof and assumes it covers the economic tree would be wrong in a way that is easy
-to miss.
+**CORRECTION.** An earlier revision of this ruling said `DSMNonInterference.lean` *"proves leaf-key
+injectivity for the relationship SMT"*. **It does not.** `relKey : Nat → Nat → Nat × Nat` is a
+min/max sort of two naturals, and `relKey_injective` proves that sorting an unordered pair is
+injective. That file contains **no hash, no SMT, no domain separation, and zero axioms** — the
+BLAKE3 leaf-key derivation it nominally corresponds to is not modelled there at all. The real
+precedent for a hash-derived key is `DSMCertChain.lean`. An implementer who read the original
+sentence and assumed the relationship tree was covered would have been misled about both trees.
+
+Two further corrections to the obligations as written above, both found while discharging them:
+
+- **Obligation 4 presupposes a root domain that does not exist.** `empty_economic_root()` is
+  `default_node(256)` and every non-empty root is an `econ_node` output, so **node and root are one
+  domain**. The Lean module proves that (`root_lives_in_the_node_domain`) rather than asserting it;
+  a model that tried to separate them would be proving something false. The real content is node vs
+  leaf vs leaf-state.
+- **The leaf-state domain `DSM/economic-leaf-state/v1` is missing from the list** but is step 2 of
+  the frozen five-step chain, and belongs in the disjointness set. It is included in the discharge.
+
+And one scoping caveat: **obligation 1's input domain is not closed** for the settlement-receipt and
+consumed-source keys, whose `receipt_id` and `source_id` are themselves domain hashes. Injectivity
+is discharged relative to the **declared 32-byte inputs**; the nested derivations are a recorded
+dependency, not part of that chain.
 
 ```text
 2c-C2                    freezes the economic SMT definition
                          identifies the exact formal obligations
-                         claims NO model coverage
 
-implementation adoption  must add the corresponding Lean / TLA coverage
+DISCHARGED               lean4/DSMEconomicSmtSeparation.lean  (obligations 1-7)
+                         tla/DSM_EconRegisterObservation.tla  (the concurrent
+                                                               register half)
 ```
+
+**The claim boundary, stated so "formal verification" stays precise:**
+
+```text
+Formal coverage establishes the stated properties of the normative
+economic-SMT and economic-register MODELS.
+
+It does NOT constitute a machine-checked refinement proof that the
+shipping Rust implementation implements those models.
+
+Implementation correspondence is supported separately by conformance
+vectors, source-level invariants, tests, and deliberate falsification
+controls.
+```
+
+**Nor is the Lean module "axiom-free" without qualification.** The quorum results are. The economic
+hash and non-aliasing results rest on the symbolic abstraction declared in that module's header, and
+its adequacy bridge additionally rests on a **local** collision hypothesis — and, for obligation 5's
+byte-level form only, on a **local** zero-sentinel hypothesis. Neither is a global claim about
+BLAKE3: a universal "distinct preimages give distinct 256-bit outputs" would be *false* by
+pigeonhole, and "no populated economic preimage produces `0^256`" is not implied by preimage
+resistance, which speaks only to the infeasibility of finding one.
 
 ---
 
@@ -1125,8 +1165,11 @@ requirement is normative. Signing determinism is explicitly **not** frozen.
 **The binding record — FROZEN as `BindingRecordWireV1` (ruling F)**, outside CCB, as the single
 named storage-substrate exception.
 
-**Formal-model coverage — NOT CLAIMED, and the debt is enumerated (ruling G)** as six non-aliasing
-obligations under the symbolic hash abstraction.
+**Formal-model coverage — DISCHARGED under the stated symbolic assumptions (ruling G).**
+`lean4/DSMEconomicSmtSeparation.lean` carries obligations 1–7; `tla/DSM_EconRegisterObservation.tla`
+carries the concurrent register-observation half, with five deliberate-falsification configs that
+are machine-gated on the invariant each must violate. This is coverage of the normative **models**,
+not a refinement proof from the Rust — see the claim boundary in ruling G.
 
 **Conformance surface — OWED.** Rev 15 has no conformance row for the economic register, `R_econ`,
 the cell observation, or the address construction, because Rev 15 does not mention them. The repo's

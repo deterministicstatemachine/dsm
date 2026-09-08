@@ -25,8 +25,21 @@
 //! An absent leaf is the literal all-zero digest, **not** a hash of anything.
 //! It has to be key-independent: a 256-deep tree is only computable at all
 //! because empty subtrees collapse into a precomputed default chain, and a
-//! key-dependent empty leaf has no such chain. Since every present leaf is a
-//! BLAKE3 output, all-zero is unreachable as a present value.
+//! key-dependent empty leaf has no such chain.
+//!
+//! [`ABSENT_LEAF`] therefore RESERVES the all-zero digest. A populated leaf
+//! could take that value only by producing a valid economic preimage whose
+//! BLAKE3 digest is all zero, and security treats producing such a preimage as
+//! computationally infeasible.
+//!
+//! Stated that way deliberately. Being a BLAKE3 output is what makes the
+//! all-zero digest POSSIBLE, not what rules it out — a fixed-width hash over an
+//! unbounded domain has preimages of every value. What makes it unreachable in
+//! practice is preimage resistance, which is an assumption rather than a
+//! consequence of the construction. `lean4/DSMEconomicSmtSeparation.lean` draws
+//! the same boundary: the symbolic model puts `absent` outside the image of the
+//! hash by construction, and its adequacy bridge carries the byte-level claim as
+//! an explicit local hypothesis (`h_not_absent_x`) rather than deriving it.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
