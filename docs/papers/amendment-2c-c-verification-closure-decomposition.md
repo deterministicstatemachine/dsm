@@ -22,6 +22,12 @@ four dimensions that are separable in fact, not merely in presentation
 §2 framework extensions REQUIRED before the economic classes can be expressed at all
 ```
 
+**The third line is too strong, and amendment 2c-C1 retracts it.** §5.2 `StorageSet` already
+establishes that a field table may declare an encoding the framework does not supply — *"The element
+encoding is declared here, because §2.4 does not cover it."* Every gap the C1 audit surfaced,
+including `0x001E` field 3's uncounted 256 × `digest32`, is closed that way without touching §2. The
+other two grounds stand unchanged, so the split stands; only this reason for it narrows.
+
 The originally chartered asymmetry — *record every class number, but fully specify only the
 transitive closure `TA_B` reaches* — remains the scope guard. It is not, by itself, a sufficient
 packaging rule once the dimensions were shown to have different prerequisites and different failure
@@ -252,6 +258,15 @@ structurally** — `economic/decode.rs` pins every economic class with exact env
 both classes ship at schema 2, so a schema-1 body is refused on the wire. The gap is therefore
 **declarative, not enforcement**: the pairs are absent from `schema::BURNED`, no test asserts the
 refusal, and the registry's burned-schema paragraph omits them. **C1.**
+
+> **Correction, amendment 2c-C1.** Two of those three limbs hold; the middle one does not. A test
+> does exist — `the_burned_dlv_source_schemas_are_refused`
+> (`dsm/tests/economic_provenance_wire.rs:486`) stamps schema 1 over canonical bytes and asserts the
+> decode fails. It asserts only `is_err()`, so it does not distinguish `BurnedSchema` from
+> `UnknownSchema` and is green under the gap. Executed against a clean tree, both pairs return
+> `UnknownSchema { got: 1 }` and `is_burned` is `false` for each. The finding stands as stated
+> otherwise, and C1 records it. **This paragraph was briefly retracted in a C1 draft written against
+> a working tree a research subagent had modified mid-audit; the retraction was withdrawn.**
 
 ## Two stale scope headers and one stale test comment
 
