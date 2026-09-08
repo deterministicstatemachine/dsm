@@ -23,6 +23,16 @@ use crate::tla_trace_replay::{
 };
 
 /// Configuration for a single TLA+ model check run.
+/// How many specs `standard_specs()` must register.
+///
+/// The registry is Rust, not a glob, so a spec deleted from `standard_specs`
+/// leaves nothing behind for a file count to notice — the suite simply gets
+/// smaller and stays green. This is the analogue of the Lean gate's
+/// `expected=12` module count in CI, and it exists for the same reason: an
+/// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
+/// failure mode that looks most like success.
+pub const EXPECTED_STANDARD_SPECS: usize = 13;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
     /// Human-readable label (e.g., "DSM_tiny")
@@ -592,6 +602,14 @@ impl TlaRunner {
         include_liveness: bool,
     ) -> anyhow::Result<Vec<(TlaSpec, TlcResult)>> {
         let mut specs = Self::standard_specs();
+        if specs.len() != EXPECTED_STANDARD_SPECS {
+            anyhow::bail!(
+                "standard_specs() registers {} specs, expected {EXPECTED_STANDARD_SPECS}. \
+                 A spec was added or removed. Update EXPECTED_STANDARD_SPECS deliberately, \
+                 so that dropping a spec from the registry cannot leave this gate green.",
+                specs.len()
+            );
+        }
         if include_liveness {
             specs.extend(Self::extended_specs());
         }
@@ -641,6 +659,43 @@ impl TlaRunner {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// The registry is the suite. `run_all` bails on a mismatch so CI cannot go
+    /// green on a shrunken suite, and this test fails the same way in
+    /// `cargo test` — before anyone waits on TLC — so the count is corrected
+    /// deliberately rather than discovered in a model-checking log.
+    #[test]
+    fn the_standard_spec_registry_is_the_expected_size() {
+        assert_eq!(
+            TlaRunner::standard_specs().len(),
+            EXPECTED_STANDARD_SPECS,
+            "standard_specs() changed size. Update EXPECTED_STANDARD_SPECS on purpose."
+        );
+    }
+
+    /// Every falsification config must name an invariant the spec actually
+    /// declares. A typo here degrades silently into "a different failure",
+    /// which reads as a real defect in the model rather than in the registry.
+    #[test]
+    fn every_falsification_config_names_an_invariant_its_spec_declares() {
+        for spec in TlaRunner::standard_specs() {
+            let Some(expected) = spec.expect_violation.as_deref() else {
+                continue;
+            };
+            assert!(
+                spec.invariants.iter().any(|i| i == expected),
+                "{} expects a violation of `{expected}`, which is not in its own \
+                 declared invariants {:?}",
+                spec.label,
+                spec.invariants
+            );
+        }
     }
 }
 

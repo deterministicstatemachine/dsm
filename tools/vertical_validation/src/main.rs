@@ -180,11 +180,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::PropertyTests { iterations, seed } => {
-            run_property_tests(iterations, seed);
+            run_property_tests(iterations, seed)?;
         }
 
         Commands::ImplementationTraces => {
-            run_implementation_traces();
+            run_implementation_traces()?;
         }
 
         Commands::Adversarial => {
@@ -221,6 +221,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Turn an aggregate verdict into a process exit status.
+///
+/// A gate that PRINTS "FAILED" and then exits 0 is not a gate. CI reads the
+/// process status, not the report text, so a suite that summarises its own
+/// failures and returns `Ok` is indistinguishable from a green one to the only
+/// consumer that matters.
+///
+/// Enforcement runs AFTER the report is printed, so the failing spec, property
+/// or trace — and the invariant it violated — stay visible in the log.
+fn enforce(gate: &str, total: usize, failing: &[String]) -> anyhow::Result<()> {
+    if failing.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{gate}: {} of {total} FAILED — {}",
+        failing.len(),
+        failing.join(", ")
+    )
 }
 
 /// Collect TLAPS proof results (progress on stderr, no report printed).
@@ -341,6 +361,18 @@ async fn run_tla_check(
     };
 
     print!("{}", report.render_ascii());
+
+    // A violated invariant, or a falsification config that failed to falsify,
+    // must redden CI. `run_all` has already NORMALISED every verdict, including
+    // inverting the expected-to-fail configs, so `passed` here is the gate's
+    // answer and not TLC's raw one.
+    let failing: Vec<String> = results
+        .iter()
+        .filter(|(_, r)| !r.passed)
+        .map(|(s, _)| s.label.clone())
+        .collect();
+    enforce("TLA+ model checking", results.len(), &failing)?;
+
     Ok(results)
 }
 
@@ -368,8 +400,15 @@ async fn run_benchmark(
 }
 
 /// Run property tests standalone.
-fn run_property_tests(iterations: u64, seed: u64) {
+fn run_property_tests(iterations: u64, seed: u64) -> anyhow::Result<()> {
     let results = property_tests::collect_property_test_results(seed, iterations);
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| r.property_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -381,11 +420,19 @@ fn run_property_tests(iterations: u64, seed: u64) {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Real-code bridge properties", total, &failing)
 }
 
 /// Run deterministic implementation traces standalone.
-fn run_implementation_traces() {
+fn run_implementation_traces() -> anyhow::Result<()> {
     let results = implementation_traces::collect_implementation_trace_results();
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| r.trace_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -397,6 +444,7 @@ fn run_implementation_traces() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Implementation traces", total, &failing)
 }
 
 /// Run adversarial tests standalone.
