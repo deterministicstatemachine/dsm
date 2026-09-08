@@ -576,6 +576,9 @@ those classes are substrate, excluded from the Rev 15 closure count exactly as `
 closed a namespace gap; it did not add Rev 15 objects, so a reader should not expect the totals here
 to change.
 
+**Nor for 2c-C3**, which decides successor *validity* and adds no class, no encoding and no field
+table.
+
 **They did not move for 2c-C2 either.** That amendment added the retrieval obligation (§2.11), the
 normative network parameters (§3.2) and the one named non-CCB grammar (§2.10), and corrected §3.1's
 `signature_alg` member — framework and namespace content, not object classes. No field table was
@@ -1820,6 +1823,18 @@ In order, and not combined:
      formal debt. **Authenticated retrieval is frozen as a rule (§2.11) and is NOT met by the
      implementation** — three of the walk's four fetches do not discharge it; that is a recorded
      implementation debt, owned by the adopting change. Verification *semantics* remain C3's.
+   - **2c-C3 — WRITTEN.** [`amendment-2c-c3-valid-dlv-successor.md`](amendment-2c-c3-valid-dlv-successor.md).
+     Freezes `ValidDlvSuccessorCore`: a two-level clause inventory with stable identifiers, the
+     complete fifteen-field disposition, derive-and-compare as the successor-state correspondence
+     test (`Canon(expected) = Canon(supplied)` is **one conjunct**, not the whole predicate), a typed
+     partial `DeriveExpected`, and a two-layer outcome taxonomy over applicable outcomes only.
+     **Corrects four Rev 15 errata**, two of which made the predicate unformulable: the burned
+     parent-reserves-digest operand, `terminal/retired` having no tuple field, §7.1's `fee_t` being
+     non-zero for a family that extracts no fee, and `direction` being carried nowhere. Records that
+     `successor_ccb` and `parent_reserves_digest` die with 2c-A's CCB cut, and that until it lands
+     the bundle identity `b` is computed over prost bytes in violation of §2.10. **`TokenPolicyValid`
+     and the terminal close's exactly-once owner credit are DECLARED AND UNDISCHARGED** — the
+     complete predicate is `ValidDlvSuccessor := ValidDlvSuccessorCore ∧ TokenPolicyValid`.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
