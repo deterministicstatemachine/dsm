@@ -1168,7 +1168,17 @@ named storage-substrate exception.
 **Formal-model coverage — DISCHARGED under the stated symbolic assumptions (ruling G).**
 `lean4/DSMEconomicSmtSeparation.lean` carries obligations 1–7; `tla/DSM_EconRegisterObservation.tla`
 carries the concurrent register-observation half, with five deliberate-falsification configs that
-are machine-gated on the invariant each must violate. This is coverage of the normative **models**,
+are classified on the invariant each must violate.
+
+> **Correction, recorded after the fact.** This sentence originally read *"machine-gated"*. The
+> classification was real — `run_all` normalizes every verdict and inverts the expected-to-fail
+> configs correctly — but **CI could not act on it**: `tla-check` printed `FAILED specs: …` and
+> returned `Ok`, and neither `main` nor the CI step converted that into a non-zero exit. A violated
+> invariant, a falsification config that stopped falsifying, and a spec silently dropped from the
+> registry were all green. The same defect affected `property-tests` and `implementation-traces`.
+> The gate became load-bearing only with the corrective change that added exit-status enforcement
+> and a registry-count tripwire; until then, "machine-gated" was true of the runner's bookkeeping
+> and false of CI. This is coverage of the normative **models**,
 not a refinement proof from the Rust — see the claim boundary in ruling G.
 
 **Conformance surface — OWED.** Rev 15 has no conformance row for the economic register, `R_econ`,
