@@ -25,6 +25,22 @@
   Discharges OMITTED obligations in DSM_NonInterference.tla:
     - NonInterferenceStep: SMT key injectivity
     - ZeroRefreshForInactive: separation argument
+
+  Honesty notes:
+    * `relKey_injective` is about the min/max NORMALIZATION of an unordered
+      pair. It is NOT a statement about a hash: this module models no hash,
+      no SMT and no domain separation, and the BLAKE3 leaf-key derivation
+      that consumes `relKey` is out of scope here. The economic tree's
+      corresponding property lives in DSMEconomicSmtSeparation.lean.
+    * `operation_locality` was REPAIRED. It previously read
+      `let _ := pairCommit s1 amount; s2 = s2`, a tautology advertised as a
+      frame condition; see the note at that theorem. The current statement
+      quantifies over a world of pairs and mentions the operation.
+    * `commit_is_not_a_noop` and `commit_hits_its_own_target` prove the
+      repaired theorem is not vacuous: the operation changes its own target,
+      and the target really is the committed state.
+    * Zero `axiom` and zero `opaque` declarations. Every theorem depends only
+      on `propext`, checked with `#print axioms`.
 -/
 
 -- ============================================================
@@ -93,16 +109,69 @@ def pairCommit (s : PairState) (amount : Nat) : PairState :=
     balance2  := s.balance2 + amount
     relTip    := s.relTip + 1 }
 
-/-- Operation locality: committing on pair1 does not modify pair2.
-    This is the mathematical core of Paper Lemma 3.1 — operations on
-    one pair's projection are structurally independent of all other
-    projections.
+/-- The world: every bilateral pair's state, indexed by its relationship key.
+
+    A frame condition needs something to frame AGAINST. `PairState` alone is
+    one pair with no notion of the others, so "committing here does not touch
+    there" is not even expressible over it — which is how the previous version
+    of `operation_locality` came to be a tautology (see the note below). -/
+abbrev PairWorld := (Nat × Nat) → PairState
+
+/-- Commit on exactly ONE pair of the world. Every other key is passed through
+    untouched, which is the property the theorems below actually check. -/
+def commitAt (w : PairWorld) (k : Nat × Nat) (amount : Nat) : PairWorld :=
+  fun j => if j = k then pairCommit (w j) amount else w j
+
+/-- Operation locality: committing on pair `k` does not modify pair `j ≠ k`.
+    The mathematical core of Paper Lemma 3.1 — operations on one pair's
+    projection are structurally independent of all other projections.
+
+    NOTE — this theorem previously read
+
+        theorem operation_locality (s1 s2 : PairState) (amount : Nat) :
+            let _ := pairCommit s1 amount
+            s2 = s2 := by rfl
+
+    whose `let _ :=` binder is discarded, leaving the goal `s2 = s2`. That is
+    `True` wearing a frame condition's clothes: it mentions the operation
+    nowhere, holds for any operation whatsoever, and passed CI because
+    sorry-free is not the same as non-vacuous. The statement below mentions
+    BOTH the operation and both sides of the equation, and the two theorems
+    after it prove it is not free.
 
     OMITTED in: NonInterferenceStep (frame condition). -/
-theorem operation_locality (s1 s2 : PairState) (amount : Nat) :
-    let _ := pairCommit s1 amount  -- commit on pair1
-    s2 = s2 := by                   -- pair2 unchanged
-  rfl
+theorem operation_locality (w : PairWorld) (k j : Nat × Nat) (amount : Nat)
+    (hne : j ≠ k) :
+    commitAt w k amount j = w j := by
+  simp only [commitAt, if_neg hne]
+
+/-- TEETH (own-target mutation): the commit genuinely CHANGES the pair it
+    names. Without this, `operation_locality` could hold because `commitAt`
+    does nothing at all — the failure mode of the version it replaces. -/
+theorem commit_is_not_a_noop :
+    ∃ (w : PairWorld) (k : Nat × Nat) (amount : Nat),
+      commitAt w k amount k ≠ w k := by
+  refine ⟨fun _ => ⟨0, 0, 0, 0, 0⟩, (0, 0), 0, ?_⟩
+  simp only [commitAt, if_true, pairCommit]
+  intro h
+  exact absurd (congrArg PairState.relTip h) (by decide)
+
+/-- REGRESSION GUARD: the target key really is the committed state. An
+    implementation that discarded the operation — exactly what the old
+    `let _ :=` did — makes this unprovable. -/
+theorem commit_hits_its_own_target (w : PairWorld) (k : Nat × Nat) (amount : Nat) :
+    commitAt w k amount k = pairCommit (w k) amount := by
+  simp only [commitAt, if_true]
+
+/-- Non-interference in the paper's own terms: a commit on the relationship
+    `{a,b}` leaves the state of any DISTINCT relationship `{c,d}` unchanged.
+    `relKey_injective` above is what makes the key distinctness meaningful —
+    distinct unordered pairs really do give distinct keys. -/
+theorem distinct_pairs_do_not_interfere
+    (w : PairWorld) (a b c d : Nat) (amount : Nat)
+    (hne : relKey c d ≠ relKey a b) :
+    commitAt w (relKey a b) amount (relKey c d) = w (relKey c d) :=
+  operation_locality w (relKey a b) (relKey c d) amount hne
 
 -- ============================================================
 -- Separation Theorem (Paper Theorem 3.1)

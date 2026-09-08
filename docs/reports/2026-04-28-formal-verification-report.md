@@ -92,7 +92,7 @@ Toolchain: `Lean (version 4.30.0-rc2, arm64-apple-darwin24.6.0, commit 3dc1a088b
 |------|----------|--------|--------|---------|
 | DSMCardinality.lean | 12 | 0 | No | PASS |
 | DSMCryptoBinding.lean | 4 | 8 | No | PASS |
-| DSMNonInterference.lean | 7 | 0 | No | PASS |
+| DSMNonInterference.lean | 10 | 0 | No | PASS |
 | DSMOfflineFinality.lean | 6 | 3 | No | PASS |
 | DSM_dBTC_Conservation.lean | 23 | 0 | No | PASS |
 | DSM_dBTC_TrustReduction.lean | 9 | 0 | No | PASS |
@@ -117,7 +117,16 @@ Toolchain: `Lean (version 4.30.0-rc2, arm64-apple-darwin24.6.0, commit 3dc1a088b
 
 **DSMCryptoBinding.lean**: signed_digest_verifies, signature_retargeting_requires_same_digest, cross_domain_signature_retargeting_impossible, math_owned_claim_retargeting_impossible
 
-**DSMNonInterference.lean**: relKey_symmetric, relKey_normalized, relKey_injective, operation_locality, separation_inactive_zero_refresh, separation_refresh_bound, per_pair_conservation
+**DSMNonInterference.lean**: relKey_symmetric, relKey_normalized, relKey_injective, operation_locality, commit_is_not_a_noop, commit_hits_its_own_target, distinct_pairs_do_not_interfere, separation_inactive_zero_refresh, separation_refresh_bound, per_pair_conservation
+
+> **Correction.** An earlier revision of this report listed `operation_locality` among the proven
+> theorems while that theorem was **vacuous**: it read `let _ := pairCommit s1 amount; s2 = s2`,
+> whose `let` binder is discarded, leaving the tautology `s2 = s2`. It mentioned the operation
+> nowhere and held for any operation whatsoever. It passed the gate because sorry-free is not the
+> same as non-vacuous. The theorem has been repaired to a real frame condition over a world of
+> pairs, and `commit_is_not_a_noop` / `commit_hits_its_own_target` were added to prove the repaired
+> statement is not free. Note also that `relKey_injective` concerns the min/max **normalization** of
+> an unordered pair — it is not a statement about a hash, and this module models none.
 
 **DSMOfflineFinality.lean**: committed_balance_spendable, commit_conservation, tripwire_tip_strictly_advances, tip_advance_prevents_reuse, no_double_commit_same_tip, fail_preserves_balance
 
