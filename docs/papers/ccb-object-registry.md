@@ -1344,9 +1344,14 @@ In order, and not combined:
      rather than as a Rust function. **Complete market `Canon(B)` and a conformant market `b` are
      now constructible.** Declares the beta identity cut its re-basing of the evidence address
      causes.
-   - **2c-C.** Economic substrate closure: the namespace record (this §3 table is behind the
-     shipped code for `0x001B`–`0x0030`), plus the transitive verification closure, including
-     `ValidDlvSuccessor(V_n, V_{n+1}, operation)`.
+   - **2c-C — DECOMPOSED into C1–C4.**
+     [`amendment-2c-c-verification-closure-decomposition.md`](amendment-2c-c-verification-closure-decomposition.md).
+     Economic substrate closure: the namespace record (this §3 table is behind the shipped code for
+     `0x001B`–`0x0030`), plus the transitive verification closure, including
+     `ValidDlvSuccessor(V_n, V_{n+1}, operation)`. A source audit found ~26 open decisions and §2
+     framework extensions required before the economic classes can be expressed, so it ships as
+     **C1** framework + namespace, **C2** verification substrate (addressing, SMT, quorum, P0–P6),
+     **C3** `ValidDlvSuccessor`, **C4** the `TA_B` closure walk.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
