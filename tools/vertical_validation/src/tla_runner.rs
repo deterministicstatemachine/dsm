@@ -39,6 +39,14 @@ pub struct TlaSpec {
     pub linked_implementation_traces: Vec<String>,
     /// Whether this spec supports TLC trace replay into Rust shadow models.
     pub supports_trace_replay: bool,
+    /// `Some(invariant)` when this config is a DELIBERATE FALSIFICATION: the
+    /// run passes the gate only if TLC reports exactly that invariant violated.
+    ///
+    /// Falsification configs are how "the invariants have teeth" stops being a
+    /// claim in a README and becomes a checked fact. Three ways to fail:
+    /// no violation at all (the invariant is decoration), the wrong invariant
+    /// (the config is not modelling what it says), or a TLC error.
+    pub expect_violation: Option<String>,
 }
 
 /// Structured result from parsing TLC stdout.
@@ -279,6 +287,7 @@ impl TlaRunner {
                     "token_manager_overspend_rejection".into(),
                 ],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             TlaSpec {
                 label: "DSM_small".into(),
@@ -307,6 +316,7 @@ impl TlaRunner {
                     "token_manager_overspend_rejection".into(),
                 ],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             TlaSpec {
                 label: "DSM_system".into(),
@@ -335,6 +345,7 @@ impl TlaRunner {
                     "token_manager_overspend_rejection".into(),
                 ],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             TlaSpec {
                 label: "Tripwire".into(),
@@ -359,6 +370,7 @@ impl TlaRunner {
                     "bilateral_precomputed_finalize_hash".into(),
                 ],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             // --- Offline Finality (Paper Theorems 4.1, 4.2) ---
             // Bilateral settlement irreversibility + BLE partition tolerance.
@@ -378,6 +390,7 @@ impl TlaRunner {
                 properties: vec![],
                 linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
             // Additive scaling: operations on one bilateral pair cannot affect
@@ -396,6 +409,7 @@ impl TlaRunner {
                 properties: vec![],
                 linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             // --- Offline Anchor Single Appliance (Software Authority, Hardware
             // Identity: appliance-producer form of Theorem 1). One correct
@@ -419,6 +433,98 @@ impl TlaRunner {
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
+                expect_violation: None,
+            },
+            // ── Economic register, observed concurrently (amendment 2c-C2) ──
+            // The write-once economic register read under concurrency:
+            // competing claimants, member outage, register REBUILD, and a
+            // NON-ATOMIC read round whose samples interleave with all of them.
+            // Owns the BEHAVIOURAL half of observe_cell
+            // (dsm/src/economic/cell_observation.rs:122-175); the algebraic
+            // half -- canonical quorum, 2q > n -- is Lean's
+            // (lean4/DSMEconomicSmtSeparation.lean §10) and is deliberately
+            // not restated here.
+            TlaSpec {
+                label: "EconRegisterObservation".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "EmptinessIsGrounded".into(),
+                    "EmptyAtQuorumIsWitnessed".into(),
+                    "NoEmptyAtQuorumAfterClaimed".into(),
+                    "TwoAtQuorumIsConflict".into(),
+                    "VerdictMatchesObservation".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+            },
+            // ── DELIBERATE FALSIFICATIONS ───────────────────────────────────
+            // Each models a REAL shipped defect and must violate the named
+            // invariant. A green run here means the invariant has no teeth.
+            TlaSpec {
+                label: "EconRegisterObservation/flatten-collapse".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation_FlattenCollapse.cfg".into(),
+                invariants: vec!["EmptinessIsGrounded".into()],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                // peer_lineage.rs:165-169 -- .ok().flatten() delivers a
+                // quarantined write-once cell as emptiness.
+                expect_violation: Some("EmptinessIsGrounded".into()),
+            },
+            TlaSpec {
+                label: "EconRegisterObservation/unavailable-is-none".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation_UnavailableIsNone.cfg".into(),
+                invariants: vec!["EmptinessIsGrounded".into()],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                // economic_registers.rs:232 -- Unavailable => Ok(None).
+                expect_violation: Some("EmptinessIsGrounded".into()),
+            },
+            TlaSpec {
+                label: "EconRegisterObservation/error-is-empty".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation_ErrorIsEmpty.cfg".into(),
+                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                // The historical defect cell_observation.rs exists to remove:
+                // an unusable answer classified as "no value".
+                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
+            },
+            TlaSpec {
+                label: "EconRegisterObservation/no-incarnation-echo".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation_NoIncarnationEcho.cfg".into(),
+                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                // Attribution on node id alone -- the live economic read path
+                // before the incarnation header was stamped. A rebuilt member's
+                // absence is counted as attributable when it is not.
+                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
+            },
+            TlaSpec {
+                label: "EconRegisterObservation/conflict-reachable".into(),
+                spec_file: "DSM_EconRegisterObservation.tla".into(),
+                config_file: "DSM_EconRegisterObservation_Reachability.cfg".into(),
+                invariants: vec!["ConflictUnreachable".into()],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                // NON-VACUITY. Conflict must be REACHABLE from two claimants
+                // racing one write-once cell, with no misbehaviour at all.
+                // Without this, the falsification configs above could pass for
+                // the wrong reason.
+                expect_violation: Some("ConflictUnreachable".into()),
             },
         ]
     }
@@ -455,6 +561,7 @@ impl TlaRunner {
                     "token_manager_overspend_rejection".into(),
                 ],
                 supports_trace_replay: true,
+                expect_violation: None,
             },
             TlaSpec {
                 label: "DSM_bilateral_liveness".into(),
@@ -474,6 +581,7 @@ impl TlaRunner {
                 ],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
+                expect_violation: None,
             },
         ]
     }
@@ -491,11 +599,43 @@ impl TlaRunner {
 
         for spec in specs {
             eprintln!("  Running TLC: {} ({}) ...", spec.label, spec.config_file);
-            let result = self.run_spec(&spec).await?;
+            let mut result = self.run_spec(&spec).await?;
+            // A deliberate-falsification config INVERTS the verdict, and only
+            // for the invariant it names. A config that fails for some other
+            // reason is not evidence about the invariant it was written for.
+            if let Some(expected) = spec.expect_violation.as_deref() {
+                let needle = format!("Invariant violated: {expected}");
+                let hit = result.errors.iter().any(|e| e == &needle);
+                if hit {
+                    result.passed = true;
+                    result.errors = vec![format!(
+                        "EXPECTED violation observed: {expected} (falsification config)"
+                    )];
+                } else {
+                    let saw = if result.errors.is_empty() {
+                        "no violation at all — the invariant is decoration".to_string()
+                    } else {
+                        format!("a different failure: {:?}", result.errors)
+                    };
+                    result.passed = false;
+                    result.errors = vec![format!(
+                        "falsification config must violate {expected}, but saw {saw}"
+                    )];
+                }
+            }
             let verdict = if result.passed { "PASSED" } else { "FAILED" };
+            let note = if spec.expect_violation.is_some() {
+                " [expected-to-fail]"
+            } else {
+                ""
+            };
             eprintln!(
-                "    {} ({} states, {} distinct, depth {})",
-                verdict, result.states_generated, result.distinct_states, result.depth_reached
+                "    {}{} ({} states, {} distinct, depth {})",
+                verdict,
+                note,
+                result.states_generated,
+                result.distinct_states,
+                result.depth_reached
             );
             results.push((spec, result));
         }
