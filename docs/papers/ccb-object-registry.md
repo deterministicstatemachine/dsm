@@ -1835,6 +1835,13 @@ In order, and not combined:
      the bundle identity `b` is computed over prost bytes in violation of §2.10. **`TokenPolicyValid`
      and the terminal close's exactly-once owner credit are DECLARED AND UNDISCHARGED** — the
      complete predicate is `ValidDlvSuccessor := ValidDlvSuccessorCore ∧ TokenPolicyValid`.
+     **Frozen is not the same as implementable:** the successor-correspondence conjunct
+     `VDS.COMMON.10.a` is normative and **implementation-blocked on 2c-A's encoder cut**, because no
+     authoritative canonical successor bytes exist on the wire today — `successor_ccb` carries the
+     route-set commitment on a market bundle and a slot commitment on a close, and both composition
+     arms derive the successor locally. C3 also fixes the correspondence test as equality of
+     canonical **bytes**, since `decode_vault_state` normalizes rather than refuses and a
+     decode/re-encode substitute would launder non-canonical input.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material

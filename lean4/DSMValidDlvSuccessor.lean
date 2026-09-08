@@ -27,6 +27,18 @@
     * The terminal close's exactly-once owner credit is NOT modelled. It is a
       property of the OWNER'S balance, not of `V_{n+1}`, so no predicate over
       the successor -- here or in Rust -- can express it.
+    * `VDS.COMMON.10.a` -- the correspondence conjunct these theorems are built
+      around -- is NORMATIVE and PROVED HERE, but is IMPLEMENTATION-BLOCKED on
+      2c-A's canonical encoder cut. No authoritative canonical successor bytes
+      exist on the wire today: `successor_ccb` carries the route-set commitment
+      on a market bundle and a slot commitment on a close, and both composition
+      arms derive the successor locally. Proving it here does not make it
+      implementable there, and production must not report VALID for a path whose
+      validity requires it until the byte comparison is actually performed.
+    * The acceptance condition is equality of canonical BYTES. A decode/re-encode
+      round trip is NOT a substitute unless the encoder performing it is the
+      frozen normative encoder -- `decode_vault_state` normalizes rather than
+      refuses, so the substitute would launder non-canonical input.
     * This is a model of the NORMATIVE objects, not a refinement proof from the
       shipped Rust. `canonVault` is an injective encoding with the same two
       variable-length hazards as CCB; it is not CCB.
@@ -279,7 +291,8 @@ inductive Reason where
   | correspondenceMismatch
   | composeFromRetiredParent
   | settlerKeyMismatch
-  | notBindingFinal
+  | noBindingEstablished
+  | bindingUndetermined
   | bindingEvidenceUnavailable
   | duplicateBindingFinality
   deriving Repr, DecidableEq
@@ -708,19 +721,28 @@ inductive AuthorityResolution where
   | incomplete (r : Reason)
   deriving Repr, DecidableEq
 
-/-- C2's four-valued cell observation, consumed UNCHANGED. C3 assigns its
-    normative meaning; it never redefines it. -/
-inductive CellObservation where
-  | claimed (payload : Nat)
-  | conflict
-  | emptyAtQuorum
-  | unavailable
+/-- The DLV parent-binding observation, consumed UNCHANGED. C3 assigns its
+    normative meaning; it never redefines it.
+
+    NOTE -- this is `dsm::dlv::binding_observation::BindingObservation`, which
+    has FIVE arms. It is NOT the four-valued `CellObservation` of the economic
+    register (`dsm::economic::cell_observation`), and an earlier draft of the C3
+    input contract named that one by mistake. The two are different types over
+    different keys, and the arm that only the binding observation has --
+    `undetermined` -- is precisely the one its module header calls easy to get
+    backwards. -/
+inductive BindingObservation where
+  | free
+  | boundFinal (chosen : Nat)
+  | conflict (distinct : Nat)
+  | undetermined (attributed : Nat)
+  | unavailable (attributed required : Nat)
   deriving Repr, DecidableEq
 
 structure C3Input where
   parentAuth : ParentAuth
   authority  : AuthorityResolution
-  binding    : CellObservation
+  binding    : BindingObservation
   operation  : Operation
   settlerKey : Nat
   supplied   : VaultState
@@ -740,10 +762,19 @@ def classify (i : C3Input) : Cls × Option Reason :=
       -- against the externally resolved authority, never its own source.
       if i.settlerKey ≠ ak then (.invalid, some .settlerKeyMismatch)
       else match i.binding with
-        | .unavailable   => (.incomplete, some .bindingEvidenceUnavailable)
-        | .emptyAtQuorum => (.incomplete, some .notBindingFinal)
-        | .conflict      => (.safetyViolation, some .duplicateBindingFinality)
-        | .claimed _     => correspondence v cn i.operation i.supplied
+        -- A quorum of members each explicitly hold NOTHING at this key. That IS
+        -- evidence, and it says this settle never won exclusivity over the
+        -- parent it names -- so it is decidably false, not unlearned.
+        | .free            => (.invalid, some .noBindingEstablished)
+        | .conflict _      => (.safetyViolation, some .duplicateBindingFinality)
+        -- THE ARM THAT IS EASY TO GET BACKWARDS. A promise in flight, or a
+        -- chosen value sitting behind a down member, lands here: two quorums
+        -- intersect, but one READ need not see the intersection. Reading it as
+        -- `free` composes past a live bind; reading it as a forgery makes every
+        -- concurrent settle permanently invalid. It is retryable evidence.
+        | .undetermined _  => (.incomplete, some .bindingUndetermined)
+        | .unavailable _ _ => (.incomplete, some .bindingEvidenceUnavailable)
+        | .boundFinal _    => correspondence v cn i.operation i.supplied
 
 /-- What C3 proves. -/
 def ValidDlvSuccessorCore (i : C3Input) : Prop := classify i = (.valid, none)
@@ -757,11 +788,11 @@ def ValidDlvSuccessor (i : C3Input) (TokenPolicyValid : C3Input → Prop) : Prop
 -- What the input contract buys
 -- ============================================================
 
-/-- `Unavailable` NEVER counts as attributed: it cannot produce a valid
-    successor, and it is `INCOMPLETE` rather than `INVALID` — not learning a
-    fact is not learning its negation (Req 6.25). -/
-theorem unavailable_is_incomplete_never_valid (i : C3Input)
-    (h : i.binding = .unavailable) :
+/-- Neither `unavailable` nor `undetermined` can ever produce a valid
+    successor. Both are `INCOMPLETE` rather than `INVALID` — not learning a fact
+    is not learning its negation (Req 6.25). -/
+theorem unavailable_is_incomplete_never_valid (i : C3Input) (a r : Nat)
+    (h : i.binding = .unavailable a r) :
     classify i = (.valid, none) → False := by
   unfold classify
   split
@@ -774,30 +805,67 @@ theorem unavailable_is_incomplete_never_valid (i : C3Input)
       · intro hc; exact absurd hc (by simp)
       · rw [h]; intro hc; exact absurd hc (by simp)
 
-/-- A `Conflict` is a SAFETY_VIOLATION, never a tie to be broken and never a
-    plain rejection. Req 6.3 forbids tie-breaking because either continuation
-    may already have been relied upon. -/
-theorem conflict_is_a_safety_violation (i : C3Input) (v : VaultState) (cn ak nid : Nat)
+/-- **The arm that is easy to get backwards.** `undetermined` is retryable
+    evidence: a value already chosen behind a down member lands here, because
+    two quorums intersect but one READ need not see the intersection. Mapping it
+    to `INVALID` would make every concurrent settle permanently invalid; mapping
+    it to `free` would compose past a live bind. It is neither. -/
+theorem undetermined_is_incomplete_never_valid_never_invalid
+    (i : C3Input) (v : VaultState) (cn ak nid a : Nat)
     (hp : i.parentAuth = .established v cn)
     (ha : i.authority = .resolved ak nid)
     (hk : i.settlerKey = ak)
-    (hb : i.binding = .conflict) :
+    (hb : i.binding = .undetermined a) :
+    classify i = (.incomplete, some .bindingUndetermined) := by
+  unfold classify
+  rw [hp, ha, hb, hk]
+  simp
+
+/-- `free` is the opposite case and is deliberately NOT incomplete: a quorum of
+    authenticated explicit absences is positive evidence that nothing is chosen,
+    so the successor decidably never won exclusivity over the parent it names. -/
+theorem free_is_invalid_not_incomplete
+    (i : C3Input) (v : VaultState) (cn ak nid : Nat)
+    (hp : i.parentAuth = .established v cn)
+    (ha : i.authority = .resolved ak nid)
+    (hk : i.settlerKey = ak)
+    (hb : i.binding = .free) :
+    classify i = (.invalid, some .noBindingEstablished) := by
+  unfold classify
+  rw [hp, ha, hb, hk]
+  simp
+
+/-- A `Conflict` is a SAFETY_VIOLATION, never a tie to be broken and never a
+    plain rejection. Req 6.3 forbids tie-breaking because either continuation
+    may already have been relied upon. -/
+theorem conflict_is_a_safety_violation
+    (i : C3Input) (v : VaultState) (cn ak nid d : Nat)
+    (hp : i.parentAuth = .established v cn)
+    (ha : i.authority = .resolved ak nid)
+    (hk : i.settlerKey = ak)
+    (hb : i.binding = .conflict d) :
     classify i = (.safetyViolation, some .duplicateBindingFinality) := by
   unfold classify
   rw [hp, ha, hb, hk]
   simp
 
-/-- Layer 2 REFINES layer 1: two different facts both classify `INCOMPLETE`,
-    and they are distinguishable. Collapsing them would lose exactly Req 6.25's
-    distinction between "no binding exists" and "I could not find out". -/
+/-- Layer 2 REFINES layer 1. The five binding arms collapse to three classes,
+    and the two that share `INCOMPLETE` remain distinguishable by reason.
+    Collapsing them would lose the distinction between "the bind is mid-flight"
+    and "I could not reach a quorum to find out" — and collapsing either into
+    `free` would lose the distinction between both and "nothing is bound". -/
 theorem the_two_incomplete_reasons_are_distinct :
-    Reason.notBindingFinal ≠ Reason.bindingEvidenceUnavailable := by decide
+    Reason.bindingUndetermined ≠ Reason.bindingEvidenceUnavailable := by decide
+
+theorem no_binding_is_distinct_from_both_incomplete_reasons :
+    Reason.noBindingEstablished ≠ Reason.bindingUndetermined ∧
+    Reason.noBindingEstablished ≠ Reason.bindingEvidenceUnavailable := by decide
 
 /-- The sample transition, carried through the full input contract. -/
 def sampleInput : C3Input :=
   { parentAuth := .established sampleParent 42
     authority  := .resolved 77 1
-    binding    := .claimed 0
+    binding    := .boundFinal 0
     operation  := .market sampleOp
     settlerKey := 77
     supplied   := sampleSuccessor }
@@ -817,8 +885,19 @@ theorem settler_key_mismatch_is_rejected :
     transition, evidence unobtainable: `INCOMPLETE`, never `INVALID`, and never
     silently valid. -/
 theorem unavailable_binding_is_incomplete :
-    classify { sampleInput with binding := .unavailable }
+    classify { sampleInput with binding := .unavailable 1 2 }
       = (.incomplete, some .bindingEvidenceUnavailable) := by
+  decide
+
+/-- …and the mid-flight arm is a THIRD outcome, distinct from both. -/
+theorem undetermined_binding_is_its_own_outcome :
+    classify { sampleInput with binding := .undetermined 2 }
+      = (.incomplete, some .bindingUndetermined) := by
+  decide
+
+theorem free_binding_is_invalid :
+    classify { sampleInput with binding := .free }
+      = (.invalid, some .noBindingEstablished) := by
   decide
 
 /-- **RULING H, formalized.** `ValidDlvSuccessorCore` does NOT discharge token
@@ -850,4 +929,6 @@ theorem core_does_not_discharge_token_policy :
 #print axioms market_successor_not_accepted_under_close
 #print axioms unavailable_is_incomplete_never_valid
 #print axioms conflict_is_a_safety_violation
+#print axioms undetermined_is_incomplete_never_valid_never_invalid
+#print axioms free_is_invalid_not_incomplete
 #print axioms core_does_not_discharge_token_policy

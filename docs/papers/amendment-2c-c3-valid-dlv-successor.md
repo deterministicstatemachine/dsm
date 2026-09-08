@@ -51,10 +51,16 @@ code:
   implemented literally from Def 6.1 and §7.1 rejects every valid beta market successor. All four are
   corrected below.
 
-- **`let _ = transition;`** — `vault_state_composition.rs:572`. The bundle's declared successor is
-  bound and then discarded; the walk folds its own locally derived `next_state`
-  (`vault_state_composition.rs:470`) and never compares the two. The comparison this amendment makes
-  normative is, today, absent at the one site where both values are live.
+- **There is no declared successor on the wire at all.** This corrects an earlier draft of this
+  amendment, which said `vault_state_composition.rs:572` *"binds the bundle's declared successor and
+  discards it"* and that *"both values are live at that point"*. Only the trivial half was true.
+  `VaultTransitionV1.successor_ccb` is 32 bytes that are **not a successor commitment**: production
+  market bundles write the route-set commitment `x` (`dlv_routes.rs:3249`, whose own comment says
+  *"there is no such commitment to name, so it carries the trade identity and nothing reads it as a
+  successor"*), and production closes write `x_close` (`settlement_bind.rs:161`), a pure function of
+  `(vault_id, parent_generation)` that commits nothing about reserves. Both composition arms
+  **derive** the successor locally (`:470` market, `:479` close). So `VDS.COMMON.10.a` has no second
+  operand today — see the blocking note under its clause.
 
 - **A whole successor-validity condition was missing from every draft.** §8's Req 8.1 — *"A claim is
   consumed at most once and its exact removal must be visible in the successor state"* — is a
@@ -153,6 +159,39 @@ CanonVault(x) = CanonVault(y)  ->  x = y
 
 This is an obligation of the encoding, discharged as a Lean theorem over the modelled encoder. It is
 named here because omitting it would let the derived consequences carry an unstated assumption.
+
+## The comparison is over BYTES, and the reason is not stylistic
+
+```text
+NORMATIVE:  the acceptance condition is equality of the CANONICAL BYTES
+
+    encode_canonical(expected)  ==  the exact supplied canonical bytes
+
+FORBIDDEN as a substitute:
+
+    decode(supplied) == expected            -- compares objects, not bytes
+    encode(decode(supplied)) == encode(expected)
+                                            -- launders non-canonical input
+                                               through the decoder
+```
+
+**Semantic successor equality and canonical-byte equality are different conditions**, and here they
+genuinely come apart. `decode_vault_state` (`dsm/src/ccb/decode.rs`) **normalizes rather than
+refuses**: `StorageSetMembers::new` sorts by `member_id` and `EncumbranceSet::new` sorts by element
+encoding, and both reject only *duplicates*, never bad *order*. CCB has no decode/re-encode equality
+check, although roughly ten sibling modules in the same crate apply exactly that discipline and one
+of them names it *"the settlement-wire discipline"*. So two distinct byte strings decode to one
+`VaultStateV2`, and any implementation that compares decoded objects — or re-encodes a decoded object
+— **accepts non-canonical supplied bytes**.
+
+A decode/re-encode round trip may stand in for the byte comparison **only** when the encoder
+performing it is itself the frozen normative encoder. That encoder does not exist yet: repository-wide
+there is exactly one `fn canon`, in `dsm/src/dlv/settlement_bundle.rs`, and it is protobuf. **There is
+no `canon()` for `VaultStateV2`.** Phase D must build it, not call it.
+
+The decoder's own comment (`decode.rs:271-272`) claims *"duplicate or misordered input is refused by
+the constructor, not repaired."* The `misordered` half is false, and is recorded here as an
+implementation debt rather than repaired in a documentation amendment.
 
 ## Why derive-and-compare rather than a checklist
 
@@ -384,12 +423,19 @@ converts a detected safety failure into a silent, blessed fork.
 
 ```text
 FORBIDDEN   a catch-all "other" arm
-FORBIDDEN   .ok().flatten() over a fallible verification step
+FORBIDDEN   .ok() / .ok()? / .ok().flatten() over a fallible VERIFICATION step
 FORBIDDEN   mapping an error to an absence
+FORBIDDEN   mapping a FAILED SIGNATURE to an absence
 FORBIDDEN   any branch without a (class, reason)
 ```
 
-The current code violates the third at the boundary this amendment lands on; see Ruling J.
+The fourth is listed separately because the shipped code does exactly that, and does it deliberately:
+`fetch_verified_receipt` discards a failed SPHINCS+ receipt verification with `.ok()?`, and its doc
+comment defends the collapse on the ground that *"the only decision downstream is whether the pointer
+may be folded, and every one of these says it may not."* That reasoning is sound about **folding** and
+wrong about **classification** — the fold stops either way, but a forged receipt and an absent one are
+not the same fact, and the resulting `MarketRealization::Absent` returns `Ok(...)` rather than any
+error at all. Under this ruling a failed verification is `INVALID`, never an absence.
 
 ---
 
@@ -591,7 +637,8 @@ C3Input {
     authority_resolution  : Resolved(proven_ak, network_id)
                           | Invalid(reason) | Incomplete(reason)
 
-    binding_observation   : Claimed(..) | Conflict(..) | EmptyAtQuorum | Unavailable
+    binding_observation   : Free | BoundFinal(..) | Conflict(..)
+                          | Undetermined(..) | Unavailable(..)
 
     operation             : Canonical(..) | Invalid(reason)
 
@@ -605,11 +652,51 @@ C4  OBTAINS and PROVES those observations from the ordered evidence walk.
 C3  ASSIGNS their normative meaning for successor validity.
 ```
 
-`binding_observation` is C2's four-valued `CellObservation`, unchanged. C3 **consumes** it and never
-redefines it: `Unavailable` never counts as attributed, `Conflict` is not a tie to be broken, and
-`EmptyAtQuorum` is a positive observation of absence rather than a failure to look.
+## The binding observation has FIVE arms, not four
 
-The boundary is preserved — C3 still does not perform the walk — while the taxonomy stays coherent.
+An earlier draft of this amendment described `binding_observation` as *"C2's four-valued
+`CellObservation`, unchanged"*. **That named the wrong type.** Two distinct observation types exist
+over two distinct key spaces, and only one of them is C2's:
+
+```text
+CellObservation      dsm::economic::cell_observation      FOUR arms
+                     the ECONOMIC REGISTER cell
+                     Claimed | EmptyAtQuorum | Conflict | Unavailable
+                     frozen by 2c-C2; C3 does not consume it here
+
+BindingObservation   dsm::dlv::binding_observation        FIVE arms
+                     the DLV PARENT-BINDING slot
+                     Free | BoundFinal | Conflict | Undetermined | Unavailable
+                     this is what the settle path actually reads
+```
+
+C3 consumes the **five-valued** one and preserves every arm. The mapping is normative:
+
+| arm | class | reason |
+|---|---|---|
+| `Free` | `INVALID` | `NO_BINDING_ESTABLISHED` |
+| `BoundFinal(chosen)` | — | proceeds to `VDS.COMMON.10.a` |
+| `Conflict { distinct }` | `SAFETY_VIOLATION` | `DUPLICATE_BINDING_FINALITY` (Req 6.3) |
+| `Undetermined { attributed, .. }` | `INCOMPLETE` | `BINDING_UNDETERMINED` |
+| `Unavailable { attributed, required }` | `INCOMPLETE` | `BINDING_EVIDENCE_UNAVAILABLE` |
+
+Two facts about this table are easy to get backwards, and the module that defines the type says so
+in its own header.
+
+**`Undetermined` is neither emptiness nor forgery.** Two quorums intersect, but one *read* need not
+see the intersection: a value already chosen behind a down member lands here. Reading it as `Free`
+composes past a bind that is mid-flight; reading it as invalid *"would make every concurrent settle
+permanently invalid."* It is retryable evidence and nothing else — which is why it takes `INCOMPLETE`
+with its **own** reason, distinct from `Unavailable`'s.
+
+**`Free` is `INVALID`, not `INCOMPLETE`.** A quorum of authenticated explicit absences is positive
+evidence: if a value were chosen, `q` members would hold it and any `q`-subset would intersect them.
+So `Free` proves this successor never won exclusivity over the parent it names — decidably false,
+not unlearned. Req 6.25's distinction is between *candidate validity* and *binding finality*; it does
+not license treating a proven absence as an unanswered question.
+
+The boundary is preserved — C3 still does not perform the walk — while the taxonomy stays coherent
+across all five arms.
 
 ---
 
@@ -667,7 +754,7 @@ close arm is `INVALID`, never accidentally accepted.
 | `VDS.COMMON.8.b` | the seven admissibility conditions hold | §5.1, market admissibility | `INVALID`, each with its own reason |
 | `VDS.COMMON.8.c` | checked arithmetic; the single floor division is the only rounding | §5.1 | `INVALID` on overflow |
 | `VDS.COMMON.9` | conservation with `fee_t = 0` | §7.1, D3 | `INVALID` |
-| `VDS.COMMON.10.a` | **`VDS.CORRESPONDENCE`** — `Canon(expected) = Canon(supplied)` | Def 6.1, Ruling B | class and reason propagated from `DeriveExpected` |
+| `VDS.COMMON.10.a` | **`VDS.CORRESPONDENCE`** — `Canon(expected) = Canon(supplied)` — **IMPLEMENTATION-BLOCKED**, see below | Def 6.1, Ruling B | class and reason propagated from `DeriveExpected` |
 | `VDS.COMMON.10.b` | the proof material selected by the binding decision is byte-identical | Def 6.1 | `INVALID` |
 | `VDS.COMMON.11` | the advancing party's signature verifies over the concrete successor CCB | §5.2 item 1 | `INVALID` |
 | `VDS.COMMON.12` | settler identity correspondence against externally resolved authority | Ruling I | `INVALID` mismatch · `INCOMPLETE` unresolved authority |
@@ -675,6 +762,37 @@ close arm is `INVALID`, never accidentally accepted.
 | `VDS.COMMON.14` | `V_{n+1}.r_o = V_n.r_o` | §4, Ruling F | `INVALID` |
 | `D` | every preserved field of `V_{n+1}` equals `V_n`'s | Ruling B | derived from `VDS.COMMON.10.a` |
 | `D` | every mutated field equals its deterministic derived value | Ruling B | derived from `VDS.COMMON.10.a` |
+
+### `VDS.COMMON.10.a` — normative, and implementation-blocked
+
+```text
+NORMATIVE                YES
+FORMALLY SPECIFIED       YES   -- Ruling B; lean4/DSMValidDlvSuccessor.lean
+PRODUCTION IMPLEMENTED   NO
+BLOCKED ON               the 2c-A canonical encoder cut
+```
+
+**The exact blocker.** The conjunct needs two operands. The first, `expected`, is derivable today.
+The second does not exist: no authoritative canonical successor bytes are carried on the wire.
+`VaultTransitionV1.successor_ccb` holds the route-set commitment on a market bundle and
+`close_slot_commitment(vault_id, parent_generation)` on a close — neither commits the successor
+state, and the market writer's own comment says nothing reads it as a successor.
+
+**What unblocks it.** 2c-A freezes `0x000F` field 2 as the **complete nested `0x0001` schema 4**
+successor, from which `c_{n+1} = H_dom(DSM/vault-state, CCB(T_v.successor))` derives. Once that
+encoder cut lands, the supplied operand exists and the comparison is implementable as stated.
+
+**Owning prerequisite:** 2c-A. This amendment adds no class and changes no encoding, so C3 must not
+absorb that cut, and Phase D must not manufacture a surrogate operand — not protobuf re-encoding, not
+`successor_ccb`, not a newly invented field, not producer-derived bytes.
+
+**What "blocked" must not mean.** It must not mean *accept without it*. Until the byte comparison has
+actually been performed against authoritative supplied bytes, a verifier **must not** report full
+`ValidDlvSuccessorCore = VALID` for any path whose validity requires this conjunct. Phase D therefore
+exposes the gap explicitly as **implementation/deployment status** — a component that can report
+`BlockedOnCanonicalSuccessorEncoding` — and **never** as a protocol reason code. The normative
+`INVALID / INCOMPLETE / SAFETY_VIOLATION` taxonomy is not contaminated because a development
+prerequisite has not landed.
 
 `VDS.COMMON.11`–`14` are **not** from Def 6.1's ten. They come from §5.2's completion witness and
 from the field-disposition rulings, and are numbered after the ten so that Def 6.1's own list stays
@@ -715,9 +833,25 @@ implementation against itself.
 C3 is documentation. The changes that adopt it inherit these, and each must carry the conformance
 vectors published under C2 ruling D.
 
-**The comparison does not exist.** `vault_state_composition.rs:572` binds the bundle's declared
-successor and discards it with `let _ = transition;`, folding the locally derived `next_state`
-(`:470`) instead. Both values are live at that point. `VDS.COMMON.10.a` has no implementation.
+**The comparison has no second operand.** `vault_state_composition.rs:572` discards a
+`&VaultTransitionV1` with `let _ = transition;`, and that value is **not** a declared successor —
+its `successor_ccb` carries `x` on a market bundle and `close_slot_commitment(vault_id, generation)`
+on a close. Both arms derive the successor locally and there is nothing to compare against, so
+`VDS.COMMON.10.a` is not merely unimplemented: it is **unimplementable against the current
+encoding**. See its blocking note.
+
+**Nor can `successor_ccb` simply be repurposed.** `is_close_transition`
+(`dsm/src/dlv/settlement_bundle.rs:136-146`) derives `BundleShape` from exactly that field, and the
+shape drives the arm selection at `vault_state_composition.rs:470`. Writing a genuine successor
+commitment into it would silently reclassify every close bundle as `Market`. The field's disposition
+belongs to 2c-A (Ruling D), and the shape discriminator must move first.
+
+**A failed signature is not an absence.** `fetch_verified_receipt`
+(`dsm_sdk/src/sdk/settlement_receipt_codec.rs:141`) converts a **failed SPHINCS+ receipt
+verification** into `None` via `.ok()?`. That becomes `MarketRealization::Absent`, which `break`s the
+fold and returns **`Ok(ComposedVaultState)`** — so a forged receipt is not an error at all, and never
+reaches the error taxonomy for a split to correct. This is a larger hole than the two named below and
+is an `INVALID` fact classified as an absence, which Ruling E forbids.
 
 **The taxonomy collapses at the boundary.** `ParentOccupancy::Unresolvable`
 (`vault_state_composition.rs:439-440`) funnels forged successors — wrong parent state, wrong
@@ -749,8 +883,17 @@ terms Def 6.14 and 2c-A contradict; they die with the CCB cut (Ruling D).
 
 # Closure status
 
+```text
+C3 predicate                       FROZEN
+C3 Lean structure                  FROZEN / PROVED AS CLAIMED
+VDS.COMMON.10.a                    NORMATIVE, IMPLEMENTATION-BLOCKED ON THE
+                                   2c-A ENCODER CUT
+Production C3 closure              NOT YET COMPLETE
+```
+
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation
-contract, the outcome taxonomy, the field dispositions and the input contract.
+contract, the outcome taxonomy, the field dispositions and the input contract. **Frozen is not the
+same as presently implementable** — `VDS.COMMON.10.a` is normative and blocked, as recorded above.
 
 **Two conjuncts are DECLARED AND UNDISCHARGED**, named so that "C3 is closed" can never be read as
 "DLV succession is fully verified":
@@ -804,3 +947,32 @@ that C2's owed registry edits land first, as a separate commit, because C3 cites
    that no sentence claims `Canon(expected) = Canon(supplied)` is the whole predicate, that no
    sentence claims C3 discharges token policy or the owner credit, and that no clause count is
    presented as normative.
+
+# Corrections made to this amendment before it merged
+
+A read-only survey of the Rust surface, run before any production code was written, found three
+defects in the first draft of this document. They are recorded rather than silently rewritten,
+because the draft was circulated for review and because two of them were confident, specific and
+wrong.
+
+**The production-debt statement was false.** The draft said line 572 binds *"the bundle's declared
+successor"*. No declared successor exists on the wire; `successor_ccb` carries the route-set
+commitment or a slot commitment, and both composition arms derive the successor locally. Corrected,
+and `VDS.COMMON.10.a` is now marked implementation-blocked on the 2c-A encoder cut rather than merely
+unimplemented.
+
+**Ruling J named the wrong observation type.** The draft said the binding observation is C2's
+four-valued `CellObservation`. The settle path reads the five-valued
+`dsm::dlv::binding_observation::BindingObservation`, whose extra arm — `Undetermined` — is the one its
+own module header calls easy to get backwards. All five arms are now mapped, and the Lean module was
+corrected to match before this document was.
+
+**The correspondence condition needed a byte-level statement.** The draft said
+`Canon(expected) = Canon(supplied)` without excluding a decode/re-encode substitute. Because
+`decode_vault_state` normalizes rather than refuses, that substitute silently accepts non-canonical
+bytes. Now stated as byte equality, with the round-trip permitted only under the frozen normative
+encoder — which does not yet exist.
+
+The first two would have become normative authority had this merged unreviewed. That is the argument
+for the ordering, not an argument against it: the survey ran before Phase D, and the cost of all three
+was one corrective commit rather than a retraction against shipped code.
