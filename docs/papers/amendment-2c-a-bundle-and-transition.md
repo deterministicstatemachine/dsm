@@ -475,7 +475,10 @@ Therefore:
 > recovery type.
 
 The owner-close shape does not carry `MarketTerms` and is unaffected by that particular encoding
-dependency.
+dependency. *(Corrected by 2c-B: it is unaffected by **field 6**, but it is not free of 2c-B
+altogether — `0x000F` field 4's signing preimage is 2c-B's to freeze, so the close shape is
+encodable given already-prepared `close_authorization` bytes and 2c-B supplies the grammar for
+producing a fresh one.)*
 
 ### Field table
 
@@ -1653,7 +1656,8 @@ Therefore:
 
 ## Worked encoding status
 
-2c-A can carry a **complete owner-close encoding example**, including:
+2c-A can carry a **complete owner-close encoding example** — complete *given* already-prepared
+`close_authorization` bytes; the grammar for producing fresh ones is 2c-B's — including:
 
 - `market_terms = absent`;
 - one `0x000F` transition;

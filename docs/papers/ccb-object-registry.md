@@ -281,7 +281,7 @@ storage address, a resource key or an authority check appears here.
 | `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
 | `0x000C` | `RouteSet` (`R`) | **2** | nested in `0x0017` | §5.14 defined; schema 1 **burned** |
 | `0x000D` | `Route` (`r_i`) | **2** | set element of `0x000C` | §5.13 defined; schema 1 **burned** |
-| `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | **§5.19 A-stage frozen; market encoding blocked on 2c-B** |
+| `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
 | `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-B/2c-C/2c-D** |
@@ -294,7 +294,8 @@ storage address, a resource key or an authority check appears here.
 | `0x0018` | **substrate** `GenesisParamsV3` | 1 | `G = H(DSM/genesis/v3 ‖ CCB)` | §5.15 defined |
 | `0x0019` | **substrate** `RootProgressionDelegation` (`D_i`) | 1 | `del_i = H(DSM/devtree-delegation ‖ CCB)`, and the GRK-signed bytes | §5.16 defined |
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
-| `0x0033` | `MarketTerms` | 1 | nested in `0x000E` | **§5.20 A-stage frozen; encoding blocked on 2c-B field 6** |
+| `0x0031` | **substrate** `DsmSuccessorEvidence` | 1 | `evidence_addr = H(DSM/economic-dsm-successor-evidence/v1 ‖ CCB)`; nested in `0x0033` | §5.23 defined |
+| `0x0033` | `MarketTerms` | 1 | nested in `0x000E` | §5.20 defined |
 
 `0x0000` reserved. `0x0014` is **burned**: it shipped on `main` as `ExternalCommitmentBody`,
 and §6a finding 3 established there is no such object. Re-using that number for
@@ -377,13 +378,14 @@ missing ones.**
 Of the **twenty-two live** object classes above — `0x0014` is burned and not counted, and
 `0x0033` `MarketTerms` was added by amendment 2c-A:
 
-- **17 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
-  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x000F`, `0x0010`, `0x0013`,
-  `0x0015`, `0x0016`, `0x0017`.
-- **2 are A-stage frozen** — `0x000E` and `0x0033`. Every field number, type, ordering and
-  presence rule is permanent and the `b` derivation is final, but a market bundle cannot be
-  encoded until 2c-B supplies `MarketTerms` field 6's nested class. The owner-close shape is
-  fully constructible today.
+- **19 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x000E`, `0x000F`, `0x0010`,
+  `0x0013`, `0x0015`, `0x0016`, `0x0017`, `0x0033`. (Substrate `0x0031` is defined at §5.23 and,
+  like `0x0018`–`0x001A`, is **outside** this count.)
+- **Encoding closure for the settlement bundle is ACHIEVED.** 2c-B closed `MarketTerms` field 6, so
+  a conformant market `b` is constructible; the owner-close shape is encodable once the exact
+  prepared `close_authorization` bytes are supplied, and 2c-B freezes the grammar for producing a
+  fresh one. Verification closure and production acceptance remain 2c-C's.
 - **1 is partial** — `0x0006`, where the specification fixes the preimage but `0x0008` is
   still open.
 - **2 are blocked** — `0x0011` `TraderAcceptance` and `0x0012` `TradeDigest`, both belonging to
@@ -922,10 +924,11 @@ seven owner rulings and the full verification obligations. This registry supplie
 
 `b = H_dom(DSM/settlement-bundle, CCB(SettlementBundle))`, and `tx_id = value_digest = b`.
 
-> **A-stage: the derivation is final; complete market instantiation is not.** A market bundle
-> carries mandatory `MarketTerms.recovery_material` (§5.20 field 6), whose nested class is fixed by
-> **2c-B**. No conforming market producer may emit `B` or compute a final market `b` until then.
-> The **owner-close** shape carries no `MarketTerms` and is fully constructible today.
+> **Encoding closure ACHIEVED for both shapes.** `MarketTerms.recovery_material` (§5.20 field 6)
+> nests `0x0031` schema 1 per [2c-B](amendment-2c-b-accepted-successor-and-recovery.md), so a
+> conformant market `b` is constructible. The **owner-close** shape carries no `MarketTerms` and is
+> encodable **once the exact prepared `close_authorization` bytes are supplied** — 2c-B freezes the
+> foreign grammar needed to construct and verify a fresh one.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
@@ -965,8 +968,9 @@ Everything a market settlement has and an owner close does not. Nested by value 
 and never separately content-addressed, so it adds **no entry to §15.8's canonical immutable-object
 inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `TradeIntent`.
 
-> **A-stage: field numbers, ordering, meanings and mandatoriness are frozen. Encoding closure is
-> NOT claimed**, because field 6 is a mandatory nested object whose class and schema are 2c-B's.
+> **Encoding closure ACHIEVED.** Field 6 nests `0x0031` schema 1, fixed by
+> [amendment 2c-B](amendment-2c-b-accepted-successor-and-recovery.md). Verification closure remains
+> 2c-C's, and production acceptance of the market shape stays gated on `ValidDlvSuccessor`.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
@@ -975,7 +979,7 @@ inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `Tr
 | 3 | `selected_route` (`r`) | nested `0x000D` schema 2 | the complete executed route, inline by value |
 | 4 | `trader_parent` | `digest32` | exact ordinary-DSM bilateral parent-state commitment |
 | 5 | `trader_successor` | `digest32` | exact prepared `C_dsm+` |
-| 6 | `recovery_material` | **mandatory** nested; class and schema fixed by **2c-B** | non-secret canonical material reconstructing exactly `trader_parent → trader_successor` |
+| 6 | `recovery_material` | **mandatory** nested `0x0031` schema 1 | non-secret canonical material reconstructing exactly `trader_parent → trader_successor`; see §5.23 |
 
 **Field 6 is mandatory, not optional-with-a-rule.** A market settle is not reconstructible from
 `C_dsm+` alone — the route-commit preimage, signature material and entropy are not
@@ -1053,6 +1057,44 @@ it never appears on the wire.
 version, so `0x0010` schema 2 forces a `0x000F` bump, which forces a `0x000E` bump. Field 3 buys a
 permanently assigned slot and semantic role, not immunity from enclosing-schema propagation.
 
+### 5.23 `DsmSuccessorEvidence` — class `0x0031`, schema 1
+
+**Substrate**, on the same footing as `0x0018`–`0x001A`: allocated from the single namespace,
+carrying the same immutability rules, and excluded from §4's Rev 15 closure count. Frozen by
+[amendment 2c-B](amendment-2c-b-accepted-successor-and-recovery.md), which carries the reasoning
+and the four owner rulings.
+
+`evidence_addr = H_dom(DSM/economic-dsm-successor-evidence/v1, CCB(DsmSuccessorEvidence))` —
+over the **canonical CCB bytes**, never over protobuf. Protobuf remains transport only.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `rel_key` | `digest32` | not derivable from `B`: `DevID = H(DSM/devid ‖ AK_pk ‖ AttA)`, and `AttA` is nowhere in the bundle |
+| 2 | `embedded_parent` | `digest32` | must equal `B.market_terms.trader_parent`; carried so the equality is checked, not assumed |
+| 3 | `counterparty_devid` | `digest32` | same `AttA` problem; a settle is a self-loop, so this is the trader's own DevID |
+| 4 | `operation_bytes` | `bytes` | a `DlvSettleOperationPreimageV1` — a **foreign** grammar frozen by 2c-B, carried opaquely here |
+| 5 | `entropy` | `bytes`, **exactly 32** | `H_dom(DSM/state-entropy, prior_entropy ‖ op_bytes ‖ prior_hash)`. Any other length is invalid |
+| 6 | `encapsulated_entropy` | optional `bytes` | always **absent** in this profile; the chain-tip preimage distinguishes absent from present-and-empty, so absence is encoded per §2.3, never flattened |
+| 7 | `sigma_dsm` | `bytes`, **exactly 49,856** | one `SPHINCS_PLUS_SPX256F` signature (§3.1) over `H_dom(DSM/economic-substrate-sign/v1, G ‖ DevID ‖ C_dsm+ ‖ operation_digest)`. Any other length is invalid |
+
+**`c_dsm_plus` is not a field.** It is doubly derivable — `relationship_chain_tip_v2` recomputes it
+from the six inputs, and it equals `B.market_terms.trader_successor` — so carrying it would state
+one fact three times. The existing verifier already recomputes rather than trusting a carried value.
+
+**CCB field numbers are their own namespace** (§2.10) and need not agree with the transport
+message's, so `sigma_dsm` is field 7 here and field 8 there. The gap is deliberate, not an omission.
+
+**Two nested foreign grammars, and one endianness trap.** `operation_bytes` and `0x000F` field 4's
+signature preimage are hand-rolled encodings frozen by 2c-B, carried by CCB but not *being* CCB —
+which §2.10 permits. They use **little-endian** length prefixes and length-prefix their 32-byte
+values, both the opposite of CCB's big-endian `u32` and bare `digest32`. Separate preimages, not a
+contradiction; an implementation that conflates them produces different bytes for the same object.
+
+**Validity.** A market bundle's field 6 must decode, re-encode to itself, and satisfy the
+encoding-level conjunct on `operation_bytes` **before** the chain-tip equalities against
+`B.market_terms.trader_successor` and `.trader_parent`. 2c-B states both, in that order, and
+performs no other cross-object comparison — everything further is `ValidDlvSuccessor`, owned by 2c-C.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -1074,20 +1116,14 @@ One class has a partial table in §5, two are frozen only to A-stage, and one mo
   blocks it. Two operands were removed for the same reason, one amendment apart: `Canon(P_M)` by
   the Def 5.2 amendment, and `vault_id` by the state-identity cut. Both are members of `V_0`, and
   `c_0` commits the complete canonical `V_0`, so each was an alias rather than a binding.
-- `0x000E` `SettlementBundle` (§5.19) and `0x0033` `MarketTerms` (§5.20) are **A-stage frozen** by
-  amendment 2c-A: every field number, type, ordering and presence rule is permanent, and the
-  identity derivation `b = H_dom(DSM/settlement-bundle, CCB)` is final. They remain
-  **encoding-blocked for exactly one reason**:
-
-  ```text
-  0x000E and 0x0033
-      remain encoding-blocked only because
-      MarketTerms field 6 requires 2c-B's canonical recovery class
-  ```
-
-  Because field 6 is mandatory, a conforming market producer cannot emit `B` or compute a final
-  market `b` until 2c-B lands. The **owner-close** shape carries no `MarketTerms` and is fully
-  constructible today. Nothing else about either object is open.
+- `0x000E` `SettlementBundle` (§5.19) and `0x0033` `MarketTerms` (§5.20) are **fully specified**.
+  Amendment 2c-A froze their structure and the identity derivation
+  `b = H_dom(DSM/settlement-bundle, CCB)`; amendment 2c-B closed the one remaining blocker by
+  fixing `MarketTerms` field 6's nested class as `0x0031` (§5.23). **A conformant market `b` is
+  constructible.** The owner-close shape carries no `MarketTerms` and is encodable once the exact
+  prepared `close_authorization` bytes are supplied; 2c-B freezes the foreign grammar for producing
+  a fresh one. Encoding closure is not verification closure — production acceptance of the market
+  shape remains gated on 2c-C's `ValidDlvSuccessor`.
 - `0x0011` `TraderAcceptance` blocks on the encoding of `(C_T^+, σ_T^+)`, which is ordinary DSM
   successor material rather than a SoFi object, and therefore needs a decision about whether
   the DSM core encoding is referenced or restated. Owned by **2c-B/2c-C/2c-D**.
@@ -1299,10 +1335,15 @@ In order, and not combined:
    - **2c-A — WRITTEN.** [`amendment-2c-a-bundle-and-transition.md`](amendment-2c-a-bundle-and-transition.md).
      `0x000F` and `0x0010` fully defined (§5.21, §5.22); `0x000E` and the new `MarketTerms`
      `0x0033` **A-stage frozen** (§5.19, §5.20); `b`'s derivation fixed; `0x000B` given its
-     satisfaction predicate. **The owner-close shape is fully constructible; a conforming market
+     satisfaction predicate. **The owner-close shape is encodable once the exact prepared
+     `close_authorization` bytes are supplied (2c-B freezes that grammar); a conforming market
      `b` is not, until 2c-B.**
-   - **2c-B.** The substrate accepted-successor / recovery preimage class — the sole remaining
-     blocker on complete market `Canon(B)`.
+   - **2c-B — WRITTEN.** [`amendment-2c-b-accepted-successor-and-recovery.md`](amendment-2c-b-accepted-successor-and-recovery.md).
+     Substrate `0x0031` (§5.23) closes `MarketTerms` field 6, and the two foreign byte grammars
+     `CloseAuthorizationPreimageV1` and `DlvSettleOperationPreimageV1` are frozen as byte grammars
+     rather than as a Rust function. **Complete market `Canon(B)` and a conformant market `b` are
+     now constructible.** Declares the beta identity cut its re-basing of the evidence address
+     causes.
    - **2c-C.** Economic substrate closure: the namespace record (this §3 table is behind the
      shipped code for `0x001B`–`0x0030`), plus the transitive verification closure, including
      `ValidDlvSuccessor(V_n, V_{n+1}, operation)`.
