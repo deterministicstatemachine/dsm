@@ -26,7 +26,8 @@
 | NonInterference (TLC) | Protocol Mechanics | SR Lemma 3.1, 3.2, Thm 3.1 | Bilateral isolation, Θ(N) scaling core | PASS |
 | DSMCardinality.lean | Mathematical Proof | Whitepaper §16.6 | Finite-set cardinality for TLAPS obligations | PASS |
 | DSMCryptoBinding.lean | Mathematical Proof | Whitepaper §5 | Signature retargeting prevention, domain separation | PASS |
-| DSMNonInterference.lean | Mathematical Proof | SR Thm 3.1 | SMT key injectivity, separation theorem | PASS |
+| DSMNonInterference.lean | Mathematical Proof | SR Thm 3.1 | relKey normalization (NOT a hash), separation theorem, repaired frame condition | PASS |
+| DSMEconomicSmtSeparation.lean | Mathematical Proof | 2c-C2 ruling G | economic-SMT domain separation, non-interference, quorum intersection | PASS |
 | DSMOfflineFinality.lean | Mathematical Proof | Whitepaper Thm 4.1, 4.2 | Chain-tip monotonicity, balance conservation | PASS |
 | DSM_dBTC_Conservation.lean | Mathematical Proof | dBTC Paper §19 | Bridge conservation (11 actions) | PASS |
 | DSM_dBTC_TrustReduction.lean | Mathematical Proof | dBTC Paper §14-15 | Trust reduction, mainnet settlement evidence | PASS |
