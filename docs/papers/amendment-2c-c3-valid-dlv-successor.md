@@ -419,6 +419,12 @@ obligations attach:
 Tie-breaking is forbidden because either continuation may already have been relied upon; picking one
 converts a detected safety failure into a silent, blessed fork.
 
+**Obligations 2, 3 and 4 have no mechanism in the repository.** Their trigger, scope, persistence,
+effects, the absence of any clearing path and the denial-of-service boundary are frozen by
+[amendment 2c-C3.1](amendment-2c-c3-1-lineage-quarantine.md), which also records that the
+single-read `Conflict` arm is arithmetically unreachable at the canonical quorum, so the
+contradiction this class names is observable by one verifier only across reads.
+
 ## What this forbids in the implementation
 
 ```text
@@ -889,6 +895,7 @@ C3 Lean structure                  FROZEN / PROVED AS CLAIMED
 VDS.COMMON.10.a                    NORMATIVE, IMPLEMENTATION-BLOCKED ON THE
                                    2c-A ENCODER CUT
 Production C3 closure              NOT YET COMPLETE
+Req 6.3 containment (2, 3, 4)      FROZEN BY 2c-C3.1, NOT IMPLEMENTED
 ```
 
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation
