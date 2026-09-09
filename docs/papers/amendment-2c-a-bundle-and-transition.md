@@ -7,6 +7,12 @@ Normative and encoder-free, per the registry preamble.
 Governs `docs/papers/ccb-object-registry.md` classes `0x000E`, `0x0033`, `0x000F`, `0x0010`,
 and implements the already-defined `0x000B`.
 
+> **Corrected 2026-09-09 by amendment 2c-A.1.** 2c-B fixed field 6 as `0x0031` and froze the two foreign grammars, so
+> the market encoding is no longer blocked and this document's sequencing rule is satisfied. The
+> encoder is authorized by [2c-A.1](amendment-2c-a-1-encoder-cut-rulings.md), which also rules the
+> decisions the A-stage text left open. Passages below that still read "blocked on 2c-B" are the
+> A-stage record and carry the same note.
+
 ## Context
 
 Amendment 2c decomposed into four (`amendment-2c-settlement-and-evidence-profile.md`).
@@ -602,6 +608,9 @@ Consequently:
 ```
 
 A complete market bundle becomes constructible only after 2c-B lands.
+
+> **Corrected 2026-09-09 by amendment 2c-A.1.** 2c-B landed; field 6 is `0x0031` schema 1 and the market encoding is
+> closed (registry §5.20).
 
 `MarketTerms` is nested by value in `SettlementBundle` and is never separately content-addressed.
 
@@ -1478,6 +1487,8 @@ Status after 2c-A:
 `0x000E` and `MarketTerms` must **not** be marked fully encoding-closed until the mandatory
 recovery class exists.
 
+> **Corrected 2026-09-09 by amendment 2c-A.1.** The recovery class exists (`0x0031`, 2c-B); both are encoding-closed.
+
 The status pointers for `0x000E`, `0x000F` and `0x0011` were corrected in the same change; the
 registry had been sending them to unrelated sections.
 
@@ -1575,6 +1586,9 @@ After 2c-A:
 - leave `0x0012 TradeDigest` unchanged;
 - leave `0x0011 TraderAcceptance` blocked and point it to 2c-B/2c-C/2c-D.
 
+> **Corrected 2026-09-09 by amendment 2c-A.1.** The "exact remaining blocker" sentence was superseded by 2c-B's closure
+> text in the registry's §6; `0x000E` and `0x0033` are fully specified there.
+
 ---
 
 # Burns
@@ -1651,6 +1665,10 @@ Therefore:
 - the fact that it is a nested canonical object.
 
 2c-B freezes its concrete nested class.
+
+> **Corrected 2026-09-09 by amendment 2c-A.1.** Done: `0x0031` schema 1. Encoding closure is achieved for both shapes; the
+> market byte vector this section calls the mandatory "2c-A + 2c-B closure test" is owed by the
+> encoder cut and is a class-1 vector under 2c-A.1.
 
 ---
 
@@ -1813,6 +1831,9 @@ No proto.
 No tests.
 
 No encoder.
+
+> **Corrected 2026-09-09 by amendment 2c-A.1.** This was the A-stage boundary, not a standing prohibition. With 2c-B landed
+> the encoder is authorized by 2c-A.1; the last sentence below remains true of it.
 
 Shipping code is evidence of current behavior only; it is never authority over the canonical
 protocol definition.
@@ -2173,3 +2194,6 @@ ONLY THEN
 ```
 
 This is the exact boundary. 2c-A is not permitted to claim more.
+
+> **Corrected 2026-09-09 by amendment 2c-A.1.** 2c-B closed the blocker; "STILL BLOCKED" above is the A-stage record. The
+> encoder cut — both shapes, one atomic change — is ruled in 2c-A.1.
