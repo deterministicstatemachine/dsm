@@ -40,6 +40,21 @@
 > | the advancement gate reads as a wiring residue | `trader_fence::permits_successor` and its SDK wrapper `active_verdict` have **zero non-test callers**, and the bilateral advance path consults no fence at all. TWO producers are owed, not one: the gate, and the release event, which has no production emitter either |
 > | the fence keys the trade | The ONLY production `bind_settlement` call (`dlv_routes.rs:2897`) passes `vault_id` as `trader_chain_id`, so production writes **vault-keyed** rows. Step 3's `FenceKey` move is load-bearing, not cosmetic: one row cannot serve both the vault and trader coordinate systems |
 >
+> **Step 3's `TA_B` half is NOT 5c-2's to build.** Step 3 says "Then build `TA_B` (`0x0011`, …)".
+> The registry lists `0x0011` `TraderAcceptance` as **blocked — 2c-D**, and states that "Ownership
+> of `0x0011` itself is 2c-D's — 2c-B disclaims it, and 2c-C4 records that `TA_B` verification moves
+> with its field table." 2c-C4 says the same in its charter note: an amendment cannot specify the
+> verification of an object whose fields another amendment defines. So an implementer following
+> Step 3 literally would try to build a class that is not yet defined.
+>
+> **What 5c-2 CAN reach without 2c-D is exactly one state, and it is ruled.** 2c-C4: "After C4 and
+> before 2c-D: accepted-successor verification may succeed and validated economic admission may
+> succeed — and a market fold remains `PartialPendingRealization`. It **MUST NOT** be promoted to
+> realized from correspondence alone." So Step 2/3 may lift the emission refusal and carry a market
+> trade as far as BOUND-BUT-UNREALIZED. Realization, fence release, receipt publication and `TA_B`
+> all wait for 2c-D. That is the designed lifecycle, not a shortfall — and it means the refusal can
+> be lifted before 2c-D ships, provided nothing downstream reads a bound fold as realized.
+>
 > **Ruling V3 outranks any reading in which the advance releases the fence.** 2c-C4 §7 gates fence
 > release on `may_certify()`, and Ruling V3 records that market fence release is unreachable until
 > 2c-D *by construction*. A committed fence therefore STAYS in `CommittedAwaitingAcceptance` — that
