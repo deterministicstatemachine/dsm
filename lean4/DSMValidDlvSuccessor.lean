@@ -295,6 +295,25 @@ inductive Reason where
   | bindingUndetermined
   | bindingEvidenceUnavailable
   | duplicateBindingFinality
+  -- Three reasons the amendment's clause table assigns INVALID to and this
+  -- model originally omitted -- found when the Rust implementation had to
+  -- choose a code for each and there was none. NONE is a field equality
+  -- Ruling B derives from correspondence; each is an independent conjunct.
+  /-- `VDS.COMMON.11` / `VDS.CLOSE.2`: the advancing party's signature over
+      the concrete successor does not verify. A signature is not a field
+      equality, so it is independent of `10.a`. -/
+  | successorSignatureInvalid
+  /-- Ruling J's `operation : Invalid(reason)` arm: the bound bundle yields
+      no canonical operation -- it does not decode, re-encode, hash to the
+      record's identity, or has no valid shape. -/
+  | bundleNotCanonical
+  /-- `VDS.COMMON.5`'s "and `storage_set_id` re-derives from it" and
+      `VDS.COMMON.6`'s "and equals the canonical `n/2 + 1`": the bundle was
+      bound under a set or quorum this vault did not commit. These are the
+      SECOND clauses of those rows -- consistency checks on the bundle -- and
+      are distinct from the field equalities in the first clauses, which
+      Ruling B derives from `10.a` alone. -/
+  | bundleForeignToVault
   deriving Repr, DecidableEq
 
 /-- 2c-C3 ruling B: the derivation is TYPED AND PARTIAL. A total function
@@ -399,11 +418,16 @@ def deriveClose (v : VaultState) (cn : Nat) : DeriveResult :=
 inductive Operation where
   | market (op : MarketOp)
   | ownerClose
+  /-- Ruling J's `operation : Invalid(reason)` arm, which an earlier draft of
+      this model omitted. The bundle a binding resolved to yielded no canonical
+      operation for this vault; no successor can be derived from it. -/
+  | invalid (r : Reason)
   deriving Repr, DecidableEq
 
 def deriveExpected (v : VaultState) (cn : Nat) : Operation → DeriveResult
   | .market op => deriveMarket v cn op
   | .ownerClose => deriveClose v cn
+  | .invalid r => .invalid r
 
 -- ============================================================
 -- Every derived successor came from `mkSuccessor`
@@ -413,6 +437,7 @@ theorem derived_is_mkSuccessor {v e : VaultState} {cn : Nat} {o : Operation}
     (h : deriveExpected v cn o = .derived e) :
     ∃ rA rB enc b, e = mkSuccessor v cn rA rB enc b := by
   cases o with
+  | invalid r => exact DeriveResult.noConfusion h
   | ownerClose =>
     simp only [deriveExpected, deriveClose] at h
     repeat' split at h
@@ -565,6 +590,20 @@ theorem correspondence_propagates_safety_violation
     (h : deriveExpected v cn o = .safetyViolation r) :
     correspondence v cn o supplied = (.safetyViolation, some r) := by
   simp only [correspondence, h]
+
+/-- A non-canonical operation input NEVER derives a successor, and propagates
+    its own reason unchanged. This is Ruling J's `Invalid(reason)` arm made
+    explicit; before it existed here, the model could not express a bundle that
+    fails to decode, and the Rust had to choose a code with nothing to mirror. -/
+theorem invalid_operation_never_derives
+    (v e : VaultState) (cn : Nat) (r : Reason) :
+    deriveExpected v cn (.invalid r) ≠ .derived e := by
+  simp [deriveExpected]
+
+theorem invalid_operation_propagates_its_reason
+    (v supplied : VaultState) (cn : Nat) (r : Reason) :
+    correspondence v cn (.invalid r) supplied = (.invalid, some r) := by
+  simp [correspondence, deriveExpected]
 
 /-- On the DERIVED arm — and only there — the outcome turns on the bytes.
     Note this is NOT "the class always agrees with the derivation's class": a
@@ -932,3 +971,5 @@ theorem core_does_not_discharge_token_policy :
 #print axioms undetermined_is_incomplete_never_valid_never_invalid
 #print axioms free_is_invalid_not_incomplete
 #print axioms core_does_not_discharge_token_policy
+#print axioms invalid_operation_never_derives
+#print axioms invalid_operation_propagates_its_reason

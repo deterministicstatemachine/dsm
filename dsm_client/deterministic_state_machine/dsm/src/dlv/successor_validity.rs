@@ -93,9 +93,11 @@ impl core::fmt::Display for OutcomeClass {
 /// The exact reason a conjunct did not hold. Layer 2 REFINES layer 1 and never
 /// competes with it.
 ///
-/// These are the twenty-two codes frozen in `lean4/DSMValidDlvSuccessor.lean`,
-/// mirrored here rather than paraphrased — a Rust vocabulary that drifted from
-/// the proved one would make the proof describe a different predicate.
+/// These are the codes frozen in `lean4/DSMValidDlvSuccessor.lean`, mirrored
+/// here rather than paraphrased — a Rust vocabulary that drifted from the
+/// proved one would make the proof describe a different predicate. The two
+/// lists are kept in lockstep: when this implementation needed a code the model
+/// lacked, the MODEL was extended first (see the last three).
 ///
 /// Codes for storage-set change, quorum change and `r_o` change are absent **by
 /// design**: Ruling B derives those from the byte comparison rather than making
@@ -154,6 +156,35 @@ pub enum Reason {
     BindingEvidenceUnavailable,
     /// Two distinct binding-final bundles at one DLV parent (Req 6.3).
     DuplicateBindingFinality,
+
+    // ---- clause-table conjuncts the Lean model originally omitted ----
+    //
+    // Found when this implementation had to choose a code for each and the
+    // model had none. Each was reconciled against the merged clause table,
+    // found NORMATIVE there, added to the Lean model, and only then here:
+    //
+    //   SuccessorSignatureInvalid   VDS.COMMON.11, VDS.CLOSE.2
+    //   BundleNotCanonical          Ruling J's `operation : Invalid(reason)` arm
+    //   BundleForeignToVault        VDS.COMMON.5 "and storage_set_id re-derives",
+    //                               VDS.COMMON.6 "and equals the canonical n/2+1"
+    //                               -- the SECOND clauses of those rows
+    //
+    // NONE of these is a field equality. The FIRST clauses of COMMON.5/6 and
+    // all of COMMON.14 -- successor field equals parent field -- are what
+    // Ruling B derives from VDS.COMMON.10.a alone; codes for those would build
+    // a second acceptance predicate beside the frozen one. Deliberately absent.
+    /// `VDS.COMMON.11` / `VDS.CLOSE.2` — the advancing party's (for a close,
+    /// the owner's) signature over the concrete successor does not verify. A
+    /// signature is not a field equality, so this is independent of `10.a`.
+    SuccessorSignatureInvalid,
+    /// The bound bundle is not a canonical settlement bundle: it does not
+    /// decode, does not re-encode, does not hash to the record's identity, or
+    /// has no valid shape. A structural fact about bytes in hand.
+    BundleNotCanonical,
+    /// The bound bundle was bound under a storage set or quorum this vault did
+    /// not commit. (A bundle that consumes no leg of the vault is
+    /// [`Reason::VaultMismatch`] — `VDS.COMMON.1.a` — not this.)
+    BundleForeignToVault,
 }
 
 impl Reason {
@@ -194,6 +225,9 @@ impl Reason {
             Self::BindingUndetermined => "BINDING_UNDETERMINED",
             Self::BindingEvidenceUnavailable => "DLV_BINDING_EVIDENCE_UNAVAILABLE",
             Self::DuplicateBindingFinality => "DUPLICATE_BINDING_FINALITY",
+            Self::SuccessorSignatureInvalid => "SUCCESSOR_SIGNATURE_INVALID",
+            Self::BundleNotCanonical => "BUNDLE_NOT_CANONICAL",
+            Self::BundleForeignToVault => "BUNDLE_FOREIGN_TO_VAULT",
         }
     }
 }
@@ -782,6 +816,9 @@ mod tests {
             Reason::SettlerKeyMismatch,
             Reason::ComposeFromRetiredParent,
             Reason::CorrespondenceMismatch,
+            Reason::SuccessorSignatureInvalid,
+            Reason::BundleNotCanonical,
+            Reason::BundleForeignToVault,
         ] {
             assert_eq!(r.class(), OutcomeClass::Invalid, "{r:?}");
         }

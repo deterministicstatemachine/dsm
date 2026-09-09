@@ -64,6 +64,7 @@
 //! its own: the `c_n` a new trade's hop must bind as its parent.
 
 use dsm::ccb::{vault_state_commitment, VaultStateV2};
+use dsm::dlv::successor_validity::{OutcomeClass, Reason};
 use dsm::types::proto as generated;
 use prost::Message;
 
@@ -219,12 +220,11 @@ pub(crate) enum CompositionError {
     /// The signed state is authoritative; a disagreeing caller tuple means
     /// the caller's view is stale or fabricated.
     BaselineMismatch(String),
-    /// Storage listing the pending prefix failed.
-    StorageListFailed(String),
-    /// Decoding a pointer proto failed in a non-recoverable way.  The
-    /// individual pointer is skipped; this variant fires only if the
-    /// whole list page failed.
-    PointerDecodeFailed(String),
+    // `StorageListFailed` and `PointerDecodeFailed` were DELETED here. Both had
+    // zero construction sites workspace-wide — leftovers of the pre-cell
+    // prefix-listing fold, kept alive only by their own Display arms. Amendment
+    // 2c-C3 splits this taxonomy; translating dead classes forward would have
+    // carried two of them into the new one.
     /// The caller names the pair by something other than 32-byte policy
     /// commits, so it cannot be matched against the signed state's market
     /// policy. FAILS CLOSED — a label is not an identity.
@@ -242,6 +242,20 @@ pub(crate) enum CompositionError {
     /// indefinitely — that is a liveness cost, and it is strictly preferable
     /// to manufacturing a maximality claim the network did not support.
     BindingEvidenceUnavailable(String),
+    /// A C3 conjunct decided AGAINST this successor.
+    ///
+    /// The distinction from `BindingEvidenceUnavailable` is the whole point of
+    /// the split: a forged successor, a bundle that names another vault's
+    /// parent, and an unauthorized close are all DECIDABLY FALSE, and reporting
+    /// them under an `INCOMPLETE`-shaped name told a caller to retry something
+    /// that can never succeed.
+    SuccessorInvalid { reason: Reason, detail: String },
+    /// Req 6.3 — a proven contradiction in the storage substrate.
+    ///
+    /// Never a failed check, and never tie-broken: two binding-final bundles at
+    /// one parent means either continuation may already have been relied upon,
+    /// so picking one converts a detected safety failure into a blessed fork.
+    SafetyViolation { reason: Reason, detail: String },
 }
 
 impl std::fmt::Display for CompositionError {
@@ -256,12 +270,6 @@ impl std::fmt::Display for CompositionError {
                     "baseline disagrees with the caller's market tuple: {msg}"
                 )
             }
-            CompositionError::StorageListFailed(msg) => {
-                write!(f, "storage list failed: {msg}")
-            }
-            CompositionError::PointerDecodeFailed(msg) => {
-                write!(f, "pointer decode failed: {msg}")
-            }
             CompositionError::PairIsNotPolicyCommits => write!(
                 f,
                 "caller pair must be 32-byte policy commits so it can be matched to the signed \
@@ -269,6 +277,12 @@ impl std::fmt::Display for CompositionError {
             ),
             CompositionError::BindingEvidenceUnavailable(msg) => {
                 write!(f, "DLV_BINDING_EVIDENCE_UNAVAILABLE: {msg}")
+            }
+            CompositionError::SuccessorInvalid { reason, detail } => {
+                write!(f, "{}: {detail}", reason.as_str())
+            }
+            CompositionError::SafetyViolation { reason, detail } => {
+                write!(f, "STORAGE_SAFETY_VIOLATION {}: {detail}", reason.as_str())
             }
         }
     }
@@ -436,11 +450,26 @@ pub(crate) async fn compose_vault_state(
                 frontier_binding = local_fence_overlay(vault_id, &cursor_c_n)?;
                 break;
             }
+            // ROUTE BY CLASS. This arm used to funnel every unresolvable
+            // occupancy into `BindingEvidenceUnavailable` — including forged
+            // successors, bundles naming another vault's parent, and duplicate
+            // binding finality, none of which is an absence of evidence.
             crate::sdk::binding_occupancy::ParentOccupancy::Unresolvable(why) => {
-                return Err(CompositionError::BindingEvidenceUnavailable(format!(
-                    "binding at generation {}: {why}",
-                    cursor_state.generation
-                )))
+                let detail = format!("binding at generation {}: {why}", cursor_state.generation);
+                return Err(match why.class() {
+                    OutcomeClass::SafetyViolation => CompositionError::SafetyViolation {
+                        reason: why.reason,
+                        detail,
+                    },
+                    OutcomeClass::Invalid => CompositionError::SuccessorInvalid {
+                        reason: why.reason,
+                        detail,
+                    },
+                    // Genuinely nothing was learned. Req 6.25's code, kept.
+                    OutcomeClass::Incomplete | OutcomeClass::Valid => {
+                        CompositionError::BindingEvidenceUnavailable(detail)
+                    }
+                });
             }
             crate::sdk::binding_occupancy::ParentOccupancy::BoundBy(b) => b,
         };
@@ -460,8 +489,22 @@ pub(crate) async fn compose_vault_state(
                 crate::util::text_id::encode_base32_crockford(&bound.bundle_digest)
             ))
         };
+        // The same prefix, for facts that are DECIDABLY FALSE rather than
+        // unobtainable. Sharing the prefix keeps the diagnostics readable; the
+        // class is what a caller branches on.
+        let refused = |reason: Reason, what: &str| CompositionError::SuccessorInvalid {
+            reason,
+            detail: format!(
+                "generation {} is bound by {} but {what}",
+                cursor_state.generation,
+                crate::util::text_id::encode_base32_crockford(&bound.bundle_digest)
+            ),
+        };
         let Some(transition) = bound.transition() else {
-            return Err(unavailable("its bundle lost the transition it named"));
+            return Err(refused(
+                Reason::BundleNotCanonical,
+                "its bundle lost the transition it named",
+            ));
         };
 
         // Discriminate on SHAPE FIRST. A close bundle's `route_set_commitment`
@@ -492,9 +535,10 @@ pub(crate) async fn compose_vault_state(
                     &owner.ak_pk,
                 )
                 .map_err(|e| {
-                    unavailable(&format!(
-                        "its close is not authorized by the vault owner: {e}"
-                    ))
+                    refused(
+                        Reason::SuccessorSignatureInvalid,
+                        &format!("its close is not authorized by the vault owner: {e}"),
+                    )
                 })?;
                 let mut next = cursor_state.clone();
                 next.generation = cursor_state.generation.saturating_add(1);
@@ -519,7 +563,12 @@ pub(crate) async fn compose_vault_state(
             // ###################################################################
             dsm::dlv::settlement_bundle::BundleShape::Market => {
                 let x = <[u8; 32]>::try_from(bound.bundle.route_set_commitment.as_slice())
-                    .map_err(|_| unavailable("its route-set commitment is not 32 bytes"))?;
+                    .map_err(|_| {
+                        refused(
+                            Reason::BundleNotCanonical,
+                            "its route-set commitment is not 32 bytes",
+                        )
+                    })?;
                 match realize_market_successor_5c1(
                     vault_id,
                     &x,
@@ -548,7 +597,9 @@ pub(crate) async fn compose_vault_state(
                     }
                     // Evidence PRESENT and it CONTRADICTS the bundle. A
                     // divergence is never an absence.
-                    MarketRealization::Contradicts(why) => return Err(unavailable(&why)),
+                    MarketRealization::Contradicts(why) => {
+                        return Err(refused(Reason::StaleParent, &why))
+                    }
                 }
             }
         };
@@ -1710,9 +1761,14 @@ mod tests {
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect_err("a close nobody authorized must not compose as a closed vault");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        // FLIPPED by amendment 2c-C3. A close no owner signed is DECIDABLY
+        // FALSE (VDS.CLOSE.2), not evidence we failed to obtain. Reporting it
+        // as unavailable told a caller to retry a bundle that can never verify.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected SUCCESSOR_SIGNATURE_INVALID, got {err:?}");
         };
+        assert_eq!(reason, Reason::SuccessorSignatureInvalid);
+        assert_eq!(reason.class(), OutcomeClass::Invalid);
         assert!(
             detail.contains("not authorized by the vault owner"),
             "the refusal names the missing authorization: {detail}"
@@ -1819,9 +1875,11 @@ mod tests {
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect_err("and now nothing can realize it");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        // FLIPPED by amendment 2c-C3 — see the sibling test.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected SUCCESSOR_SIGNATURE_INVALID, got {err:?}");
         };
+        assert_eq!(reason, Reason::SuccessorSignatureInvalid);
         assert!(
             detail.contains("not authorized by the vault owner"),
             "the vault is now occupied by an unrealizable close: {detail}"
@@ -1894,9 +1952,13 @@ mod tests {
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect_err("a bundle bound elsewhere is a divergence");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        // FLIPPED by amendment 2c-C3. A bundle bound at a key it does not name
+        // is a divergence, and a divergence is never an absence.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected STALE_PARENT, got {err:?}");
         };
+        assert_eq!(reason, Reason::StaleParent);
+        assert_eq!(reason.class(), OutcomeClass::Invalid);
         assert!(
             detail.contains("different parent state"),
             "the refusal names the binding: {detail}"
@@ -1939,9 +2001,13 @@ mod tests {
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect_err("a stale hop binding cannot fold");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        // FLIPPED by amendment 2c-C3. `MarketRealization::Contradicts` — the
+        // module's own comment already said "a divergence is never an absence";
+        // now the type says it too.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected STALE_PARENT, got {err:?}");
         };
+        assert_eq!(reason, Reason::StaleParent);
         assert!(
             detail.contains("bound to a different parent state"),
             "the refusal names the hop binding: {detail}"
@@ -1977,9 +2043,12 @@ mod tests {
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
             .expect_err("a receipt for another step cannot activate this edge");
-        let CompositionError::BindingEvidenceUnavailable(detail) = err else {
-            panic!("expected DLV_BINDING_EVIDENCE_UNAVAILABLE, got {err:?}");
+        // FLIPPED by amendment 2c-C3 — a receipt for another generation
+        // contradicts the bundle; it does not fail to exist.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected STALE_PARENT, got {err:?}");
         };
+        assert_eq!(reason, Reason::StaleParent);
         assert!(
             detail.contains("different generation step"),
             "the refusal names the step: {detail}"
