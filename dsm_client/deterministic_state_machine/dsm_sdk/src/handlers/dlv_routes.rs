@@ -1630,13 +1630,36 @@ impl AppRouterImpl {
         // The receipt is the authority. No receipt, nothing to apply — and that
         // is a refusal rather than a no-op, because the caller asked about a
         // settlement that is not witnessed.
-        let Some(receipt) =
-            crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x).await
-        else {
-            return err(format!(
-                "dlv.reconcile: no verified settlement receipt for vault {} at that commitment",
-                crate::util::text_id::encode_base32_crockford(&vault_id),
-            ));
+        let vault_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
+        use crate::sdk::settlement_receipt_codec::ReceiptFetch;
+        let receipt = match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(
+            &vault_id, &x,
+        )
+        .await
+        {
+            ReceiptFetch::Verified(r) => *r,
+            ReceiptFetch::Absent => {
+                return err(format!(
+                    "dlv.reconcile: no settlement receipt for vault {vault_b32} at that commitment"
+                ))
+            }
+            ReceiptFetch::Unavailable(e) => {
+                return err(format!(
+                    "dlv.reconcile: the receipt for vault {vault_b32} could not be read (retryable): {e}"
+                ))
+            }
+            ReceiptFetch::Malformed(why) => {
+                return err(format!(
+                    "dlv.reconcile: the receipt for vault {vault_b32} is malformed: {why}"
+                ))
+            }
+            // The operator is told the truth: a receipt is sitting in storage
+            // and it does not verify. That is not "no receipt".
+            ReceiptFetch::Invalid(e) => {
+                return err(format!(
+                    "dlv.reconcile: the receipt for vault {vault_b32} FAILS VERIFICATION: {e}"
+                ))
+            }
         };
 
         // Precondition: a reconcile needs a device head to advance.
@@ -5681,6 +5704,7 @@ mod funded_creation_tests {
         // (7) THE RECEIPT was published, and verifies.
         let receipt = crate::runtime::get_runtime()
             .block_on(crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x))
+            .verified()
             .expect("the settlement must publish a verifiable receipt");
         assert_eq!(receipt.trade.input_amount, input);
         assert_eq!(receipt.trade.output_amount, expected_out);
@@ -7583,6 +7607,7 @@ mod funded_creation_tests {
                 .block_on(
                     crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x),
                 )
+                .verified()
                 .expect("receipt published");
             assert_eq!(
                 (receipt.trade.parent_sequence, receipt.trade.new_sequence),

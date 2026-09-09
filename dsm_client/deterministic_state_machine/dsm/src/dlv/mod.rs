@@ -15,6 +15,7 @@ pub mod route_commit;
 pub mod settlement_bundle; // Def 6.14 — the canonical immutable SettlementBundle + K(B)
 pub mod settlement_receipt_leaf;
 pub mod settlement_slot_claim; // write-once claim envelope for the settlement-slot quorum register
+pub mod successor_validity; // 2c-C3 — ValidDlvSuccessorCore: what makes a DLV continuation valid
 pub mod trader_fence; // Req 6.23 â the initiating-trader parent fence (pure state machine)
 pub mod vault_pending_pointer;
 pub mod vault_reserve_inclusion;

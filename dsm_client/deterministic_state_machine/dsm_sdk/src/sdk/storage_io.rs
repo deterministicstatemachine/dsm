@@ -1147,6 +1147,24 @@ pub(crate) async fn get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
     sdk.get(key).await
 }
 
+/// Fetch an object's bytes by key, with `Ok(None)` for NOT-FOUND kept typed
+/// rather than erased into an error string. See `StorageNodeSDK::get_opt`.
+pub(crate) async fn get_bytes_opt(key: &str) -> Result<Option<Vec<u8>>, DsmError> {
+    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+        DsmError::storage(
+            format!("load storage node config: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let sdk = StorageNodeSDK::new(config).await.map_err(|e| {
+        DsmError::storage(
+            format!("construct storage node sdk: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    sdk.get_opt(key).await
+}
+
 /// List posted objects under `prefix` (paginated).
 pub(crate) async fn list_objects(
     prefix: &str,

@@ -14,6 +14,7 @@
 //! caller actually asked about — a storage node that serves the wrong bytes
 //! under the right key changes nothing.
 
+use dsm::dlv::settlement_receipt_leaf::ReceiptError;
 use dsm::dlv::settlement_receipt_leaf::{SettledTrade, SignedTraderSettlementReceipt};
 use dsm::types::proto as generated;
 use prost::Message;
@@ -113,31 +114,75 @@ pub(crate) async fn publish_settlement_receipt(
         .map(|_| ())
 }
 
-/// Fetch and fully verify the receipt witnessing the settlement at `(vault, x)`.
+/// What fetching the receipt at `(vault, x)` established.
 ///
-/// `None` means "no usable receipt", and every route to it is the same to the
-/// caller: absent, unfetchable, undecodable, mis-keyed, or failing verification.
-/// That collapse is deliberate — the only decision downstream is whether the
-/// pointer may be folded, and every one of these says it may not. Reporting them
-/// separately would invite a caller to treat some as recoverable and fold
-/// anyway.
-pub(crate) async fn fetch_verified_receipt(
-    vault_id: &[u8; 32],
-    x: &[u8; 32],
-) -> Option<SignedTraderSettlementReceipt> {
-    let key = vault_receipt_key(vault_id, x);
-    let bytes = BitcoinTapSdk::storage_get_bytes(&key).await.ok()?;
-    let proto = generated::TraderSettlementReceiptV1::decode(bytes.as_slice()).ok()?;
-    let receipt = receipt_from_proto(&proto)?;
+/// This used to be an `Option`, and its doc argued the collapse was deliberate:
+/// "the only decision downstream is whether the pointer may be folded, and
+/// every one of these says it may not." That is true of FOLDING and false of
+/// CLASSIFICATION. Fourteen distinct causes — a storage miss, a transport
+/// fault, a truncated record, a receipt served for another settlement, and a
+/// SPHINCS+ signature that does not verify — were reduced to one bit, and that
+/// bit became `MarketRealization::Absent`, which `break`s the composition walk
+/// and returns `Ok(...)`. A forged receipt was not an error at all.
+///
+/// Follows `ResolveFailure`'s shape. `Absent` is ONE node's answer where this
+/// reader looked, never a quorum observation.
+#[derive(Debug)]
+pub(crate) enum ReceiptFetch {
+    /// No object at the key. Not an error — the trade may simply not have
+    /// settled yet.
+    Absent,
+    /// Could not read: storage config, transport, node fault. Retryable, and
+    /// establishes NOTHING about whether a receipt exists.
+    Unavailable(String),
+    /// Bytes were served but are not a receipt for this settlement:
+    /// undecodable, a field of the wrong width, or a record for another vault
+    /// or `x`.
+    Malformed(&'static str),
+    /// A well-formed receipt that FAILS verification. INVALID — never absence.
+    Invalid(ReceiptError),
+    /// A receipt that verifies. Per `settlement_receipt_leaf`'s own header this
+    /// is a statement the receipt makes about itself, not proof value moved.
+    Verified(Box<SignedTraderSettlementReceipt>),
+}
 
+impl ReceiptFetch {
+    /// The verified receipt, or `None` for every other outcome — for callers
+    /// whose only question is "did it verify". Production paths that must tell
+    /// the outcomes apart match on the enum instead.
+    pub(crate) fn verified(self) -> Option<SignedTraderSettlementReceipt> {
+        match self {
+            Self::Verified(r) => Some(*r),
+            _ => None,
+        }
+    }
+}
+
+/// Fetch the receipt witnessing the settlement at `(vault, x)` and say exactly
+/// what was found. No `.ok()?` at any step: every failure keeps its class.
+pub(crate) async fn fetch_verified_receipt(vault_id: &[u8; 32], x: &[u8; 32]) -> ReceiptFetch {
+    let key = vault_receipt_key(vault_id, x);
+    let bytes = match BitcoinTapSdk::storage_get_bytes_opt(&key).await {
+        Ok(Some(b)) => b,
+        Ok(None) => return ReceiptFetch::Absent,
+        Err(e) => return ReceiptFetch::Unavailable(e.to_string()),
+    };
+    let Ok(proto) = generated::TraderSettlementReceiptV1::decode(bytes.as_slice()) else {
+        return ReceiptFetch::Malformed("the bytes at the receipt key do not decode as a receipt");
+    };
+    let Some(receipt) = receipt_from_proto(&proto) else {
+        return ReceiptFetch::Malformed("a receipt field is not 32 bytes");
+    };
     // The key is a label the storage node chose to serve these bytes under; the
     // record's own fields are the claim. Require them to agree, or a node could
     // answer a query about one settlement with a receipt for another.
     if receipt.vault_id != *vault_id || receipt.trade.x != *x {
-        return None;
+        return ReceiptFetch::Malformed("the served receipt is for another vault or settlement");
     }
-    dsm::dlv::settlement_receipt_leaf::verify_trader_settlement_receipt(&receipt).ok()?;
-    Some(receipt)
+    match dsm::dlv::settlement_receipt_leaf::verify_trader_settlement_receipt(&receipt) {
+        Ok(()) => ReceiptFetch::Verified(Box::new(receipt)),
+        Err(e) => ReceiptFetch::Invalid(e),
+    }
 }
 
 #[cfg(test)]
