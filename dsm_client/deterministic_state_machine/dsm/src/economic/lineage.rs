@@ -612,20 +612,21 @@ pub fn advance_validated(
         .map_err(EconomicValidationError::Provenance)?;
 
     // THE C3/C4 SEAM. For a DLV transition, provenance has just established
-    // its conjuncts; say so, typed, instead of discarding it. The verdict slot
-    // stays empty -- this path does not hold V_n, and an empty slot is not
-    // Valid. C4 fills it.
+    // its conjuncts; say so, typed, instead of discarding it — the KIND, and
+    // nothing more. 2c-C4 ruling V2 deleted the verdict slot rather than
+    // filling it: this path is the trader's own admission, and ruling V1 makes
+    // the ordered third-party composition walk the only authoritative
+    // constructor of a market verdict. A verdict produced here would be
+    // self-attestation to any foreign verifier.
     let validity = match accepted.dsm_verified_operation() {
         Some(crate::types::operations::Operation::DlvSettle { .. }) => {
             SuccessorValidity::DlvTransition {
                 kind: DlvTransitionKind::Settle,
-                verdict: None,
             }
         }
         Some(crate::types::operations::Operation::DlvClose { .. }) => {
             SuccessorValidity::DlvTransition {
                 kind: DlvTransitionKind::Close,
-                verdict: None,
             }
         }
         _ => SuccessorValidity::NoDlvTransition,
