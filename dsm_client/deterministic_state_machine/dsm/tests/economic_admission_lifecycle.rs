@@ -16,6 +16,7 @@ use dsm::economic::admission::{
 use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use dsm::economic::classifier::EconomicEffect;
 use dsm::economic::credit::{CreditSource, CreditSourceAuthorizedIssuance};
+use dsm::dlv::successor_validity::SuccessorValidity;
 use dsm::economic::lineage::{
     activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
     EconomicValidationError,
@@ -402,6 +403,7 @@ fn run(
 ) -> Result<
     (
         dsm::economic::lineage::ValidatedEconomicRoot,
+        SuccessorValidity,
         Vec<dsm::economic::provenance::FundedCredit>,
     ),
     EconomicValidationError,
@@ -429,7 +431,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
     let manifest = manifest_for(&fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
-    let (one, funded) =
+    let (one, _validity, funded) =
         run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
     assert_eq!(one.economic_position(), 1);
     assert_eq!(funded.len(), 1);
@@ -794,6 +796,7 @@ fn dlv_fund_drive(
 ) -> Result<
     (
         dsm::economic::lineage::ValidatedEconomicRoot,
+        SuccessorValidity,
         Vec<dsm::economic::provenance::FundedCredit>,
     ),
     EconomicValidationError,
@@ -888,7 +891,7 @@ fn a_dlv_fund_with_a_rooted_transferable_leg_validates() {
     let resolver = MarketRooted {
         policies: [(pc, proto)].into_iter().collect(),
     };
-    let (root, funded) = dlv_fund_drive(pc, era, &resolver)
+    let (root, _validity, funded) = dlv_fund_drive(pc, era, &resolver)
         .expect("a rooted transferable leg beside a builtin validates");
     assert_eq!(root.economic_position(), 8);
     assert_eq!(funded.len(), 2, "both reserve credits funded by SameMove");

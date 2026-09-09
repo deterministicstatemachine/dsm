@@ -448,7 +448,7 @@ fn walk_positions(
             expected_network_id,
             state: std::cell::RefCell::new(&mut *state),
         };
-        let (next, _funded) = advance_validated(
+        let (next, _validity, _funded) = advance_validated(
             &validated,
             &registered,
             &manifest,

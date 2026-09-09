@@ -266,6 +266,50 @@ impl From<ConstantProductRefusal> for Reason {
 }
 
 // ============================================================
+// The C3 / C4 seam — what an advance carries about a DLV successor
+// ============================================================
+
+/// What `advance_validated` established about the DLV successor, if the
+/// verified operation was one.
+///
+/// This is the seam amendment 2c-C4 fills. `advance_validated` verifies the
+/// transition's provenance -- for a DLV settle or close, that is the economic
+/// arm's parent authentication, pair/fee/quorum axes, binding observation and
+/// bundle checks -- and until now discarded that fact into `Ok(())`. It does
+/// NOT hold `V_n`, so it cannot yet produce a full [`C3Verdict`]; the walk that
+/// carries the parent state is C4's. Widening the return here means C4's
+/// change is a PAYLOAD change, not a signature change at every call site.
+///
+/// A non-DLV operation is `NoDlvTransition`, vacuously.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuccessorValidity {
+    /// The verified operation is not a DLV transition; nothing to say.
+    NoDlvTransition,
+    /// The verified operation is a DLV transition and provenance established
+    /// its conjuncts. The verdict slot is `None` until C4 threads `V_n`
+    /// through -- it is NOT `Valid`, and nothing may read it as such.
+    DlvTransition {
+        kind: DlvTransitionKind,
+        verdict: Option<C3Verdict>,
+    },
+}
+
+/// Which DLV family the verified operation belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DlvTransitionKind {
+    Settle,
+    Close,
+}
+
+impl SuccessorValidity {
+    /// Whether anything here may be certified as a complete C3 result.
+    /// `false` in every shape this commit can produce.
+    pub fn may_certify(&self) -> bool {
+        matches!(self, Self::DlvTransition { verdict: Some(v), .. } if v.may_certify())
+    }
+}
+
+// ============================================================
 // Erratum D2 — retirement has no tuple field
 // ============================================================
 
@@ -902,5 +946,34 @@ mod tests {
             Reason::BindingEvidenceUnavailable.class(),
             OutcomeClass::Incomplete
         );
+    }
+    // ---------- the C3/C4 seam ----------
+
+    /// Nothing this commit can produce is certifiable: the verdict slot is
+    /// empty until C4 threads V_n, and an empty slot is not Valid.
+    #[test]
+    fn a_dlv_transition_with_no_verdict_can_never_certify() {
+        for kind in [DlvTransitionKind::Settle, DlvTransitionKind::Close] {
+            let v = SuccessorValidity::DlvTransition {
+                kind,
+                verdict: None,
+            };
+            assert!(!v.may_certify(), "{kind:?}");
+        }
+        assert!(!SuccessorValidity::NoDlvTransition.may_certify());
+    }
+
+    /// And a partial verdict in the slot still does not certify -- the seam
+    /// inherits C3Verdict's separation of fold from claim.
+    #[test]
+    fn a_partial_verdict_in_the_slot_does_not_certify() {
+        let v = SuccessorValidity::DlvTransition {
+            kind: DlvTransitionKind::Settle,
+            verdict: Some(C3Verdict::PartialPendingEncoderCut(EstablishedChecks {
+                expected: Box::new(parent(1_000, 1_000, None)),
+                parent_commitment: [7; 32],
+            })),
+        };
+        assert!(!v.may_certify());
     }
 }
