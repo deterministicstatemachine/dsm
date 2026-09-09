@@ -570,13 +570,6 @@ pub fn genesis_parent_commitment(vault_id: &[u8; 32]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// `h_n` for the successor of `parent`: `c_{n-1}`.
-pub fn parent_state_commitment_for_successor_of(
-    parent: &VaultStateV2,
-) -> Result<[u8; 32], CcbError> {
-    vault_state_commitment(parent)
-}
-
 /// `storage_set_id = H_dom(DSM/storage-set, CCB(S))`.
 ///
 /// An ordinary CCB object under an ordinary domain, over the canonical

@@ -874,6 +874,29 @@ reason }` must replace it so the compiler forces the distinction.
 proto comments at `dsm_app.proto:1745,1761` describe `successor_ccb` and `parent_reserves_digest` in
 terms Def 6.14 and 2c-A contradict; they die with the CCB cut (Ruling D).
 
+## Discharge record (Phase F, 2026-09-09)
+
+The line numbers above are those of the tree this amendment was written against and are kept as
+written; each debt's disposition is recorded here rather than by rewriting the debt.
+
+```text
+the comparison has no second operand        OPEN         2c-A encoder cut
+successor_ccb cannot be repurposed          OPEN         2c-A (shape discriminator moves first)
+a failed signature is not an absence        DISCHARGED   #789: ReceiptFetch is four classes;
+                                                         a present-but-failing receipt is
+                                                         REALIZATION_EVIDENCE_INVALID, with a
+                                                         corrupted-signature control
+the taxonomy collapses at the boundary      DISCHARGED   #789: SuccessorInvalid / SafetyViolation
+                                                         carry (reason, class); the sixteen
+                                                         Unresolvable sites route by class
+advance_validated has no VaultStateV2       DISCHARGED   #790: the return carries
+  IN SHAPE                                               SuccessorValidity; the verdict slot on
+                                                         that path is empty by design, C4 fills it
+dead code                                   DISCHARGED   parent_state_commitment_for_successor_of
+                                                         deleted (Phase F)
+false proto comments                        OPEN         die with the CCB cut (2c-A)
+```
+
 ---
 
 # Registry and cross-document edits
@@ -891,11 +914,22 @@ terms Def 6.14 and 2c-A contradict; they die with the CCB cut (Ruling D).
 
 ```text
 C3 predicate                       FROZEN
-C3 Lean structure                  FROZEN / PROVED AS CLAIMED
+C3 Lean structure                  FROZEN / PROVED AS CLAIMED — 21 results, per-theorem
+                                   axiom report, two mutation controls executed
 VDS.COMMON.10.a                    NORMATIVE, IMPLEMENTATION-BLOCKED ON THE
                                    2c-A ENCODER CUT
-Production C3 closure              NOT YET COMPLETE
+Production ValidDlvSuccessorCore   IMPLEMENTED for every presently-evaluable conjunct
+                                   (#788–#791, #795, #796); every fold carries
+                                   PartialPendingEncoderCut; Valid is unconstructible
 Req 6.3 containment (2, 3, 4)      FROZEN BY 2c-C3.1, IMPLEMENTED (client-local)
+Owner-close C3 completion          needs 10.a only
+Market C3 completion               needs 10.a AND the C4 realization fact
+TokenPolicyValid                   EXTERNAL (Ruling H)
+VDS.TERMINAL.2 owner credit        EXTERNAL (Ruling G)
+
+C3 overall                         CLOSED EXCEPT 10.a — which is NOT "DLV succession
+                                   verified": two conjuncts are external and one is
+                                   blocked, and every fold today says so as a value
 ```
 
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation
@@ -916,12 +950,20 @@ written. A verifier built literally from Def 6.1 and §7.1 rejects every valid b
 **The evidence walk — NOT C3's.** How results compose into an accepted-successor proof remains
 2c-C4's; `TA_B` and the bundle-acceptance leaf remain 2c-D's.
 
-**Implementation — NOT DONE, and the predicate's central comparison does not exist today.** Recorded
-above and owned by the adopting change.
+**Implementation — DONE for every presently-evaluable conjunct (Phase F report, 2026-09-09).**
+Phase D landed the core module and typed derivation (#788), the taxonomy split and receipt classes
+(#789), the settler-identity seam, the widened `advance_validated` (#790) and both composition arms
+deriving through the predicate (#791); Phase E landed the class-1 vectors (#792), the lineage
+quarantine that 2c-C3.1 froze (#793, #795) and the forced-partial control (#796). The predicate's
+central comparison still does not exist — `VDS.COMMON.10.a` waits on 2c-A — and every fold records
+`PartialPendingEncoderCut` rather than an absence, so the withheld claim is a value a caller must
+confront. `C3Verdict::Valid` cannot be constructed anywhere; `compile_fail` doctests pin it.
 
-**Formal coverage — STATEMENTS ONLY at this stage.** Phase C writes `DSMValidDlvSuccessor.lean`
-definitions and theorem statements; proof bodies and `#print axioms` reporting follow. The module
-must not be described as axiom-free without per-theorem qualification.
+**Formal coverage — PROVED AS CLAIMED.** `DSMValidDlvSuccessor.lean` carries proof bodies for every
+statement, a per-theorem `#print axioms` report (no result depends on `sorryAx` or
+`Classical.choice`), and two executed mutation controls; `DSMLineageQuarantine.lean` (2c-C3.1) adds
+twenty results and four executed controls. CI kernel-checks all thirteen modules with the count
+pinned. "Axiom-free" remains a per-theorem statement, never a blanket one.
 
 # Scope
 

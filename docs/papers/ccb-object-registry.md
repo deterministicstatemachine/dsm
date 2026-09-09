@@ -1843,6 +1843,10 @@ In order, and not combined:
      arms derive the successor locally. C3 also fixes the correspondence test as equality of
      canonical **bytes**, since `decode_vault_state` normalizes rather than refuses and a
      decode/re-encode substitute would launder non-canonical input.
+     **Status 2026-09-09 (C3 Phase F):** production `ValidDlvSuccessorCore` is implemented for every
+     presently-evaluable conjunct and every fold carries `PartialPendingEncoderCut`; **C3 is CLOSED
+     EXCEPT `VDS.COMMON.10.a`**, which stays blocked on 2c-A. Owner-close completion needs 10.a only;
+     market completion needs 10.a and the C4 realization fact. The two external conjuncts remain so.
    - **2c-C3.1 — WRITTEN.** [`amendment-2c-c3-1-lineage-quarantine.md`](amendment-2c-c3-1-lineage-quarantine.md).
      Freezes the containment Req 6.3 attaches to `SAFETY_VIOLATION` and that 2c-C3 quoted without a
      mechanism: the trigger (duplicate contradictory qualifying binding finality at one parent,
