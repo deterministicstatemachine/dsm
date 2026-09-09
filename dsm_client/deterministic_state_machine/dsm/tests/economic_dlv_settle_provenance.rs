@@ -13,7 +13,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use dsm::ccb::{
-    storage_set_id, vault_state_commitment, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy,
+    vault_state_commitment, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy,
     StorageSetMembers, VaultStateV2,
 };
 use dsm::economic::mutation::EconomicLeafMutation;
@@ -157,7 +157,6 @@ struct Fixture {
     output: u64,
     vn: VaultStateV2,
     c_n: [u8; 32],
-    vault_set_id: [u8; 32],
     owner_root: [u8; 32],
     /// (state, siblings) per leg, proven into `owner_root`.
     reserve_a: (
@@ -184,37 +183,17 @@ struct Fixture {
     witness: EconomicTransitionWitness,
 }
 
-/// A market settlement bundle over this vault's parent — the object the binding
-/// register's chosen record names. Its `route_set_commitment` IS the settle's
-/// `x`, which is what ties the binding to this trade.
-fn market_bundle(
-    storage_set_id: [u8; 32],
-    x: [u8; 32],
-    c_n: [u8; 32],
-    output: u64,
-) -> dsm::types::proto::SettlementBundleV1 {
-    dsm::types::proto::SettlementBundleV1 {
-        version: dsm::dlv::settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-        storage_set_id: storage_set_id.to_vec(),
-        q: 2,
-        intent_commitment: vec![0x1D; 32],
-        route_set_commitment: x.to_vec(),
-        selected_route: b"route".to_vec(),
-        trader_parent: c_n.to_vec(),
-        trader_successor: vec![0xBB; 32],
-        vault_transitions: vec![dsm::types::proto::VaultTransitionV1 {
-            vault_id: VAULT.to_vec(),
-            parent_generation: PARENT,
-            parent_state_commitment: c_n.to_vec(),
-            parent_reserves_digest: vec![0x0A; 32],
-            successor_ccb: vec![0x5C; 32],
-            reserve_deltas: output.to_be_bytes().to_vec(),
-            witnesses: vec![],
-        }],
-        proof_material: vec![],
-        bundle_signatures: vec![],
-        recovery_material: b"r".to_vec(),
-    }
+/// A canonical market settlement bundle over this vault's parent — the object
+/// the binding register's chosen record names. Its `MarketTerms.route_set_commitment`
+/// IS the settle's `x`, which is what ties the binding to this trade; the
+/// transition's successor is THIS vault's next generation, linked to `c_n`.
+/// The bundle carries no storage set and no quorum (registry §5.19).
+fn market_bundle(x: [u8; 32], c_n: [u8; 32]) -> dsm::ccb::SettlementBundle {
+    dsm::ccb::settlement::fixtures::market_bundle(
+        c_n,
+        dsm::ccb::settlement::fixtures::successor_of(c_n, VAULT, PARENT + 1, 1, 1),
+        x,
+    )
 }
 
 fn sibling_array(tree: &EconomicSmt, key: &[u8; 32]) -> Box<[[u8; 32]; ECONOMIC_SMT_HEIGHT]> {
@@ -313,7 +292,6 @@ fn fixture() -> Fixture {
         quorum: 2,
     };
     let c_n = vault_state_commitment(&vn).expect("c_n");
-    let vault_set_id = storage_set_id(&vn.storage_set).expect("set id");
 
     // The signed RouteCommit whose hop binds c_n.
     let mut rc = dsm::types::proto::RouteCommitV1 {
@@ -349,7 +327,7 @@ fn fixture() -> Fixture {
     // record naming this bundle's identity, and the arm re-hashes the bytes
     // itself. Note there is no claimant field to forge or to check — authorship
     // now travels through X -> RouteCommit -> initiator signature.
-    let bundle = market_bundle(vault_set_id, x, c_n, output);
+    let bundle = market_bundle(x, c_n);
     let bundle_bytes = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon bundle");
     let bundle_digest = dsm::dlv::settlement_bundle::bundle_digest(&bundle_bytes);
     let bundle_addr = dsm::dlv::settlement_bundle::bundle_addr(&bundle_bytes);
@@ -444,7 +422,6 @@ fn fixture() -> Fixture {
         output,
         vn,
         c_n,
-        vault_set_id,
         owner_root,
         reserve_a,
         reserve_b,
@@ -614,7 +591,7 @@ impl ProvenanceResolver for SettleResolver {
 /// the register's chosen record at them. The register is application-blind, so
 /// ANY well-formed bundle can be bound here — which is precisely why the arm
 /// must check the bundle against the parent itself.
-fn bind_bundle(r: &mut SettleResolver, bundle: &dsm::types::proto::SettlementBundleV1) {
+fn bind_bundle(r: &mut SettleResolver, bundle: &dsm::ccb::SettlementBundle) {
     let bytes = dsm::dlv::settlement_bundle::canon(bundle).expect("canon");
     let digest = dsm::dlv::settlement_bundle::bundle_digest(&bytes);
     let addr = dsm::dlv::settlement_bundle::bundle_addr(&bytes);
@@ -845,33 +822,14 @@ fn a_bound_bundle_naming_a_different_parent_state_is_refused() {
     // other parent. Nothing in the read catches that; the ARM is what refuses.
     let fx = fixture();
     let mut r = resolver_for(&fx);
-    let mut divergent = market_bundle(fx.vault_set_id, fx.x, fx.c_n, fx.output);
-    divergent.vault_transitions[0].parent_state_commitment = vec![0xDD; 32];
+    // Bound at k(c_n), but its one transition consumes some other parent.
+    let divergent = market_bundle(fx.x, [0xDD; 32]);
     bind_bundle(&mut r, &divergent);
     expect_reserve_refusal(
         &fx,
         &r,
         &ctx_for(&fx),
         "does not name this settle's parent state",
-    );
-}
-
-#[test]
-fn a_bundle_bound_under_another_storage_set_is_refused() {
-    // THE SET IS THE VAULT'S, NOT THE READER'S. A member reconfigured into a
-    // different set keeps serving rows written under the old one, so a
-    // cross-set bundle is reachable — and one bound under a set `V_n` does not
-    // commit established exclusivity in some other register entirely.
-    let fx = fixture();
-    let mut r = resolver_for(&fx);
-    // Well-formed, right vault, right parent, right X — and a foreign set.
-    let foreign = market_bundle([0x5E; 32], fx.x, fx.c_n, fx.output);
-    bind_bundle(&mut r, &foreign);
-    expect_reserve_refusal(
-        &fx,
-        &r,
-        &ctx_for(&fx),
-        "bound under a different storage set",
     );
 }
 
@@ -985,7 +943,7 @@ fn a_bundle_committing_another_route_set_is_refused() {
     // strictly stronger than trusting a self-asserted claimant field.
     let fx = fixture();
     let mut r = resolver_for(&fx);
-    let rival = market_bundle(fx.vault_set_id, [0xA1; 32], fx.c_n, fx.output);
+    let rival = market_bundle([0xA1; 32], fx.c_n);
     bind_bundle(&mut r, &rival);
     expect_reserve_refusal(&fx, &r, &ctx_for(&fx), "commits a different route set");
 }
@@ -1498,7 +1456,7 @@ fn an_over_paying_trade_is_refused_by_re_simulation_alone() {
     }
     // The binding must name the INFLATED trade's X, so the arm reaches the
     // re-simulation check rather than refusing on the route set first.
-    let inflated_bundle = market_bundle(fx.vault_set_id, x, fx.c_n, inflated);
+    let inflated_bundle = market_bundle(x, fx.c_n);
     let _ = ow;
 
     // Rebuild the trader witness for the inflated op.

@@ -595,6 +595,138 @@ impl SettlementBundle {
     }
 }
 
+/// TEST FIXTURES for the canonical bundle — shared by every crate that binds,
+/// decodes or composes one, so there is one construction of "a canonical
+/// market bundle over parent `c_n`" rather than several that drift. Nothing
+/// here is a production construction: the intent, route and evidence are
+/// syntactically valid stand-ins, and the signatures are patterns of the
+/// right length, never SPHINCS+ output. A test that needs a REAL owner
+/// authorization signs one and passes it to [`ConsumedDlvTransition::owner_close`].
+#[cfg(any(test, feature = "testing"))]
+#[allow(clippy::disallowed_methods)] // fixture construction; a failure here is the signal
+pub mod fixtures {
+    use super::*;
+    use crate::ccb::state::{EncumbranceSet, MarketPolicy, ReleasePolicy, StorageSetMembers};
+
+    /// A `SPHINCS_PLUS_SPX256F`-length byte pattern, distinguishable by seed.
+    pub fn signature_bytes(seed: u8) -> Vec<u8> {
+        (0..SPX256F_SIGNATURE_LEN)
+            .map(|i| (i as u32).wrapping_mul(u32::from(seed) + 1).to_le_bytes()[0])
+            .collect()
+    }
+
+    /// The 2c-A worked fixture's `V_{n+1}` shape over `parent`: zero claims,
+    /// a three-member set, budget absent, generation 8, the `0x10`/`0x20`
+    /// pair at 30 bps, quorum 2.
+    pub fn successor(parent: [u8; 32], reserve_a: u64, reserve_b: u64) -> VaultStateV2 {
+        successor_of(parent, [0x03; 32], 8, reserve_a, reserve_b)
+    }
+
+    /// The same shape with the vault id and generation a test needs.
+    pub fn successor_of(
+        parent: [u8; 32],
+        vault_id: [u8; 32],
+        generation: u64,
+        reserve_a: u64,
+        reserve_b: u64,
+    ) -> VaultStateV2 {
+        VaultStateV2 {
+            owner_genesis_id: [0x01; 32],
+            owner_device_id: [0x02; 32],
+            vault_id,
+            generation,
+            reserve_a,
+            reserve_b,
+            market_policy: MarketPolicy::beta_constant_product([0x10; 32], [0x20; 32]).unwrap(),
+            release_policy: ReleasePolicy::beta_owner_local_full_close(),
+            fee_policy: FeePolicy::new(30).unwrap(),
+            encumbrances: EncumbranceSet::empty(),
+            iteration_budget: None,
+            parent_state_commitment: parent,
+            owner_authority_transition_digest: [0x0D; 32],
+            storage_set: StorageSetMembers::new(&[
+                (b"node-1".as_slice(), [0x11; 32]),
+                (b"node-2".as_slice(), [0x22; 32]),
+                (b"node-3".as_slice(), [0x33; 32]),
+            ])
+            .unwrap(),
+            quorum: 2,
+        }
+    }
+
+    /// Syntactically valid market terms whose route consumes `parent` and
+    /// whose route-set commitment is `x` — what ties a bound bundle to a
+    /// trade in every consumer.
+    pub fn market_terms(parent: [u8; 32], x: [u8; 32]) -> MarketTerms {
+        MarketTerms {
+            intent: TradeIntent {
+                token_in: [0x10; 32],
+                amount_in: 10_000,
+                token_out: [0x20; 32],
+                min_out: 4_900,
+                max_fee: 100,
+                max_hops: 1,
+                max_fanout: 1,
+                k: 1,
+                nonce: [0x5E; 32],
+            },
+            route_set_commitment: x,
+            selected_route: Route::new(vec![RouteLeg::Single(Allocation {
+                parent_binding: parent,
+                delta_in: 10_000,
+                delta_out: 4_935,
+                encumbrance_claim: [0x00; 32],
+                fee_policy: FeePolicy::new(30).unwrap(),
+            })])
+            .unwrap(),
+            trader_parent: [0x52; 32],
+            trader_successor: [0x59; 32],
+            recovery_material: DsmSuccessorEvidence::new(
+                [0x51; 32],
+                [0x52; 32],
+                [0x53; 32],
+                vec![0x1A; 300],
+                [0x55; 32],
+                signature_bytes(0x57),
+            )
+            .unwrap(),
+        }
+    }
+
+    /// A canonical market bundle consuming `parent` into `successor` under
+    /// route-set commitment `x`.
+    pub fn market_bundle(
+        parent: [u8; 32],
+        successor: VaultStateV2,
+        x: [u8; 32],
+    ) -> SettlementBundle {
+        SettlementBundle::market(
+            market_terms(parent, x),
+            vec![ConsumedDlvTransition::market(parent, successor).unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// A canonical owner close of `parent` into `successor` with the given
+    /// authorization bytes (a real signature, or a pattern for tests that
+    /// never verify it).
+    pub fn owner_close_bundle_with(
+        parent: [u8; 32],
+        successor: VaultStateV2,
+        close_authorization: Vec<u8>,
+    ) -> SettlementBundle {
+        SettlementBundle::owner_close(
+            ConsumedDlvTransition::owner_close(parent, successor, close_authorization).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// An owner close with a fixture authorization of the right length.
+    pub fn owner_close_bundle(parent: [u8; 32], successor: VaultStateV2) -> SettlementBundle {
+        owner_close_bundle_with(parent, successor, signature_bytes(0xA5))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {

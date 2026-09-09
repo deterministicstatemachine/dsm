@@ -533,8 +533,9 @@ pub(crate) async fn compose_vault_state(
             // The successor is fully determined — both reserves to zero at
             // parent+1 — so there is no amount to witness and no second
             // artifact to wait for. What must be proven is WHO authorized it:
-            // `x_close` is a public derivation anyone can recompute, so the
-            // shape is a DISCRIMINATOR and never an authorization. The proof
+            // the drained successor and its `c_{n+1}` are public derivations
+            // anyone can recompute, so the shape is a DISCRIMINATOR and never
+            // an authorization. The proof
             // is the owner's signature over the exact release successor,
             // rebuilt here from the frontier this walk is standing on.
             dsm::dlv::settlement_bundle::BundleShape::OwnerClose => {
@@ -589,13 +590,16 @@ pub(crate) async fn compose_vault_state(
             // # proof material.
             // ###################################################################
             dsm::dlv::settlement_bundle::BundleShape::Market => {
-                let x = <[u8; 32]>::try_from(bound.bundle.route_set_commitment.as_slice())
-                    .map_err(|_| {
-                        refused(
-                            Reason::BundleNotCanonical,
-                            "its route-set commitment is not 32 bytes",
-                        )
-                    })?;
+                // A market bundle carries its terms by construction (field 1
+                // present IS the shape), so this cannot fail on a decoded
+                // bundle; stated as a refusal rather than a panic all the same.
+                let Some(terms) = bound.bundle.market_terms() else {
+                    return Err(refused(
+                        Reason::BundleNotCanonical,
+                        "its market shape carries no market terms",
+                    ));
+                };
+                let x = terms.route_set_commitment;
                 match realize_market_successor_5c1(
                     vault_id,
                     &x,
@@ -1105,7 +1109,7 @@ mod tests {
         claimant_pk: &[u8],
     ) {
         let set = fleet_set();
-        let bundle = market_bundle_for_tests(&set, vault_id, parent_sequence, parent_c_n, x);
+        let bundle = market_bundle_for_tests(vault_id, parent_sequence, parent_c_n, x);
         let out = crate::sdk::settlement_bind::bind_settlement(
             &set,
             proposer_for(claimant_pk),
@@ -1135,37 +1139,37 @@ mod tests {
         *h.finalize().as_bytes()
     }
 
-    /// The market bundle a fixture binds: its `route_set_commitment` IS the
-    /// trade's `x`, which is what the walk reads back to locate the receipt and
-    /// the RouteCommit.
+    /// The canonical market bundle a fixture binds: its `route_set_commitment`
+    /// IS the trade's `x`, which is what the walk reads back to locate the
+    /// receipt and the RouteCommit, and its one transition consumes
+    /// `parent_c_n` into a successor of this vault at the next generation.
     fn market_bundle_for_tests(
-        set: &crate::sdk::storage_set::StorageSet,
         vault_id: &[u8; 32],
         parent_sequence: u64,
         parent_c_n: &[u8; 32],
         x: &[u8; 32],
-    ) -> generated::SettlementBundleV1 {
-        generated::SettlementBundleV1 {
-            version: dsm::dlv::settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-            storage_set_id: set.id().to_vec(),
-            q: set.quorum(),
-            intent_commitment: x.to_vec(),
-            route_set_commitment: x.to_vec(),
-            selected_route: b"route".to_vec(),
-            trader_parent: parent_c_n.to_vec(),
-            trader_successor: x.to_vec(),
-            vault_transitions: vec![generated::VaultTransitionV1 {
-                vault_id: vault_id.to_vec(),
-                parent_generation: parent_sequence,
-                parent_state_commitment: parent_c_n.to_vec(),
-                parent_reserves_digest: [0x0A; 32].to_vec(),
-                successor_ccb: x.to_vec(),
-                reserve_deltas: Vec::new(),
-                witnesses: Vec::new(),
-            }],
-            proof_material: Vec::new(),
-            bundle_signatures: Vec::new(),
-            recovery_material: Vec::new(),
+    ) -> dsm::ccb::SettlementBundle {
+        dsm::ccb::settlement::fixtures::market_bundle(
+            *parent_c_n,
+            dsm::ccb::settlement::fixtures::successor_of(
+                *parent_c_n,
+                *vault_id,
+                parent_sequence.saturating_add(1),
+                0,
+                0,
+            ),
+            *x,
+        )
+    }
+
+    /// The exact drained successor the frozen predicate derives for a close of
+    /// `parent` — what an honest close's field 2 carries, and what
+    /// `close_bundle` requires to be linked to `c_n` and retired.
+    fn drained(parent: &VaultStateV2, c_n: [u8; 32]) -> VaultStateV2 {
+        use dsm::dlv::successor_validity::{derive_close_successor, DeriveExpected};
+        match derive_close_successor(parent, c_n) {
+            DeriveExpected::Derived(v) => *v,
+            DeriveExpected::Refused(r) => panic!("the fixture parent must close: {r}"),
         }
     }
 
@@ -2180,10 +2184,11 @@ mod tests {
 
     /// A STRANGER CANNOT CLOSE SOMEBODY ELSE'S VAULT.
     ///
-    /// `x_close = close_slot_commitment(vault, gen)` is a PUBLIC derivation and
-    /// the binding register is application-blind by design (§22 #12), so anyone
-    /// can build a close-shaped bundle naming a victim's vault at its current
-    /// `c_n` and bind it. The register will accept it — that is not its job.
+    /// The drained successor and its `c_{n+1}` are PUBLIC derivations from a
+    /// public parent, and the binding register is application-blind by design
+    /// (§22 #12), so anyone can build a close-shaped bundle naming a victim's
+    /// vault at its current `c_n` and bind it. The register will accept it —
+    /// that is not its job.
     ///
     /// What stops the composer folding that vault to zero is the owner's
     /// signature over the exact release successor. This is the mutation control
@@ -2193,7 +2198,7 @@ mod tests {
     async fn a_stranger_cannot_close_a_vault_by_binding_a_close_shaped_bundle() {
         let _fleet = fleet();
         let vault_id = vid(0x1B);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let set = fleet_set();
 
         // A stranger's key, and a close-shaped bundle for the victim's vault at
@@ -2211,16 +2216,8 @@ mod tests {
         let forged =
             dsm::dlv::close_authorization::sign_close_authorization(&successor, &stranger_sk)
                 .expect("a stranger can always sign SOMETHING");
-        let bundle = crate::sdk::settlement_bind::close_bundle(
-            set.id(),
-            set.quorum(),
-            vault_id,
-            0,
-            c0,
-            [0x0A; 32],
-            dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
-            forged,
-        );
+        let bundle = crate::sdk::settlement_bind::close_bundle(c0, drained(&state, c0), forged)
+            .expect("a close-shaped bundle over a public parent always builds");
         let out =
             crate::sdk::settlement_bind::bind_settlement(&set, [0x9E; 32], &bundle, vault_id, c0)
                 .await
@@ -2277,7 +2274,7 @@ mod tests {
     async fn an_unauthorized_close_must_be_refused_before_it_reaches_occupancy() {
         let _fleet = fleet();
         let vault_id = vid(0x1C);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let set = fleet_set();
 
         let composed =
@@ -2300,16 +2297,8 @@ mod tests {
         };
         let sig = dsm::dlv::close_authorization::sign_close_authorization(&successor, &other_sk)
             .expect("sign");
-        let bundle = crate::sdk::settlement_bind::close_bundle(
-            set.id(),
-            set.quorum(),
-            vault_id,
-            0,
-            c0,
-            [0x0A; 32],
-            dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
-            sig,
-        );
+        let bundle = crate::sdk::settlement_bind::close_bundle(c0, drained(&state, c0), sig)
+            .expect("a close-shaped bundle over a public parent always builds");
 
         // ── ORDER 1: authorize first. This is what `dlv.close` does. ─────────
         assert!(
@@ -2367,15 +2356,13 @@ mod tests {
             &set,
             [0x9D; 32],
             &crate::sdk::settlement_bind::close_bundle(
-                set.id(),
-                set.quorum(),
-                vault_id,
-                0,
                 c0,
-                [0x0A; 32],
-                dsm::dlv::settlement_bundle::close_slot_commitment(&vault_id, 0),
-                b"a properly authorized signature".to_vec(),
-            ),
+                drained(&state, c0),
+                // Length-valid stand-in: the register is application-blind and
+                // never verifies it, and the bind is what this asserts on.
+                dsm::ccb::settlement::fixtures::signature_bytes(0x9D),
+            )
+            .expect("builds"),
             vault_id,
             c0,
         )
@@ -2410,8 +2397,7 @@ mod tests {
         win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk).await;
         // Now plant its committed record at THIS parent's key, which is what
         // an application-blind register permits.
-        let set = fleet_set();
-        let bundle = market_bundle_for_tests(&set, &vault_id, 0, &stale, &x_seed(0x10));
+        let bundle = market_bundle_for_tests(&vault_id, 0, &stale, &x_seed(0x10));
         let canon = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon");
         crate::sdk::binding_fleet_double::plant_committed(
             &["dsm-node-1", "dsm-node-2"],
