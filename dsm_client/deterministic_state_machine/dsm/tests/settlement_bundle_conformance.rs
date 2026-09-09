@@ -112,30 +112,30 @@ fn prod_successor(reserve_a: u64, reserve_b: u64) -> VaultStateV2 {
 // ── pinned identities (captured once from the independent encoder) ───────────
 
 const CLOSE_B: [u8; 32] = [
-    51, 16, 196, 176, 63, 41, 85, 7, 169, 76, 21, 164, 212, 126, 62, 145, 173, 225, 154, 28, 239,
-    193, 54, 203, 234, 9, 99, 76, 235, 227, 238, 228,
+    19, 14, 237, 145, 26, 180, 133, 226, 121, 53, 213, 205, 56, 229, 207, 161, 0, 225, 242, 44,
+    228, 40, 86, 121, 181, 10, 25, 116, 218, 66, 113, 248,
 ];
 const CLOSE_ADDR: [u8; 32] = [
-    183, 62, 7, 70, 141, 157, 41, 52, 35, 159, 20, 124, 28, 145, 215, 23, 192, 216, 127, 214, 173,
-    122, 17, 11, 2, 36, 68, 15, 184, 224, 69, 199,
+    124, 202, 174, 159, 47, 228, 36, 49, 3, 140, 43, 39, 191, 199, 222, 150, 9, 155, 89, 142, 206,
+    54, 134, 166, 123, 246, 141, 41, 235, 249, 213, 218,
 ];
 const CLOSE_C_NEXT: [u8; 32] = [
     201, 10, 173, 167, 78, 52, 108, 26, 142, 80, 242, 142, 130, 112, 165, 122, 199, 234, 187, 148,
     211, 33, 203, 193, 77, 214, 102, 100, 101, 238, 21, 202,
 ];
 const MARKET_B: [u8; 32] = [
-    28, 110, 135, 77, 109, 127, 205, 228, 196, 204, 73, 241, 121, 254, 160, 72, 133, 235, 134, 182,
-    159, 217, 139, 132, 152, 236, 202, 175, 241, 92, 196, 149,
+    133, 132, 102, 202, 228, 107, 231, 91, 84, 220, 218, 237, 60, 4, 29, 208, 223, 11, 9, 23, 201,
+    83, 169, 125, 122, 80, 39, 29, 254, 206, 84, 150,
 ];
 const MARKET_ADDR: [u8; 32] = [
-    149, 89, 221, 218, 222, 138, 117, 112, 173, 99, 64, 127, 16, 189, 62, 9, 96, 136, 83, 193, 236,
-    185, 29, 240, 236, 187, 119, 221, 206, 197, 66, 34,
+    116, 21, 183, 190, 111, 55, 90, 16, 14, 149, 176, 90, 11, 219, 75, 233, 134, 89, 129, 214, 49,
+    198, 194, 240, 157, 89, 214, 215, 183, 186, 25, 161,
 ];
 const MARKET_C_NEXT: [u8; 32] = [
     88, 81, 131, 194, 192, 135, 159, 196, 243, 15, 252, 230, 230, 74, 138, 88, 40, 172, 114, 12,
     214, 32, 187, 15, 162, 99, 253, 20, 36, 127, 221, 149,
 ];
-const MARKET_LEN: usize = 51107;
+const MARKET_LEN: usize = 51091;
 
 // ── the owner-close vector ───────────────────────────────────────────────────
 
@@ -163,7 +163,11 @@ fn owner_close_reproduces_the_worked_layout_byte_for_byte() {
     assert_eq!(indep_successor(0, 0).len(), 423, "0x0001 schema 4 fixture");
     assert_eq!(bytes.len(), 50_330, "0x000E owner close, 2c-A worked total");
     // The framing 2c-A prints.
-    assert_eq!(&bytes[..4], &[0x00, 0x0E, 0x00, 0x01]);
+    assert_eq!(
+        &bytes[..4],
+        &[0x00, 0x0E, 0x00, 0x02],
+        "0x000E SCHEMA 2 (2c-E)"
+    );
     assert_eq!(
         bytes[4], 0x00,
         "field 1 ABSENT is EMITTED, and it is the discriminator"
@@ -249,7 +253,7 @@ fn sigma_fixture() -> Vec<u8> {
 }
 
 fn indep_market_bundle() -> Vec<u8> {
-    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_900, 100, 1, 1, 1, NONCE);
+    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
@@ -282,11 +286,8 @@ fn prod_market_bundle() -> SettlementBundle {
             token_in: TOKEN_A,
             amount_in: 10_000,
             token_out: TOKEN_B,
-            min_out: 4_900,
-            max_fee: 100,
-            max_hops: 1,
-            max_fanout: 1,
-            k: 1,
+            exact_out: 4_935,
+            fee_bps: FEE_BPS,
             nonce: NONCE,
         },
         route_set_commitment: X,
@@ -329,29 +330,32 @@ fn the_market_vector_is_the_a_plus_b_closure_test() {
         bytes.len() < 512 * 1024,
         "under the storage node's ingress cap"
     );
-    // 2c-A's worked A-stage layout: the 0x0033 header, then the intent at 4,
-    // X at 140, the route at 172 — and field 6, which 2c-B closed, following
-    // the two trader coordinates.
+    // The worked layout, as 2c-E leaves it: the 0x0033 header, then the intent
+    // at 4, X at 124, the route at 156 — and field 6, which 2c-B closed,
+    // following the two trader coordinates. X and the route each sit 16 bytes
+    // earlier than the 2c-A layout because schema 2's intent is 120 bytes
+    // rather than 136: `min_out` and `max_fee` (8 each) and `max_hops`,
+    // `max_fanout`, `k` (4 each) left, and `fee_bps` (4) arrived.
     assert_eq!(
         &bytes[..5],
-        &[0x00, 0x0E, 0x00, 0x01, 0x01],
-        "field 1 PRESENT -> Market"
+        &[0x00, 0x0E, 0x00, 0x02, 0x01],
+        "field 1 PRESENT -> Market; 0x000E SCHEMA 2 (2c-E)"
     );
-    assert_eq!(&bytes[5..9], &[0x00, 0x33, 0x00, 0x01]);
+    assert_eq!(&bytes[5..9], &[0x00, 0x33, 0x00, 0x02], "0x0033 SCHEMA 2");
     assert_eq!(
         &bytes[9..13],
-        &[0x00, 0x0B, 0x00, 0x01],
-        "intent at MarketTerms offset 4"
+        &[0x00, 0x0B, 0x00, 0x02],
+        "intent at MarketTerms offset 4, 0x000B SCHEMA 2"
     );
-    assert_eq!(&bytes[5 + 140..5 + 172], &X, "X at offset 140");
+    assert_eq!(&bytes[5 + 124..5 + 156], &X, "X at offset 124");
     assert_eq!(
-        &bytes[5 + 172..5 + 176],
+        &bytes[5 + 156..5 + 160],
         &[0x00, 0x0D, 0x00, 0x02],
-        "route at 172, schema 2"
+        "route at 156, schema 2"
     );
     // The route: one Single leg, i.e. a 0x0015 schema-2 envelope right after
     // the count.
-    assert_eq!(&bytes[5 + 180..5 + 184], &[0x00, 0x15, 0x00, 0x02]);
+    assert_eq!(&bytes[5 + 164..5 + 168], &[0x00, 0x15, 0x00, 0x02]);
 
     // 1. the production encoder agrees.
     assert_eq!(prod_market_bundle().encode().unwrap(), bytes);
@@ -384,7 +388,7 @@ fn market_identities_are_pinned_and_the_decoder_records_the_span() {
 
 #[test]
 fn a_close_authorization_inside_a_market_bundle_is_refused() {
-    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_900, 100, 1, 1, 1, NONCE);
+    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
@@ -457,7 +461,7 @@ fn a_transposed_parent_linkage_is_refused_inside_the_bytes() {
 /// waits on 5c-2 Step 2/3, so this vector's `operation_bytes` stay arbitrary.)
 #[test]
 fn market_terms_whose_evidence_names_another_trader_parent_are_refused_inside_the_bytes() {
-    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_900, 100, 1, 1, 1, NONCE);
+    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
@@ -574,6 +578,20 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
         assert!(
             dsm::ccb::schema::is_burned(n, 1),
             "{n:#06x} schema 1 is burned"
+        );
+    }
+    // 2c-E's burns: the intent cut, and the two classes it propagates through.
+    // Recorded in the machine-readable table, not only in a comment, so a
+    // schema-1 envelope classifies as BURNED rather than as an unknown schema —
+    // the distinction registry §2.8 rests its never-re-assign guarantee on.
+    for n in [0x000B, 0x0033, 0x000E] {
+        assert!(
+            dsm::ccb::schema::is_burned(n, 1),
+            "{n:#06x} schema 1 is burned by 2c-E"
+        );
+        assert!(
+            !dsm::ccb::schema::is_burned(n, 2),
+            "{n:#06x} schema 2 is the LIVE form and must never be burned"
         );
     }
 }

@@ -74,17 +74,25 @@ pub struct TradeIntent {
     pub token_in: [u8; 32],
     pub amount_in: u64,
     pub token_out: [u8; 32],
-    pub min_out: u64,
-    pub max_fee: u64,
-    pub max_hops: u32,
-    pub max_fanout: u32,
-    pub k: u32,
+    /// The EXACT output the trader signed — not a floor. RouteCommit v2 removed
+    /// slippage floors for "one route, one anchored state, one exact output,
+    /// one signature", so there is nothing for a minimum to bound.
+    pub exact_out: u64,
+    /// The fee RATE the trader signed. Base units are deliberately not carried:
+    /// they are a function of the amount and the rate, and a second
+    /// representation could disagree with its own inputs.
+    pub fee_bps: u32,
     pub nonce: [u8; 32],
 }
 
 impl CcbObject for TradeIntent {
     const CLASS: u16 = class::TRADE_INTENT;
-    const SCHEMA: u16 = 1;
+    /// Schema 2 (amendment 2c-E). Schema 1 carried `min_out`, `max_fee`,
+    /// `max_hops`, `max_fanout` and `k` — members of the model RouteCommit v2
+    /// deleted. Four had no wire source at all, so a producer could only have
+    /// invented them and `I` would commit to values no verifier could
+    /// re-derive. Schema 1 is BURNED.
+    const SCHEMA: u16 = 2;
 }
 
 impl TradeIntent {
@@ -94,12 +102,9 @@ impl TradeIntent {
         push_digest32(&mut out, &self.token_in); // 1
         push_u64(&mut out, self.amount_in); // 2
         push_digest32(&mut out, &self.token_out); // 3
-        push_u64(&mut out, self.min_out); // 4
-        push_u64(&mut out, self.max_fee); // 5
-        push_u32(&mut out, self.max_hops); // 6
-        push_u32(&mut out, self.max_fanout); // 7
-        push_u32(&mut out, self.k); // 8
-        push_digest32(&mut out, &self.nonce); // 9
+        push_u64(&mut out, self.exact_out); // 4
+        push_u32(&mut out, self.fee_bps); // 5
+        push_digest32(&mut out, &self.nonce); // 6
         out
     }
 }
@@ -138,8 +143,9 @@ impl Allocation {
 
 // ── 0x0016 AllocationBundle (schema 2) ──────────────────────────────────────
 
-/// §5.11 — a same-pair fan-out, `1 ≤ f ≤ max_fanout`, ordered by complete
-/// element CCB (§2.4). `max_fanout` is `TradeIntent` field 7 and is checked
+/// §5.11 — a same-pair fan-out ordered by complete element CCB (§2.4).
+/// 2c-E deleted `max_fanout` from `TradeIntent`: it had no wire source and beta
+/// emits one allocation per leg. The bound, if a later release needs one,
 /// against the count there, not carried here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllocationBundle {
@@ -349,7 +355,10 @@ pub struct MarketTerms {
 
 impl CcbObject for MarketTerms {
     const CLASS: u16 = class::MARKET_TERMS;
-    const SCHEMA: u16 = 1;
+    /// Schema 2, transitively: field 1 nests `0x000B`, and §2.7 nests by
+    /// complete CCB including the nested schema, so 2c-E's cut changes these
+    /// bytes. Schema 1 is BURNED.
+    const SCHEMA: u16 = 2;
 }
 
 impl MarketTerms {
@@ -521,7 +530,10 @@ pub struct SettlementBundle {
 
 impl CcbObject for SettlementBundle {
     const CLASS: u16 = class::SETTLEMENT_BUNDLE;
-    const SCHEMA: u16 = 1;
+    /// Schema 2, transitively through `0x0033` (2c-E §7). The owner-close arm
+    /// changes no substance but shares the enclosing class, so a close bundle's
+    /// bytes move with this bump. Schema 1 is BURNED.
+    const SCHEMA: u16 = 2;
 }
 
 impl SettlementBundle {
@@ -695,11 +707,8 @@ pub mod fixtures {
                 token_in: [0x10; 32],
                 amount_in: 10_000,
                 token_out: [0x20; 32],
-                min_out: 4_900,
-                max_fee: 100,
-                max_hops: 1,
-                max_fanout: 1,
-                k: 1,
+                exact_out: 4_935,
+                fee_bps: 30,
                 nonce: [0x5E; 32],
             },
             route_set_commitment: x,
@@ -817,11 +826,8 @@ mod tests {
             token_in: [0x10; 32],
             amount_in: 10_000,
             token_out: [0x20; 32],
-            min_out: 4_900,
-            max_fee: 100,
-            max_hops: 1,
-            max_fanout: 1,
-            k: 1,
+            exact_out: 4_935,
+            fee_bps: 30,
             nonce: [0x5E; 32],
         }
     }
@@ -859,10 +865,12 @@ mod tests {
         let b = SettlementBundle::owner_close(t).unwrap();
         let bytes = b.encode().unwrap();
         assert_eq!(bytes.len(), 50_330, "0x000E owner close");
-        // 2c-A's layout: envelope, field 1 ABSENT, count = 1, then 0x000F.
+        // The layout: envelope, field 1 ABSENT, count = 1, then 0x000F. The
+        // close carries no intent, so 2c-E moves only its schema byte — the
+        // length is unchanged at 50,330.
         assert_eq!(
             &bytes[..9],
-            &[0x00, 0x0E, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01]
+            &[0x00, 0x0E, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
         );
         assert_eq!(&bytes[9..13], &[0x00, 0x0F, 0x00, 0x01]);
         assert_eq!(&bytes[13..45], &parent, "parent_binding is a bare digest32");
@@ -881,11 +889,11 @@ mod tests {
             ConsumedDlvTransition::market(parent, successor(parent, 1_010_000, 495_065)).unwrap();
         let b = SettlementBundle::market(terms(parent), vec![t]).unwrap();
         let bytes = b.encode().unwrap();
-        assert_eq!(&bytes[..5], &[0x00, 0x0E, 0x00, 0x01, 0x01]);
+        assert_eq!(&bytes[..5], &[0x00, 0x0E, 0x00, 0x02, 0x01]);
         assert_eq!(
             &bytes[5..9],
-            &[0x00, 0x33, 0x00, 0x01],
-            "MarketTerms follows the marker"
+            &[0x00, 0x33, 0x00, 0x02],
+            "MarketTerms follows the marker, at SCHEMA 2 (2c-E)"
         );
         assert_eq!(b.shape(), BundleShape::Market);
         // The transition's last two bytes: proof_material absent, field 4 absent.
