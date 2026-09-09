@@ -314,6 +314,13 @@ pub mod schema {
         (super::class::ALLOCATION, 1),
         (super::class::ALLOCATION_BUNDLE, 1),
         (super::declared_unencoded::ROUTE_COMMITMENT_BODY, 1),
+        // Amendment 2c-E cut `TradeIntent` to the exact-output model, and the
+        // bump propagates by §2.7 nesting: `0x0033` carries the intent and
+        // `0x000E` carries the terms. Recorded so a schema-1 envelope for any
+        // of the three classifies as BURNED rather than unknown.
+        (super::class::TRADE_INTENT, 1),
+        (super::class::MARKET_TERMS, 1),
+        (super::class::SETTLEMENT_BUNDLE, 1),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live

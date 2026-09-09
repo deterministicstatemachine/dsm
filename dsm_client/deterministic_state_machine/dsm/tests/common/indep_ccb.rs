@@ -149,28 +149,23 @@ pub fn storage_addr(namespace: &[u8], inner: &[u8; 32]) -> [u8; 32] {
     h_dom(b"DSM/storage-object", &[namespace, inner].concat())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Schema 2 (amendment 2c-E): the exact-output model. Six members, and the
+/// fee is a rate.
 pub fn trade_intent(
     token_in: [u8; 32],
     amount_in: u64,
     token_out: [u8; 32],
-    min_out: u64,
-    max_fee: u64,
-    max_hops: u32,
-    max_fanout: u32,
-    k: u32,
+    exact_out: u64,
+    fee_bps: u32,
     nonce: [u8; 32],
 ) -> Vec<u8> {
     [
-        envelope(0x000B, 1),
+        envelope(0x000B, 2),
         token_in.to_vec(),
         u64be(amount_in),
         token_out.to_vec(),
-        u64be(min_out),
-        u64be(max_fee),
-        u32be(max_hops),
-        u32be(max_fanout),
-        u32be(k),
+        u64be(exact_out),
+        u32be(fee_bps),
         nonce.to_vec(),
     ]
     .concat()
@@ -246,7 +241,7 @@ pub fn market_terms(
     recovery_material: Vec<u8>,
 ) -> Vec<u8> {
     [
-        envelope(0x0033, 1),
+        envelope(0x0033, 2),
         intent,
         route_set_commitment.to_vec(),
         selected_route,
@@ -278,7 +273,7 @@ pub fn consumed_dlv_transition(
     .concat()
 }
 
-/// `0x000E` schema 1: field 1 with its marker always emitted, then the
+/// `0x000E` schema 2 (2c-E, transitive): field 1 with its marker always emitted, then the
 /// transition SET ordered by complete element encoding.
 pub fn settlement_bundle(market_terms: Option<Vec<u8>>, mut transitions: Vec<Vec<u8>>) -> Vec<u8> {
     let field1 = match market_terms {
@@ -286,7 +281,7 @@ pub fn settlement_bundle(market_terms: Option<Vec<u8>>, mut transitions: Vec<Vec
         Some(t) => [vec![0x01], t].concat(),
     };
     transitions.sort();
-    let mut out = [envelope(0x000E, 1), field1, u32be(transitions.len() as u32)].concat();
+    let mut out = [envelope(0x000E, 2), field1, u32be(transitions.len() as u32)].concat();
     for t in transitions {
         out.extend(t);
     }
