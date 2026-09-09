@@ -349,12 +349,15 @@ pub enum SuccessorValidity {
     /// The verified operation is not a DLV transition; nothing to say.
     NoDlvTransition,
     /// The verified operation is a DLV transition and provenance established
-    /// its conjuncts. The verdict slot is `None` until C4 threads `V_n`
-    /// through -- it is NOT `Valid`, and nothing may read it as such.
-    DlvTransition {
-        kind: DlvTransitionKind,
-        verdict: Option<C3Verdict>,
-    },
+    /// its conjuncts. The KIND is all this carries.
+    ///
+    /// 2c-C4 ruling V2 deleted the verdict slot rather than filling it. A
+    /// verdict here would be produced by the trader's own admission path, and
+    /// ruling V1 makes the ordered third-party composition walk the only
+    /// authoritative constructor of a market verdict — so a slot on this type
+    /// could only ever hold a value no foreign verifier may trust. The typed
+    /// intermediate fact that survives is the kind.
+    DlvTransition { kind: DlvTransitionKind },
 }
 
 /// Which DLV family the verified operation belongs to.
@@ -362,14 +365,6 @@ pub enum SuccessorValidity {
 pub enum DlvTransitionKind {
     Settle,
     Close,
-}
-
-impl SuccessorValidity {
-    /// Whether anything here may be certified as a complete C3 result.
-    /// `false` in every shape this commit can produce.
-    pub fn may_certify(&self) -> bool {
-        matches!(self, Self::DlvTransition { verdict: Some(v), .. } if v.may_certify())
-    }
 }
 
 // ============================================================
@@ -1230,31 +1225,22 @@ mod tests {
     }
     // ---------- the C3/C4 seam ----------
 
-    /// Nothing this commit can produce is certifiable: the verdict slot is
-    /// empty until C4 threads V_n, and an empty slot is not Valid.
+    /// 2c-C4 ruling V2: the seam carries the KIND and nothing certifiable.
+    /// There is no verdict slot to read, so no caller can mistake a
+    /// trader-side intermediate fact for a third-party verdict; certification
+    /// is `C3Verdict::may_certify` on the walk's own verdict, and this type
+    /// has no path to it.
     #[test]
-    fn a_dlv_transition_with_no_verdict_can_never_certify() {
+    fn the_seam_carries_a_kind_and_nothing_certifiable() {
         for kind in [DlvTransitionKind::Settle, DlvTransitionKind::Close] {
-            let v = SuccessorValidity::DlvTransition {
-                kind,
-                verdict: None,
-            };
-            assert!(!v.may_certify(), "{kind:?}");
+            let v = SuccessorValidity::DlvTransition { kind };
+            assert_eq!(v, SuccessorValidity::DlvTransition { kind });
         }
-        assert!(!SuccessorValidity::NoDlvTransition.may_certify());
-    }
-
-    /// And a partial verdict in the slot still does not certify -- the seam
-    /// inherits C3Verdict's separation of fold from claim.
-    #[test]
-    fn a_partial_verdict_in_the_slot_does_not_certify() {
-        let p = parent(1_000, 1_000, None);
-        let w =
-            check_correspondence(&p, [7; 32], &p.encode().expect("encodes")).expect("bytes equal");
-        let v = SuccessorValidity::DlvTransition {
-            kind: DlvTransitionKind::Settle,
-            verdict: Some(C3Verdict::PartialPendingRealization(w)),
-        };
-        assert!(!v.may_certify());
+        assert_ne!(
+            SuccessorValidity::NoDlvTransition,
+            SuccessorValidity::DlvTransition {
+                kind: DlvTransitionKind::Settle
+            }
+        );
     }
 }
