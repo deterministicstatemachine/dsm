@@ -379,18 +379,16 @@ fn fee_policy_at(c: &mut Cursor<'_>) -> Result<FeePolicy, DecodeError> {
     FeePolicy::new(c.u32()?).map_err(invalid)
 }
 
-/// `0x000B` schema 1.
+/// `0x000B` schema 2 (amendment 2c-E). Schema-1 bytes are refused as BURNED by
+/// the envelope check, never decoded on a compatibility path.
 pub(crate) fn trade_intent_at(c: &mut Cursor<'_>) -> Result<TradeIntent, DecodeError> {
     c.envelope(class::TRADE_INTENT, TradeIntent::SCHEMA)?;
     Ok(TradeIntent {
         token_in: c.digest32()?,
         amount_in: c.u64()?,
         token_out: c.digest32()?,
-        min_out: c.u64()?,
-        max_fee: c.u64()?,
-        max_hops: c.u32()?,
-        max_fanout: c.u32()?,
-        k: c.u32()?,
+        exact_out: c.u64()?,
+        fee_bps: c.u32()?,
         nonce: c.digest32()?,
     })
 }
