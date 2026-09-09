@@ -449,6 +449,48 @@ fn a_transposed_parent_linkage_is_refused_inside_the_bytes() {
     ));
 }
 
+/// 2c-B's second chain-tip equality, at the boundary a FOREIGN bundle crosses:
+/// field 4 names one trader parent and the nested `0x0031` field 2 another.
+/// The independent encoder will happily emit it; the decoder must not accept
+/// it. (Its sibling conjunct — the frozen `DlvSettleOperationPreimageV1`
+/// grammar and the recomputed relationship chain tip — is NOT enforced yet and
+/// waits on 5c-2 Step 2/3, so this vector's `operation_bytes` stay arbitrary.)
+#[test]
+fn market_terms_whose_evidence_names_another_trader_parent_are_refused_inside_the_bytes() {
+    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_900, 100, 1, 1, 1, NONCE);
+    let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
+    let terms = indep::market_terms(
+        intent,
+        X,
+        indep::route(vec![leg]),
+        TRADER_PARENT,
+        TRADER_SUCCESSOR,
+        indep::dsm_successor_evidence(
+            REL_KEY,
+            [0xEE; 32], // NOT TRADER_PARENT
+            TRADER_DEVID,
+            &op_bytes_fixture(),
+            ENTROPY,
+            &sigma_fixture(),
+        ),
+    );
+    let bytes = indep::settlement_bundle(
+        Some(terms),
+        vec![indep::consumed_dlv_transition(
+            PARENT,
+            indep_successor(1_010_000, 495_065),
+            None,
+        )],
+    );
+    assert!(matches!(
+        decode_settlement_bundle(&bytes),
+        Err(DecodeError::Invalid(m)) if m.contains("embedded_parent")
+    ));
+    // …and the honest vector still decodes, so the refusal is the mismatch and
+    // not the fixture decaying.
+    assert!(decode_settlement_bundle(&indep_market_bundle()).is_ok());
+}
+
 #[test]
 fn a_close_whose_successor_holds_reserves_is_refused() {
     let bytes = indep::settlement_bundle(
