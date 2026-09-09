@@ -267,8 +267,7 @@ impl From<ConstantProductRefusal> for Reason {
 
 // ============================================================
 // The C3 / C4 seam — what an advance carries about a DLV successor
-// ============================================================
-
+// =====================================================
 /// What `advance_validated` established about the DLV successor, if the
 /// verified operation was one.
 ///
@@ -307,6 +306,59 @@ impl SuccessorValidity {
     pub fn may_certify(&self) -> bool {
         matches!(self, Self::DlvTransition { verdict: Some(v), .. } if v.may_certify())
     }
+}
+
+=======
+// Ruling I — settler identity is derived authority, never self-assertion
+// ============================================================
+
+/// The SPHINCS+ attestation-key width. A DevID is 32 bytes; an AK is 64. The
+/// production route once fell back to a DevID for the settler key, which could
+/// never satisfy the correspondence check and yet passed the device-head
+/// advance. Making the widths different TYPES is what stops that recurring.
+pub const AUTHORITY_KEY_LEN: usize = 64;
+
+/// A device identity. Never an authority key, whatever its bytes look like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevId(pub [u8; 32]);
+
+/// An authority (attestation) public key. Constructible only at the right
+/// width, so DevID bytes cannot be passed where a key belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityPublicKey(Vec<u8>);
+
+impl AuthorityPublicKey {
+    /// Refuses anything that is not AK-width. `VDS.COMMON.12`: a settler key
+    /// of the wrong width is not a key that could correspond to any authority.
+    pub fn try_new(bytes: &[u8]) -> Result<Self, Reason> {
+        if bytes.len() != AUTHORITY_KEY_LEN {
+            return Err(Reason::SettlerKeyMismatch);
+        }
+        Ok(Self(bytes.to_vec()))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// `VDS.COMMON.12` — settler identity correspondence (Ruling I).
+///
+/// The operation's embedded `settler_public_key` and `settler_devid` are
+/// CORRESPONDENCE CLAIMS. They are checked against identity established
+/// EXTERNALLY -- the proven authority key and the DevID ordinary DSM authority
+/// resolution produced -- and are never their own source. Pinning is
+/// commitment; this is what makes the commitment checkable.
+pub fn check_settler_correspondence(
+    embedded_key: &AuthorityPublicKey,
+    embedded_devid: &DevId,
+    proven_ak: &AuthorityPublicKey,
+    established_devid: &DevId,
+) -> Result<(), Reason> {
+    if embedded_key != proven_ak || embedded_devid != established_devid {
+        return Err(Reason::SettlerKeyMismatch);
+    }
+    Ok(())
 }
 
 // ============================================================
@@ -975,5 +1027,55 @@ mod tests {
             })),
         };
         assert!(!v.may_certify());
+    // ---------- ruling I: settler identity ----------
+
+    fn ak(b: u8) -> AuthorityPublicKey {
+        AuthorityPublicKey::try_new(&[b; AUTHORITY_KEY_LEN]).expect("64 bytes")
+    }
+
+    #[test]
+    fn a_matching_key_and_devid_correspond() {
+        assert_eq!(
+            check_settler_correspondence(&ak(7), &DevId([1; 32]), &ak(7), &DevId([1; 32])),
+            Ok(())
+        );
+    }
+
+    /// Correct DevID, different valid-width key: INVALID.
+    #[test]
+    fn a_different_valid_width_key_is_rejected() {
+        assert_eq!(
+            check_settler_correspondence(&ak(7), &DevId([1; 32]), &ak(8), &DevId([1; 32])),
+            Err(Reason::SettlerKeyMismatch)
+        );
+    }
+
+    /// Correct key, wrong DevID: INVALID. The two halves are both claims.
+    #[test]
+    fn a_correct_key_with_the_wrong_devid_is_rejected() {
+        assert_eq!(
+            check_settler_correspondence(&ak(7), &DevId([1; 32]), &ak(7), &DevId([2; 32])),
+            Err(Reason::SettlerKeyMismatch)
+        );
+    }
+
+    /// DevID bytes offered as the settler key are refused at CONSTRUCTION --
+    /// they never reach a comparison. This is the production fallback that
+    /// wrote a 32-byte DevID into a 64-byte key field, made structural.
+    #[test]
+    fn devid_bytes_can_never_be_an_authority_key() {
+        assert_eq!(
+            AuthorityPublicKey::try_new(&[9; 32]),
+            Err(Reason::SettlerKeyMismatch)
+        );
+        assert_eq!(
+            AuthorityPublicKey::try_new(&[9; 63]),
+            Err(Reason::SettlerKeyMismatch)
+        );
+        assert_eq!(
+            AuthorityPublicKey::try_new(&[9; 65]),
+            Err(Reason::SettlerKeyMismatch)
+        );
+        assert!(AuthorityPublicKey::try_new(&[9; 64]).is_ok());
     }
 }

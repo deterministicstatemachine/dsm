@@ -1006,10 +1006,29 @@ pub fn verify_credit_source(
             // The transition under validation IS the trader's: the settler
             // named by the signed operation must be the authenticated
             // identity whose lineage this is.
-            if settler_devid != ctx.device_id || settler_public_key.as_slice() != ctx.proven_ak {
-                return Err(invalid(
-                    "the settle's settler is not the identity under validation".into(),
-                ));
+            // VDS.COMMON.12 through the ONE typed check. A wrong-width key is
+            // refused at construction: DevID bytes can never be an AK here.
+            {
+                use crate::dlv::successor_validity::{
+                    check_settler_correspondence, AuthorityPublicKey, DevId,
+                };
+                let embedded = AuthorityPublicKey::try_new(settler_public_key);
+                let proven = AuthorityPublicKey::try_new(ctx.proven_ak);
+                let ok = match (embedded, proven) {
+                    (Ok(e), Ok(p)) => check_settler_correspondence(
+                        &e,
+                        &DevId(*settler_devid),
+                        &p,
+                        &DevId(*ctx.device_id),
+                    )
+                    .is_ok(),
+                    _ => false,
+                };
+                if !ok {
+                    return Err(invalid(
+                        "the settle's settler is not the identity under validation".into(),
+                    ));
+                }
             }
             // ── 2. The evidence bundle, by exact content address ──────────
             let bundle_bytes = resolver
