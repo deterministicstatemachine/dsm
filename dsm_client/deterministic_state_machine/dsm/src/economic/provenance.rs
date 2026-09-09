@@ -1274,10 +1274,13 @@ pub fn verify_credit_source(
             let chosen = match resolver.parent_binding_observation(&k_v, &vn.storage_set, vn.quorum)
             {
                 crate::dlv::binding_observation::BindingObservation::BoundFinal(c) => c,
-                crate::dlv::binding_observation::BindingObservation::Conflict { distinct } => {
+                crate::dlv::binding_observation::BindingObservation::Conflict {
+                    chosen, ..
+                } => {
                     return Err(ProvenanceError::OwnerLineage(
                         PeerLineageFailure::Quarantined(format!(
-                            "the binding key for this parent holds {distinct} chosen values"
+                            "the binding key for this parent holds {} chosen values",
+                            chosen.len()
                         )),
                     ))
                 }

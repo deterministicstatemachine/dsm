@@ -53,6 +53,30 @@ fn display_name_for(policy_commit: &[u8; 32]) -> String {
 /// the same matrix from local rooting for every caller, and the economic
 /// verifier reruns it foreign-verifiably in `advance_validated`. Only this
 /// layer may touch the network, which is why the fetch lives here.
+/// 2c-C3.1 ruling D, effect 4. An execution that consumes a composed parent
+/// refuses on a quarantined lineage INDEPENDENTLY of the walk's own cursor
+/// check and of the observer's: each stands when the others are removed, and
+/// each has its own control.
+fn refuse_quarantined_lineage(
+    route: &str,
+    vault_id: &[u8; 32],
+    generation: u64,
+    c_n: &[u8; 32],
+) -> Result<(), String> {
+    use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
+    match quarantine::refusing_root(vault_id, generation, c_n) {
+        Ok(None) => Ok(()),
+        Ok(Some(root)) => Err(format!(
+            "{route}: STORAGE_SAFETY_VIOLATION {}: {}",
+            dsm::dlv::successor_validity::Reason::LineageQuarantined.as_str(),
+            quarantine::describe_refusal(&root, generation)
+        )),
+        Err(e) => Err(format!(
+            "{route}: the lineage quarantine table is unreadable ({e}); refusing"
+        )),
+    }
+}
+
 async fn require_rooted_market_leg(route: &str, pc: &[u8; 32]) -> Result<(), String> {
     if dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(pc).is_some() {
         return Ok(());
@@ -100,6 +124,7 @@ impl AppRouterImpl {
         match q.path.as_str() {
             "dlv.listOwnedAmmVaults" => self.dlv_list_owned_amm_vaults(q).await,
             "dlv.composeVault" => self.dlv_compose_vault(q).await,
+            "dlv.lineageQuarantine" => self.dlv_lineage_quarantine(q).await,
             other => err(format!("unknown dlv query path: {other}")),
         }
     }
@@ -350,6 +375,53 @@ impl AppRouterImpl {
                 composed.reserves_b,
                 crate::util::text_id::encode_base32_crockford(&composed.c_n),
             )),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// dlv.lineageQuarantine — the quarantine roots of one vault on this
+    /// device, with both evidence objects (2c-C3.1 ruling D, effect 2). Params:
+    /// the vault id, Base32 Crockford. One root per line:
+    /// `root_c_n:root_generation:storage_set_id:quorum:first_evidence:second_evidence`,
+    /// the evidence as Base32 Crockford of the client-local encoding. An empty
+    /// value means no root.
+    async fn dlv_lineage_quarantine(&self, q: crate::bridge::AppQuery) -> AppResult {
+        let params = match std::str::from_utf8(&q.params) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => return err(format!("dlv.lineageQuarantine: params not UTF-8: {e}")),
+        };
+        let Some(vault_id) = crate::util::text_id::decode_base32_crockford(&params)
+            .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())
+        else {
+            return err("dlv.lineageQuarantine: vault_id is not a 32-byte Base32 id".into());
+        };
+        let roots =
+            match crate::storage::client_db::dlv_lineage_quarantine::roots_for_vault(&vault_id) {
+                Ok(r) => r,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.lineageQuarantine: the quarantine table is unreadable: {e}"
+                    ))
+                }
+            };
+        let b32 = crate::util::text_id::encode_base32_crockford;
+        let lines: Vec<String> = roots
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    b32(&r.root_c_n),
+                    r.root_generation,
+                    b32(&r.storage_set_id),
+                    r.quorum,
+                    b32(&r.first_evidence),
+                    b32(&r.second_evidence),
+                )
+            })
+            .collect();
+        let resp = generated::AppStateResponse {
+            key: "dlv.lineageQuarantine".to_string(),
+            value: Some(lines.join("\n")),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
@@ -1725,6 +1797,12 @@ impl AppRouterImpl {
                 ))
             }
         };
+        // 2c-C3.1 ruling D, effect 4: independent of the walk.
+        if let Err(e) =
+            refuse_quarantined_lineage("dlv.reconcile", &vault_id, composed.sequence, &composed.c_n)
+        {
+            return err(e);
+        }
         let parent_state: dsm::ccb::VaultStateV2 =
             if composed.sequence == receipt.trade.parent_sequence {
                 composed.state.clone()
@@ -2520,6 +2598,14 @@ impl AppRouterImpl {
                 composed.sequence
             ));
         }
+        // 2c-C3.1 ruling D, effect 4: the close is the operation that advances
+        // the baseline, so it refuses on a quarantined lineage independently
+        // of the walk that just composed it.
+        if let Err(e) =
+            refuse_quarantined_lineage("dlv.close", &vault_id, composed.sequence, &composed.c_n)
+        {
+            return err(e);
+        }
         // ── OCCUPANCY, BEFORE ANYTHING ELSE ──────────────────────────────────
         // A bound parent cannot be closed, and finding that out HERE costs one
         // read instead of a full Paxos round-trip that ends in ConflictFinal.
@@ -3040,6 +3126,16 @@ impl AppRouterImpl {
                             ));
                         }
                     }
+                }
+
+                // 2c-C3.1 ruling D, effect 4: independent of the walk.
+                if let Err(e) = refuse_quarantined_lineage(
+                    "dlv.unlockRouted",
+                    &vault_id,
+                    composed.sequence,
+                    &composed.c_n,
+                ) {
+                    return err(e);
                 }
 
                 amm_fee_bps = vault_fee_bps;
@@ -5549,6 +5645,128 @@ mod funded_creation_tests {
                 crate::util::text_id::encode_base32_crockford(&frontier.c_n)
             ),
             "the observable is the composed state, byte for byte"
+        );
+    }
+
+    /// 2c-C3.1 ruling D, effect 4 — the route surfaces. A quarantine root on
+    /// this device's own vault refuses the close (the operation that could
+    /// carry a verifier past its own root), the walk refuses the same vault,
+    /// and the owner's query surface lists the root with both evidence
+    /// objects.
+    #[test]
+    #[serial]
+    fn a_quarantined_lineage_refuses_the_close_and_is_listed_by_the_query() {
+        use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
+        use prost::Message as _;
+        install_identity();
+        let r = router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(&r, 10_000, 5_000);
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            &r, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let frontier = crate::runtime::get_runtime()
+            .block_on(compose_own_vault(&vault_id))
+            .expect("composes before any root exists");
+        quarantine::quarantine_root(&quarantine::QuarantineRoot {
+            vault_id,
+            root_c_n: frontier.c_n,
+            root_generation: frontier.sequence,
+            storage_set_id: frontier.storage_set_id,
+            quorum: 2,
+            first_evidence: vec![0xA1],
+            second_evidence: vec![0xB2],
+            insertion_ordinal: 0,
+        })
+        .expect("root written");
+
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.invoke(AppInvoke {
+                method: "dlv.close".to_string(),
+                args: pack(
+                    generated::DlvCloseV1 {
+                        vault_id: vault_id.to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            })
+            .await
+        });
+        assert!(!res.success, "a quarantined lineage must not close");
+        let msg = res.error_message.unwrap_or_default();
+        assert!(msg.contains("LINEAGE_QUARANTINED"), "{msg}");
+
+        assert!(
+            crate::runtime::get_runtime()
+                .block_on(compose_own_vault(&vault_id))
+                .is_err(),
+            "the walk refuses the quarantined vault too"
+        );
+
+        let res = crate::runtime::get_runtime().block_on(async {
+            r.query(crate::bridge::AppQuery {
+                path: "dlv.lineageQuarantine".to_string(),
+                params: crate::util::text_id::encode_base32_crockford(&vault_id).into_bytes(),
+            })
+            .await
+        });
+        assert!(
+            res.success,
+            "the query lists roots: {:?}",
+            res.error_message
+        );
+        let env = generated::Envelope::decode(&res.data[1..]).expect("envelope");
+        let generated::envelope::Payload::AppStateResponse(resp) = env.payload.expect("payload")
+        else {
+            panic!("unexpected payload")
+        };
+        let value = resp.value.expect("value");
+        let b32 = crate::util::text_id::encode_base32_crockford;
+        assert!(
+            value.starts_with(&format!("{}:{}:", b32(&frontier.c_n), frontier.sequence)),
+            "the root is named: {value}"
+        );
+        assert!(
+            value.ends_with(&format!(":{}:{}", b32(&[0xA1]), b32(&[0xB2]))),
+            "both evidence objects are listed: {value}"
+        );
+    }
+
+    /// The admission check stands on its own: it names a quarantined parent
+    /// directly, with no walk in between, so removing the walk's cursor check
+    /// leaves this red and removing this leaves that red.
+    #[test]
+    #[serial]
+    fn the_admission_check_refuses_a_quarantined_parent_on_its_own() {
+        use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init");
+        let vault = [0x5A; 32];
+        let root_c_n = [0x5B; 32];
+        quarantine::quarantine_root(&quarantine::QuarantineRoot {
+            vault_id: vault,
+            root_c_n,
+            root_generation: 4,
+            storage_set_id: [0x55; 32],
+            quorum: 2,
+            first_evidence: vec![1],
+            second_evidence: vec![2],
+            insertion_ordinal: 0,
+        })
+        .expect("root written");
+        assert!(
+            refuse_quarantined_lineage("t", &vault, 3, &[0x11; 32]).is_ok(),
+            "below the root"
+        );
+        let e = refuse_quarantined_lineage("t", &vault, 4, &root_c_n).expect_err("the root");
+        assert!(e.contains("LINEAGE_QUARANTINED"), "{e}");
+        assert!(
+            refuse_quarantined_lineage("t", &vault, 9, &[0x12; 32]).is_err(),
+            "beyond the root, by generation"
+        );
+        assert!(
+            refuse_quarantined_lineage("t", &[0x5C; 32], 9, &root_c_n).is_ok(),
+            "another vault is untouched"
         );
     }
 

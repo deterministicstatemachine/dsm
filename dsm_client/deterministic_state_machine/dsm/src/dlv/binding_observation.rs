@@ -25,8 +25,10 @@
 //! - [`BindingObservation::Undetermined`] — at least `q` responses are
 //!   attributable, but the evidence establishes NEITHER a chosen value NOR a
 //!   quorum of explicit absences.
-//! - [`BindingObservation::Conflict`] — two chosen values on one key. Reported,
-//!   never resolved by iteration order.
+//! - [`BindingObservation::Conflict`] — two chosen values on one key, carrying
+//!   the read that showed them (2c-C3.1 ruling H). Reported, never resolved by
+//!   iteration order — and ARITHMETICALLY UNREACHABLE at the canonical quorum,
+//!   the only quorum this observer reads at (see [`CanonicalQuorum`]).
 //! - [`BindingObservation::Unavailable`] — fewer than `q` attributed answers.
 //!   The read establishes nothing.
 //!
@@ -46,6 +48,16 @@
 //! semantics `EmptyAtQuorum` documents, and the loser of that race is refused
 //! at bind time by the register itself. The observer does not have to serialize
 //! what the register already serializes.
+//!
+//! **Duplicate finality is seen ACROSS reads, not within one.** A member holds
+//! one record per key, so two chosen sets are disjoint, and two disjoint sets
+//! cannot both exceed `n/2`. The `Conflict` arm therefore cannot fire from any
+//! answers whatever once `q` is the canonical strict majority — which
+//! [`CanonicalQuorum`] makes the only `q` an observer can pass. The
+//! contradiction Req 6.3 names is a qualifying finality that contradicts one
+//! this verifier established EARLIER at the same key; amendment 2c-C3.1
+//! freezes that trigger, and it needs the read a finality came from, which is
+//! why every observation can now return its [`KeyRead`].
 
 use std::collections::BTreeMap;
 
@@ -78,6 +90,65 @@ pub struct ChosenBinding {
     pub holders: u32,
 }
 
+/// What every member of the committed set answered at ONE key, exactly as the
+/// observer counted it — the evidence object of 2c-C3.1 ruling H. Outer `None`:
+/// the member's answer was not attributed. Inner `None`: the member explicitly
+/// holds nothing at the key. Never collapsed, because a count of two says
+/// nothing about which two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRead {
+    pub per_member: Vec<Option<Option<BindingRecord>>>,
+}
+
+impl KeyRead {
+    /// The read as [`tally_key`] consumes it, so a preserved evidence object can
+    /// be re-tallied and checked against the finality it claims to establish.
+    pub fn as_attributed_records(&self) -> AttributedRecords {
+        self.per_member
+            .iter()
+            .map(|m| m.as_ref().map(|r| vec![r.clone()]))
+            .collect()
+    }
+}
+
+/// The only quorum an observer reads at: the canonical strict majority of the
+/// committed set, validated at construction (2c-C3.1 ruling F).
+///
+/// A bare `u32` let a caller pass `1` over three members and reach `Conflict`,
+/// which at the real quorum is impossible; since 2c-C3.1 a `Conflict` is a
+/// safety fact with a durable consequence, so the observer refuses to be
+/// handed a quorum it cannot stand behind. The member count is carried so the
+/// observer can also refuse a read whose fan-out does not match the set the
+/// quorum was validated against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalQuorum {
+    members: usize,
+    q: u32,
+}
+
+impl CanonicalQuorum {
+    /// The vault's committed `q` over its committed set, or the exact reason
+    /// it is not the canonical strict majority.
+    pub fn of_committed(
+        members: usize,
+        committed: u32,
+    ) -> Result<Self, crate::economic::cell_observation::NoncanonicalQuorum> {
+        crate::economic::cell_observation::require_canonical_quorum(members, committed)?;
+        Ok(Self {
+            members,
+            q: committed,
+        })
+    }
+
+    pub const fn get(&self) -> u32 {
+        self.q
+    }
+
+    pub const fn members(&self) -> usize {
+        self.members
+    }
+}
+
 /// What a set of attributed `ReadBinding` answers establishes about ONE key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingObservation {
@@ -85,12 +156,17 @@ pub enum BindingObservation {
     Free,
     /// Binding-final (Def 6.21). Occupancy, not realization.
     BoundFinal(ChosenBinding),
-    /// Two distinct chosen values on one key. Arithmetically impossible while
-    /// `q` is the canonical strict majority — a member holds exactly one record
-    /// per key, so two chosen sets are disjoint and cannot both exceed `n/2` —
-    /// which is why reaching this arm means a wrong `q` or a member that broke
-    /// its register, and it is quarantined rather than resolved.
-    Conflict { distinct: usize },
+    /// Two distinct chosen values on one key, with the read that showed them.
+    /// Arithmetically impossible while `q` is the canonical strict majority —
+    /// a member holds exactly one record per key, so two chosen sets are
+    /// disjoint and cannot both exceed `n/2` — and [`CanonicalQuorum`] is the
+    /// only `q` this observer accepts. Retained as a refusal, never resolved
+    /// by iteration order; it is NOT the duplicate-finality trigger, which is
+    /// temporal (2c-C3.1 ruling A).
+    Conflict {
+        chosen: Vec<ChosenBinding>,
+        read: KeyRead,
+    },
     /// Attributed, but neither a chosen value nor a quorum of absences.
     Undetermined {
         attributed: u32,
@@ -209,46 +285,102 @@ pub fn tally_key(per_member: &AttributedRecords, key_ix: usize, quorum: u32) -> 
     }
 }
 
-/// Classify one key of a read at `quorum`.
-pub fn observe_key(
+/// Classify one key of a read at the vault's canonical quorum, and return the
+/// read itself so the caller can preserve it (2c-C3.1 ruling H).
+pub fn observe_key_with_read(
     reads: &[Option<MemberRead>],
     key_ix: usize,
     key_count: usize,
-    quorum: u32,
-) -> BindingObservation {
+    quorum: CanonicalQuorum,
+) -> (BindingObservation, KeyRead) {
+    let q = quorum.get();
     let (per_member, attributed) = attributed_records(reads, key_count);
-    if attributed < quorum {
-        return BindingObservation::Unavailable {
-            attributed,
-            required: quorum,
-        };
+    let read = KeyRead {
+        per_member: per_member
+            .iter()
+            .map(|m| m.as_ref().map(|recs| recs.get(key_ix).cloned().flatten()))
+            .collect(),
+    };
+    // A fan-out that does not match the set the quorum was validated against
+    // is not a read of that set. The arithmetic that makes `Conflict`
+    // unreachable assumes one answer per member, so establish nothing.
+    if reads.len() != quorum.members() {
+        return (
+            BindingObservation::Unavailable {
+                attributed: 0,
+                required: q,
+            },
+            read,
+        );
     }
-    let mut t = tally_key(&per_member, key_ix, quorum);
+    if attributed < q {
+        return (
+            BindingObservation::Unavailable {
+                attributed,
+                required: q,
+            },
+            read,
+        );
+    }
+    let mut t = tally_key(&per_member, key_ix, q);
     match t.chosen.len() {
         0 => {}
         1 => {
             // `pop` cannot fail on a one-element vector, and expressing it this
             // way keeps the arm total without a panicking index.
             if let Some(c) = t.chosen.pop() {
-                return BindingObservation::BoundFinal(c);
+                return (BindingObservation::BoundFinal(c), read);
             }
         }
-        distinct => return BindingObservation::Conflict { distinct },
+        _ => {
+            let evidence = read.clone();
+            return (
+                BindingObservation::Conflict {
+                    chosen: t.chosen,
+                    read: evidence,
+                },
+                read,
+            );
+        }
     }
     // Nothing is chosen. A quorum of EXPLICIT absences settles it: any chosen
     // value would be held by `q` members, and every `q`-subset intersects them.
-    if t.absent >= quorum {
-        return BindingObservation::Free;
+    if t.absent >= q {
+        return (BindingObservation::Free, read);
     }
-    BindingObservation::Undetermined {
-        attributed,
-        highest_round: t.highest_accept.map(|r| r.round),
-    }
+    (
+        BindingObservation::Undetermined {
+            attributed,
+            highest_round: t.highest_accept.map(|r| r.round),
+        },
+        read,
+    )
+}
+
+/// Classify one key of a read at the vault's canonical quorum.
+pub fn observe_key(
+    reads: &[Option<MemberRead>],
+    key_ix: usize,
+    key_count: usize,
+    quorum: CanonicalQuorum,
+) -> BindingObservation {
+    observe_key_with_read(reads, key_ix, key_count, quorum).0
 }
 
 /// Classify the only key of a single-key read — the frontier walk's shape.
-pub fn observe_single_key(reads: &[Option<MemberRead>], quorum: u32) -> BindingObservation {
+pub fn observe_single_key(
+    reads: &[Option<MemberRead>],
+    quorum: CanonicalQuorum,
+) -> BindingObservation {
     observe_key(reads, 0, 1, quorum)
+}
+
+/// [`observe_single_key`], returning the read as well.
+pub fn observe_single_key_with_read(
+    reads: &[Option<MemberRead>],
+    quorum: CanonicalQuorum,
+) -> (BindingObservation, KeyRead) {
+    observe_key_with_read(reads, 0, 1, quorum)
 }
 
 #[cfg(test)]
@@ -257,7 +389,11 @@ mod tests {
     use super::*;
     use crate::dlv::quorum_bind::BINDING_STATUS_PROMISED;
 
-    const Q: u32 = 2; // the strict majority of the three-member beta profile
+    /// The strict majority of the three-member beta profile, as the observer
+    /// demands it: validated, never a bare number.
+    fn q3() -> CanonicalQuorum {
+        CanonicalQuorum::of_committed(3, 2).expect("2 of 3 is canonical")
+    }
 
     fn round(counter: u64, proposer: u8) -> Round {
         Round {
@@ -306,7 +442,7 @@ mod tests {
             absent(),
             absent(),
         ];
-        assert_eq!(observe_single_key(&reads, Q), BindingObservation::Free);
+        assert_eq!(observe_single_key(&reads, q3()), BindingObservation::Free);
     }
 
     /// Swap one absence for an unreachable member and the absence quorum is
@@ -320,7 +456,7 @@ mod tests {
             down(),
         ];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::Undetermined {
                 attributed: 2,
                 highest_round: Some(round(3, 1)),
@@ -339,7 +475,7 @@ mod tests {
             absent(),
         ];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::BoundFinal(ChosenBinding {
                 tx_id: [0xAA; 32],
                 value_digest: [0xAA; 32],
@@ -353,7 +489,7 @@ mod tests {
     #[test]
     fn a_quorum_of_absences_is_free() {
         let reads = [absent(), absent(), absent()];
-        assert_eq!(observe_single_key(&reads, Q), BindingObservation::Free);
+        assert_eq!(observe_single_key(&reads, q3()), BindingObservation::Free);
     }
 
     /// A PROMISE is not a claim. The whole reason this module cannot reuse the
@@ -368,7 +504,7 @@ mod tests {
             absent(),
         ];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::Undetermined {
                 attributed: 3,
                 highest_round: None, // no ACCEPTED record exists at all
@@ -385,7 +521,7 @@ mod tests {
             down(),
         ];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::Undetermined {
                 attributed: 2,
                 highest_round: Some(round(5, 2)),
@@ -397,10 +533,10 @@ mod tests {
     fn fewer_than_quorum_attributed_answers_establish_nothing() {
         let reads = [absent(), down(), down()];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::Unavailable {
                 attributed: 1,
-                required: Q,
+                required: 2,
             }
         );
     }
@@ -416,27 +552,32 @@ mod tests {
             down(),
         ];
         assert_eq!(
-            observe_single_key(&reads, Q),
+            observe_single_key(&reads, q3()),
             BindingObservation::Unavailable {
                 attributed: 1,
-                required: Q,
+                required: 2,
             }
         );
     }
 
-    /// Two chosen values on one key. Unreachable at a canonical `q` (the two
-    /// holder sets are disjoint and cannot both exceed n/2), so it is forced
-    /// here with a degenerate `q` to prove the arm reports rather than picks.
+    /// Two chosen values on one key are unreachable at a canonical `q`: the
+    /// two holder sets are disjoint and cannot both exceed `n/2`. The old form
+    /// of this test forced the arm with a degenerate `q = 1`; that `q` can no
+    /// longer be handed to the observer at all. What CAN be shown is the
+    /// identity tally reporting both values rather than picking one, which is
+    /// the property the arm exists to preserve.
     #[test]
-    fn two_chosen_values_conflict_and_are_never_resolved_by_order() {
+    fn two_values_at_one_key_are_both_reported_by_the_tally_never_ordered() {
         let reads = [
             holds(rec(BINDING_STATUS_ACCEPTED, round(3, 1), 0xAA)),
             holds(rec(BINDING_STATUS_ACCEPTED, round(5, 2), 0xBB)),
         ];
-        assert_eq!(
-            observe_single_key(&reads, 1),
-            BindingObservation::Conflict { distinct: 2 }
-        );
+        let (per_member, _) = attributed_records(&reads, 1);
+        let t = tally_key(&per_member, 0, 1);
+        assert_eq!(t.chosen.len(), 2, "both values are reported");
+        let mut ids: Vec<[u8; 32]> = t.chosen.iter().map(|c| c.tx_id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![[0xAA; 32], [0xBB; 32]]);
     }
 
     /// Records sharing a round but naming different values are a divergence,
@@ -449,10 +590,96 @@ mod tests {
             holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
             holds(rec(BINDING_STATUS_ACCEPTED, r, 0xBB)),
         ];
+        let (per_member, _) = attributed_records(&reads, 1);
+        assert_eq!(tally_key(&per_member, 0, 1).chosen.len(), 2);
+    }
+
+    // ── 2c-C3.1 ────────────────────────────────────────────────────────────
+
+    /// THE ARITHMETIC CONTROL. The strongest adversarial single reads a
+    /// 3-member fleet can produce at the canonical `q = 2` never classify as
+    /// `Conflict`: two members agreeing is bound-final on that value whatever
+    /// the third holds, and three different values is undetermined.
+    #[test]
+    fn the_strongest_adversarial_single_read_is_never_a_conflict() {
+        let r = round(3, 1);
+        let two_agree = [
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xBB)),
+        ];
+        match observe_single_key(&two_agree, q3()) {
+            BindingObservation::BoundFinal(c) => assert_eq!(c.tx_id, [0xAA; 32]),
+            other => panic!("two of three agreeing is bound-final, got {other:?}"),
+        }
+        let all_differ = [
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            holds(rec(BINDING_STATUS_ACCEPTED, round(4, 2), 0xBB)),
+            holds(rec(BINDING_STATUS_ACCEPTED, round(5, 3), 0xCC)),
+        ];
+        assert!(matches!(
+            observe_single_key(&all_differ, q3()),
+            BindingObservation::Undetermined { .. }
+        ));
+    }
+
+    /// A quorum that is not the canonical strict majority cannot be handed to
+    /// the observer, so the degenerate `q` that used to reach `Conflict` is
+    /// unrepresentable rather than merely unused.
+    #[test]
+    fn a_non_canonical_quorum_cannot_be_constructed() {
+        assert!(CanonicalQuorum::of_committed(3, 1).is_err());
+        assert!(CanonicalQuorum::of_committed(3, 3).is_err());
+        assert!(CanonicalQuorum::of_committed(4, 2).is_err());
+        assert_eq!(CanonicalQuorum::of_committed(4, 3).map(|q| q.get()), Ok(3));
         assert_eq!(
-            observe_single_key(&reads, 1),
-            BindingObservation::Conflict { distinct: 2 }
+            CanonicalQuorum::of_committed(3, 2).map(|q| q.members()),
+            Ok(3)
         );
+    }
+
+    /// A fan-out that does not match the set the quorum was validated against
+    /// establishes nothing: the one-answer-per-member premise is not met.
+    #[test]
+    fn a_fan_out_that_does_not_match_the_validated_set_establishes_nothing() {
+        let r = round(3, 1);
+        let four = [
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xBB)),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xBB)),
+        ];
+        assert_eq!(
+            observe_single_key(&four, q3()),
+            BindingObservation::Unavailable {
+                attributed: 0,
+                required: 2
+            }
+        );
+    }
+
+    /// The read a finality came from is returned losslessly: re-tallying it
+    /// reproduces the chosen value, member for member. This is what lets a
+    /// preserved evidence object be checked rather than trusted.
+    #[test]
+    fn the_read_behind_a_bound_final_is_returned_losslessly() {
+        let r = round(3, 1);
+        let reads = [
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+            absent(),
+            holds(rec(BINDING_STATUS_ACCEPTED, r, 0xAA)),
+        ];
+        let (obs, read) = observe_single_key_with_read(&reads, q3());
+        let BindingObservation::BoundFinal(chosen) = obs else {
+            panic!("bound-final, got {obs:?}")
+        };
+        assert_eq!(read.per_member.len(), 3);
+        assert!(
+            read.per_member[1].as_ref().is_some_and(|m| m.is_none()),
+            "the absence is preserved as an absence"
+        );
+        let again = tally_key(&read.as_attributed_records(), 0, 2);
+        assert_eq!(again.chosen, vec![chosen]);
     }
 
     /// The multi-key shape: each key is classified independently, and a bundle
@@ -469,10 +696,10 @@ mod tests {
             two(None, None),
         ];
         assert!(matches!(
-            observe_key(&reads, 0, 2, Q),
+            observe_key(&reads, 0, 2, q3()),
             BindingObservation::BoundFinal(_)
         ));
-        assert_eq!(observe_key(&reads, 1, 2, Q), BindingObservation::Free);
+        assert_eq!(observe_key(&reads, 1, 2, q3()), BindingObservation::Free);
     }
 
     /// `max_ballot` is the ballot of ANY record, promise included — a proposer
@@ -488,7 +715,7 @@ mod tests {
             1,
         )
         .0;
-        let t = tally_key(&per_member, 0, Q);
+        let t = tally_key(&per_member, 0, q3().get());
         assert_eq!(t.max_ballot, 4); // 9/2 — the promise, not the accept
         assert_eq!(t.absent, 1);
         assert_eq!(t.holders_at_highest, 1);

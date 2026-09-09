@@ -810,7 +810,24 @@ fn an_unreadable_or_undecided_binding_is_retryable_and_a_divergent_one_is_quaran
     // A divergence — two chosen values on one key — is a QUARANTINE.
     let r = Observing {
         inner: &base,
-        observation: BindingObservation::Conflict { distinct: 2 },
+        // Carries the evidence a real Conflict would (2c-C3.1 ruling H); the
+        // arm itself is unreachable at a canonical quorum, so it is built.
+        observation: BindingObservation::Conflict {
+            chosen: [0xAAu8, 0xBB]
+                .into_iter()
+                .map(|v| dsm::dlv::binding_observation::ChosenBinding {
+                    tx_id: [v; 32],
+                    value_digest: [v; 32],
+                    value_addr: [v ^ 0xFF; 32],
+                    round: dsm::storage::binding_record::Round {
+                        counter: 1,
+                        proposer_id: [v; 32],
+                    },
+                    holders: 2,
+                })
+                .collect(),
+            read: dsm::dlv::binding_observation::KeyRead { per_member: vec![] },
+        },
     };
     match verify_transition_provenance(&fx.witness, &r, &ctx_for(&fx)) {
         Err(ProvenanceError::OwnerLineage(

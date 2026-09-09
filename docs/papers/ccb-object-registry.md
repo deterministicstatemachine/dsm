@@ -1852,7 +1852,8 @@ In order, and not combined:
      of any kind**, and the denial-of-service boundary. Adds one reason code, `LINEAGE_QUARANTINED`,
      in the existing class. **Records that the single-read `Conflict` arm is arithmetically
      unreachable at the canonical quorum**, so the trigger is temporal and needs a durable record
-     of every qualifying finality. Effects 2–4 remain **NOT IMPLEMENTED**; the mechanism follows.
+     of every qualifying finality. Effects 2–4 are **IMPLEMENTED** by the adopting change, with
+     the five-effect integration control and six mutation controls.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material

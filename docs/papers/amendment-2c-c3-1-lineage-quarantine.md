@@ -445,8 +445,9 @@ theorem is `#print axioms`-reported.
 Trigger, scope, persistence, effects, clearing, DoS boundary     FROZEN
 LINEAGE_QUARANTINED                                              FROZEN (Lean first)
 Lean model of the trigger, monotonicity, derivation, refusal     PROVED AS CLAIMED
-Production mechanism                                             NOT IMPLEMENTED
-Req 6.3 effects 2, 3, 4                                          NOT IMPLEMENTED
+Production mechanism                                             IMPLEMENTED (client-local)
+Req 6.3 effects 2, 3, 4                                          IMPLEMENTED, controls E1–E5 green,
+                                                                 six mutation controls red
 Recovery / clearing                                              DECLARED ABSENT, NOT DESIGNED
 ```
 
@@ -455,6 +456,19 @@ the contradiction is not bound by another's quarantine; the substrate fault is c
 verifier, not per network. C4 consumes this state and must not present its walk as closing that gap.
 
 **Residual — the write can fail.** The refusal stands; the memory may not. Named under Ruling C.
+
+**Implementation record.** The adopting change landed the mechanism as frozen: two write-once
+client-database tables (`dlv_binding_finality_observed`, `dlv_lineage_quarantine`) with no update
+and no delete statement; the observer validates the canonical quorum itself (`CanonicalQuorum`) and
+returns the read behind every verdict; a finality is recorded the moment it is established, by
+observation and by this device's own commit, and compared on value; the cursor check runs in the
+observer ahead of its read, and each execution route (`dlv.unlockRouted`, `dlv.close`,
+`dlv.reconcile`) checks again on its own; `dlv.lineageQuarantine` lists the roots with both evidence
+objects. The `Conflict` arm now carries the read; the probe reports `LINEAGE_QUARANTINED` and names
+no value. One deviation from the verification obligations is recorded rather than hidden: E3's
+"after a restart of the client database connection" is not exercised in-process, because the test
+database is shared in-memory and cannot be closed without being lost; restart-survival is the
+durability of the on-disk table.
 
 ---
 
