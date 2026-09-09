@@ -1776,8 +1776,9 @@ In order, and not combined:
    An accidental transport field must not become canonical merely because it exists in
    protobuf.
 
-   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A, 2c-B, 2c-C1–C3 and
-   2c-C3.1 are written; 2c-A.1 authorizes the encoder, and its adopting change landed 2026-09-09.**
+   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A, 2c-B, 2c-C1–C4 and
+   2c-C3.1 are written; 2c-A.1 authorizes the encoder, and its adopting change landed 2026-09-09.
+   Only 2c-D remains unwritten.**
    `DlvProofMaterial` `0x0010`, finishing `ConsumedDlvTransition` `0x000F`, `SettlementBundle`
    `0x000E`, the new `MarketTerms` `0x0033`, and `TraderAcceptance` `0x0011`. Needs the route and
    bundle identity from 2b.
@@ -1881,6 +1882,25 @@ In order, and not combined:
      for both shapes with class-1 vectors, owner-close cutover on `c_{n+1}`, market emission
      fail-closed at every gate's end, `VDS.COMMON.10.a` wired, the protobuf bundle deleted. The
      identity-scoped reprovision (ruling 4) is owed at deployment.
+   - **2c-C4 — WRITTEN.** [`amendment-2c-c4-accepted-successor-closure.md`](amendment-2c-c4-accepted-successor-closure.md).
+     Closes the verification walk C3 left open: the trusted start (the canonical empty activation
+     root or this verifier's own completed validated conclusion — never a network value, and never
+     the register winner, since registration is not validation), the numbered economic chain
+     `WALK.0..7` at `(G, DevID, p)` ending at a validated economic root, with `R_T^+` **derived** at
+     `WALK.6` and required to equal the claim registered at `WALK.1` — which is where Req 21.17's
+     forged-root vector dies. Freezes the accepted-successor/economic-root correspondence
+     `CORR.1..5`, and the beta refusal of the offline arm with the portable quorum certificate
+     Req 6.25 names as its exit condition. Keeps the two coordinate systems apart: everything
+     cursor-keyed `(V, c_n, g)` — including 2c-C3.1's quarantine consult, consumed unchanged —
+     stays in the composition section. **`IndependentRealization` is DEFINED and NOT CONSTRUCTIBLE**: its constructor takes
+     an abstract bundle-acceptance witness that only 2c-D can instantiate, so a market fold stays
+     `PartialPendingRealization` and must not be promoted from correspondence alone — and market
+     fence release is unreachable until 2c-D, by construction. The market verdict is constructed at
+     the ordered third-party composition walk in a core constructor, never pre-filled by the
+     trader's own admission path. Restates the two Rev 15 corrections it depends on: `C_T^+` does
+     not commit `R_T^+` (2c-B's linked pair) and `L_B` need not bind all four coordinates (§9.1's
+     two-conjunct rule). Lands the **fourteenth** Lean module with the 2c-D leaf as an abstract
+     Prop parameter; CI module pin 13 → 14. **C4 allocates no class number and changes no encoding.**
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
