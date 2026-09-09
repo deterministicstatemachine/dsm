@@ -1564,7 +1564,7 @@ writing an encoder.**
 family nothing irreducible remains, so §5.22 defines it with **zero fields** rather than inventing
 a witness record. `0x000F` `ConsumedDlvTransition` left it too, fully defined at §5.21.
 
-One class has a partial table in §5, two are frozen only to A-stage, and one more is blocked:
+One class has a partial table in §5, two are fully specified since 2c-B, and one more is blocked:
 
 - `0x0006` `FulfillmentMechanism` is fixed as a preimage —
   `M = H(DSM/fulfillment ‖ c_0 ‖ CCB(B_M))` — so its field order is known and only `0x0008`
@@ -1776,7 +1776,8 @@ In order, and not combined:
    An accidental transport field must not become canonical merely because it exists in
    protobuf.
 
-   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A is written.**
+   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A, 2c-B, 2c-C1–C3 and
+   2c-C3.1 are written; 2c-A.1 authorizes the encoder.**
    `DlvProofMaterial` `0x0010`, finishing `ConsumedDlvTransition` `0x000F`, `SettlementBundle`
    `0x000E`, the new `MarketTerms` `0x0033`, and `TraderAcceptance` `0x0011`. Needs the route and
    bundle identity from 2b.
@@ -1792,7 +1793,7 @@ In order, and not combined:
      `0x0033` **A-stage frozen** (§5.19, §5.20); `b`'s derivation fixed; `0x000B` given its
      satisfaction predicate. **The owner-close shape is encodable once the exact prepared
      `close_authorization` bytes are supplied (2c-B freezes that grammar); a conforming market
-     `b` is not, until 2c-B.**
+     `b` is not, until 2c-B.** *(2c-B has since closed it; the encoder is authorized by 2c-A.1.)*
    - **2c-B — WRITTEN.** [`amendment-2c-b-accepted-successor-and-recovery.md`](amendment-2c-b-accepted-successor-and-recovery.md).
      Substrate `0x0031` (§5.23) closes `MarketTerms` field 6, and the two foreign byte grammars
      `CloseAuthorizationPreimageV1` and `DlvSettleOperationPreimageV1` are frozen as byte grammars
@@ -1858,6 +1859,17 @@ In order, and not combined:
      unreachable at the canonical quorum**, so the trigger is temporal and needs a durable record
      of every qualifying finality. Effects 2–4 are **IMPLEMENTED** by the adopting change, with
      the five-effect integration control and six mutation controls.
+   - **2c-A.1 — WRITTEN.** [`amendment-2c-a-1-encoder-cut-rulings.md`](amendment-2c-a-1-encoder-cut-rulings.md).
+     Reconciles 2c-A's status text with 2c-B's closure and rules the encoder cut: **both shapes in
+     one atomic change** with class-1 vectors for each (the market vector is the A+B closure test);
+     the owner close's permitted continuation is `c_{n+1}` of the exact field-2 successor and
+     `close_slot_commitment` is deleted; an identity-scoped full reprovision; strict decoders
+     (field 4 exactly 49,856 bytes, `proof_material` refused present, whole-bundle round trip);
+     the transition located by `parent_binding == c_n`; the route-family schema-1 burns recorded;
+     namespace enforcement closed; `PartialPendingEncoderCut` replaced by a
+     `CorrespondenceWitness` and `PartialPendingRealization`; the protobuf bundle deleted.
+     **The encoder surface is NOT IMPLEMENTED by this document**; it authorizes the change that
+     implements it, which is what unblocks `VDS.COMMON.10.a`.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
