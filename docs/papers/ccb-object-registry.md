@@ -274,6 +274,91 @@ but a serialized protobuf message is never a valid CCB blob and must never be ha
 as if it were. Protobuf field numbers and CCB field numbers are independent namespaces and
 need not agree.
 
+#### The one named exception — `BindingRecordWireV1`
+
+Amendment 2c-C2 ruling F freezes exactly one structure outside CCB, and names it so that it can
+never be cited as a general precedent.
+
+```text
+BindingRecordWireV1 is a frozen storage-layer canonical BYTE GRAMMAR.
+It is NOT a CCB object: no CCB class, no schema envelope, no field table here.
+
+Class N hashes the exact BindingRecordWireV1 bytes it stores.
+Class N MUST NOT decode CCB or application objects to compute these identities.
+
+record_digest_of_bytes, record_set_keys and record_set_digest are defined over
+the exact frozen BindingRecordWireV1 bytes.
+```
+
+The exception exists because the storage node's design *is* "hash what I physically store without
+interpreting it". Cutting protobuf here the way the economic identities were cut would push CCB
+parsing **into Class N**, across the boundary that keeps a storage node from interpreting
+application objects. The economic cases were different in kind: they leaked a transport
+serialization into *application-semantic* identity.
+
+The shipping `to_proto().encode_to_vec()` output is byte-identical to the grammar and is its
+**present implementation** — evidence, never the definition. Leaving `prost::encode_to_vec()` as the
+normative authority would make a library the protocol, which is the failure this section exists to
+prevent. Future changes to those bytes require an explicit storage-wire version or amendment; **a
+protobuf library refactor MUST NOT silently change them.**
+
+This is a narrowly named storage-substrate exception. **It is not permission for arbitrary
+protobuf-derived identities**, and no other object may cite it.
+
+### 2.11 Authenticated retrieval — the retrieval obligation
+
+Fetching an addressed object is not the same as obtaining it. The retrieval obligation is stated at
+framework level because it governs every addressed object in this registry, not only the economic
+ones.
+
+> **Every fetch of an addressed object is followed by recomputing that object's canonical identity
+> over the bytes actually returned, and comparing it to the address that was asked for, BEFORE any
+> field of the object is read.** A mismatch is a refusal, never a repair.
+
+A successful decode is **not** a substitute. Decoding proves the bytes are well-formed; it says
+nothing about whether they are the bytes that address names. Canonicality and authenticity are
+different properties, and only the second is at issue here. Strict decode-plus-re-encode equality
+makes an address *exact given a byte string* — it cannot tell you the byte string is the right one.
+
+The obligation is the **consumer's**, deliberately, and never the fetcher's: a fetcher is an
+untrusted I/O boundary, and "the fetcher must return honest bytes" is not a rule a verifier can
+check.
+
+The recomputed value is the **inner** identity `H_dom(N, P)` per 2c-C1 ruling A. The outer
+storage-object address is what was used to reach the storage layer; it is never what the comparison
+is against, because it is not the object's identity.
+
+**Rev 15 §15.3 is reconciled to this, not the reverse.** Rev 15 writes
+
+```text
+addr(P) = H(DSM/storage-object ‖ N ‖ H(N ‖ P))
+```
+
+which names no hash function, has no `0x00` separator, and imposes no length discipline on the
+variable-length namespace `N`. **Taken literally it is not injective in `N`**: `N = "ab"` with
+`P = "c"` and `N = "a"` with `P = "bc"` are the same byte string, so two distinct namespaces can
+collide by concatenation alone. The frozen construction is §2.9's:
+
+```text
+inner  =  H_dom(N, P)  =  BLAKE3(N ‖ 0x00 ‖ P)
+```
+
+The `0x00` separator restores injectivity in `(N, P)` — **but only because §2.9 additionally
+requires `N` to contain no NUL of its own.** The separator alone would not be enough: without that
+condition, `N = "a\x00b", P = "c"` and `N = "a", P = "b\x00c"` produce the same preimage, and the
+concatenation ambiguity returns one byte deeper. Injectivity here is a property of the pair
+(NUL-free tag, separator), never of the separator by itself.
+
+The shipped construction is the more specific and is the one frozen here; **the specification text
+is corrected to match it**, rather than the code changed to match a form that is ambiguous as
+written.
+
+Because a rule discharged by open-coding at eleven sites is a rule that will be missed at the
+twelfth, the obligation must be discharged by **a single named construct** through which a consumer
+cannot obtain a usable object without the comparison having happened — the idiom
+`ValidatedEconomicRoot` already uses, with a private field and no public conversion from its
+unvalidated counterpart.
+
 ## 3. Object-class registry
 
 The single namespace. Every canonical object in Revision 15 that feeds a hash, a signature, a
@@ -405,11 +490,27 @@ public keys and signatures.
 
 | Value | Member | Public key | Signature |
 |---|---|---|---|
-| `0x0001` | `SPHINCS_PLUS_SPX256F` | 64 bytes (`2n`, `n = 32`) | 49,856 bytes |
+| `0x0001` | `DSM_BLAKE3_SPHINCS_PLUS_SPX256F` | 64 bytes (`2n`, `n = 32`) | 49,856 bytes |
 
-Beta declares no other member. The value is committed wherever a public key is, so a future
-variant can never be substituted for the committed one: the algorithm and the key bytes stand or
-fall together.
+`0x0001` identifies the exact construction a foreign verifier must implement — its unambiguous
+normative designation is **DSM BLAKE3-SPHINCS+-SPX256F**: the SPX256f structure and parameters, with
+**DSM's BLAKE3-based hash / PRF / thash construction** in place of SHA2/SHAKE.
+
+**It is not FIPS-205 SLH-DSA-256f.** The public-key and signature widths above coincide *exactly*
+with SLH-DSA-256f's, and that coincidence does not make the algorithms interchangeable. An
+implementer who reads only the widths, links a standards-conformant SLH-DSA library and verifies a
+DSM signature gets a **silent, undiagnosable failure**: every signature is rejected, and no length
+mismatch points at why. The member is named for the construction rather than the parameter set so
+that this substitution cannot be made by reasonable reading.
+
+Beta declares no other member. The value is committed wherever a public key is, so a future variant
+can never be substituted for the committed one.
+
+Widths do **not** identify an algorithm. The committed `signature_alg` value is what binds a key to
+its verification procedure; two constructions sharing a parameter set share their sizes and nothing
+else. (This replaces an earlier sentence here — *"the algorithm and the key bytes stand or fall
+together"* — which was false as written, and false in precisely the direction that made the
+substitution above look safe.)
 
 **`authority_role`** — the scope a root-authority delegation confers.
 
@@ -421,6 +522,49 @@ Beta declares no other member. A role is deliberately narrow: the GRK exists to 
 capability, and a role that meant "may act for the owner" would make the delegation a universal
 authority, which the area 8 semantics forbid.
 
+### 3.2 Network parameters
+
+**Normative network parameters.** A verifier resolves these from the authenticated genesis, never
+from a candidate object or a catalog:
+
+```text
+authenticated genesis  ->  network_id  ->  this table  ->  exact profile
+```
+
+**`dsm-testnet` root-register profile.** `network_id = "dsm-testnet"` (ASCII, 11 bytes).
+
+| # | `member_id` | `register_incarnation_id` |
+|---|---|---|
+| 1 | `dsm-node-1` | `DXWR7W9J2E5ASQ5BJBYF13ZZEK1VFTZFYNWAYPF1KNT8C33YPVM0` |
+| 2 | `dsm-node-2` | `H4ZSDG34M1BSQQH8T9WWWZ65Y90YW9QY2CYRR2EG3H621VDGJ3W0` |
+| 3 | `dsm-node-3` | `VW3REAWA7PR608Y4AY3VX18M8BE4828PFPNVTG380XV18HKF8SSG` |
+
+```text
+n  = 3
+q  = 2
+storage_set_id = E05YS8101EJH33KY2CG625JJE8A0Z4GJNSEM335TX1XVTWM9RR8G
+```
+
+`member_id` is the ASCII name itself, not a digest. `storage_set_id` is
+`H_dom(DSM/storage-set, CCB(StorageSet))` over the §5.2 `0x0002` **schema 3** object built from
+exactly those three `(member_id, register_incarnation_id)` pairs, in that order. The value is
+reproduced here so a foreign verifier can check its own derivation without holding this
+repository's build.
+
+**Membership and set id come from one source**, so the two cannot drift apart. This is why `0x0002`
+went to schema 3: a set of bare member ids says only *which nodes* a vault trusts, and a member
+that rebuilt its register still satisfied it. Pairing each member with its incarnation removes
+exactly that ambiguity — **a rebuilt member is a different entry**, so a claim written under the old
+incarnation no longer names the set the network resolves to.
+
+**A catalog resolves; it never chooses.** A catalog may say *where* a member is reached and *which*
+incarnation it claims. The pinned `storage_set_id` decides whether that is the register the network
+actually commits to. Every resolution failure is fail-closed: there is no default register and no
+fallback set, because a default register is one an attacker can steer traffic into.
+
+**A network whose identifier has no entry in this table is unknown, not permissive** — verification
+refuses.
+
 ## 4. Status of this registry
 
 **This registry does not complete every field table, and says so rather than inventing the
@@ -431,6 +575,14 @@ those classes are substrate, excluded from the Rev 15 closure count exactly as `
 `0x0031` are, and the six `0x002A`–`0x002F` entries are reserved rather than classes. Absorbing them
 closed a namespace gap; it did not add Rev 15 objects, so a reader should not expect the totals here
 to change.
+
+**Nor for 2c-C3**, which decides successor *validity* and adds no class, no encoding and no field
+table.
+
+**They did not move for 2c-C2 either.** That amendment added the retrieval obligation (§2.11), the
+normative network parameters (§3.2) and the one named non-CCB grammar (§2.10), and corrected §3.1's
+`signature_alg` member — framework and namespace content, not object classes. No field table was
+added, changed or burned.
 
 Of the **twenty-two live** object classes above — `0x0014` is burned and not counted, and
 `0x0033` `MarketTerms` was added by amendment 2c-A:
@@ -550,6 +702,11 @@ An empty set, an empty `member_id`, a duplicate `member_id` and an all-zero
 Sorting on the whole entry would let one member appear twice under two incarnations and still
 produce a strictly ascending list — exactly the ambiguity schema 3 exists to remove. A duplicate
 `member_id` is therefore refused *regardless of incarnation*.
+
+**The pinned instantiation lives in §3.2.** That table carries the exact
+`(member_id, register_incarnation_id)` pairs, `n`, `q` and the derived `storage_set_id` for each
+network, so the element encoding frozen here and the values it is instantiated with can be read
+against one another. A network absent from §3.2 is unknown, not permissive.
 
 An all-zero incarnation is refused because that is the value a member holds before it has
 established one; committing it would bind a vault to "whatever this node had not yet decided".
@@ -1646,8 +1803,8 @@ In order, and not combined:
      Economic substrate closure: the namespace record, plus the transitive verification closure,
      including `ValidDlvSuccessor(V_n, V_{n+1}, operation)`. A source audit found ~26 open decisions
      across four dimensions separable in fact, so it ships as **C1** framework + namespace, **C2**
-     verification substrate (addressing, SMT, quorum, P0–P6), **C3** `ValidDlvSuccessor`, **C4** the
-     `TA_B` closure walk. (The decomposition also gave "§2 framework extensions required" as a third
+     verification substrate (addressing, SMT, quorum, the authority-resolver contract), **C3**
+     `ValidDlvSuccessor`, **C4** the `TA_B` closure walk. (The decomposition also gave "§2 framework extensions required" as a third
      ground; C1 retracts that — §5.2's precedent lets a field table declare an encoding §2 does not
      supply, and no §2 change was needed.)
    - **2c-C1 — WRITTEN.** [`amendment-2c-c1-framework-and-namespace.md`](amendment-2c-c1-framework-and-namespace.md).
@@ -1656,6 +1813,35 @@ In order, and not combined:
      structurally frozen and beta-refused pending `0x002D`, `0x0029` field 6 admitting no zero, and
      every reserved value appearing in this registry. **Encoding closure for fifteen of the sixteen**
      — `0x0028` is the exception. Verification closure remains C2/C3/C4's.
+   - **2c-C2 — WRITTEN.** [`amendment-2c-c2-verification-substrate.md`](amendment-2c-c2-verification-substrate.md).
+     Freezes the verification substrate: the economic SMT parameters and bit ordering, the five-step
+     leaf chain, the four leaf-key derivations, `K_root`, the four-valued cell observation, and the
+     canonical quorum rule. Seven rulings — the authority-resolver contract (never "P0–P6"),
+     normative network parameters (§3.2), traversal limits as local policy rather than validity,
+     two conformance-vector classes, the signature primitive (§3.1) with a retry rule in place of a
+     determinism requirement, `BindingRecordWireV1` as the one named non-CCB grammar (§2.10), and the
+     formal debt. **Authenticated retrieval is frozen as a rule (§2.11) and is NOT met by the
+     implementation** — three of the walk's four fetches do not discharge it; that is a recorded
+     implementation debt, owned by the adopting change. Verification *semantics* remain C3's.
+   - **2c-C3 — WRITTEN.** [`amendment-2c-c3-valid-dlv-successor.md`](amendment-2c-c3-valid-dlv-successor.md).
+     Freezes `ValidDlvSuccessorCore`: a two-level clause inventory with stable identifiers, the
+     complete fifteen-field disposition, derive-and-compare as the successor-state correspondence
+     test (`Canon(expected) = Canon(supplied)` is **one conjunct**, not the whole predicate), a typed
+     partial `DeriveExpected`, and a two-layer outcome taxonomy over applicable outcomes only.
+     **Corrects four Rev 15 errata**, two of which made the predicate unformulable: the burned
+     parent-reserves-digest operand, `terminal/retired` having no tuple field, §7.1's `fee_t` being
+     non-zero for a family that extracts no fee, and `direction` being carried nowhere. Records that
+     `successor_ccb` and `parent_reserves_digest` die with 2c-A's CCB cut, and that until it lands
+     the bundle identity `b` is computed over prost bytes in violation of §2.10. **`TokenPolicyValid`
+     and the terminal close's exactly-once owner credit are DECLARED AND UNDISCHARGED** — the
+     complete predicate is `ValidDlvSuccessor := ValidDlvSuccessorCore ∧ TokenPolicyValid`.
+     **Frozen is not the same as implementable:** the successor-correspondence conjunct
+     `VDS.COMMON.10.a` is normative and **implementation-blocked on 2c-A's encoder cut**, because no
+     authoritative canonical successor bytes exist on the wire today — `successor_ccb` carries the
+     route-set commitment on a market bundle and a slot commitment on a close, and both composition
+     arms derive the successor locally. C3 also fixes the correspondence test as equality of
+     canonical **bytes**, since `decode_vault_state` normalizes rather than refuses and a
+     decode/re-encode substitute would launder non-canonical input.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
