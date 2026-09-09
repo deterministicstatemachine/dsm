@@ -603,7 +603,9 @@ impl SettlementBundle {
 /// right length, never SPHINCS+ output. A test that needs a REAL owner
 /// authorization signs one and passes it to [`ConsumedDlvTransition::owner_close`].
 #[cfg(any(test, feature = "testing"))]
-#[allow(clippy::disallowed_methods)] // fixture construction; a failure here is the signal
+// Fixture construction under the `testing` feature: a failure here is the
+// signal, and the production safety lints (`--all-features`) see this module.
+#[allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
 pub mod fixtures {
     use super::*;
     use crate::ccb::state::{EncumbranceSet, MarketPolicy, ReleasePolicy, StorageSetMembers};
