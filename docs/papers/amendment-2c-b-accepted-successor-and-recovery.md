@@ -268,15 +268,26 @@ well-formed `DlvSettle` of the frozen grammar, not that the settle is authorised
 Without these conjuncts field 6 is decoration — today `settlement_bundle::validate` width-checks
 the two successor fields and **never reads `recovery_material` at all**.
 
-> **Partially corrected 2026-09-09 by the 2c-A.1 adopting change (#799), and the headline still
-> stands.** `settlement_bundle::validate` is deleted; field 6 is now a mandatory nested `0x0031`
-> that is strictly decoded and round-tripped, so it is no longer unread bytes. But **none of the
-> conjuncts above is implemented**: nothing decodes `operation_bytes` as
-> `DlvSettleOperationPreimageV1`, nothing recomputes `relationship_chain_tip_v2`, and nothing
-> compares `embedded_parent` with `B.market_terms.trader_parent`. 2c-B is documentation-only and no
-> adopting change has been assigned these conjuncts, so field 6 remains decoration in exactly the
-> sense this paragraph means. Recorded here rather than in a code comment, because the code comment
-> that claimed the equality was checked was itself the defect (corrected in the same change).
+> **Corrected 2026-09-09, and the obligation is now SPLIT by owner ruling.** `settlement_bundle::validate`
+> is deleted and field 6 is a mandatory nested `0x0031`, strictly decoded and round-tripped, so it is
+> no longer unread bytes. The conjuncts above were then found unimplemented, and the split is:
+>
+> - **`embedded_parent == B.market_terms.trader_parent` — ENFORCED** as of this change, at both
+>   `SettlementBundle::market` and `market_terms_at`, via `MarketTerms::check_evidence_linkage`
+>   (`CcbError::EvidenceParentMismatch`). Both operands live inside `B`, so it is an in-bundle
+>   structural check and belongs to the decoder under 2c-A.1 ruling 9. The class-1 market vector
+>   already satisfied it, so no pinned bytes moved.
+> - **The grammar and chain-tip conjuncts — NOT YET.** Decoding `operation_bytes` under
+>   `DlvSettleOperationPreimageV1`, requiring canonical re-encode equality and a discriminator of 26,
+>   and requiring `relationship_chain_tip_v2(...) == trader_successor` are successor-evidence
+>   validity rather than byte decoding, and their operand does not exist until 5c-2 Step 2/3 gives
+>   the market producer a real prepared successor. They land there, together with a regenerated
+>   market class-1 vector carrying genuine `operation_bytes` and a genuine `trader_successor`.
+>   **Nothing may fabricate those operands to make the current vector pass.**
+>
+> Until that half lands, field 6's chain-tip claim remains decoration in the sense this paragraph
+> means. Recorded here because the code comment that asserted the equality was checked was itself
+> the defect that surfaced this.
 
 ---
 

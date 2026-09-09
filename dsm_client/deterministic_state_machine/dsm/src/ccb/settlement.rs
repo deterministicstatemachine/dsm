@@ -256,15 +256,17 @@ impl Route {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DsmSuccessorEvidence {
     pub rel_key: [u8; 32],
-    /// 2c-B requires this to equal `MarketTerms.trader_parent`, as the second
-    /// of its two chain-tip equalities over the canonical `operation_bytes`.
+    /// Equals `MarketTerms.trader_parent` — 2c-B's second chain-tip equality,
+    /// ENFORCED by [`MarketTerms::check_evidence_linkage`] at both
+    /// construction and decode, so a bundle that violates it is refused
+    /// before any verifier reads it.
     ///
-    /// **NOT ENFORCED HERE, OR ANYWHERE YET.** 2c-B is documentation-only
-    /// ("No Rust, no proto, no tests, no encoder") and no adopting change has
-    /// implemented its market-bundle validity conjuncts, so field 6 is what
-    /// that amendment itself calls decoration: it round-trips, and nothing
-    /// reads it. This comment previously said the equality "is checked, not
-    /// assumed", which certified a check that does not exist.
+    /// Its sibling conjunct is NOT enforced yet: nothing decodes
+    /// `operation_bytes` under the frozen `DlvSettleOperationPreimageV1`
+    /// grammar or recomputes `relationship_chain_tip_v2` against
+    /// `trader_successor`. That half needs a real prepared successor, which no
+    /// producer has until 5c-2 Step 2/3, and nothing may fabricate one to make
+    /// a bundle pass.
     pub embedded_parent: [u8; 32],
     pub counterparty_devid: [u8; 32],
     /// A `DlvSettleOperationPreimageV1` — a foreign, little-endian grammar
@@ -351,6 +353,26 @@ impl CcbObject for MarketTerms {
 }
 
 impl MarketTerms {
+    /// 2c-B's second chain-tip equality: the carried successor evidence must
+    /// name the same trader parent the terms do.
+    ///
+    /// Both operands are inside `B`, so this is an in-bundle structural check
+    /// and belongs to construction and decode (2c-A.1 ruling 9). Its sibling
+    /// conjunct — decode `operation_bytes` under the frozen
+    /// `DlvSettleOperationPreimageV1` grammar, require canonical re-encode
+    /// equality and a discriminator of 26, then require
+    /// `relationship_chain_tip_v2(...) == trader_successor` — is deliberately
+    /// NOT here: it is successor-evidence validity, not byte decoding, and its
+    /// operand does not exist until 5c-2 Step 2/3 gives the market producer a
+    /// real prepared successor. Nothing may fabricate that operand to make a
+    /// bundle pass.
+    pub fn check_evidence_linkage(&self) -> Result<(), CcbError> {
+        if self.recovery_material.embedded_parent != self.trader_parent {
+            return Err(CcbError::EvidenceParentMismatch);
+        }
+        Ok(())
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<Self>(&mut out);
@@ -518,6 +540,7 @@ impl SettlementBundle {
                 "a market bundle carries a close authorization",
             ));
         }
+        terms.check_evidence_linkage()?;
         Ok(Self {
             market_terms: Some(terms),
             transitions,
@@ -896,6 +919,37 @@ mod tests {
         assert_eq!(
             SettlementBundle::market(terms(parent), vec![]),
             Err(CcbError::TransitionCount { got: 0 })
+        );
+    }
+
+    /// 2c-B's second chain-tip equality, enforced in the constructor: the
+    /// carried successor evidence must name the terms' own trader parent. The
+    /// sibling grammar/chain-tip conjunct is deliberately absent until 5c-2
+    /// Step 2/3 supplies a real prepared successor.
+    #[test]
+    fn market_terms_whose_evidence_names_another_trader_parent_are_refused() {
+        let parent = [0xC7; 32];
+        let good = terms(parent);
+        assert_eq!(good.check_evidence_linkage(), Ok(()));
+        assert!(SettlementBundle::market(
+            good,
+            vec![ConsumedDlvTransition::market(parent, successor(parent, 1, 1)).unwrap()]
+        )
+        .is_ok());
+
+        let mut wrong = terms(parent);
+        wrong.trader_parent = [0xEE; 32];
+        assert_eq!(
+            wrong.check_evidence_linkage(),
+            Err(CcbError::EvidenceParentMismatch)
+        );
+        assert_eq!(
+            SettlementBundle::market(
+                wrong,
+                vec![ConsumedDlvTransition::market(parent, successor(parent, 1, 1)).unwrap()]
+            ),
+            Err(CcbError::EvidenceParentMismatch),
+            "the constructor refuses it, so no such bundle can be encoded"
         );
     }
 
