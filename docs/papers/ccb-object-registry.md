@@ -577,7 +577,8 @@ closed a namespace gap; it did not add Rev 15 objects, so a reader should not ex
 to change.
 
 **Nor for 2c-C3**, which decides successor *validity* and adds no class, no encoding and no field
-table.
+table. **Nor for 2c-C3.1**, whose lineage quarantine is client-local durable state — never
+published, never a register value — and allocates nothing here.
 
 **They did not move for 2c-C2 either.** That amendment added the retrieval obligation (§2.11), the
 normative network parameters (§3.2) and the one named non-CCB grammar (§2.10), and corrected §3.1's
@@ -1842,6 +1843,16 @@ In order, and not combined:
      arms derive the successor locally. C3 also fixes the correspondence test as equality of
      canonical **bytes**, since `decode_vault_state` normalizes rather than refuses and a
      decode/re-encode substitute would launder non-canonical input.
+   - **2c-C3.1 — WRITTEN.** [`amendment-2c-c3-1-lineage-quarantine.md`](amendment-2c-c3-1-lineage-quarantine.md).
+     Freezes the containment Req 6.3 attaches to `SAFETY_VIOLATION` and that 2c-C3 quoted without a
+     mechanism: the trigger (duplicate contradictory qualifying binding finality at one parent,
+     compared on value and never on round), the scope (the exact parent as root, descendants by
+     derivation through the generation bound, never enumerated), durable client-local persistence
+     that is not a register value, the five effects as independent observables, **no clearing path
+     of any kind**, and the denial-of-service boundary. Adds one reason code, `LINEAGE_QUARANTINED`,
+     in the existing class. **Records that the single-read `Conflict` arm is arithmetically
+     unreachable at the canonical quorum**, so the trigger is temporal and needs a durable record
+     of every qualifying finality. Effects 2–4 remain **NOT IMPLEMENTED**; the mechanism follows.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
