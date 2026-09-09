@@ -569,11 +569,9 @@ M10 skip the shared operation digest    -> the operation-digest negative red
   dsm/tests/economic_admission_lifecycle.rs — destructure the result and discard the
   validity, so the tuple shape is unchanged and they need no edit; the sweep confirms
   that rather than assuming it
-- realize_market_successor_5c1 and MarketRealization are DELETED, with no fallback and
-  no parallel path. Their Realized / Absent / Unavailable / Contradicts arms are
-  re-expressed in the walk — and Realized has NO successor here, market realization
-  being unreachable until 2c-D (Ruling R1), so the adopting change states what the
-  market arm returns in its place. Every dependent of both symbols is grepped and listed
+- realize_market_successor_5c1 and MarketRealization are NOT deleted here — see the
+  correction below. Every dependent of both symbols is grepped and listed when 5c-2
+  removes them
 - absence claims re-verified against origin/main with `git show`, never a working tree
 - lean -DwarningAsError=true lean4/DSMAcceptedSuccessorWalk.lean, the ci.yml lean job's
   expected= raised 13 -> 14 in the same commit, and the per-theorem #print axioms output
@@ -674,3 +672,32 @@ Formal coverage                     the fourteenth module, with the 2c-D leaf ab
 
 **Frozen is not implemented.** This document specifies; the adopting change implements, and its
 record belongs at the end of this file the way 2c-A.1's does.
+
+---
+
+# Corrected 2026-09-09, while implementing this document
+
+Two defects in §9, both found by writing the adopting change rather than by reading. They are
+recorded rather than silently rewritten, because this document was merged before they surfaced.
+
+## The 5c-1 scaffolding deletion is 5c-2's, not C4's
+
+§9's integration block required `realize_market_successor_5c1` and `MarketRealization` to be deleted
+by C4's adopting change. **That obligation was wrong and is withdrawn.**
+
+The symbols' own banners have assigned their removal to 5c-2 since 5c-1 landed — *"TEMPORARY
+SCAFFOLDING (5c-1). DELETED IN 5c-2"*, twice — and C4 has nothing to put in their place. The
+`Absent` arm is what makes a bound-but-unrealized market parent hold its reserves and generation at
+the composed parent, which is exactly Req 21.15's expected state. Delete it and a market bundle
+either folds without realization, violating Req 21.15, or never folds at all, taking the market path
+dark for two amendments. Neither is what C4 decided; C4 gates **certification**, and the arm that
+gates the **cursor** is 5c-2's to replace when `TA_B` becomes producible.
+
+## `may_fold` for a market successor does not advance the reserve cursor
+
+§6 says the composition walk folds forward on `may_fold`, and §7 gates realized-frontier advancement
+on `may_certify`. Read together those are consistent, but §6's sentence alone invites the reading
+that a market fold advances reserves, which Req 21.15 forbids while the acceptance is withheld.
+Stated explicitly: **for a market successor, `may_fold` permits the walk to compute forward; the
+reserve cursor and the generation stay at the composed parent until realization is established.**
+The frontier a withheld market bundle produces is bound-but-unrealized, not advanced.
