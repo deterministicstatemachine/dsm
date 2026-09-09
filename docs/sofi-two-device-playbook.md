@@ -1,5 +1,30 @@
 # SoFi Two-Device Playbook
 
+> ## STATUS 2026-09-09 — the settle step does not currently succeed
+>
+> The trader's routed settlement (`dlv.unlockRouted`) is deliberately **fail-closed** on `main` and
+> refuses before binding anything:
+>
+> > `dlv.unlockRouted: market settlement is deployment-blocked until 5c-2 Step 2 — a canonical`
+> > `market bundle needs the bundled trader successor evidence, which this device cannot produce`
+> > `before it advances; vault <id> parent <c_n> (generation <n>) was NOT bound and nothing moved`
+>
+> This is a **deployment block, not a bug and not a misconfiguration**. No setting lifts it. The
+> refusal fires *after* every eligibility gate passes, and nothing is stored, fenced, bound, signed
+> or advanced when it does: the trader's balances do not move and the vault generation stays free.
+>
+> The reason is an ordering one. A canonical market bundle must carry the trader's prepared
+> successor and its `0x0031` successor evidence, and today the trader binds BEFORE it advances, so
+> there is no signed successor to name and nothing may be fabricated in its place. 5c-2 Step 2 is
+> the only thing that lifts it.
+>
+> **What still works:** vault creation and funding, routing advertisement, discovery, quoting, and
+> the **owner close path**, which is live and unaffected.
+>
+> The body below is **not rewritten**. It is the runbook as validated, and every step before
+> the settle is still exactly right. Expect the refusal above where it says the trade settles.
+
+
 End-to-end runbook for exercising the SoFi pipeline on two real
 phones over a real storage node. After this, the claim
 "SoFi works on my phone" is defensible from a clean device.
