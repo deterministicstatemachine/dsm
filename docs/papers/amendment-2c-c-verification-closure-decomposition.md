@@ -210,7 +210,7 @@ cardinality appears.
 | Whether `ValidDlvSuccessor` takes `V_{n+1}` as **input** or **derives** it | **C3** (open, and consequential) |
 | Field 13 on an owner close; fields 14/15 on a close; `β` semantics; the arithmetic discipline | **C3** (open) |
 | The walk as a numbered normative chain, ending at `ValidatedEconomicRoot` | **C4** |
-| Trusted start, position-0 semantics for a foreign lineage, offline-arm refusal | **C4** (open) |
+| Trusted start, position-0 semantics for a foreign lineage, offline-arm refusal | **C4** — ruled 2026-09-09 (rulings W1, W2) |
 | The leaf-key derivation family stated as **class-dispatched and open**, so 2c-D can add `0x0032`'s key without reopening C2 | **C2**, consumed by **C4** |
 
 ## Explicitly not any 2c-C sub-amendment
