@@ -40,6 +40,19 @@
 > | the advancement gate reads as a wiring residue | `trader_fence::permits_successor` and its SDK wrapper `active_verdict` have **zero non-test callers**, and the bilateral advance path consults no fence at all. TWO producers are owed, not one: the gate, and the release event, which has no production emitter either |
 > | the fence keys the trade | The ONLY production `bind_settlement` call (`dlv_routes.rs:2897`) passes `vault_id` as `trader_chain_id`, so production writes **vault-keyed** rows. Step 3's `FenceKey` move is load-bearing, not cosmetic: one row cannot serve both the vault and trader coordinate systems |
 >
+> **Step 3 named the wrong credit source, and it is corrected in the body.** As written it said
+> the settle routes through "a `ValidatedDlvSettlementPayment` credit source the settle path never
+> ran". That class is `0x0027` and it is the OWNER-APPLY arm: `SemanticWriteSet::DlvOwnerApply`
+> requires `CreditSourceFacts::DlvSettlementPayment` and `SemanticWriteSet::DlvSettle` requires
+> `CreditSourceFacts::DlvReserveConsumption` (`0x0026`), each refusing the other with
+> `FactsDoNotMatchOperation`. The write-set table's own doc says it plainly: "A trader's settle
+> output, funded by consuming an owner vault reserve (`0x0026`)". An implementer following the
+> original sentence literally would assemble facts the write-set builder refuses. This is a factual
+> error about which code exists rather than a record of a decision, so unlike every other correction
+> here it is fixed IN THE BODY; the original wording is preserved in this note. The "never ran"
+> qualifier is right for production but not absolute — the settle pairing is already exercised by
+> `dsm/tests/economic_dlv_settle_provenance.rs`.
+>
 > **Step 3's `TA_B` half is NOT 5c-2's to build.** Step 3 says "Then build `TA_B` (`0x0011`, …)".
 > The registry lists `0x0011` `TraderAcceptance` as **blocked — 2c-D**, and states that "Ownership
 > of `0x0011` itself is 2c-D's — 2c-B disclaims it, and 2c-C4 records that `TA_B` verification moves
@@ -885,7 +898,10 @@ placeholder shape.
 
 `FenceKey` moves to the trader's chain identity and parent (A). Route `DlvSettle`
 through economic admission (already `ClosedWriteSet`, with a write-set arm and a
-`ValidatedDlvSettlementPayment` credit source the settle path never ran).
+`DlvReserveConsumption` credit source — `0x0026` — that no production path has ever
+emitted). The trader's settle OUTPUT is funded by consuming an owner vault reserve,
+which is what `0x0026` names. `0x0027` `ValidatedDlvSettlementPayment` is the
+OWNER-APPLY arm and belongs to `DlvOwnerApplyV2`, not to this leg.
 
 **The exact sequence, pinned.** DSM's admission architecture requires the
 Prepared economic admission to be attached *before* `advance` — `DeviceState::advance`
