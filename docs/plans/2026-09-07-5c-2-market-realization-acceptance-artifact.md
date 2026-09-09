@@ -1,5 +1,31 @@
 # 5c-2 — Market realization: the trader-acceptance artifact `TA_B`
 
+> ## STATUS 2026-09-09 — what the 2c-A.1 encoder cut falsified in this plan
+>
+> Required by amendment 2c-C4 §10. **The body below is NOT rewritten** — it is the plan as written
+> on 2026-09-07, and rewriting it would destroy the record of what was decided when. Read it with
+> these corrections applied. Each was checked against the tree at `main`, not inferred.
+>
+> | the plan says | now |
+> |---|---|
+> | `SettlementBundleV1` needs no schema change; field 8 holds `C_T^+` (:461) | **The proto message is deleted** (2c-A.1 ruling 13). `B` is the CCB object `0x000E`; the successor is `MarketTerms` field 5 |
+> | use the existing proto field for recovery material (:745) | **`MarketTerms` field 6 is a mandatory nested `0x0031`** `DsmSuccessorEvidence`, strictly decoded and round-tripped — not a bytes field |
+> | the transport is `repeated bytes proof_material` (:757) | `0x0010` `DlvProofMaterial` has **zero fields** and beta encodes `0x000F` field 3 absent, so it never appears on the wire (2c-A.1 ruling 6) |
+> | `settlement_bundle::validate` only width-checks the two successor fields (:417) | **`validate` is deleted.** Strict decoders, a whole-bundle round trip, and the in-bundle structural checks replaced it (2c-A.1 rulings 8, 9) |
+> | the bundle is bound at `dlv_routes.rs:3264` (:396) | **The market route now refuses before binding** (`dlv_routes.rs:3340`, "deployment-blocked until 5c-2 Step 2"). The ordering problem the line names is real and unchanged; the line number is not |
+>
+> **One flagged item was checked and is NOT stale.** A survey reported that
+> `execute_on_relationship_staged` (`core_sdk.rs:1617`) does not exist. It does, at exactly that
+> line. The plan's Step 3 guidance stands, and the claim is recorded here as refuted so nobody
+> re-derives it.
+>
+> **What this plan still owes, unchanged by the cut:** Step 2/3 re-order the market producer so the
+> trader successor and its evidence exist BEFORE binding, which is the only thing that lifts the
+> emission refusal. Landing with it: 2c-B's deferred grammar and chain-tip conjuncts (`G1`–`G4` in
+> 2c-C4 §2.1) and a regenerated market class-1 vector carrying genuine `operation_bytes` and a
+> genuine `trader_successor`. **Nothing may fabricate those operands to make the current vector
+> pass** (owner ruling, 2026-09-09).
+
 > ## OPEN GATE — prove the ~50 KB owner-close bundle survives every real path
 >
 > A fully pinned owner-close `SettlementBundle` under 2c-A is **50,330 bytes**, almost entirely
