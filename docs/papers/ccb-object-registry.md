@@ -1860,8 +1860,11 @@ In order, and not combined:
      of every qualifying finality. Effects 2–4 are **IMPLEMENTED** by the adopting change, with
      the five-effect integration control and six mutation controls.
    - **2c-A.1 — WRITTEN.** [`amendment-2c-a-1-encoder-cut-rulings.md`](amendment-2c-a-1-encoder-cut-rulings.md).
-     Reconciles 2c-A's status text with 2c-B's closure and rules the encoder cut: **both shapes in
-     one atomic change** with class-1 vectors for each (the market vector is the A+B closure test);
+     Reconciles 2c-A's status text with 2c-B's closure and rules the encoder cut: the encoder
+     **surface for both shapes** with class-1 vectors for each (the market vector is the A+B
+     closure test), the **owner close cut over now**, and the **market producer fail-closed until
+     5c-2 Step 2** re-orders the settle flow so the trader's successor and evidence exist at bind
+     time (the ruling was amended the same day on that source finding);
      the owner close's permitted continuation is `c_{n+1}` of the exact field-2 successor and
      `close_slot_commitment` is deleted; an identity-scoped full reprovision; strict decoders
      (field 4 exactly 49,856 bytes, `proof_material` refused present, whole-bundle round trip);

@@ -73,6 +73,41 @@ tests. No encoder."* described the A-stage boundary; it is not a standing prohib
 > "settlement bundle identity" has exactly one canonical meaning for every supported beta bundle
 > shape.
 
+**Amended the same day, on a source finding.** The premise above — that both producer paths can
+emit a conformant canonical bundle at this cut — is false for MARKET today. `dlv.unlockRouted`
+binds first and advances the trader's DSM chain after, so at bind time there is no prepared
+`C_dsm+` and no signed `DsmSuccessorEvidence` (`sign_dsm_successor_evidence` is reached only from
+the economic-admission flow, after acceptance); no `TradeIntent` or `0x000D` producer exists
+anywhere; and the shipped market bundle carries the vault's `c_n` as `trader_parent` and `X` as
+`trader_successor`. The 5c-2 plan already sequences the fix: *"Build and bind `B` is not safe until
+`I`, the trader coordinates, the recovery material, the DLV successor and the proof semantics are
+all real"* — its Step 2. The owner amended the ruling:
+
+> AMEND the prior "both shapes atomic cutover" ruling as follows. The 2c-A encoder SURFACE remains
+> complete for BOTH supported shapes: OWNER CLOSE, MARKET. But producer CUTOVER is not atomic
+> across both shapes because the current MARKET producer cannot construct the frozen canonical
+> bundle at bind time without 5c-2 Step 2 changing the ordering. Therefore:
+>
+> 1. Implement canonical encoders/decoders and class-1 vectors for BOTH shapes in 2c-A.
+> 2. Cut OWNER CLOSE over to canonical CCB immediately.
+> 3. MARKET production MUST FAIL CLOSED after 2c-A until 5c-2 Step 2 lands.
+> 4. Do not fabricate `trader_successor` / `DsmSuccessorEvidence` before they exist.
+> 5. Do not preserve the prost bundle as a fallback market identity.
+> 6. Do not fold 5c-2 Steps 2+3 into 2c-A merely to make the market path compile.
+> 7. 5c-2 Step 2 changes the ordering so the trader successor/evidence exists before binding; at
+>    that point MARKET may be cut over to the already-frozen canonical encoder surface.
+> 8. `COMMON.10.a` for OWNER CLOSE can become live with 2c-A. `COMMON.10.a` for MARKET remains
+>    deployment-blocked until the 5c-2 ordering prerequisite is satisfied.
+>
+> One canonical format for both shapes now; only the shape that can actually produce valid
+> evidence is allowed to emit it now.
+
+Consequences the adopting change carries: `dlv.unlockRouted` refuses to bind with a refusal that
+names 5c-2 Step 2 — today it binds a placeholder bundle the 5c-2 plan calls unsafe to bind live, so
+the intermediate state removes an unsafe path rather than disabling a safe one; the market
+composition arm and the market decoder are implemented and vector-pinned against the frozen shape,
+with no live producer until 5c-2; the market rig proof is re-run when 5c-2 lands.
+
 The encoder surface the cut ships, all first ships at the schema the registry names:
 
 ```text
@@ -296,7 +331,10 @@ under the cap.
 ```text
 2c-A status text                    RECONCILED (this document)
 Rulings 1-14                        FROZEN
-Encoder surface                     NOT IMPLEMENTED — the adopting change
-VDS.COMMON.10.a                     WIRABLE once the surface lands; owner-close C3
-                                    completion then needs nothing else; market needs C4
+Encoder surface (both shapes)       NOT IMPLEMENTED — the adopting change
+Owner-close producer cutover        NOT IMPLEMENTED — the adopting change
+Market producer                     FAIL-CLOSED after the cut until 5c-2 Step 2
+VDS.COMMON.10.a, owner close        WIRABLE once the surface lands; C3 owner-close
+                                    completion then needs nothing else
+VDS.COMMON.10.a, market             DEPLOYMENT-BLOCKED on the 5c-2 ordering; then C4
 ```
