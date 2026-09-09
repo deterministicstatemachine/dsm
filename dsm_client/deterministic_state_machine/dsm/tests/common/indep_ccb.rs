@@ -149,6 +149,7 @@ pub fn storage_addr(namespace: &[u8], inner: &[u8; 32]) -> [u8; 32] {
     h_dom(b"DSM/storage-object", &[namespace, inner].concat())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn trade_intent(
     token_in: [u8; 32],
     amount_in: u64,
