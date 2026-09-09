@@ -3009,6 +3009,37 @@ impl BitcoinTapSdk {
         }
     }
 
+    /// `storage_get_bytes`, with absence TYPED. `Ok(None)` is the key not
+    /// being present where this reader looked; `Err` is a fault. The test
+    /// seam models absence the same way the production path does, so a caller
+    /// never has to match an error's Display text to tell the two apart.
+    pub(crate) async fn storage_get_bytes_opt(key: &str) -> Result<Option<Vec<u8>>, DsmError> {
+        #[cfg(any(test, feature = "demos"))]
+        {
+            let mut state = dbtc_storage_test_state();
+            if let Some(message) = state.get_failures.remove(key) {
+                return Err(DsmError::storage(
+                    format!("load {key}: {message}"),
+                    None::<std::io::Error>,
+                ));
+            }
+            if let Some(bytes) = state.object_store.get(key).cloned() {
+                return Ok(Some(bytes));
+            }
+            drop(state);
+            #[cfg(test)]
+            if let Some(bytes) = crate::sdk::storage_io::fake_fleet::any_member_holding(key) {
+                return Ok(Some(bytes));
+            }
+            Ok(None)
+        }
+
+        #[cfg(not(any(test, feature = "demos")))]
+        {
+            crate::sdk::storage_io::get_bytes_opt(key).await
+        }
+    }
+
     pub(crate) async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {

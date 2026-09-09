@@ -32,6 +32,7 @@
 //! channel beside the verdict is an invitation to collapse uncertainty into
 //! "the parent is free", which is the one reading that is never safe.
 
+use dsm::dlv::successor_validity::{OutcomeClass, Reason};
 use dsm::dlv::binding_observation::{observe_single_key, BindingObservation};
 use dsm::dlv::settlement_bundle::{self, BundleShape};
 use dsm::types::proto as pb;
@@ -49,10 +50,45 @@ pub(crate) enum ParentOccupancy {
     Free,
     /// A binding-final bundle owns this parent, resolved and checked against it.
     BoundBy(Box<BoundParent>),
-    /// Conflict, Undetermined, Unavailable, or a chosen record whose bundle
-    /// cannot be resolved. The string is what the caller reports; every one of
-    /// them must fail closed.
-    Unresolvable(String),
+    /// The parent could not be resolved to a bound bundle, WITH the class of
+    /// the fact that stopped it.
+    ///
+    /// This used to be a bare `String` covering Conflict, Undetermined,
+    /// Unavailable and every way a chosen record's bundle fails to resolve —
+    /// sixteen sites spanning three genuinely different responses (quarantine,
+    /// retry, refuse) reduced to one. All of them fail closed, which is why the
+    /// collapse was survivable; none of them mean the same thing, which is why
+    /// amendment 2c-C3 requires them apart.
+    Unresolvable(OccupancyRefusal),
+}
+
+/// Why a parent did not resolve, classified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OccupancyRefusal {
+    /// The frozen C3 reason, which fixes the class.
+    pub reason: Reason,
+    /// Human-readable detail. Diagnostics only — never branched on.
+    pub detail: String,
+}
+
+impl OccupancyRefusal {
+    pub(crate) fn new(reason: Reason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+
+    /// The class this refusal carries.
+    pub(crate) fn class(&self) -> OutcomeClass {
+        self.reason.class()
+    }
+}
+
+impl core::fmt::Display for OccupancyRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.reason.as_str(), self.detail)
+    }
 }
 
 /// The bundle that owns a parent, already checked against THAT parent.
@@ -161,7 +197,7 @@ pub async fn probe_parent_binding(
             ParentOccupancy::BoundBy(_) => probe.bundle_parent_matches = Some(true),
             ParentOccupancy::Unresolvable(why) => {
                 probe.bundle_parent_matches = Some(false);
-                probe.detail = Some(why);
+                probe.detail = Some(why.to_string());
             }
             // Unreachable: the key was BoundFinal a moment ago. Report rather
             // than assert — a race here is information, not a panic.
@@ -330,27 +366,42 @@ pub(crate) async fn observe_parent_binding(
         // down member lands here, because two quorums intersect but one read
         // need not see the intersection.
         BindingObservation::Undetermined { attributed, .. } => {
-            return ParentOccupancy::Unresolvable(format!(
-                "the binding for this parent is not yet decided ({attributed} members answered)"
+            return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
+                Reason::BindingUndetermined,
+                format!(
+                    "the binding for this parent is not yet decided ({attributed} members answered)"
+                ),
             ))
         }
+        // Req 6.3. Two chosen values at one write-once key is a proven
+        // contradiction in the substrate, not a failed check — SAFETY_VIOLATION,
+        // never resolved by iteration order and never tie-broken.
         BindingObservation::Conflict { distinct } => {
-            return ParentOccupancy::Unresolvable(format!(
-                "the binding key for this parent holds {distinct} chosen values"
+            return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
+                Reason::DuplicateBindingFinality,
+                format!("the binding key for this parent holds {distinct} chosen values"),
             ))
         }
         BindingObservation::Unavailable {
             attributed,
             required,
         } => {
-            return ParentOccupancy::Unresolvable(format!(
-                "only {attributed} of the vault's members answered the binding key \
-                 ({required} required)"
+            return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
+                Reason::BindingEvidenceUnavailable,
+                format!(
+                    "only {attributed} of the vault's members answered the binding key \
+                     ({required} required)"
+                ),
             ))
         }
     };
 
-    let unresolvable = |what: &str| ParentOccupancy::Unresolvable(what.to_string());
+    // Each site now names the class of the fact it observed. The INVALID ones
+    // are decidable from bytes already in hand; the INCOMPLETE ones are the two
+    // fetch outcomes, where nothing was learned at all.
+    let unresolvable = |reason: Reason, what: &str| {
+        ParentOccupancy::Unresolvable(OccupancyRefusal::new(reason, what))
+    };
 
     // The record's two identity fields must agree with each other before either
     // is used to fetch anything.
@@ -359,7 +410,10 @@ pub(crate) async fn observe_parent_binding(
         &chosen.value_digest,
     );
     if expected_addr != chosen.value_addr {
-        return unresolvable("the bound record's digest and address disagree");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "the bound record's digest and address disagree",
+        );
     }
 
     // Fetch by the record's own value identity. `fetch_immutable_payload`
@@ -371,22 +425,44 @@ pub(crate) async fn observe_parent_binding(
     .await
     {
         Ok(Some(b)) => b,
-        Ok(None) => return unresolvable("its bound bundle is not retrievable"),
-        Err(_) => return unresolvable("its bound bundle could not be fetched"),
+        Ok(None) => {
+            return unresolvable(
+                Reason::BindingEvidenceUnavailable,
+                "its bound bundle is not retrievable",
+            )
+        }
+        Err(_) => {
+            return unresolvable(
+                Reason::BindingEvidenceUnavailable,
+                "its bound bundle could not be fetched",
+            )
+        }
     };
     let Ok(bundle) = settlement_bundle::decode_canonical(&bytes) else {
-        return unresolvable("its bound bundle is not a canonical settlement bundle");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle is not a canonical settlement bundle",
+        );
     };
     let Ok(canon) = settlement_bundle::canon(&bundle) else {
-        return unresolvable("its bound bundle does not re-encode canonically");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle does not re-encode canonically",
+        );
     };
     let bundle_digest = settlement_bundle::bundle_digest(&canon);
     let bundle_addr = settlement_bundle::bundle_addr(&canon);
     if bundle_digest != chosen.value_digest || bundle_addr != chosen.value_addr {
-        return unresolvable("its bound bundle does not hash to the record's identity");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle does not hash to the record's identity",
+        );
     }
     let Ok(shape) = settlement_bundle::shape(&bundle) else {
-        return unresolvable("its bound bundle has no valid shape");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle has no valid shape",
+        );
     };
 
     // BOUND UNDER THIS SET, AT THIS q. A member reconfigured into another set
@@ -394,10 +470,16 @@ pub(crate) async fn observe_parent_binding(
     // reachable. `q` comes from the vault's own committed V_n, so the bundle's
     // restatement of it must AGREE — it is never consumed in place of it.
     if as32(&bundle.storage_set_id) != Some(*storage_set_id) {
-        return unresolvable("its bound bundle was bound under a different storage set");
+        return unresolvable(
+            Reason::BundleForeignToVault,
+            "its bound bundle was bound under a different storage set",
+        );
     }
     if bundle.q != committed_quorum {
-        return unresolvable("its bound bundle states a different quorum than this vault commits");
+        return unresolvable(
+            Reason::BundleForeignToVault,
+            "its bound bundle states a different quorum than this vault commits",
+        );
     }
 
     // AND IT NAMES THIS PARENT. The register never inspects the value it holds,
@@ -408,16 +490,30 @@ pub(crate) async fn observe_parent_binding(
         .iter()
         .position(|t| as32(&t.vault_id) == Some(*vault_id))
     else {
-        return unresolvable("its bound bundle consumes no leg of this vault");
+        // VDS.COMMON.1.a — the operation names no leg of this vault. Not a
+        // foreign-set problem; the bundle simply is not about this vault.
+        return unresolvable(
+            Reason::VaultMismatch,
+            "its bound bundle consumes no leg of this vault",
+        );
     };
     let Some(t) = bundle.vault_transitions.get(transition_ix) else {
-        return unresolvable("its bound bundle lost the transition it just named");
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle lost the transition it just named",
+        );
     };
     if as32(&t.parent_state_commitment) != Some(*parent_c_n) {
-        return unresolvable("its bound bundle names a different parent state for this vault");
+        return unresolvable(
+            Reason::StaleParent,
+            "its bound bundle names a different parent state for this vault",
+        );
     }
     if t.parent_generation != generation {
-        return unresolvable("its bound bundle names a different generation for this vault");
+        return unresolvable(
+            Reason::GenerationMismatch,
+            "its bound bundle names a different generation for this vault",
+        );
     }
 
     ParentOccupancy::BoundBy(Box::new(BoundParent {
@@ -584,9 +680,12 @@ mod tests {
             },
         );
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        // A bundle bound at a key it does not name is DECIDABLY FALSE. It was
+        // reported as an absence of evidence before amendment 2c-C3.
         assert!(
             matches!(&occ, ParentOccupancy::Unresolvable(w)
-                     if w.contains("names a different parent state")),
+                     if w.reason == Reason::StaleParent
+                        && w.class() == OutcomeClass::Invalid),
             "got {occ:?}"
         );
     }
@@ -603,7 +702,8 @@ mod tests {
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &foreign, set.quorum()).await;
         assert!(
             matches!(&occ, ParentOccupancy::Unresolvable(w)
-                     if w.contains("different storage set")),
+                     if w.reason == Reason::BundleForeignToVault
+                        && w.class() == OutcomeClass::Invalid),
             "got {occ:?}"
         );
     }
@@ -617,8 +717,12 @@ mod tests {
         binding_fleet_double::fail_member_id("dsm-node-1");
         binding_fleet_double::fail_member_id("dsm-node-2");
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        // Nothing was learned. This one stays INCOMPLETE, and Req 6.25's code
+        // stays with it.
         assert!(
-            matches!(&occ, ParentOccupancy::Unresolvable(w) if w.contains("answered the binding key")),
+            matches!(&occ, ParentOccupancy::Unresolvable(w)
+                     if w.reason == Reason::BindingEvidenceUnavailable
+                        && w.class() == OutcomeClass::Incomplete),
             "got {occ:?}"
         );
     }
@@ -643,8 +747,14 @@ mod tests {
         );
         binding_fleet_double::fail_member_id("dsm-node-2");
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        // Mid-flight is its OWN reason, distinct from "could not reach a
+        // quorum to find out" — reading it as free would compose past a live
+        // bind, reading it as a forgery would make every concurrent settle
+        // permanently invalid.
         assert!(
-            matches!(&occ, ParentOccupancy::Unresolvable(w) if w.contains("not yet decided")),
+            matches!(&occ, ParentOccupancy::Unresolvable(w)
+                     if w.reason == Reason::BindingUndetermined
+                        && w.class() == OutcomeClass::Incomplete),
             "got {occ:?}"
         );
     }
@@ -659,7 +769,9 @@ mod tests {
         binding_fleet_double::set_echo("http://127.0.0.1:8081", b"dsm-node-0".to_vec(), [1; 32]);
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
         assert!(
-            matches!(&occ, ParentOccupancy::Unresolvable(w) if w.contains("answered the binding key")),
+            matches!(&occ, ParentOccupancy::Unresolvable(w)
+                     if w.reason == Reason::BindingEvidenceUnavailable
+                        && w.class() == OutcomeClass::Incomplete),
             "got {occ:?}"
         );
     }

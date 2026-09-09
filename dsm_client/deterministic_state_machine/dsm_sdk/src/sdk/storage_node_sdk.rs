@@ -3591,7 +3591,76 @@ impl StorageNodeSDK {
         F: Fn(Arc<StorageNodeClient>) -> Fut,
         Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
     {
-        const MAX_RETRIES: u32 = 6;
+        // Retry on EVERY error, as this function always has. Its callers get
+        // the erased `DsmError`; nothing about their behaviour changes.
+        self.retry_loop(operation, |_| true)
+            .await
+            .map_err(|(e, n_clients)| {
+                DsmError::storage(
+                    format!(
+                        "Storage operation failed after {} retries across {} node(s): {e}",
+                        Self::MAX_RETRIES,
+                        n_clients
+                    ),
+                    None::<std::io::Error>,
+                )
+            })
+    }
+
+    /// Fetch an object, keeping NOT-FOUND typed.
+    ///
+    /// `get` erases every error into a `DsmError` string and, worse, RETRIES a
+    /// 404 six times with exponential backoff (200ms → 5s, ~11s in total)
+    /// before doing so — an absence treated as a transient fault. Callers that
+    /// had to tell "absent" from "unreachable" were reduced to matching
+    /// `"not found"` in the message, which is the class confusion amendment
+    /// 2c-C3 exists to remove, implemented in string comparison.
+    ///
+    /// Here a 404 returns `Ok(None)` on the first attempt, with no retry, and
+    /// every other failure is still retried across nodes and then surfaced as
+    /// `Err`. `Ok(None)` is ONE node's answer, not a quorum observation; it
+    /// says the key was absent where this reader looked, and nothing more.
+    pub async fn get_opt(&self, key: &str) -> Result<Option<Vec<u8>>, DsmError> {
+        let outcome = self
+            .retry_loop(
+                |client| {
+                    let key = key.to_string();
+                    async move { client.get(&key).await }
+                },
+                |e| !matches!(e.kind, StorageNodeErrorKind::NotFound),
+            )
+            .await;
+        match outcome {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err((e, _)) if matches!(e.kind, StorageNodeErrorKind::NotFound) => Ok(None),
+            Err((e, n_clients)) => Err(DsmError::storage(
+                format!(
+                    "Storage get failed after {} retries across {} node(s): {e}",
+                    Self::MAX_RETRIES,
+                    n_clients
+                ),
+                None::<std::io::Error>,
+            )),
+        }
+    }
+
+    const MAX_RETRIES: u32 = 6;
+
+    /// The one retry loop, with the erasure of `StorageNodeError` kept OUT of
+    /// it so a caller can decide what an error kind means before it becomes a
+    /// string. `retry_on` says whether a given failure is worth another
+    /// attempt; the final failure is returned typed, with the node count for
+    /// the caller's message.
+    async fn retry_loop<F, Fut, T>(
+        &self,
+        operation: F,
+        retry_on: impl Fn(&StorageNodeError) -> bool,
+    ) -> Result<T, (StorageNodeError, usize)>
+    where
+        F: Fn(Arc<StorageNodeClient>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StorageNodeError>>,
+    {
+        const MAX_RETRIES: u32 = StorageNodeSDK::MAX_RETRIES;
         const BASE_DELAY_MS: u64 = 200;
         const MAX_DELAY_MS: u64 = 5_000;
 
@@ -3607,7 +3676,7 @@ impl StorageNodeSDK {
             let client = self.clients[(attempt as usize) % n_clients].clone();
             match operation(client).await {
                 Ok(result) => return Ok(result),
-                Err(e) if attempt < MAX_RETRIES => {
+                Err(e) if attempt < MAX_RETRIES && retry_on(&e) => {
                     let delay_ms =
                         (BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(20))).min(MAX_DELAY_MS);
                     let next_node_idx = ((attempt as usize) + 1) % n_clients;
@@ -3622,23 +3691,17 @@ impl StorageNodeSDK {
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
-                Err(e) => {
-                    return Err(DsmError::storage(
-                        format!(
-                            "Storage operation failed after {} retries across {} node(s): {e}",
-                            MAX_RETRIES, n_clients
-                        ),
-                        None::<std::io::Error>,
-                    ));
-                }
+                Err(e) => return Err((e, n_clients)),
             }
         }
 
         // Unreachable: the loop exits via `return` in both Ok and final-Err
         // branches; this is here only to satisfy the compiler.
-        Err(DsmError::storage(
-            "Storage operation failed due to unhandled error after retries".to_string(),
-            None::<std::io::Error>,
+        Err((
+            StorageNodeError::new(
+                "Storage operation failed due to unhandled error after retries".to_string(),
+            ),
+            n_clients,
         ))
     }
 

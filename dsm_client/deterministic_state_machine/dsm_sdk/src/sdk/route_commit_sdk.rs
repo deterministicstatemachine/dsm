@@ -651,11 +651,19 @@ pub(crate) async fn publish_route_anchor_with_pointers(
 /// with the decoded anchor on success, `Err` if the anchor is absent
 /// or malformed — vault-owner verifiers treat any error as
 /// "commitment not visible".
-pub(crate) async fn fetch_external_commitment(
+/// Fetch the external-commitment anchor for `X`, with ABSENCE TYPED and every
+/// present anchor still validated. `Ok(None)` is the key not being present where
+/// this reader looked; `Ok(Some(_))` is an anchor that decoded and whose `x`
+/// matches the key; a present anchor that fails either check is `Err`, exactly
+/// as it always was. Absence and a mismatched anchor are different facts and
+/// stay different here.
+pub(crate) async fn fetch_external_commitment_opt(
     x: &[u8; 32],
-) -> Result<generated::ExternalCommitmentV1, dsm::types::error::DsmError> {
+) -> Result<Option<generated::ExternalCommitmentV1>, dsm::types::error::DsmError> {
     let key = external_commitment_key(x);
-    let bytes = BitcoinTapSdk::storage_get_bytes(&key).await?;
+    let Some(bytes) = BitcoinTapSdk::storage_get_bytes_opt(&key).await? else {
+        return Ok(None);
+    };
     let anchor = generated::ExternalCommitmentV1::decode(bytes.as_slice()).map_err(|e| {
         dsm::types::error::DsmError::serialization_error(
             "ExternalCommitmentV1",
@@ -669,31 +677,42 @@ pub(crate) async fn fetch_external_commitment(
             "ExternalCommitmentV1.x does not match anchor key",
         ));
     }
-    Ok(anchor)
+    Ok(Some(anchor))
+}
+
+/// Fetch the external-commitment anchor for `X`, refusing on absence. The
+/// contract every existing caller relies on; absence becomes the same storage
+/// error it always did.
+pub(crate) async fn fetch_external_commitment(
+    x: &[u8; 32],
+) -> Result<generated::ExternalCommitmentV1, dsm::types::error::DsmError> {
+    match fetch_external_commitment_opt(x).await? {
+        Some(anchor) => Ok(anchor),
+        None => Err(dsm::types::error::DsmError::storage(
+            format!("load {}: object not found", external_commitment_key(x)),
+            None::<std::io::Error>,
+        )),
+    }
 }
 
 /// Return `Ok(true)` if the external-commitment anchor for `X` is
 /// currently visible at storage nodes, `Ok(false)` if absent.  Errors
 /// other than "not found" propagate so the caller can distinguish
 /// transient storage failures from "commitment not visible".
+///
+/// Absence is TYPED here. This used to match `"not found"` in the error's
+/// Display text — the storage SDK had erased the 404 into a string one layer
+/// down — so any future error whose message happened to contain that substring
+/// would silently have become "not visible". That is the class confusion
+/// amendment 2c-C3 exists to remove, implemented in string comparison.
 pub(crate) async fn is_external_commitment_visible(
     x: &[u8; 32],
 ) -> Result<bool, dsm::types::error::DsmError> {
-    match fetch_external_commitment(x).await {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            // The dBTC + posted-DLV mock encodes "not found" as a
-            // storage error containing "object not found".  In
-            // production this maps to HTTP 404 from the storage node.
-            // Treat both as "not visible"; surface anything else.
-            let msg = format!("{e}");
-            if msg.contains("not found") {
-                Ok(false)
-            } else {
-                Err(e)
-            }
-        }
-    }
+    // A PRESENT anchor is still decoded and its `x` still checked: "visible"
+    // means "a valid anchor for THIS X is there", not "some bytes are there".
+    // The first cut of this rewrite tested only presence and let a present
+    // anchor with the wrong `x` read as visible -- the full suite caught it.
+    Ok(fetch_external_commitment_opt(x).await?.is_some())
 }
 
 /// AMM-side re-simulation outcome.  `Some((new_reserve_a, new_reserve_b))`
