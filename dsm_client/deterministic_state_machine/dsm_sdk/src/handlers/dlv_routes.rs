@@ -3143,11 +3143,28 @@ impl AppRouterImpl {
             }
         };
         // Past the gates. This is a SETTLEMENT: value moves.
-        let unlocker_pk = if req.unlocker_public_key.is_empty() {
-            req.device_id.clone()
-        } else {
-            req.unlocker_public_key.clone()
-        };
+        // Ruling I. The settler key is a correspondence claim checked against
+        // the proven authority at economic admission (provenance.rs). It used to
+        // fall back to `req.device_id` -- 32 DevID bytes in a 64-byte AK field --
+        // which passed the device-head advance (the signature is verified
+        // against THIS device's key, not the operation's) and could only fail
+        // later. A DevID is not an authority key, and no key is manufactured:
+        // an absent key is a refusal.
+        if req.unlocker_public_key.is_empty() {
+            return err(
+                "dlv.unlockRouted: unlocker_public_key is required; a DevID is not an \
+                 authority key and none is manufactured in its place"
+                    .to_string(),
+            );
+        }
+        if req.unlocker_public_key.len() != dsm::dlv::successor_validity::AUTHORITY_KEY_LEN {
+            return err(format!(
+                "dlv.unlockRouted: unlocker_public_key must be {} bytes (an authority key), got {}",
+                dsm::dlv::successor_validity::AUTHORITY_KEY_LEN,
+                req.unlocker_public_key.len()
+            ));
+        }
+        let unlocker_pk = req.unlocker_public_key.clone();
 
         // The trade, in the terms the conservation chokepoint checks. Taken from
         // the hop that was just verified against the owner's proven reserves, so
