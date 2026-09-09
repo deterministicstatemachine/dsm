@@ -375,10 +375,10 @@ storage address, a resource key or an authority check appears here.
 | `0x0008` | `MarketBounds` (`B_M`) | 1 | nested in `0x0006` | §5.6 defined |
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | §5.4 defined |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
-| `0x000B` | `TradeIntent` | 1 | `I = H(DSM/intent ‖ CCB)` | §5.5 defined |
+| `0x000B` | `TradeIntent` | **2** | `I = H(DSM/intent ‖ CCB)` | §5.5 defined; schema 1 burned by 2c-E |
 | `0x000C` | `RouteSet` (`R`) | **2** | nested in `0x0017` | §5.14 defined; schema 1 **burned** |
 | `0x000D` | `Route` (`r_i`) | **2** | set element of `0x000C` | §5.13 defined; schema 1 **burned** |
-| `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined |
+| `0x000E` | `SettlementBundle` (`B`) | **2** | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined; schema 1 burned by 2c-E's transitive bump |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
 | `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-D** |
@@ -392,7 +392,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0019` | **substrate** `RootProgressionDelegation` (`D_i`) | 1 | `del_i = H(DSM/devtree-delegation ‖ CCB)`, and the GRK-signed bytes | §5.16 defined |
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
 | `0x0031` | **substrate** `DsmSuccessorEvidence` | 1 | `evidence_addr = H(DSM/economic-dsm-successor-evidence/v1 ‖ CCB)`; nested in `0x0033` | §5.23 defined |
-| `0x0033` | `MarketTerms` | 1 | nested in `0x000E` | §5.20 defined |
+| `0x0033` | `MarketTerms` | **2** | nested in `0x000E` | §5.20 defined; schema 1 burned by 2c-E's transitive bump |
 | `0x001B` | **substrate** `EconomicRootClaimBody` | 1 | signed over `H_dom(DSM/economic-root-claim-sign/v1, CCB)` | §5.24 defined |
 | `0x001C` | **substrate** `EconomicAdmissionManifest` | 1 | inner `H_dom(N, P)`; named by `0x001B` field 5 | §5.25 defined |
 | `0x001D` | **substrate** `EconomicTransitionWitness` | 1 | inner identity; named by `0x001C` field 2 | §5.26 defined |
@@ -428,7 +428,11 @@ tuple's `enc(entry)` inline, so it still needs no class of its own. Per §2.8 a 
 is never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
 **Burned schema versions.** `0x0004`, `0x0005`, `0x000C`, `0x000D`, `0x0015`, `0x0016` and
-`0x0017` have schema 1 burned by the state/route identity cut. `0x0002` has schemas **1 and 2**
+`0x0017` have schema 1 burned by the state/route identity cut. `0x000B`, `0x0033` and `0x000E` have
+**schema 1 burned by amendment 2c-E** — `0x000B` because the exact-output cut changed its members,
+and the other two transitively, because §2.7 nests by complete CCB. No production path decodes,
+accepts, emits or falls back to any of the three, and schema-1 bytes must be refused as **burned**
+rather than as an unknown schema. `0x0002` has schemas **1 and 2**
 burned, and `0x0001` has schemas **1, 2 and 3** — the second bump on each is the
 register-incarnation cut (§5.1, §5.2). They are recorded so their numbers are never re-assigned; no
 production path decodes or emits them.
@@ -454,6 +458,8 @@ judgement call:
 0x0002 StorageSet   1→2 ─┐
 0x0005 EncumbranceSet 1→2─┴─► 0x0001 VaultStateV2  2→3   (fields 14 and 10)
 0x0002 StorageSet   2→3 ────► 0x0001 VaultStateV2  3→4   (field 14, register incarnations)
+0x000B TradeIntent  1→2 ────► 0x0033 MarketTerms  1→2   (field 1)
+                              └─► 0x000E SettlementBundle 1→2   (field 1, the market arm)
 0x0015 Allocation   1→2 ─┐
 0x0016 AllocBundle  1→2 ─┴─► 0x000D Route          1→2   (leg elements)
                              └─► 0x000C RouteSet    1→2   (set elements)
@@ -801,26 +807,36 @@ optional field bolted onto this one.
 
 `evaluation_budget` is a constant of `family_version`, as in `0x0007`.
 
-### 5.5 `TradeIntent` — class `0x000B`, schema 1
+### 5.5 `TradeIntent` — class `0x000B`, schema 2
 
-The specification enumerates the members:
-`TradeIntent = {token_in, amount_in, token_out, min_out, max_fee, max_hops, max_fanout, k, nonce}`,
-and states that no expiry, timestamp or duration is permitted.
+Amended by **2c-E** to the shipped exact-output market model.
+`TradeIntent = {token_in, amount_in, token_out, exact_out, fee_bps, nonce}`. No expiry, timestamp or
+duration is permitted; §9.1 of the specification excludes them and §2.8 forbids extending a shipped
+schema version.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `token_in` | `digest32` | token policy commitment |
-| 2 | `amount_in` | `u64` | base units |
-| 3 | `token_out` | `digest32` | |
-| 4 | `min_out` | `u64` | base units |
-| 5 | `max_fee` | `u64` | base units |
-| 6 | `max_hops` | `u32` | |
-| 7 | `max_fanout` | `u32` | Req 9.1: bounds DLVs inside one same-pair allocation leg |
-| 8 | `k` | `u32` | Req 9.1: bounds alternative routes retained in `R`; independent of field 7 |
-| 9 | `nonce` | `digest32` | |
+| 1 | `token_in` | `digest32` | input token policy commitment |
+| 2 | `amount_in` | `u64` | base units; checked narrowing from the signed 16-byte wire value, a value exceeding `u64` is a refusal and never a truncation |
+| 3 | `token_out` | `digest32` | output token policy commitment |
+| 4 | `exact_out` | `u64` | base units — the exact output the trader signed. NOT a floor |
+| 5 | `fee_bps` | `u32` | the fee **rate** the trader signed. Base units are not carried: the fee in base units is a function of the amount and the rate, and a second representation could disagree with its own inputs |
+| 6 | `nonce` | `digest32` | the trader's replay binding |
 
-No field 10. Adding expiry or any time-like field to this class is forbidden; §9.1 of the
-specification excludes them, and §2.8 forbids extending a shipped schema version.
+No field 7.
+
+**Schema 1 is burned.** It carried `min_out`, `max_fee`, `max_hops`, `max_fanout` and `k` — members
+of a model `RouteCommit` v2 deleted when it removed slippage floors and pre-signed fallbacks for
+*"one route, one anchored state, one exact output, one signature"*. Four of them had no wire source
+at all, so a producer could only have invented them, and `I` would then commit to values no verifier
+could re-derive. What each dropped member protected, and what protects it now, is tabulated in
+amendment 2c-E §5.
+
+**"The selected route satisfies `I`"** is stated normatively in 2c-E §6 (`SAT.1`–`SAT.6`), replacing
+the prose amendment 2c flagged. The load-bearing clause is `SAT.5`: `exact_out` is checked by
+re-simulating the market policy against the **authenticated** `V_n` that `c_n` names, never against
+the route's own account of itself — otherwise the predicate would be a self-attestation of the
+selected route.
 
 ### 5.6 `MarketBounds` — class `0x0008`, schema 1
 
@@ -1149,7 +1165,7 @@ seven owner rulings and the full verification obligations. This registry supplie
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `market_terms` | optional nested `0x0033` schema 1 | §2.3 presence marker always emitted; present **iff** Market. This is the bundle-shape discriminator |
+| 1 | `market_terms` | optional nested `0x0033` schema 2 | §2.3 presence marker always emitted; present **iff** Market. This is the bundle-shape discriminator |
 | 2 | `transitions` (`{T_v}`) | set of `0x000F` schema 1 | §2.4 over complete element CCB; duplicates invalid; **beta cardinality exactly 1** |
 
 **Shape rule.**
@@ -1197,7 +1213,7 @@ inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `Tr
 
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 1 | `intent` | nested `0x000B` schema 1 | the complete `TradeIntent`; `I = H_dom(DSM/intent, CCB(field 1))` is **derived, never carried** |
+| 1 | `intent` | nested `0x000B` schema 2 | the complete `TradeIntent`; `I = H_dom(DSM/intent, CCB(field 1))` is **derived, never carried** |
 | 2 | `route_set_commitment` (`X`) | `digest32` | `H_dom(DSM/route-set, CCB(Q))` |
 | 3 | `selected_route` (`r`) | nested `0x000D` schema 2 | the complete executed route, inline by value |
 | 4 | `trader_parent` | `digest32` | exact ordinary-DSM bilateral parent-state commitment |
@@ -1735,8 +1751,8 @@ Applying the anti-alias rule to three questions this audit exposed:
 
 | Object | Holds | Does **not** hold | Because |
 |---|---|---|---|
-| `Route` `0x000D` | the ordered leg sequence | `max_hops` | authoritative in `TradeIntent` `0x000B` field 6; `Route` validity checks `len(legs) ≤ max_hops` |
-| `AllocationBundle` `0x0016` | the canonical allocations | `max_fanout` | authoritative in `TradeIntent` field 7; the member count is checked against it |
+| `Route` `0x000D` | the ordered leg sequence | a leg-count bound | 2c-E deleted `max_hops`: `Route` validity now requires the legs to correspond EXACTLY to the signed `RouteCommit` hops, which is a check against a signed fact rather than a bound read out of the intent it bounds |
+| `AllocationBundle` `0x0016` | the canonical allocations | `max_fanout` | 2c-E deleted `max_fanout` — it had no wire source and beta emits one allocation per leg. If a later release needs the bound it belongs where the topology is signed, not in the trader's intent |
 | `AllocationBundle` `0x0016` | — | the token pair, by default | `p_v` binds the DLV parent, whose state already commits its canonical pair through `P_M`. Carrying it again creates a two-source equality invariant |
 
 The token-pair exclusion is a default, not a certainty: if independent verification turns out
@@ -1915,6 +1931,27 @@ In order, and not combined:
      not commit `R_T^+` (2c-B's linked pair) and `L_B` need not bind all four coordinates (§9.1's
      two-conjunct rule). Lands the **fourteenth** Lean module with the 2c-D leaf as an abstract
      Prop parameter; CI module pin 13 → 14. **C4 allocates no class number and changes no encoding.**
+   - **2c-E — WRITTEN.** [`amendment-2c-e-trade-intent-exact-output.md`](amendment-2c-e-trade-intent-exact-output.md).
+     5c-2 Step 1's fourth document, the one that never landed: amendment 2c had recorded that "the
+     selected route satisfies that exact `I`" was left as prose, and it still was. Surfaced by
+     checking whether the 5c-2 market producer could be written at all — it could not.
+     `MarketTerms` field 1 carries a complete `TradeIntent`, but `RouteCommit` is pinned at version
+     2 and carries no `min_out`, `max_fee`, `max_fanout` or `k`; their absence is the deliberate
+     removal of v1's slippage floors and pre-signed fallbacks for *"one route, one anchored state,
+     one exact output, one signature"*. A fifth member, `max_hops`, was derivable only by inverting
+     the authority direction. So the producer could only have invented four of nine members, and
+     `I` would have committed to values no verifier could re-derive. Owner ruling: amend the object
+     to the shipped model, **spec before code**. `0x000B` **schema 2** is six members reconciled
+     against the canonical `RouteCommit` the trader signs — `token_in`, `amount_in`, `token_out`,
+     `exact_out`, `fee_bps`, `nonce` — with schema 1 burned and every dropped member re-homed
+     (§5.5, and 2c-E §5). States the satisfaction predicate normatively as `SAT.1`–`SAT.6`; `SAT.5`
+     carries it, requiring `exact_out` to be checked by re-simulation against the authenticated
+     `V_n`, never against the route's own account, or the predicate is a self-attestation. The
+     schema bump propagates mechanically under §2.7 to `0x0033` and `0x000E`, moving every market
+     bundle's `b` and `addr`. **2c-E allocates no class number.** Its adopting change — the encoder
+     and strict decoder cut to schema 2 with schema-1 bytes refused as burned, the formal predicate,
+     the producer, the class-1 market vector regenerated exactly once from it, and three mutation
+     controls — is NOT started.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
