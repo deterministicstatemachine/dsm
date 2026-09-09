@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 
 //! CLASS-1 CONFORMANCE VECTORS FOR THE DLV SUCCESSOR DERIVATION.
 //!
@@ -14,6 +15,7 @@
 //!   1. the derivation lands on the pinned bytes (the predicate is frozen);
 //!   2. the production encoder agrees with the independent one on the derived
 //!      state (the encoding is frozen).
+//!
 //! A change to either the derivation or the encoding turns exactly one of them
 //! red, which is what makes the failure legible.
 
