@@ -3,10 +3,44 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      # A markdown-only change cannot alter any CI outcome, so running the
+      # pipeline on one buys nothing and costs ~95 minutes of runner time
+      # (Coverage alone is ~50). Verified before adding this, not assumed:
+      #   - no `.md` is compiled in — zero `include_str!("*.md")` in the tree;
+      #   - every gate that scans the tree excludes markdown explicitly
+      #     (`--glob '!**/*.md'` in no_clock_and_no_json.sh and
+      #     bridge_contracts_gate.sh, `--exclude='*.md'` in
+      #     check_forbidden_symbols.sh);
+      #   - the `main-branch-protect` ruleset requires deletion protection,
+      #     non-fast-forward, a reviewed PR and signed commits, and NO status
+      #     checks — so a skipped workflow cannot leave a PR unmergeable,
+      #     which is the usual trap with `paths-ignore`.
+      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
+      # two PDFs; those still run the pipeline, because "it lives under docs/"
+      # is not evidence that nothing consumes it.
+      - '**/*.md'
   # Run on every PR regardless of base branch, so stacked PRs (whose base is
   # another feature branch, not main) are validated too — not only the one at
   # the bottom of a stack that targets main. Push/schedule stay main-only.
   pull_request:
+    paths-ignore:
+      # A markdown-only change cannot alter any CI outcome, so running the
+      # pipeline on one buys nothing and costs ~95 minutes of runner time
+      # (Coverage alone is ~50). Verified before adding this, not assumed:
+      #   - no `.md` is compiled in — zero `include_str!("*.md")` in the tree;
+      #   - every gate that scans the tree excludes markdown explicitly
+      #     (`--glob '!**/*.md'` in no_clock_and_no_json.sh and
+      #     bridge_contracts_gate.sh, `--exclude='*.md'` in
+      #     check_forbidden_symbols.sh);
+      #   - the `main-branch-protect` ruleset requires deletion protection,
+      #     non-fast-forward, a reviewed PR and signed commits, and NO status
+      #     checks — so a skipped workflow cannot leave a PR unmergeable,
+      #     which is the usual trap with `paths-ignore`.
+      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
+      # two PDFs; those still run the pipeline, because "it lives under docs/"
+      # is not evidence that nothing consumes it.
+      - '**/*.md'
 
 permissions:
   contents: read
