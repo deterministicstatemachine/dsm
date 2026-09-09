@@ -977,7 +977,7 @@ pub(crate) async fn finish_admission(
         runtime: tokio::runtime::Handle::current(),
         expected_network_id: network_id.to_vec(),
     };
-    let (new_validated, _funded) = advance_validated(
+    let (new_validated, _validity, _funded) = advance_validated(
         validated,
         &registered,
         &manifest,
