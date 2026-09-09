@@ -493,7 +493,14 @@ impl DeriveExpected {
 /// reach [`C3Verdict::Valid`] without one, so the encoder cut alone can never
 /// make a market successor look complete. That inference —
 /// `2c-A lands + 10.a passes = market valid` — is not sound, and this type is
-/// what stops the compiler from letting anyone write it.
+/// what stops the compiler from letting anyone write it:
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::IndependentRealization;
+/// let _ = IndependentRealization {
+///     _c4_owns_this: core::marker::PhantomData,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndependentRealization {
     _c4_owns_this: core::marker::PhantomData<()>,
@@ -549,6 +556,23 @@ pub enum C3Verdict {
 /// Private field and no public constructor, the same discipline
 /// `ValidatedEconomicRoot` uses: there is no network event that declares a
 /// successor fully valid, and no `assume_valid` shortcut to add later in a hurry.
+///
+/// Pinned by the compiler, not by convention — this does not build:
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::{C3Verdict, CompleteValidity};
+/// let claimed = C3Verdict::Valid(CompleteValidity {
+///     _unreachable_until_2c_a: core::marker::PhantomData,
+/// });
+/// assert!(claimed.may_certify());
+/// ```
+///
+/// and neither does the default-construction route:
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::CompleteValidity;
+/// let _ = CompleteValidity::default();
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteValidity {
     _unreachable_until_2c_a: core::marker::PhantomData<()>,
