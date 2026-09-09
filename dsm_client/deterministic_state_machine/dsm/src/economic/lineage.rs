@@ -66,6 +66,7 @@
 //! acyclicity rule structural: an external source resolves from a root this
 //! verifier has itself validated, never from the transition being validated.
 
+use crate::dlv::successor_validity::{DlvTransitionKind, SuccessorValidity};
 use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
 use crate::economic::provenance::{
     verify_transition_provenance, FundedCredit, ProvenanceContext, ProvenanceError,
@@ -448,7 +449,8 @@ pub fn advance_validated(
     // claims bind against THIS, because storage-node bearer attribution is
     // not the cryptographic identity binding.
     proven_ak: &[u8],
-) -> Result<(ValidatedEconomicRoot, Vec<FundedCredit>), EconomicValidationError> {
+) -> Result<(ValidatedEconomicRoot, SuccessorValidity, Vec<FundedCredit>), EconomicValidationError>
+{
     if previous.economic_root != witness.pre_economic_root {
         return Err(EconomicValidationError::PreRootIsNotThePredecessor {
             predecessor: previous.economic_root,
@@ -609,11 +611,32 @@ pub fn advance_validated(
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
+    // THE C3/C4 SEAM. For a DLV transition, provenance has just established
+    // its conjuncts; say so, typed, instead of discarding it. The verdict slot
+    // stays empty -- this path does not hold V_n, and an empty slot is not
+    // Valid. C4 fills it.
+    let validity = match accepted.dsm_verified_operation() {
+        Some(crate::types::operations::Operation::DlvSettle { .. }) => {
+            SuccessorValidity::DlvTransition {
+                kind: DlvTransitionKind::Settle,
+                verdict: None,
+            }
+        }
+        Some(crate::types::operations::Operation::DlvClose { .. }) => {
+            SuccessorValidity::DlvTransition {
+                kind: DlvTransitionKind::Close,
+                verdict: None,
+            }
+        }
+        _ => SuccessorValidity::NoDlvTransition,
+    };
+
     Ok((
         ValidatedEconomicRoot {
             economic_position: registered.economic_position,
             economic_root: derived,
         },
+        validity,
         funded,
     ))
 }
