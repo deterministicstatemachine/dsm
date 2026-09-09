@@ -320,7 +320,10 @@ fn the_pinned_successor_bytes_correspond_and_yield_c_next_from_the_supplied_side
 fn each_ruling_b_deviation_is_a_correspondence_mismatch() {
     let (m, c_n) = derived_market();
     let reject = |name: &str, supplied: Vec<u8>| {
-        assert_ne!(supplied, MARKET_SUCCESSOR_CCB, "{name}: the vector must differ");
+        assert_ne!(
+            supplied, MARKET_SUCCESSOR_CCB,
+            "{name}: the vector must differ"
+        );
         assert_eq!(
             check_correspondence(&m, c_n, &supplied).unwrap_err(),
             Reason::CorrespondenceMismatch,

@@ -1028,8 +1028,8 @@ pub(crate) async fn compose_discovered_vault(
 mod tests {
     use super::*;
     use dsm::ccb::{
-        genesis_parent_commitment, vault_state_commitment, EncumbranceSet, FeePolicy,
-        MarketPolicy, ReleasePolicy, StorageSetMembers,
+        genesis_parent_commitment, vault_state_commitment, EncumbranceSet, FeePolicy, MarketPolicy,
+        ReleasePolicy, StorageSetMembers,
     };
     use dsm::crypto::sphincs::{generate_keypair, SphincsVariant};
     use dsm::dlv::settlement_receipt_leaf::{
@@ -1189,7 +1189,11 @@ mod tests {
 
     /// A successor of `vault_id` at `parent_sequence + 1` for a bind whose
     /// realization evidence never arrives — the walk stops before `10.a`.
-    fn any_successor(vault_id: &[u8; 32], parent_sequence: u64, parent_c_n: &[u8; 32]) -> VaultStateV2 {
+    fn any_successor(
+        vault_id: &[u8; 32],
+        parent_sequence: u64,
+        parent_c_n: &[u8; 32],
+    ) -> VaultStateV2 {
         dsm::ccb::settlement::fixtures::successor_of(
             *parent_c_n,
             *vault_id,
@@ -1201,7 +1205,12 @@ mod tests {
 
     /// The exact market successor the frozen predicate derives for a swap on
     /// `parent` — what an honest bundle's field 2 carries.
-    fn swapped(parent: &VaultStateV2, c_n: [u8; 32], input_is_a: bool, input_amount: u64) -> VaultStateV2 {
+    fn swapped(
+        parent: &VaultStateV2,
+        c_n: [u8; 32],
+        input_is_a: bool,
+        input_amount: u64,
+    ) -> VaultStateV2 {
         let (in_pc, out_pc) = if input_is_a {
             (TOKEN_A, TOKEN_B)
         } else {
@@ -1897,9 +1906,18 @@ mod tests {
         let vault_id = vid(0x34);
         let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
         let (pk, sk) = trader();
-        let (new_a, new_b, x) =
-            publish_rc_for_swap(&x_seed(0x34), &vault_id, 1_000_000, 500_000, &c0, true, 10_000, &pk, &sk)
-                .await;
+        let (new_a, new_b, x) = publish_rc_for_swap(
+            &x_seed(0x34),
+            &vault_id,
+            1_000_000,
+            500_000,
+            &c0,
+            true,
+            10_000,
+            &pk,
+            &sk,
+        )
+        .await;
         publish_extcommit(&x, &pk).await;
         let trade = settled_trade(&x, 0, true, 10_000, 500_000 - new_b);
         publish_receipt(&vault_id, &trade, &pk, &sk).await;
@@ -2336,7 +2354,10 @@ mod tests {
             (1, 0, 0),
             "the vault is dead"
         );
-        assert_eq!(composed.state, drained_state, "the installed state IS the carried one");
+        assert_eq!(
+            composed.state, drained_state,
+            "the installed state IS the carried one"
+        );
         assert_eq!(
             composed.c_n,
             vault_state_commitment(&drained_state).expect("commits"),
@@ -2633,7 +2654,8 @@ mod tests {
         win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk).await;
         // Now plant its committed record at THIS parent's key, which is what
         // an application-blind register permits.
-        let bundle = market_bundle_for_tests(&stale, any_successor(&vault_id, 0, &stale), &x_seed(0x10));
+        let bundle =
+            market_bundle_for_tests(&stale, any_successor(&vault_id, 0, &stale), &x_seed(0x10));
         let canon = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon");
         crate::sdk::binding_fleet_double::plant_committed(
             &["dsm-node-1", "dsm-node-2"],

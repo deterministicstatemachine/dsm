@@ -1249,8 +1249,8 @@ mod tests {
     #[test]
     fn a_partial_verdict_in_the_slot_does_not_certify() {
         let p = parent(1_000, 1_000, None);
-        let w = check_correspondence(&p, [7; 32], &p.encode().expect("encodes"))
-            .expect("bytes equal");
+        let w =
+            check_correspondence(&p, [7; 32], &p.encode().expect("encodes")).expect("bytes equal");
         let v = SuccessorValidity::DlvTransition {
             kind: DlvTransitionKind::Settle,
             verdict: Some(C3Verdict::PartialPendingRealization(w)),

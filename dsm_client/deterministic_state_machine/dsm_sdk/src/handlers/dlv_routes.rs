@@ -2719,7 +2719,11 @@ impl AppRouterImpl {
         };
         let close_commitment = match dsm::ccb::vault_state_commitment(&next_state) {
             Ok(c) => c,
-            Err(e) => return err(format!("dlv.close: the close successor does not encode: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "dlv.close: the close successor does not encode: {e}"
+                ))
+            }
         };
 
         // The release must satisfy the applicable token policy (Req 4.6 /
@@ -2857,10 +2861,8 @@ impl AppRouterImpl {
                 Ok(kp) => kp,
                 Err(e) => return err(format!("dlv.close: no signing authority: {e}")),
             };
-            match dsm::dlv::close_authorization::sign_close_authorization(
-                &release,
-                &kp.secret_key,
-            ) {
+            match dsm::dlv::close_authorization::sign_close_authorization(&release, &kp.secret_key)
+            {
                 Ok(sig) => sig,
                 Err(e) => return err(format!("dlv.close: could not authorize the close: {e}")),
             }
