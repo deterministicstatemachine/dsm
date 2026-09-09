@@ -483,14 +483,17 @@ pub(crate) fn dsm_successor_evidence_at(
 /// `0x0033` schema 1.
 pub(crate) fn market_terms_at(c: &mut Cursor<'_>) -> Result<MarketTerms, DecodeError> {
     c.envelope(class::MARKET_TERMS, MarketTerms::SCHEMA)?;
-    Ok(MarketTerms {
+    let terms = MarketTerms {
         intent: trade_intent_at(c)?,
         route_set_commitment: c.digest32()?,
         selected_route: route_at(c)?,
         trader_parent: c.digest32()?,
         trader_successor: c.digest32()?,
         recovery_material: dsm_successor_evidence_at(c)?,
-    })
+    };
+    // 2c-B's in-bundle half, enforced where a foreign bundle actually arrives.
+    terms.check_evidence_linkage().map_err(invalid)?;
+    Ok(terms)
 }
 
 /// A decoded `0x000F` with the exact byte span its field 2 occupied in the

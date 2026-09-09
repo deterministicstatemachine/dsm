@@ -398,6 +398,15 @@ pub enum CcbError {
     TransitionCount { got: usize },
     /// `V_{n+1}.parent_state_commitment != T_v.parent_binding`.
     ParentLinkage,
+    /// `MarketTerms.recovery_material.embedded_parent != MarketTerms.trader_parent`
+    /// — the second of 2c-B's two chain-tip equalities, and the half whose
+    /// operands both live inside `B` (2c-A.1 ruling 9: in-bundle structural
+    /// checks are the decoder's). The first half — decoding
+    /// `operation_bytes` as `DlvSettleOperationPreimageV1` and recomputing
+    /// `relationship_chain_tip_v2` — is successor-evidence validity rather
+    /// than byte decoding and lands with 5c-2 Step 2/3, when a real prepared
+    /// preimage exists to carry.
+    EvidenceParentMismatch,
     /// An owner close whose successor still holds reserves.
     CloseSuccessorNotRetired { reserve_a: u64, reserve_b: u64 },
     /// A `signature_alg` value the registry does not declare.
@@ -592,6 +601,10 @@ impl core::fmt::Display for CcbError {
             CcbError::ParentLinkage => write!(
                 f,
                 "the successor's parent_state_commitment is not the transition's parent_binding"
+            ),
+            CcbError::EvidenceParentMismatch => write!(
+                f,
+                "the successor evidence's embedded_parent is not the market terms' trader_parent"
             ),
             CcbError::CloseSuccessorNotRetired {
                 reserve_a,

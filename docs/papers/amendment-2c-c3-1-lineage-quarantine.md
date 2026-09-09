@@ -277,8 +277,15 @@ nothing downstream may resolve a quarantined key to a value. A `resolve` that an
 quarantined key is the fork Req 6.3 forbids, whichever value it picks.
 
 **Not convertible.** A quarantined outcome may not be mapped to `INVALID` (as if the candidate were
-merely bad), to `INCOMPLETE` (as if retrying could help), or to `PartialPendingEncoderCut` (as if it
-were a deployment status). C3's `C3Verdict` has no arm that admits it, and none is added.
+merely bad), to `INCOMPLETE` (as if retrying could help), or to any deployment-status arm of
+`C3Verdict` (as if the containment were a deployment gap). C3's `C3Verdict` has no arm that admits
+it, and none is added.
+
+> **Corrected 2026-09-09 by the 2c-A.1 adopting change (#799).** The third clause named
+> `PartialPendingEncoderCut` by type. 2c-A.1 ruling 12 deleted that arm, and the deployment-status
+> arm is now `PartialPendingRealization` — which carries a market fold pending 2c-C4's realization
+> fact. The RULE is unchanged and now reads by role rather than by type name, so it binds whatever
+> deployment-status arm exists: a quarantine is a `SAFETY_VIOLATION` and is convertible to nothing.
 
 ---
 

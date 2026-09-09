@@ -28,13 +28,18 @@
       property of the OWNER'S balance, not of `V_{n+1}`, so no predicate over
       the successor -- here or in Rust -- can express it.
     * `VDS.COMMON.10.a` -- the correspondence conjunct these theorems are built
-      around -- is NORMATIVE and PROVED HERE, but is IMPLEMENTATION-BLOCKED on
-      2c-A's canonical encoder cut. No authoritative canonical successor bytes
-      exist on the wire today: `successor_ccb` carries the route-set commitment
-      on a market bundle and a slot commitment on a close, and both composition
-      arms derive the successor locally. Proving it here does not make it
-      implementable there, and production must not report VALID for a path whose
-      validity requires it until the byte comparison is actually performed.
+      around -- is NORMATIVE and PROVED HERE. It WAS implementation-blocked on
+      2c-A's canonical encoder cut: no authoritative canonical successor bytes
+      existed on the wire, `successor_ccb` carried the route-set commitment on a
+      market bundle and a slot commitment on a close, and both composition arms
+      derived the successor locally.
+      UNBLOCKED 2026-09-09 by the 2c-A.1 adopting change: `0x000F` field 2 now
+      carries the complete nested successor, and `check_correspondence` compares
+      `Canon(expected)` against the recorded field-2 byte span of the fetched
+      bundle. Proving it here still does not make it implementable there -- the
+      standing rule is unchanged: production must not report VALID for a path
+      whose validity requires the comparison until the comparison is actually
+      performed on authoritative supplied bytes.
     * The acceptance condition is equality of canonical BYTES. A decode/re-encode
       round trip is NOT a substitute unless the encoder performing it is the
       frozen normative encoder -- `decode_vault_state` normalizes rather than
@@ -44,7 +49,7 @@
       variable-length hazards as CCB; it is not CCB.
     * `Nat` is unbounded, so overflow cannot arise on its own. The overflow
       admissibility arm is therefore an EXPLICIT bound guard, not an emergent
-      property -- see `noOverflow`.
+      property -- see the `maxU64` guard inside `deriveMarket`.
 
   Mutation controls, executed rather than asserted. A green suite around a gate
   proves nothing about whether the gate is load-bearing, so both were run and

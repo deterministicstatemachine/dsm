@@ -734,13 +734,19 @@ retired item. Classes are the failing outcome; every conjunct contributes `VALID
 | id | condition | source | on failure |
 |---|---|---|---|
 | `VDS.GATE.M.1` | the complete `SettlementBundle` is binding-final | Def 6.1(a), Def 6.24 | `INCOMPLETE` unresolved · `SAFETY_VIOLATION` if two distinct bundles are binding-final at one parent (Req 6.3) |
-| `VDS.GATE.M.2` | the exact initiating trader successor has a verified acceptance artifact `A_B` | Def 6.1(a), Def 6.26 | `INCOMPLETE` absent · `INVALID` present and not verifying |
+| `VDS.GATE.M.2` | the exact initiating trader successor has a verified acceptance artifact `TA_B` | Def 6.1(a), Def 6.26 | `INCOMPLETE` absent · `INVALID` present and not verifying |
 | `VDS.GATE.C.1` | the exact release/close candidate is binding-final for the current parent | Def 6.1(b) | `INCOMPLETE` · `SAFETY_VIOLATION` on duplicate |
 | `VDS.GATE.C.2` | the successor verifies under Req 4.6, token policy, conservation and owner authority Def 5.1(a) | Def 6.1(b) | `INVALID`; token policy per Ruling H |
 
-`VDS.GATE.C.*` requires **no** `A_B` and no owner-side post-binding acceptance artifact. The two gate
+`VDS.GATE.C.*` requires **no** `TA_B` and no owner-side post-binding acceptance artifact. The two gate
 arms are **disjoint and exhaustive** over the successor kinds; a market successor evaluated under the
 close arm is `INVALID`, never accidentally accepted.
+
+> **Corrected 2026-09-09.** Both rows above named the acceptance artifact `A_B`. Registry §6a
+> Finding 4 settled that `A_B` denoted two different objects and renamed both: the trader acceptance
+> for a settlement bundle is `TA_B` (`0x0011`, digest `ta_B`) and the allocation bundle is
+> `AB_{A→B}` (`0x0016`); **bare `A_B` is retained for neither**. Only the symbol changes here — the
+> gate, its source and its failure classes are unaltered.
 
 ### Common
 
@@ -942,8 +948,13 @@ C3 overall                         CLOSED — which is NOT "DLV succession verif
 ```
 
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation
-contract, the outcome taxonomy, the field dispositions and the input contract. **Frozen is not the
-same as presently implementable** — `VDS.COMMON.10.a` is normative and blocked, as recorded above.
+contract, the outcome taxonomy, the field dispositions and the input contract.
+
+> **Corrected 2026-09-09 by the 2c-A.1 adopting change (#799).** This paragraph read "**Frozen is not
+> the same as presently implementable** — `VDS.COMMON.10.a` is normative and blocked, as recorded
+> above." The encoder cut supplied the missing operand, so the sentence is now false and is replaced:
+> every conjunct of `ValidDlvSuccessorCore` is presently implementable and implemented. What remains
+> undischarged is named below and is not `10.a`.
 
 **Two conjuncts are DECLARED AND UNDISCHARGED**, named so that "C3 is closed" can never be read as
 "DLV succession is fully verified":
@@ -959,7 +970,9 @@ written. A verifier built literally from Def 6.1 and §7.1 rejects every valid b
 **The evidence walk — NOT C3's.** How results compose into an accepted-successor proof remains
 2c-C4's; `TA_B` and the bundle-acceptance leaf remain 2c-D's.
 
-**Implementation — DONE for every presently-evaluable conjunct (Phase F report, 2026-09-09).**
+**Implementation — the Phase F record (2026-09-09, superseded the same day by the paragraph that
+follows it).** Read as history: every sentence in this paragraph about `10.a` was true when Phase F
+was written and false after the 2c-A.1 adopting change landed.
 Phase D landed the core module and typed derivation (#788), the taxonomy split and receipt classes
 (#789), the settler-identity seam, the widened `advance_validated` (#790) and both composition arms
 deriving through the predicate (#791); Phase E landed the class-1 vectors (#792), the lineage
