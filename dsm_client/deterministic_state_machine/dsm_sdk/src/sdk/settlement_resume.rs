@@ -184,7 +184,7 @@ mod live {
             trader_parent_state_commitment: fence.trader_parent_state_commitment,
             tx_id: fence.tx_id,
         };
-        run_fenced(
+        let out = run_fenced(
             &mut engine,
             &members,
             &r.keys,
@@ -196,8 +196,23 @@ mod live {
             fence.storage_set_id,
             fence.value_addr,
         )
-        .await
-        .is_ok()
+        .await;
+        // 2c-C3.1 ruling A, source (b): a resumed transaction that commits is
+        // this device's own finality too.
+        if out == Ok(dsm::dlv::quorum_bind::Outcome::Committed) {
+            if let Ok(bundle) = dsm::dlv::settlement_bundle::decode_canonical(&bytes) {
+                crate::sdk::settlement_bind::record_own_commit(
+                    &set,
+                    &bundle,
+                    fence.tx_id,
+                    fence.value_addr,
+                    engine.ballot(),
+                    proposer_id,
+                    r.trader_successor,
+                );
+            }
+        }
+        out.is_ok()
     }
 
     /// Restore every unresolved trader-parent fence on restart (Req 16.5).

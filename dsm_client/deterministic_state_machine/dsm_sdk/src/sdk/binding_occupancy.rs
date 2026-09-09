@@ -33,12 +33,15 @@
 //! "the parent is free", which is the one reading that is never safe.
 
 use dsm::dlv::successor_validity::{OutcomeClass, Reason};
-use dsm::dlv::binding_observation::{observe_single_key, BindingObservation};
+use dsm::dlv::binding_observation::{
+    observe_single_key_with_read, BindingObservation, CanonicalQuorum, ChosenBinding, KeyRead,
+};
 use dsm::dlv::settlement_bundle::{self, BundleShape};
 use dsm::types::proto as pb;
 
 use crate::sdk::quorum_bind_runner::{binding_transport, read_binding_attributed};
 use crate::sdk::storage_set::StorageSet;
+use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
 
 /// What the vault's committed set says about the binding of one parent state.
 ///
@@ -155,6 +158,22 @@ pub async fn probe_parent_binding(
     committed_quorum: u32,
 ) -> BindingProbe {
     let resource_key = settlement_bundle::resource_key(parent_c_n);
+    // 2c-C3.1 ruling D, effect 5: a quarantined key is reported as such and
+    // never resolved to a value — on the probe exactly as on the walk.
+    if let Ok(Some(root)) = quarantine::refusing_root(vault_id, generation, parent_c_n) {
+        return BindingProbe {
+            resource_key,
+            verdict: "LINEAGE_QUARANTINED",
+            tx_id: None,
+            value_digest: None,
+            value_addr: None,
+            round_counter: None,
+            round_proposer: None,
+            holders: None,
+            bundle_parent_matches: None,
+            detail: Some(quarantine::describe_refusal(&root, generation)),
+        };
+    }
     let observation = observe_parent_key(set, parent_c_n, committed_quorum).await;
     let mut probe = BindingProbe {
         resource_key,
@@ -317,6 +336,39 @@ pub(crate) async fn observe_key_at_set(
     key: &[u8; 32],
     committed_quorum: u32,
 ) -> BindingObservation {
+    observe_key_at_set_with_read(set, key, committed_quorum)
+        .await
+        .0
+}
+
+/// [`observe_key_at_set`], returning the read the verdict came from (2c-C3.1
+/// ruling H) so a finality can be recorded with its evidence.
+///
+/// 2c-C3.1 ruling F: THE OBSERVER REFUSES A NON-CANONICAL QUORUM ITSELF.
+/// Composition validates `q` before it reads; this validates it again at the
+/// point the read is classified, so no caller can hand the observer a weaker
+/// `q` and make `Conflict` reachable. A read at a `q` the observer cannot
+/// stand behind establishes nothing.
+pub(crate) async fn observe_key_at_set_with_read(
+    set: &StorageSet,
+    key: &[u8; 32],
+    committed_quorum: u32,
+) -> (BindingObservation, KeyRead) {
+    let quorum = match CanonicalQuorum::of_committed(set.len(), committed_quorum) {
+        Ok(q) => q,
+        Err(e) => {
+            log::warn!("binding read refused at a non-canonical quorum: {e}");
+            return (
+                BindingObservation::Unavailable {
+                    attributed: 0,
+                    required: committed_quorum,
+                },
+                KeyRead {
+                    per_member: Vec::new(),
+                },
+            );
+        }
+    };
     let members: Vec<dsm::dlv::quorum_bind::CommittedMember> = set
         .members()
         .iter()
@@ -327,7 +379,7 @@ pub(crate) async fn observe_key_at_set(
         .collect();
     let transport = binding_transport(set);
     let reads = read_binding_attributed(&members, &[*key], transport.as_ref()).await;
-    observe_single_key(&reads, committed_quorum)
+    observe_single_key_with_read(&reads, quorum)
 }
 
 /// Read `k(c_n)` at every committed member and classify it at the vault's
@@ -340,12 +392,108 @@ pub(crate) async fn observe_parent_key(
     parent_c_n: &[u8; 32],
     committed_quorum: u32,
 ) -> BindingObservation {
-    observe_key_at_set(
+    observe_parent_key_with_read(set, parent_c_n, committed_quorum)
+        .await
+        .0
+}
+
+/// [`observe_parent_key`], with the read the verdict came from.
+pub(crate) async fn observe_parent_key_with_read(
+    set: &StorageSet,
+    parent_c_n: &[u8; 32],
+    committed_quorum: u32,
+) -> (BindingObservation, KeyRead) {
+    observe_key_at_set_with_read(
         set,
         &settlement_bundle::resource_key(parent_c_n),
         committed_quorum,
     )
     .await
+}
+
+/// 2c-C3.1 ruling A: record an OBSERVED qualifying finality the moment it is
+/// established, before any use is made of it, compared on VALUE against what
+/// this verifier recorded earlier at the same key. A contradiction writes the
+/// quarantine root with BOTH evidence objects and refuses.
+///
+/// Returns the refusal to hand back, or `None` when the finality may be used.
+#[allow(clippy::too_many_arguments)]
+fn establish_observed_finality(
+    set: &StorageSet,
+    vault_id: &[u8; 32],
+    generation: u64,
+    parent_c_n: &[u8; 32],
+    storage_set_id: &[u8; 32],
+    committed_quorum: u32,
+    chosen: &ChosenBinding,
+    read: KeyRead,
+) -> Option<OccupancyRefusal> {
+    let b32 = crate::util::text_id::encode_base32_crockford;
+    let evidence = quarantine::Evidence::Observed(quarantine::ObservedEvidence {
+        quorum: committed_quorum,
+        members: set
+            .members()
+            .iter()
+            .map(|m| quarantine::MemberIdentity {
+                member_id: m.member_id.as_bytes().to_vec(),
+                register_incarnation: m.register_incarnation_id,
+            })
+            .collect(),
+        read,
+        chosen: chosen.clone(),
+    })
+    .encode();
+    let finality = quarantine::ObservedFinality {
+        vault_id: *vault_id,
+        c_n: *parent_c_n,
+        generation,
+        value: quarantine::FinalityValue::of(chosen),
+        round: chosen.round,
+        holders: chosen.holders,
+        storage_set_id: *storage_set_id,
+        quorum: committed_quorum,
+        evidence,
+    };
+    match quarantine::record_finality(&finality) {
+        Ok(quarantine::RecordOutcome::Recorded)
+        | Ok(quarantine::RecordOutcome::AlreadyRecordedSameValue) => None,
+        Ok(quarantine::RecordOutcome::Contradiction { recorded }) => {
+            let mut detail = format!(
+                "duplicate binding finality at generation {generation}: this verifier recorded \
+                 {} chosen at this parent and now observes {} chosen; the lineage is quarantined",
+                b32(&recorded.value.tx_id),
+                b32(&chosen.tx_id),
+            );
+            // Ruling C: the root is written BEFORE the refusal is returned. If
+            // it cannot be, the refusal stands and the failure is reported —
+            // never downgraded, never silently proceeded past.
+            if let Err(e) = quarantine::quarantine_root(&quarantine::QuarantineRoot {
+                vault_id: *vault_id,
+                root_c_n: *parent_c_n,
+                root_generation: generation,
+                storage_set_id: *storage_set_id,
+                quorum: committed_quorum,
+                first_evidence: recorded.evidence,
+                second_evidence: finality.evidence,
+                insertion_ordinal: 0,
+            }) {
+                detail.push_str(&format!(
+                    "; the quarantine root could NOT be durably written ({e}), so this refusal \
+                     stands without its memory until a later observation writes it"
+                ));
+            }
+            Some(OccupancyRefusal::new(
+                Reason::DuplicateBindingFinality,
+                detail,
+            ))
+        }
+        // A finality that could not be recorded may not be used (ruling A):
+        // a local resource failure, so INCOMPLETE, and retryable.
+        Err(e) => Some(OccupancyRefusal::new(
+            Reason::BindingEvidenceUnavailable,
+            format!("could not durably record the binding finality: {e}"),
+        )),
+    }
 }
 
 /// Occupancy of one vault parent, with the owning bundle resolved and bound to
@@ -358,9 +506,43 @@ pub(crate) async fn observe_parent_binding(
     storage_set_id: &[u8; 32],
     committed_quorum: u32,
 ) -> ParentOccupancy {
-    let chosen = match observe_parent_key(set, parent_c_n, committed_quorum).await {
+    // 2c-C3.1 ruling D, effect 5: a quarantined lineage is NEVER resolved to a
+    // value — not by the walk, not by the probe. The durable root is consulted
+    // BEFORE the register is read, because the register may now say anything
+    // about this key; the root is the fact.
+    match quarantine::refusing_root(vault_id, generation, parent_c_n) {
+        Ok(None) => {}
+        Ok(Some(root)) => {
+            return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
+                Reason::LineageQuarantined,
+                quarantine::describe_refusal(&root, generation),
+            ))
+        }
+        Err(e) => {
+            return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
+                Reason::BindingEvidenceUnavailable,
+                format!("the lineage quarantine table is unreadable: {e}"),
+            ))
+        }
+    }
+    let (observation, read) = observe_parent_key_with_read(set, parent_c_n, committed_quorum).await;
+    let chosen = match observation {
         BindingObservation::Free => return ParentOccupancy::Free,
-        BindingObservation::BoundFinal(c) => c,
+        BindingObservation::BoundFinal(c) => {
+            if let Some(refusal) = establish_observed_finality(
+                set,
+                vault_id,
+                generation,
+                parent_c_n,
+                storage_set_id,
+                committed_quorum,
+                &c,
+                read,
+            ) {
+                return ParentOccupancy::Unresolvable(refusal);
+            }
+            c
+        }
         // A promise in flight, or an accepted record below THIS reader's
         // quorum. Retryable, and never "free": a value already chosen behind a
         // down member lands here, because two quorums intersect but one read
@@ -375,11 +557,17 @@ pub(crate) async fn observe_parent_binding(
         }
         // Req 6.3. Two chosen values at one write-once key is a proven
         // contradiction in the substrate, not a failed check — SAFETY_VIOLATION,
-        // never resolved by iteration order and never tie-broken.
-        BindingObservation::Conflict { distinct } => {
+        // never resolved by iteration order and never tie-broken. Unreachable
+        // at the canonical quorum the observer insists on (`CanonicalQuorum`);
+        // retained as the refusal it always was. The trigger that IS reachable
+        // is the temporal one above.
+        BindingObservation::Conflict { chosen, .. } => {
             return ParentOccupancy::Unresolvable(OccupancyRefusal::new(
                 Reason::DuplicateBindingFinality,
-                format!("the binding key for this parent holds {distinct} chosen values"),
+                format!(
+                    "the binding key for this parent holds {} chosen values",
+                    chosen.len()
+                ),
             ))
         }
         BindingObservation::Unavailable {
@@ -604,6 +792,153 @@ mod tests {
     async fn bind(set: &StorageSet, b: &pb::SettlementBundleV1, c_n: [u8; 32]) {
         let out = bind_settlement(set, [7; 32], b, VAULT, c_n).await.unwrap();
         assert_eq!(out, Ok(Outcome::Committed));
+    }
+
+    fn all_members() -> [&'static str; 3] {
+        ["dsm-node-0", "dsm-node-1", "dsm-node-2"]
+    }
+
+    // ── 2c-C3.1 ────────────────────────────────────────────────────────────
+
+    /// Ruling A: a bound parent is recorded as a finality the moment it is
+    /// observed, and re-observing the SAME value writes nothing new.
+    #[tokio::test]
+    #[serial]
+    async fn a_bound_parent_is_recorded_and_reobserving_it_is_not_a_contradiction() {
+        let set = init();
+        let b = market_bundle(&set, VAULT, C_N);
+        bind(&set, &b, C_N).await;
+        let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        assert!(matches!(occ, ParentOccupancy::BoundBy(_)), "{occ:?}");
+        let canon = settlement_bundle::canon(&b).unwrap();
+        let recorded = quarantine::observed_finality(&VAULT, &C_N)
+            .unwrap()
+            .expect("recorded at the moment it was established");
+        assert_eq!(
+            recorded.value.tx_id,
+            settlement_bundle::bundle_digest(&canon)
+        );
+        assert_eq!(recorded.generation, GEN);
+        let again = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        assert!(matches!(again, ParentOccupancy::BoundBy(_)), "{again:?}");
+        assert!(quarantine::roots_for_vault(&VAULT).unwrap().is_empty());
+    }
+
+    /// Rulings A, B, D, E at the observer: a SECOND chosen value at a key this
+    /// verifier recorded is duplicate finality; the root is written with both
+    /// evidence objects; and from then on the key is never resolved again —
+    /// not with the second value, not with the first restored, and not on the
+    /// probe.
+    #[tokio::test]
+    #[serial]
+    async fn a_second_chosen_value_at_a_recorded_key_quarantines_and_is_never_resolved_again() {
+        let set = init();
+        let b = market_bundle(&set, VAULT, C_N);
+        bind(&set, &b, C_N).await;
+        assert!(matches!(
+            observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await,
+            ParentOccupancy::BoundBy(_)
+        ));
+        let a = quarantine::observed_finality(&VAULT, &C_N)
+            .unwrap()
+            .unwrap();
+
+        // Every member breaks its register and serves B at the same key.
+        let k = settlement_bundle::resource_key(&C_N);
+        let b_digest = [0xB1u8; 32];
+        let b_addr = dsm::storage_object::immutable_addr_from_inner(
+            dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+            &b_digest,
+        );
+        binding_fleet_double::plant_committed(
+            &all_members(),
+            &[k],
+            b_digest,
+            b_digest,
+            b_addr,
+            Round {
+                counter: a.round.counter + 10,
+                proposer_id: [0xB1; 32],
+            },
+        );
+        let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        let ParentOccupancy::Unresolvable(why) = occ else {
+            panic!("expected the duplicate-finality refusal, got {occ:?}");
+        };
+        assert_eq!(why.reason, Reason::DuplicateBindingFinality);
+        assert_eq!(why.class(), OutcomeClass::SafetyViolation);
+
+        let roots = quarantine::roots_for_vault(&VAULT).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].root_c_n, C_N);
+        assert_eq!(roots[0].root_generation, GEN);
+        let first = quarantine::Evidence::decode(&roots[0].first_evidence).unwrap();
+        let second = quarantine::Evidence::decode(&roots[0].second_evidence).unwrap();
+        assert_eq!(first.value(), a.value, "the first evidence is A");
+        assert_eq!(second.value().tx_id, b_digest, "the second evidence is B");
+        let quarantine::Evidence::Observed(o) = &second else {
+            panic!("the second finality was observed")
+        };
+        o.recompute().expect("the preserved read reproduces B");
+
+        // Never resolved again: with B still served, with A restored, and on
+        // the probe.
+        let refused = |occ: ParentOccupancy| {
+            let ParentOccupancy::Unresolvable(why) = occ else {
+                panic!("expected the durable refusal, got {occ:?}");
+            };
+            assert_eq!(why.reason, Reason::LineageQuarantined);
+        };
+        refused(observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await);
+        binding_fleet_double::plant_committed(
+            &all_members(),
+            &[k],
+            a.value.tx_id,
+            a.value.value_digest,
+            a.value.value_addr,
+            a.round,
+        );
+        refused(observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await);
+        let probe = probe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        assert_eq!(probe.verdict, "LINEAGE_QUARANTINED");
+        assert!(probe.tx_id.is_none() && probe.value_digest.is_none());
+        // Both continuations and everything beyond, by the generation bound;
+        // a parent below the root is not refused by it.
+        refused(
+            observe_parent_binding(&set, &VAULT, GEN + 1, &[0xD1; 32], &set.id(), set.quorum())
+                .await,
+        );
+        refused(
+            observe_parent_binding(&set, &VAULT, GEN + 7, &[0xD2; 32], &set.id(), set.quorum())
+                .await,
+        );
+        assert_eq!(
+            observe_parent_binding(&set, &VAULT, GEN - 1, &[0xD0; 32], &set.id(), set.quorum())
+                .await,
+            ParentOccupancy::Free
+        );
+    }
+
+    /// Ruling F: the observer refuses a non-canonical quorum ITSELF, so no
+    /// caller can make `Conflict` reachable by passing a weaker `q`.
+    #[tokio::test]
+    #[serial]
+    async fn a_non_canonical_quorum_establishes_nothing_at_the_observer() {
+        let set = init();
+        let b = market_bundle(&set, VAULT, C_N);
+        bind(&set, &b, C_N).await;
+        let key = settlement_bundle::resource_key(&C_N);
+        assert_eq!(
+            observe_key_at_set(&set, &key, 1).await,
+            BindingObservation::Unavailable {
+                attributed: 0,
+                required: 1
+            }
+        );
+        assert!(matches!(
+            observe_key_at_set(&set, &key, set.quorum()).await,
+            BindingObservation::BoundFinal(_)
+        ));
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ mod cert_resync;
 mod contacts;
 pub mod counterparty_canonical_heads;
 pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
+pub mod dlv_lineage_quarantine; // 2c-C3.1 durable lineage quarantine + finality record (namespaced)
 mod dlv_receipts;
 pub mod economic_admission;
 pub mod economic_faucet;
@@ -615,6 +616,44 @@ fn create_schema(conn: &Connection) -> Result<()> {
                                               'released','released_no_advance')),
             permitted_successor            BLOB,
             UNIQUE (trader_chain_id, trader_parent_state_commitment, tx_id)
+        );
+
+        -- 2c-C3.1: every qualifying binding finality this verifier established
+        -- at a key, with the read (or the commit) that established it.
+        -- Write-once per (vault, c_n). The duplicate-finality trigger compares
+        -- a NEW finality against this row on VALUE, never on round — one read
+        -- at the canonical quorum cannot show two chosen values, so the
+        -- contradiction Req 6.3 names is only ever seen across reads.
+        CREATE TABLE IF NOT EXISTS dlv_binding_finality_observed(
+            vault_id         BLOB NOT NULL,
+            c_n              BLOB NOT NULL,
+            generation       INTEGER NOT NULL,
+            tx_id            BLOB NOT NULL,
+            value_digest     BLOB NOT NULL,
+            value_addr       BLOB NOT NULL,
+            round_counter    INTEGER NOT NULL,
+            round_proposer   BLOB NOT NULL,
+            holders          INTEGER NOT NULL,
+            storage_set_id   BLOB NOT NULL,
+            quorum           INTEGER NOT NULL,
+            evidence         BLOB NOT NULL,
+            PRIMARY KEY (vault_id, c_n)
+        );
+
+        -- 2c-C3.1: lineage quarantine roots. One row per (vault, root c_n)
+        -- holding BOTH evidence objects. Never updated, never deleted: ruling E
+        -- defines no clearing path, so the module exposes none. Descendants
+        -- are refused by the generation bound, not enumerated.
+        CREATE TABLE IF NOT EXISTS dlv_lineage_quarantine(
+            insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+            vault_id          BLOB NOT NULL,
+            root_c_n          BLOB NOT NULL,
+            root_generation   INTEGER NOT NULL,
+            storage_set_id    BLOB NOT NULL,
+            quorum            INTEGER NOT NULL,
+            first_evidence    BLOB NOT NULL,
+            second_evidence   BLOB NOT NULL,
+            UNIQUE (vault_id, root_c_n)
         );
 
         CREATE TABLE IF NOT EXISTS settlement_slot_claim_local(
