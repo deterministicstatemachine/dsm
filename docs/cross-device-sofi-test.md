@@ -1,5 +1,31 @@
 # Cross-Device SoFi Trade Test (Phase 8)
 
+> ## STATUS 2026-09-09 — this test's settle assertion cannot pass on main
+>
+> The trader's routed settlement (`dlv.unlockRouted`) is deliberately **fail-closed** on `main` and
+> refuses before binding anything:
+>
+> > `dlv.unlockRouted: market settlement is deployment-blocked until 5c-2 Step 2 — a canonical`
+> > `market bundle needs the bundled trader successor evidence, which this device cannot produce`
+> > `before it advances; vault <id> parent <c_n> (generation <n>) was NOT bound and nothing moved`
+>
+> This is a **deployment block, not a bug and not a misconfiguration**. No setting lifts it. The
+> refusal fires *after* every eligibility gate passes, and nothing is stored, fenced, bound, signed
+> or advanced when it does: the trader's balances do not move and the vault generation stays free.
+>
+> The reason is an ordering one. A canonical market bundle must carry the trader's prepared
+> successor and its `0x0031` successor evidence, and today the trader binds BEFORE it advances, so
+> there is no signed successor to name and nothing may be fabricated in its place. 5c-2 Step 2 is
+> the only thing that lifts it.
+>
+> **What still works:** vault creation and funding, routing advertisement, discovery, quoting, and
+> the **owner close path**, which is live and unaffected.
+>
+> The capability table below records what this test proved when it was written. Its
+> `dlv.unlockRouted` rows are the ones the refusal now blocks; the discovery, advertisement and
+> cross-device composition rows are unaffected.
+
+
 Automated end-to-end test that proves SoFi spec §4.1's _"once a valid
 σ exists on storage, the unlock is computable by anyone"_ property on
 real hardware. Wallet A on one device creates AMM vaults and
