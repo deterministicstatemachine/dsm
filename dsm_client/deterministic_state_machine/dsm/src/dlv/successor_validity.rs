@@ -198,6 +198,14 @@ pub enum Reason {
     /// and quarantining on it would let anyone able to inject a forged receipt
     /// force a denial-of-service quarantine.
     RealizationEvidenceInvalid,
+    /// 2c-C3.1 ruling G — a DURABLE quarantine root of this vault refuses this
+    /// cursor or this execution. Distinct from
+    /// [`Reason::DuplicateBindingFinality`], which is the live observation that
+    /// created the root: the refused cursor's own key may read `BoundFinal` or
+    /// `Free`, so reporting a duplicate there would be false.
+    /// `SAFETY_VIOLATION`, never convertible to `INVALID` or `INCOMPLETE`.
+    /// Added to the Lean inventory first (`DSMLineageQuarantine.lean`).
+    LineageQuarantined,
 }
 
 impl Reason {
@@ -205,7 +213,9 @@ impl Reason {
     /// caller pairing a reason with a class it does not belong to.
     pub const fn class(&self) -> OutcomeClass {
         match self {
-            Self::DuplicateBindingFinality => OutcomeClass::SafetyViolation,
+            Self::DuplicateBindingFinality | Self::LineageQuarantined => {
+                OutcomeClass::SafetyViolation
+            }
             Self::ParentUnauthenticated
             | Self::BindingUndetermined
             | Self::BindingEvidenceUnavailable => OutcomeClass::Incomplete,
@@ -242,6 +252,7 @@ impl Reason {
             Self::BundleNotCanonical => "BUNDLE_NOT_CANONICAL",
             Self::BundleForeignToVault => "BUNDLE_FOREIGN_TO_VAULT",
             Self::RealizationEvidenceInvalid => "REALIZATION_EVIDENCE_INVALID",
+            Self::LineageQuarantined => "LINEAGE_QUARANTINED",
         }
     }
 }
@@ -911,10 +922,9 @@ mod tests {
     /// `Invalid` are the ones the frozen taxonomy singles out.
     #[test]
     fn every_reason_carries_exactly_one_class() {
-        assert_eq!(
-            Reason::DuplicateBindingFinality.class(),
-            OutcomeClass::SafetyViolation
-        );
+        for r in [Reason::DuplicateBindingFinality, Reason::LineageQuarantined] {
+            assert_eq!(r.class(), OutcomeClass::SafetyViolation, "{r:?}");
+        }
         for r in [
             Reason::ParentUnauthenticated,
             Reason::BindingUndetermined,

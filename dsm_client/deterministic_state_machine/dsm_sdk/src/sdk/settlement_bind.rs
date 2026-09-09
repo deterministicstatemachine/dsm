@@ -243,7 +243,112 @@ pub async fn bind_settlement(
     if out == Err(RunError::FenceNotPersisted) {
         return Err(BindError::FenceNotPersisted);
     }
+    // 2c-C3.1 ruling A, source (b): this device's OWN committed bind is a
+    // qualifying finality at every key the bundle bound. It is recorded like
+    // an observed one and compared on value against what was recorded earlier,
+    // so a commit that lands where this verifier already saw a DIFFERENT value
+    // chosen is the same contradiction, caught here.
+    if out == Ok(Outcome::Committed) {
+        record_own_commit(
+            set,
+            bundle,
+            b,
+            addr,
+            engine.ballot(),
+            proposer_id,
+            trader_successor,
+        );
+    }
     Ok(out)
+}
+
+/// Record a committed bind as this device's own finality at each vault parent
+/// the bundle consumed (2c-C3.1 ruling A, source (b)). Never changes the
+/// outcome: the bind DID commit. A contradiction writes the quarantine root
+/// and is logged at error level; composition refuses from then on.
+pub(crate) fn record_own_commit(
+    set: &StorageSet,
+    bundle: &pb::SettlementBundleV1,
+    b: [u8; 32],
+    addr: [u8; 32],
+    ballot: u64,
+    proposer_id: [u8; 32],
+    trader_successor: [u8; 32],
+) {
+    use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
+    let b32 = crate::util::text_id::encode_base32_crockford;
+    let value = quarantine::FinalityValue {
+        tx_id: b,
+        value_digest: b,
+        value_addr: addr,
+    };
+    let evidence = quarantine::Evidence::OwnCommit(quarantine::OwnCommitEvidence {
+        quorum: set.quorum(),
+        value,
+        ballot,
+        storage_set_id: set.id(),
+        trader_successor,
+    })
+    .encode();
+    for t in &bundle.vault_transitions {
+        let (Ok(vault_id), Ok(c_n)) = (
+            <[u8; 32]>::try_from(t.vault_id.as_slice()),
+            <[u8; 32]>::try_from(t.parent_state_commitment.as_slice()),
+        ) else {
+            continue;
+        };
+        let finality = quarantine::ObservedFinality {
+            vault_id,
+            c_n,
+            generation: t.parent_generation,
+            value,
+            // The round column carries the driver's final ballot for a commit;
+            // rounds are never compared.
+            round: dsm::storage::binding_record::Round {
+                counter: ballot,
+                proposer_id,
+            },
+            holders: set.quorum(),
+            storage_set_id: set.id(),
+            quorum: set.quorum(),
+            evidence: evidence.clone(),
+        };
+        match quarantine::record_finality(&finality) {
+            Ok(quarantine::RecordOutcome::Recorded)
+            | Ok(quarantine::RecordOutcome::AlreadyRecordedSameValue) => {}
+            Ok(quarantine::RecordOutcome::Contradiction { recorded }) => {
+                let written = quarantine::quarantine_root(&quarantine::QuarantineRoot {
+                    vault_id,
+                    root_c_n: c_n,
+                    root_generation: t.parent_generation,
+                    storage_set_id: set.id(),
+                    quorum: set.quorum(),
+                    first_evidence: recorded.evidence,
+                    second_evidence: evidence.clone(),
+                    insertion_ordinal: 0,
+                });
+                log::error!(
+                    "STORAGE_SAFETY_VIOLATION DUPLICATE_BINDING_FINALITY: this device committed {} \
+                     at a parent where it had recorded {} chosen (vault {}, generation {}); the \
+                     lineage is quarantined{}",
+                    b32(&b),
+                    b32(&recorded.value.tx_id),
+                    b32(&vault_id),
+                    t.parent_generation,
+                    match written {
+                        Ok(()) => String::new(),
+                        Err(e) => format!(" — and the root could NOT be durably written: {e}"),
+                    }
+                );
+            }
+            Err(e) => log::error!(
+                "could not durably record this device's own binding finality at vault {} \
+                 generation {}: {e}",
+                b32(&vault_id),
+                t.parent_generation
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

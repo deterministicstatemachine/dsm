@@ -895,7 +895,7 @@ C3 Lean structure                  FROZEN / PROVED AS CLAIMED
 VDS.COMMON.10.a                    NORMATIVE, IMPLEMENTATION-BLOCKED ON THE
                                    2c-A ENCODER CUT
 Production C3 closure              NOT YET COMPLETE
-Req 6.3 containment (2, 3, 4)      FROZEN BY 2c-C3.1, NOT IMPLEMENTED
+Req 6.3 containment (2, 3, 4)      FROZEN BY 2c-C3.1, IMPLEMENTED (client-local)
 ```
 
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation

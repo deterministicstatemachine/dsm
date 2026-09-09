@@ -103,9 +103,11 @@ pub(crate) struct FoldedParent {
 /// What the binding register — plus this device's own fence table — says about
 /// the REALIZED frontier `c_n`, at the moment of this walk.
 ///
-/// Only these three are reachable: `Conflict`, `Undetermined` and `Unavailable`
-/// never return a composition at all, they fail closed as
-/// [`CompositionError::BindingEvidenceUnavailable`].
+/// Only these three are reachable: `Undetermined` and `Unavailable` never
+/// return a composition at all, they fail closed as
+/// [`CompositionError::BindingEvidenceUnavailable`]; duplicate binding
+/// finality and a durable quarantine root fail closed as
+/// [`CompositionError::SafetyViolation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FrontierBinding {
     /// `q` attributed members hold nothing at `k(c_n)`: the parent is available
@@ -430,6 +432,12 @@ pub(crate) async fn compose_vault_state(
                 "walk saturated at depth {MAX_PENDING_CHAIN_DEPTH} without reaching a free parent"
             )));
         }
+        // 2c-C3.1 ruling B (i): the durable quarantine is consulted at EVERY
+        // cursor — the baseline included — BEFORE the register is read. That
+        // check lives in `observe_parent_binding`, ahead of its read, so the
+        // walk and the probe cannot disagree about a root; it surfaces here as
+        // `Unresolvable(LineageQuarantined)` and is routed by class below. The
+        // execution routes make the same check again on their own.
         let bound = match crate::sdk::binding_occupancy::observe_parent_binding(
             &set,
             vault_id,
@@ -1517,9 +1525,217 @@ mod tests {
         };
         assert_eq!(reason, Reason::RealizationEvidenceInvalid);
         assert_eq!(reason.class(), OutcomeClass::Invalid);
+        // 2c-C3.1 ruling A: INVALID evidence — the input an attacker can
+        // manufacture at will — MUST NOT create a quarantine.
+        assert!(
+            crate::storage::client_db::dlv_lineage_quarantine::roots_for_vault(&vault_id)
+                .expect("readable")
+                .is_empty(),
+            "a forged receipt never quarantines"
+        );
         assert!(
             detail.contains("fails verification"),
             "the refusal names the failed verification: {detail}"
+        );
+    }
+
+    /// 2c-C3.1 — THE FIVE-EFFECT CONTROL for Req 6.3, on the walk.
+    ///
+    /// A trade is bound and realized at generation 0 (value A), so this
+    /// verifier RECORDS A as the finality at `k(c0)` — by its own commit and
+    /// again by observation. Then every member of the committed set serves a
+    /// DIFFERENT chosen value B at the same key: a broken write-once register,
+    /// the only way duplicate finality can arise, because one read at the
+    /// canonical quorum cannot show two values. Each of the five effects is
+    /// asserted on its own, so a mutation that removes one turns a NAMED
+    /// assertion red while the others stay green.
+    ///
+    /// Restart-survival is a property of the on-disk table and is not
+    /// simulated here: the test database is shared in-memory and cannot be
+    /// closed without being lost.
+    #[tokio::test]
+    async fn duplicate_binding_finality_quarantines_the_lineage_with_all_five_effects() {
+        use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
+        let _fleet = fleet();
+        let vault_id = vid(0x31);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(
+            &vault_id,
+            &x_seed(0x31),
+            1_000_000,
+            500_000,
+            0,
+            &c0,
+            true,
+            10_000,
+        )
+        .await;
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("A composes");
+        assert_eq!(composed.sequence, 1);
+        let a = quarantine::observed_finality(&vault_id, &c0)
+            .expect("readable")
+            .expect("the verifier recorded A at k(c0) the moment it established it");
+        assert_eq!(a.value.tx_id, composed.folded_parents[0].bound_by);
+        // Re-observing the SAME value is not a contradiction: composing again
+        // folds A again and writes no root.
+        compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect("A still composes");
+        assert!(quarantine::roots_for_vault(&vault_id)
+            .expect("readable")
+            .is_empty());
+
+        // A member breaks its register: every member now serves B at k(c0).
+        let all = ["dsm-node-1", "dsm-node-2", "dsm-node-3"];
+        let k = dsm::dlv::settlement_bundle::resource_key(&c0);
+        let b_digest = [0xB1u8; 32];
+        let b_addr = dsm::storage_object::immutable_addr_from_inner(
+            dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+            &b_digest,
+        );
+        crate::sdk::binding_fleet_double::plant_committed(
+            &all,
+            &[k],
+            b_digest,
+            b_digest,
+            b_addr,
+            dsm::storage::binding_record::Round {
+                counter: a.round.counter + 10,
+                proposer_id: [0xB1; 32],
+            },
+        );
+
+        // E1 — REPORT: SAFETY_VIOLATION, with the live reason.
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("E1: duplicate finality does not compose");
+        let CompositionError::SafetyViolation { reason, detail } = err else {
+            panic!("E1: expected STORAGE_SAFETY_VIOLATION, got {err:?}");
+        };
+        assert_eq!(reason, Reason::DuplicateBindingFinality, "E1");
+        assert!(
+            detail.contains("duplicate binding finality"),
+            "E1: {detail}"
+        );
+
+        // E2 — PRESERVE: the root holds BOTH evidence objects. The first is
+        // this device's own commit of A (source (b)); the second is the
+        // observed read of B, and it reproduces B when re-tallied.
+        let roots = quarantine::roots_for_vault(&vault_id).expect("readable");
+        assert_eq!(roots.len(), 1, "E2: one root");
+        let root = &roots[0];
+        assert_eq!(
+            root.root_c_n, c0,
+            "E2: the root is the parent A and B both bound"
+        );
+        assert_eq!(root.root_generation, 0, "E2");
+        let first = quarantine::Evidence::decode(&root.first_evidence).expect("E2: first decodes");
+        let second =
+            quarantine::Evidence::decode(&root.second_evidence).expect("E2: second decodes");
+        assert_eq!(first.value(), a.value, "E2: the first evidence is A");
+        assert_eq!(
+            second.value().tx_id,
+            b_digest,
+            "E2: the second evidence is B"
+        );
+        match &first {
+            quarantine::Evidence::OwnCommit(c) => assert_eq!(c.value, a.value, "E2"),
+            quarantine::Evidence::Observed(o) => o.recompute().expect("E2: first recomputes"),
+        }
+        let quarantine::Evidence::Observed(o) = &second else {
+            panic!("E2: B was observed, not committed by this device");
+        };
+        o.recompute()
+            .expect("E2: the preserved read of B reproduces B");
+
+        // E3 — REFUSE COMPOSITION, DURABLY: the durable reason from now on,
+        // with NO composed state — after the register is put back to A, and
+        // when the register reads Free.
+        let refused = |what: &str, err: CompositionError| {
+            let CompositionError::SafetyViolation { reason, .. } = err else {
+                panic!("E3 ({what}): expected STORAGE_SAFETY_VIOLATION, got {err:?}");
+            };
+            assert_eq!(reason, Reason::LineageQuarantined, "E3 ({what})");
+        };
+        refused(
+            "second walk",
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect_err("E3"),
+        );
+        crate::sdk::binding_fleet_double::plant_committed(
+            &all,
+            &[k],
+            a.value.tx_id,
+            a.value.value_digest,
+            a.value.value_addr,
+            a.round,
+        );
+        refused(
+            "register restored to A",
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect_err("E3"),
+        );
+        crate::sdk::binding_fleet_double::reset_all();
+        crate::sdk::binding_fleet_double::register_set(&fleet_set());
+        refused(
+            "register reads Free",
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect_err("E3"),
+        );
+
+        // E4 — REFUSE EXECUTION ON THIS LINEAGE ONLY (walk side; the route
+        // side is `dlv_routes`): the observer refuses this parent, and a
+        // sibling vault on the same set composes.
+        let set = fleet_set();
+        let occ = crate::sdk::binding_occupancy::observe_parent_binding(
+            &set,
+            &vault_id,
+            0,
+            &c0,
+            &set.id(),
+            set.quorum(),
+        )
+        .await;
+        let crate::sdk::binding_occupancy::ParentOccupancy::Unresolvable(why) = occ else {
+            panic!("E4: expected a refusal, got {occ:?}");
+        };
+        assert_eq!(why.reason, Reason::LineageQuarantined, "E4");
+        let sibling = vid(0x32);
+        let (p2, ccb2, _s2, _c2) = baseline_fixture(sibling, 1_000_000, 500_000);
+        let ok = compose_vault_state(&sibling, &p2, &ccb2, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect("E4: a sibling vault on the same set is untouched");
+        assert_eq!(ok.sequence, 0, "E4");
+
+        // E5 — NEVER TIE-BREAK: no surface resolves k(c0) to a value, even with
+        // A served again. The probe reports the quarantine and names nothing.
+        crate::sdk::binding_fleet_double::plant_committed(
+            &all,
+            &[k],
+            a.value.tx_id,
+            a.value.value_digest,
+            a.value.value_addr,
+            a.round,
+        );
+        let probe = crate::sdk::binding_occupancy::probe_parent_binding(
+            &set,
+            &vault_id,
+            0,
+            &c0,
+            &set.id(),
+            set.quorum(),
+        )
+        .await;
+        assert_eq!(probe.verdict, "LINEAGE_QUARANTINED", "E5");
+        assert!(
+            probe.tx_id.is_none() && probe.value_digest.is_none() && probe.value_addr.is_none(),
+            "E5: no value is resolved on a quarantined key"
         );
     }
 
@@ -1574,6 +1790,13 @@ mod tests {
         assert!(
             detail.contains("answered the binding key"),
             "the refusal names the counting failure: {detail}"
+        );
+        // 2c-C3.1 ruling A: unavailable evidence MUST NOT create a quarantine.
+        assert!(
+            crate::storage::client_db::dlv_lineage_quarantine::roots_for_vault(&vault_id)
+                .expect("readable")
+                .is_empty(),
+            "a short quorum never quarantines"
         );
 
         // Positive control: heal the members and the SAME vault composes to a
