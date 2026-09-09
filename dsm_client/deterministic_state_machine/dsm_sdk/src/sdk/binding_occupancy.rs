@@ -36,8 +36,7 @@ use dsm::dlv::successor_validity::{OutcomeClass, Reason};
 use dsm::dlv::binding_observation::{
     observe_single_key_with_read, BindingObservation, CanonicalQuorum, ChosenBinding, KeyRead,
 };
-use dsm::dlv::settlement_bundle::{self, BundleShape};
-use dsm::types::proto as pb;
+use dsm::dlv::settlement_bundle::{self, BundleShape, ConsumedDlvTransition, SettlementBundle};
 
 use crate::sdk::quorum_bind_runner::{binding_transport, read_binding_attributed};
 use crate::sdk::storage_set::StorageSet;
@@ -95,26 +94,32 @@ impl core::fmt::Display for OccupancyRefusal {
 }
 
 /// The bundle that owns a parent, already checked against THAT parent.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoundParent {
-    pub bundle: pb::SettlementBundleV1,
-    /// `b` — equal to the record's `value_digest`; the bytes were re-hashed.
+    pub bundle: SettlementBundle,
+    /// The exact bytes fetched by `value_digest` — `Canon(B)`, re-hashed.
+    pub canon: Vec<u8>,
+    /// `b` — equal to the record's `value_digest`.
     pub bundle_digest: [u8; 32],
     pub bundle_addr: [u8; 32],
-    /// The transition naming THIS vault. Located by `vault_id`, never assumed
-    /// to be index 0 — a market bundle may consume several vaults.
+    /// The transition consuming THIS parent. Located by `parent_binding ==
+    /// c_n` (2c-A.1 ruling 7), never assumed to be index 0.
     pub transition_ix: usize,
+    /// Where that transition's nested successor sits in `canon` — the
+    /// supplied operand of `VDS.COMMON.10.a`, never re-encoded.
+    pub successor_span: core::ops::Range<usize>,
     pub shape: BundleShape,
 }
 
 impl BoundParent {
-    pub fn transition(&self) -> Option<&pb::VaultTransitionV1> {
-        self.bundle.vault_transitions.get(self.transition_ix)
+    pub fn transition(&self) -> Option<&ConsumedDlvTransition> {
+        self.bundle.transitions().get(self.transition_ix)
     }
-}
 
-fn as32(v: &[u8]) -> Option<[u8; 32]> {
-    <[u8; 32]>::try_from(v).ok()
+    /// The exact canonical bytes of `V_{n+1}` as the bundle carries them.
+    pub fn successor_bytes(&self) -> &[u8] {
+        &self.canon[self.successor_span.clone()]
+    }
 }
 
 /// ── THE HARDWARE-PROOF SURFACE ───────────────────────────────────────────────
@@ -626,89 +631,84 @@ pub(crate) async fn observe_parent_binding(
             )
         }
     };
-    let Ok(bundle) = settlement_bundle::decode_canonical(&bytes) else {
-        return unresolvable(
-            Reason::BundleNotCanonical,
-            "its bound bundle is not a canonical settlement bundle",
-        );
+    // Strict decode and the whole-bundle round trip under the frozen encoder
+    // (2c-A.1 ruling 8): a non-canonical nested successor is refused here,
+    // before any verifier reads it. The identity is over exactly the bytes
+    // that were fetched.
+    let decoded = match settlement_bundle::decode_canonical(&bytes) {
+        Ok(d) => d,
+        Err(e) => {
+            return unresolvable(
+                Reason::BundleNotCanonical,
+                &format!("its bound bundle is not canonical: {e}"),
+            )
+        }
     };
-    let Ok(canon) = settlement_bundle::canon(&bundle) else {
-        return unresolvable(
-            Reason::BundleNotCanonical,
-            "its bound bundle does not re-encode canonically",
-        );
-    };
-    let bundle_digest = settlement_bundle::bundle_digest(&canon);
-    let bundle_addr = settlement_bundle::bundle_addr(&canon);
+    let bundle_digest = settlement_bundle::bundle_digest(&bytes);
+    let bundle_addr = settlement_bundle::bundle_addr(&bytes);
     if bundle_digest != chosen.value_digest || bundle_addr != chosen.value_addr {
         return unresolvable(
             Reason::BundleNotCanonical,
             "its bound bundle does not hash to the record's identity",
         );
     }
-    let Ok(shape) = settlement_bundle::shape(&bundle) else {
-        return unresolvable(
-            Reason::BundleNotCanonical,
-            "its bound bundle has no valid shape",
-        );
-    };
+    let bundle = decoded.bundle;
+    let shape = settlement_bundle::shape(&bundle);
 
-    // BOUND UNDER THIS SET, AT THIS q. A member reconfigured into another set
-    // still serves rows written under the old one, so a cross-set bundle is
-    // reachable. `q` comes from the vault's own committed V_n, so the bundle's
-    // restatement of it must AGREE — it is never consumed in place of it.
-    if as32(&bundle.storage_set_id) != Some(*storage_set_id) {
-        return unresolvable(
-            Reason::BundleForeignToVault,
-            "its bound bundle was bound under a different storage set",
-        );
-    }
-    if bundle.q != committed_quorum {
-        return unresolvable(
-            Reason::BundleForeignToVault,
-            "its bound bundle states a different quorum than this vault commits",
-        );
-    }
-
+    // The bundle carries no storage set and no quorum (registry §5.19):
+    // binding authority is `V_n`'s own fields 14 and 15 — the set this key
+    // was just read at, at its canonical quorum.
+    //
     // AND IT NAMES THIS PARENT. The register never inspects the value it holds,
-    // so a proposer can bind a bundle at k(c_n) whose transitions name some
-    // other c_n. Nothing above catches that; this does.
+    // so a proposer can bind a bundle at k(c_n) whose transition names some
+    // other c_n. The transition is located by `parent_binding == c_n` (2c-A.1
+    // ruling 7); its successor must be THIS vault's next generation.
     let Some(transition_ix) = bundle
-        .vault_transitions
+        .transitions()
         .iter()
-        .position(|t| as32(&t.vault_id) == Some(*vault_id))
+        .position(|t| t.parent_binding == *parent_c_n)
     else {
-        // VDS.COMMON.1.a — the operation names no leg of this vault. Not a
-        // foreign-set problem; the bundle simply is not about this vault.
         return unresolvable(
-            Reason::VaultMismatch,
-            "its bound bundle consumes no leg of this vault",
+            Reason::StaleParent,
+            "its bound bundle names a different parent state",
         );
     };
-    let Some(t) = bundle.vault_transitions.get(transition_ix) else {
+    let Some(t) = bundle.transitions().get(transition_ix) else {
         return unresolvable(
             Reason::BundleNotCanonical,
             "its bound bundle lost the transition it just named",
         );
     };
-    if as32(&t.parent_state_commitment) != Some(*parent_c_n) {
+    if t.successor.vault_id != *vault_id {
+        // VDS.COMMON.1.a — the successor is some other vault's state.
         return unresolvable(
-            Reason::StaleParent,
-            "its bound bundle names a different parent state for this vault",
+            Reason::VaultMismatch,
+            "its bound bundle consumes no leg of this vault",
         );
     }
-    if t.parent_generation != generation {
+    if t.successor.generation != generation.saturating_add(1) {
         return unresolvable(
             Reason::GenerationMismatch,
-            "its bound bundle names a different generation for this vault",
+            "its bound bundle's successor is not this parent's next generation",
         );
     }
+    let Some(successor_span) = decoded.successor_spans.get(transition_ix).cloned() else {
+        return unresolvable(
+            Reason::BundleNotCanonical,
+            "its bound bundle lost the successor span it just decoded",
+        );
+    };
+    // `storage_set_id` is the walk's, not the bundle's; it is no longer
+    // compared against anything the bundle carries.
+    let _ = storage_set_id;
 
     ParentOccupancy::BoundBy(Box::new(BoundParent {
         bundle,
+        canon: bytes,
         bundle_digest,
         bundle_addr,
         transition_ix,
+        successor_span,
         shape,
     }))
 }
@@ -754,30 +754,14 @@ mod tests {
             .collect()
     }
 
-    /// A market bundle consuming `vault` at `c_n`.
-    fn market_bundle(set: &StorageSet, vault: [u8; 32], c_n: [u8; 32]) -> pb::SettlementBundleV1 {
-        pb::SettlementBundleV1 {
-            version: settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-            storage_set_id: set.id().to_vec(),
-            q: set.quorum(),
-            intent_commitment: vec![0x1D; 32],
-            route_set_commitment: vec![0x0C; 32],
-            selected_route: b"route".to_vec(),
-            trader_parent: c_n.to_vec(),
-            trader_successor: vec![0xBB; 32],
-            vault_transitions: vec![pb::VaultTransitionV1 {
-                vault_id: vault.to_vec(),
-                parent_generation: GEN,
-                parent_state_commitment: c_n.to_vec(),
-                parent_reserves_digest: vec![0x0A; 32],
-                successor_ccb: vec![0x5C; 32],
-                reserve_deltas: b"d".to_vec(),
-                witnesses: vec![],
-            }],
-            proof_material: vec![],
-            bundle_signatures: vec![],
-            recovery_material: b"r".to_vec(),
-        }
+    /// A canonical market bundle consuming `vault` at `c_n` into its next
+    /// generation.
+    fn market_bundle(vault: [u8; 32], c_n: [u8; 32]) -> SettlementBundle {
+        dsm::ccb::settlement::fixtures::market_bundle(
+            c_n,
+            dsm::ccb::settlement::fixtures::successor_of(c_n, vault, GEN + 1, 1, 1),
+            [0x0C; 32],
+        )
     }
 
     fn init() -> StorageSet {
@@ -789,7 +773,7 @@ mod tests {
         set
     }
 
-    async fn bind(set: &StorageSet, b: &pb::SettlementBundleV1, c_n: [u8; 32]) {
+    async fn bind(set: &StorageSet, b: &SettlementBundle, c_n: [u8; 32]) {
         let out = bind_settlement(set, [7; 32], b, VAULT, c_n).await.unwrap();
         assert_eq!(out, Ok(Outcome::Committed));
     }
@@ -806,7 +790,7 @@ mod tests {
     #[serial]
     async fn a_bound_parent_is_recorded_and_reobserving_it_is_not_a_contradiction() {
         let set = init();
-        let b = market_bundle(&set, VAULT, C_N);
+        let b = market_bundle(VAULT, C_N);
         bind(&set, &b, C_N).await;
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
         assert!(matches!(occ, ParentOccupancy::BoundBy(_)), "{occ:?}");
@@ -833,7 +817,7 @@ mod tests {
     #[serial]
     async fn a_second_chosen_value_at_a_recorded_key_quarantines_and_is_never_resolved_again() {
         let set = init();
-        let b = market_bundle(&set, VAULT, C_N);
+        let b = market_bundle(VAULT, C_N);
         bind(&set, &b, C_N).await;
         assert!(matches!(
             observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await,
@@ -925,7 +909,7 @@ mod tests {
     #[serial]
     async fn a_non_canonical_quorum_establishes_nothing_at_the_observer() {
         let set = init();
-        let b = market_bundle(&set, VAULT, C_N);
+        let b = market_bundle(VAULT, C_N);
         bind(&set, &b, C_N).await;
         let key = settlement_bundle::resource_key(&C_N);
         assert_eq!(
@@ -955,7 +939,7 @@ mod tests {
     #[serial]
     async fn a_bound_parent_resolves_to_the_bundle_that_owns_it() {
         let set = init();
-        let b = market_bundle(&set, VAULT, C_N);
+        let b = market_bundle(VAULT, C_N);
         bind(&set, &b, C_N).await;
 
         let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
@@ -968,9 +952,16 @@ mod tests {
         assert_eq!(bp.shape, BundleShape::Market);
         assert_eq!(bp.transition_ix, 0);
         // And it is occupancy ONLY: nothing here says the successor realized.
+        assert_eq!(bp.transition().unwrap().parent_binding, C_N);
+        // The successor span is the exact nested bytes, never a re-encoding.
         assert_eq!(
-            as32(&bp.transition().unwrap().parent_state_commitment),
-            Some(C_N)
+            bp.successor_bytes(),
+            bp.transition()
+                .unwrap()
+                .successor
+                .encode()
+                .unwrap()
+                .as_slice()
         );
     }
 
@@ -981,7 +972,7 @@ mod tests {
     async fn binding_one_parent_does_not_occupy_another() {
         let set = init();
         let other_c_n = [0xC1; 32];
-        let b = market_bundle(&set, VAULT, other_c_n);
+        let b = market_bundle(VAULT, other_c_n);
         bind(&set, &b, other_c_n).await;
         assert_eq!(
             observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await,
@@ -997,7 +988,7 @@ mod tests {
     async fn a_bundle_bound_at_a_key_it_does_not_name_is_unresolvable() {
         let set = init();
         let other_c_n = [0xC1; 32];
-        let b = market_bundle(&set, VAULT, other_c_n);
+        let b = market_bundle(VAULT, other_c_n);
         bind(&set, &b, other_c_n).await;
 
         // Now plant that same committed record at THIS parent's key.
@@ -1020,24 +1011,6 @@ mod tests {
         assert!(
             matches!(&occ, ParentOccupancy::Unresolvable(w)
                      if w.reason == Reason::StaleParent
-                        && w.class() == OutcomeClass::Invalid),
-            "got {occ:?}"
-        );
-    }
-
-    /// A cross-set bundle is reachable: a member reconfigured into another set
-    /// keeps serving rows written under the old one.
-    #[tokio::test]
-    #[serial]
-    async fn a_bundle_bound_under_another_storage_set_is_unresolvable() {
-        let set = init();
-        let b = market_bundle(&set, VAULT, C_N);
-        bind(&set, &b, C_N).await;
-        let foreign = [0xEE; 32];
-        let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &foreign, set.quorum()).await;
-        assert!(
-            matches!(&occ, ParentOccupancy::Unresolvable(w)
-                     if w.reason == Reason::BundleForeignToVault
                         && w.class() == OutcomeClass::Invalid),
             "got {occ:?}"
         );

@@ -1777,7 +1777,7 @@ In order, and not combined:
    protobuf.
 
    **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A, 2c-B, 2c-C1–C3 and
-   2c-C3.1 are written; 2c-A.1 authorizes the encoder.**
+   2c-C3.1 are written; 2c-A.1 authorizes the encoder, and its adopting change landed 2026-09-09.**
    `DlvProofMaterial` `0x0010`, finishing `ConsumedDlvTransition` `0x000F`, `SettlementBundle`
    `0x000E`, the new `MarketTerms` `0x0033`, and `TraderAcceptance` `0x0011`. Needs the route and
    bundle identity from 2b.
@@ -1793,7 +1793,8 @@ In order, and not combined:
      `0x0033` **A-stage frozen** (§5.19, §5.20); `b`'s derivation fixed; `0x000B` given its
      satisfaction predicate. **The owner-close shape is encodable once the exact prepared
      `close_authorization` bytes are supplied (2c-B freezes that grammar); a conforming market
-     `b` is not, until 2c-B.** *(2c-B has since closed it; the encoder is authorized by 2c-A.1.)*
+     `b` is not, until 2c-B.** *(2c-B has since closed it; the encoder is authorized by 2c-A.1 and
+     implemented by its adopting change.)*
    - **2c-B — WRITTEN.** [`amendment-2c-b-accepted-successor-and-recovery.md`](amendment-2c-b-accepted-successor-and-recovery.md).
      Substrate `0x0031` (§5.23) closes `MarketTerms` field 6, and the two foreign byte grammars
      `CloseAuthorizationPreimageV1` and `DlvSettleOperationPreimageV1` are frozen as byte grammars
@@ -1848,6 +1849,11 @@ In order, and not combined:
      presently-evaluable conjunct and every fold carries `PartialPendingEncoderCut`; **C3 is CLOSED
      EXCEPT `VDS.COMMON.10.a`**, which stays blocked on 2c-A. Owner-close completion needs 10.a only;
      market completion needs 10.a and the C4 realization fact. The two external conjuncts remain so.
+     **Status 2026-09-09 (2c-A.1 adopting change):** `VDS.COMMON.10.a` is IMPLEMENTED —
+     `check_correspondence` over the recorded field-2 span, a `CorrespondenceWitness` that exists
+     only on byte equality; an owner-close fold is `C3Verdict::Valid`, a market fold is
+     `PartialPendingRealization` pending C4's realization fact. **C3 is CLOSED.** The two external
+     conjuncts remain so.
    - **2c-C3.1 — WRITTEN.** [`amendment-2c-c3-1-lineage-quarantine.md`](amendment-2c-c3-1-lineage-quarantine.md).
      Freezes the containment Req 6.3 attaches to `SAFETY_VIOLATION` and that 2c-C3 quoted without a
      mechanism: the trigger (duplicate contradictory qualifying binding finality at one parent,
@@ -1871,8 +1877,10 @@ In order, and not combined:
      the transition located by `parent_binding == c_n`; the route-family schema-1 burns recorded;
      namespace enforcement closed; `PartialPendingEncoderCut` replaced by a
      `CorrespondenceWitness` and `PartialPendingRealization`; the protobuf bundle deleted.
-     **The encoder surface is NOT IMPLEMENTED by this document**; it authorizes the change that
-     implements it, which is what unblocks `VDS.COMMON.10.a`.
+     **IMPLEMENTED 2026-09-09 by the adopting change** (record in the amendment): encoder surface
+     for both shapes with class-1 vectors, owner-close cutover on `c_{n+1}`, market emission
+     fail-closed at every gate's end, `VDS.COMMON.10.a` wired, the protobuf bundle deleted. The
+     identity-scoped reprovision (ruling 4) is owed at deployment.
    - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material

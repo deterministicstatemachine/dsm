@@ -778,6 +778,15 @@ PRODUCTION IMPLEMENTED   NO
 BLOCKED ON               the 2c-A canonical encoder cut
 ```
 
+> **Discharged 2026-09-09 by the 2c-A.1 adopting change.** `0x000F` field 2 carries the complete
+> nested successor; `dsm::dlv::successor_validity::check_correspondence` compares `Canon(expected)`
+> against the recorded field-2 byte span of the fetched bundle (never a re-encoding) and returns a
+> `CorrespondenceWitness` only on equality; the walk installs the witness's `c_{n+1}`, derived from
+> the supplied bytes. `PRODUCTION IMPLEMENTED` is now `YES` for both shapes. An owner-close fold is
+> `C3Verdict::Valid`; a market fold is `PartialPendingRealization`, the one remaining fact being
+> 2c-C4's. The block above is the record of why it was blocked; the paragraphs that follow it
+> describe the state before the cut.
+
 **The exact blocker.** The conjunct needs two operands. The first, `expected`, is derivable today.
 The second does not exist: no authoritative canonical successor bytes are carried on the wire.
 `VaultTransitionV1.successor_ccb` holds the route-set commitment on a market bundle and
@@ -916,20 +925,20 @@ false proto comments                        OPEN         die with the CCB cut (2
 C3 predicate                       FROZEN
 C3 Lean structure                  FROZEN / PROVED AS CLAIMED — 21 results, per-theorem
                                    axiom report, two mutation controls executed
-VDS.COMMON.10.a                    NORMATIVE, IMPLEMENTATION-BLOCKED ON THE
-                                   2c-A ENCODER CUT
-Production ValidDlvSuccessorCore   IMPLEMENTED for every presently-evaluable conjunct
-                                   (#788–#791, #795, #796); every fold carries
-                                   PartialPendingEncoderCut; Valid is unconstructible
+VDS.COMMON.10.a                    IMPLEMENTED (2c-A.1 adopting change, 2026-09-09):
+                                   check_correspondence over the recorded field-2 span
+Production ValidDlvSuccessorCore   IMPLEMENTED for every conjunct (#788–#791, #795,
+                                   #796, and the encoder cut); an owner-close fold is
+                                   Valid, a market fold is PartialPendingRealization
 Req 6.3 containment (2, 3, 4)      FROZEN BY 2c-C3.1, IMPLEMENTED (client-local)
-Owner-close C3 completion          needs 10.a only
-Market C3 completion               needs 10.a AND the C4 realization fact
+Owner-close C3 completion          COMPLETE — C3Verdict::Valid, certifiable
+Market C3 completion               needs the C4 realization fact only
 TokenPolicyValid                   EXTERNAL (Ruling H)
 VDS.TERMINAL.2 owner credit        EXTERNAL (Ruling G)
 
-C3 overall                         CLOSED EXCEPT 10.a — which is NOT "DLV succession
-                                   verified": two conjuncts are external and one is
-                                   blocked, and every fold today says so as a value
+C3 overall                         CLOSED — which is NOT "DLV succession verified":
+                                   two conjuncts are external and market realization
+                                   is C4's, and every market fold says so as a value
 ```
 
 **Successor validity — FROZEN** as `ValidDlvSuccessorCore`: the clause inventory, the derivation
@@ -958,6 +967,16 @@ quarantine that 2c-C3.1 froze (#793, #795) and the forced-partial control (#796)
 central comparison still does not exist — `VDS.COMMON.10.a` waits on 2c-A — and every fold records
 `PartialPendingEncoderCut` rather than an absence, so the withheld claim is a value a caller must
 confront. `C3Verdict::Valid` cannot be constructed anywhere; `compile_fail` doctests pin it.
+
+**`VDS.COMMON.10.a` — DONE (2c-A.1 adopting change, 2026-09-09).** The paragraph above is the
+Phase F record. With the encoder cut, the supplied operand exists and the comparison runs on every
+fold: `check_correspondence` in core, a `CorrespondenceWitness` that exists only because the bytes
+matched, `C3Verdict::Valid` reachable for an owner close through `CompleteValidity::from_close_witness`
+and unreachable for a market successor without 2c-C4's `IndependentRealization`. The
+`PartialPendingEncoderCut` status is deleted rather than kept as a fallback. Correspondence vectors
+and the by-construction controls (a close bundle carrying a drained successor with one preserved
+field changed, under the owner's real authorization, does not fold) are recorded in 2c-A.1's
+adopting change record.
 
 **Formal coverage — PROVED AS CLAIMED.** `DSMValidDlvSuccessor.lean` carries proof bodies for every
 statement, a per-theorem `#print axioms` report (no result depends on `sorryAx` or

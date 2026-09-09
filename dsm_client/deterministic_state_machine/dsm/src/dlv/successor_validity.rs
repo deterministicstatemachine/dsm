@@ -25,20 +25,19 @@
 //!   retries or refuses forever, and collapsing it is the defect this taxonomy
 //!   exists to remove.
 //!
+//! - **`VDS.COMMON.10.a` is performed here, and only here.**
+//!   [`check_correspondence`] compares `Canon(expected)` against the exact
+//!   supplied byte span of the bound bundle's field-2 successor (amendment
+//!   2c-A.1, the wiring point) and returns a [`CorrespondenceWitness`] on
+//!   equality — the only way one is made. The walk takes `c_{n+1}` from the
+//!   witness, derived from the SUPPLIED bytes, never from its local state.
+//! - **Preserved- and mutated-field equality are consequences of `10.a`**
+//!   (Ruling B), not conjuncts of their own: a supplied successor that changed
+//!   a preserved field encodes differently and fails the comparison. There is
+//!   no second per-field predicate beside the frozen one.
+//!
 //! # What this module does NOT establish
 //!
-//! - **`VDS.COMMON.10.a` — the canonical-byte successor comparison — is NOT
-//!   performed here, and cannot be.** No authoritative supplied successor bytes
-//!   exist on the wire: `successor_ccb` carries the route-set commitment on a
-//!   market bundle and a slot commitment on a close, and both composition arms
-//!   derive the successor locally. The conjunct is normative and
-//!   IMPLEMENTATION-BLOCKED on amendment 2c-A's canonical encoder cut, recorded
-//!   by [`C3Verdict::PartialPendingEncoderCut`]. Nothing here may substitute a
-//!   surrogate operand for it.
-//! - **Preserved- and mutated-field equality.** Ruling B derives those from
-//!   `10.a` alone. Re-adding them as bespoke per-field checks would create a
-//!   SECOND acceptance predicate beside the frozen one, so while `10.a` is
-//!   blocked they stay unenforced and the verdict says so.
 //! - **That a market settlement actually occurred.** See
 //!   [`IndependentRealization`] — a trader receipt cannot establish it, and
 //!   this module has no way to construct one.
@@ -134,9 +133,9 @@ pub enum Reason {
     ClaimNotHeld,
     /// The successor violates `Σ amount(e) ≤ R_t` for some token.
     SolvencyViolated,
-    /// `Canon(expected) != Canon(supplied)`. **Unreachable until 2c-A** — kept
-    /// so the frozen vocabulary is complete and the code exists the moment the
-    /// comparison does.
+    /// `Canon(expected) != supplied` — the bundle's field-2 successor is not
+    /// the successor this verifier derives (`VDS.COMMON.10.a`). Every
+    /// preserved- and mutated-field disposition of Ruling B lands here.
     CorrespondenceMismatch,
     /// A market successor was proposed for a retired parent.
     ComposeFromRetiredParent,
@@ -506,17 +505,72 @@ pub struct IndependentRealization {
     _c4_owns_this: core::marker::PhantomData<()>,
 }
 
-/// Which conjuncts a partial verdict did evaluate.
+/// `VDS.COMMON.10.a` held for one candidate: `Canon(expected)` is
+/// byte-for-byte the successor the bound bundle carries.
 ///
-/// Carried by [`C3Verdict::PartialPendingEncoderCut`] so that "everything I
-/// could check, I checked" is a statement with content rather than a shrug.
+/// Private fields and no public constructor — one exists only because
+/// [`check_correspondence`] returned it, so holding one IS the fact. `c_next`
+/// is derived from the SUPPLIED bytes; by injectivity of the canonical
+/// encoding (`canonVault_injective`) it equals the commitment of `expected`,
+/// and the walk installs the witness's value rather than recomputing its own.
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::CorrespondenceWitness;
+/// let _ = CorrespondenceWitness {
+///     expected: Box::new(unreachable!()),
+///     parent_commitment: [0; 32],
+///     c_next: [0; 32],
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EstablishedChecks {
-    /// The successor this verifier derived. It is NOT compared against a
-    /// supplied successor, because none exists on the wire yet.
-    pub expected: Box<VaultStateV2>,
-    /// The parent this successor was derived from.
-    pub parent_commitment: [u8; 32],
+pub struct CorrespondenceWitness {
+    expected: Box<VaultStateV2>,
+    parent_commitment: [u8; 32],
+    c_next: [u8; 32],
+}
+
+impl CorrespondenceWitness {
+    /// The successor the verifier derived — and, by the comparison that made
+    /// this witness, the one the bundle carries.
+    pub fn expected(&self) -> &VaultStateV2 {
+        &self.expected
+    }
+
+    /// The parent `c_n` the successor was derived from.
+    pub const fn parent_commitment(&self) -> [u8; 32] {
+        self.parent_commitment
+    }
+
+    /// `c_{n+1} = H_dom(DSM/vault-state, supplied bytes)`.
+    pub const fn c_next(&self) -> [u8; 32] {
+        self.c_next
+    }
+}
+
+/// `VDS.COMMON.10.a`: `Canon(expected) == supplied`, else
+/// `CORRESPONDENCE_MISMATCH`.
+///
+/// `supplied` is the exact byte span of the bound bundle's field-2 successor
+/// as fetched — never a re-encoding of anything this verifier holds, or the
+/// comparison would be of the verifier against itself. An `expected` with no
+/// canonical form cannot equal any supplied span, so an encoding failure is
+/// the same refusal.
+pub fn check_correspondence(
+    expected: &VaultStateV2,
+    parent_commitment: [u8; 32],
+    supplied: &[u8],
+) -> Result<CorrespondenceWitness, Reason> {
+    let canon = expected
+        .encode()
+        .map_err(|_| Reason::CorrespondenceMismatch)?;
+    if canon.as_slice() != supplied {
+        return Err(Reason::CorrespondenceMismatch);
+    }
+    Ok(CorrespondenceWitness {
+        expected: Box::new(expected.clone()),
+        parent_commitment,
+        c_next: crate::ccb::vault_state_commitment_of_canon(supplied),
+    })
 }
 
 /// What C3 concluded about one candidate successor.
@@ -527,9 +581,10 @@ pub struct EstablishedChecks {
 pub enum C3Verdict {
     /// Every applicable conjunct was evaluated and held.
     ///
-    /// **Unreachable today**, and that is the point: reaching it requires
-    /// `VDS.COMMON.10.a`, which is blocked on 2c-A, and for a market successor
-    /// additionally an [`IndependentRealization`], which nothing can construct.
+    /// Reachable for an OWNER CLOSE through
+    /// [`CompleteValidity::from_close_witness`] — its conjuncts are all
+    /// present-tense once `10.a` is. A market successor additionally needs an
+    /// [`IndependentRealization`], which nothing can construct.
     Valid(CompleteValidity),
     /// A conjunct decided against the successor.
     Invalid(Reason),
@@ -538,8 +593,9 @@ pub enum C3Verdict {
     Incomplete(Reason),
     /// A proven contradiction in the storage substrate (Req 6.3).
     SafetyViolation(Reason),
-    /// Every conjunct that CAN be evaluated held, and at least one is
-    /// IMPLEMENTATION-BLOCKED.
+    /// A MARKET successor: every conjunct held, `10.a` included, and the one
+    /// fact still missing is that the settlement occurred — 2c-C4's
+    /// [`IndependentRealization`].
     ///
     /// This is **deployment status, not a protocol outcome** — it deliberately
     /// sits outside the [`Reason`] namespace so it can never be mistaken for a
@@ -548,21 +604,25 @@ pub enum C3Verdict {
     /// fence, advance the realized frontier as accepted, or convert it to
     /// [`C3Verdict::Valid`] downstream. The fold may compute forward; the
     /// validity claim may not.
-    PartialPendingEncoderCut(EstablishedChecks),
+    PartialPendingRealization(CorrespondenceWitness),
 }
 
-/// Evidence that every conjunct held, including the ones that are blocked today.
+/// Evidence that every conjunct held.
 ///
-/// Private field and no public constructor, the same discipline
+/// Private field and exactly two constructors, the same discipline
 /// `ValidatedEconomicRoot` uses: there is no network event that declares a
-/// successor fully valid, and no `assume_valid` shortcut to add later in a hurry.
+/// successor fully valid, and no `assume_valid` shortcut to add later in a
+/// hurry. [`Self::from_close_witness`] is the owner-close path — the witness
+/// is the last conjunct a close has. [`Self::from_market_witness`] also takes
+/// an [`IndependentRealization`], which has no constructor, so
+/// `2c-A + 10.a = market valid` is a compile error rather than a rule.
 ///
 /// Pinned by the compiler, not by convention — this does not build:
 ///
 /// ```compile_fail
 /// use dsm::dlv::successor_validity::{C3Verdict, CompleteValidity};
 /// let claimed = C3Verdict::Valid(CompleteValidity {
-///     _unreachable_until_2c_a: core::marker::PhantomData,
+///     witness: unreachable!(),
 /// });
 /// assert!(claimed.may_certify());
 /// ```
@@ -575,33 +635,60 @@ pub enum C3Verdict {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteValidity {
-    _unreachable_until_2c_a: core::marker::PhantomData<()>,
+    witness: CorrespondenceWitness,
+}
+
+impl CompleteValidity {
+    /// An owner close whose `10.a` held. The close's other conjuncts — the
+    /// parent authenticated, the owner's authorization over the exact release
+    /// successor verified, the derivation itself — are established before a
+    /// witness can exist, because the witness compares against the derived
+    /// successor.
+    pub fn from_close_witness(witness: CorrespondenceWitness) -> Self {
+        Self { witness }
+    }
+
+    /// A market successor whose `10.a` held AND whose settlement is
+    /// independently established. Uncallable until 2c-C4 gives
+    /// [`IndependentRealization`] a constructor — deliberately.
+    pub fn from_market_witness(
+        witness: CorrespondenceWitness,
+        realization: IndependentRealization,
+    ) -> Self {
+        let IndependentRealization { _c4_owns_this } = realization;
+        Self { witness }
+    }
+
+    /// The correspondence this validity rests on.
+    pub fn witness(&self) -> &CorrespondenceWitness {
+        &self.witness
+    }
 }
 
 impl C3Verdict {
     /// The class, for callers that branch on it.
     ///
-    /// `PartialPendingEncoderCut` returns `None` rather than a class: it is not
-    /// one of the four protocol outcomes, and returning `Valid` for it would be
-    /// exactly the claim this whole type exists to withhold.
+    /// `PartialPendingRealization` returns `None` rather than a class: it is
+    /// not one of the four protocol outcomes, and returning `Valid` for it
+    /// would be exactly the claim this whole type exists to withhold.
     pub const fn class(&self) -> Option<OutcomeClass> {
         match self {
             Self::Valid(_) => Some(OutcomeClass::Valid),
             Self::Invalid(_) => Some(OutcomeClass::Invalid),
             Self::Incomplete(_) => Some(OutcomeClass::Incomplete),
             Self::SafetyViolation(_) => Some(OutcomeClass::SafetyViolation),
-            Self::PartialPendingEncoderCut(_) => None,
+            Self::PartialPendingRealization(_) => None,
         }
     }
 
     /// Whether the caller may fold this successor forward.
     ///
-    /// True for a complete verdict and for a partial one — the encoder-cut
-    /// blocker withholds the validity CLAIM, it does not halt composition.
-    /// Blocking the fold instead would stop every vault, since the operand the
-    /// blocked conjunct needs does not exist yet.
+    /// True for a complete verdict and for a market fold pending its
+    /// realization fact — the missing fact withholds the validity CLAIM, it
+    /// does not halt composition. Blocking the fold instead would stop every
+    /// market vault until 2c-C4.
     pub const fn may_fold(&self) -> bool {
-        matches!(self, Self::Valid(_) | Self::PartialPendingEncoderCut(_))
+        matches!(self, Self::Valid(_) | Self::PartialPendingRealization(_))
     }
 
     /// Whether the successor may cross a boundary whose semantics require FULL
@@ -988,25 +1075,81 @@ mod tests {
         );
     }
 
-    /// A partial verdict may fold and may NOT certify. This is the whole
-    /// separation the encoder-cut blocker rests on.
+    /// A witness exists only because the bytes matched; it carries the
+    /// derived successor, its parent, and `c_{n+1}` from the SUPPLIED bytes —
+    /// which equals the commitment of the derived successor, by injectivity.
     #[test]
-    fn a_partial_verdict_folds_but_never_certifies() {
+    fn a_witness_is_made_by_equality_and_names_c_next_from_the_supplied_bytes() {
         let v = parent(1_000, 1_000, None);
-        let partial = C3Verdict::PartialPendingEncoderCut(EstablishedChecks {
-            expected: Box::new(v.clone()),
-            parent_commitment: [7; 32],
-        });
-        assert!(partial.may_fold(), "composition must continue");
-        assert!(
-            !partial.may_certify(),
-            "a blocked conjunct must never be certified as valid"
+        let supplied = v.encode().expect("encodes");
+        let w = check_correspondence(&v, [7; 32], &supplied).expect("bytes equal");
+        assert_eq!(*w.expected(), v);
+        assert_eq!(w.parent_commitment(), [7; 32]);
+        assert_eq!(
+            w.c_next(),
+            crate::ccb::vault_state_commitment(&v).expect("commits")
+        );
+    }
+
+    /// One byte off — anywhere — is `CORRESPONDENCE_MISMATCH`, class Invalid.
+    /// So is a supplied span that is longer or shorter than the canonical
+    /// encoding: the comparison is over the whole span.
+    #[test]
+    fn any_byte_difference_is_a_correspondence_mismatch() {
+        let v = parent(1_000, 1_000, None);
+        let canon = v.encode().expect("encodes");
+        for i in [0usize, 4, 100, canon.len() - 1] {
+            let mut supplied = canon.clone();
+            supplied[i] ^= 0x01;
+            assert_eq!(
+                check_correspondence(&v, [7; 32], &supplied).unwrap_err(),
+                Reason::CorrespondenceMismatch,
+                "byte {i}"
+            );
+        }
+        let mut longer = canon.clone();
+        longer.push(0);
+        assert_eq!(
+            check_correspondence(&v, [7; 32], &longer).unwrap_err(),
+            Reason::CorrespondenceMismatch
         );
         assert_eq!(
-            partial.class(),
+            check_correspondence(&v, [7; 32], &canon[..canon.len() - 1]).unwrap_err(),
+            Reason::CorrespondenceMismatch
+        );
+        assert_eq!(
+            Reason::CorrespondenceMismatch.class(),
+            OutcomeClass::Invalid
+        );
+    }
+
+    /// A market verdict pending its realization fact may fold and may NOT
+    /// certify; a close verdict from the same witness does both. This is the
+    /// whole separation the C4 seam rests on.
+    #[test]
+    fn a_market_witness_folds_but_never_certifies_and_a_close_witness_certifies() {
+        let v = parent(1_000, 1_000, None);
+        let supplied = v.encode().expect("encodes");
+        let w = check_correspondence(&v, [7; 32], &supplied).expect("bytes equal");
+        let market = C3Verdict::PartialPendingRealization(w.clone());
+        assert!(market.may_fold(), "composition must continue");
+        assert!(
+            !market.may_certify(),
+            "a missing realization fact must never be certified as valid"
+        );
+        assert_eq!(
+            market.class(),
             None,
             "deployment status is not a protocol class"
         );
+        let close = C3Verdict::Valid(CompleteValidity::from_close_witness(w.clone()));
+        assert!(close.may_fold());
+        assert!(close.may_certify(), "a close's 10.a is its last conjunct");
+        assert_eq!(close.class(), Some(OutcomeClass::Valid));
+        let C3Verdict::Valid(cv) = close else {
+            unreachable!()
+        };
+        assert_eq!(*cv.witness(), w);
     }
 
     #[test]
@@ -1105,12 +1248,12 @@ mod tests {
     /// inherits C3Verdict's separation of fold from claim.
     #[test]
     fn a_partial_verdict_in_the_slot_does_not_certify() {
+        let p = parent(1_000, 1_000, None);
+        let w =
+            check_correspondence(&p, [7; 32], &p.encode().expect("encodes")).expect("bytes equal");
         let v = SuccessorValidity::DlvTransition {
             kind: DlvTransitionKind::Settle,
-            verdict: Some(C3Verdict::PartialPendingEncoderCut(EstablishedChecks {
-                expected: Box::new(parent(1_000, 1_000, None)),
-                parent_commitment: [7; 32],
-            })),
+            verdict: Some(C3Verdict::PartialPendingRealization(w)),
         };
         assert!(!v.may_certify());
     }

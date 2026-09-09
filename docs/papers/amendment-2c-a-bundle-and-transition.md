@@ -11,7 +11,9 @@ and implements the already-defined `0x000B`.
 > the market encoding is no longer blocked and this document's sequencing rule is satisfied. The
 > encoder is authorized by [2c-A.1](amendment-2c-a-1-encoder-cut-rulings.md), which also rules the
 > decisions the A-stage text left open. Passages below that still read "blocked on 2c-B" are the
-> A-stage record and carry the same note.
+> A-stage record and carry the same note. The adopting change landed the same day: the encoder
+> surface for both shapes, the owner-close cutover, market emission fail-closed until 5c-2 Step 2,
+> and `VDS.COMMON.10.a` wired — see 2c-A.1's adopting change record.
 
 ## Context
 

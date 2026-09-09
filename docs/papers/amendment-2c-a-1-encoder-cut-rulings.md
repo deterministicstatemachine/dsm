@@ -326,15 +326,56 @@ under the cap.
   re-encoding; the comparison skipped.
 - **Targeted tests per edited module**, then CI is the board.
 
+# Adopting change record (2026-09-09)
+
+One PR, `feat/ccb-settlement-bundle-encoder-cut`, in three code commits and this record:
+
+1. **The encoder surface, both shapes.** `dsm::ccb::settlement` — `0x000B`, `0x000D`, `0x000E`,
+   `0x000F`, `0x0010`, `0x0015`, `0x0016`, `0x0031`, `0x0033` — with strict decoders that record
+   each transition's successor span, `decode_settlement_bundle_canonical` (whole-bundle round
+   trip, ruling 8), the in-bundle structural checks (ruling 9), the route-family schema-1 burns
+   (ruling 10) and the `declared_unencoded` set (ruling 11). Class-1 vectors for both shapes: the
+   owner close at 50,330 bytes with `b`, `addr(B)` and `c_{n+1}` pinned as literals; the market
+   vector at 51,107 bytes, under the 512 KiB cap, with `c_{n+1}` from the field-2 span.
+2. **The atomic type switch.** The protobuf bundle deleted from the proto, the frontend bindings
+   and every consumer (ruling 13); the owner-close producer cut over with `c_{n+1}` of the derived
+   successor as the close's ONE identity — consume-once claim, pointer, durable intent
+   (`close_commitment`), fence — and recovery comparing against it, plus an in-transaction check
+   that the terminal state the device publishes IS the permitted continuation (ruling 3); the
+   market producer FAIL-CLOSED at emission after every gate (ruling 2, amended), nothing stored,
+   fenced, bound, signed or advanced, the refusal naming 5c-2 Step 2; the transition located by
+   `parent_binding == c_n` (ruling 7); one derivation shared by producer and verifier (ruling 14).
+   The two settle-through lifecycle tests became emission-refusal tests; the LP-offline walk and
+   the close-after-trade tests bind their market generations through a fixture that performs what
+   the route did past its gates (canonical bundle through the production driver, DlvSettle through
+   the production advance, receipt off the advanced head) — what 5c-2 Step 2 owes.
+3. **`VDS.COMMON.10.a` wired** (ruling 12, the wiring point). `check_correspondence` in core over
+   the recorded field-2 span; `CorrespondenceWitness`; `C3Verdict::Valid` for an owner close via
+   `CompleteValidity::from_close_witness`; `PartialPendingRealization` for a market fold; the walk
+   installs the witness's `c_{n+1}`. Correspondence vectors: accept, and the four reject
+   dispositions plus a parent-edge change and an off-by-one mutated field. Controls by
+   construction: an authorized close folds Valid and certifies; a close bundle carrying a drained,
+   linked successor with one preserved field changed — under the owner's real authorization —
+   fails `10.a`; a market bundle whose successor is not the derived one fails `10.a`.
+
+**Mutation controls executed** — each named test went red with the check removed and green with
+it restored: m1 the owner-close shape check skipped in the constructor → `an_owner_close_without_authorization_is_refused`; m2 a `close_authorization` accepted in a market bundle → `a_close_authorization_inside_a_market_bundle_is_refused`; m3 the `parent_binding == c_n` locate dropped → `a_bundle_bound_at_a_key_it_does_not_name_is_unresolvable`; m4 `verify_close_authorization` skipped → `a_stranger_cannot_close_a_vault_by_binding_a_close_shaped_bundle`; m5 the supplied span replaced by a producer-derived re-encoding → `a_close_bundle_carrying_a_successor_other_than_the_derived_one_fails_10a`; m6 the comparison skipped in `check_correspondence` → `any_byte_difference_is_a_correspondence_mismatch`. Classified by the named test's `FAILED` line, never by the presence of "error" in cargo output; each file restored from a byte copy.
+
+**Ruling 4 is owed at deployment**, not by this change: no prost-era identity is conformant, and
+the identity-scoped reprovision (Class-N binding rows, `DSM/settlement-bundle` objects, client-local
+fence / quarantine / close-intent / slot-claim rows, beta DLVs re-created) is the operator's act
+when this ships to a device.
+
 # Closure status
 
 ```text
 2c-A status text                    RECONCILED (this document)
-Rulings 1-14                        FROZEN
-Encoder surface (both shapes)       NOT IMPLEMENTED — the adopting change
-Owner-close producer cutover        NOT IMPLEMENTED — the adopting change
-Market producer                     FAIL-CLOSED after the cut until 5c-2 Step 2
-VDS.COMMON.10.a, owner close        WIRABLE once the surface lands; C3 owner-close
-                                    completion then needs nothing else
-VDS.COMMON.10.a, market             DEPLOYMENT-BLOCKED on the 5c-2 ordering; then C4
+Rulings 1-14                        FROZEN, EXECUTED (adopting change record above)
+Encoder surface (both shapes)       IMPLEMENTED — class-1 vectors for both shapes
+Owner-close producer cutover        IMPLEMENTED — c_{n+1} is the close's one identity
+Market producer                     FAIL-CLOSED at emission until 5c-2 Step 2; every gate live
+VDS.COMMON.10.a, owner close        LIVE — an owner-close fold is C3Verdict::Valid
+VDS.COMMON.10.a, market             EVALUATED on every market fold; the fold is
+                                    PartialPendingRealization until C4's realization fact
+Identity-scoped reprovision         OWED AT DEPLOYMENT (ruling 4)
 ```

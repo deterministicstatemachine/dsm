@@ -492,6 +492,48 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         ("MarketPolicy", MarketPolicy::CLASS, MarketPolicy::SCHEMA),
         ("ReleasePolicy", ReleasePolicy::CLASS, ReleasePolicy::SCHEMA),
         ("FeePolicy", FeePolicy::CLASS, FeePolicy::SCHEMA),
+        // Amendment 2c-A.1: the settlement bundle and what it nests.
+        (
+            "TradeIntent",
+            dsm::ccb::TradeIntent::CLASS,
+            dsm::ccb::TradeIntent::SCHEMA,
+        ),
+        ("Route", dsm::ccb::Route::CLASS, dsm::ccb::Route::SCHEMA),
+        (
+            "SettlementBundle",
+            dsm::ccb::SettlementBundle::CLASS,
+            dsm::ccb::SettlementBundle::SCHEMA,
+        ),
+        (
+            "ConsumedDlvTransition",
+            dsm::ccb::ConsumedDlvTransition::CLASS,
+            dsm::ccb::ConsumedDlvTransition::SCHEMA,
+        ),
+        (
+            "DlvProofMaterial",
+            dsm::ccb::DlvProofMaterial::CLASS,
+            dsm::ccb::DlvProofMaterial::SCHEMA,
+        ),
+        (
+            "Allocation",
+            dsm::ccb::Allocation::CLASS,
+            dsm::ccb::Allocation::SCHEMA,
+        ),
+        (
+            "AllocationBundle",
+            dsm::ccb::AllocationBundle::CLASS,
+            dsm::ccb::AllocationBundle::SCHEMA,
+        ),
+        (
+            "DsmSuccessorEvidence",
+            dsm::ccb::DsmSuccessorEvidence::CLASS,
+            dsm::ccb::DsmSuccessorEvidence::SCHEMA,
+        ),
+        (
+            "MarketTerms",
+            dsm::ccb::MarketTerms::CLASS,
+            dsm::ccb::MarketTerms::SCHEMA,
+        ),
     ];
 
     // Registry §3, the live column.
@@ -503,6 +545,15 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         (0x0007, 1),
         (0x0009, 1),
         (0x000A, 1),
+        (0x000B, 1),
+        (0x000D, 2),
+        (0x000E, 1),
+        (0x000F, 1),
+        (0x0010, 1),
+        (0x0015, 2),
+        (0x0016, 2),
+        (0x0031, 1),
+        (0x0033, 1),
     ];
 
     for (name, class, sch) in live {

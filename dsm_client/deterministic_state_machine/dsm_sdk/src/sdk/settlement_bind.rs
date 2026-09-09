@@ -17,9 +17,9 @@
 //!
 //! [`SettlementBundle`]: dsm::dlv::settlement_bundle
 
+use dsm::ccb::{ConsumedDlvTransition, SettlementBundle, VaultStateV2};
 use dsm::dlv::quorum_bind::{BindingTransaction, CommittedMember, Outcome, QuorumBind};
 use dsm::dlv::settlement_bundle;
-use dsm::types::proto as pb;
 
 use crate::sdk::quorum_bind_runner::{binding_transport, run_fenced, Backoff, FenceKey, RunError};
 use crate::sdk::storage_set::StorageSet;
@@ -33,8 +33,6 @@ const MAX_BALLOTS: u32 = 8;
 pub enum BindError {
     /// The bundle is not canonical / well-formed.
     Bundle,
-    /// A fixed-width bundle field is not 32 bytes.
-    BadField,
     /// The immutable bundle could not be stored at all (no usable member SDK).
     PutImmutable,
     /// The bundle reached fewer than `q` ATTRIBUTABLE members of the committed
@@ -48,10 +46,6 @@ pub enum BindError {
     Profile,
     /// The fence could not be persisted, so the transaction did not begin.
     FenceNotPersisted,
-}
-
-fn as32(v: &[u8]) -> Result<[u8; 32], BindError> {
-    <[u8; 32]>::try_from(v).map_err(|_| BindError::BadField)
 }
 
 /// This Class K instance's proposer id — the low tiebreak of every round and
@@ -122,50 +116,21 @@ async fn put_bundle(set: &StorageSet, canon: &[u8], addr: [u8; 32]) -> Result<()
     Ok(())
 }
 
-/// Build the minimal owner-close `SettlementBundle` (5c-1). A close consumes one
-/// vault parent and is owner-local, so the market fields (`I`, `X`, route) are
-/// empty and there is one vault transition. `trader_parent` is the vault's
-/// committed parent state `c_n` (the resource the quorum consumes); the close's
-/// unique commitment `x_close` is the permitted successor the fence fixes on
-/// `COMMITTED`, and the close folds one-phase (Req 6.30) on that.
-#[allow(clippy::too_many_arguments)]
+/// Build the canonical owner-close `SettlementBundle` (2c-A.1): no market
+/// terms, one transition carrying the exact drained successor the frozen
+/// predicate derived (`derive_close_successor`) and the owner's authorization
+/// over it. The permitted continuation the fence fixes on `COMMITTED` is
+/// `c_{n+1}` of that successor (ruling 3); the close folds one-phase on it
+/// (Req 6.30). A successor that is not linked to `parent_c_n`, not retired,
+/// or an authorization of any length but 49,856 cannot be built.
 pub fn close_bundle(
-    storage_set_id: [u8; 32],
-    quorum: u32,
-    vault_id: [u8; 32],
-    parent_sequence: u64,
-    c_n: [u8; 32],
-    parent_reserves_digest: [u8; 32],
-    x_close: [u8; 32],
-    // The owner's authorization over the EXACT release successor — the
-    // signature over the canonical `Operation::DlvClose` this close realizes.
-    // A close bundle without it is refused by every composer, because
-    // `x_close` is a public derivation and proves nothing about who authored
-    // the close.
+    parent_c_n: [u8; 32],
+    successor: VaultStateV2,
     owner_authorization: Vec<u8>,
-) -> pb::SettlementBundleV1 {
-    pb::SettlementBundleV1 {
-        version: settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-        storage_set_id: storage_set_id.to_vec(),
-        q: quorum,
-        intent_commitment: vec![0u8; 32],
-        route_set_commitment: vec![0u8; 32],
-        selected_route: Vec::new(),
-        trader_parent: c_n.to_vec(),
-        trader_successor: x_close.to_vec(),
-        vault_transitions: vec![pb::VaultTransitionV1 {
-            vault_id: vault_id.to_vec(),
-            parent_generation: parent_sequence,
-            parent_state_commitment: c_n.to_vec(),
-            parent_reserves_digest: parent_reserves_digest.to_vec(),
-            successor_ccb: x_close.to_vec(),
-            reserve_deltas: Vec::new(),
-            witnesses: Vec::new(),
-        }],
-        proof_material: Vec::new(),
-        bundle_signatures: vec![owner_authorization],
-        recovery_material: Vec::new(),
-    }
+) -> Result<SettlementBundle, BindError> {
+    let transition = ConsumedDlvTransition::owner_close(parent_c_n, successor, owner_authorization)
+        .map_err(|_| BindError::Bundle)?;
+    SettlementBundle::owner_close(transition).map_err(|_| BindError::Bundle)
 }
 
 /// Store `B` and drive its QuorumBind transaction to a terminal outcome under
@@ -179,7 +144,7 @@ pub fn close_bundle(
 pub async fn bind_settlement(
     set: &StorageSet,
     proposer_id: [u8; 32],
-    bundle: &pb::SettlementBundleV1,
+    bundle: &SettlementBundle,
     trader_chain_id: [u8; 32],
     trader_parent_state_commitment: [u8; 32],
 ) -> Result<Result<Outcome, RunError>, BindError> {
@@ -187,7 +152,10 @@ pub async fn bind_settlement(
     let b = settlement_bundle::bundle_digest(&canon);
     let addr = settlement_bundle::bundle_addr(&canon);
     let keys = settlement_bundle::key_set(bundle).map_err(|_| BindError::Bundle)?;
-    let trader_successor = as32(&bundle.trader_successor)?;
+    // The continuation the fence fixes on COMMITTED: the market's exact
+    // prepared trader successor, or the close's c_{n+1} (2c-A.1 ruling 3).
+    let trader_successor =
+        settlement_bundle::permitted_continuation(bundle).map_err(|_| BindError::Bundle)?;
 
     // Store B before any mutating binding op, so recovery can always fetch it.
     put_bundle(set, &canon, addr).await?;
@@ -268,7 +236,7 @@ pub async fn bind_settlement(
 /// and is logged at error level; composition refuses from then on.
 pub(crate) fn record_own_commit(
     set: &StorageSet,
-    bundle: &pb::SettlementBundleV1,
+    bundle: &SettlementBundle,
     b: [u8; 32],
     addr: [u8; 32],
     ballot: u64,
@@ -290,17 +258,16 @@ pub(crate) fn record_own_commit(
         trader_successor,
     })
     .encode();
-    for t in &bundle.vault_transitions {
-        let (Ok(vault_id), Ok(c_n)) = (
-            <[u8; 32]>::try_from(t.vault_id.as_slice()),
-            <[u8; 32]>::try_from(t.parent_state_commitment.as_slice()),
-        ) else {
-            continue;
-        };
+    for t in bundle.transitions() {
+        // The vault and the consumed generation come from the carried
+        // successor (registry §5.19: no vault id beside c_n) — its vault_id,
+        // and its generation less one.
+        let vault_id = t.successor.vault_id;
+        let c_n = t.parent_binding;
         let finality = quarantine::ObservedFinality {
             vault_id,
             c_n,
-            generation: t.parent_generation,
+            generation: t.successor.generation.saturating_sub(1),
             value,
             // The round column carries the driver's final ballot for a commit;
             // rounds are never compared.
@@ -320,7 +287,7 @@ pub(crate) fn record_own_commit(
                 let written = quarantine::quarantine_root(&quarantine::QuarantineRoot {
                     vault_id,
                     root_c_n: c_n,
-                    root_generation: t.parent_generation,
+                    root_generation: t.successor.generation.saturating_sub(1),
                     storage_set_id: set.id(),
                     quorum: set.quorum(),
                     first_evidence: recorded.evidence,
@@ -334,7 +301,7 @@ pub(crate) fn record_own_commit(
                     b32(&b),
                     b32(&recorded.value.tx_id),
                     b32(&vault_id),
-                    t.parent_generation,
+                    t.successor.generation.saturating_sub(1),
                     match written {
                         Ok(()) => String::new(),
                         Err(e) => format!(" — and the root could NOT be durably written: {e}"),
@@ -345,7 +312,7 @@ pub(crate) fn record_own_commit(
                 "could not durably record this device's own binding finality at vault {} \
                  generation {}: {e}",
                 b32(&vault_id),
-                t.parent_generation
+                t.successor.generation.saturating_sub(1)
             ),
         }
     }
@@ -384,29 +351,15 @@ mod tests {
             .collect()
     }
 
-    fn a_bundle(set: &StorageSet, value: u8) -> pb::SettlementBundleV1 {
-        pb::SettlementBundleV1 {
-            version: settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-            storage_set_id: set.id().to_vec(),
-            q: set.quorum(),
-            intent_commitment: vec![0x1D; 32],
-            route_set_commitment: vec![0x0C; 32],
-            selected_route: b"route".to_vec(),
-            trader_parent: vec![0xA1; 32],
-            trader_successor: vec![value; 32],
-            vault_transitions: vec![pb::VaultTransitionV1 {
-                vault_id: vec![value; 32],
-                parent_generation: 3,
-                parent_state_commitment: vec![value ^ 0x40; 32],
-                parent_reserves_digest: vec![0x0A; 32],
-                successor_ccb: vec![0x5C; 32],
-                reserve_deltas: b"d".to_vec(),
-                witnesses: vec![],
-            }],
-            proof_material: vec![],
-            bundle_signatures: vec![],
-            recovery_material: b"r".to_vec(),
-        }
+    /// A canonical market bundle over vault `[value; 32]`, consuming parent
+    /// `[value ^ 0x40; 32]`.
+    fn a_bundle(_set: &StorageSet, value: u8) -> SettlementBundle {
+        let parent = [value ^ 0x40; 32];
+        dsm::ccb::settlement::fixtures::market_bundle(
+            parent,
+            dsm::ccb::settlement::fixtures::successor_of(parent, [value; 32], 4, 1, 1),
+            [0x0C; 32],
+        )
     }
 
     fn init_db() {
@@ -441,7 +394,7 @@ mod tests {
     /// and return the result.
     async fn bind_with_accepted(
         set: &StorageSet,
-        bundle: &pb::SettlementBundleV1,
+        bundle: &SettlementBundle,
         make_unattributable: &[&str],
         fail: &[&str],
     ) -> Result<Result<Outcome, RunError>, BindError> {
@@ -557,13 +510,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, Ok(Outcome::Committed));
-        // The fence now permits ONLY the bundle's trader successor.
+        // The fence now permits ONLY the bundle's continuation — for a market
+        // bundle, its exact prepared trader successor.
         let verdict = crate::storage::client_db::trader_parent_fence::active_verdict(
             &[0x11; 32],
             &[0xA1; 32],
         )
         .unwrap();
-        assert_eq!(verdict, FenceVerdict::PermitsOnly([0xAA; 32]));
+        assert_eq!(
+            verdict,
+            FenceVerdict::PermitsOnly(settlement_bundle::permitted_continuation(&bundle).unwrap())
+        );
     }
 
     #[tokio::test]
@@ -582,9 +539,12 @@ mod tests {
         );
         // A different bundle sharing the SAME vault parent (same c_n) cannot
         // also become binding-final.
-        let mut second = a_bundle(&set, 0xBB);
-        second.vault_transitions[0].parent_state_commitment =
-            first.vault_transitions[0].parent_state_commitment.clone();
+        let same_parent = first.transitions()[0].parent_binding;
+        let second = dsm::ccb::settlement::fixtures::market_bundle(
+            same_parent,
+            dsm::ccb::settlement::fixtures::successor_of(same_parent, [0xBB; 32], 4, 1, 1),
+            [0x0D; 32],
+        );
         let out = bind_settlement(&set, [2; 32], &second, [0x22; 32], [0xB2; 32])
             .await
             .unwrap();

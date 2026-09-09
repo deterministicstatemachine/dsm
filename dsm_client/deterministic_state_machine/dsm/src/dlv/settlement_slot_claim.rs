@@ -166,12 +166,6 @@ pub fn sign_settlement_slot_claim(
     Ok(env.encode_to_vec())
 }
 
-// `close_slot_commitment` now lives in [`crate::dlv::settlement_bundle`], where
-// the bundle layer needs it to tell an owner close from a market settle. This
-// re-export keeps its old path alive only until 5d deletes this module whole;
-// it is one definition, not a second one.
-pub use crate::dlv::settlement_bundle::close_slot_commitment;
-
 /// Strictly decode an envelope and verify its signature under the body's own
 /// `claimant_public_key`. Refuses anything that does not re-encode to exactly
 /// the input bytes.

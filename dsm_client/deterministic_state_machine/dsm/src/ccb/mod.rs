@@ -2,14 +2,13 @@
 
 //! Canonical commit bytes (CCB) — the production encoder.
 //!
-//! Implements `docs/papers/ccb-object-registry.md` for the transitive encoding
-//! closure of `VaultStateV2` and nothing else. The registry is the authority;
-//! this module is an implementation of it, written from that text rather than
-//! the other way round. If the two disagree, the registry is right.
+//! Implements `docs/papers/ccb-object-registry.md`. The registry is the
+//! authority; this module is an implementation of it, written from that text
+//! rather than the other way round. If the two disagree, the registry is right.
 //!
 //! ## Scope
 //!
-//! Exactly the classes `c_n` depends on:
+//! The transitive encoding closure of `c_n` (`state`):
 //!
 //! | Class | Object |
 //! |---|---|
@@ -21,17 +20,22 @@
 //! | `0x0009` | `ReleasePolicy` |
 //! | `0x000A` | `FeePolicy` |
 //!
-//! The routing and settlement classes are deliberately absent. They are still
-//! blocked in the registry, and a placeholder encoder for a class whose field
-//! table does not exist would be exactly the "encoder defines the protocol"
-//! failure the registry ordering exists to prevent.
+//! and, since amendment 2c-A.1, the transitive encoding closure of `b`
+//! (`settlement`): `0x000E`, `0x000F`, `0x0010`, `0x0033`, `0x0031`,
+//! `0x000B`, `0x000D`, `0x0015`, `0x0016`. Every one of them ships against a
+//! field table the registry defines; a class the registry has not defined
+//! has no encoder here, and [`declared_unencoded`] keeps it that way
+//! structurally rather than by convention.
 //!
-//! ## Not a decoder
+//! ## Decoders are strict, and the conformance parser stays independent
 //!
 //! CCB is not self-describing: structure comes from `(object_class,
-//! schema_version)` plus the registry, never from the byte stream. This module
-//! only encodes. Parsing is implemented independently in the conformance test,
-//! which is the point — a decoder here would share this module's assumptions.
+//! schema_version)` plus the registry, never from the byte stream. The
+//! decoders in `decode` rebuild objects through the same validating
+//! constructors the encoders use and refuse burned schemas, trailing bytes
+//! and misordered sets; they are consumers, not checks. The conformance
+//! tests parse and encode with an independent implementation written from
+//! the registry text, which is what makes them evidence.
 
 use blake3::Hasher;
 
@@ -44,6 +48,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 pub mod decode;
 pub mod devtree;
 pub mod genesis;
+pub mod settlement;
 pub mod state;
 
 pub use decode::{
@@ -54,6 +59,11 @@ pub use devtree::{
     RootProgressionDelegation,
 };
 pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
+pub use settlement::{
+    Allocation, AllocationBundle, BundleShape, ConsumedDlvTransition, DlvProofMaterial,
+    DsmSuccessorEvidence, MarketTerms, Route, RouteLeg, SettlementBundle, TradeIntent,
+    BETA_TRANSITIONS, ENTROPY_LEN, SPX256F_SIGNATURE_LEN,
+};
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetEntry,
     StorageSetMembers, VaultStateV2,
@@ -72,6 +82,27 @@ pub mod class {
     pub const MARKET_POLICY: u16 = 0x0007;
     pub const RELEASE_POLICY: u16 = 0x0009;
     pub const FEE_POLICY: u16 = 0x000A;
+    // ── The settlement bundle and what it nests (amendments 2c-A, 2c-B,
+    // 2c-A.1). Encoders live in `settlement`.
+    /// `TradeIntent` (§5.5).
+    pub const TRADE_INTENT: u16 = 0x000B;
+    /// `Route` schema 2 (§5.13); schema 1 burned.
+    pub const ROUTE: u16 = 0x000D;
+    /// `SettlementBundle` `B` (§5.19).
+    pub const SETTLEMENT_BUNDLE: u16 = 0x000E;
+    /// `ConsumedDlvTransition` `T_v` (§5.21).
+    pub const CONSUMED_DLV_TRANSITION: u16 = 0x000F;
+    /// `DlvProofMaterial` `P_v` (§5.22) — zero fields in schema 1.
+    pub const DLV_PROOF_MATERIAL: u16 = 0x0010;
+    /// `Allocation` schema 2 (§5.10); schema 1 burned.
+    pub const ALLOCATION: u16 = 0x0015;
+    /// `AllocationBundle` schema 2 (§5.11); schema 1 burned.
+    pub const ALLOCATION_BUNDLE: u16 = 0x0016;
+    /// Substrate class — `DsmSuccessorEvidence` (§5.23), nested in `0x0033`.
+    pub const DSM_SUCCESSOR_EVIDENCE: u16 = 0x0031;
+    /// `MarketTerms` (§5.20), nested in `0x000E` field 1.
+    pub const MARKET_TERMS: u16 = 0x0033;
+
     /// Substrate class — the Genesis v3 parameter set (registry §5.15).
     pub const GENESIS_PARAMS_V3: u16 = 0x0018;
     /// Substrate class — GRK-signed root-progression delegation (§5.16).
@@ -183,6 +214,66 @@ pub mod reserved {
     }
 }
 
+/// Discriminants the registry DEFINES (or names as blocked) that this crate
+/// does not encode — the namespace-enforcement gap 2c-A assigned to 2c-C and
+/// 2c-A.1 ruling 11 closes here.
+///
+/// Same discipline as [`reserved`]: a `CcbObject` impl cannot name one of
+/// these without moving the constant into [`class`], which is a reviewable
+/// diff arriving with the encoder that earns it. `0x0032` is claimed by
+/// amendment 2c for 2c-D with no field table yet, so it belongs here too.
+pub mod declared_unencoded {
+    /// §6 partial table; only `0x0008` blocks it.
+    pub const FULFILLMENT_MECHANISM: u16 = 0x0006;
+    /// §5.6.
+    pub const MARKET_BOUNDS: u16 = 0x0008;
+    /// §5.14 `RouteSet` `R`, schema 2; schema 1 burned.
+    pub const ROUTE_SET: u16 = 0x000C;
+    /// Blocked — 2c-B/2c-C/2c-D.
+    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
+    /// Blocked — §6.
+    pub const TRADE_DIGEST: u16 = 0x0012;
+    /// §5.8.
+    pub const REFERENCE_WINDOW: u16 = 0x0013;
+    /// §5.12 `RouteCommitmentBody` `Q`, schema 2; schema 1 burned. `X` is
+    /// carried as a digest in `MarketTerms`; `Q` lives in the receipt
+    /// publication set (2c-A ruling 2).
+    pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
+    /// Claimed by amendment 2c for 2c-D.
+    pub const CLAIMED_FOR_2C_D: u16 = 0x0032;
+
+    pub const ALL: &[u16] = &[
+        FULFILLMENT_MECHANISM,
+        MARKET_BOUNDS,
+        ROUTE_SET,
+        TRADER_ACCEPTANCE,
+        TRADE_DIGEST,
+        REFERENCE_WINDOW,
+        ROUTE_COMMITMENT_BODY,
+        CLAIMED_FOR_2C_D,
+    ];
+
+    pub fn is_declared_unencoded(object_class: u16) -> bool {
+        ALL.contains(&object_class)
+    }
+}
+
+/// Class numbers the registry BURNED outright — never re-assigned, never
+/// encoded at any schema.
+pub mod burned_class {
+    /// Briefly a `StorageMemberId` class before §5.2 settled that member ids
+    /// are bare length-prefixed bytes.
+    pub const STORAGE_MEMBER_ID: u16 = 0x0003;
+    /// `ExternalCommitmentBody` — §6a finding 3.
+    pub const EXTERNAL_COMMITMENT_BODY: u16 = 0x0014;
+
+    pub const ALL: &[u16] = &[STORAGE_MEMBER_ID, EXTERNAL_COMMITMENT_BODY];
+
+    pub fn is_burned_class(object_class: u16) -> bool {
+        ALL.contains(&object_class)
+    }
+}
+
 /// Live schema versions, and the ones the state-identity cut burned.
 ///
 /// A burned `(class, schema)` pair is recorded so its number is never
@@ -214,6 +305,15 @@ pub mod schema {
         (super::class::STORAGE_SET, 2),
         (super::class::ENCUMBRANCE_CLAIM, 1),
         (super::class::ENCUMBRANCE_SET, 1),
+        // The route family moved to schema 2 when `p_v` became `c_n` and legs
+        // began nesting by complete CCB (registry §5.10–§5.14). Recorded for
+        // the two classes this crate does not encode as well, so a schema-1
+        // envelope classifies as burned rather than unknown (2c-A.1 ruling 10).
+        (super::declared_unencoded::ROUTE_SET, 1),
+        (super::class::ROUTE, 1),
+        (super::class::ALLOCATION, 1),
+        (super::class::ALLOCATION_BUNDLE, 1),
+        (super::declared_unencoded::ROUTE_COMMITMENT_BODY, 1),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live
@@ -281,6 +381,25 @@ pub enum CcbError {
     },
     /// A length did not fit the 4-byte prefix the format allows.
     LengthOverflow,
+    /// A `bytes` field whose length schema 1 fixes (`sigma_dsm`,
+    /// `close_authorization`) has another length.
+    FixedLength {
+        field: &'static str,
+        expected: usize,
+        got: usize,
+    },
+    /// A `bytes` field that carries the object's substance is empty.
+    EmptyBytes { field: &'static str },
+    /// A sequence or set that must have at least one element has none.
+    EmptySequence { class: u16 },
+    /// The §5.19 shape rule: which side of it was violated.
+    BundleShape(&'static str),
+    /// Beta's transition cardinality is exactly one.
+    TransitionCount { got: usize },
+    /// `V_{n+1}.parent_state_commitment != T_v.parent_binding`.
+    ParentLinkage,
+    /// An owner close whose successor still holds reserves.
+    CloseSuccessorNotRetired { reserve_a: u64, reserve_b: u64 },
     /// A `signature_alg` value the registry does not declare.
     UnknownSignatureAlg { alg: u16 },
     /// A public key whose length is not the declared width for its algorithm.
@@ -453,6 +572,34 @@ impl core::fmt::Display for CcbError {
                  which is not a positive credit — provenance for a debit or an insertion is \
                  provenance for nothing"
             ),
+            CcbError::FixedLength {
+                field,
+                expected,
+                got,
+            } => write!(
+                f,
+                "{field} is {got} bytes; schema 1 fixes it at exactly {expected}"
+            ),
+            CcbError::EmptyBytes { field } => write!(f, "{field} is empty"),
+            CcbError::EmptySequence { class } => {
+                write!(f, "class {class:#06x}: a sequence with no elements is not defined")
+            }
+            CcbError::BundleShape(why) => write!(f, "settlement bundle shape: {why}"),
+            CcbError::TransitionCount { got } => write!(
+                f,
+                "a beta settlement bundle carries exactly one transition, not {got}"
+            ),
+            CcbError::ParentLinkage => write!(
+                f,
+                "the successor's parent_state_commitment is not the transition's parent_binding"
+            ),
+            CcbError::CloseSuccessorNotRetired {
+                reserve_a,
+                reserve_b,
+            } => write!(
+                f,
+                "an owner close drains both legs; the successor holds ({reserve_a}, {reserve_b})"
+            ),
             CcbError::WitnessHasNoMutations => write!(
                 f,
                 "economic transition witness: no mutations — a transition that changes no \
@@ -553,10 +700,17 @@ pub fn dlv_policy_digest(release: &ReleasePolicy, fee: &FeePolicy) -> [u8; 32] {
 }
 
 pub fn vault_state_commitment(state: &VaultStateV2) -> Result<[u8; 32], CcbError> {
-    let ccb = state.encode()?;
+    Ok(vault_state_commitment_of_canon(&state.encode()?))
+}
+
+/// `c_n = H_dom(DSM/vault-state, CCB(V_n))` over bytes that already ARE
+/// `CCB(V_n)` — the form `VDS.COMMON.10.a` needs, where the operand is the
+/// exact supplied span of a bundle and nothing re-encodes it. The one
+/// derivation; [`vault_state_commitment`] is this over a fresh encoding.
+pub fn vault_state_commitment_of_canon(canon: &[u8]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_VAULT_STATE);
-    h.update(&ccb);
-    Ok(*h.finalize().as_bytes())
+    h.update(canon);
+    *h.finalize().as_bytes()
 }
 
 /// `h_0 = H(DSM/vault-state-parent/genesis/v2 ‖ vault_id)`.

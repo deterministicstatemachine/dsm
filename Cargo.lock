@@ -1211,6 +1211,7 @@ dependencies = [
  "constant_time_eq 0.5.0",
  "crc32fast",
  "derive_more",
+ "dsm",
  "ed25519-dalek",
  "env_logger",
  "ff 0.14.0",
