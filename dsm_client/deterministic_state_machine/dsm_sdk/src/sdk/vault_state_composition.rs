@@ -65,8 +65,8 @@
 
 use dsm::ccb::{vault_state_commitment, VaultStateV2};
 use dsm::dlv::successor_validity::{
-    derive_close_successor, derive_market_successor, DeriveExpected, MarketTerms, OutcomeClass,
-    Reason,
+    derive_close_successor, derive_market_successor, C3Verdict, DeriveExpected, EstablishedChecks,
+    MarketTerms, OutcomeClass, Reason,
 };
 use dsm::types::proto as generated;
 use prost::Message;
@@ -98,6 +98,13 @@ pub(crate) struct FoldedParent {
     /// Which KIND of consumer owned it. A resumed close must be able to tell
     /// its own fold from a market settle that landed at the same generation.
     pub bound_kind: dsm::dlv::settlement_bundle::BundleShape,
+    /// What C3 concluded about the successor this fold produced. Today every
+    /// fold is [`C3Verdict::PartialPendingEncoderCut`]: every conjunct that can
+    /// be evaluated held, and `VDS.COMMON.10.a` cannot be — so the fold may
+    /// compute forward and the validity claim is withheld. Recorded so that
+    /// the withholding is a value a caller must confront, not an absence it
+    /// can read as consent.
+    pub verdict: C3Verdict,
 }
 
 /// What the binding register — plus this device's own fence table — says about
@@ -638,12 +645,29 @@ pub(crate) async fn compose_vault_state(
                 return Err(unavailable(&format!("its successor does not encode: {e}")));
             }
         };
+        // THE VERDICT THIS FOLD CARRIES. Everything above that could be
+        // evaluated held; the byte comparison of VDS.COMMON.10.a could not be,
+        // because no supplied successor exists on the wire until the 2c-A
+        // encoder cut. The walk folds forward BECAUSE the verdict permits it
+        // (`may_fold`), and nothing downstream may read the fold as
+        // certification (`may_certify` is false on every fold today).
+        let verdict = C3Verdict::PartialPendingEncoderCut(EstablishedChecks {
+            expected: Box::new(next_state.clone()),
+            parent_commitment: cursor_c_n,
+        });
+        if !verdict.may_fold() {
+            return Err(refused(
+                Reason::CorrespondenceMismatch,
+                "its verdict does not permit folding",
+            ));
+        }
         folded_parents.push(FoldedParent {
             generation: cursor_state.generation,
             c_n: cursor_c_n,
             state: cursor_state.clone(),
             bound_by: bound.bundle_digest,
             bound_kind: bound.shape,
+            verdict,
         });
         let _ = transition;
         cursor_state = next_state;
@@ -1736,6 +1760,64 @@ mod tests {
         assert!(
             probe.tx_id.is_none() && probe.value_digest.is_none() && probe.value_addr.is_none(),
             "E5: no value is resolved on a quarantined key"
+        );
+    }
+
+    /// 2c-C3 Phase E — THE FORCED-PARTIAL CONTROL. Every fold the walk makes
+    /// today carries `PartialPendingEncoderCut`: composition CONTINUES on it,
+    /// the recorded `expected` is exactly the successor the walk installed,
+    /// the recorded parent is the `c_n` it was derived from, and the verdict
+    /// permits folding while refusing certification. `Valid` is not reachable
+    /// from here or anywhere — `CompleteValidity` has no constructor, pinned
+    /// by the `compile_fail` doctests on the type — so nothing built on a fold
+    /// can claim accepted-successor finality, `TA_B`, or a fence release.
+    #[tokio::test]
+    async fn every_fold_is_partial_pending_the_encoder_cut_and_never_certifies() {
+        let _fleet = fleet();
+        let vault_id = vid(0x33);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(
+            &vault_id,
+            &x_seed(0x33),
+            1_000_000,
+            500_000,
+            0,
+            &c0,
+            true,
+            10_000,
+        )
+        .await;
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("composition continues on a partial verdict");
+        assert_eq!(composed.sequence, 1, "the fold happened");
+        assert_eq!(composed.folded_parents.len(), 1);
+        let fold = &composed.folded_parents[0];
+        let C3Verdict::PartialPendingEncoderCut(checks) = &fold.verdict else {
+            panic!(
+                "every fold today is partial pending the encoder cut, got {:?}",
+                fold.verdict
+            );
+        };
+        assert_eq!(
+            *checks.expected, composed.state,
+            "expected IS the installed successor"
+        );
+        assert_eq!(
+            checks.parent_commitment, fold.c_n,
+            "derived from the folded parent"
+        );
+        assert_eq!(checks.parent_commitment, c0);
+        assert!(fold.verdict.may_fold(), "the fold may compute forward");
+        assert!(
+            !fold.verdict.may_certify(),
+            "the validity claim is withheld"
+        );
+        assert_eq!(
+            fold.verdict.class(),
+            None,
+            "deployment status is not a protocol class"
         );
     }
 
