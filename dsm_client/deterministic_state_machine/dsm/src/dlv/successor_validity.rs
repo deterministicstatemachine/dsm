@@ -492,12 +492,166 @@ impl DeriveExpected {
 /// ```compile_fail
 /// use dsm::dlv::successor_validity::IndependentRealization;
 /// let _ = IndependentRealization {
-///     _c4_owns_this: core::marker::PhantomData,
+///     _corr: unreachable!(),
+///     _acceptance: unreachable!(),
+/// };
+/// ```
+///
+/// **2c-C4 gave it a definition and deliberately not a constructor that can
+/// run.** [`IndependentRealization::from_parts`] takes C4's own half — a
+/// [`MarketCorrespondence`], which the walk can produce — together with a
+/// [`BundleAcceptanceWitness`], which nothing can. The impossibility moved one
+/// level down rather than away: 2c-D defines the bundle-acceptance leaf, binds
+/// the accepted economic result to the exact `b`, and gives that witness its
+/// only constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndependentRealization {
+    _corr: MarketCorrespondence,
+    _acceptance: BundleAcceptanceWitness,
+}
+
+/// **2c-D's conjunct: this acceptance realizes THIS bundle `b`.**
+///
+/// The bundle-acceptance leaf under the validated root, whose authenticated
+/// content commits `b` (amendment 2c §9.1's two-conjunct rule). There is no
+/// constructor here and 2c-C4 may not add one: an amendment cannot verify an
+/// object whose fields another amendment defines, and `0x0011`'s field table
+/// and `0x0032`'s leaf are both 2c-D's.
+///
+/// It is what keeps *"the right trader transition happened"* from standing in
+/// for *"…for this exact `b`"* — the binding gap 2c-D exists to close.
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::BundleAcceptanceWitness;
+/// let _ = BundleAcceptanceWitness {
+///     _2c_d_owns_this: core::marker::PhantomData,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndependentRealization {
-    _c4_owns_this: core::marker::PhantomData<()>,
+pub struct BundleAcceptanceWitness {
+    _2c_d_owns_this: core::marker::PhantomData<()>,
+}
+
+/// The accepted `DlvSettle` the ordered walk validated, as `CORR` reads it
+/// (2c-C4 §4). Every field comes from the transition the walk VALIDATED, never
+/// from the bundle's carried bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedTransition {
+    /// The accepted successor's own parent on the trader's bilateral chain.
+    pub embedded_parent: [u8; 32],
+    /// `C_dsm+`, recomputed by the walk, never carried (2c-B ruling 1).
+    pub c_dsm_plus: [u8; 32],
+    /// The trade identity the accepted operation names.
+    pub external_commitment_x: [u8; 32],
+    /// The vault parent the accepted operation consumes.
+    pub parent_binding: [u8; 32],
+    /// A digest of the operation's balance effects, for CORR.4.
+    pub effects_digest: [u8; 32],
+}
+
+/// The market coordinates `B` carries, as `CORR` compares them. Read from the
+/// decoded bundle; the two coordinate systems are never mixed (2c-C4 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundleCoordinates {
+    pub trader_parent: [u8; 32],
+    pub trader_successor: [u8; 32],
+    pub route_set_commitment: [u8; 32],
+    /// A digest of the selected route's `T_v` economics, for CORR.4.
+    pub route_effects_digest: [u8; 32],
+}
+
+/// C4's own half of realization: `CORR.1`–`CORR.5` all held for one candidate.
+///
+/// Private fields and one constructor, [`check_market_correspondence`], so a
+/// value of this type IS the fact that the equalities were checked. It is not
+/// realization — [`IndependentRealization`] additionally needs 2c-D's
+/// [`BundleAcceptanceWitness`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketCorrespondence {
+    witness: CorrespondenceWitness,
+    cursor_c_n: [u8; 32],
+}
+
+impl MarketCorrespondence {
+    /// The `VDS.COMMON.10.a` witness this correspondence rests on (CORR.5).
+    pub fn witness(&self) -> &CorrespondenceWitness {
+        &self.witness
+    }
+
+    /// The vault cursor whose `c_n` the accepted operation consumed (CORR.3).
+    pub const fn cursor_c_n(&self) -> [u8; 32] {
+        self.cursor_c_n
+    }
+}
+
+/// **`CORR.1`–`CORR.5`** (2c-C4 §4). Sans-IO: the caller supplies the accepted
+/// transition the walk validated, the coordinates `B` carries, the cursor, and
+/// the `10.a` witness.
+///
+/// What this establishes and what it does not: it establishes that the trader
+/// accepted the exact transition `B` names, priced as `B`'s route says,
+/// consuming the cursor `B`'s transition names. **It does not establish that
+/// the acceptance realizes THIS bundle `b`** — that step is
+/// [`BundleAcceptanceWitness`]'s, and 2c-D's.
+///
+/// `CORR.1` is C4's own cross-object check and is NOT 2c-B's deferred
+/// chain-tip conjunct: this compares the pair the WALK VALIDATED against `B`'s
+/// coordinates, where 2c-B's compares a recomputed tip against `B`'s own
+/// carried bytes. The two can hold or fail independently.
+pub fn check_market_correspondence(
+    accepted: &AcceptedTransition,
+    bundle: &BundleCoordinates,
+    cursor_c_n: [u8; 32],
+    witness: CorrespondenceWitness,
+) -> Result<MarketCorrespondence, Reason> {
+    // CORR.1 — the accepted pair IS the bundle's pair.
+    if accepted.embedded_parent != bundle.trader_parent
+        || accepted.c_dsm_plus != bundle.trader_successor
+    {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    // CORR.2 — one trade identity.
+    if accepted.external_commitment_x != bundle.route_set_commitment {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    // CORR.3 — the accepted settle consumes THIS cursor. A settle naming
+    // another parent is stale here in exactly C3's sense.
+    if accepted.parent_binding != cursor_c_n {
+        return Err(Reason::StaleParent);
+    }
+    // CORR.4 — the effects are the selected route's economics.
+    if accepted.effects_digest != bundle.route_effects_digest {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    // CORR.5 — the byte correspondence held at the cursor. Structural: a
+    // `CorrespondenceWitness` exists only because `check_correspondence`
+    // returned it, and its parent must be the cursor this correspondence is
+    // about, or the two halves describe different parents.
+    if witness.parent_commitment() != cursor_c_n {
+        return Err(Reason::CorrespondenceMismatch);
+    }
+    Ok(MarketCorrespondence {
+        witness,
+        cursor_c_n,
+    })
+}
+
+impl IndependentRealization {
+    /// **The realization fact, 2c-C4 §5.** C4's own half plus 2c-D's witness.
+    ///
+    /// Callable the moment `BundleAcceptanceWitness` gains a constructor, and
+    /// not before. Until then a market fold carries
+    /// [`C3Verdict::PartialPendingRealization`] and **must not** be promoted
+    /// to realized from the correspondence alone.
+    pub fn from_parts(
+        correspondence: MarketCorrespondence,
+        acceptance: BundleAcceptanceWitness,
+    ) -> Self {
+        Self {
+            _corr: correspondence,
+            _acceptance: acceptance,
+        }
+    }
 }
 
 /// `VDS.COMMON.10.a` held for one candidate: `Canon(expected)` is
@@ -610,7 +764,9 @@ pub enum C3Verdict {
 /// hurry. [`Self::from_close_witness`] is the owner-close path — the witness
 /// is the last conjunct a close has. [`Self::from_market_witness`] also takes
 /// an [`IndependentRealization`], which has no constructor, so
-/// `2c-A + 10.a = market valid` is a compile error rather than a rule.
+/// `2c-A + 10.a = market valid` is a compile error rather than a rule — the
+/// impossibility now sitting one level down, in
+/// [`BundleAcceptanceWitness`].
 ///
 /// Pinned by the compiler, not by convention — this does not build:
 ///
@@ -644,13 +800,13 @@ impl CompleteValidity {
     }
 
     /// A market successor whose `10.a` held AND whose settlement is
-    /// independently established. Uncallable until 2c-C4 gives
-    /// [`IndependentRealization`] a constructor — deliberately.
+    /// independently established. Uncallable until 2c-D gives
+    /// [`BundleAcceptanceWitness`] a constructor — deliberately.
     pub fn from_market_witness(
         witness: CorrespondenceWitness,
         realization: IndependentRealization,
     ) -> Self {
-        let IndependentRealization { _c4_owns_this } = realization;
+        let IndependentRealization { .. } = realization;
         Self { witness }
     }
 
@@ -1115,6 +1271,119 @@ mod tests {
         assert_eq!(
             Reason::CorrespondenceMismatch.class(),
             OutcomeClass::Invalid
+        );
+    }
+
+    // ---------- 2c-C4 §4: CORR.1..5, one negative per conjunct ----------
+
+    fn corr_fixture() -> (
+        AcceptedTransition,
+        BundleCoordinates,
+        [u8; 32],
+        CorrespondenceWitness,
+    ) {
+        let v = parent(1_000, 1_000, None);
+        let cursor = [0x3C; 32];
+        let w =
+            check_correspondence(&v, cursor, &v.encode().expect("encodes")).expect("bytes equal");
+        let accepted = AcceptedTransition {
+            embedded_parent: [0x11; 32],
+            c_dsm_plus: [0x12; 32],
+            external_commitment_x: [0x13; 32],
+            parent_binding: cursor,
+            effects_digest: [0x14; 32],
+        };
+        let bundle = BundleCoordinates {
+            trader_parent: [0x11; 32],
+            trader_successor: [0x12; 32],
+            route_set_commitment: [0x13; 32],
+            route_effects_digest: [0x14; 32],
+        };
+        (accepted, bundle, cursor, w)
+    }
+
+    /// The honest triple corresponds, and the correspondence carries both the
+    /// witness and the cursor it is about.
+    #[test]
+    fn a_corresponding_transition_yields_the_correspondence() {
+        let (a, b, cursor, w) = corr_fixture();
+        let c = check_market_correspondence(&a, &b, cursor, w.clone())
+            .expect("the honest triple corresponds");
+        assert_eq!(c.cursor_c_n(), cursor);
+        assert_eq!(*c.witness(), w);
+    }
+
+    /// CORR.1 — a foreign trader parent, and a foreign trader successor. Two
+    /// halves of one conjunct, each separately necessary.
+    #[test]
+    fn a_foreign_accepted_pair_does_not_correspond() {
+        let (a, b, cursor, w) = corr_fixture();
+        let mut wrong = a;
+        wrong.embedded_parent = [0xEE; 32];
+        assert_eq!(
+            check_market_correspondence(&wrong, &b, cursor, w.clone()),
+            Err(Reason::RealizationEvidenceInvalid)
+        );
+        let mut wrong = a;
+        wrong.c_dsm_plus = [0xEE; 32];
+        assert_eq!(
+            check_market_correspondence(&wrong, &b, cursor, w),
+            Err(Reason::RealizationEvidenceInvalid)
+        );
+    }
+
+    /// CORR.2 — the accepted operation names a different trade.
+    #[test]
+    fn a_foreign_trade_identity_does_not_correspond() {
+        let (a, b, cursor, w) = corr_fixture();
+        let mut wrong = a;
+        wrong.external_commitment_x = [0xEE; 32];
+        assert_eq!(
+            check_market_correspondence(&wrong, &b, cursor, w),
+            Err(Reason::RealizationEvidenceInvalid)
+        );
+    }
+
+    /// CORR.3 — the accepted operation consumes some other vault parent. That
+    /// is STALE_PARENT in exactly C3's sense, not a generic evidence failure.
+    #[test]
+    fn an_accepted_settle_on_another_cursor_is_stale() {
+        let (a, b, cursor, w) = corr_fixture();
+        let mut wrong = a;
+        wrong.parent_binding = [0xEE; 32];
+        assert_eq!(
+            check_market_correspondence(&wrong, &b, cursor, w),
+            Err(Reason::StaleParent)
+        );
+    }
+
+    /// CORR.4 — the effects are not the selected route's economics. This is
+    /// the conjunct that stops a trader accepting the exactly-right transition
+    /// at the wrong price.
+    #[test]
+    fn effects_that_are_not_the_routes_economics_do_not_correspond() {
+        let (a, b, cursor, w) = corr_fixture();
+        let mut wrong = a;
+        wrong.effects_digest = [0xEE; 32];
+        assert_eq!(
+            check_market_correspondence(&wrong, &b, cursor, w),
+            Err(Reason::RealizationEvidenceInvalid)
+        );
+    }
+
+    /// CORR.5 — a witness about a DIFFERENT parent. The two halves would
+    /// otherwise describe different cursors while each looked internally
+    /// consistent.
+    #[test]
+    fn a_witness_about_another_parent_does_not_correspond() {
+        let (a, b, cursor, _) = corr_fixture();
+        let v = parent(1_000, 1_000, None);
+        let elsewhere = check_correspondence(&v, [0x9E; 32], &v.encode().expect("encodes"))
+            .expect("bytes equal");
+        assert_ne!(elsewhere.parent_commitment(), cursor);
+        assert_eq!(
+            check_market_correspondence(&a, &b, cursor, elsewhere),
+            Err(Reason::CorrespondenceMismatch)
         );
     }
 

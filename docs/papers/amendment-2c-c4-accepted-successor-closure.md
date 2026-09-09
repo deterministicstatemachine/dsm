@@ -675,6 +675,41 @@ record belongs at the end of this file the way 2c-A.1's does.
 
 ---
 
+# Adopting-change record (2026-09-09)
+
+Four PRs on top of the specification (#801), each based on main and independent of the others.
+
+1. **The fourteenth Lean module** (#802). `lean4/DSMAcceptedSuccessorWalk.lean`, with the CI
+   module-count pin moved 13 → 14 in the same commit and 2c-C3's closure paragraph updated with it.
+   It machine-checks START, DERIVED, LINK, ORDER, CORRESPOND, REALIZE and WITHHOLD, with the 2c-D
+   leaf as an abstract `Prop` parameter so every realization theorem is an implication the module
+   cannot discharge. No theorem depends on `sorryAx`; the samples use kernel `decide` rather than
+   `native_decide`, so none depends on `Lean.ofReduceBool` or `Lean.trustCompiler`. Two mutation
+   controls executed, each producing the kernel proving a named theorem FALSE.
+2. **Ruling V2** (#803). `SuccessorValidity::DlvTransition` carries `kind` only;
+   `SuccessorValidity::may_certify`, its only reader, is deleted with it. All four
+   `advance_validated` call sites already discard the validity, so the tuple shape is unchanged.
+3. **The registry transcriptions** (#804), retargeted BY KIND: a bare "verification closure is
+   2c-C's" → C4; a "`ValidDlvSuccessor` is 2c-C's" → 2c-C3, which froze it. A blanket retarget would
+   have moved the second group to the wrong amendment.
+4. **The correspondence and the realization type** (this change). `check_market_correspondence`
+   implements `CORR.1`–`CORR.5` sans-IO and returns a `MarketCorrespondence` whose only constructor
+   it is. `IndependentRealization::from_parts` takes that plus a `BundleAcceptanceWitness` — a type
+   with a private field and **no constructor**, which 2c-D owns. The impossibility moved one level
+   down rather than away, exactly as Ruling R1 requires. No `Reason` code was added: every
+   correspondence failure maps onto the frozen inventory, so the Lean model needed no extension.
+
+**Mutation controls, all executed and red on a named test:** one per correspondence conjunct
+(`CORR.1`–`CORR.5`), each removed in turn from `check_market_correspondence`.
+
+**Deliberately not wired into the composition walk.** The market arm would call
+`check_market_correspondence` and then have nothing to do with the result: the fact it feeds cannot
+be constructed until 2c-D, so the call would compute a value that can never reach `Valid`. The types
+are foreign-verifiable and tested on their own; wiring them is 5c-2/2c-D's, with the producer that
+makes the fact reachable.
+
+---
+
 # Corrected 2026-09-09, while implementing this document
 
 Two defects in §9, both found by writing the adopting change rather than by reading. They are
