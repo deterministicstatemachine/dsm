@@ -314,6 +314,17 @@ inductive Reason where
       are distinct from the field equalities in the first clauses, which
       Ruling B derives from `10.a` alone. -/
   | bundleForeignToVault
+  /-- Ruling J's `economic_facts : Invalid(reason)` arm: realization evidence
+      that is PRESENT and fails verification -- a receipt whose signature does
+      not verify, a RouteCommit that does not recompute the bundle's `X`, a
+      claimed output the state's curve does not yield. This is `INVALID`, never
+      absence: a fetched-but-forged receipt is not the same fact as no receipt,
+      and mapping it to absence let a forged receipt fold as "not settled yet".
+      It is deliberately NOT a safety violation -- a bad signature establishes
+      invalid evidence, not a substrate contradiction, and quarantining on it
+      would let anyone who can inject a forged receipt force a denial-of-service
+      quarantine. -/
+  | realizationEvidenceInvalid
   deriving Repr, DecidableEq
 
 /-- 2c-C3 ruling B: the derivation is TYPED AND PARTIAL. A total function
@@ -778,13 +789,22 @@ inductive BindingObservation where
   | unavailable (attributed required : Nat)
   deriving Repr, DecidableEq
 
+/-- Ruling J's `economic_facts` input. An earlier draft of this model omitted
+    it, so a present-but-invalid realization evidence had no arm to land in. -/
+inductive EconomicFacts where
+  | established
+  | invalid (r : Reason)
+  | incomplete (r : Reason)
+  deriving Repr, DecidableEq
+
 structure C3Input where
-  parentAuth : ParentAuth
-  authority  : AuthorityResolution
-  binding    : BindingObservation
-  operation  : Operation
-  settlerKey : Nat
-  supplied   : VaultState
+  parentAuth    : ParentAuth
+  authority     : AuthorityResolution
+  binding       : BindingObservation
+  operation     : Operation
+  economicFacts : EconomicFacts
+  settlerKey    : Nat
+  supplied      : VaultState
   deriving Repr, DecidableEq
 
 /-- Every branch carries a (class, reason). No catch-all, no error-to-absence. -/
@@ -813,7 +833,15 @@ def classify (i : C3Input) : Cls × Option Reason :=
         -- concurrent settle permanently invalid. It is retryable evidence.
         | .undetermined _  => (.incomplete, some .bindingUndetermined)
         | .unavailable _ _ => (.incomplete, some .bindingEvidenceUnavailable)
-        | .boundFinal _    => correspondence v cn i.operation i.supplied
+        -- Ruling J's economic_facts arm sits between binding and the
+        -- successor comparison: evidence that is present and wrong is INVALID,
+        -- evidence that could not be obtained is INCOMPLETE, and only
+        -- established facts reach the derivation.
+        | .boundFinal _    =>
+          match i.economicFacts with
+          | .invalid r     => (.invalid, some r)
+          | .incomplete r  => (.incomplete, some r)
+          | .established   => correspondence v cn i.operation i.supplied
 
 /-- What C3 proves. -/
 def ValidDlvSuccessorCore (i : C3Input) : Prop := classify i = (.valid, none)
@@ -906,6 +934,7 @@ def sampleInput : C3Input :=
     authority  := .resolved 77 1
     binding    := .boundFinal 0
     operation  := .market sampleOp
+    economicFacts := .established
     settlerKey := 77
     supplied   := sampleSuccessor }
 
@@ -937,6 +966,22 @@ theorem undetermined_binding_is_its_own_outcome :
 theorem free_binding_is_invalid :
     classify { sampleInput with binding := .free }
       = (.invalid, some .noBindingEstablished) := by
+  decide
+
+/-- **TEETH — a forged receipt is INVALID, never absence, never a safety
+    violation.** Present-but-failing realization evidence refuses the fold
+    with its own reason. Under the shipped code this exact input became
+    `Absent` and composition returned `Ok(...)`. -/
+theorem forged_realization_evidence_is_invalid_not_absent :
+    classify { sampleInput with economicFacts := .invalid .realizationEvidenceInvalid }
+      = (.invalid, some .realizationEvidenceInvalid) := by
+  decide
+
+/-- …and evidence that could not be obtained is a DIFFERENT class from
+    evidence that was obtained and is wrong. -/
+theorem unobtainable_realization_evidence_is_incomplete :
+    classify { sampleInput with economicFacts := .incomplete .bindingEvidenceUnavailable }
+      = (.incomplete, some .bindingEvidenceUnavailable) := by
   decide
 
 /-- **RULING H, formalized.** `ValidDlvSuccessorCore` does NOT discharge token
@@ -973,3 +1018,5 @@ theorem core_does_not_discharge_token_policy :
 #print axioms core_does_not_discharge_token_policy
 #print axioms invalid_operation_never_derives
 #print axioms invalid_operation_propagates_its_reason
+#print axioms forged_realization_evidence_is_invalid_not_absent
+#print axioms unobtainable_realization_evidence_is_incomplete

@@ -168,6 +168,7 @@ pub enum Reason {
     //   BundleForeignToVault        VDS.COMMON.5 "and storage_set_id re-derives",
     //                               VDS.COMMON.6 "and equals the canonical n/2+1"
     //                               -- the SECOND clauses of those rows
+    //   RealizationEvidenceInvalid  Ruling J's `economic_facts : Invalid(reason)` arm
     //
     // NONE of these is a field equality. The FIRST clauses of COMMON.5/6 and
     // all of COMMON.14 -- successor field equals parent field -- are what
@@ -185,6 +186,18 @@ pub enum Reason {
     /// not commit. (A bundle that consumes no leg of the vault is
     /// [`Reason::VaultMismatch`] — `VDS.COMMON.1.a` — not this.)
     BundleForeignToVault,
+    /// Ruling J's `economic_facts : Invalid(reason)` arm: realization evidence
+    /// that is PRESENT and fails verification — a receipt whose signature does
+    /// not verify, a RouteCommit that does not recompute the bundle's `X`, a
+    /// claimed output the state's curve does not yield.
+    ///
+    /// `INVALID`, never absence: a fetched-but-forged receipt is not the same
+    /// fact as no receipt, and mapping it to absence let a forged receipt fold
+    /// as "not settled yet". Deliberately NOT a safety violation — a bad
+    /// signature establishes invalid evidence, not a substrate contradiction,
+    /// and quarantining on it would let anyone able to inject a forged receipt
+    /// force a denial-of-service quarantine.
+    RealizationEvidenceInvalid,
 }
 
 impl Reason {
@@ -228,6 +241,7 @@ impl Reason {
             Self::SuccessorSignatureInvalid => "SUCCESSOR_SIGNATURE_INVALID",
             Self::BundleNotCanonical => "BUNDLE_NOT_CANONICAL",
             Self::BundleForeignToVault => "BUNDLE_FOREIGN_TO_VAULT",
+            Self::RealizationEvidenceInvalid => "REALIZATION_EVIDENCE_INVALID",
         }
     }
 }
@@ -819,6 +833,7 @@ mod tests {
             Reason::SuccessorSignatureInvalid,
             Reason::BundleNotCanonical,
             Reason::BundleForeignToVault,
+            Reason::RealizationEvidenceInvalid,
         ] {
             assert_eq!(r.class(), OutcomeClass::Invalid, "{r:?}");
         }

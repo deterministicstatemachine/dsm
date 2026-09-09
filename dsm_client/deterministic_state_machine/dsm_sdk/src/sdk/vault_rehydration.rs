@@ -332,11 +332,31 @@ pub(crate) async fn unapplied_settlements_for_vault(
             let Ok(x) = <[u8; 32]>::try_from(x_bytes.as_slice()) else {
                 continue;
             };
-            // Inert without a verified receipt.
-            let Some(receipt) =
-                crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, &x).await
-            else {
-                continue;
+            use crate::sdk::settlement_receipt_codec::ReceiptFetch;
+            let receipt = match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(
+                vault_id, &x,
+            )
+            .await
+            {
+                ReceiptFetch::Verified(r) => *r,
+                // Nothing to apply, or nothing learned. Inert either way.
+                ReceiptFetch::Absent | ReceiptFetch::Unavailable(_) => continue,
+                // Present and WRONG. Not an unapplied settlement — but not
+                // silently nothing either: named, then skipped.
+                ReceiptFetch::Malformed(why) => {
+                    log::warn!(
+                        "[vault-pending] receipt at {} is malformed, not an unapplied settlement: {why}",
+                        crate::util::text_id::encode_base32_crockford(&x)
+                    );
+                    continue;
+                }
+                ReceiptFetch::Invalid(e) => {
+                    log::warn!(
+                        "[vault-pending] receipt at {} FAILS VERIFICATION, not an unapplied settlement: {e}",
+                        crate::util::text_id::encode_base32_crockford(&x)
+                    );
+                    continue;
+                }
             };
             let applied = head
                 .vault_reserve_entry(vault_id, &receipt.trade.input_policy_commit)

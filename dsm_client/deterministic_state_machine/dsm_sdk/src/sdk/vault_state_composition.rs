@@ -595,10 +595,15 @@ pub(crate) async fn compose_vault_state(
                         };
                         break;
                     }
+                    // Evidence UNOBTAINABLE. Nothing was learned, so this is
+                    // Req 6.25's INCOMPLETE and not a bound-unrealized frontier:
+                    // reporting a frontier here would claim the trade is
+                    // unsettled on the strength of a transport fault.
+                    MarketRealization::Unavailable(why) => return Err(unavailable(&why)),
                     // Evidence PRESENT and it CONTRADICTS the bundle. A
                     // divergence is never an absence.
-                    MarketRealization::Contradicts(why) => {
-                        return Err(refused(Reason::StaleParent, &why))
+                    MarketRealization::Contradicts(reason, why) => {
+                        return Err(refused(reason, &why))
                     }
                 }
             }
@@ -692,9 +697,15 @@ enum MarketRealization {
     Realized(Box<VaultStateV2>),
     /// The evidence is ABSENT — the trade has not settled yet. Not an error.
     Absent(String),
+    /// The evidence could NOT BE READ. Establishes nothing about whether the
+    /// trade settled, so it is neither a frontier nor a contradiction —
+    /// INCOMPLETE, and the walk fails closed rather than reporting a bound
+    /// frontier on the strength of a transport fault.
+    Unavailable(String),
     /// The evidence is PRESENT and CONTRADICTS the bundle. A divergence is
-    /// never an absence, and this must fail closed.
-    Contradicts(String),
+    /// never an absence, and this must fail closed — with the frozen reason
+    /// for THIS site, not one shared reason for all of them.
+    Contradicts(Reason, String),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -708,19 +719,49 @@ async fn realize_market_successor_5c1(
     fee_bps: u32,
 ) -> MarketRealization {
     // THE RECEIPT GATE. Everything below this line moves someone's liquidity,
-    // so nothing below it runs until the settlement is witnessed. The receipt
-    // is the only artifact here that cannot be produced without settling: it
-    // carries an inclusion path for a leaf the trader's own settling advance
-    // wrote into its own device root.
+    // so nothing below it runs until a receipt is present and verifies.
     //
-    // A missing receipt is ABSENCE, not contradiction. The bundle is bound, so
-    // the parent is consumed and the vault leaves routing — but the trade has
-    // simply not landed yet, and a later walk will fold it.
-    let Some(receipt) =
-        crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, x).await
-    else {
-        return MarketRealization::Absent("its settlement receipt is not available".into());
-    };
+    // What the receipt PROVES, stated honestly: internal consistency — the
+    // signature verifies under the key the receipt names, and the recomputed
+    // leaf is included under the root the receipt names. Both are read OUT OF
+    // THE RECEIPT. Per `settlement_receipt_leaf`'s own header, the honest
+    // fixture and a forgery are byte-identical constructions, and a pass is
+    // "not evidence that value moved". An earlier comment here claimed the
+    // receipt "cannot be produced without settling"; the receipt module
+    // retracts that, and 5c-2 / 2c-C4 is where the independent realization
+    // fact gets established. Until then this gate is a consistency check on
+    // trader-supplied evidence, and nothing here may be promoted into that
+    // fact.
+    //
+    // What the gate DOES distinguish, and did not before amendment 2c-C3:
+    // a missing receipt is ABSENCE (the trade has not landed; a later walk
+    // folds it), an unreadable one is INCOMPLETE, and a present receipt that
+    // is malformed or fails verification is INVALID — never absence.
+    use crate::sdk::settlement_receipt_codec::ReceiptFetch;
+    let receipt =
+        match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, x).await {
+            ReceiptFetch::Verified(r) => *r,
+            ReceiptFetch::Absent => {
+                return MarketRealization::Absent("its settlement receipt is not available".into())
+            }
+            ReceiptFetch::Unavailable(e) => {
+                return MarketRealization::Unavailable(format!(
+                    "its settlement receipt could not be read: {e}"
+                ))
+            }
+            ReceiptFetch::Malformed(why) => {
+                return MarketRealization::Contradicts(
+                    Reason::RealizationEvidenceInvalid,
+                    format!("its settlement receipt is malformed: {why}"),
+                )
+            }
+            ReceiptFetch::Invalid(e) => {
+                return MarketRealization::Contradicts(
+                    Reason::RealizationEvidenceInvalid,
+                    format!("its settlement receipt fails verification: {e}"),
+                )
+            }
+        };
     // The receipt must describe the step this bundle claims. It is fetched by
     // (vault, x) and x came from the bound bundle, so it is already tied to
     // this trade; this pins the generations it moves between. A receipt for a
@@ -729,6 +770,7 @@ async fn realize_market_successor_5c1(
         || receipt.trade.new_sequence != cursor_state.generation.saturating_add(1)
     {
         return MarketRealization::Contradicts(
+            Reason::GenerationMismatch,
             "its receipt witnesses a different generation step".into(),
         );
     }
@@ -739,12 +781,16 @@ async fn realize_market_successor_5c1(
         return MarketRealization::Absent("its RouteCommit is not published".into());
     };
     let Ok(rc) = generated::RouteCommitV1::decode(rc_bytes.as_slice()) else {
-        return MarketRealization::Contradicts("its RouteCommit does not decode".into());
+        return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
+            "its RouteCommit does not decode".into(),
+        );
     };
     // Storage keys are untrusted labels, so X is RECOMPUTED from the
     // RouteCommit bytes and required to equal the one the bundle commits.
     if compute_external_commitment(&rc) != *x {
         return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
             "its RouteCommit does not recompute the bundle's X".into(),
         );
     }
@@ -752,6 +798,7 @@ async fn realize_market_successor_5c1(
     // this vault present in the route, and the anchor for X visible.
     let Ok(hop) = verify_route_commit_unlock_eligibility(&rc_bytes, vault_id).await else {
         return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
             "its RouteCommit fails routed-unlock eligibility".into(),
         );
     };
@@ -761,11 +808,15 @@ async fn realize_market_successor_5c1(
     // members of the identified V_n.
     if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice() {
         return MarketRealization::Contradicts(
+            Reason::StaleParent,
             "its hop is bound to a different parent state".into(),
         );
     }
     if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
-        return MarketRealization::Contradicts("its hop amounts are malformed".into());
+        return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
+            "its hop amounts are malformed".into(),
+        );
     }
     let mut in_buf = [0u8; 16];
     in_buf.copy_from_slice(&hop.input_amount_u128);
@@ -778,13 +829,19 @@ async fn realize_market_successor_5c1(
         u64::try_from(u128::from_be_bytes(in_buf)),
         u64::try_from(u128::from_be_bytes(out_buf)),
     ) else {
-        return MarketRealization::Contradicts("its hop amounts do not fit u64".into());
+        return MarketRealization::Contradicts(
+            Reason::ArithmeticOverflow,
+            "its hop amounts do not fit u64".into(),
+        );
     };
     // Direction against the state's own canonical pair.
     let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
     let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
     if !input_is_a && !input_is_b {
-        return MarketRealization::Contradicts("its hop trades a different pair".into());
+        return MarketRealization::Contradicts(
+            Reason::PairNotVaultPair,
+            "its hop trades a different pair".into(),
+        );
     }
     let (cursor_in, cursor_out) = if input_is_a {
         (cursor_state.reserve_a, cursor_state.reserve_b)
@@ -797,11 +854,13 @@ async fn realize_market_successor_5c1(
     let Some(simulated) = constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
     else {
         return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
             "its trade does not re-simulate against this state".into(),
         );
     };
     if simulated != expected_output {
         return MarketRealization::Contradicts(
+            Reason::RealizationEvidenceInvalid,
             "its claimed output is not what this state's curve yields".into(),
         );
     }
@@ -1266,6 +1325,41 @@ mod tests {
             .expect("publish receipt");
     }
 
+    /// `publish_receipt`, with one signature byte flipped after signing. The
+    /// receipt is well-formed, correctly keyed, and FAILS SPHINCS+ verification
+    /// — the exact input that used to become `Absent` and compose `Ok`.
+    async fn publish_receipt_with_corrupted_signature(
+        vault_id: &[u8; 32],
+        trade: &SettledTrade,
+        trader_pk: &[u8],
+        trader_sk: &[u8],
+    ) {
+        let (genesis, devid) = ([0xA0u8; 32], [0xB0u8; 32]);
+        let receipt_id = derive_receipt_id(vault_id, &trade.x);
+        let key = settlement_receipt_key(&genesis, &devid, vault_id, &receipt_id);
+        let mut tree = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(64);
+        tree.update_leaf(&key, &settlement_receipt_value(trade))
+            .expect("update_leaf");
+        let root = *tree.root();
+        let sibs = tree.get_inclusion_proof(&key, 256).expect("proof").siblings;
+        let mut receipt = sign_trader_settlement_receipt(
+            vault_id,
+            &receipt_id,
+            *trade,
+            &genesis,
+            &devid,
+            &root,
+            sibs,
+            trader_pk,
+            trader_sk,
+        )
+        .expect("sign receipt");
+        receipt.trader_signature[0] ^= 0xFF;
+        crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt)
+            .await
+            .expect("publish receipt");
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn publish_pointer(
         vault_id: &[u8; 32],
@@ -1350,6 +1444,62 @@ mod tests {
         // the network must have serialized this generation to this claimant.
         win_slot(vault_id, parent_sequence, &x, parent_binding, &pk).await;
         (new_a, new_b)
+    }
+
+    /// A receipt that is PRESENT, correctly keyed, well-formed, and FAILS
+    /// SPHINCS+ verification.
+    ///
+    /// Before amendment 2c-C3 this exact input became `Absent`: the fetch
+    /// collapsed a failed verification into `None`, the walk read `None` as
+    /// "not settled yet", `break`ed, and returned `Ok(...)` with a
+    /// bound-unrealized frontier. A forged receipt was not an error at all.
+    ///
+    /// It is INVALID, with the frozen reason — not absence, not "evidence
+    /// unavailable", and NOT a safety violation: a bad signature establishes
+    /// invalid evidence, and quarantining on it would let anyone able to
+    /// inject a forged receipt force a denial-of-service quarantine.
+    #[tokio::test]
+    async fn a_present_receipt_with_a_corrupted_signature_is_invalid_not_absent() {
+        let _fleet = fleet();
+        let vault_id = vid(0x0C);
+        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (pk, sk) = trader();
+        let (new_a, new_b, x) = publish_rc_for_swap(
+            &x_seed(0x0C),
+            &vault_id,
+            1_000_000,
+            500_000,
+            &c0,
+            true,
+            10_000,
+            &pk,
+            &sk,
+        )
+        .await;
+        publish_extcommit(&x, &pk).await;
+        let output = 500_000 - new_b;
+        let _ = new_a;
+        let trade = settled_trade(&x, 0, true, 10_000, output);
+        // Same shape as the honest path in every byte but one.
+        publish_receipt_with_corrupted_signature(&vault_id, &trade, &pk, &sk).await;
+        win_slot(&vault_id, 0, &x, &c0, &pk).await;
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a forged receipt must not compose — as a frontier or otherwise");
+
+        // NOT absence. The old behaviour was `Ok(BoundUnrealized)`; the
+        // `expect_err` above already rules that out. Now rule out the other
+        // wrong class: this is decidably false, not unobtainable.
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected REALIZATION_EVIDENCE_INVALID, got {err:?}");
+        };
+        assert_eq!(reason, Reason::RealizationEvidenceInvalid);
+        assert_eq!(reason.class(), OutcomeClass::Invalid);
+        assert!(
+            detail.contains("fails verification"),
+            "the refusal names the failed verification: {detail}"
+        );
     }
 
     /// THE FRONTIER, and the only way to reach one: q attributed members of
@@ -2044,11 +2194,13 @@ mod tests {
             .await
             .expect_err("a receipt for another step cannot activate this edge");
         // FLIPPED by amendment 2c-C3 — a receipt for another generation
-        // contradicts the bundle; it does not fail to exist.
+        // contradicts the bundle; it does not fail to exist. And it is a
+        // GENERATION mismatch, its own frozen code — not the shared
+        // StaleParent the previous commit routed every contradiction to.
         let CompositionError::SuccessorInvalid { reason, detail } = err else {
-            panic!("expected STALE_PARENT, got {err:?}");
+            panic!("expected GENERATION_MISMATCH, got {err:?}");
         };
-        assert_eq!(reason, Reason::StaleParent);
+        assert_eq!(reason, Reason::GenerationMismatch);
         assert!(
             detail.contains("different generation step"),
             "the refusal names the step: {detail}"
