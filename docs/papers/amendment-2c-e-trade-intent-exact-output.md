@@ -204,8 +204,45 @@ cut.
    schema 2, with schema-1 bytes refused as **burned** rather than merely unknown.
 3. **The formal predicate that consumes `TradeIntent`** updated, so the machine-checked statement is
    about the object that ships.
-4. **The MARKET class-1 vector regenerated EXACTLY ONCE**, from the genuine 5c-2 producer, never
-   from a hand-built stand-in. It must not be regenerated before that producer exists.
+4. **The MARKET class-1 vector.** *(Corrected 2026-09-09 by owner ruling — the original wording was
+   self-contradictory and is preserved at the end of this item.)* Two different acts are involved
+   and only one of them is the one-time act:
+
+   ```text
+   A. schema changes              -> canonical bytes / digest / address may move
+   B. fake operands -> genuine    -> happens EXACTLY ONCE
+      producer operands
+   ```
+
+   **"Exactly once, from the genuine producer" governs B — making the MARKET operands genuine.** It
+   does NOT prohibit regenerating `MARKET_B` / `MARKET_ADDR` / `MARKET_LEN` when an independent
+   canonical envelope or schema cut necessarily changes their bytes. Therefore:
+
+   1. The schema-2 encoder and decoder cut **may land independently**.
+   2. Any class-1 vector constant whose canonical bytes necessarily change because the envelope
+      itself changed MUST be regenerated **immediately and remain asserted**. Market byte assertions
+      are never deleted or disabled, not even briefly.
+   3. That schema-driven regeneration does **not** consume the one-time genuine-producer
+      regeneration.
+   4. When the real 5c-2 producer lands, the fabricated MARKET operands are replaced **exactly
+      once** by genuine producer output.
+   5. The affected market vector constants are then regenerated from that genuine output and frozen.
+   6. After the genuine-producer cutover, **no further operand regeneration is permitted** absent
+      another explicit normative protocol change.
+
+   Explicitly forbidden: combining the entire encoder cut, producer, economic-admission path and
+   vector replacement into one giant change merely to preserve the mistaken sentence; removing
+   market byte assertions temporarily; and pretending a schema-number change leaves the canonical
+   vector identity unchanged.
+
+   > **Original wording, preserved.** *"The MARKET class-1 vector regenerated EXACTLY ONCE, from the
+   > genuine 5c-2 producer, never from a hand-built stand-in. It must not be regenerated before that
+   > producer exists."* Its last sentence contradicted item 2: the CCB envelope encodes class then
+   > schema, so the schema-2 cut necessarily moves `MARKET_B`, `MARKET_ADDR` and `MARKET_LEN`, and
+   > `CLOSE_B` / `CLOSE_ADDR` with them. Item 2 therefore forced item 4, and the rule as written
+   > could only have been honoured by never touching the encoding in between — which the cut it sits
+   > beside does. Found by starting the implementation, which is the check the document itself
+   > should have run.
 5. **Mutation controls, executed and reported by the named failing test:** a changed signed intent
    changes `I`; route correspondence rejects a route that disagrees with the intent; and SAT.5
    rejects an `exact_out` the authenticated `V_n` does not reproduce.
@@ -234,5 +271,15 @@ decoder emit and refuse schema 2 with schema 1 burned; the formal predicate name
 object; the class-1 market vector is regenerated once from the real producer; and the three mutation
 controls in §8.5 each turn a **named** test red by performing the forbidden action, and are restored.
 
-**Closure status.** Normative content FROZEN. Adopting change NOT STARTED. The 5c-2 market producer
-remains blocked on items 1–3 of §8, by the ruling's own sequencing.
+**Closure status (2026-09-09).** Normative content FROZEN. Adopting change IN PROGRESS:
+
+```text
+§8.1  registry transcription            DONE
+§8.2  encoder / decoder cut to schema 2 NEXT — may land independently (§8.4 as corrected)
+§8.3  formal predicate                  owed
+§8.4  genuine-operand regeneration      owed, and lands WITH the producer, not before
+§8.5  mutation controls                 owed
+```
+
+The 5c-2 market producer remains blocked on §8.2 and §8.3. The market emission refusal is untouched
+by any of this and stays fail-closed until the producer exists.
