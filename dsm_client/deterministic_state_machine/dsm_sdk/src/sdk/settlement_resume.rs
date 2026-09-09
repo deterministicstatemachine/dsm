@@ -40,14 +40,10 @@ pub enum ResumeError {
     DigestMismatch,
     /// The bytes' content address is not the fence's `value_addr`.
     AddrMismatch,
-    /// The bundle's own `storage_set_id` disagrees with the fence.
-    SetMismatch,
     /// The bundle's `trader_parent` disagrees with the fenced parent.
     ParentMismatch,
     /// `K(B)` could not be derived (a malformed bundle).
     KeySet,
-    /// A fixed-width bundle field is not 32 bytes.
-    Width,
 }
 
 /// The rebuilt inputs for a resumed transaction.
@@ -56,10 +52,6 @@ pub struct Reconstructed {
     pub transaction: BindingTransaction,
     pub trader_successor: [u8; 32],
     pub keys: Vec<[u8; 32]>,
-}
-
-fn as32(v: &[u8]) -> Result<[u8; 32], ResumeError> {
-    <[u8; 32]>::try_from(v).map_err(|_| ResumeError::Width)
 }
 
 /// Rebuild the transaction from the fetched immutable bundle bytes and the
@@ -77,28 +69,36 @@ pub fn reconstruct(
     quorum: u32,
     proposer_id: [u8; 32],
 ) -> Result<Reconstructed, ResumeError> {
-    let b =
+    // Strict decode and the whole-bundle round trip under the frozen encoder;
+    // the identity is over exactly the bytes that were fetched.
+    let decoded =
         settlement_bundle::decode_canonical(bundle_bytes).map_err(|_| ResumeError::BundleDecode)?;
-    let canon = settlement_bundle::canon(&b).map_err(|_| ResumeError::BundleDecode)?;
+    let b = decoded.bundle;
 
     // Req 15.3: the bytes must hash to the fence's committed identity.
-    let digest = settlement_bundle::bundle_digest(&canon);
+    let digest = settlement_bundle::bundle_digest(bundle_bytes);
     if digest != fence.tx_id {
         return Err(ResumeError::DigestMismatch);
     }
-    if settlement_bundle::bundle_addr(&canon) != fence.value_addr {
+    if settlement_bundle::bundle_addr(bundle_bytes) != fence.value_addr {
         return Err(ResumeError::AddrMismatch);
     }
-    // The bundle's OWN commitments must match the fence.
-    if as32(&b.storage_set_id)? != fence.storage_set_id {
-        return Err(ResumeError::SetMismatch);
-    }
-    if as32(&b.trader_parent)? != fence.trader_parent_state_commitment {
+    // The bundle's OWN parent must match the fence: the trader's ordinary-DSM
+    // parent for a market bundle, the consumed vault parent for an owner
+    // close (the close fence is keyed by the vault and its c_n). The bundle
+    // carries no storage set (registry §5.19); the fence's is the resolver's.
+    let bundle_parent = match (b.market_terms(), b.transitions().first()) {
+        (Some(terms), _) => terms.trader_parent,
+        (None, Some(t)) => t.parent_binding,
+        (None, None) => return Err(ResumeError::BundleDecode),
+    };
+    if bundle_parent != fence.trader_parent_state_commitment {
         return Err(ResumeError::ParentMismatch);
     }
 
     let keys = settlement_bundle::key_set(&b).map_err(|_| ResumeError::KeySet)?;
-    let trader_successor = as32(&b.trader_successor)?;
+    let trader_successor =
+        settlement_bundle::permitted_continuation(&b).map_err(|_| ResumeError::BundleDecode)?;
     let transaction = BindingTransaction {
         proposer_id,
         members,
@@ -200,10 +200,10 @@ mod live {
         // 2c-C3.1 ruling A, source (b): a resumed transaction that commits is
         // this device's own finality too.
         if out == Ok(dsm::dlv::quorum_bind::Outcome::Committed) {
-            if let Ok(bundle) = dsm::dlv::settlement_bundle::decode_canonical(&bytes) {
+            if let Ok(decoded) = dsm::dlv::settlement_bundle::decode_canonical(&bytes) {
                 crate::sdk::settlement_bind::record_own_commit(
                     &set,
-                    &bundle,
+                    &decoded.bundle,
                     fence.tx_id,
                     fence.value_addr,
                     engine.ballot(),
@@ -230,7 +230,6 @@ pub use live::{recover_all, resume_one};
 mod tests {
     use super::*;
     use dsm::dlv::trader_fence::FenceState;
-    use dsm::types::proto as pb;
 
     fn members(n: u8) -> Vec<CommittedMember> {
         (0..n)
@@ -241,43 +240,24 @@ mod tests {
             .collect()
     }
 
-    fn transition(vault: u8, c_n: u8) -> pb::VaultTransitionV1 {
-        pb::VaultTransitionV1 {
-            vault_id: vec![vault; 32],
-            parent_generation: 3,
-            parent_state_commitment: vec![c_n; 32],
-            parent_reserves_digest: vec![0x0A; 32],
-            successor_ccb: vec![0x5C; 32],
-            reserve_deltas: b"d".to_vec(),
-            witnesses: vec![],
-        }
-    }
-
-    fn a_bundle() -> pb::SettlementBundleV1 {
-        pb::SettlementBundleV1 {
-            version: settlement_bundle::SETTLEMENT_BUNDLE_VERSION_V1,
-            storage_set_id: vec![0x6B; 32],
-            q: 2,
-            intent_commitment: vec![0x1D; 32],
-            route_set_commitment: vec![0x0C; 32],
-            selected_route: b"route".to_vec(),
-            trader_parent: vec![0xA1; 32],
-            trader_successor: vec![0xAA; 32],
-            vault_transitions: vec![transition(1, 0x11), transition(2, 0x22)],
-            proof_material: vec![b"P".to_vec()],
-            bundle_signatures: vec![b"s".to_vec()],
-            recovery_material: b"r".to_vec(),
-        }
+    /// A canonical market bundle: one transition over parent `[0x11; 32]`,
+    /// trader parent `[0x52; 32]` (the fixture's).
+    fn a_bundle() -> dsm::ccb::SettlementBundle {
+        dsm::ccb::settlement::fixtures::market_bundle(
+            [0x11; 32],
+            dsm::ccb::settlement::fixtures::successor_of([0x11; 32], [1; 32], 4, 1, 1),
+            [0x0C; 32],
+        )
     }
 
     /// A fence whose identity fields match `a_bundle()`.
     fn matching_fence(canon: &[u8]) -> TraderFence {
         TraderFence {
             trader_chain_id: [0x11; 32],
-            trader_parent_state_commitment: [0xA1; 32], // == bundle.trader_parent
+            trader_parent_state_commitment: [0x52; 32], // == bundle.market_terms.trader_parent
             tx_id: settlement_bundle::bundle_digest(canon),
             ballot: 5,
-            storage_set_id: [0x6B; 32], // == bundle.storage_set_id
+            storage_set_id: [0x6B; 32], // the resolver's set; the bundle carries none
             value_addr: settlement_bundle::bundle_addr(canon),
             state: FenceState::Fenced,
             insertion_ordinal: 0,
@@ -291,7 +271,10 @@ mod tests {
         let fence = matching_fence(&canon);
         let r = reconstruct(&fence, &canon, members(3), 2, [7; 32]).unwrap();
         assert_eq!(r.keys, settlement_bundle::key_set(&b).unwrap());
-        assert_eq!(r.trader_successor, [0xAA; 32]);
+        assert_eq!(
+            r.trader_successor,
+            settlement_bundle::permitted_continuation(&b).unwrap()
+        );
         assert_eq!(
             r.transaction.base_ballot, 5,
             "resumes above the persisted ballot"
@@ -331,15 +314,6 @@ mod tests {
         assert_eq!(
             reconstruct(&wrong_parent, &canon, members(3), 2, [7; 32]),
             Err(ResumeError::ParentMismatch)
-        );
-        // The fence's set disagrees with the bundle.
-        let mut wrong_set = good.clone();
-        wrong_set.storage_set_id = [0xD4; 32];
-        wrong_set.tx_id = good.tx_id;
-        wrong_set.value_addr = good.value_addr;
-        assert_eq!(
-            reconstruct(&wrong_set, &canon, members(3), 2, [7; 32]),
-            Err(ResumeError::SetMismatch)
         );
         // Non-bundle bytes.
         assert_eq!(

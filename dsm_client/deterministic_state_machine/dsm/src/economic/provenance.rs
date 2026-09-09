@@ -1344,45 +1344,50 @@ pub fn verify_credit_source(
                     &chosen.value_digest,
                 )
                 .map_err(ProvenanceError::OwnerLineage)?;
-            let bundle = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
+            // Strict decode and the whole-bundle round trip under the frozen
+            // encoder (2c-A.1 ruling 8); the identity is over exactly these
+            // bytes, which are the bytes that were fetched.
+            let decoded = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
                 .map_err(|e| invalid(format!("bound bundle: {e}")))?;
-            let bundle_canon = crate::dlv::settlement_bundle::canon(&bundle)
-                .map_err(|e| invalid(format!("bound bundle: {e}")))?;
-            if crate::dlv::settlement_bundle::bundle_digest(&bundle_canon) != chosen.value_digest
-                || crate::dlv::settlement_bundle::bundle_addr(&bundle_canon) != chosen.value_addr
+            let bundle = decoded.bundle;
+            if crate::dlv::settlement_bundle::bundle_digest(&bundle_bytes) != chosen.value_digest
+                || crate::dlv::settlement_bundle::bundle_addr(&bundle_bytes) != chosen.value_addr
             {
                 return Err(invalid(
                     "the bound bundle does not hash to the record's identity".into(),
                 ));
             }
-            // Bound under THIS vault's set, at THIS vault's q. `V_n` is
-            // authoritative, so the bundle's restatement must AGREE with it and
-            // is never consumed in its place.
-            let vault_set_id = crate::ccb::storage_set_id(&vn.storage_set)
-                .map_err(|e| invalid(format!("V_n storage set: {e}")))?;
-            if bundle.storage_set_id != vault_set_id || bundle.q != vn.quorum {
-                return Err(invalid(
-                    "the bound bundle was bound under a different storage set or quorum".into(),
-                ));
-            }
+            // The bundle carries no storage set and no quorum (registry §5.19):
+            // binding authority is `V_n`'s own fields 14 and 15, which is the
+            // set this key was read at.
+            //
             // AND IT NAMES THIS SETTLE'S PARENT. The register is
             // application-blind (§22 #12) and never inspects the value it
             // holds, so a proposer can bind a bundle at k(c_n) whose
-            // transitions name some other parent. Nothing above catches that.
+            // transition names some other parent. The transition is located by
+            // `parent_binding == c_n` (2c-A.1 ruling 7); the successor's own
+            // `vault_id` and generation must be this vault's next.
             let transition = bundle
-                .vault_transitions
-                .iter()
-                .find(|t| t.vault_id == vault)
-                .ok_or_else(|| invalid("the bound bundle consumes no leg of this vault".into()))?;
-            if transition.parent_state_commitment != *parent_binding
-                || transition.parent_generation != *parent_sequence
-            {
+                .transition_for_parent(parent_binding)
+                .ok_or_else(|| {
+                    invalid("the bound bundle does not name this settle's parent state".into())
+                })?;
+            if transition.successor.vault_id != vault {
                 return Err(invalid(
-                    "the bound bundle does not name this settle's parent state".into(),
+                    "the bound bundle consumes no leg of this vault".into(),
                 ));
             }
-            // THE TRADE IDENTITY. Replaces the old claim's `x` equality.
-            if bundle.route_set_commitment != d.x {
+            if transition.successor.generation != parent_sequence.saturating_add(1) {
+                return Err(invalid(
+                    "the bound bundle's successor is not this parent's next generation".into(),
+                ));
+            }
+            // THE TRADE IDENTITY. A close bundle has no market terms and is
+            // not a settle at all.
+            let terms = bundle.market_terms().ok_or_else(|| {
+                invalid("the bound bundle is an owner close, not a settle".into())
+            })?;
+            if terms.route_set_commitment != d.x {
                 return Err(invalid(
                     "the bound bundle commits a different route set than this settle".into(),
                 ));

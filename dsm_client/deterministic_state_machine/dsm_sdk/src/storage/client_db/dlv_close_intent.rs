@@ -72,8 +72,11 @@ pub struct CloseIntent {
     pub state: CloseIntentState,
     /// The signed canonical `Operation::DlvClose`, byte-for-byte.
     pub op_bytes: Vec<u8>,
-    /// The deterministic close commitment naming this close in the slot.
-    pub x_close: [u8; 32],
+    /// `c_{n+1}` of the exact drained successor this close authorized — the
+    /// fence's permitted continuation (2c-A.1 ruling 3). Recorded at decision
+    /// time and COMPARED by recovery, never re-derived: a re-derivation could
+    /// name a successor other than the one the fence permits.
+    pub close_commitment: [u8; 32],
     /// The discovery pointer this close publishes, and where.
     pub pointer_key: String,
     pub pointer_bytes: Vec<u8>,
@@ -93,7 +96,7 @@ pub struct CloseIntent {
 pub fn put_intent_with_conn(conn: &Connection, intent: &CloseIntent) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO dlv_close_intent
-            (vault_id, parent_sequence, state, op_bytes, x_close,
+            (vault_id, parent_sequence, state, op_bytes, close_commitment,
              pointer_key, pointer_bytes, storage_set_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
@@ -101,7 +104,7 @@ pub fn put_intent_with_conn(conn: &Connection, intent: &CloseIntent) -> Result<(
             intent.parent_sequence as i64,
             intent.state.as_str(),
             intent.op_bytes,
-            intent.x_close.as_slice(),
+            intent.close_commitment.as_slice(),
             intent.pointer_key,
             intent.pointer_bytes,
             intent.storage_set_id.as_slice(),
@@ -157,7 +160,7 @@ fn row_to_intent(r: &rusqlite::Row<'_>) -> rusqlite::Result<CloseIntent> {
         parent_sequence: r.get::<_, i64>(1)? as u64,
         state: CloseIntentState::from_str(&r.get::<_, String>(2)?),
         op_bytes: r.get(3)?,
-        x_close: fixed(r.get::<_, Vec<u8>>(4)?),
+        close_commitment: fixed(r.get::<_, Vec<u8>>(4)?),
         pointer_key: r.get(5)?,
         pointer_bytes: r.get(6)?,
         storage_set_id: fixed(r.get::<_, Vec<u8>>(7)?),
@@ -165,7 +168,7 @@ fn row_to_intent(r: &rusqlite::Row<'_>) -> rusqlite::Result<CloseIntent> {
     })
 }
 
-const COLS: &str = "vault_id, parent_sequence, state, op_bytes, x_close, \
+const COLS: &str = "vault_id, parent_sequence, state, op_bytes, close_commitment, \
                     pointer_key, pointer_bytes, storage_set_id, insertion_ordinal";
 
 pub fn get_intent(vault_id: &[u8; 32], parent_sequence: u64) -> Result<Option<CloseIntent>> {
@@ -212,7 +215,7 @@ mod tests {
             parent_sequence: seq,
             state: CloseIntentState::PreparedClose,
             op_bytes: b"signed-op".to_vec(),
-            x_close: [0xC1; 32],
+            close_commitment: [0xC1; 32],
             pointer_key: "sofi/vault-pending/V/1/X".to_string(),
             pointer_bytes: b"pointer".to_vec(),
             storage_set_id: [0x6B; 32],
