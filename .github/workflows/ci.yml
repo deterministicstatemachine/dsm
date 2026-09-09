@@ -519,7 +519,7 @@ jobs:
       - name: Kernel-check every module, sorry-free
         run: |
           set -euo pipefail
-          expected=12
+          expected=13
           found=$(ls lean4/*.lean | wc -l)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::lean4/ has $found modules, expected $expected."

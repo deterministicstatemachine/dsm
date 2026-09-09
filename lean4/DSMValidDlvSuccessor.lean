@@ -325,6 +325,13 @@ inductive Reason where
       would let anyone who can inject a forged receipt force a denial-of-service
       quarantine. -/
   | realizationEvidenceInvalid
+  /-- 2c-C3.1 ruling G: a DURABLE quarantine root of this vault refuses this
+      cursor or this execution. Distinct from `duplicateBindingFinality`,
+      which is the live observation that created the root -- the refused
+      cursor's own key may read `BoundFinal` or `Free`, so reporting a
+      duplicate there would be false. Class SAFETY_VIOLATION; modelled in
+      `DSMLineageQuarantine.lean`. -/
+  | lineageQuarantined
   deriving Repr, DecidableEq
 
 /-- 2c-C3 ruling B: the derivation is TYPED AND PARTIAL. A total function
