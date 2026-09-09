@@ -63,10 +63,10 @@
 //! The composed result is a full `VaultStateV2` with a canonical identity of
 //! its own: the `c_n` a new trade's hop must bind as its parent.
 
-use dsm::ccb::{vault_state_commitment, VaultStateV2};
+use dsm::ccb::VaultStateV2;
 use dsm::dlv::successor_validity::{
-    derive_close_successor, derive_market_successor, C3Verdict, DeriveExpected, EstablishedChecks,
-    MarketTerms, OutcomeClass, Reason,
+    check_correspondence, derive_close_successor, derive_market_successor, C3Verdict,
+    CompleteValidity, DeriveExpected, MarketTerms, OutcomeClass, Reason,
 };
 use dsm::types::proto as generated;
 use prost::Message;
@@ -98,12 +98,13 @@ pub(crate) struct FoldedParent {
     /// Which KIND of consumer owned it. A resumed close must be able to tell
     /// its own fold from a market settle that landed at the same generation.
     pub bound_kind: dsm::dlv::settlement_bundle::BundleShape,
-    /// What C3 concluded about the successor this fold produced. Today every
-    /// fold is [`C3Verdict::PartialPendingEncoderCut`]: every conjunct that can
-    /// be evaluated held, and `VDS.COMMON.10.a` cannot be — so the fold may
-    /// compute forward and the validity claim is withheld. Recorded so that
-    /// the withholding is a value a caller must confront, not an absence it
-    /// can read as consent.
+    /// What C3 concluded about the successor this fold produced. An owner
+    /// close folds [`C3Verdict::Valid`]: every conjunct held, `VDS.COMMON.10.a`
+    /// included. A market fold is [`C3Verdict::PartialPendingRealization`]:
+    /// every conjunct held, `10.a` included, and the fact that the settlement
+    /// occurred is 2c-C4's — so the fold may compute forward and the validity
+    /// claim is withheld. Recorded so that the withholding is a value a caller
+    /// must confront, not an absence it can read as consent.
     pub verdict: C3Verdict,
 }
 
@@ -528,7 +529,10 @@ pub(crate) async fn compose_vault_state(
         // Discriminate on SHAPE FIRST. A close bundle's `route_set_commitment`
         // is 32 zero bytes, so reading X before this branch would silently
         // compute an all-zero commitment.
-        let next_state = match bound.shape {
+        // What this walk DERIVES for the bound transition — the frozen
+        // predicate's successor, by shape. `VDS.COMMON.10.a` then compares it,
+        // byte for byte, against the successor the bundle CARRIES.
+        let expected = match bound.shape {
             // ── CLOSE: binding-final ⇒ REALIZE IMMEDIATELY (Req 6.30). ─────
             // The successor is fully determined — both reserves to zero at
             // parent+1 — so there is no amount to witness and no second
@@ -640,25 +644,36 @@ pub(crate) async fn compose_vault_state(
             }
         };
 
-        let next_c_n = match vault_state_commitment(&next_state) {
-            Ok(c) => c,
-            Err(e) => {
-                // A successor of a decoded-valid state re-encodes unless the
-                // walk produced something the constructors refuse. Never a
-                // partial advance, and never a frontier.
-                return Err(unavailable(&format!("its successor does not encode: {e}")));
+        // ── VDS.COMMON.10.a ─────────────────────────────────────────────
+        // `Canon(expected)` against the EXACT byte span of the successor the
+        // bound bundle carries (2c-A.1 ruling 8: the recorded field-2 span of
+        // the fetched bytes, never a re-encoding). Every preserved- and
+        // mutated-field disposition of C3 ruling B is decided by this one
+        // comparison. The commitment the walk installs comes from the
+        // witness — derived from the SUPPLIED bytes — not from local state.
+        let witness = check_correspondence(&expected, cursor_c_n, bound.successor_bytes())
+            .map_err(|reason| {
+                refused(
+                    reason,
+                    "the successor its bundle carries is not the successor this walk derives \
+                     for the transition (VDS.COMMON.10.a)",
+                )
+            })?;
+        let next_state = witness.expected().clone();
+        let next_c_n = witness.c_next();
+        // THE VERDICT THIS FOLD CARRIES. An owner close has no conjunct left:
+        // Valid. A market fold holds every conjunct INCLUDING 10.a, and the
+        // fact that the settlement occurred is 2c-C4's — the walk folds
+        // forward BECAUSE the verdict permits it (`may_fold`), and nothing
+        // downstream may read a market fold as certification.
+        let verdict = match bound.shape {
+            dsm::dlv::settlement_bundle::BundleShape::OwnerClose => {
+                C3Verdict::Valid(CompleteValidity::from_close_witness(witness))
+            }
+            dsm::dlv::settlement_bundle::BundleShape::Market => {
+                C3Verdict::PartialPendingRealization(witness)
             }
         };
-        // THE VERDICT THIS FOLD CARRIES. Everything above that could be
-        // evaluated held; the byte comparison of VDS.COMMON.10.a could not be,
-        // because no supplied successor exists on the wire until the 2c-A
-        // encoder cut. The walk folds forward BECAUSE the verdict permits it
-        // (`may_fold`), and nothing downstream may read the fold as
-        // certification (`may_certify` is false on every fold today).
-        let verdict = C3Verdict::PartialPendingEncoderCut(EstablishedChecks {
-            expected: Box::new(next_state.clone()),
-            parent_commitment: cursor_c_n,
-        });
         if !verdict.may_fold() {
             return Err(refused(
                 Reason::CorrespondenceMismatch,
@@ -1013,8 +1028,8 @@ pub(crate) async fn compose_discovered_vault(
 mod tests {
     use super::*;
     use dsm::ccb::{
-        genesis_parent_commitment, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy,
-        StorageSetMembers,
+        genesis_parent_commitment, vault_state_commitment, EncumbranceSet, FeePolicy,
+        MarketPolicy, ReleasePolicy, StorageSetMembers,
     };
     use dsm::crypto::sphincs::{generate_keypair, SphincsVariant};
     use dsm::dlv::settlement_receipt_leaf::{
@@ -1108,8 +1123,26 @@ mod tests {
         parent_c_n: &[u8; 32],
         claimant_pk: &[u8],
     ) {
+        win_slot_with(
+            vault_id,
+            x,
+            parent_c_n,
+            any_successor(vault_id, parent_sequence, parent_c_n),
+            claimant_pk,
+        )
+        .await;
+    }
+
+    /// `win_slot` with the exact successor the bundle carries.
+    async fn win_slot_with(
+        vault_id: &[u8; 32],
+        x: &[u8; 32],
+        parent_c_n: &[u8; 32],
+        successor: VaultStateV2,
+        claimant_pk: &[u8],
+    ) {
         let set = fleet_set();
-        let bundle = market_bundle_for_tests(vault_id, parent_sequence, parent_c_n, x);
+        let bundle = market_bundle_for_tests(parent_c_n, successor, x);
         let out = crate::sdk::settlement_bind::bind_settlement(
             &set,
             proposer_for(claimant_pk),
@@ -1142,24 +1175,51 @@ mod tests {
     /// The canonical market bundle a fixture binds: its `route_set_commitment`
     /// IS the trade's `x`, which is what the walk reads back to locate the
     /// receipt and the RouteCommit, and its one transition consumes
-    /// `parent_c_n` into a successor of this vault at the next generation.
+    /// `parent_c_n` into `successor` — which, for a fold that is meant to
+    /// REALIZE, must be the exact successor the predicate derives
+    /// (`VDS.COMMON.10.a` compares the bytes); for a bind whose evidence
+    /// never arrives, any successor of this vault at the next generation.
     fn market_bundle_for_tests(
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
         parent_c_n: &[u8; 32],
+        successor: VaultStateV2,
         x: &[u8; 32],
     ) -> dsm::ccb::SettlementBundle {
-        dsm::ccb::settlement::fixtures::market_bundle(
+        dsm::ccb::settlement::fixtures::market_bundle(*parent_c_n, successor, *x)
+    }
+
+    /// A successor of `vault_id` at `parent_sequence + 1` for a bind whose
+    /// realization evidence never arrives — the walk stops before `10.a`.
+    fn any_successor(vault_id: &[u8; 32], parent_sequence: u64, parent_c_n: &[u8; 32]) -> VaultStateV2 {
+        dsm::ccb::settlement::fixtures::successor_of(
             *parent_c_n,
-            dsm::ccb::settlement::fixtures::successor_of(
-                *parent_c_n,
-                *vault_id,
-                parent_sequence.saturating_add(1),
-                0,
-                0,
-            ),
-            *x,
+            *vault_id,
+            parent_sequence.saturating_add(1),
+            0,
+            0,
         )
+    }
+
+    /// The exact market successor the frozen predicate derives for a swap on
+    /// `parent` — what an honest bundle's field 2 carries.
+    fn swapped(parent: &VaultStateV2, c_n: [u8; 32], input_is_a: bool, input_amount: u64) -> VaultStateV2 {
+        let (in_pc, out_pc) = if input_is_a {
+            (TOKEN_A, TOKEN_B)
+        } else {
+            (TOKEN_B, TOKEN_A)
+        };
+        match derive_market_successor(
+            parent,
+            c_n,
+            &MarketTerms {
+                input_policy_commit: in_pc,
+                output_policy_commit: out_pc,
+                input_amount,
+                fee_bps: FEE_BPS,
+            },
+        ) {
+            DeriveExpected::Derived(v) => *v,
+            DeriveExpected::Refused(r) => panic!("the fixture swap must derive: {r}"),
+        }
     }
 
     /// The exact drained successor the frozen predicate derives for a close of
@@ -1462,27 +1522,27 @@ mod tests {
         (kp.public_key.clone(), kp.secret_key.clone())
     }
 
-    /// One settled trade end-to-end: X anchor, signed RC bound to
-    /// `parent_binding`, pointer, and a matching receipt. Returns the
-    /// post-trade reserves.
-    #[allow(clippy::too_many_arguments)]
+    /// One settled trade end-to-end on `parent`: X anchor, signed RC bound to
+    /// the parent's `c_n`, pointer, a matching receipt, and the canonical
+    /// bundle carrying the EXACT derived successor bound through the
+    /// production driver. Returns that successor — `V_{n+1}` as the walk will
+    /// install it, so a caller chaining a second trade stands on the same
+    /// state the walk does.
     async fn publish_settled_trade(
         vault_id: &[u8; 32],
         nonce_seed: &[u8; 32],
-        parent_reserve_a: u64,
-        parent_reserve_b: u64,
-        parent_sequence: u64,
-        parent_binding: &[u8; 32],
+        parent: &VaultStateV2,
         input_is_a: bool,
         input_amount: u64,
-    ) -> (u64, u64) {
+    ) -> VaultStateV2 {
+        let parent_binding = vault_state_commitment(parent).expect("c_n");
         let (pk, sk) = trader();
         let (new_a, new_b, x) = publish_rc_for_swap(
             nonce_seed,
             vault_id,
-            parent_reserve_a,
-            parent_reserve_b,
-            parent_binding,
+            parent.reserve_a,
+            parent.reserve_b,
+            &parent_binding,
             input_is_a,
             input_amount,
             &pk,
@@ -1491,16 +1551,22 @@ mod tests {
         .await;
         publish_extcommit(&x, &pk).await;
         let output = if input_is_a {
-            parent_reserve_b - new_b
+            parent.reserve_b - new_b
         } else {
-            parent_reserve_a - new_a
+            parent.reserve_a - new_a
         };
-        let trade = settled_trade(&x, parent_sequence, input_is_a, input_amount, output);
+        let trade = settled_trade(&x, parent.generation, input_is_a, input_amount, output);
         publish_receipt(vault_id, &trade, &pk, &sk).await;
         // THE EDGE. Publishing evidence no longer makes a successor exist —
         // the network must have serialized this generation to this claimant.
-        win_slot(vault_id, parent_sequence, &x, parent_binding, &pk).await;
-        (new_a, new_b)
+        let successor = swapped(parent, parent_binding, input_is_a, input_amount);
+        assert_eq!(
+            (successor.reserve_a, successor.reserve_b),
+            (new_a, new_b),
+            "the RC's simulated swap and the predicate's derivation agree"
+        );
+        win_slot_with(vault_id, &x, &parent_binding, successor.clone(), &pk).await;
+        successor
     }
 
     /// A receipt that is PRESENT, correctly keyed, well-formed, and FAILS
@@ -1586,18 +1652,8 @@ mod tests {
         use crate::storage::client_db::dlv_lineage_quarantine as quarantine;
         let _fleet = fleet();
         let vault_id = vid(0x31);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        publish_settled_trade(
-            &vault_id,
-            &x_seed(0x31),
-            1_000_000,
-            500_000,
-            0,
-            &c0,
-            true,
-            10_000,
-        )
-        .await;
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(&vault_id, &x_seed(0x31), &state, true, 10_000).await;
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
@@ -1767,30 +1823,22 @@ mod tests {
         );
     }
 
-    /// 2c-C3 Phase E — THE FORCED-PARTIAL CONTROL. Every fold the walk makes
-    /// today carries `PartialPendingEncoderCut`: composition CONTINUES on it,
-    /// the recorded `expected` is exactly the successor the walk installed,
-    /// the recorded parent is the `c_n` it was derived from, and the verdict
-    /// permits folding while refusing certification. `Valid` is not reachable
-    /// from here or anywhere — `CompleteValidity` has no constructor, pinned
-    /// by the `compile_fail` doctests on the type — so nothing built on a fold
-    /// can claim accepted-successor finality, `TA_B`, or a fence release.
+    /// 2c-C3 Phase E, re-pinned after 2c-A.1 — THE MARKET FOLD'S VERDICT. A
+    /// market fold carries `PartialPendingRealization`: composition CONTINUES
+    /// on it, the witness's `expected` is exactly the successor the walk
+    /// installed, its parent is the `c_n` it was derived from, its `c_{n+1}`
+    /// — taken from the SUPPLIED bytes — is the commitment the walk installed,
+    /// and the verdict permits folding while refusing certification. `Valid`
+    /// is not reachable for a market fold: `CompleteValidity::from_market_witness`
+    /// needs an `IndependentRealization`, which has no constructor — so
+    /// nothing built on a market fold can claim accepted-successor finality,
+    /// `TA_B`, or a fence release.
     #[tokio::test]
-    async fn every_fold_is_partial_pending_the_encoder_cut_and_never_certifies() {
+    async fn a_market_fold_corresponds_and_is_partial_pending_realization() {
         let _fleet = fleet();
         let vault_id = vid(0x33);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        publish_settled_trade(
-            &vault_id,
-            &x_seed(0x33),
-            1_000_000,
-            500_000,
-            0,
-            &c0,
-            true,
-            10_000,
-        )
-        .await;
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(&vault_id, &x_seed(0x33), &state, true, 10_000).await;
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
@@ -1798,21 +1846,33 @@ mod tests {
         assert_eq!(composed.sequence, 1, "the fold happened");
         assert_eq!(composed.folded_parents.len(), 1);
         let fold = &composed.folded_parents[0];
-        let C3Verdict::PartialPendingEncoderCut(checks) = &fold.verdict else {
+        let C3Verdict::PartialPendingRealization(witness) = &fold.verdict else {
             panic!(
-                "every fold today is partial pending the encoder cut, got {:?}",
+                "a market fold is partial pending its realization fact, got {:?}",
                 fold.verdict
             );
         };
         assert_eq!(
-            *checks.expected, composed.state,
+            *witness.expected(),
+            composed.state,
             "expected IS the installed successor"
         );
         assert_eq!(
-            checks.parent_commitment, fold.c_n,
+            witness.parent_commitment(),
+            fold.c_n,
             "derived from the folded parent"
         );
-        assert_eq!(checks.parent_commitment, c0);
+        assert_eq!(witness.parent_commitment(), c0);
+        assert_eq!(
+            witness.c_next(),
+            composed.c_n,
+            "the installed c_{{n+1}} is the witness's, from the supplied bytes"
+        );
+        assert_eq!(
+            witness.c_next(),
+            vault_state_commitment(&composed.state).expect("encodes"),
+            "and equals the commitment of the derived successor (injectivity)"
+        );
         assert!(fold.verdict.may_fold(), "the fold may compute forward");
         assert!(
             !fold.verdict.may_certify(),
@@ -1822,6 +1882,45 @@ mod tests {
             fold.verdict.class(),
             None,
             "deployment status is not a protocol class"
+        );
+    }
+
+    /// VDS.COMMON.10.a, MARKET — THE MUTATION BY CONSTRUCTION. The same
+    /// honest evidence (RC bound to c_0, X, a verifying receipt) with a bound
+    /// bundle whose field 2 is NOT the derived successor: one preserved field
+    /// differs. Before the encoder cut the walk derived locally and this
+    /// bundle folded like any other; now the comparison refuses it with C3's
+    /// code, and the vault does not advance.
+    #[tokio::test]
+    async fn a_market_bundle_whose_successor_is_not_the_derived_one_fails_10a() {
+        let _fleet = fleet();
+        let vault_id = vid(0x34);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let (pk, sk) = trader();
+        let (new_a, new_b, x) =
+            publish_rc_for_swap(&x_seed(0x34), &vault_id, 1_000_000, 500_000, &c0, true, 10_000, &pk, &sk)
+                .await;
+        publish_extcommit(&x, &pk).await;
+        let trade = settled_trade(&x, 0, true, 10_000, 500_000 - new_b);
+        publish_receipt(&vault_id, &trade, &pk, &sk).await;
+        // The derived successor with ONE preserved field changed — a field
+        // Ruling B says the operation cannot touch.
+        let mut carried = swapped(&state, c0, true, 10_000);
+        assert_eq!((carried.reserve_a, carried.reserve_b), (new_a, new_b));
+        carried.owner_authority_transition_digest = [0xEE; 32];
+        win_slot_with(&vault_id, &x, &c0, carried, &pk).await;
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("a bundle carrying a successor other than the derived one must not fold");
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected CORRESPONDENCE_MISMATCH, got {err:?}");
+        };
+        assert_eq!(reason, Reason::CorrespondenceMismatch);
+        assert_eq!(reason.class(), OutcomeClass::Invalid);
+        assert!(
+            detail.contains("VDS.COMMON.10.a"),
+            "the refusal names the conjunct: {detail}"
         );
     }
 
@@ -2056,17 +2155,8 @@ mod tests {
         let _fleet = fleet();
         let vault_id = vid(0x06);
         let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (new_a, new_b) = publish_settled_trade(
-            &vault_id,
-            &x_seed(0x06),
-            1_000_000,
-            500_000,
-            0,
-            &c0,
-            true,
-            10_000,
-        )
-        .await;
+        let next = publish_settled_trade(&vault_id, &x_seed(0x06), &state, true, 10_000).await;
+        let (new_a, new_b) = (next.reserve_a, next.reserve_b);
 
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
@@ -2180,6 +2270,152 @@ mod tests {
             "one arbitrary-keypair storage write must not change what any verifier composes"
         );
         assert_eq!(composed.c_n, c0);
+    }
+
+    /// The fixture owner's authority keypair — the key the presentation's
+    /// P0-P6 chain delegates to, so a close it signs is one the composer
+    /// verifies as the OWNER's.
+    fn owner_keys() -> (Vec<u8>, Vec<u8>) {
+        let aph = dsm::core::identity::genesis_session::genesis_authority_policy_hash();
+        let g = dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested(
+            SEED,
+            INPUTS.network_id,
+            INPUTS.wallet_index,
+            INPUTS.device_slot,
+            INPUTS.genesis_version,
+            &aph,
+        )
+        .expect("the fixture owner's genesis derives");
+        (g.ak_public.clone(), g.ak_secret.clone())
+    }
+
+    /// AN AUTHORIZED CLOSE FOLDS `Valid` — C3 owner-close completion, live.
+    ///
+    /// The owner's real authorization over the exact release successor, the
+    /// canonical bundle carrying the exact drained successor, bound through
+    /// the production driver: the walk verifies the authorization under the
+    /// authority the parent committed, derives the same successor,
+    /// `VDS.COMMON.10.a` holds byte for byte, and the fold's verdict is the
+    /// one verdict that certifies. The installed `c_{n+1}` is the witness's —
+    /// from the SUPPLIED bytes — and equals the commitment of the derived
+    /// state.
+    #[tokio::test]
+    async fn an_authorized_close_folds_valid_and_certifies() {
+        let _fleet = fleet();
+        let vault_id = vid(0x1D);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let set = fleet_set();
+        let (_owner_pk, owner_sk) = owner_keys();
+        let release = dsm::dlv::close_authorization::CloseSuccessor {
+            vault_id,
+            leg_a_policy_commit: TOKEN_A,
+            leg_a_amount: 1_000_000,
+            leg_b_policy_commit: TOKEN_B,
+            leg_b_amount: 500_000,
+            parent_sequence: 0,
+            fee_bps: FEE_BPS,
+        };
+        let sig = dsm::dlv::close_authorization::sign_close_authorization(&release, &owner_sk)
+            .expect("the owner signs");
+        let drained_state = drained(&state, c0);
+        let bundle = crate::sdk::settlement_bind::close_bundle(c0, drained_state.clone(), sig)
+            .expect("builds");
+        assert_eq!(
+            crate::sdk::settlement_bind::bind_settlement(&set, [0x9F; 32], &bundle, vault_id, c0)
+                .await
+                .expect("drive the bind"),
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed)
+        );
+
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("the owner's close folds");
+        assert_eq!(
+            (composed.sequence, composed.reserves_a, composed.reserves_b),
+            (1, 0, 0),
+            "the vault is dead"
+        );
+        assert_eq!(composed.state, drained_state, "the installed state IS the carried one");
+        assert_eq!(
+            composed.c_n,
+            vault_state_commitment(&drained_state).expect("commits"),
+            "c_{{n+1}} of the exact successor"
+        );
+        assert_eq!(composed.folded_parents.len(), 1);
+        let fold = &composed.folded_parents[0];
+        assert_eq!(
+            fold.bound_kind,
+            dsm::dlv::settlement_bundle::BundleShape::OwnerClose
+        );
+        let C3Verdict::Valid(validity) = &fold.verdict else {
+            panic!("an authorized close is C3-complete, got {:?}", fold.verdict);
+        };
+        assert_eq!(validity.witness().c_next(), composed.c_n);
+        assert_eq!(validity.witness().parent_commitment(), c0);
+        assert!(fold.verdict.may_fold());
+        assert!(
+            fold.verdict.may_certify(),
+            "the close's 10.a was its last conjunct"
+        );
+        assert_eq!(fold.verdict.class(), Some(OutcomeClass::Valid));
+    }
+
+    /// VDS.COMMON.10.a, CLOSE — THE MUTATION BY CONSTRUCTION. The owner's
+    /// REAL authorization (it covers the release coordinates: legs, amounts,
+    /// generation, fee) over a bundle whose field 2 is a drained, linked
+    /// successor with ONE preserved field changed — a budget where the parent
+    /// carries none. Every check but the byte comparison passes: the
+    /// signature verifies, the constructor accepts a retired linked
+    /// successor, the derivation succeeds. Only `10.a` sees that the state
+    /// the bundle would install is not the state the owner's close derives —
+    /// which is exactly why Ruling B makes the field dispositions its
+    /// consequence rather than the signature's.
+    #[tokio::test]
+    async fn a_close_bundle_carrying_a_successor_other_than_the_derived_one_fails_10a() {
+        let _fleet = fleet();
+        let vault_id = vid(0x1E);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        let set = fleet_set();
+        let (_owner_pk, owner_sk) = owner_keys();
+        let release = dsm::dlv::close_authorization::CloseSuccessor {
+            vault_id,
+            leg_a_policy_commit: TOKEN_A,
+            leg_a_amount: 1_000_000,
+            leg_b_policy_commit: TOKEN_B,
+            leg_b_amount: 500_000,
+            parent_sequence: 0,
+            fee_bps: FEE_BPS,
+        };
+        let sig = dsm::dlv::close_authorization::sign_close_authorization(&release, &owner_sk)
+            .expect("the owner signs");
+        let mut carried = drained(&state, c0);
+        carried.iteration_budget = Some(5);
+        let bundle = crate::sdk::settlement_bind::close_bundle(c0, carried, sig)
+            .expect("retired and linked: the constructor accepts it");
+        assert_eq!(
+            crate::sdk::settlement_bind::bind_settlement(&set, [0xA0; 32], &bundle, vault_id, c0)
+                .await
+                .expect("drive the bind"),
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed),
+            "the register is application-blind"
+        );
+
+        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+            .await
+            .expect_err("the carried successor is not the derived one");
+        let CompositionError::SuccessorInvalid { reason, detail } = err else {
+            panic!("expected CORRESPONDENCE_MISMATCH, got {err:?}");
+        };
+        assert_eq!(reason, Reason::CorrespondenceMismatch);
+        assert_eq!(reason.class(), OutcomeClass::Invalid);
+        assert!(
+            detail.contains("VDS.COMMON.10.a"),
+            "the refusal names the conjunct: {detail}"
+        );
+        // That the refusal is the comparison's and not the signature's is the
+        // sibling test: the same key, the same release, the DERIVED successor
+        // — and the fold is Valid.
     }
 
     /// A STRANGER CANNOT CLOSE SOMEBODY ELSE'S VAULT.
@@ -2397,7 +2633,7 @@ mod tests {
         win_slot(&vault_id, 0, &x_seed(0x10), &stale, &pk).await;
         // Now plant its committed record at THIS parent's key, which is what
         // an application-blind register permits.
-        let bundle = market_bundle_for_tests(&vault_id, 0, &stale, &x_seed(0x10));
+        let bundle = market_bundle_for_tests(&stale, any_successor(&vault_id, 0, &stale), &x_seed(0x10));
         let canon = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon");
         crate::sdk::binding_fleet_double::plant_committed(
             &["dsm-node-1", "dsm-node-2"],
@@ -2528,26 +2764,12 @@ mod tests {
         let _fleet = fleet();
         let vault_id = vid(0x0A);
         let (presentation, ccb, state0, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (a1, b1) = publish_settled_trade(
-            &vault_id,
-            &x_seed(0x0A),
-            1_000_000,
-            500_000,
-            0,
-            &c0,
-            true,
-            10_000,
-        )
-        .await;
-        // Recompute c_1 exactly as the walk will.
-        let mut s1 = state0.clone();
-        s1.generation = 1;
-        s1.reserve_a = a1;
-        s1.reserve_b = b1;
-        s1.parent_state_commitment = c0;
+        let s1 = publish_settled_trade(&vault_id, &x_seed(0x0A), &state0, true, 10_000).await;
+        // c_1 exactly as the walk will install it: the derived successor's.
+        assert_eq!((s1.generation, s1.parent_state_commitment), (1, c0));
         let c1 = vault_state_commitment(&s1).expect("c_1");
-        let (a2, b2) =
-            publish_settled_trade(&vault_id, &x_seed(0x0B), a1, b1, 1, &c1, false, 7_000).await;
+        let s2 = publish_settled_trade(&vault_id, &x_seed(0x0B), &s1, false, 7_000).await;
+        let (a2, b2) = (s2.reserve_a, s2.reserve_b);
 
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)

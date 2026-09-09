@@ -248,3 +248,151 @@ fn the_two_vectors_differ_only_in_the_reserve_fields() {
         "differs outside the reserves: {diff:?}"
     );
 }
+
+// ── VDS.COMMON.10.a — the correspondence vectors (amendment 2c-A.1) ──────────
+//
+// `check_correspondence` compares `Canon(expected)` against the bytes a bundle
+// carries. The accept vector's supplied side is the PINNED independent
+// rendering; each reject vector is one deviation Ruling B says the comparison
+// must catch, rendered by the independent encoder (or spliced from the pinned
+// bytes), never by the production encoder.
+
+use dsm::dlv::successor_validity::{check_correspondence, Reason};
+
+fn derived_market() -> (VaultStateV2, [u8; 32]) {
+    let p = parent(7, 1_000_000, 500_000, d(0xC0), None);
+    let c_n = vault_state_commitment(&p).expect("c_n");
+    let DeriveExpected::Derived(m) = derive_market_successor(
+        &p,
+        c_n,
+        &MarketTerms {
+            input_policy_commit: TOKEN_A,
+            output_policy_commit: TOKEN_B,
+            input_amount: 10_000,
+            fee_bps: 30,
+        },
+    ) else {
+        panic!("a well-formed market hop derives")
+    };
+    (*m, c_n)
+}
+
+/// ACCEPT: the pinned bytes ARE the derived successor, and the witness's
+/// `c_{n+1}` is `H_dom(DSM/vault-state, supplied)` computed without the
+/// production helper — equal to the production commitment of the derived
+/// state, which is the injectivity the walk leans on.
+#[test]
+fn the_pinned_successor_bytes_correspond_and_yield_c_next_from_the_supplied_side() {
+    let (m, c_n) = derived_market();
+    let w = check_correspondence(&m, c_n, MARKET_SUCCESSOR_CCB).expect("the bytes correspond");
+    assert_eq!(*w.expected(), m);
+    assert_eq!(w.parent_commitment(), c_n);
+    assert_eq!(
+        w.c_next(),
+        indep::h_dom(b"DSM/vault-state", MARKET_SUCCESSOR_CCB),
+        "c_{{n+1}} is the domain hash of the SUPPLIED bytes"
+    );
+    assert_eq!(
+        w.c_next(),
+        vault_state_commitment(&m).expect("commits"),
+        "and equals the commitment of the derived successor"
+    );
+    // The close vector corresponds to the close derivation, and to nothing
+    // else: the two derivations are not interchangeable operands.
+    let p = parent(7, 1_000_000, 500_000, d(0xC0), None);
+    let DeriveExpected::Derived(c) = derive_close_successor(&p, c_n) else {
+        panic!("a funded vault closes")
+    };
+    assert!(check_correspondence(&c, c_n, CLOSE_SUCCESSOR_CCB).is_ok());
+    assert_eq!(
+        check_correspondence(&c, c_n, MARKET_SUCCESSOR_CCB).unwrap_err(),
+        Reason::CorrespondenceMismatch
+    );
+    assert_eq!(
+        check_correspondence(&m, c_n, CLOSE_SUCCESSOR_CCB).unwrap_err(),
+        Reason::CorrespondenceMismatch
+    );
+}
+
+/// REJECT, one deviation each — the independent encoder renders a successor
+/// that differs from the derived one in exactly one of Ruling B's dispositions.
+#[test]
+fn each_ruling_b_deviation_is_a_correspondence_mismatch() {
+    let (m, c_n) = derived_market();
+    let reject = |name: &str, supplied: Vec<u8>| {
+        assert_ne!(supplied, MARKET_SUCCESSOR_CCB, "{name}: the vector must differ");
+        assert_eq!(
+            check_correspondence(&m, c_n, &supplied).unwrap_err(),
+            Reason::CorrespondenceMismatch,
+            "{name}"
+        );
+    };
+    // The independent rendering with the fixture's fixed identity, except
+    // for the two fields a deviation below needs to vary.
+    let render = |v: &VaultStateV2, r_o: [u8; 32], e: Vec<u8>| -> Vec<u8> {
+        let entries: Vec<(Vec<u8>, [u8; 32])> = MEMBERS
+            .iter()
+            .map(|(id, inc)| (id.to_vec(), *inc))
+            .collect();
+        indep::vault_state(
+            d(0xA1),
+            d(0xA2),
+            VAULT_ID,
+            v.generation,
+            v.reserve_a,
+            v.reserve_b,
+            indep::market_policy(1, 1, TOKEN_A, TOKEN_B),
+            indep::release_policy(1, 1),
+            indep::fee_policy(30),
+            e,
+            v.iteration_budget,
+            v.parent_state_commitment,
+            r_o,
+            indep::storage_set(entries),
+            4,
+        )
+    };
+    // A PRESERVED field changed: the owner's authority position.
+    reject(
+        "preserved field changed",
+        render(&m, d(0xA4), indep::encumbrance_set(Vec::new())),
+    );
+    // A preserved field changed: the parent edge.
+    let mut v = m.clone();
+    v.parent_state_commitment = d(0xC1);
+    reject("parent edge changed", indep_bytes(&v));
+    // A MUTATED field wrong: the output reserve one unit off the curve.
+    let mut v = m.clone();
+    v.reserve_b += 1;
+    reject("mutated field off by one", indep_bytes(&v));
+    // An encumbrance claim ADDED — the operation holds none.
+    reject(
+        "encumbrance claim added",
+        render(
+            &m,
+            d(0xA3),
+            indep::encumbrance_set(vec![indep::encumbrance_claim(d(0xC0), 1, 5, TOKEN_A, 1)]),
+        ),
+    );
+    // The budget marker FLIPPED: a present budget where the derivation
+    // carries none.
+    let mut v = m.clone();
+    v.iteration_budget = Some(3);
+    reject("budget marker flipped", indep_bytes(&v));
+    // SEMANTICALLY EQUAL BUT NON-CANONICAL: the same storage set with two
+    // members out of order. Spliced from the pinned bytes — the set is the
+    // last 238 bytes before the 4-byte quorum: envelope (4) + count (4) +
+    // five members of (4 + 10 + 32) — and members 0 and 1 swap blocks.
+    let n = MARKET_SUCCESSOR_CCB.len();
+    let set_start = n - 4 - 238;
+    let members = set_start + 8;
+    let mut unsorted = MARKET_SUCCESSOR_CCB.to_vec();
+    let (b0, b1) = (members..members + 46, members + 46..members + 92);
+    let first = MARKET_SUCCESSOR_CCB[b0.clone()].to_vec();
+    let second = MARKET_SUCCESSOR_CCB[b1.clone()].to_vec();
+    assert_eq!(&first[4..14], b"dsm-node-1");
+    assert_eq!(&second[4..14], b"dsm-node-2");
+    unsorted[b0].copy_from_slice(&second);
+    unsorted[b1].copy_from_slice(&first);
+    reject("same set, non-canonical order", unsorted);
+}

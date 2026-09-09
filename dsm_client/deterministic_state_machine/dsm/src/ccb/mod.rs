@@ -700,10 +700,17 @@ pub fn dlv_policy_digest(release: &ReleasePolicy, fee: &FeePolicy) -> [u8; 32] {
 }
 
 pub fn vault_state_commitment(state: &VaultStateV2) -> Result<[u8; 32], CcbError> {
-    let ccb = state.encode()?;
+    Ok(vault_state_commitment_of_canon(&state.encode()?))
+}
+
+/// `c_n = H_dom(DSM/vault-state, CCB(V_n))` over bytes that already ARE
+/// `CCB(V_n)` — the form `VDS.COMMON.10.a` needs, where the operand is the
+/// exact supplied span of a bundle and nothing re-encodes it. The one
+/// derivation; [`vault_state_commitment`] is this over a fresh encoding.
+pub fn vault_state_commitment_of_canon(canon: &[u8]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(TAG_DSM_VAULT_STATE);
-    h.update(&ccb);
-    Ok(*h.finalize().as_bytes())
+    h.update(canon);
+    *h.finalize().as_bytes()
 }
 
 /// `h_0 = H(DSM/vault-state-parent/genesis/v2 ‖ vault_id)`.
