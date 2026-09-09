@@ -7,7 +7,7 @@
 //! `K(B)` and the transaction identity from the bytes, and drives the fenced
 //! QuorumBind runner to a terminal outcome. It records the DLV outcome only —
 //! a `COMMITTED` is binding-final, NOT realized. Owner-close folds one-phase on
-//! that (Req 6.30); market realization (the `A_B` acceptance gate) is 5c-2. The
+//! that (Req 6.30); market realization (the `TA_B` acceptance gate) is 5c-2. The
 //! old register is still present until 5d; this is the wiring step.
 //!
 //! `PutImmutable(B)` happens before the first mutating binding op (Req 6.15/16.1

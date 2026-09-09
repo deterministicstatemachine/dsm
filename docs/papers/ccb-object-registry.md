@@ -1177,6 +1177,11 @@ would claim the same `c_n` and collide.
 hashes protobuf bytes, which §2.10 says is never a CCB blob. No current identifier is a conformant
 `b`.
 
+> **Corrected 2026-09-09 by the 2c-A.1 adopting change (#799).** The present tense above is the
+> pre-cut record. The encoder shipped, the protobuf bundle was deleted, and every `b` is now
+> `H_dom(DSM/settlement-bundle, CCB(B))` over canonical bytes. No prost-era identifier is
+> grandfathered — the cut is a reprovision (2c-A.1 ruling 4), owed at deployment.
+
 ### 5.20 `MarketTerms` — class `0x0033`, schema 1
 
 Everything a market settlement has and an owner close does not. Nested by value in `0x000E` field 1

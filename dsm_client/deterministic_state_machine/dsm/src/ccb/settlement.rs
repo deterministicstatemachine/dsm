@@ -256,8 +256,15 @@ impl Route {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DsmSuccessorEvidence {
     pub rel_key: [u8; 32],
-    /// Must equal `MarketTerms.trader_parent`; carried so the equality is
-    /// checked, not assumed.
+    /// 2c-B requires this to equal `MarketTerms.trader_parent`, as the second
+    /// of its two chain-tip equalities over the canonical `operation_bytes`.
+    ///
+    /// **NOT ENFORCED HERE, OR ANYWHERE YET.** 2c-B is documentation-only
+    /// ("No Rust, no proto, no tests, no encoder") and no adopting change has
+    /// implemented its market-bundle validity conjuncts, so field 6 is what
+    /// that amendment itself calls decoration: it round-trips, and nothing
+    /// reads it. This comment previously said the equality "is checked, not
+    /// assumed", which certified a check that does not exist.
     pub embedded_parent: [u8; 32],
     pub counterparty_devid: [u8; 32],
     /// A `DlvSettleOperationPreimageV1` — a foreign, little-endian grammar

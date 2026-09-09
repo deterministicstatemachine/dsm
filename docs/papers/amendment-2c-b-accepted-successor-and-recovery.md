@@ -268,6 +268,16 @@ well-formed `DlvSettle` of the frozen grammar, not that the settle is authorised
 Without these conjuncts field 6 is decoration — today `settlement_bundle::validate` width-checks
 the two successor fields and **never reads `recovery_material` at all**.
 
+> **Partially corrected 2026-09-09 by the 2c-A.1 adopting change (#799), and the headline still
+> stands.** `settlement_bundle::validate` is deleted; field 6 is now a mandatory nested `0x0031`
+> that is strictly decoded and round-tripped, so it is no longer unread bytes. But **none of the
+> conjuncts above is implemented**: nothing decodes `operation_bytes` as
+> `DlvSettleOperationPreimageV1`, nothing recomputes `relationship_chain_tip_v2`, and nothing
+> compares `embedded_parent` with `B.market_terms.trader_parent`. 2c-B is documentation-only and no
+> adopting change has been assigned these conjuncts, so field 6 remains decoration in exactly the
+> sense this paragraph means. Recorded here rather than in a code comment, because the code comment
+> that claimed the equality was checked was itself the defect (corrected in the same change).
+
 ---
 
 # The two frozen foreign byte grammars
@@ -550,6 +560,9 @@ the chain-tip conjunct but not *validated* — that is `ValidDlvSuccessor`, rout
    identical B bytes -> identical b`.
 2. **Namespace re-audit, run before writing.** Code tops out at `0x0030`; `0x0031`/`0x0032` appear
    in no Rust constant and no proto, and are claimed in prose for 2c-B and 2c-D. `0x0031` is free.
+   *(Audit as run, 2026-09-09; the 2c-A.1 adopting change has since taken `0x0031` as
+   `DSM_SUCCESSOR_EVIDENCE` and reserved `0x0032` for 2c-D, with the collision test that scope
+   required.)*
 3. **§2.8 audit.** Seven field numbers, all new within `0x0031`; no reuse; **no new burn** — this is
    a first ship at schema 1.
 4. **Both byte grammars, encoded from these tables.** `CloseAuthorizationPreimageV1` signing form is

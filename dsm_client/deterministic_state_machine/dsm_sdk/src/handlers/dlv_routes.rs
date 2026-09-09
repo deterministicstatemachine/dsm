@@ -3296,7 +3296,7 @@ impl AppRouterImpl {
         //                      second one would reuse ballots recovery spent.
         //
         // The BoundUnrealized arm is also the seam 5c-2 grows into: once
-        // realization is gated on the accepted trader successor plus `A_B`,
+        // realization is gated on the accepted trader successor plus `TA_B`,
         // "our own bundle is bound but not yet realized" stops being a retry
         // case and becomes the normal mid-flight state.
         match settle.frontier_binding {

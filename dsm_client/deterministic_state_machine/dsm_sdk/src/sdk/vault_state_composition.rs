@@ -44,9 +44,12 @@
 //! ```
 //!
 //! Validating an edge means: the winner's claim verifies and binds this exact
-//! parent `c_n`; a settlement receipt witnesses this generation step; the
-//! signed `RouteCommit` recomputes the claimed `X`; the hop binds the cursor's
-//! `c_n`; and the AMM re-simulates to exactly the claimed output. A close
+//! parent `c_n`; a settlement receipt is PRESENT and internally consistent for
+//! this generation step -- it is the trader's self-attested claim and NOT proof
+//! that value moved, per `settlement_receipt_leaf`'s own header, and 2c-C4 owns
+//! the fact that replaces it; the signed `RouteCommit` recomputes the claimed
+//! `X`; the hop binds the cursor's `c_n`; and the AMM re-simulates to exactly
+//! the claimed output. A close
 //! consumes the same cell — close and settle contend for one slot per
 //! generation — and is recognised by its deterministic `x` claimed under the
 //! owner's proven authority key, folding to the terminal zero-reserve state.
@@ -588,7 +591,7 @@ pub(crate) async fn compose_vault_state(
             // # bytes) + routed-unlock eligibility + hop parent binding +
             // # exact constant-product re-simulation.
             // # 5c-2 REPLACES this whole call with the Rev-15 rule — the exact
-            // # bundled trader successor accepted under ordinary DSM AND `A_B`
+            // # bundled trader successor accepted under ordinary DSM AND `TA_B`
             // # verified — at which point X, the receipt and the RouteCommit
             // # stop being the realization source and become bundle-internal
             // # proof material.
@@ -752,7 +755,7 @@ fn local_fence_overlay(
 /// # This is the PRE-BUNDLE evidence gate, kept verbatim so successful market
 /// # trades keep advancing reserves while the acceptance seam is unfinished.
 /// # 5c-2 replaces the whole function with the Rev-15 rule: the exact bundled
-/// # trader successor accepted under ordinary DSM advancement AND `A_B`
+/// # trader successor accepted under ordinary DSM advancement AND `TA_B`
 /// # verified. Do not grow new dependencies on it.
 /// ###################################################################
 enum MarketRealization {
