@@ -1,5 +1,30 @@
 # SoFi LP Walkthrough — Alice's Journey
 
+> ## STATUS 2026-09-09 — the trade step is fail-closed today
+>
+> The trader's routed settlement (`dlv.unlockRouted`) is deliberately **fail-closed** on `main` and
+> refuses before binding anything:
+>
+> > `dlv.unlockRouted: market settlement is deployment-blocked until 5c-2 Step 2 — a canonical`
+> > `market bundle needs the bundled trader successor evidence, which this device cannot produce`
+> > `before it advances; vault <id> parent <c_n> (generation <n>) was NOT bound and nothing moved`
+>
+> This is a **deployment block, not a bug and not a misconfiguration**. No setting lifts it. The
+> refusal fires *after* every eligibility gate passes, and nothing is stored, fenced, bound, signed
+> or advanced when it does: the trader's balances do not move and the vault generation stays free.
+>
+> The reason is an ordering one. A canonical market bundle must carry the trader's prepared
+> successor and its `0x0031` successor evidence, and today the trader binds BEFORE it advances, so
+> there is no signed successor to name and nothing may be fabricated in its place. 5c-2 Step 2 is
+> the only thing that lifts it.
+>
+> **What still works:** vault creation and funding, routing advertisement, discovery, quoting, and
+> the **owner close path**, which is live and unaffected.
+>
+> This document is about concepts, and the concepts are unchanged. Only the click-path note
+> that says the unlock proceeds is currently untrue on `main`.
+
+
 A side-by-side narrative for liquidity providers transitioning from
 pool-AMM mental models (Uniswap, Curve, Balancer) to DSM's sovereign-
 vault model. Companion to the two-device playbook; this one is about
