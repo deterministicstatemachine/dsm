@@ -26,6 +26,36 @@
 > genuine `trader_successor`. **Nothing may fabricate those operands to make the current vector
 > pass** (owner ruling, 2026-09-09).
 
+> ## STATUS 2026-09-09 (second pass) — what an adversarial re-read of the tree falsified
+>
+> A read-only fan-out over `main` at `30bec581` attacked this plan's Step 2/3 ordering; the working
+> tree was proven clean before and after, so the findings are evidentially sound. Four survived
+> adversarial verification. **The body below is still NOT rewritten.** Each row was checked against
+> source, never inferred.
+>
+> | the plan says | now |
+> |---|---|
+> | Step 0 renames `list_unresolved_fences` → `list_binding_recovery_fences` with `WHERE state = 'fenced'` (:796) | **Already done.** The function, the filter, its explanatory banner and its tests are all on `main`. Step 0 is closed |
+> | Step 3: "`DeviceState::advance` refuses an economic operation with no pending admission" (:845) | **False for `DlvSettle`.** The chokepoint fences only `DlvCreateFundedV2` and authorized issuance mints; its own comment reads "Deliberately NARROW. Settle, close and owner-apply are not fenced here." The pinned sequence may still be the right one, but this justification for it does not hold today |
+> | the advancement gate reads as a wiring residue | `trader_fence::permits_successor` and its SDK wrapper `active_verdict` have **zero non-test callers**, and the bilateral advance path consults no fence at all. TWO producers are owed, not one: the gate, and the release event, which has no production emitter either |
+> | the fence keys the trade | The ONLY production `bind_settlement` call (`dlv_routes.rs:2897`) passes `vault_id` as `trader_chain_id`, so production writes **vault-keyed** rows. Step 3's `FenceKey` move is load-bearing, not cosmetic: one row cannot serve both the vault and trader coordinate systems |
+>
+> **Ruling V3 outranks any reading in which the advance releases the fence.** 2c-C4 §7 gates fence
+> release on `may_certify()`, and Ruling V3 records that market fence release is unreachable until
+> 2c-D *by construction*. A committed fence therefore STAYS in `CommittedAwaitingAcceptance` — that
+> is the bound-but-unrealized state, not a leak. Acceptance is the precondition; certification is the
+> trigger; release is Step 5. The frozen prose in `dlv/trader_fence.rs` said the opposite and is
+> corrected separately, because that prose is what produced the wrong reading in the first place.
+>
+> **Still owed an owner ruling: where `G1`–`G4` live.** The grammar conjuncts have a layering fork —
+> `ccb` (which today has no dependency on `dsm::types::operations`), `successor_validity`, or
+> `operations` — and `economic/successor_evidence.rs` emits protobuf where 2c-B requires CCB bytes,
+> so one of the two must move. This is a decision, not a discovery.
+>
+> **Scale, recorded so it is not underestimated again.** Step 2/3 touches core Rust, the SDK, the
+> class-1 conformance vectors, Android instrumented tests, frontend TypeScript, several amendment
+> documents, a rig shell script and the Lean module. It is not one pull request.
+
 > ## OPEN GATE — prove the ~50 KB owner-close bundle survives every real path
 >
 > A fully pinned owner-close `SettlementBundle` under 2c-A is **50,330 bytes**, almost entirely
