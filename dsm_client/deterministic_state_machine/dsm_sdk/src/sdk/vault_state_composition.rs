@@ -64,7 +64,10 @@
 //! its own: the `c_n` a new trade's hop must bind as its parent.
 
 use dsm::ccb::{vault_state_commitment, VaultStateV2};
-use dsm::dlv::successor_validity::{OutcomeClass, Reason};
+use dsm::dlv::successor_validity::{
+    derive_close_successor, derive_market_successor, DeriveExpected, MarketTerms, OutcomeClass,
+    Reason,
+};
 use dsm::types::proto as generated;
 use prost::Message;
 
@@ -540,12 +543,21 @@ pub(crate) async fn compose_vault_state(
                         &format!("its close is not authorized by the vault owner: {e}"),
                     )
                 })?;
-                let mut next = cursor_state.clone();
-                next.generation = cursor_state.generation.saturating_add(1);
-                next.reserve_a = 0;
-                next.reserve_b = 0;
-                next.parent_state_commitment = cursor_c_n;
-                next
+                // THE PREDICATE DERIVES THE SUCCESSOR. This used to be
+                // clone() plus four mutations here -- preserved fields were
+                // preserved by construction of this producer, not by any
+                // rule. derive_close_successor is the frozen C3 derivation:
+                // both legs drained, generation+1, h_{n+1} = c_n, beta per
+                // ruling F, and a RETIRED parent refused (erratum D2).
+                match derive_close_successor(&cursor_state, cursor_c_n) {
+                    DeriveExpected::Derived(next) => *next,
+                    DeriveExpected::Refused(reason) => {
+                        return Err(refused(
+                            reason,
+                            "its close does not derive from this parent",
+                        ))
+                    }
+                }
             }
 
             // ── MARKET: binding-final alone MUST NOT realize. ──────────────
@@ -869,23 +881,32 @@ async fn realize_market_successor_5c1(
     // fee, release policy, encumbrances, authority position, storage set,
     // quorum — copied byte-for-byte. Saturating arithmetic is defense in depth;
     // the re-simulation above should already exclude these.
-    let (new_a, new_b) = if input_is_a {
-        (
-            cursor_state.reserve_a.saturating_add(input_amount),
-            cursor_state.reserve_b.saturating_sub(expected_output),
-        )
-    } else {
-        (
-            cursor_state.reserve_a.saturating_sub(expected_output),
-            cursor_state.reserve_b.saturating_add(input_amount),
-        )
+    // THE PREDICATE DERIVES THE SUCCESSOR (erratum D4 picks the leg from the
+    // policy-commit set equality; D3 keeps the fee in the pool; the seven
+    // admissibility conditions each refuse with their own reason; a retired
+    // parent is refused). The receipt's claimed amounts were already checked
+    // against the curve above -- that is VDS.MARKET.1 evidence consistency,
+    // and it stays. What changes is that the SUCCESSOR is no longer this
+    // function's clone()-plus-mutations; it is the frozen derivation.
+    let terms = MarketTerms {
+        input_policy_commit: receipt.trade.input_policy_commit,
+        output_policy_commit: receipt.trade.output_policy_commit,
+        input_amount,
+        fee_bps,
     };
-    let mut next = cursor_state.clone();
-    next.generation = new_sequence;
-    next.reserve_a = new_a;
-    next.reserve_b = new_b;
-    next.parent_state_commitment = *cursor_c_n;
-    MarketRealization::Realized(Box::new(next))
+    let next = match derive_market_successor(cursor_state, *cursor_c_n, &terms) {
+        DeriveExpected::Derived(next) => next,
+        DeriveExpected::Refused(reason) => {
+            return MarketRealization::Contradicts(
+                reason,
+                "its successor does not derive from this parent under the frozen predicate".into(),
+            )
+        }
+    };
+    // The receipt names the generation it moved to; the derivation advances
+    // by exactly one from the parent. They were pinned equal above.
+    debug_assert_eq!(next.generation, new_sequence);
+    MarketRealization::Realized(next)
 }
 
 /// Compose a DISCOVERED vault from its published artifacts alone.
