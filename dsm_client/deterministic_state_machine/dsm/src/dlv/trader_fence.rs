@@ -20,14 +20,30 @@
 //! This module is the PURE state machine of the fence: the legal transitions
 //! and the verdict a caller consults before creating a trader successor. The
 //! durable row and the restart-recovery list live in the SDK
-//! (`storage::client_db::trader_parent_fence`); the live advancement gate is
-//! wired where the settle path is rewritten to QuorumBind. No I/O, no clock.
+//! (`storage::client_db::trader_parent_fence`). No I/O, no clock.
+//!
+//! NOT WIRED YET, AND THIS FILE IS NOT EVIDENCE THAT IT IS. [`permits_successor`]
+//! and its SDK wrapper `active_verdict` have NO production caller: the bilateral
+//! advance path consults no fence at all, and the only live reader of the table
+//! is the composition overlay, which merely REPORTS occupancy and is explicitly
+//! not fail-closed. Wiring the advancement gate is 5c-2 Step 5, after admission
+//! routing and `TA_B`. Read what follows as the frozen predicate, never as a
+//! description of a live gate.
 //!
 //! The load-bearing rule is transition (4) of Req 6.23: `COMMITTED(B)` fixes
 //! the permitted continuation to the EXACT `trader_successor` committed inside
-//! `B`, and the quorum result alone does not consume the fence — Class K
-//! releases it only when that exact successor is accepted through ordinary DSM
-//! bilateral advancement. A different successor can never consume the fence.
+//! `B`, and the quorum result alone does not consume the fence. A different
+//! successor can never consume it.
+//!
+//! ACCEPTANCE IS NECESSARY, NOT SUFFICIENT (2c-C4 Ruling V3). Accepting that
+//! exact successor through ordinary DSM bilateral advancement is a
+//! PRECONDITION of release, never its trigger. The terminal event fires only
+//! on a verdict that certifies (`C3Verdict::may_certify`), so releasing beside
+//! the advance outcome is wrong however ordinary that advance looked. Because
+//! a market verdict cannot certify until 2c-D (Ruling R1), MARKET fence
+//! release is unreachable until then — the intended state, not an oversight.
+//! This module is the pure transition only: it does not decide who may emit
+//! the event, and nothing here grants permission to.
 
 /// Where the fenced trader parent sits relative to its DLV transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +107,11 @@ pub enum FenceEvent {
     /// transaction.
     ConflictFinal,
     /// The exact committed trader successor was accepted through ordinary DSM
-    /// bilateral state advancement — the only thing that consumes a committed
-    /// fence.
+    /// bilateral state advancement AND a certifying verdict authorized the
+    /// release (2c-C4 Ruling V3). Acceptance alone does NOT consume a committed
+    /// fence — it is the precondition and `C3Verdict::may_certify` is the gate.
+    /// No production emitter exists; a market bundle cannot reach one until
+    /// 2c-D.
     SuccessorAccepted { successor: [u8; 32] },
 }
 
@@ -138,7 +157,10 @@ impl std::error::Error for FenceTransitionError {}
 /// - `Committed{successor}` fixes the permitted continuation.
 /// - `Aborted` / `ConflictFinal` release without advancing.
 /// - `SuccessorAccepted{s}` consumes the fence ONLY when `s` is exactly the
-///   committed successor.
+///   committed successor. Whether that event may be emitted at all is a
+///   separate question this function does not answer: Ruling V3 gates emission
+///   on a certifying verdict, so a caller holding an accepted successor and
+///   nothing else must not construct it.
 pub fn next_state(
     state: &FenceState,
     event: &FenceEvent,
