@@ -381,7 +381,7 @@ storage address, a resource key or an authority check appears here.
 | `0x000E` | `SettlementBundle` (`B`) | 1 | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
-| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-B/2c-C/2c-D** |
+| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-D** |
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
@@ -595,7 +595,9 @@ Of the **twenty-two live** object classes above — `0x0014` is burned and not c
 - **Encoding closure for the settlement bundle is ACHIEVED.** 2c-B closed `MarketTerms` field 6, so
   a conformant market `b` is constructible; the owner-close shape is encodable once the exact
   prepared `close_authorization` bytes are supplied, and 2c-B freezes the grammar for producing a
-  fresh one. Verification closure and production acceptance remain 2c-C's.
+  fresh one. Verification closure is **2c-C4's** (the ordered evidence walk, the correspondence and
+  the realization predicate); production acceptance of the market shape additionally waits on 2c-D's
+  bundle-acceptance witness, without which 2c-C4's realization fact is not constructible.
 - **1 is partial** — `0x0006`, where the specification fixes the preimage but `0x0008` is
   still open.
 - **2 are blocked** — `0x0011` `TraderAcceptance` and `0x0012` `TradeDigest`, both belonging to
@@ -1189,8 +1191,9 @@ and never separately content-addressed, so it adds **no entry to §15.8's canoni
 inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `TradeIntent`.
 
 > **Encoding closure ACHIEVED.** Field 6 nests `0x0031` schema 1, fixed by
-> [amendment 2c-B](amendment-2c-b-accepted-successor-and-recovery.md). Verification closure remains
-> 2c-C's, and production acceptance of the market shape stays gated on `ValidDlvSuccessor`.
+> [amendment 2c-B](amendment-2c-b-accepted-successor-and-recovery.md). Verification closure is
+> **2c-C4's**; production acceptance of the market shape stays gated on 2c-C3's `ValidDlvSuccessor`
+> and on 2c-C4's realization fact, whose final conjunct only 2c-D can supply.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
@@ -1255,7 +1258,8 @@ OwnerClose: V_{n+1}.reserve_a == 0 and V_{n+1}.reserve_b == 0
 ```
 
 The full `ValidDlvSuccessor(V_n, V_{n+1}, operation)` relation — every preserved field, every
-permitted mutation — is **2c-C's**. Constant-product re-simulation proves reserve arithmetic and
+permitted mutation — is **2c-C3's**, which froze it (`ValidDlvSuccessorCore`; `TokenPolicyValid`
+stays external per its ruling H). Constant-product re-simulation proves reserve arithmetic and
 nothing else; field 13 `owner_authority_transition_digest`, for instance, is invariant across a
 market successor and no arithmetic check would notice it moving.
 
@@ -1314,7 +1318,8 @@ contradiction; an implementation that conflates them produces different bytes fo
 **Validity.** A market bundle's field 6 must decode, re-encode to itself, and satisfy the
 encoding-level conjunct on `operation_bytes` **before** the chain-tip equalities against
 `B.market_terms.trader_successor` and `.trader_parent`. 2c-B states both, in that order, and
-performs no other cross-object comparison — everything further is `ValidDlvSuccessor`, owned by 2c-C.
+performs no other cross-object comparison — everything further is `ValidDlvSuccessor`, owned by
+2c-C3.
 
 ### 5.24 `EconomicRootClaimBody` — class `0x001B`, schema 1
 
@@ -1583,10 +1588,14 @@ One class has a partial table in §5, two are fully specified since 2c-B, and on
   constructible.** The owner-close shape carries no `MarketTerms` and is encodable once the exact
   prepared `close_authorization` bytes are supplied; 2c-B freezes the foreign grammar for producing
   a fresh one. Encoding closure is not verification closure — production acceptance of the market
-  shape remains gated on 2c-C's `ValidDlvSuccessor`.
+  shape remains gated on 2c-C3's `ValidDlvSuccessor`, and on 2c-C4's realization fact, whose final
+  conjunct only 2c-D can supply.
 - `0x0011` `TraderAcceptance` blocks on the encoding of `(C_T^+, σ_T^+)`, which is ordinary DSM
   successor material rather than a SoFi object, and therefore needs a decision about whether
-  the DSM core encoding is referenced or restated. Owned by **2c-B/2c-C/2c-D**.
+  the DSM core encoding is referenced or restated. **Answered by 2c-B**: `0x0031`
+  `DsmSuccessorEvidence` (§5.23) references the DSM successor material rather than restating it.
+  Ownership of `0x0011` itself is **2c-D's** — 2c-B disclaims it, and 2c-C4 records that `TA_B`
+  verification moves with its field table.
 
 ## 6a. Amendment 2b — opening object audit
 
