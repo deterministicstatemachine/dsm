@@ -3106,6 +3106,8 @@ impl AppRouterImpl {
             // carries is a function of the state `c_n` names rather than of
             // anything the trader supplies.
             let composed_state;
+            let composed_authority_evidence;
+            let composed_economic_proof;
             let composed_storage_set_id;
             let (proven_a, proven_b) = {
                 // The pair comes from the vault's OWN condition, so the legs the
@@ -3217,6 +3219,8 @@ impl AppRouterImpl {
                 owner_genesis = composed.owner_genesis;
                 settle_fee_bps = vault_fee_bps;
                 composed_state = composed.state.clone();
+                composed_authority_evidence = composed.owner_authority_evidence.clone();
+                composed_economic_proof = composed.owner_economic_proof;
                 composed_storage_set_id = composed.storage_set_id;
                 (composed.reserves_a, composed.reserves_b)
             };
@@ -3251,6 +3255,8 @@ impl AppRouterImpl {
                         input_amount: outcome.input_amount,
                         output_amount: outcome.expected_output,
                         parent_state: composed_state.clone(),
+                        owner_authority_evidence: composed_authority_evidence.clone(),
+                        owner_economic_proof: composed_economic_proof,
                         storage_set_id: composed_storage_set_id,
                         parent_binding,
                         parent_sequence: composed_sequence,
@@ -3596,13 +3602,72 @@ impl AppRouterImpl {
         .await
         {
             Ok(Ok(dsm::dlv::quorum_bind::Outcome::Committed)) => {
-                // BOUND-BUT-UNREALIZED, and deliberately nothing more. The
-                // trader parent stays fenced; no successor is accepted here,
-                // no receipt is published, no frontier is advanced and no
-                // bundle-acceptance witness exists to construct. 2c-D supplies
-                // the certifying verdict that releases the fence and realizes
-                // the trade; until then this is the end state, and it is a
-                // success rather than a failure.
+                // THE BINDING IS AUTHORITATIVE. Now, and only now, the trader
+                // advances its OWN chain to the successor the bundle names,
+                // with the economic admission attached (Step 4 requirement 6).
+                //
+                // The credit arm is `0x0026 DlvReserveConsumption`: a trader's
+                // settle output is funded by consuming an owner vault reserve.
+                // The evidence names the exact `V_n`, the owner's authority
+                // evidence and the owner's economic proof, so a verifier
+                // REPLAYS the owner's ancestry instead of trusting this device.
+                let Some(locator) = settle.owner_economic_proof else {
+                    return err(
+                        "dlv.unlockRouted: the vault's advertisement carries no economic-proof \
+                         locator, so this trade cannot be admitted; it is BOUND and must be \
+                         reconciled once the owner republishes one"
+                            .into(),
+                    );
+                };
+                let evidence_bytes = {
+                    let vn = match settle.parent_state.encode() {
+                        Ok(v) => v,
+                        Err(e) => return err(format!("dlv.unlockRouted: V_n encode: {e:?}")),
+                    };
+                    generated::ReserveConsumptionEvidenceV1 {
+                        exact_vault_state_ccb: vn,
+                        owner_authority_evidence: settle.owner_authority_evidence.clone(),
+                        economic_proof_addr: locator.addr.to_vec(),
+                    }
+                    .encode_to_vec()
+                };
+                // `expected_successor` is the exact successor the bundle was
+                // BOUND to. The advance refuses if it would commit any other,
+                // checked after the pure prepare and before anything is
+                // written — so a device that would diverge leaves nothing
+                // persisted and nothing credited.
+                if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_settle(
+                    &self.core_sdk,
+                    signed.clone(),
+                    rel_key,
+                    actor,
+                    init_tip,
+                    &deltas,
+                    evidence_bytes,
+                    locator.position,
+                    prepared.trader_successor(),
+                    |_o| Ok(()),
+                    |_tx, _o, _a| Ok(()),
+                )
+                .await
+                {
+                    // The bundle is bound and stays bound; what failed is this
+                    // device's own admission. Reported as a refusal so no
+                    // caller reads it as a completed trade.
+                    return err(format!(
+                        "dlv.unlockRouted: the trade is BOUND but this device could not admit its \
+                         own advance ({e}); nothing was credited and the parent stays fenced"
+                    ));
+                }
+
+                // BOUND, ACCEPTED, AND DELIBERATELY NOT REALIZED. The trader's
+                // own chain accepted the successor and its credit is admitted,
+                // so the value it holds is foreign-verifiable. What has NOT
+                // happened: the market fold stays PartialPendingRealization,
+                // the vault's reserves have not moved, no Def 14.2 receipt is
+                // published, no bundle-acceptance witness exists to construct,
+                // and THE FENCE IS NOT RELEASED — Ruling V3 gates release on a
+                // certifying verdict, and ordinary DSM advancement is not one.
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
                     generated::AppStateResponse {
                         key: "dlv.unlockRouted".to_string(),
@@ -4069,6 +4134,15 @@ struct SettleTerms {
     /// by the rule every verifier applies, so it is a function of the state
     /// `c_n` names rather than of anything the trader supplies.
     parent_state: dsm::ccb::VaultStateV2,
+    /// The owner's `AuthorityEvidenceV1`, re-encoded from the same six values
+    /// the presentation authenticated. The reserve-consumption evidence names
+    /// it so a verifier can REPLAY the owner's authority rather than trust it.
+    owner_authority_evidence: Vec<u8>,
+    /// Where the owner's economic proof lives, per the unsigned advertisement.
+    /// `None` means this trade cannot be admitted: the credit source needs it,
+    /// and inventing a locator would only move the failure somewhere with less
+    /// context to explain it.
+    owner_economic_proof: Option<crate::sdk::vault_state_composition::OwnerEconomicProofLocator>,
     /// The vault's COMMITTED storage set. The bundle publishes there, not to
     /// whatever fleet this device happens to have configured.
     storage_set_id: [u8; 32],
@@ -5528,19 +5602,21 @@ mod funded_creation_tests {
             res.error_message
         );
 
-        // NOTHING MOVED ON THE TRADER: no balance, no advance. The settle was
-        // PREPARED, not committed — enough to learn the parent and entropy the
-        // chain tip covers, and no further.
+        // THE FOREIGN TRADER'S OWN VALUE MOVED, exactly and admissibly: 1,000
+        // in, 453 out. A device that holds no owner record and no owner
+        // signature has bound a trade against the owner's liquidity while the
+        // owner is offline, advanced its own chain to the bound successor, and
+        // had its credit admitted.
         let trader_after = trader.core_sdk.device_head().expect("trader head");
         assert_eq!(
             (trader_after.balance(&pc_a), trader_after.balance(&pc_b)),
-            (bal_a_before, bal_b_before),
-            "the refused settle moved none of the trader's value"
+            (bal_a_before - 1_000, bal_b_before + 453),
+            "the foreign trader paid exactly the input and received exactly the derived output"
         );
-        assert_eq!(
+        assert_ne!(
             trader_after.root(),
             trader_head.root(),
-            "and advanced nothing on the trader's head"
+            "and its own head advanced"
         );
         // NOTHING WAS EMITTED: no receipt, no binding, no fence — the refusal
         // came before the first mutating op.
@@ -5985,24 +6061,34 @@ mod funded_creation_tests {
         // asserted separately, because "it bound" and "it did not realize" fail
         // in opposite directions.
         //
-        // NOT ADVANCED, NOT REALIZED. The trader only PREPARED its advance —
-        // enough to learn the parent and entropy the chain tip covers — so no
-        // balance moved and no head installed. The vault's reserves do not move
-        // until realization, which 2c-D gates.
+        // ACCEPTED. The trader advanced its OWN chain to the successor the
+        // bundle names, with the economic admission attached, so the value it
+        // now holds is foreign-verifiable rather than a raw local credit.
+        // The movement is asserted EXACTLY: 1,000 in, 453 out — the
+        // constant-product output for this pool and fee. A range check here
+        // would pass for a trade that credited the wrong amount.
         let after = r.core_sdk.device_head().expect("head");
         assert_eq!(
             (after.balance(&pc_a), after.balance(&pc_b)),
-            (bal_a_before, bal_b_before),
-            "no balance moved: binding is not settling"
+            (bal_a_before - 1_000, bal_b_before + 453),
+            "the trader paid exactly the input and received exactly the derived output"
         );
-        assert_eq!(after.root(), before.root(), "the head did not advance");
+        assert_ne!(
+            after.root(),
+            before.root(),
+            "the trader's head advanced: that is what accepting the successor means"
+        );
+        // AND STILL NOT REALIZED. The vault's reserves are the OWNER's leaves
+        // and they do not move until realization, which 2c-D gates. This is
+        // the half that would silently break if an advance were ever mistaken
+        // for a settlement.
         assert_eq!(
             (
                 after.vault_reserve(&vault_id, &pc_a),
                 after.vault_reserve(&vault_id, &pc_b)
             ),
             (10_000, 5_000),
-            "the reserves are untouched until realization"
+            "the vault's reserves are untouched until realization"
         );
         assert!(
             matches!(
@@ -6044,6 +6130,43 @@ mod funded_creation_tests {
                 .is_none(),
             "no VAULT-keyed fence: the market fence is keyed on the trader's own chain"
         );
+        // REQUIREMENT 9, POSITIVELY. The fence IS on the trader's own chain,
+        // and the advance did NOT release it. Ordinary DSM advancement is not
+        // a certifying verdict; Ruling V3 gates release on one, and a market
+        // verdict cannot certify until 2c-D. So the fence must still be
+        // active — holding the trader's parent — even though the successor it
+        // permits has now been accepted.
+        let actor = r
+            .core_sdk
+            .get_current_state()
+            .expect("state")
+            .device_info
+            .device_id;
+        let trader_rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        // The parent the fence is keyed on is the trader's chain tip as it
+        // stood BEFORE this settle — which is not the initial tip, because the
+        // trader's self-loop already advanced when it was funded.
+        let trader_parent = before.chain_tip(&trader_rel_key).unwrap_or_else(|| {
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &actor, &actor,
+            )
+        });
+        let fence = crate::storage::client_db::trader_parent_fence::active_fence(
+            &trader_rel_key,
+            &trader_parent,
+        )
+        .expect("trader fence read")
+        .expect("the market fence is on the TRADER's chain and is still active");
+        assert!(
+            matches!(
+                fence.state,
+                dsm::dlv::trader_fence::FenceState::CommittedAwaitingAcceptance { .. }
+            ),
+            "the fence is committed and AWAITING acceptance, not Released: an ordinary \
+             advance is not a fence-release event ({:?})",
+            fence.state
+        );
         assert!(
             crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
                 .expect("load consumer")
@@ -6060,26 +6183,31 @@ mod funded_creation_tests {
             })
             .await
         });
-        // Re-submitting the SAME trade is accepted, not refused: the
-        // generation is bound by this very trade, which the occupancy gate
-        // admits by comparing the route-set commitment. A trader that retries
-        // after a dropped response must not be told the vault is taken by
-        // someone else.
+        // NO DOUBLE SPEND. Once the trader has accepted the successor, the
+        // same request is REFUSED rather than replayed: its chain has moved,
+        // so the retry prepares from a different parent and the quorum finds
+        // the vault generation already taken. Refusing is the safe direction —
+        // an idempotent "success" here would have to either credit twice or
+        // lie about having done anything.
         assert!(
-            again.success,
-            "re-submitting the same trade is idempotent, not a conflict: {:?}",
-            again.error_message
+            !again.success,
+            "a replayed settle must not be accepted a second time"
         );
-        // And it still has not realized anything.
+        // The assertion that actually matters: the retry moved nothing. A
+        // refusal that had already debited would be worse than an acceptance.
         let after_retry = r.core_sdk.device_head().expect("head");
         assert_eq!(
+            (after_retry.balance(&pc_a), after_retry.balance(&pc_b)),
+            (bal_a_before - 1_000, bal_b_before + 453),
+            "the replay credited and debited nothing further"
+        );
+        assert_eq!(
             (
-                after_retry.balance(&pc_a),
-                after_retry.balance(&pc_b),
-                after_retry.root()
+                after_retry.vault_reserve(&vault_id, &pc_a),
+                after_retry.vault_reserve(&vault_id, &pc_b)
             ),
-            (bal_a_before, bal_b_before, before.root()),
-            "a retry moves nothing either"
+            (10_000, 5_000),
+            "and still nothing is realized"
         );
     }
 
