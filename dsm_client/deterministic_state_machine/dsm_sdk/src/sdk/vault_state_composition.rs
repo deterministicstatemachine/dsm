@@ -148,6 +148,16 @@ pub(crate) enum FrontierBinding {
     LocallyFenced { tx_id: [u8; 32] },
 }
 
+/// Where the owner's `EconomicProofArtifactV1` lives, as an unsigned
+/// advertisement claims. Both halves travel together because neither is usable
+/// alone: the address names the artifact, and the position names the register
+/// cell whose root every inclusion path is re-derived against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnerEconomicProofLocator {
+    pub addr: [u8; 32],
+    pub position: u64,
+}
+
 /// Result of composing pending pointers onto a presentation-verified
 /// baseline.
 #[derive(Debug, Clone)]
@@ -203,6 +213,23 @@ pub(crate) struct ComposedVaultState {
     pub owner_devid: [u8; 32],
     pub owner_genesis: [u8; 32],
     pub owner_public_key: Vec<u8>,
+    /// The owner's `EconomicProofArtifactV1` locator, copied verbatim from the
+    /// advertisement the discovered path already fetched and decoded.
+    ///
+    /// `None` on paths that had no advertisement to read it from — the owner's
+    /// own, which keeps its copy in `amm_vault_records`. Absence is explicit
+    /// rather than an all-zero address, so a caller cannot mistake "not
+    /// carried here" for "the owner published nothing".
+    ///
+    /// A LOCATOR, AND ONLY A LOCATOR. The advertisement is unsigned and
+    /// authenticates nothing, so this is a hint about where to look, never a
+    /// fact. A reader resolves the position's root from the
+    /// owner's own write-once register cell and re-derives every inclusion
+    /// path against it, so a wrong address or position here can only make the
+    /// lookup FAIL — never succeed against a root the owner did not register.
+    /// Surfaced because a settling TRADER holds no `amm_vault_record` and has
+    /// no other way to reach it; the owner keeps its own copy locally.
+    pub owner_economic_proof: Option<OwnerEconomicProofLocator>,
     /// `AuthorityEvidenceV1` bytes for this vault's owner, re-encoded from
     /// the SAME six values the presentation just authenticated.
     ///
@@ -705,6 +732,9 @@ pub(crate) async fn compose_vault_state(
         owner_devid: owner.device_id,
         owner_genesis: cursor_state.owner_genesis_id,
         owner_public_key: owner.ak_pk,
+        // Filled by the DISCOVERED path from the advertisement it decoded;
+        // this constructor never saw one.
+        owner_economic_proof: None,
         owner_authority_evidence,
         storage_set_id,
         c_n: cursor_c_n,
@@ -1016,7 +1046,7 @@ pub(crate) async fn compose_discovered_vault(
         .ok_or_else(|| {
             CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
         })?;
-    compose_vault_state(
+    let mut composed = compose_vault_state(
         vault_id,
         &presentation,
         &vn_bytes,
@@ -1024,7 +1054,22 @@ pub(crate) async fn compose_discovered_vault(
         token_b,
         fee_bps,
     )
-    .await
+    .await?;
+    // The advertisement's economic-proof locator, carried through for readers
+    // that have no `amm_vault_record` of their own — which is every settling
+    // TRADER. Copied verbatim and NOT validated here: it is a hint, and the
+    // reader that uses it re-derives every inclusion path against the root the
+    // owner's own register cell names, so a wrong value can only fail.
+    // A malformed address is treated as absent rather than as a refusal,
+    // because composition is about the authenticated state and this field
+    // authenticates nothing.
+    composed.owner_economic_proof = <[u8; 32]>::try_from(ad.economic_proof_addr.as_slice())
+        .ok()
+        .map(|addr| OwnerEconomicProofLocator {
+            addr,
+            position: ad.economic_proof_position,
+        });
+    Ok(composed)
 }
 
 #[cfg(test)]
