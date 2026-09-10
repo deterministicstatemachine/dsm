@@ -401,7 +401,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0020` | **substrate** `EconomicVaultReserveState` | 1 | leaf state; nested in `0x001E` | §5.29 defined |
 | `0x0021` | **substrate** `EconomicSettlementReceiptState` | 1 | leaf state; nested in `0x001E` | §5.30 defined |
 | `0x0022` | **substrate** `EconomicConsumedSourceState` | 1 | leaf state; nested in `0x001E` | §5.31 defined |
-| `0x0032` | **substrate** `EconomicBundleAcceptanceState` | 1 | leaf state; nested in `0x001E`; keyed on `C_dsm+` | §5.41 defined by 2c-D |
+| `0x0032` | **substrate** `EconomicBundleAcceptanceState` | 1 | leaf state; nested in `0x001E`; keyed on `economic_operation_id` | §5.41 defined by 2c-D |
 | `0x0023` | **substrate** `CreditSourceAuthorizedIssuance` | 1 | credit arm; nested in `0x001D` | §5.33 defined |
 | `0x0024` | **substrate** `CreditSourceSameTransitionMove` | 1 | credit arm; nested in `0x001D` | §5.34 defined |
 | `0x0025` | **substrate** `CreditSourceValidatedPeerDebit` | 1 | credit arm; nested in `0x001D` | §5.35 defined |
@@ -1634,7 +1634,7 @@ whose step 3 walk failure is INCOMPLETE.
 
 ### 5.41 `EconomicBundleAcceptanceState` — class `0x0032`, schema 1
 
-**36 bytes.** A substrate leaf state nested in `0x001E` `EconomicLeafMutation` — the same position
+**68 bytes.** A substrate leaf state nested in `0x001E` `EconomicLeafMutation` — the same position
 its siblings `0x001F`–`0x0022` occupy, and a fifth arm of the economic state family rather than a
 new mechanism beside it. Frozen by
 [amendment 2c-D](amendment-2c-d-bundle-acceptance-and-realization.md), which allocates the number
@@ -1643,36 +1643,43 @@ amendment 2c had held in prose.
 | # | Field | Type | Notes |
 |---|---|---|---|
 | 1 | `bundle` (`b`) | `digest32` | the exact `SettlementBundle` this acceptance realizes |
+| 2 | `economic_operation_id` | `digest32` | the authenticated economic operation identity this acceptance belongs to. **Not caller-authoritative** — must equal the enclosing `0x001D` witness's, which is itself recomputed from `(G, DevID, C_dsm+)` |
 
-**No field 2.** Amendment 2c §9.1 requires the authenticated content to commit *"at least `b`"*, and
+**No field 3.** Amendment 2c §9.1 requires the authenticated content to commit *"at least `b`"*, and
 2c-D ruling D2 forbids adding anything recoverable from `b` — which already commits `X`, the trader
 coordinates, the selected route and every `T_v`. In particular the leaf does **not** carry `C_dsm+`:
-that coordinate is in the leaf's key, and carrying it as content would be the second representation
-the ruling refuses.
+`economic_operation_id` is the abstraction boundary between DSM transition context and this tree
+(2c-D ruling D3), and reaching back through it to restate the raw successor would be the second
+representation ruling D2 refuses.
+
+Field 2 follows `0x0022`'s precedent exactly — that leaf carries `consumer_economic_operation_id`
+and the verifier requires it to equal the witness's, which is what makes a bare marker attributable.
+Here it does the same job **and** fixes the position.
 
 **The key, and why it is not the content.** Amendment 2c §9.1 fixes that the position stays
 operation-derived even though the content cannot be:
 
 ```text
-bundle_acceptance_key(G, DevID, C_dsm+)
-    = H_dom(DSM/economic-bundle-acceptance-key/v1, G ‖ DevID ‖ C_dsm+)
+bundle_acceptance_key(G, DevID, economic_operation_id)
+    = H_dom(DSM/economic-bundle-acceptance-key/v1, G ‖ DevID ‖ economic_operation_id)
 
-position_material = (0x0032, [C_dsm+])
+position_material = (0x0032, [economic_operation_id])
 ```
 
-`C_dsm+` is the identity of the exact accepted transition: recomputed by the walk and never carried
-(2c-B ruling 1), and it subsumes both the operation and the parent it was applied to, so the same
-operation against two parents occupies two positions. `operation_digest` would name the operation
-but not the transition and would let those two collide. Keying on `b` is forbidden outright — it
-would make the position caller-chooseable, which §9.1 rules a worse defect than a more expensive
+`economic_operation_id = H_dom(DSM/economic-operation-id/dsm/v2, G ‖ DevID ‖ C_dsm+)` is the
+canonical identity of the exact accepted transition. Its own definition carries the argument: the id
+names WHICH authenticated successor performed the operation, while `operation_digest` names WHAT was
+performed — and two successors can carry byte-identical operation bytes. So the same operation
+against two parents yields two ids and occupies two positions. Keying on `b` is forbidden outright:
+it would make the position caller-chooseable, which §9.1 rules a worse defect than a more expensive
 Req 21.17 fixture.
 
-**Validity, stated as rejections.** Invalid if `bundle` is all-zero, or if its CCB does not
-re-encode canonically to the bytes presented.
+**Validity, stated as rejections.** Invalid if `bundle` is all-zero, if `economic_operation_id` is
+all-zero, or if its CCB does not re-encode canonically to the bytes presented.
 
-**What the write set may check.** Presence and shape only: `pre: None`, write-once, the key equal to
-the derivation above for the transition's own accepted successor, and **exactly one** such leaf per
-economic operation. It must **not** attempt to validate `bundle` — `b` is the first economic
+**What the write set may check.** Presence and shape only: `pre: None`, write-once,
+`economic_operation_id` equal to the enclosing witness's, the key equal to the derivation above, and
+**exactly one** such leaf per economic operation. It must **not** attempt to validate `bundle` — `b` is the first economic
 post-state fact not derivable from `Operation::DlvSettle`, so the content-to-operation binding every
 other leaf enjoys structurally cannot apply, and an arm that appears to check it is worse than one
 that visibly declines to. Amendment 2c §9.1's two-conjunct rule is what replaces it.
@@ -2070,9 +2077,9 @@ In order, and not combined:
      The fourth and final amendment of the series, and the one every other member stopped at.
      Defines `0x0032` `EconomicBundleAcceptanceState` (§5.41) — a substrate leaf state nested in
      `0x001E`, carrying exactly one field, `bundle`. Its CONTENT commits `b`; its POSITION stays
-     operation-derived per amendment 2c §9.1, keyed on `C_dsm+`, the identity of the exact accepted
-     transition — `operation_digest` would name the operation but not the transition and would let
-     one operation against two parents collide. Re-derives `TraderAcceptance` `0x0011` (§5.40) from
+     operation-derived per amendment 2c §9.1, keyed on `economic_operation_id`, the canonical
+     identity of the exact accepted transition — `operation_digest` would name the operation but not
+     the transition and would let one operation against two parents collide (ruling D3). Re-derives `TraderAcceptance` `0x0011` (§5.40) from
      nine fields to four; a **first freezing, not an amendment to frozen bytes**, so nothing is
      burned. Two owner rulings: `trader_genesis` SURVIVES as a carried authenticated witness because
      it is not recoverable from `b` — it enters only through `sigma_dsm`'s signing digest, so a

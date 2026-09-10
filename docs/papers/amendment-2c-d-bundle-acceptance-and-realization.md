@@ -83,7 +83,10 @@ commits `X`, the trader coordinates, the selected route and every `T_v`.
 ## §3 — Owner rulings (2026-09-10)
 
 Two questions were put before any of this was written, because writing the object against a stale
-table and repairing the specification afterward is the exact failure 2c-E was created to avoid.
+table and repairing the specification afterward is the exact failure 2c-E was created to avoid. A
+third, **ruling D3**, is in §5: it was taken when implementation exposed that §4's original operand
+sat one step behind the economic layer's own abstraction boundary, and it was taken **before** the
+leaf was implemented, for the same reason.
 
 ### Ruling D1 — `trader_genesis` survives the re-derivation
 
@@ -216,15 +219,22 @@ family, not a new mechanism beside it.
 | # | Field | Type | Notes |
 |---|-------|------|-------|
 | 1 | `bundle` (`b`) | `digest32` | the exact `SettlementBundle` this acceptance realizes |
+| 2 | `economic_operation_id` | `digest32` | the authenticated economic operation identity this acceptance belongs to. **Not caller-authoritative** — §7 requires it to equal `witness.economic_operation_id`, which is itself recomputed from `(G, DevID, C_dsm+)` |
 
-**No field 2.** §9.1 requires the authenticated content to commit *"at least `b`"*; ruling D2's
+**No field 3.** §9.1 requires the authenticated content to commit *"at least `b`"*; ruling D2's
 invariant forbids adding anything recoverable from `b`, and `b` commits `X`, the trader coordinates,
-the selected route and every `T_v`. In particular the leaf does **not** carry `C_dsm+`: that
-coordinate is in the leaf's *key* (§5), and carrying it as content would be the second
-representation ruling D2 refuses.
+the selected route and every `T_v`. In particular the leaf does **not** carry `C_dsm+`: the
+abstraction boundary between DSM transition context and the economic tree is
+`economic_operation_id` (ruling D3), and reaching back through it to restate the raw successor
+would be the second representation ruling D2 refuses.
 
-**Validity, stated as rejections.** A bundle-acceptance leaf is invalid if `bundle` is all-zero, or
-if its CCB does not re-encode canonically to the bytes presented.
+Field 2 follows the `0x0022 EconomicConsumedSourceState` precedent exactly: that leaf carries
+`consumer_economic_operation_id` and the verifier requires it to equal the witness's, which is what
+turns a bare marker into an attributable one. Here it does the same job **and** fixes the position.
+
+**Validity, stated as rejections.** A bundle-acceptance leaf is invalid if `bundle` is all-zero, if
+`economic_operation_id` is all-zero, or if its CCB does not re-encode canonically to the bytes
+presented.
 
 ---
 
@@ -237,19 +247,79 @@ Amendment 2c §9.1 fixes this and it is transcribed, not decided:
 > chooses. Content commits `b`; position remains structurally tied to the exact accepted economic
 > transition, preserving as much of the "key derived, never supplied" doctrine as the cycle allows.
 
-The identity of *"the exact accepted economic transition"* is `C_dsm+`. It is recomputed by the walk
-and never carried (2c-B ruling 1); it subsumes both the operation and the parent it was applied to,
-so the same operation from a different parent occupies a different position; and it is precisely
-what G1–G4 already recompute as `relationship_chain_tip_v2(...) == trader_successor`. Choosing
-`operation_digest` instead would name the operation but not the transition, and would let one
-operation applied to two parents collide.
+### Ruling D3 — the identity is `economic_operation_id`, and it is the abstraction boundary
+
+An earlier revision of this section read *"the identity of the exact accepted economic transition is
+`C_dsm+`"* and had the key take the raw successor. The reasoning was right and the operand was one
+step too far back. **`economic_operation_id` already IS that identity, canonically**, and §9.1's own
+words name it: *"keyed to the authenticated economic operation identity"*.
 
 ```text
-bundle_acceptance_key(G, DevID, C_dsm+)
-    = H_dom(DSM/economic-bundle-acceptance-key/v1, G ‖ DevID ‖ C_dsm+)
+economic_operation_id = H_dom(DSM/economic-operation-id/dsm/v2, G ‖ DevID ‖ C_dsm+)
 ```
 
-`position_material` is `(0x0032, [C_dsm+])`, matching the family's shape.
+It is a field of `0x001D`, and it is **recomputed and required to match** — never trusted. Its own
+definition makes exactly the argument the earlier revision made from scratch: *"the id names WHICH
+authenticated successor performed the operation; the operation digest names WHAT was performed. Two
+successors can carry byte-identical operation bytes, so an id derived from the digest could not tell
+them apart."* Choosing `operation_digest` instead would still name the operation but not the
+transition, and would still let one operation applied to two parents collide.
+
+> ```text
+> RULING: Option 1.
+>
+> Amend the bundle-acceptance leaf to two fields:
+>
+>     bundle
+>     economic_operation_id
+>
+> and derive its SMT position from:
+>
+>     bundle_acceptance_key(G, DevID, economic_operation_id)
+>
+> This is a normative correction to 2c-D §4/§5 and the corresponding
+> registry entry. Amend the frozen text BEFORE implementing the leaf.
+>
+> Verification must require:
+>
+>     leaf.economic_operation_id
+>         == witness.economic_operation_id
+>         == recompute(G, DevID, C_dsm+)
+>
+> before the acceptance leaf can certify the bundle.
+>
+> The carried operation id is therefore not caller-authoritative.
+> Its value is constrained by the independently verified transition.
+>
+> This preserves the intended property:
+>
+>     exact economic transition
+>         -> exact economic_operation_id
+>         -> exact acceptance-leaf position
+>         -> exact accepted bundle b
+>
+> A different C_dsm+ produces a different operation id and therefore a
+> different leaf position.
+> ```
+
+```text
+bundle_acceptance_key(G, DevID, economic_operation_id)
+    = H_dom(DSM/economic-bundle-acceptance-key/v1, G ‖ DevID ‖ economic_operation_id)
+```
+
+`position_material` is `(0x0032, [economic_operation_id])`, matching the family's shape — and unlike
+the earlier revision, it can be answered from the state itself, which is what the family's method
+signature requires.
+
+**Why not thread `C_dsm+` through the leaf-key API.** `EconomicLeafState::leaf_key` takes
+`(genesis, device_id)` and is called from 26 sites across six files. Adding the raw successor would
+give four of five arms a parameter they ignore and would oblige every caller — including
+`proof_artifact.rs` and the SDK admission flow — to acquire DSM transition context it otherwise has
+no reason to hold. In the owner's words: *"`economic_operation_id` is the abstraction boundary.
+`C_dsm+` establishes it; the economic SMT consumes it. The acceptance leaf should not reach backward
+through that boundary and make every generic leaf-key caller understand DSM transition context."*
+Having callers pass the operation id *separately* was also refused: it recreates the threading
+problem and leaves the leaf body unable to state which operation identity it claims.
 
 **Trade-off recorded by §9.1, unchanged:** keying on `b` would have made Req 21.17's mandatory
 forged-root vector cheaper, because the expected leaf position would be computable from `B` alone.
@@ -345,10 +415,24 @@ The order is normative. Each step may only use facts the steps above it establis
    `trader_successor`, from exactly its `trader_parent`. Both operands come from the bundle; neither
    is carried by `TA_B` any longer.
 
-5. **Fold the path.** Recompute the leaf key as `bundle_acceptance_key(G, DevID, C_dsm+)` from
-   authenticated `G` and the walk's own `C_dsm+` — never from anything `TA_B` supplies — take the
-   leaf value from `CCB(acceptance_leaf)`, fold `acceptance_path`, and require the result to equal
-   `R_T^+`.
+5. **Bind the operation identity, then fold the path.** Require
+
+   ```text
+   acceptance_leaf.economic_operation_id
+       == witness.economic_operation_id
+       == dsm_economic_operation_id(G, DevID, C_dsm+)
+   ```
+
+   with `G` authenticated by step 2 and `C_dsm+` the walk's own from step 4 — never anything `TA_B`
+   supplies. Only then recompute the leaf key as
+   `bundle_acceptance_key(G, DevID, economic_operation_id)`, take the leaf value from
+   `CCB(acceptance_leaf)`, fold `acceptance_path`, and require the result to equal `R_T^+`.
+
+   The three-way equality is what keeps the carried id from being caller-authoritative (ruling D3).
+   Checking the leaf against the witness alone would not suffice: the witness's own id is only
+   authoritative because it is itself recomputed against `C_dsm+`, and the middle term is what ties
+   the acceptance to *this* transition rather than to any transition the witness happens to
+   describe.
 
 6. **Obtain `b` and bind it.** Read `b` from the now-authenticated `acceptance_leaf.bundle` and
    require it to equal the settlement bundle being composed or verified (ruling D2). `b` is
@@ -388,9 +472,10 @@ TA_B realization separately establishes:
 ```
 
 **Neither conjunct is sufficient alone**, and the write-set half must say so in the code rather than
-imply it. `verify_operation_write_set` gains a `0x0032` arm that requires `pre: None`, requires the
-key to equal `bundle_acceptance_key(G, DevID, C_dsm+)` for the transition's own accepted successor,
-and requires **exactly one** such leaf per economic operation. It must **not** attempt to validate
+imply it. `verify_operation_write_set` gains a `0x0032` arm that requires `pre: None`, requires
+`economic_operation_id` to equal the enclosing witness's, requires the key to equal
+`bundle_acceptance_key(G, DevID, economic_operation_id)`, and requires **exactly one** such leaf per
+economic operation. It must **not** attempt to validate
 `bundle`: it structurally cannot, and an arm that appears to check the content is worse than one
 that visibly declines to.
 
@@ -480,6 +565,9 @@ cannot proceed without.
 10 mutation controls, each showing a NAMED test go red by performing the
    forbidden action:
    - a leaf at a caller-chosen key -> rejected;
+   - leaf.economic_operation_id != witness.economic_operation_id -> rejected;
+   - a witness id not equal to recompute(G, DevID, C_dsm+) -> rejected,
+     even when the leaf agrees with the witness;
    - two bundle-acceptance leaves in one operation -> rejected;
    - a leaf whose bundle != the composed B -> realization refused at §7.6;
    - G supplied but sigma_dsm not verified -> §7.2 must refuse;
