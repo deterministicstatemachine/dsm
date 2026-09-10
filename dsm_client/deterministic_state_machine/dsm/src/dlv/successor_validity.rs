@@ -521,15 +521,71 @@ pub struct IndependentRealization {
 /// It is what keeps *"the right trader transition happened"* from standing in
 /// for *"…for this exact `b`"* — the binding gap 2c-D exists to close.
 ///
+/// It now HAS a constructor — 2c-D §7's verifier — but not a public one, so
+/// the impossibility is unchanged for anything outside this crate. Both the
+/// struct literal and the constructor are unreachable:
+///
 /// ```compile_fail
 /// use dsm::dlv::successor_validity::BundleAcceptanceWitness;
 /// let _ = BundleAcceptanceWitness {
-///     _2c_d_owns_this: core::marker::PhantomData,
+///     bundle: [0u8; 32],
+///     economic_operation_id: [0u8; 32],
+///     economic_root: [0u8; 32],
 /// };
+/// ```
+///
+/// ```compile_fail
+/// use dsm::dlv::successor_validity::BundleAcceptanceWitness;
+/// let _ = BundleAcceptanceWitness::from_verified_acceptance([0u8; 32], [0u8; 32], [0u8; 32]);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleAcceptanceWitness {
-    _2c_d_owns_this: core::marker::PhantomData<()>,
+    /// The exact bundle the authenticated acceptance leaf committed.
+    bundle: [u8; 32],
+    /// The authenticated economic operation identity that fixed the leaf's
+    /// position, and which §7 required to equal the walk's own recomputation.
+    economic_operation_id: [u8; 32],
+    /// The validated economic root the acceptance path folded to.
+    economic_root: [u8; 32],
+}
+
+impl BundleAcceptanceWitness {
+    /// **The only constructor, and `pub(crate)` so nothing outside this crate
+    /// can mint one.** 2c-D §7's verifier is its single caller; that is pinned
+    /// by `the_acceptance_witness_has_exactly_one_construction_site`, because
+    /// `pub(crate)` alone would let any module in this crate assert the fact
+    /// without doing the work.
+    ///
+    /// It is not `pub`: a caller outside the crate holding this type must have
+    /// received it from the verifier, so HOLDING one is the fact that §7's
+    /// conjuncts held — the same property [`MarketCorrespondence`] has.
+    pub(crate) const fn from_verified_acceptance(
+        bundle: [u8; 32],
+        economic_operation_id: [u8; 32],
+        economic_root: [u8; 32],
+    ) -> Self {
+        Self {
+            bundle,
+            economic_operation_id,
+            economic_root,
+        }
+    }
+
+    /// The exact `b` this acceptance realizes — authenticated, because it was
+    /// read from a leaf whose inclusion under the validated root was proven.
+    pub const fn bundle(&self) -> [u8; 32] {
+        self.bundle
+    }
+
+    /// The authenticated economic operation identity.
+    pub const fn economic_operation_id(&self) -> [u8; 32] {
+        self.economic_operation_id
+    }
+
+    /// The validated economic root the path folded to.
+    pub const fn economic_root(&self) -> [u8; 32] {
+        self.economic_root
+    }
 }
 
 /// The accepted `DlvSettle` the ordered walk validated, as `CORR` reads it
@@ -1510,6 +1566,68 @@ mod tests {
             SuccessorValidity::DlvTransition {
                 kind: DlvTransitionKind::Settle
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod witness_construction_site {
+    /// **`pub(crate)` is not "only §7".** The constructor is unreachable from
+    /// outside this crate, but any module inside it could assert the fact
+    /// without doing the work. This pins the call sites so that becoming true
+    /// requires editing a test that says why it must not.
+    ///
+    /// Exactly one production call site is permitted:
+    /// `economic::acceptance_verify::verify_trader_acceptance`, which is 2c-D
+    /// §7. If this fails, either a second module started minting the witness —
+    /// which is a protocol defect, not a test problem — or §7 moved and this
+    /// test should follow it.
+    #[test]
+    fn the_acceptance_witness_has_exactly_one_construction_site() {
+        // ASSEMBLED AT RUNTIME so the complete pattern never appears as a
+        // literal in this file. Both earlier attempts counted the scanner's
+        // own source line: a test that searches for a string it also contains
+        // will always find itself.
+        let needle = format!("::{}(", "from_verified_acceptance");
+
+        fn walk(dir: &std::path::Path, needle: &str, hits: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).expect("readable source dir") {
+                let path = e.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, needle, hits);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("readable source");
+                    for line in text.lines() {
+                        let trimmed = line.trim_start();
+                        // Skip the definition and every doc/comment mention:
+                        // what is being counted is CALLS.
+                        if trimmed.starts_with("//") || trimmed.starts_with("pub(crate) const fn") {
+                            continue;
+                        }
+                        // Matched on the QUALIFIED form. The scanner's own
+                        // literal below is unqualified, so this test cannot
+                        // count itself — a self-match is how the first version
+                        // of it failed.
+                        if line.contains(needle) {
+                            hits.push(format!("{}: {}", path.display(), trimmed));
+                        }
+                    }
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        walk(&src, &needle, &mut hits);
+        assert_eq!(
+            hits.len(),
+            1,
+            "the bundle-acceptance witness must be minted in exactly one place; found: {hits:#?}"
+        );
+        assert!(
+            hits[0].contains("acceptance_verify"),
+            "the one construction site must be 2c-D §7's verifier; found: {}",
+            hits[0]
         );
     }
 }
