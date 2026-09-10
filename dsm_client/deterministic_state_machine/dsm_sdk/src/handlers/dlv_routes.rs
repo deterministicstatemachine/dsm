@@ -8063,6 +8063,336 @@ mod funded_creation_tests {
     /// route could drive this itself; the fixture is kept because this test is
     /// about THREE generations of LP reconciliation, and driving the full
     /// route three times would make it a test of the route instead. The probes
+    /// Set up an owner, a funded vault at 10,000/5,000, its advertisement, and
+    /// `n` funded traders. Returns the vault, the pair, the owner device and
+    /// the traders.
+    ///
+    /// Extracted for the two Step 4 requirement-10 controls below, which need
+    /// the same live market but diverge at the settle.
+    fn market_with_traders(
+        spec_key: &str,
+        traders: &[(&'static str, u8)],
+    ) -> (
+        [u8; 32],
+        ([u8; 32], [u8; 32]),
+        crate::test_support::two_device::TestDevice,
+        Vec<crate::test_support::two_device::TestDevice>,
+    ) {
+        use prost::Message as _;
+
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 75_000, 20_000);
+        let traders: Vec<_> = traders
+            .iter()
+            .map(|(slot, tag)| {
+                let t = participant(slot, *tag);
+                owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+                t
+            })
+            .collect();
+        owner_dev.enter();
+
+        let create = generated::DlvInstantiateV1 {
+            spec: Some(generated::DlvSpecV1 {
+                policy_digest: Vec::new(),
+                fulfillment_bytes: amm_fulfillment_bytes(&pc_a, &pc_b, 30),
+                anchor_enforcement: generated::AnchorEnforcement::Required as i32,
+                ..Default::default()
+            }),
+            creator_public_key: Vec::new(),
+            signature: Vec::new(),
+            funding_legs: vec![
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_a.to_vec(),
+                    amount: 10_000,
+                },
+                generated::DlvFundingLegV1 {
+                    policy_commit: pc_b.to_vec(),
+                    amount: 5_000,
+                },
+            ],
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "dlv.create".to_string(),
+                    args: pack(create.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "create failed: {:?}", res.error_message);
+        let vault_id = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .expect("list")
+            .pop()
+            .expect("one vault")
+            .vault_id;
+
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: spec_key.to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "publish failed: {:?}", res.error_message);
+        (vault_id, (pc_a, pc_b), owner_dev, traders)
+    }
+
+    /// The trader-keyed fence for `dev`, if one exists.
+    fn trader_fence_of(
+        dev: &crate::test_support::two_device::TestDevice,
+    ) -> Option<crate::storage::client_db::trader_parent_fence::TraderFence> {
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &dev.device_id,
+            &dev.device_id,
+        );
+        let head = dev.router().core_sdk.device_head().expect("head");
+        let parent = head.chain_tip(&rel_key).unwrap_or_else(|| {
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev.device_id,
+                &dev.device_id,
+            )
+        });
+        crate::storage::client_db::trader_parent_fence::active_fence(&rel_key, &parent)
+            .expect("fence read")
+    }
+
+    /// STEP 4 REQUIREMENT 10: publication below quorum leaves NO fence and NO
+    /// bind — driven through `dlv.unlockRouted`, not through `bind_settlement`
+    /// with a hand-built bundle.
+    ///
+    /// `bind_settlement`'s own tests already prove the refusal at that layer.
+    /// What they cannot show is that the LIVE route reaches it: that the whole
+    /// producer path — sign, prepare, produce, resolve the vault's committed
+    /// set — runs and then refuses at publication, leaving nothing behind. Two
+    /// of three members are down, so publication is attributable at 1 of 3
+    /// against a quorum of 2.
+    #[test]
+    #[serial]
+    fn a_settle_whose_publication_misses_quorum_binds_nothing_and_fences_nothing() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/pub-quorum", &[("trader0", 0x51)]);
+
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let before = trader.core_sdk.device_head().expect("trader head");
+        let (ba, bb) = (before.balance(&pc_a), before.balance(&pc_b));
+        let frontier_before = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert!(
+            trader_fence_of(trader_dev).is_none(),
+            "no fence before the attempt"
+        );
+
+        // TAKE THE FLEET BELOW QUORUM. n=3, q=2; two down leaves one
+        // attributable acceptance, which `put_bundle` refuses.
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
+        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+
+        let (res, _x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output"),
+            0x31,
+        );
+        assert!(
+            !res.success,
+            "a settle that cannot publish durably must refuse"
+        );
+        // NAME THE REFUSAL. Without this the test would also pass if the
+        // settle had died earlier for some unrelated reason — which, with two
+        // storage members down, is exactly the plausible false pass. The
+        // counts prove the whole producer path ran and stopped at the
+        // publication quorum: one attributable acceptance out of three,
+        // against a required two.
+        let why = res.error_message.clone().unwrap_or_default();
+        assert!(
+            why.contains("PublicationNotDurable")
+                && why.contains("accepted: 1")
+                && why.contains("required: 2"),
+            "the refusal must be the publication quorum itself, got: {why}"
+        );
+
+        // NOTHING BEHIND IT. No fence row, no binding, no value moved — the
+        // refusal came before the first mutating op, which is the whole claim.
+        assert!(
+            trader_fence_of(trader_dev).is_none(),
+            "a fence row was written despite a non-durable publication"
+        );
+        let after = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(
+            (after.balance(&pc_a), after.balance(&pc_b)),
+            (ba, bb),
+            "no value moved"
+        );
+        assert_eq!(
+            after.root(),
+            before.root(),
+            "the trader's head did not advance"
+        );
+
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
+        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+        let frontier_after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            frontier_after.frontier_binding,
+            crate::sdk::vault_state_composition::FrontierBinding::Free,
+            "the generation is still FREE: nothing was bound"
+        );
+        assert_eq!(
+            (frontier_after.c_n, frontier_after.sequence),
+            (frontier_before.c_n, frontier_before.sequence),
+            "and the frontier did not move"
+        );
+    }
+
+    /// STEP 4 REQUIREMENT 10: a conflicting value for the same parent stays
+    /// excluded AFTER a commit — at the route, between two real devices.
+    ///
+    /// The rival is a genuinely distinct trader with its own database,
+    /// identity and funding, quoting the same vault generation under a
+    /// DIFFERENT external commitment. It must be refused, and — the part that
+    /// matters more than the refusal — it must take nothing with it: its own
+    /// balances and head unmoved, and the vault still bound by the FIRST
+    /// trade rather than by the rival's.
+    ///
+    /// EXCLUSION DOES NOT REST ON THE EARLY-OUT THIS TEST PINS. Removing the
+    /// `BoundUnrealized` arm of the frontier pre-check above and re-running
+    /// this test was executed, not reasoned about: the rival then reaches the
+    /// settlement register and is refused `ConflictFinal`, and every
+    /// nothing-moved assertion below still holds. The pre-check is a liveness
+    /// courtesy that declines to price a trade the register would reject; the
+    /// register is the authority. Two separate identities are at work and
+    /// neither substitutes for the other — the register slot is keyed by the
+    /// vault generation, which is what makes two traders rivals at all, while
+    /// the fence is keyed by the trader relationship (Step 4 requirement 5).
+    #[test]
+    #[serial]
+    fn a_rival_settle_on_a_committed_parent_is_excluded_and_changes_nothing() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/rival", &[("trader0", 0x51), ("rival", 0x52)]);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+
+        // THE FIRST TRADE COMMITS.
+        let winner = &traders[0];
+        winner.enter();
+        let (res, first_x) = trader_settles(
+            winner.router(),
+            &winner.ak_pk.clone(),
+            &winner.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0x41,
+        );
+        assert!(
+            res.success,
+            "the first settle binds: {:?}",
+            res.error_message
+        );
+        let bound = composed_frontier(&vault_id, &pc_a, &pc_b);
+        match bound.frontier_binding {
+            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                route_set_commitment,
+                ..
+            } => assert_eq!(route_set_commitment, first_x, "bound by the FIRST trade"),
+            other => panic!("expected BoundUnrealized, got {other:?}"),
+        }
+
+        // THE RIVAL QUOTES THE SAME PARENT under a different commitment.
+        let rival = &traders[1];
+        rival.enter();
+        let rival_router = rival.router();
+        let rival_before = rival_router.core_sdk.device_head().expect("rival head");
+        let (rba, rbb) = (rival_before.balance(&pc_a), rival_before.balance(&pc_b));
+        let (res, rival_x) = trader_settles(
+            rival_router,
+            &rival.ak_pk.clone(),
+            &rival.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0x42,
+        );
+        assert_ne!(rival_x, first_x, "a genuinely different trade identity");
+        assert!(
+            !res.success,
+            "a rival on a committed parent must be excluded, not admitted"
+        );
+        // NAME THE GATE. At HEAD the rival never reaches the register: the
+        // route reads the composed frontier first and declines to price a
+        // trade it would lose. Pinning the message here is what makes removing
+        // that early-out show up as a failure in this named test.
+        let why = res.error_message.clone().unwrap_or_default();
+        assert!(
+            why.contains("bound by another trade"),
+            "the rival must be refused against the composed frontier, got: {why}"
+        );
+
+        // IT TOOK NOTHING WITH IT.
+        let rival_after = rival_router.core_sdk.device_head().expect("rival head");
+        assert_eq!(
+            (rival_after.balance(&pc_a), rival_after.balance(&pc_b)),
+            (rba, rbb),
+            "the excluded rival was neither debited nor credited"
+        );
+        assert_eq!(
+            rival_after.root(),
+            rival_before.root(),
+            "and its own head did not advance"
+        );
+
+        // AND THE WINNER STILL OWNS THE PARENT.
+        let still = composed_frontier(&vault_id, &pc_a, &pc_b);
+        match still.frontier_binding {
+            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                route_set_commitment,
+                ..
+            } => assert_eq!(
+                route_set_commitment, first_x,
+                "the parent is still the FIRST trade's, not the rival's"
+            ),
+            other => panic!("expected BoundUnrealized, got {other:?}"),
+        }
+        assert_eq!(
+            (still.c_n, still.sequence),
+            (bound.c_n, bound.sequence),
+            "and the frontier did not move"
+        );
+    }
+
     /// below still go through the route.
     #[test]
     #[serial]
