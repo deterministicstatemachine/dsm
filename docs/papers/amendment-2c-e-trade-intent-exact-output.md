@@ -202,8 +202,16 @@ cut.
    retargeted to the `Route`/`RouteCommit` correspondence of §5.
 2. **The CCB field table in code** — encoder, strict decoder and the schema constants — cut to
    schema 2, with schema-1 bytes refused as **burned** rather than merely unknown.
-3. **The formal predicate that consumes `TradeIntent`** updated, so the machine-checked statement is
-   about the object that ships.
+3. **The formal predicate that consumes `TradeIntent`.** *(Corrected: there was none to update.)*
+   No Lean module and no TLA+ specification referenced `TradeIntent` or any of the four retired
+   members — the search returns zero hits across `lean4/` and `tla/`. So the obligation is to
+   AUTHOR the predicate, not to reconcile one, and "remove every formal dependency on the retired
+   members" is discharged vacuously and recorded as such rather than silently skipped. Landed as
+   `lean4/DSMTradeIntentCorrespondence.lean`, the fifteenth module, machine-checking `SAT.1`-`SAT.6`
+   with the market policy as a parameter so the model fixes no pricing rule. Its load-bearing
+   result is `the_tautological_form_accepts_the_forgery`: SAT.5 compared against the route's own
+   claim accepts a trade the authenticated-state comparison refuses, so the forbidden shape is
+   provably a different predicate rather than a stylistic preference.
 4. **The MARKET class-1 vector.** *(Corrected 2026-09-09 by owner ruling — the original wording was
    self-contradictory and is preserved at the end of this item.)* Two different acts are involved
    and only one of them is the one-time act:
@@ -275,11 +283,11 @@ controls in §8.5 each turn a **named** test red by performing the forbidden act
 
 ```text
 §8.1  registry transcription            DONE
-§8.2  encoder / decoder cut to schema 2 NEXT — may land independently (§8.4 as corrected)
-§8.3  formal predicate                  owed
+§8.2  encoder / decoder cut to schema 2 DONE — landed alone, per §8.4 as corrected
+§8.3  formal predicate                  DONE — authored, not updated; nothing referenced it
 §8.4  genuine-operand regeneration      owed, and lands WITH the producer, not before
 §8.5  mutation controls                 owed
 ```
 
-The 5c-2 market producer remains blocked on §8.2 and §8.3. The market emission refusal is untouched
+The 5c-2 market producer is no longer blocked by this amendment: §8.1-§8.3 are complete. The market emission refusal is untouched
 by any of this and stays fail-closed until the producer exists.

@@ -994,8 +994,10 @@ adopting change record.
 **Formal coverage — PROVED AS CLAIMED.** `DSMValidDlvSuccessor.lean` carries proof bodies for every
 statement, a per-theorem `#print axioms` report (no result depends on `sorryAx` or
 `Classical.choice`), and two executed mutation controls; `DSMLineageQuarantine.lean` (2c-C3.1) adds
-twenty results and four executed controls. CI kernel-checks all fourteen modules with the count
-pinned — thirteen until 2c-C4's adopting change added `DSMAcceptedSuccessorWalk.lean`. "Axiom-free" remains a per-theorem statement, never a blanket one.
+twenty results and four executed controls. CI kernel-checks all fifteen modules with the count
+pinned — thirteen until 2c-C4's adopting change added `DSMAcceptedSuccessorWalk.lean`, and fourteen
+until 2c-E's added `DSMTradeIntentCorrespondence.lean`. "Axiom-free" remains a per-theorem
+statement, never a blanket one.
 
 # Scope
 
