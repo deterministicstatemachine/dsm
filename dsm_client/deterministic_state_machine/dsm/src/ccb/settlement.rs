@@ -698,12 +698,133 @@ pub mod fixtures {
         }
     }
 
-    /// Syntactically valid market terms whose route consumes `parent` and
-    /// whose route-set commitment is `x` — what ties a bound bundle to a
-    /// trade in every consumer.
+    /// The trader's fixture identity. A market settle advances the trader's
+    /// SELF-LOOP, so the counterparty devid IS the trader's own.
+    pub const FIXTURE_TRADER_GENESIS: [u8; 32] = [0x41; 32];
+    pub const FIXTURE_TRADER_DEVID: [u8; 32] = [0x42; 32];
+    pub const FIXTURE_REL_KEY: [u8; 32] = [0x51; 32];
+    pub const FIXTURE_TRADER_PARENT: [u8; 32] = [0x52; 32];
+    pub const FIXTURE_ENTROPY: [u8; 32] = [0x55; 32];
+
+    /// The trader's deterministic fixture keypair. Signing SPX256f is not free,
+    /// so it is derived once.
+    fn fixture_keypair() -> &'static crate::crypto::sphincs::SphincsKeyPair {
+        static KP: std::sync::OnceLock<crate::crypto::sphincs::SphincsKeyPair> =
+            std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            crate::crypto::sphincs::generate_keypair_from_seed(
+                crate::crypto::sphincs::SphincsVariant::SPX256f,
+                &[0x57; 32],
+            )
+            .expect("fixture keypair")
+        })
+    }
+
+    /// The settle this trade actually is, signed. Every field is coherent with
+    /// the route leg and the successor the bundle carries: same pair, same
+    /// amounts, same fee, same parent.
+    fn fixture_signed_settle(parent: [u8; 32], x: [u8; 32]) -> crate::types::operations::Operation {
+        use crate::types::operations::{Operation, TransactionMode};
+        let kp = fixture_keypair();
+        let unsigned = Operation::DlvSettle {
+            vault_id: [0x03; 32].to_vec(),
+            owner_public_key: vec![0x02; 64],
+            owner_devid: [0x02; 32],
+            owner_genesis: [0x01; 32],
+            input_policy_commit: [0x10; 32],
+            output_policy_commit: [0x20; 32],
+            parent_sequence: 7,
+            parent_binding: parent,
+            route_commit_bytes: vec![0x09; 5],
+            external_commitment_x: x,
+            input_amount: 10_000,
+            output_amount: 4_935,
+            fee_bps: 30,
+            sigma: [0x00; 32],
+            settler_public_key: kp.public_key.clone(),
+            settler_devid: FIXTURE_TRADER_DEVID,
+            settlement_receipt_id: [0x11; 32],
+            signature: Vec::new(),
+            mode: TransactionMode::Unilateral,
+        };
+        // The settler signs the canonical bytes with field 18 cleared, then
+        // writes the signature back — which is why a settle cannot be signed
+        // after the advance.
+        let sig = crate::crypto::sphincs::sphincs_sign(&kp.secret_key, &unsigned.to_bytes())
+            .expect("fixture settle signature");
+        match unsigned {
+            Operation::DlvSettle {
+                vault_id,
+                owner_public_key,
+                owner_devid,
+                owner_genesis,
+                input_policy_commit,
+                output_policy_commit,
+                parent_sequence,
+                parent_binding,
+                route_commit_bytes,
+                external_commitment_x,
+                input_amount,
+                output_amount,
+                fee_bps,
+                sigma,
+                settler_public_key,
+                settler_devid,
+                settlement_receipt_id,
+                mode,
+                ..
+            } => Operation::DlvSettle {
+                vault_id,
+                owner_public_key,
+                owner_devid,
+                owner_genesis,
+                input_policy_commit,
+                output_policy_commit,
+                parent_sequence,
+                parent_binding,
+                route_commit_bytes,
+                external_commitment_x,
+                input_amount,
+                output_amount,
+                fee_bps,
+                sigma,
+                settler_public_key,
+                settler_devid,
+                settlement_receipt_id,
+                signature: sig,
+                mode,
+            },
+            _ => unreachable!("constructed as DlvSettle"),
+        }
+    }
+
+    /// Market terms whose route consumes `parent` and whose route-set
+    /// commitment is `x`.
+    ///
+    /// NOTHING HERE IS INVENTED ANY MORE (5c-2 Step 2). `operation_bytes` is a
+    /// real signed `DlvSettleOperationPreimageV1`, `trader_successor` is
+    /// `relationship_chain_tip_v2` recomputed over exactly those bytes, and
+    /// `sigma_dsm` is a real SPHINCS+ signature over the substrate digest —
+    /// all produced by [`crate::dlv::market_producer`], which is the only way
+    /// to obtain them. The previous fixture asserted a 300-byte filler and a
+    /// byte-pattern signature, which could not have satisfied 2c-B's `G1`-`G4`.
     pub fn market_terms(parent: [u8; 32], x: [u8; 32]) -> MarketTerms {
-        MarketTerms {
-            intent: TradeIntent {
+        let settle = fixture_signed_settle(parent, x);
+        let prepared = crate::dlv::market_producer::prepare_market_successor(
+            FIXTURE_REL_KEY,
+            FIXTURE_TRADER_PARENT,
+            FIXTURE_TRADER_DEVID,
+            &settle,
+            FIXTURE_ENTROPY,
+            &crate::dlv::market_producer::TraderIdentity {
+                genesis: FIXTURE_TRADER_GENESIS,
+                device_id: FIXTURE_TRADER_DEVID,
+            },
+            &fixture_keypair().secret_key,
+        )
+        .expect("fixture market successor");
+        crate::dlv::market_producer::market_terms(
+            TradeIntent {
                 token_in: [0x10; 32],
                 amount_in: 10_000,
                 token_out: [0x20; 32],
@@ -711,8 +832,8 @@ pub mod fixtures {
                 fee_bps: 30,
                 nonce: [0x5E; 32],
             },
-            route_set_commitment: x,
-            selected_route: Route::new(vec![RouteLeg::Single(Allocation {
+            x,
+            Route::new(vec![RouteLeg::Single(Allocation {
                 parent_binding: parent,
                 delta_in: 10_000,
                 delta_out: 4_935,
@@ -720,18 +841,9 @@ pub mod fixtures {
                 fee_policy: FeePolicy::new(30).unwrap(),
             })])
             .unwrap(),
-            trader_parent: [0x52; 32],
-            trader_successor: [0x59; 32],
-            recovery_material: DsmSuccessorEvidence::new(
-                [0x51; 32],
-                [0x52; 32],
-                [0x53; 32],
-                vec![0x1A; 300],
-                [0x55; 32],
-                signature_bytes(0x57),
-            )
-            .unwrap(),
-        }
+            &prepared,
+        )
+        .expect("fixture market terms")
     }
 
     /// A canonical market bundle consuming `parent` into `successor` under
@@ -809,6 +921,9 @@ mod tests {
         vec![0xA5; SPX256F_SIGNATURE_LEN]
     }
 
+    /// Synthetic on purpose, and legitimately so: these two call sites encode
+    /// it to check the `0x0031` ENVELOPE AND FIELD ORDER, not to stand in for a
+    /// produced bundle. Nothing derived from it is offered as a market bundle.
     fn evidence() -> DsmSuccessorEvidence {
         DsmSuccessorEvidence::new(
             [0x51; 32],
@@ -821,17 +936,6 @@ mod tests {
         .unwrap()
     }
 
-    fn intent() -> TradeIntent {
-        TradeIntent {
-            token_in: [0x10; 32],
-            amount_in: 10_000,
-            token_out: [0x20; 32],
-            exact_out: 4_935,
-            fee_bps: 30,
-            nonce: [0x5E; 32],
-        }
-    }
-
     fn allocation(parent: [u8; 32]) -> Allocation {
         Allocation {
             parent_binding: parent,
@@ -842,15 +946,11 @@ mod tests {
         }
     }
 
+    /// Producer-derived, like every other market bundle in the tree since
+    /// 5c-2 Step 2. The tests below that need a MISMATCH build it by mutating
+    /// this, never by inventing a second set of operands.
     fn terms(parent: [u8; 32]) -> MarketTerms {
-        MarketTerms {
-            intent: intent(),
-            route_set_commitment: [0x58; 32],
-            selected_route: Route::new(vec![RouteLeg::Single(allocation(parent))]).unwrap(),
-            trader_parent: [0x52; 32],
-            trader_successor: [0x59; 32],
-            recovery_material: evidence(),
-        }
+        fixtures::market_terms(parent, [0x58; 32])
     }
 
     // ── the worked owner-close layout, byte for byte where 2c-A pins it ──

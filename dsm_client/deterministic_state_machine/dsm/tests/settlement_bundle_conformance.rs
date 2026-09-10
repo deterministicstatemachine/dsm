@@ -32,9 +32,8 @@ mod indep;
 
 use dsm::ccb::decode::{decode_settlement_bundle, decode_settlement_bundle_canonical, DecodeError};
 use dsm::ccb::{
-    Allocation, ConsumedDlvTransition, DsmSuccessorEvidence, EncumbranceSet, FeePolicy,
-    MarketPolicy, MarketTerms, ReleasePolicy, Route, RouteLeg, SettlementBundle, StorageSetMembers,
-    TradeIntent, VaultStateV2, SPX256F_SIGNATURE_LEN,
+    ConsumedDlvTransition, EncumbranceSet, FeePolicy, MarketPolicy, MarketTerms, ReleasePolicy,
+    SettlementBundle, StorageSetMembers, VaultStateV2, SPX256F_SIGNATURE_LEN,
 };
 
 const NS: &[u8] = b"DSM/settlement-bundle";
@@ -124,18 +123,24 @@ const CLOSE_C_NEXT: [u8; 32] = [
     211, 33, 203, 193, 77, 214, 102, 100, 101, 238, 21, 202,
 ];
 const MARKET_B: [u8; 32] = [
-    133, 132, 102, 202, 228, 107, 231, 91, 84, 220, 218, 237, 60, 4, 29, 208, 223, 11, 9, 23, 201,
-    83, 169, 125, 122, 80, 39, 29, 254, 206, 84, 150,
+    170, 0, 170, 66, 150, 170, 70, 17, 60, 254, 4, 18, 131, 150, 221, 191, 29, 53, 181, 74, 160,
+    215, 208, 27, 227, 165, 77, 145, 15, 58, 77, 45,
 ];
 const MARKET_ADDR: [u8; 32] = [
-    116, 21, 183, 190, 111, 55, 90, 16, 14, 149, 176, 90, 11, 219, 75, 233, 134, 89, 129, 214, 49,
-    198, 194, 240, 157, 89, 214, 215, 183, 186, 25, 161,
+    31, 13, 77, 255, 209, 9, 59, 201, 198, 241, 55, 1, 55, 92, 191, 215, 219, 178, 200, 214, 30,
+    155, 133, 133, 234, 165, 56, 171, 191, 51, 35, 209,
 ];
 const MARKET_C_NEXT: [u8; 32] = [
     88, 81, 131, 194, 192, 135, 159, 196, 243, 15, 252, 230, 230, 74, 138, 88, 40, 172, 114, 12,
     214, 32, 187, 15, 162, 99, 253, 20, 36, 127, 221, 149,
 ];
-const MARKET_LEN: usize = 51091;
+// 5c-2 Step 2 doubled this, and the reason is worth stating: `operation_bytes`
+// is now a REAL signed settle preimage, which embeds the settler's own 49,856-byte
+// SPHINCS+ signature. A market bundle therefore carries TWO signatures — the
+// settler's inside the preimage and `sigma_dsm` over the successor — where the
+// old filler carried none. Still an order of magnitude under the node's
+// 512 KiB ingress cap, which the closure test asserts directly.
+const MARKET_LEN: usize = 101_186;
 
 // ── the owner-close vector ───────────────────────────────────────────────────
 
@@ -231,43 +236,42 @@ fn owner_close_identities_are_pinned_and_the_decoder_records_the_span() {
 
 // ── the market vector: the 2c-A + 2c-B closure test ──────────────────────────
 
-const REL_KEY: [u8; 32] = [0x51; 32];
-const TRADER_PARENT: [u8; 32] = [0x52; 32];
-const TRADER_DEVID: [u8; 32] = [0x53; 32];
-const ENTROPY: [u8; 32] = [0x55; 32];
 const X: [u8; 32] = [0x58; 32];
-const TRADER_SUCCESSOR: [u8; 32] = [0x59; 32];
 const NONCE: [u8; 32] = [0x5E; 32];
 const CLAIM: [u8; 32] = [0x00; 32];
 
-fn op_bytes_fixture() -> Vec<u8> {
-    (0..300u32)
-        .map(|i| (i.wrapping_mul(7) % 256) as u8)
-        .collect()
-}
-
-fn sigma_fixture() -> Vec<u8> {
-    (0..SPX256F_SIGNATURE_LEN)
-        .map(|i| ((i * 3) % 253) as u8)
-        .collect()
+// 5c-2 Step 2. The trader coordinates and the recovery material are no longer
+// this file's to choose. `op_bytes_fixture` (300 filler bytes) and
+// `sigma_fixture` (a byte pattern) are DELETED: they could not have satisfied
+// 2c-B's `G1`-`G4`, and a vector whose operands cannot satisfy the rules it
+// exists to pin is pinning the wrong thing.
+//
+// The vector is still CLASS-1. What changed is where its INPUTS come from, not
+// where its expected bytes come from: the operands are genuine producer output,
+// and `indep::` re-encodes them independently of the production encoder, so
+// agreement remains evidence rather than a tautology.
+fn produced_terms() -> MarketTerms {
+    dsm::ccb::settlement::fixtures::market_terms(PARENT, X)
 }
 
 fn indep_market_bundle() -> Vec<u8> {
+    let produced = produced_terms();
+    let ev = &produced.recovery_material;
     let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
         X,
         indep::route(vec![leg]),
-        TRADER_PARENT,
-        TRADER_SUCCESSOR,
+        produced.trader_parent,
+        produced.trader_successor,
         indep::dsm_successor_evidence(
-            REL_KEY,
-            TRADER_PARENT,
-            TRADER_DEVID,
-            &op_bytes_fixture(),
-            ENTROPY,
-            &sigma_fixture(),
+            ev.rel_key,
+            ev.embedded_parent,
+            ev.counterparty_devid,
+            &ev.operation_bytes,
+            ev.entropy,
+            ev.sigma_dsm(),
         ),
     );
     indep::settlement_bundle(
@@ -281,41 +285,9 @@ fn indep_market_bundle() -> Vec<u8> {
 }
 
 fn prod_market_bundle() -> SettlementBundle {
-    let terms = MarketTerms {
-        intent: TradeIntent {
-            token_in: TOKEN_A,
-            amount_in: 10_000,
-            token_out: TOKEN_B,
-            exact_out: 4_935,
-            fee_bps: FEE_BPS,
-            nonce: NONCE,
-        },
-        route_set_commitment: X,
-        selected_route: Route::new(vec![RouteLeg::Single(Allocation {
-            parent_binding: PARENT,
-            delta_in: 10_000,
-            delta_out: 4_935,
-            encumbrance_claim: CLAIM,
-            fee_policy: FeePolicy::new(FEE_BPS).unwrap(),
-        })])
-        .unwrap(),
-        trader_parent: TRADER_PARENT,
-        trader_successor: TRADER_SUCCESSOR,
-        recovery_material: DsmSuccessorEvidence::new(
-            REL_KEY,
-            TRADER_PARENT,
-            TRADER_DEVID,
-            op_bytes_fixture(),
-            ENTROPY,
-            sigma_fixture(),
-        )
-        .unwrap(),
-    };
-    SettlementBundle::market(
-        terms,
-        vec![ConsumedDlvTransition::market(PARENT, prod_successor(1_010_000, 495_065)).unwrap()],
-    )
-    .unwrap()
+    // The producer's own output, not a hand-assembled copy of it. If these two
+    // ever diverge the vector stops testing the thing that ships.
+    dsm::ccb::settlement::fixtures::market_bundle(PARENT, prod_successor(1_010_000, 495_065), X)
 }
 
 #[test]
@@ -388,21 +360,25 @@ fn market_identities_are_pinned_and_the_decoder_records_the_span() {
 
 #[test]
 fn a_close_authorization_inside_a_market_bundle_is_refused() {
+    // The terms are genuine; what must be refused is the close authorization
+    // riding under them, so nothing about the trade itself is weakened here.
+    let produced = produced_terms();
+    let ev = &produced.recovery_material;
     let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
         X,
         indep::route(vec![leg]),
-        TRADER_PARENT,
-        TRADER_SUCCESSOR,
+        produced.trader_parent,
+        produced.trader_successor,
         indep::dsm_successor_evidence(
-            REL_KEY,
-            TRADER_PARENT,
-            TRADER_DEVID,
-            &op_bytes_fixture(),
-            ENTROPY,
-            &sigma_fixture(),
+            ev.rel_key,
+            ev.embedded_parent,
+            ev.counterparty_devid,
+            &ev.operation_bytes,
+            ev.entropy,
+            ev.sigma_dsm(),
         ),
     );
     // A retired successor with an authorization, riding under market terms.
@@ -456,26 +432,30 @@ fn a_transposed_parent_linkage_is_refused_inside_the_bytes() {
 /// 2c-B's second chain-tip equality, at the boundary a FOREIGN bundle crosses:
 /// field 4 names one trader parent and the nested `0x0031` field 2 another.
 /// The independent encoder will happily emit it; the decoder must not accept
-/// it. (Its sibling conjunct — the frozen `DlvSettleOperationPreimageV1`
-/// grammar and the recomputed relationship chain tip — is NOT enforced yet and
-/// waits on 5c-2 Step 2/3, so this vector's `operation_bytes` stay arbitrary.)
+/// it. Since 5c-2 Step 2 this vector's `operation_bytes` are a REAL signed
+/// preimage and its successor a real recomputed chain tip, so the mutation
+/// below is the only thing wrong with the bytes.
 #[test]
 fn market_terms_whose_evidence_names_another_trader_parent_are_refused_inside_the_bytes() {
+    // Every operand is genuine producer output EXCEPT the embedded parent,
+    // which is the single mutation under test.
+    let produced = produced_terms();
+    let ev = &produced.recovery_material;
     let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 4_935, FEE_BPS, NONCE);
     let leg = indep::allocation(PARENT, 10_000, 4_935, CLAIM, indep::fee_policy(FEE_BPS));
     let terms = indep::market_terms(
         intent,
         X,
         indep::route(vec![leg]),
-        TRADER_PARENT,
-        TRADER_SUCCESSOR,
+        produced.trader_parent,
+        produced.trader_successor,
         indep::dsm_successor_evidence(
-            REL_KEY,
-            [0xEE; 32], // NOT TRADER_PARENT
-            TRADER_DEVID,
-            &op_bytes_fixture(),
-            ENTROPY,
-            &sigma_fixture(),
+            ev.rel_key,
+            [0xEE; 32], // the ONE mutation: NOT the produced embedded parent
+            ev.counterparty_devid,
+            &ev.operation_bytes,
+            ev.entropy,
+            ev.sigma_dsm(),
         ),
     );
     let bytes = indep::settlement_bundle(
