@@ -9,6 +9,7 @@ pub mod beta_storage_profile; // the deployed three-member beta profile Ã¢Â
 pub mod binding_observation; // what a set of binding reads establishes about ONE resource key
 pub mod close_authorization; // the owner signature over the exact DLV release successor
 pub mod controller_rotation;
+pub mod market_evidence; // 2c-B G1-G4 — the validity half of market successor evidence
 pub mod market_producer; // 5c-2 Step 2 — the genuine market bundle producer; nothing invented
 pub mod pair_identity;
 pub mod quorum_bind; // Def 6.21 Ã¢ÂÂ Class K sans-IO quorum-binding decision engine

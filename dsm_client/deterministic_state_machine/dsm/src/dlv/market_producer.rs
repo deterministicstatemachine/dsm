@@ -62,6 +62,11 @@ pub enum ProducerError {
     Signature(String),
     /// The evidence or the terms would not encode.
     Encoding(CcbError),
+    /// The producer's own output does not satisfy `G1`-`G4`. This cannot
+    /// happen while the construction is what it claims; it exists so that if
+    /// that ever stops being true, the producer refuses rather than emitting a
+    /// bundle a foreign verifier would reject.
+    SelfCheck(crate::dlv::market_evidence::EvidenceInvalid),
 }
 
 impl core::fmt::Display for ProducerError {
@@ -79,6 +84,10 @@ impl core::fmt::Display for ProducerError {
             Self::NotUnilateral => write!(f, "2c-B's G3 fixes the settle's mode to Unilateral"),
             Self::Signature(e) => write!(f, "sigma_dsm could not be produced: {e}"),
             Self::Encoding(e) => write!(f, "the produced object does not encode: {e:?}"),
+            Self::SelfCheck(e) => write!(
+                f,
+                "the producer's own output fails the verifier a foreign party runs: {e}"
+            ),
         }
     }
 }
@@ -194,7 +203,7 @@ pub fn market_terms(
     route_set_commitment: [u8; 32],
     selected_route: Route,
     prepared: &PreparedSuccessor,
-) -> Result<MarketTerms, CcbError> {
+) -> Result<MarketTerms, ProducerError> {
     let terms = MarketTerms {
         intent,
         route_set_commitment,
@@ -203,7 +212,15 @@ pub fn market_terms(
         trader_successor: prepared.trader_successor,
         recovery_material: prepared.evidence.clone(),
     };
-    terms.check_evidence_linkage()?;
+    terms
+        .check_evidence_linkage()
+        .map_err(ProducerError::Encoding)?;
+    // THE PRODUCER VERIFIES ITS OWN OUTPUT. `G1`-`G4` hold by construction
+    // here, so this can only fire if the construction above stops being what
+    // it claims — which is exactly when a silent divergence would otherwise
+    // start. A producer that cannot pass the verifier a foreign party runs has
+    // no business emitting a bundle.
+    crate::dlv::market_evidence::check_market_evidence(&terms).map_err(ProducerError::SelfCheck)?;
     Ok(terms)
 }
 
