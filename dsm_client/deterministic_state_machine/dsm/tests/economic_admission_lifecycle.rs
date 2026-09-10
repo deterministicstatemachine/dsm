@@ -841,6 +841,7 @@ fn dlv_fund_drive(
         &EconomicPreState::balances_only(&balances),
         &mut tree,
         &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("the real builder builds the fund write set");
     let witness = EconomicTransitionWitness::new(

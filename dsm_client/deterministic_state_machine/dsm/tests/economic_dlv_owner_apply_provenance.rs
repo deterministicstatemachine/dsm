@@ -111,6 +111,7 @@ fn fixture() -> Fixture {
         },
         &mut tree,
         &facts(evidence_addr),
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("the apply write set builds");
     let witness = EconomicTransitionWitness::new(
@@ -354,6 +355,7 @@ fn a_second_apply_of_the_same_receipt_is_refused_by_the_reserve_cas() {
         },
         &mut tree,
         &facts(fx.evidence_addr),
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect_err("a consumed parent generation cannot be folded again");
     assert!(

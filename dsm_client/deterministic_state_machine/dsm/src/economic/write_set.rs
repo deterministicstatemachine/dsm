@@ -608,6 +608,41 @@ fn balance_state(
 /// id of the PREPARED successor (`H(G ‖ DevID ‖ C_dsm+)`) — the successor is
 /// prepared before the write set is built, which is why this function can
 /// require it rather than a placeholder.
+/// The settlement-bundle context a write set is being built inside.
+///
+/// **Why this is a parameter and not something the builder works out.** `b` is
+/// not intrinsic to the DLV operation — it is the identity of the exact
+/// settlement bundle being composed AROUND that operation, established
+/// upstream from the canonical `B`. A builder that derived it, fetched it, or
+/// read it out of the operation bytes would be manufacturing the very value
+/// the acceptance leaf exists to commit (amendment 2c-D, producer adoption).
+///
+/// It is an ENUM rather than an `Option<[u8; 32]>` on purpose. An optional
+/// digest is a value a caller may omit, and omitting it on a market settle is
+/// exactly the case that must not compile quietly. Threading this through
+/// every call site is the point: each producer of economic state has to
+/// account for whether it has settlement-bundle context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EconomicWriteContext {
+    /// Not a settlement. A `0x0032` leaf is illegal here, and the builder
+    /// emits none.
+    NonSettlement,
+    /// A market `DlvSettle` composed around the bundle whose identity is
+    /// `bundle_id`.
+    DlvSettle {
+        /// `b` — the exact canonical settlement-bundle identity.
+        bundle_id: [u8; 32],
+    },
+}
+
+// The arity is the set of facts a write set is derived FROM, and each one has a
+// different origin: the operation is authenticated, the identity comes from the
+// resolver, the pre-state from the admitted root, the facts from the credit
+// arm, and the context from the composition layer. Bundling them into one
+// struct would let a caller assemble that struct once and reuse it across
+// operations, which is exactly the sharing the separation exists to prevent —
+// and it would hide the explicitness the context parameter was added to create.
+#[allow(clippy::too_many_arguments)]
 pub fn build_write_set(
     operation: &Operation,
     genesis: &[u8; 32],
@@ -616,9 +651,34 @@ pub fn build_write_set(
     pre_state: &EconomicPreState<'_>,
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
+    context: &EconomicWriteContext,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     let pre_balances = pre_state.balances;
     let semantic = semantic_write_set(operation, device_id)?;
+
+    // OPERATION AND CONTEXT MUST AGREE, checked before anything is planned.
+    // A settle without bundle context cannot produce the acceptance leaf its
+    // realization needs; a non-settlement carrying one would be composing a
+    // bundle around an operation that is not part of any.
+    let bundle_id = match (&semantic, context) {
+        (SemanticWriteSet::DlvSettle { .. }, EconomicWriteContext::DlvSettle { bundle_id }) => {
+            Some(*bundle_id)
+        }
+        (SemanticWriteSet::DlvSettle { .. }, EconomicWriteContext::NonSettlement) => {
+            return Err(WriteSetError::WrongWriteSet {
+                detail: "a market settle needs its settlement-bundle context; without `b` it \
+                         cannot emit the acceptance leaf its realization requires",
+            })
+        }
+        (_, EconomicWriteContext::DlvSettle { .. }) => {
+            return Err(WriteSetError::WrongWriteSet {
+                detail: "settlement-bundle context was supplied for an operation that is not a \
+                         settle",
+            })
+        }
+        (_, EconomicWriteContext::NonSettlement) => None,
+    };
+
     let mut planned: Vec<PlannedLeaf> = Vec::new();
 
     /// Plan one balance debit against the pre-state.
@@ -786,6 +846,37 @@ pub fn build_write_set(
                 key,
                 pre: None,
                 post: Some(receipt_state),
+                source: None,
+            });
+
+            // THE BUNDLE-ACCEPTANCE LEAF (amendment 2c-D, producer adoption).
+            //
+            // `b` comes from the context — established upstream from the
+            // canonical `B` — while the operation identity comes from the
+            // authenticated transition. The two facts have DIFFERENT ORIGINS
+            // on purpose: ruling D3's three-way binding depends on it, and
+            // deriving either from the other here would collapse the very
+            // relation §7 checks.
+            let bundle = bundle_id.ok_or(WriteSetError::WrongWriteSet {
+                detail: "a market settle reached the acceptance leaf without bundle context",
+            })?;
+            let acceptance = EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
+                bundle,
+                economic_operation_id: *economic_operation_id,
+            });
+            let key = acceptance.leaf_key(genesis, device_id);
+            // Write-once: an existing leaf means this transition already
+            // committed a bundle, and a second would be a different claim at
+            // one position rather than a new leaf.
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a bundle-acceptance leaf for this economic operation already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post: Some(acceptance),
                 source: None,
             });
         }
@@ -1443,21 +1534,16 @@ pub fn verify_operation_write_set(
                              consumed source",
                 });
             }
-            // Amendment 2c-D: a settle MAY carry one bundle-acceptance leaf.
-            // Checked before the shape below, so that a settle carrying two
-            // reports the cardinality it violated rather than a mutation count
-            // that would be right if one of them were deleted.
-            expect_at_most_one_acceptance(&acceptances, witness.economic_operation_id)?;
-            // Still exact — the acceptance widens the expected count by exactly
-            // the leaf it admits, so no OTHER extra mutation can ride along.
-            let expected_mutations = 3 + acceptances.len();
-            if witness.mutations.len() != expected_mutations
-                || balances.len() != 2
-                || receipts.len() != 1
-            {
+            // Amendment 2c-D, PRODUCER ADOPTION: a market settle carries
+            // EXACTLY ONE bundle-acceptance leaf. #845's transitional rule was
+            // `<= 1`, correct while nothing could produce one; leaving it there
+            // now would preserve a legal settle that can never obtain a `TA_B`
+            // and would sit at `PartialPendingRealization` forever.
+            expect_exactly_one_acceptance(&acceptances, witness.economic_operation_id)?;
+            if witness.mutations.len() != 4 || balances.len() != 2 || receipts.len() != 1 {
                 return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settle is exactly one input debit, one output credit and one \
-                             receipt insertion, plus at most one bundle-acceptance leaf",
+                    detail: "a settle is exactly one input debit, one output credit, one receipt \
+                             insertion and one bundle-acceptance leaf",
                 });
             }
             let debit = expect_one_balance(&balances, input.0)?;
@@ -1721,8 +1807,8 @@ pub fn verify_operation_write_set(
     }
 }
 
-/// At most one bundle-acceptance leaf, and the one present must name THIS
-/// operation (amendment 2c-D §8).
+/// EXACTLY one bundle-acceptance leaf, naming THIS operation (amendment 2c-D
+/// §8, tightened at producer adoption from #845's transitional `<= 1`).
 ///
 /// **Why this is not left to the key.** The position is derived from the
 /// operation identity alone, so two acceptance leaves for one operation land on
@@ -1739,7 +1825,7 @@ pub fn verify_operation_write_set(
 /// `dsm_economic_operation_id(G, DevID, C_dsm+)` for the accepted successor. A
 /// leaf naming another operation would otherwise sit at a well-formed position
 /// in this identity's tree while belonging to a transition that never happened.
-fn expect_at_most_one_acceptance(
+fn expect_exactly_one_acceptance(
     acceptances: &[(u32, EconomicBundleAcceptanceState)],
     operation_id: [u8; 32],
 ) -> Result<(), WriteSetError> {
@@ -1748,12 +1834,16 @@ fn expect_at_most_one_acceptance(
             detail: "more than one bundle-acceptance leaf for one economic operation",
         });
     }
-    if let Some((_, a)) = acceptances.first() {
-        if a.economic_operation_id != operation_id {
-            return Err(WriteSetError::WrongWriteSet {
-                detail: "a bundle-acceptance leaf names another economic operation",
-            });
-        }
+    let Some((_, a)) = acceptances.first() else {
+        return Err(WriteSetError::WrongWriteSet {
+            detail: "a market settle must carry its bundle-acceptance leaf; without one its \
+                     settlement could never be realized",
+        });
+    };
+    if a.economic_operation_id != operation_id {
+        return Err(WriteSetError::WrongWriteSet {
+            detail: "a bundle-acceptance leaf names another economic operation",
+        });
     }
     Ok(())
 }

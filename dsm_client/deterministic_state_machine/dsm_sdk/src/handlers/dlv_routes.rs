@@ -3631,6 +3631,14 @@ impl AppRouterImpl {
                     }
                     .encode_to_vec()
                 };
+                // `b`, DERIVED ONCE. The write set needs it to emit the
+                // bundle-acceptance leaf (2c-D producer adoption) and the
+                // response reports it; deriving it twice would be two chances
+                // to derive it differently.
+                let b = match dsm::dlv::settlement_bundle::canon(&bundle) {
+                    Ok(c) => dsm::dlv::settlement_bundle::bundle_digest(&c),
+                    Err(e) => return err(format!("dlv.unlockRouted: canon: {e:?}")),
+                };
                 // `expected_successor` is the exact successor the bundle was
                 // BOUND to. The advance refuses if it would commit any other,
                 // checked after the pure prepare and before anything is
@@ -3639,6 +3647,7 @@ impl AppRouterImpl {
                 if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_settle(
                     &self.core_sdk,
                     signed.clone(),
+                    b,
                     rel_key,
                     actor,
                     init_tip,
@@ -3673,15 +3682,7 @@ impl AppRouterImpl {
                         key: "dlv.unlockRouted".to_string(),
                         value: Some(format!(
                             "bound-unrealized:{}",
-                            crate::util::text_id::encode_base32_crockford(
-                                &dsm::dlv::settlement_bundle::bundle_digest(
-                                    &match dsm::dlv::settlement_bundle::canon(&bundle) {
-                                        Ok(c) => c,
-                                        Err(e) =>
-                                            return err(format!("dlv.unlockRouted: canon: {e:?}")),
-                                    }
-                                )
-                            )
+                            crate::util::text_id::encode_base32_crockford(&b)
                         )),
                     },
                 ))
@@ -6853,6 +6854,7 @@ mod funded_creation_tests {
             &pre.as_write_set_pre_state(),
             &mut tree.clone(),
             &facts,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect("the owner-apply write set builds from the admitted reserves");
         assert_eq!(
@@ -6871,6 +6873,7 @@ mod funded_creation_tests {
             &EconomicPreState::balances_only(&pre.balances),
             &mut tree.clone(),
             &facts,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect_err("a balances-only pre-state cannot see the reserves");
         assert!(
@@ -7485,6 +7488,12 @@ mod funded_creation_tests {
                 &pre.as_write_set_pre_state(),
                 &mut tree,
                 &facts(addr, position),
+                // A settle, so it needs its bundle context. The fixture's `b`
+                // is arbitrary because this test is about the provenance arm,
+                // not about which bundle was composed.
+                &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+                    bundle_id: [0xBB; 32],
+                },
             )
             .expect("the settle write set builds from the trader's admitted pre-state");
             EconomicTransitionWitness::new(

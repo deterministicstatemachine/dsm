@@ -474,6 +474,51 @@ TA_B realization separately establishes:
     + B's selected route / T_v economics == the authenticated settlement effects
 ```
 
+### Producer adoption — the cardinality transition (owner ruling, 2026-09-10)
+
+The rule tightens when, and only when, its input starts existing. Recorded explicitly rather than
+narrowed silently, so the history stays coherent:
+
+```text
+#845, TRANSITIONAL:   market BundleAcceptanceLeaf cardinality <= 1
+producer adoption:    every qualifying market DlvSettle produces EXACTLY ONE
+other operations:     cardinality == 0 unless separately specified
+```
+
+#845 deliberately established the admission machinery **without** changing existing settles: a
+settle carrying no acceptance leaf stayed valid, because nothing could yet produce one and a
+mandatory rule would have invalidated every settle already shipped. That was the right rule for
+that moment and the wrong rule to keep. Leaving it at *at most one* after a producer exists
+preserves a legal execution that can never obtain a `TA_B` — a nominally valid market settlement
+that becomes permanently `PartialPendingRealization` for no protocol reason.
+
+The producer emits
+
+```text
+BundleAcceptanceLeaf { bundle: b, economic_operation_id: recompute(G, DevID, C_dsm+) }
+    at bundle_acceptance_key(G, DevID, economic_operation_id)
+```
+
+**Where `b` comes from, and where it must not.** `b` is not intrinsic to the DLV operation; it is
+the identity of the exact settlement bundle being composed *around* that operation. It enters
+economic write-set construction through a settlement-specific typed context, established upstream
+from the canonical `B`:
+
+```text
+canonical B established -> derive exact b -> DlvSettle write context { bundle_id: b }
+    -> build_write_set -> the acceptance leaf
+```
+
+The builder must **not** derive `b` itself, fetch it from Class N, read it from the operation bytes
+or the authenticated operation facts, accept it as an optional digest a caller may omit on a market
+settle, or reconstruct a second `B` to recover it. Threading it through every call site is the
+point: it forces each producer of economic state to account for whether it has settlement-bundle
+context.
+
+`economic_operation_id` stays independently derived from the authenticated transition. Threading
+`b` in must not make the operation identity caller-authoritative — the three-way relation of ruling
+D3 depends on those two facts having different origins.
+
 **Neither conjunct is sufficient alone**, and the write-set half must say so in the code rather than
 imply it. `verify_operation_write_set` gains a `0x0032` arm that requires `pre: None`, requires
 `economic_operation_id` to equal the enclosing witness's, requires the key to equal

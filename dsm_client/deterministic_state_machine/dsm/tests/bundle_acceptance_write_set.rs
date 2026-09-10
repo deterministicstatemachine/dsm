@@ -128,6 +128,7 @@ fn built_settle() -> (EconomicTransitionWitness, EconomicSmt, Operation) {
         &EconomicPreState::balances_only(&balances),
         &mut tree,
         &facts(),
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle { bundle_id: B },
     )
     .expect("the settle write set builds");
 
@@ -211,28 +212,166 @@ fn witness_with(
     }
 }
 
-/// The honest settle still verifies, unchanged. Guards the relaxation: the
-/// arm now admits `3 + acceptances.len()` mutations, and with no acceptance
-/// that must still be exactly three.
+/// PRODUCER ADOPTION: the builder now EMITS the acceptance leaf, so an honest
+/// settle is four mutations and carries exactly one `0x0032`.
+///
+/// This replaces #845's `a_settle_without_an_acceptance_leaf_is_unaffected`,
+/// which asserted the opposite for the right reason at the time: nothing could
+/// produce a leaf then, so a mandatory rule would have invalidated every settle
+/// already shipped. The producer is what makes the stronger rule enforceable.
 #[test]
-fn a_settle_without_an_acceptance_leaf_is_unaffected() {
+fn an_honest_settle_now_carries_exactly_one_acceptance_leaf() {
     let (witness, _tree, op) = built_settle();
-    assert_eq!(witness.mutations.len(), 3);
-    verify_operation_write_set(&op, &G, &DEV, &witness).expect("the honest settle still verifies");
+    assert_eq!(
+        witness.mutations.len(),
+        4,
+        "one input debit, one output credit, one receipt, one acceptance"
+    );
+    let acceptances = witness
+        .mutations
+        .iter()
+        .filter(|m| matches!(m.post_state, Some(EconomicLeafState::BundleAcceptance(_))))
+        .count();
+    assert_eq!(acceptances, 1, "exactly one, emitted by the builder");
+    verify_operation_write_set(&op, &G, &DEV, &witness).expect("the honest settle verifies");
 }
 
-/// ONE acceptance leaf, naming this operation, is admitted.
+/// The emitted leaf carries the EXACT `b` the context supplied, and an
+/// operation id derived independently of it.
 #[test]
-fn one_acceptance_leaf_is_admitted_in_a_settle_write_set() {
+fn the_emitted_leaf_carries_the_exact_bundle_and_a_derived_operation_id() {
+    let (witness, _tree, _op) = built_settle();
+    let leaf = witness
+        .mutations
+        .iter()
+        .find_map(|m| match &m.post_state {
+            Some(EconomicLeafState::BundleAcceptance(a)) => Some(a.clone()),
+            _ => None,
+        })
+        .expect("the builder emitted one");
+    assert_eq!(leaf.bundle, B, "b comes from the composition layer");
+    assert_eq!(
+        leaf.economic_operation_id,
+        econ_op_id(),
+        "the operation id is derived from the authenticated transition, not from b"
+    );
+}
+
+/// A market settle WITHOUT bundle context is refused at the builder: it could
+/// not emit the leaf its realization requires.
+#[test]
+fn a_market_settle_without_bundle_context_is_refused() {
+    let op = settle();
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G, &DEV),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+
+    let err = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &facts(),
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    )
+    .expect_err("a settle without bundle context must be refused");
+    assert!(
+        matches!(err, WriteSetError::WrongWriteSet { detail } if detail.contains("bundle context")),
+        "got {err:?}"
+    );
+}
+
+/// And bundle context supplied for a NON-settlement is refused too — the
+/// agreement is checked in both directions.
+#[test]
+fn bundle_context_on_a_non_settlement_is_refused() {
+    let burn = Operation::Burn {
+        amount: dsm::types::token_types::Balance::from_state(50, [0u8; 32]),
+        token_id: b"T".to_vec(),
+        policy_commit: pc_a(),
+        proof_of_ownership: Vec::new(),
+        message: String::new(),
+    };
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G, &DEV),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+
+    let err = build_write_set(
+        &burn,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle { bundle_id: B },
+    )
+    .expect_err("bundle context on a non-settlement must be refused");
+    assert!(
+        matches!(err, WriteSetError::WrongWriteSet { detail } if detail.contains("not a settle")),
+        "got {err:?}"
+    );
+}
+
+/// A SECOND acceptance leaf appended to an already-complete settle is refused.
+///
+/// Post-adoption this is what "one more" means: the builder emitted one, so an
+/// extra is the second, and cardinality fires.
+#[test]
+fn appending_a_second_acceptance_leaf_is_refused() {
     let (witness, mut tree, op) = built_settle();
-    let m = acceptance_mutation(&mut tree, &acceptance(B, econ_op_id()));
+    let other_id = dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &[0xC6; 32]);
+    let m = acceptance_mutation(&mut tree, &acceptance([0xB1; 32], other_id));
     let mut ms = witness.mutations.clone();
     ms.push(m);
     let w = witness_with(&witness, ms, true);
 
-    assert_eq!(w.mutations.len(), 4);
-    verify_operation_write_set(&op, &G, &DEV, &w)
-        .expect("a settle may carry one bundle-acceptance leaf");
+    assert!(
+        matches!(
+            verify_operation_write_set(&op, &G, &DEV, &w),
+            Err(WriteSetError::WrongWriteSet { detail })
+                if detail.contains("more than one bundle-acceptance leaf")
+        ),
+        "the builder already emitted one; a second must be refused"
+    );
+}
+
+/// A settle whose acceptance leaf has been REMOVED is refused — the rule is
+/// exactly-one now, not at-most-one.
+#[test]
+fn a_settle_stripped_of_its_acceptance_leaf_is_refused() {
+    let (witness, _tree, op) = built_settle();
+    let stripped: Vec<_> = witness
+        .mutations
+        .iter()
+        .filter(|m| !matches!(m.post_state, Some(EconomicLeafState::BundleAcceptance(_))))
+        .cloned()
+        .collect();
+    assert_eq!(stripped.len(), 3);
+    let w = witness_with(&witness, stripped, false);
+
+    assert!(
+        matches!(
+            verify_operation_write_set(&op, &G, &DEV, &w),
+            Err(WriteSetError::WrongWriteSet { detail })
+                if detail.contains("must carry its bundle-acceptance leaf")
+        ),
+        "a market settle without its acceptance leaf could never be realized"
+    );
 }
 
 /// TWO acceptance leaves are refused — and the keys DO NOT collide here, so
@@ -309,8 +448,16 @@ fn two_acceptance_leaves_at_one_position_are_refused_by_the_write_set_not_by_ord
 fn an_acceptance_leaf_naming_another_operation_is_refused() {
     let (witness, mut tree, op) = built_settle();
     let other_id = dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &[0xC6; 32]);
+    // REPLACED, not appended. Post-adoption the builder already emitted a
+    // leaf, so appending would make two and the cardinality rule would fire
+    // first — testing a different conjunct than this test is named for.
     let m = acceptance_mutation(&mut tree, &acceptance(B, other_id));
-    let mut ms = witness.mutations.clone();
+    let mut ms: Vec<_> = witness
+        .mutations
+        .iter()
+        .filter(|x| !matches!(x.post_state, Some(EconomicLeafState::BundleAcceptance(_))))
+        .cloned()
+        .collect();
     ms.push(m);
     let w = witness_with(&witness, ms, true);
 

@@ -249,6 +249,7 @@ fn fixture(
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("the REAL builder builds the issuance write set");
     let witness = EconomicTransitionWitness::new(
@@ -331,6 +332,7 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("builder");
     let witness = EconomicTransitionWitness::new(
