@@ -44,8 +44,8 @@ use crate::economic::credit::{
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
 use crate::economic::state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
+    EconomicBalanceState, EconomicBundleAcceptanceState, EconomicConsumedSourceState,
+    EconomicLeafState, EconomicSettlementReceiptState, EconomicVaultReserveState,
 };
 use crate::economic::tree::EconomicSmt;
 use crate::economic::witness::EconomicTransitionWitness;
@@ -1180,10 +1180,16 @@ pub fn verify_operation_write_set(
             | SemanticWriteSet::DlvOwnerApply { .. }
     );
     let receipts_legal = matches!(semantic, SemanticWriteSet::DlvSettle { .. });
+    // Amendment 2c-D. A bundle-acceptance leaf is legal in exactly the write
+    // set that produces the successor it is keyed to — every other operation
+    // refuses the class outright through `classify`, which is how receipts are
+    // already kept out and why no arm needs its own emptiness check.
+    let acceptances_legal = matches!(semantic, SemanticWriteSet::DlvSettle { .. });
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
     let mut reserves: Vec<ObservedReserve> = Vec::new();
     let mut receipts: Vec<(u32, EconomicSettlementReceiptState)> = Vec::new();
+    let mut acceptances: Vec<(u32, EconomicBundleAcceptanceState)> = Vec::new();
     for (i, m) in witness.mutations.iter().enumerate() {
         let index = u32::try_from(i).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
         let classify = |s: &Option<EconomicLeafState>| -> Result<(), WriteSetError> {
@@ -1193,6 +1199,7 @@ pub fn verify_operation_write_set(
                 | Some(EconomicLeafState::ConsumedSource(_)) => Ok(()),
                 Some(EconomicLeafState::VaultReserve(_)) if reserves_legal => Ok(()),
                 Some(EconomicLeafState::SettlementReceipt(_)) if receipts_legal => Ok(()),
+                Some(EconomicLeafState::BundleAcceptance(_)) if acceptances_legal => Ok(()),
                 Some(_) => Err(WriteSetError::UnexpectedLeafClass),
             }
         };
@@ -1221,6 +1228,14 @@ pub fn verify_operation_write_set(
             (Some(EconomicLeafState::SettlementReceipt(_)), _) => {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a settlement-receipt leaf is write-once; it has no pre-state",
+                })
+            }
+            (None, Some(EconomicLeafState::BundleAcceptance(a))) => {
+                acceptances.push((index, a.clone()));
+            }
+            (Some(EconomicLeafState::BundleAcceptance(_)), _) => {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a bundle-acceptance leaf is write-once; it has no pre-state",
                 })
             }
             (Some(EconomicLeafState::VaultReserve(_)), _) => {
@@ -1428,10 +1443,21 @@ pub fn verify_operation_write_set(
                              consumed source",
                 });
             }
-            if witness.mutations.len() != 3 || balances.len() != 2 || receipts.len() != 1 {
+            // Amendment 2c-D: a settle MAY carry one bundle-acceptance leaf.
+            // Checked before the shape below, so that a settle carrying two
+            // reports the cardinality it violated rather than a mutation count
+            // that would be right if one of them were deleted.
+            expect_at_most_one_acceptance(&acceptances, witness.economic_operation_id)?;
+            // Still exact — the acceptance widens the expected count by exactly
+            // the leaf it admits, so no OTHER extra mutation can ride along.
+            let expected_mutations = 3 + acceptances.len();
+            if witness.mutations.len() != expected_mutations
+                || balances.len() != 2
+                || receipts.len() != 1
+            {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a settle is exactly one input debit, one output credit and one \
-                             receipt insertion",
+                             receipt insertion, plus at most one bundle-acceptance leaf",
                 });
             }
             let debit = expect_one_balance(&balances, input.0)?;
@@ -1693,6 +1719,43 @@ pub fn verify_operation_write_set(
             Ok(())
         }
     }
+}
+
+/// At most one bundle-acceptance leaf, and the one present must name THIS
+/// operation (amendment 2c-D §8).
+///
+/// **Why this is not left to the key.** The position is derived from the
+/// operation identity alone, so two acceptance leaves for one operation land on
+/// the SAME key and `verify_mutation_sequence`'s strict-ascent rule would
+/// already refuse them as "two disagreeing claims about one leaf". Relying on
+/// that would make the cardinality an accidental consequence of how the tree
+/// stores things — true today, unowned, and silently lost the moment the
+/// ordering rule is relaxed or the key derivation gains an input. The rule is
+/// the protocol's, so it is stated where the write set is admitted.
+///
+/// The correspondence is the other half. The leaf carries an operation id it
+/// does not get to choose: it must equal the enclosing witness's, which
+/// `verify_transition_provenance` in turn requires to equal
+/// `dsm_economic_operation_id(G, DevID, C_dsm+)` for the accepted successor. A
+/// leaf naming another operation would otherwise sit at a well-formed position
+/// in this identity's tree while belonging to a transition that never happened.
+fn expect_at_most_one_acceptance(
+    acceptances: &[(u32, EconomicBundleAcceptanceState)],
+    operation_id: [u8; 32],
+) -> Result<(), WriteSetError> {
+    if acceptances.len() > 1 {
+        return Err(WriteSetError::WrongWriteSet {
+            detail: "more than one bundle-acceptance leaf for one economic operation",
+        });
+    }
+    if let Some((_, a)) = acceptances.first() {
+        if a.economic_operation_id != operation_id {
+            return Err(WriteSetError::WrongWriteSet {
+                detail: "a bundle-acceptance leaf names another economic operation",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Exactly one observed balance mutation for this asset.
