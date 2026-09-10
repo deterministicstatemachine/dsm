@@ -138,6 +138,13 @@ pub mod class {
     /// `DlvSettle` can name it. Its KEY carries the operation binding instead.
     pub const ECONOMIC_BUNDLE_ACCEPTANCE_STATE: u16 = 0x0032;
 
+    /// `TraderAcceptance` (`TA_B`), amendment 2c-D §6 / registry §5.40. Its
+    /// encoder lives in `crate::economic::trader_acceptance`, not here: `ccb`
+    /// is the transitive encoding closure of `c_n`, and a `TA_B` is not
+    /// reachable from a `VaultStateV2`. The DISCRIMINANT lives here because §3
+    /// is a single namespace.
+    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
+
     /// A complete pre-root → post-root economic transition, carrying its
     /// mutations and its inline credit sources.
     pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
@@ -235,8 +242,6 @@ pub mod declared_unencoded {
     pub const MARKET_BOUNDS: u16 = 0x0008;
     /// §5.14 `RouteSet` `R`, schema 2; schema 1 burned.
     pub const ROUTE_SET: u16 = 0x000C;
-    /// Blocked — 2c-B/2c-C/2c-D.
-    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
     /// Blocked — §6.
     pub const TRADE_DIGEST: u16 = 0x0012;
     /// §5.8.
@@ -249,7 +254,6 @@ pub mod declared_unencoded {
         FULFILLMENT_MECHANISM,
         MARKET_BOUNDS,
         ROUTE_SET,
-        TRADER_ACCEPTANCE,
         TRADE_DIGEST,
         REFERENCE_WINDOW,
         ROUTE_COMMITMENT_BODY,

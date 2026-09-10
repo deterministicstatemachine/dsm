@@ -75,6 +75,7 @@ pub mod reserve_consumption_evidence;
 pub mod settlement_payment_evidence;
 pub mod state;
 pub mod successor_evidence;
+pub mod trader_acceptance;
 pub mod tree;
 pub mod witness;
 pub mod write_set;
