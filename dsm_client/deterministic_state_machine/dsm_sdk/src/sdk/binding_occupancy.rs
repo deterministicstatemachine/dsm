@@ -655,6 +655,27 @@ pub(crate) async fn observe_parent_binding(
     let bundle = decoded.bundle;
     let shape = settlement_bundle::shape(&bundle);
 
+    // 2c-B's `G1`-`G4`, HERE, on the consuming side. 2c-C4 §2.1 says these gate
+    // the bundle's structural validity so that "a bundle whose carried evidence
+    // disagrees with itself is refused before any verifier reads it" — and this
+    // is where a FOREIGN bundle first becomes readable: fetched from the
+    // register, canonically decoded, hashed to the record's identity.
+    //
+    // The producer checks its own output, which is worth having and is not this.
+    // A producer that means harm simply does not check, so a self-check gates
+    // nothing on the consuming side; only this does. The conjuncts refuse a
+    // preimage that does not decode, does not re-encode identically, is not a
+    // Unilateral settle, carries a short field, or names a successor that is
+    // not the tip of its own carried inputs.
+    if let Some(terms) = bundle.market_terms() {
+        if let Err(e) = dsm::dlv::market_evidence::check_market_evidence(terms) {
+            return unresolvable(
+                Reason::BundleNotCanonical,
+                &format!("its bound bundle's successor evidence disagrees with itself: {e}"),
+            );
+        }
+    }
+
     // The bundle carries no storage set and no quorum (registry §5.19):
     // binding authority is `V_n`'s own fields 14 and 15 — the set this key
     // was just read at, at its canonical quorum.
@@ -983,6 +1004,50 @@ mod tests {
     /// THE APPLICATION-BLIND REGISTER. A member never inspects the value it
     /// holds, so a proposer can put a bundle's record at a key the bundle does
     /// not name. Nothing in the read catches that; the parent check does.
+    /// A foreign bundle whose carried evidence disagrees with ITSELF is refused
+    /// here, on the CONSUMING side — not merely by the producer that built it.
+    ///
+    /// The bundle is otherwise perfect: canonical, hashing to the record's
+    /// identity, naming this exact parent, at the right generation. Only its
+    /// `trader_successor` is not the chain tip of its own carried inputs. A
+    /// producer's self-check cannot catch this, because a producer that means
+    /// harm does not run one.
+    #[tokio::test]
+    #[serial]
+    async fn a_bound_bundle_whose_evidence_contradicts_itself_is_unresolvable() {
+        let set = init();
+        let honest = market_bundle(VAULT, C_N);
+        // Tamper ONLY the carried successor. Everything else — the transition,
+        // the parent, the generation, the vault — stays exactly right, so the
+        // refusal below can only come from the evidence conjuncts.
+        let mut terms = honest.market_terms().expect("market bundle").clone();
+        terms.trader_successor = [0xAB; 32];
+        let tampered = dsm::ccb::SettlementBundle::market(terms, honest.transitions().to_vec())
+            .expect("a self-inconsistent bundle still ENCODES; that is the point");
+
+        let canon = settlement_bundle::canon(&tampered).unwrap();
+        let digest = settlement_bundle::bundle_digest(&canon);
+        bind(&set, &tampered, C_N).await;
+        binding_fleet_double::plant_committed(
+            &["dsm-node-0", "dsm-node-1"],
+            &[settlement_bundle::resource_key(&C_N)],
+            digest,
+            digest,
+            settlement_bundle::bundle_addr(&canon),
+            Round {
+                counter: 23,
+                proposer_id: [7; 32],
+            },
+        );
+        let occ = observe_parent_binding(&set, &VAULT, GEN, &C_N, &set.id(), set.quorum()).await;
+        assert!(
+            matches!(&occ, ParentOccupancy::Unresolvable(w)
+                     if w.reason == Reason::BundleNotCanonical
+                        && w.class() == OutcomeClass::Invalid),
+            "G4 must refuse it on the consuming side, got {occ:?}"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn a_bundle_bound_at_a_key_it_does_not_name_is_unresolvable() {

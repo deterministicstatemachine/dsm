@@ -4107,11 +4107,11 @@ async fn compose_own_vault(
 /// verified against the owner's PROVEN reserves: the trade's legs, the parent
 /// it would consume and that parent's occupancy.
 ///
-/// Collected in one place so every gate reads a single set of values. Until
-/// 5c-2 Step 2 lands, `dlv.unlockRouted` refuses at emission right after these
-/// are established (2c-A.1 ruling 2, amended), so nothing here feeds an
-/// operation yet — the fields an operation needs return with the seam that
-/// can sign one.
+/// Collected in one place so every gate reads a single set of values — and,
+/// since 5c-2 Step 4, these ARE the values the settle operation is built from.
+/// The owner identity, the vault's fee and the checked amounts are carried
+/// here because they die with the composition block otherwise, and the
+/// operation cannot name what did not survive that scope.
 struct SettleTerms {
     input_policy_commit: [u8; 32],
     output_policy_commit: [u8; 32],
@@ -5618,8 +5618,9 @@ mod funded_creation_tests {
             trader_head.root(),
             "and its own head advanced"
         );
-        // NOTHING WAS EMITTED: no receipt, no binding, no fence — the refusal
-        // came before the first mutating op.
+        // NOT REALIZED. The binding and the trader's own advance both happened;
+        // what has not is realization. No receipt exists, because publishing one
+        // would claim a settlement this state has not reached.
         assert!(
             matches!(
                 crate::runtime::get_runtime().block_on(
@@ -5654,6 +5655,31 @@ mod funded_creation_tests {
                 .expect("fence read")
                 .is_none(),
             "no VAULT-keyed fence: a market settle fences the trader's own chain position"
+        );
+        // And the positive half: the fence IS on the FOREIGN trader's own chain,
+        // and its own advance did not release it. Absence of a vault-keyed row
+        // alone would also be satisfied by no fence existing at all.
+        let foreign_rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&trader_did, &trader_did);
+        let foreign_parent = trader_head.chain_tip(&foreign_rel_key).unwrap_or_else(|| {
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &trader_did,
+                &trader_did,
+            )
+        });
+        let foreign_fence = crate::storage::client_db::trader_parent_fence::active_fence(
+            &foreign_rel_key,
+            &foreign_parent,
+        )
+        .expect("trader fence read")
+        .expect("the market fence is on the FOREIGN trader's own chain");
+        assert!(
+            matches!(
+                foreign_fence.state,
+                dsm::dlv::trader_fence::FenceState::CommittedAwaitingAcceptance { .. }
+            ),
+            "committed and awaiting acceptance, not Released ({:?})",
+            foreign_fence.state
         );
 
         // ── THE OWNER IS UNTOUCHED, and has nothing to reconcile. ────────────
@@ -7721,10 +7747,13 @@ mod funded_creation_tests {
     /// The canonical market bundle a trader binds for ONE hop at `frontier`:
     /// field 2 is the EXACT successor the frozen predicate derives for the
     /// trade (`derive_market_successor`), the operand VDS.COMMON.10.a compares
-    /// the bundle against. A stand-in for the 5c-2 Step 2 producer:
-    /// `dlv.unlockRouted` refuses at emission until that seam exists, so a
-    /// test that needs a bound market generation binds this through the
-    /// production driver instead.
+    /// the bundle against.
+    ///
+    /// A TEST-ONLY SHORTCUT, and no longer a stand-in for a missing producer:
+    /// since 5c-2 Step 4 `dlv.unlockRouted` binds for real, so a test that
+    /// wants a bound generation WITHOUT driving the whole route — no trader
+    /// advance, no admission — binds this through the production driver
+    /// instead. Tests that want the real thing call the route.
     fn market_bundle_at(
         frontier: &crate::sdk::vault_state_composition::ComposedVaultState,
         pc_in: &[u8; 32],
@@ -8028,11 +8057,13 @@ mod funded_creation_tests {
     /// or has not reached (unproven) is refused, so a trader can neither
     /// re-settle a consumed parent nor pre-settle a future one.
     ///
-    /// Each trader's bind-and-settle goes through `trader_settles_by_fixture`:
-    /// `dlv.unlockRouted` refuses at emission until 5c-2 Step 2 (2c-A.1 ruling
-    /// 2, amended), so the fixture performs, through the production driver and
-    /// the production advance, exactly what the route did past its gates. The
-    /// probes below still go through the route — its gates are live.
+    /// Each trader's bind-and-settle goes through `trader_settles_by_fixture`,
+    /// which performs — through the production driver and the production
+    /// advance — what the route does past its gates. Since 5c-2 Step 4 the
+    /// route could drive this itself; the fixture is kept because this test is
+    /// about THREE generations of LP reconciliation, and driving the full
+    /// route three times would make it a test of the route instead. The probes
+    /// below still go through the route.
     #[test]
     #[serial]
     fn lp_offline_market_advances_three_generations_and_lp_reconciles_each_once() {
