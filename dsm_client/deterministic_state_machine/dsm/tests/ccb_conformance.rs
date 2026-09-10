@@ -545,15 +545,17 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         (0x0007, 1),
         (0x0009, 1),
         (0x000A, 1),
-        (0x000B, 1),
+        // 2c-E cut the intent to the exact-output model, and §2.7 nesting
+        // carried the bump into the terms and the bundle that hold it.
+        (0x000B, 2),
         (0x000D, 2),
-        (0x000E, 1),
+        (0x000E, 2),
         (0x000F, 1),
         (0x0010, 1),
         (0x0015, 2),
         (0x0016, 2),
         (0x0031, 1),
-        (0x0033, 1),
+        (0x0033, 2),
     ];
 
     for (name, class, sch) in live {
