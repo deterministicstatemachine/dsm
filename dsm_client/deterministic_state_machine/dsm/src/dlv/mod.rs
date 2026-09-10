@@ -12,6 +12,7 @@ pub mod controller_rotation;
 pub mod market_evidence; // 2c-B G1-G4 — the validity half of market successor evidence
 pub mod market_producer; // 5c-2 Step 2 — the genuine market bundle producer; nothing invented
 pub mod pair_identity;
+pub mod published_receipt; // Req 21.16 — a receipt proven under an INDEPENDENT post_root
 pub mod quorum_bind; // Def 6.21 Ã¢ÂÂ Class K sans-IO quorum-binding decision engine
 pub mod route_commit;
 pub mod settlement_bundle; // Def 6.14 — the canonical immutable SettlementBundle + K(B)
