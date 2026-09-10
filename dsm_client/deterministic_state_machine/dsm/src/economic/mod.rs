@@ -51,6 +51,7 @@
 //! predicate the `0x0023` arm resolves — the producer is `token.mint`'s
 //! economic admission.
 
+pub mod acceptance_produce;
 pub mod acceptance_verify;
 pub mod admission;
 pub mod authority_evidence;
