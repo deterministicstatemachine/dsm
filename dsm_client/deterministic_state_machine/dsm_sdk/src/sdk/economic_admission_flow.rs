@@ -786,6 +786,165 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
     Ok((outcome, admitted))
 }
 
+/// A trader's market settle, admitted (5c-2 Step 4, requirement 6).
+///
+/// The credit arm is `0x0026 DlvReserveConsumption`: a trader's settle OUTPUT is
+/// funded by consuming an owner vault reserve. It is NOT `0x0027`, which is the
+/// owner-apply arm — `build_write_set` refuses the pairing outright, and the
+/// 5c-2 plan named the wrong one until it was corrected.
+///
+/// `expected_successor` is the exact `B.trader_successor` the bundle was BOUND
+/// to. It is checked inside `build`, which runs after the pure prepare and
+/// before anything is written, so a device that would advance to a different
+/// successor than the one it published refuses instead — with nothing
+/// persisted, nothing credited and the fence untouched. Requirement 6's
+/// "commit ONLY the exact `B.trader_successor`" is that check and nothing
+/// looser.
+///
+/// WHAT THIS DOES NOT DO. It does not release the trader fence, publish a Def
+/// 14.2 receipt, advance the realized frontier, or construct a
+/// bundle-acceptance witness. Ruling V3 gates release on a certifying verdict
+/// and Ruling R1 puts that behind 2c-D. A committed advance here means the
+/// trader's own chain accepted the successor; the market fold stays
+/// `PartialPendingRealization`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admitted_dlv_settle<A>(
+    core: &CoreSDK,
+    operation: Operation,
+    rel_key: [u8; 32],
+    counterparty_devid: [u8; 32],
+    initial_chain_tip: [u8; 32],
+    deltas: &[dsm::types::device_state::BalanceDelta],
+    reserve_consumption_evidence_bytes: Vec<u8>,
+    owner_economic_position: u64,
+    expected_successor: [u8; 32],
+    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+    write_extra: impl Fn(
+        &rusqlite::Transaction<'_>,
+        &dsm::types::device_state::AdvanceOutcome,
+        &A,
+    ) -> Result<(), DsmError>,
+) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    if !matches!(operation, Operation::DlvSettle { .. }) {
+        return Err(DsmError::invalid_operation(
+            "admitted_dlv_settle takes a DlvSettle",
+        ));
+    }
+    let evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &reserve_consumption_evidence_bytes,
+    );
+    let evidence_key = crate::sdk::economic_registers::immutable_object_key(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &reserve_consumption_evidence_bytes,
+    );
+
+    let StagedAdmission {
+        network_id,
+        genesis,
+        devid,
+        set,
+        validated,
+        mut tree,
+        pre_state,
+        authority,
+        facts,
+        extra_artifacts,
+        prepared,
+        ..
+    } = stage_admission(core, &operation, |_position| {
+        Ok((
+            CreditSourceFacts::DlvReserveConsumption {
+                owner_economic_position,
+                reserve_consumption_evidence_addr: evidence_addr,
+            },
+            vec![(
+                evidence_key,
+                reserve_consumption_evidence_bytes,
+                "dlv-reserve-consumption-evidence",
+            )],
+        ))
+    })
+    .await?;
+
+    let set_id = set.id();
+    let op_for_build = operation.clone();
+    let mut built: Option<DsmAdmissionParts> = None;
+    let mut accepted_out: Option<PendingEconomicAdmission> = None;
+
+    let outcome = {
+        let plan = crate::sdk::core_sdk::AdmissionPlan {
+            prepared,
+            storage_set_id: set_id,
+            build: Box::new(|o: &dsm::types::device_state::AdvanceOutcome| {
+                // THE BOUND SUCCESSOR, AND ONLY IT. This runs after the pure
+                // prepare and before any write, so a mismatch costs nothing.
+                let actual = o.new_chain_state.compute_chain_tip();
+                if actual != expected_successor {
+                    return Err(DsmError::invalid_operation(
+                        "the advance would commit a successor other than the one the bundle was \
+                         bound to; refusing before anything is written",
+                    ));
+                }
+                let parts = build_dsm_admission(
+                    &genesis,
+                    &devid,
+                    &o.new_chain_state,
+                    &op_for_build,
+                    &pre_state,
+                    &mut tree,
+                    &facts,
+                    &authority,
+                    extra_artifacts,
+                )?;
+                let coords = parts.coords;
+                let artifacts = parts.artifacts.clone();
+                built = Some(parts);
+                Ok((coords, artifacts))
+            }),
+            accepted_out: &mut accepted_out,
+        };
+        let (_state, outcome, _artifacts) = core.execute_on_relationship_staged_with_admission(
+            rel_key,
+            counterparty_devid,
+            operation.clone(),
+            deltas,
+            Some(initial_chain_tip),
+            build_artifacts,
+            write_extra,
+            Some(plan),
+        )?;
+        outcome
+    };
+
+    let pending = accepted_out.ok_or_else(|| {
+        DsmError::storage(
+            "the settle committed without an accepted admission".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    let parts = built.ok_or_else(|| {
+        DsmError::storage(
+            "the advance committed without building the witness".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    let admitted = finish_admission(
+        core,
+        &network_id,
+        &set,
+        &validated,
+        tree,
+        parts.witness,
+        parts.manifest,
+        operation,
+        pending,
+        Vec::new(),
+    )
+    .await?;
+    Ok((outcome, admitted))
+}
+
 /// Whether a counterparty can ever be asked to verify this leaf's inclusion.
 ///
 /// Vault reserves fund a trader's settle (0x0026) and settlement receipts
