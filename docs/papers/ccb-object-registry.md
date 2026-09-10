@@ -1948,7 +1948,12 @@ In order, and not combined:
      carries it, requiring `exact_out` to be checked by re-simulation against the authenticated
      `V_n`, never against the route's own account, or the predicate is a self-attestation. The
      schema bump propagates mechanically under §2.7 to `0x0033` and `0x000E`, moving every market
-     bundle's `b` and `addr`. **2c-E allocates no class number.** Its adopting change — the encoder
+     bundle's `b` and `addr`. Lands the **fifteenth** Lean module,
+     `DSMTradeIntentCorrespondence.lean`, machine-checking `SAT.1`-`SAT.6` with the market policy as
+     a parameter; CI module pin 14 → 15. Its load-bearing result is that the FORBIDDEN shape — SAT.5
+     compared against the route's own claim rather than the authenticated `V_n` — accepts a forgery
+     the real predicate refuses, so the two are provably different predicates.
+     **2c-E allocates no class number.** Its adopting change — the encoder
      and strict decoder cut to schema 2 with schema-1 bytes refused as burned, the formal predicate,
      the producer, the class-1 market vector regenerated exactly once from it, and three mutation
      controls — is NOT started.
