@@ -214,9 +214,9 @@ schema. Promoting a reserved value into a class is a normative change to this re
 ship with the corresponding code change and collision test. A number defended only in code is a
 number this registry cannot keep from being reallocated by accident.
 
-The reserved set is exactly `0x002A`–`0x002F`, six values, and §3 carries all six. `0x0032` is
-**not** reserved — it is unallocated, held in prose for amendment 2c-D, and it receives a row when
-that amendment allocates it.
+The reserved set is exactly `0x002A`–`0x002F`, six values, and §3 carries all six. `0x0032` was
+**not** reserved — it was unallocated, held in prose for amendment 2c-D. That amendment has since
+allocated it as the bundle-acceptance leaf state, and §3 carries its row.
 
 ### 2.9 Signatures are not fields
 
@@ -381,7 +381,7 @@ storage address, a resource key or an authority check appears here.
 | `0x000E` | `SettlementBundle` (`B`) | **2** | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined; schema 1 burned by 2c-E's transitive bump |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
-| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | **blocked — 2c-D** |
+| `0x0011` | `TraderAcceptance` (`TA_B`) | 1 | `ta_B = H(DSM/trader-settlement-acceptance/v2 ‖ CCB)` | §5.40 defined by 2c-D |
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
@@ -401,6 +401,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0020` | **substrate** `EconomicVaultReserveState` | 1 | leaf state; nested in `0x001E` | §5.29 defined |
 | `0x0021` | **substrate** `EconomicSettlementReceiptState` | 1 | leaf state; nested in `0x001E` | §5.30 defined |
 | `0x0022` | **substrate** `EconomicConsumedSourceState` | 1 | leaf state; nested in `0x001E` | §5.31 defined |
+| `0x0032` | **substrate** `EconomicBundleAcceptanceState` | 1 | leaf state; nested in `0x001E`; keyed on `C_dsm+` | §5.41 defined by 2c-D |
 | `0x0023` | **substrate** `CreditSourceAuthorizedIssuance` | 1 | credit arm; nested in `0x001D` | §5.33 defined |
 | `0x0024` | **substrate** `CreditSourceSameTransitionMove` | 1 | credit arm; nested in `0x001D` | §5.34 defined |
 | `0x0025` | **substrate** `CreditSourceValidatedPeerDebit` | 1 | credit arm; nested in `0x001D` | §5.35 defined |
@@ -602,12 +603,14 @@ Of the **twenty-two live** object classes above — `0x0014` is burned and not c
   a conformant market `b` is constructible; the owner-close shape is encodable once the exact
   prepared `close_authorization` bytes are supplied, and 2c-B freezes the grammar for producing a
   fresh one. Verification closure is **2c-C4's** (the ordered evidence walk, the correspondence and
-  the realization predicate); production acceptance of the market shape additionally waits on 2c-D's
-  bundle-acceptance witness, without which 2c-C4's realization fact is not constructible.
+  the realization predicate); production acceptance of the market shape additionally requires 2c-D's
+  bundle-acceptance witness, without which 2c-C4's realization fact is not constructible. 2c-D
+  **defines** that witness (§5.41, §5.40); it becomes constructible when 2c-D's adopting change
+  ships, not when the amendment freezes.
 - **1 is partial** — `0x0006`, where the specification fixes the preimage but `0x0008` is
   still open.
-- **2 are blocked** — `0x0011` `TraderAcceptance` and `0x0012` `TradeDigest`, both belonging to
-  the remaining 2c sub-amendments.
+- **1 is blocked** — `0x0012` `TradeDigest`. `0x0011` `TraderAcceptance` was the second until
+  amendment 2c-D enumerated its contents (§5.40); it is now defined.
 
 The blocked ones are blocked because the specification names them without ever enumerating
 their contents. Writing a field table for those would settle protocol in this document exactly as
@@ -619,7 +622,7 @@ The framework in §2 and the namespace in §3 are complete and are **not** block
 in §5.15–§5.17, and they do not enter the twenty-two live Rev 15 classes above. Finding 7 closes on
 the Rev 15 amendments in §7 alone; nothing about the substrate classes advances or delays it. The
 direction of independence runs both ways — the substrate objects are derivable now, whether or not
-`0x0011` and `0x0012` ever are.
+`0x0012` ever is.
 
 ## 5. Field tables
 
@@ -1209,7 +1212,9 @@ inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `Tr
 > **Encoding closure ACHIEVED.** Field 6 nests `0x0031` schema 1, fixed by
 > [amendment 2c-B](amendment-2c-b-accepted-successor-and-recovery.md). Verification closure is
 > **2c-C4's**; production acceptance of the market shape stays gated on 2c-C3's `ValidDlvSuccessor`
-> and on 2c-C4's realization fact, whose final conjunct only 2c-D can supply.
+> and on 2c-C4's realization fact, whose final conjunct only 2c-D can supply. **2c-D supplies it**
+> — the bundle-acceptance leaf `0x0032` (§5.41) and `TA_B` (§5.40) — so the gate is now on that
+> amendment's adopting change rather than on an unwritten document.
 
 | # | Field | Type | Notes |
 |---|---|---|---|
@@ -1233,7 +1238,8 @@ are never aliases: they commit different objects under different domains.
 
 **`0x0033` comes from a namespace audit.** `0x0001`–`0x0030` is contiguously allocated or reserved
 with no usable vacancy (`0x0003` and `0x0014` burned; `0x002A`–`0x002F` structurally reserved);
-`0x0031` and `0x0032` are claimed by amendment 2c for 2c-B and 2c-D. The registry §3 table was
+`0x0031` and `0x0032` were claimed by amendment 2c for 2c-B and 2c-D, and both have since been
+allocated by them (§5.23, §5.41). The registry §3 table was
 **behind the shipped code** for the economic classes in `0x001B`–`0x0030` when this audit ran;
 amendment 2c-C1 has since recorded all sixteen, with the six reserved numbers, so §3 and the
 implementation now agree across the whole block.
@@ -1576,6 +1582,101 @@ state only when `0x002D` is promoted to a class with a preimage — a normative 
 | 3 | `ticket_index` | `u64` | |
 | 4 | `faucet_claim_evidence_addr` | `digest32` | **inner form** per ruling A — the shipped code emits the outer form and must change |
 
+### 5.40 `TraderAcceptance` — class `0x0011`, schema 1
+
+**8,276 bytes.** `ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B))`. The `/v2` is the
+tag Rev 15 reserves for this artifact and is **not** a schema version.
+
+Frozen by [amendment 2c-D](amendment-2c-d-bundle-acceptance-and-realization.md). This is a **first
+freezing, not an amendment to frozen bytes**: the class has never been produced, so no schema is
+burned. It supersedes the nine-field draft in amendment 2c §2, which §7a of that document had
+already reassigned here for re-derivation.
+
+The artifact carries no signature of its own — SoFi adds no acceptance payload and no signing round
+— so §2.9 applies vacuously.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `trader_genesis` (`G`) | `digest32` | **carried authenticated witness.** Not recoverable from `b`; authenticated by reconstructing the `sigma_dsm` signing digest and verifying it under the independently established trader AK. Never authority before that check |
+| 2 | `economic_position` | `u64` | **untrusted locator.** Where to begin the validity walk, never authority for its result |
+| 3 | `acceptance_leaf` (`L_B`) | nested `0x0032` schema 1 | complete CCB per §2.7 |
+| 4 | `acceptance_path` (`π_B`) | **sequence** of `digest32` | exactly 256 siblings, leaf-to-root; a §2.5 sequence because position is tree depth and duplicates are legal |
+
+**No field 5.** Five members of the superseded draft are gone, for two distinct reasons:
+
+```text
+recoverable from the authenticated bundle b
+    route_set_commitment (X)   MarketTerms.route_set_commitment
+    trader_parent              MarketTerms.trader_parent
+    trader_successor           MarketTerms.trader_successor
+    trader_devid               operation_bytes.settler_devid — a field of the
+                               frozen DlvSettleOperationPreimageV1 grammar that
+                               G1 decodes and G2 re-encodes canonically
+
+recoverable from the authenticated acceptance leaf
+    bundle (b)                 acceptance_leaf.bundle
+```
+
+`trader_devid` is **not** taken from `recovery_material.counterparty_devid`: that equals the
+trader's DevID only under a self-loop shape nothing verifies, and 2c-D §12 records the gap rather
+than depending on it.
+
+There is **no `ta_B` field and no receipt field** — the Def 14.2 public Receipt binds `ta_B`, so a
+reciprocal field would be circular. There is **no `post_economic_root` field**: the root is derived
+by the walk from fields 1–2, and carrying it would invite a verifier to read the carried value
+instead of deriving it, which is the failure Req 21.17 tests for. 2c-D ruling D2 applies exactly
+that reasoning to `b`.
+
+**Validity, stated as rejections.** Invalid if `acceptance_path` is not exactly 256 elements; if
+`acceptance_leaf` does not decode as a canonical `0x0032` schema 1 leaf; or if `trader_genesis` is
+all-zero. Verification is 2c-D §7's seven ordered conjuncts, whose step 2 failure is INVALID and
+whose step 3 walk failure is INCOMPLETE.
+
+### 5.41 `EconomicBundleAcceptanceState` — class `0x0032`, schema 1
+
+**36 bytes.** A substrate leaf state nested in `0x001E` `EconomicLeafMutation` — the same position
+its siblings `0x001F`–`0x0022` occupy, and a fifth arm of the economic state family rather than a
+new mechanism beside it. Frozen by
+[amendment 2c-D](amendment-2c-d-bundle-acceptance-and-realization.md), which allocates the number
+amendment 2c had held in prose.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `bundle` (`b`) | `digest32` | the exact `SettlementBundle` this acceptance realizes |
+
+**No field 2.** Amendment 2c §9.1 requires the authenticated content to commit *"at least `b`"*, and
+2c-D ruling D2 forbids adding anything recoverable from `b` — which already commits `X`, the trader
+coordinates, the selected route and every `T_v`. In particular the leaf does **not** carry `C_dsm+`:
+that coordinate is in the leaf's key, and carrying it as content would be the second representation
+the ruling refuses.
+
+**The key, and why it is not the content.** Amendment 2c §9.1 fixes that the position stays
+operation-derived even though the content cannot be:
+
+```text
+bundle_acceptance_key(G, DevID, C_dsm+)
+    = H_dom(DSM/economic-bundle-acceptance-key/v1, G ‖ DevID ‖ C_dsm+)
+
+position_material = (0x0032, [C_dsm+])
+```
+
+`C_dsm+` is the identity of the exact accepted transition: recomputed by the walk and never carried
+(2c-B ruling 1), and it subsumes both the operation and the parent it was applied to, so the same
+operation against two parents occupies two positions. `operation_digest` would name the operation
+but not the transition and would let those two collide. Keying on `b` is forbidden outright — it
+would make the position caller-chooseable, which §9.1 rules a worse defect than a more expensive
+Req 21.17 fixture.
+
+**Validity, stated as rejections.** Invalid if `bundle` is all-zero, or if its CCB does not
+re-encode canonically to the bytes presented.
+
+**What the write set may check.** Presence and shape only: `pre: None`, write-once, the key equal to
+the derivation above for the transition's own accepted successor, and **exactly one** such leaf per
+economic operation. It must **not** attempt to validate `bundle` — `b` is the first economic
+post-state fact not derivable from `Operation::DlvSettle`, so the content-to-operation binding every
+other leaf enjoys structurally cannot apply, and an arm that appears to check it is worse than one
+that visibly declines to. Amendment 2c §9.1's two-conjunct rule is what replaces it.
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -1588,7 +1689,9 @@ writing an encoder.**
 
 `0x0010` `DlvProofMaterial` left this table at amendment 2c-A: for beta's only declared pricing
 family nothing irreducible remains, so §5.22 defines it with **zero fields** rather than inventing
-a witness record. `0x000F` `ConsumedDlvTransition` left it too, fully defined at §5.21.
+a witness record. `0x000F` `ConsumedDlvTransition` left it too, fully defined at §5.21, and
+`0x0011` `TraderAcceptance` left it at amendment 2c-D, fully defined at §5.40. `0x0012` is the last
+object in this table.
 
 One class has a partial table in §5, two are fully specified since 2c-B, and one more is blocked:
 
@@ -1605,13 +1708,17 @@ One class has a partial table in §5, two are fully specified since 2c-B, and on
   prepared `close_authorization` bytes are supplied; 2c-B freezes the foreign grammar for producing
   a fresh one. Encoding closure is not verification closure — production acceptance of the market
   shape remains gated on 2c-C3's `ValidDlvSuccessor`, and on 2c-C4's realization fact, whose final
-  conjunct only 2c-D can supply.
-- `0x0011` `TraderAcceptance` blocks on the encoding of `(C_T^+, σ_T^+)`, which is ordinary DSM
+  conjunct only 2c-D can supply — **and 2c-D supplies it** (§5.40, §5.41), leaving the gate on that
+  amendment's adopting change.
+- `0x0011` `TraderAcceptance` **blocked** on the encoding of `(C_T^+, σ_T^+)`, which is ordinary DSM
   successor material rather than a SoFi object, and therefore needs a decision about whether
   the DSM core encoding is referenced or restated. **Answered by 2c-B**: `0x0031`
   `DsmSuccessorEvidence` (§5.23) references the DSM successor material rather than restating it.
   Ownership of `0x0011` itself is **2c-D's** — 2c-B disclaims it, and 2c-C4 records that `TA_B`
-  verification moves with its field table.
+  verification moves with its field table. **2c-D has exercised that ownership**: the field table is
+  §5.40 and its verification is 2c-D §7. The nine-field draft in amendment 2c §2 is superseded —
+  four coordinates left because they are recoverable from the authenticated `b`, and `bundle` left
+  because the authenticated leaf is the single source of truth for it.
 
 ## 6a. Amendment 2b — opening object audit
 
@@ -1806,9 +1913,9 @@ In order, and not combined:
    An accidental transport field must not become canonical merely because it exists in
    protobuf.
 
-   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-D; 2c-A, 2c-B, 2c-C1–C4 and
-   2c-C3.1 are written; 2c-A.1 authorizes the encoder, and its adopting change landed 2026-09-09.
-   Only 2c-D remains unwritten.**
+   **2c. Settlement and evidence profile — DECOMPOSED into 2c-A…2c-E; ALL ARE WRITTEN. 2c-A,
+   2c-A.1, 2c-B, 2c-C1–C4, 2c-C3.1, 2c-E and 2c-D are frozen; 2c-A.1's and 2c-E's adopting changes
+   landed 2026-09-09, and 2c-D's is owed.**
    `DlvProofMaterial` `0x0010`, finishing `ConsumedDlvTransition` `0x000F`, `SettlementBundle`
    `0x000E`, the new `MarketTerms` `0x0033`, and `TraderAcceptance` `0x0011`. Needs the route and
    bundle identity from 2b.
@@ -1956,8 +2063,31 @@ In order, and not combined:
      **2c-E allocates no class number.** Its adopting change — the encoder
      and strict decoder cut to schema 2 with schema-1 bytes refused as burned, the formal predicate,
      the producer, the class-1 market vector regenerated exactly once from it, and three mutation
-     controls — is NOT started.
-   - **2c-D.** `TraderAcceptance` `0x0011` and the bundle-acceptance leaf.
+     controls — **LANDED 2026-09-09**: `(0x000B, 1)`, `(0x0033, 1)` and `(0x000E, 1)` are in
+     `ccb::schema::BURNED`, the fifteenth Lean module is pinned in CI, and the market operands are
+     the genuine producer's.
+   - **2c-D — WRITTEN.** [`amendment-2c-d-bundle-acceptance-and-realization.md`](amendment-2c-d-bundle-acceptance-and-realization.md).
+     The fourth and final amendment of the series, and the one every other member stopped at.
+     Defines `0x0032` `EconomicBundleAcceptanceState` (§5.41) — a substrate leaf state nested in
+     `0x001E`, carrying exactly one field, `bundle`. Its CONTENT commits `b`; its POSITION stays
+     operation-derived per amendment 2c §9.1, keyed on `C_dsm+`, the identity of the exact accepted
+     transition — `operation_digest` would name the operation but not the transition and would let
+     one operation against two parents collide. Re-derives `TraderAcceptance` `0x0011` (§5.40) from
+     nine fields to four; a **first freezing, not an amendment to frozen bytes**, so nothing is
+     burned. Two owner rulings: `trader_genesis` SURVIVES as a carried authenticated witness because
+     it is not recoverable from `b` — it enters only through `sigma_dsm`'s signing digest, so a
+     verifier can check but not recover it — while field 1 `bundle` LEAVES, because once the leaf is
+     authenticated it is the single source of truth for `b` and a second copy is the same defect the
+     registry already refuses for `post_economic_root`. The invariant both share: *one authoritative
+     source per coordinate wherever derivation permits it.* `trader_devid` is dropped as
+     `operation_bytes.settler_devid` — NOT as `recovery_material.counterparty_devid`, which is only
+     the trader's under a self-loop shape nothing verifies — and that route forces a new conjunct:
+     the DevID used to reconstruct the signing digest must equal `settler_devid`, since G1–G4 never
+     relate the trader's two appearances. Gives `BundleAcceptanceWitness` its only constructor, so
+     2c-C4's boundary holds by construction. **2c-D allocates `0x0032` and moves no schema.** Its
+     adopting change — the registry rows (this document), the domain tag, the fifth `EconomicState`
+     arm, the write-set arm, the verifier, the witness constructor, class-1 vectors, Req 21.15's
+     realize half and Req 21.16, a Lean module, and six mutation controls — is NOT started.
 
    **Prerequisite inside 2c.** `TA_B` carries ordinary DSM successor material
    `(C_T^+, σ_T^+)`. The repository's `CanonicalEncode` trait is described as the single
@@ -2015,6 +2145,6 @@ CCB(V_n))` is computable and therefore so is `h_n = c_{n-1}`. What remains befor
 be *implemented* is step 3 of this list, not another normative amendment: an encoder that emits
 `CCB(VaultStateV2)` and is checked against an independent one.
 
-The two still-blocked classes — `0x0011` and `0x0012` — belong to the remaining settlement
-sub-amendments and do not gate Anchor V2. (`0x000C`, `0x000D` and `0x0010` are now defined, and
-`0x0014` is burned.)
+The one still-blocked class — `0x0012` — belongs to the remaining settlement sub-amendments and
+does not gate Anchor V2. (`0x0011` was the second until 2c-D defined it at §5.40; `0x000C`,
+`0x000D` and `0x0010` are now defined, and `0x0014` is burned.)
