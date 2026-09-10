@@ -330,7 +330,10 @@ Doctrine wins — a caller-chooseable position is a worse defect than a more exp
 ## §6 — `TraderAcceptance` — class `0x0011`, schema 1, re-derived
 
 `ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B))`. The `/v2` is the tag Rev 15 reserves
-for this artifact and is **not** a schema version; the CCB schema is 1. This class has never been
+for this artifact and is **not** a schema version; the CCB schema is 1. **8,308 bytes**: 4 envelope
++ 32 `G` + 8 position + the 68-byte nested `0x0032` + 4 sequence count + 256×32 siblings. An earlier
+revision of this section said 8,276, computed while `0x0032` still had one field; ruling D3 gave it a
+second, and a nested object's size is the enclosing object's size. This class has never been
 produced — the registry status is *"blocked — 2c-D"* — so this is a **first freezing, not an
 amendment to frozen bytes**, and no schema is burned.
 

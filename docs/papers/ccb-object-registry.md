@@ -178,6 +178,18 @@ This rule exists because "sub-object by digest" relocates ambiguity rather than 
 A digest is only well-defined once the preimage is, so a registry that inserted policies by
 digest without defining the policies would leave the same hole one layer down.
 
+**Byte counts in this document are DERIVED, and nesting propagates them.** §2.7 already makes a
+nested schema bump propagate upward mechanically; the same is true of a nested object's *size*, and
+that consequence is easier to miss because no envelope changes to announce it. A `§5` section
+stating "N bytes" is a computed value, not a constant: when a nested class gains, loses or resizes a
+field, every enclosing section's count must be recomputed in the same change.
+
+This is recorded because it was violated once. Amendment 2c-D ruling D3 gave `0x0032` a second
+field, taking it from 36 to 68 bytes. §5.41's own count was corrected; §5.40's, which nests it, was
+not — leaving `TraderAcceptance` pinned at 8,276 when its canonical encoding is 8,308. Nothing
+caught it until an encoder was written against the section and disagreed by exactly 32 bytes. A byte
+count no implementation has yet reproduced is an assertion, not a fact.
+
 ### 2.8 The discriminant and field-number namespace
 
 Object classes are assigned from the single table in §3. Field numbers are assigned per object
@@ -1584,7 +1596,8 @@ state only when `0x002D` is promoted to a class with a preimage — a normative 
 
 ### 5.40 `TraderAcceptance` — class `0x0011`, schema 1
 
-**8,276 bytes.** `ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B))`. The `/v2` is the
+**8,308 bytes** — 4 envelope + 32 `G` + 8 position + the 68-byte nested `0x0032` + 4 sequence
+count + 256×32 siblings. `ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B))`. The `/v2` is the
 tag Rev 15 reserves for this artifact and is **not** a schema version.
 
 Frozen by [amendment 2c-D](amendment-2c-d-bundle-acceptance-and-realization.md). This is a **first

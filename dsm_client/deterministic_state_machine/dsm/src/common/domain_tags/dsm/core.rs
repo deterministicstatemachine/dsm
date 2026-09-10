@@ -86,6 +86,17 @@ pub const TAG_SETTLEMENT_RECEIPT_SIGN: TaggedHashDomain<'static> =
 /// root, because the pointer is published BEFORE the advance that produces it.
 pub const TAG_SETTLEMENT_RECEIPT_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/settlement-receipt-commit/v1");
+/// `ta_B = H(tag ‖ 0x00 ‖ CCB(TA_B))` — the identity of a trader acceptance
+/// (class `0x0011`, amendment 2c-D §6, registry §5.40).
+///
+/// The `/v2` is the tag Rev 15 reserves for this artifact and is **not** a
+/// schema version; the CCB schema is 1. Distinct from every
+/// `settlement-receipt` domain above: a receipt is the trader's own claim that
+/// a settlement committed, while `TA_B` packages the bundle-acceptance leaf and
+/// its inclusion proof. Confusing the two would let a receipt's identity stand
+/// in for an acceptance's.
+pub const TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/trader-settlement-acceptance/v2");
 /// Deterministic receipt id: `H(tag ‖ vault_id ‖ x)`. Derived, not chosen, so the pointer
 /// publisher and the settling advance agree on it without coordinating.
 pub const TAG_SETTLEMENT_RECEIPT_ID: TaggedHashDomain<'static> =
@@ -134,6 +145,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_VAULT_RESERVE_STATE,
     TAG_SETTLEMENT_RECEIPT_LEAF,
     TAG_SETTLEMENT_RECEIPT_STATE,
+    TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
     TAG_SETTLEMENT_RECEIPT_SIGN,
     TAG_SETTLEMENT_RECEIPT_COMMIT,
     TAG_SETTLEMENT_RECEIPT_ID,
