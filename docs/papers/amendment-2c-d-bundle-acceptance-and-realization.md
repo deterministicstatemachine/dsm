@@ -559,7 +559,11 @@ cannot proceed without.
 7  class-1 conformance vectors for 0x0032 and 0x0011 from an INDEPENDENT
    encoder, never the production encoder under test.
 
-8  Req 21.15's realize half and Req 21.16 in full.
+8  Req 21.15's realize half and Req 21.16 in full. Req 21.16 verifies the
+   published Receipt under the INDEPENDENTLY DERIVED TRADER `post_root` (the
+   device SMT), never under `R_T^+` (the economic SMT) and never under a root
+   the Receipt itself carries — see 2c-C4 §9's root disambiguation. The two
+   roots authenticate different claims and neither substitutes for the other.
 
 9  the fifteenth Lean module's successor, or an extension of
    DSMAcceptedSuccessorWalk, discharging §7's ordering and the two-conjunct

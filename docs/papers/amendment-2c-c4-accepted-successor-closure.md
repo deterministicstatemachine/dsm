@@ -527,11 +527,86 @@ Req 21.15 half-completion — THE WITHHOLD HALF, owed here: bind, withhold the
 Req 21.16 receipt-verifier — OWED BY 2c-D in full: no TA_B can be parsed here.
     When it lands it must establish, from the published receipt set alone: retrieve
     and verify TA_B; prove the commitment carries the exact bundled trader
-    parent/successor; verify sigma_dsm directly over it; verify the inclusion proof
-    under the DERIVED root (§1.1's correction); match (b, X); and reproduce the DLV
-    reserve deltas — with removal or substitution of TA_B, C_dsm+, sigma_dsm or the
+    parent/successor; verify sigma_dsm directly over it; verify the receipt leaf's
+    inclusion proof under the INDEPENDENTLY DERIVED/AUTHENTICATED TRADER `post_root`
+    (see the disambiguation below); match (b, X); and reproduce the DLV reserve
+    deltas — with removal or substitution of TA_B, C_dsm+, sigma_dsm or the
     inclusion proof each failing closed.
 ```
+
+### Which root — a normative clarification (owner ruling, 2026-09-10)
+
+The phrase *"under the DERIVED root"* above was ambiguous, and the ambiguity is
+load-bearing enough that it was settled before Req 21.16 was implemented rather than
+after. **Two different authenticated structures are in play, and they prove different
+things:**
+
+```text
+TA_B / BundleAcceptanceWitness
+    acceptance_leaf
+        -> economic SMT path
+        -> R_T^+                     established by 2c-D §7
+
+Published Receipt
+    receipt leaf
+        -> trader DEVICE SMT path
+        -> post_root                 verified by Req 21.16
+```
+
+> ```text
+> RULING — Req 21.16 root disambiguation
+>
+> Req 21.16 verifies the published Receipt's inclusion in the trader DEVICE
+> SMT under the independently established post_root.
+>
+> It does NOT verify the Receipt leaf under R_T^+.
+>
+> Amend the normative wording "under the DERIVED root" to name the root
+> explicitly:
+>
+>     "under the independently derived/authenticated trader post_root"
+>
+> The verifier MUST NOT accept a root merely because the Receipt carries or
+> names it. The expected post_root is an independent input/fact obtained from
+> the already validated successor/economic-admission path.
+>
+> Req 21.16 should therefore:
+>
+> 1. Parse the canonical Def 14.2 Receipt.
+> 2. Recompute all receipt identity/key material required by Def 14.2.
+> 3. Require its settlement/operation identity to correspond to the settlement
+>    being verified.
+> 4. Reconstruct the receipt leaf exactly.
+> 5. Verify the ordered SMT inclusion path for that leaf against the
+>    independently established trader post_root.
+> 6. Refuse malformed/noncanonical receipt bytes, wrong key/position,
+>    wrong operation/settlement identity, altered path, or a path that folds
+>    to any root other than that post_root.
+> 7. Return only a typed verified-receipt fact; decoding a Receipt alone is
+>    not evidence that value moved.
+>
+> Do not substitute R_T^+ for post_root and do not add the Receipt leaf to the
+> economic SMT.
+> ```
+
+**Reusing `R_T^+` here would be a category error.** The public receipt leaf is not an
+economic-state leaf; `R_T^+` is the root §7 already uses to prove the exact bundle `b`
+was accepted into the economic post-state. The two roots authenticate different
+claims, and collapsing them would let one stand in for the other.
+
+**The load-bearing word is DERIVED.** A receipt cannot prove itself by carrying a root
+and then supplying a path to that same root — which is precisely the defect
+`settlement_receipt_leaf`'s own banner records, where `trader_genesis`, `trader_devid`
+and `post_root` are all read out of the receipt so that *"the honest-path fixture and
+a forgery are byte-identical constructions"*. The expected `post_root` must come from
+the already-validated successor / economic-admission path, independently of the
+receipt being checked.
+
+That is also why the existing warning on that type is correct rather than pessimistic.
+**Serialization authenticity is not settlement authenticity.** After §7 one can
+establish that the exact bundle was economically accepted; Req 21.16 then establishes
+that the published receipt corresponds to the authenticated device post-state rather
+than being a plausible standalone object.
 
 ## Mutation controls
 
