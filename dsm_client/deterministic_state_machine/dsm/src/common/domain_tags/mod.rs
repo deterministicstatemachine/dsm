@@ -143,7 +143,7 @@ mod tests {
     /// deliberately when adding a tag — the same idiom as the CI Lean gate's
     /// hardcoded module count. It is the weakest of the three checks and is
     /// here only to make an accidental edit to the registry loud.
-    const EXPECTED_TAG_COUNT: usize = 347;
+    const EXPECTED_TAG_COUNT: usize = 348;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
