@@ -534,6 +534,12 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
             dsm::ccb::MarketTerms::CLASS,
             dsm::ccb::MarketTerms::SCHEMA,
         ),
+        // Amendment 2c-D: the bundle-acceptance leaf.
+        (
+            "EconomicBundleAcceptanceState",
+            <dsm::economic::state::EconomicBundleAcceptanceState as CcbObject>::CLASS,
+            <dsm::economic::state::EconomicBundleAcceptanceState as CcbObject>::SCHEMA,
+        ),
     ];
 
     // Registry §3, the live column.
@@ -555,6 +561,8 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         (0x0015, 2),
         (0x0016, 2),
         (0x0031, 1),
+        // Amendment 2c-D allocated 0x0032 as the bundle-acceptance leaf state.
+        (0x0032, 1),
         (0x0033, 2),
     ];
 

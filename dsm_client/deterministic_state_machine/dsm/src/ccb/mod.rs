@@ -132,6 +132,11 @@ pub mod class {
     pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
     pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
     pub const ECONOMIC_CONSUMED_SOURCE_STATE: u16 = 0x0022;
+    /// Amendment 2c-D (registry §5.41). The fifth leaf state, and the ONLY one
+    /// whose content a write set cannot bind to the operation: `b` commits
+    /// `trader_successor`, the chain tip over the operation's own bytes, so no
+    /// `DlvSettle` can name it. Its KEY carries the operation binding instead.
+    pub const ECONOMIC_BUNDLE_ACCEPTANCE_STATE: u16 = 0x0032;
 
     /// A complete pre-root → post-root economic transition, carrying its
     /// mutations and its inline credit sources.
@@ -220,8 +225,9 @@ pub mod reserved {
 ///
 /// Same discipline as [`reserved`]: a `CcbObject` impl cannot name one of
 /// these without moving the constant into [`class`], which is a reviewable
-/// diff arriving with the encoder that earns it. `0x0032` is claimed by
-/// amendment 2c for 2c-D with no field table yet, so it belongs here too.
+/// diff arriving with the encoder that earns it. `0x0032` was here while it
+/// was claimed prose; amendment 2c-D gave it a field table and this change is
+/// the encoder that earns it, so it has moved to [`class`].
 pub mod declared_unencoded {
     /// §6 partial table; only `0x0008` blocks it.
     pub const FULFILLMENT_MECHANISM: u16 = 0x0006;
@@ -239,9 +245,6 @@ pub mod declared_unencoded {
     /// carried as a digest in `MarketTerms`; `Q` lives in the receipt
     /// publication set (2c-A ruling 2).
     pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
-    /// Claimed by amendment 2c for 2c-D.
-    pub const CLAIMED_FOR_2C_D: u16 = 0x0032;
-
     pub const ALL: &[u16] = &[
         FULFILLMENT_MECHANISM,
         MARKET_BOUNDS,
@@ -250,7 +253,6 @@ pub mod declared_unencoded {
         TRADE_DIGEST,
         REFERENCE_WINDOW,
         ROUTE_COMMITMENT_BODY,
-        CLAIMED_FOR_2C_D,
     ];
 
     pub fn is_declared_unencoded(object_class: u16) -> bool {
