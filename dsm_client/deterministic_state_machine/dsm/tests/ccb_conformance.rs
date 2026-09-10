@@ -540,6 +540,12 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
             <dsm::economic::state::EconomicBundleAcceptanceState as CcbObject>::CLASS,
             <dsm::economic::state::EconomicBundleAcceptanceState as CcbObject>::SCHEMA,
         ),
+        // Amendment 2c-D: the trader acceptance itself.
+        (
+            "TraderAcceptance",
+            <dsm::economic::trader_acceptance::TraderAcceptance as CcbObject>::CLASS,
+            <dsm::economic::trader_acceptance::TraderAcceptance as CcbObject>::SCHEMA,
+        ),
     ];
 
     // Registry §3, the live column.
@@ -554,6 +560,8 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         // 2c-E cut the intent to the exact-output model, and §2.7 nesting
         // carried the bump into the terms and the bundle that hold it.
         (0x000B, 2),
+        // Amendment 2c-D defined 0x0011; it was "blocked" until then.
+        (0x0011, 1),
         (0x000D, 2),
         (0x000E, 2),
         (0x000F, 1),
