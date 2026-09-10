@@ -10,8 +10,9 @@
 //! its output, and the half a FOREIGN verifier runs.
 //!
 //! ```text
-//! G1  operation_bytes decodes under DlvSettleOperationPreimageV1,
-//!     consuming ALL bytes
+//! G1  operation_bytes decodes under DlvSettleOperationPreimageV1, consuming
+//!     ALL bytes, with every fixed-length semantic field at its required
+//!     length and the signature at the SPX256f length
 //! G2  re-encode(decode(operation_bytes)) == operation_bytes
 //! G3  discriminator == 26 and mode == Unilateral
 //! G4  relationship_chain_tip_v2(<its six inputs>) == trader_successor
@@ -34,7 +35,8 @@
 //! *settled*, or that anything is *realized*. It means the carried evidence
 //! does not disagree with itself. Realization stays unreachable until 2c-D.
 
-use crate::ccb::settlement::MarketTerms;
+use crate::ccb::settlement::{MarketTerms, SPX256F_SIGNATURE_LEN};
+use crate::dlv::successor_validity::AUTHORITY_KEY_LEN;
 use crate::types::device_state::relationship_chain_tip_v2;
 use crate::types::operations::{Operation, TransactionMode};
 
@@ -46,9 +48,19 @@ pub const DLV_SETTLE_DISCRIMINATOR: u8 = 26;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceInvalid {
     /// `G1`. The bytes do not decode under the frozen grammar at all.
+    ///
+    /// This is also what a TRAILING-BYTE preimage reports today: the grammar's
+    /// own decoder refuses leftover input rather than returning a short read,
+    /// so "consumes ALL bytes" is enforced there and surfaces here.
     Undecodable,
-    /// `G1`. They decode, but did not consume every byte. Trailing bytes are a
-    /// second message hiding behind the first.
+    /// `G1`. A decode that did not consume every byte.
+    ///
+    /// UNREACHABLE TODAY, and deliberately kept. `Operation::from_bytes`
+    /// refuses trailing input itself, and a decode that succeeded always
+    /// re-encodes to the same length — so nothing can currently reach this.
+    /// It is a guard on both of those facts: if either stops being true, the
+    /// failure is NAMED here instead of a longer or shorter re-encoding
+    /// slipping through as canonical.
     TrailingBytes { decoded: usize, carried: usize },
     /// `G2`. Canonical re-encoding does not reproduce the carried bytes, so
     /// two encodings of one operation exist and a verifier could disagree with
@@ -60,6 +72,20 @@ pub enum EvidenceInvalid {
     NotASettle,
     /// `G3`. A settle in this profile is `Unilateral`.
     NotUnilateral,
+    /// `G1`. A fixed-length semantic field is not its required length.
+    ///
+    /// The grammar writes these with a `bytes` length prefix, so a SHORT field
+    /// re-encodes to exactly the bytes it came from: `G2` passes, and `G4`
+    /// passes too whenever `trader_successor` was computed over those same
+    /// short bytes. 2c-B names this hostile case explicitly and marks the
+    /// width rule "owed at implementation" — this is that rule, and it is the
+    /// only conjunct standing between a truncated key or signature and an
+    /// otherwise self-consistent bundle.
+    FieldWidth {
+        field: &'static str,
+        expected: usize,
+        got: usize,
+    },
     /// `G4`. The carried successor is not the tip of the carried inputs. This
     /// is the conjunct that makes the evidence self-consistent rather than
     /// merely well-formed.
@@ -91,6 +117,15 @@ impl core::fmt::Display for EvidenceInvalid {
             }
             Self::NotASettle => write!(f, "G3: the decoded operation is not a DlvSettle"),
             Self::NotUnilateral => write!(f, "G3: a settle in this profile is Unilateral"),
+            Self::FieldWidth {
+                field,
+                expected,
+                got,
+            } => write!(
+                f,
+                "G1: {field} is {got} bytes, expected {expected}; a short field re-encodes to \
+                 itself, so G2 and G4 cannot catch it"
+            ),
             Self::SuccessorIsNotTheChainTip { .. } => write!(
                 f,
                 "G4: trader_successor is not relationship_chain_tip_v2 of the carried inputs"
@@ -117,9 +152,9 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
         None => return Err(EvidenceInvalid::Undecodable),
     }
 
-    // G1. `from_bytes` refuses trailing bytes, so a success already means the
-    // grammar consumed all of them; the explicit arm exists so that if that
-    // ever stops being true the failure is named rather than silent.
+    // G1's decode-and-consume rule. `from_bytes` refuses trailing input, so a
+    // success already means the grammar consumed all of it — which is why a
+    // trailing-byte preimage reports `Undecodable` rather than `TrailingBytes`.
     let op = Operation::from_bytes(bytes).map_err(|_| EvidenceInvalid::Undecodable)?;
 
     // G3, on the decoded operation rather than on its first byte.
@@ -130,6 +165,42 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
             }
         }
         _ => return Err(EvidenceInvalid::NotASettle),
+    }
+
+    // G1's width rule. The decoder enforces the digest-shaped fields and
+    // `sigma` (`get_arr32`), but reads `vault_id`, both public keys and the
+    // signature with an unbounded `get_bytes`, so those four are checked here
+    // or nowhere. 2c-B's table fixes each length.
+    if let Operation::DlvSettle {
+        vault_id,
+        owner_public_key,
+        settler_public_key,
+        signature,
+        ..
+    } = &op
+    {
+        for (field, expected, got) in [
+            ("vault_id", 32usize, vault_id.len()),
+            (
+                "owner_public_key",
+                AUTHORITY_KEY_LEN,
+                owner_public_key.len(),
+            ),
+            (
+                "settler_public_key",
+                AUTHORITY_KEY_LEN,
+                settler_public_key.len(),
+            ),
+            ("signature", SPX256F_SIGNATURE_LEN, signature.len()),
+        ] {
+            if got != expected {
+                return Err(EvidenceInvalid::FieldWidth {
+                    field,
+                    expected,
+                    got,
+                });
+            }
+        }
     }
 
     // G2.
@@ -216,6 +287,73 @@ mod tests {
             }
             other => panic!("expected G4 refusal, got {other:?}"),
         }
+    }
+
+    /// THE HOSTILE CASE 2c-B NAMES, and the reason the width rule exists.
+    ///
+    /// The signature is truncated INSIDE `operation_bytes`, and the successor
+    /// is then recomputed over those same short bytes. `G1`'s decode succeeds,
+    /// `G2`'s re-encode reproduces them exactly (a `bytes` field re-encodes to
+    /// whatever length it had), `G3` still sees discriminator 26 and
+    /// Unilateral, and `G4`'s chain tip MATCHES — because the attacker
+    /// computed it over the very bytes being checked. Only the width rule
+    /// refuses, which is why 2c-B lists it and marks it owed at
+    /// implementation.
+    #[test]
+    fn a_short_signature_is_refused_even_though_the_chain_tip_agrees() {
+        let mut t = produced().clone();
+        let mut op = Operation::from_bytes(&t.recovery_material.operation_bytes).unwrap();
+        if let Operation::DlvSettle { signature, .. } = &mut op {
+            signature.truncate(8);
+        }
+        t.recovery_material.operation_bytes = op.to_bytes();
+        // Recompute the tip so G4 CANNOT be what fires.
+        t.trader_successor = relationship_chain_tip_v2(
+            &t.recovery_material.rel_key,
+            &t.recovery_material.embedded_parent,
+            &t.recovery_material.counterparty_devid,
+            &t.recovery_material.operation_bytes,
+            &t.recovery_material.entropy,
+            None,
+        );
+        assert_eq!(
+            check_market_evidence(&t),
+            Err(EvidenceInvalid::FieldWidth {
+                field: "signature",
+                expected: SPX256F_SIGNATURE_LEN,
+                got: 8,
+            })
+        );
+    }
+
+    /// The same shape for a truncated authority key: G2 and G4 both pass.
+    #[test]
+    fn a_short_settler_key_is_refused_even_though_the_chain_tip_agrees() {
+        let mut t = produced().clone();
+        let mut op = Operation::from_bytes(&t.recovery_material.operation_bytes).unwrap();
+        if let Operation::DlvSettle {
+            settler_public_key, ..
+        } = &mut op
+        {
+            settler_public_key.truncate(16);
+        }
+        t.recovery_material.operation_bytes = op.to_bytes();
+        t.trader_successor = relationship_chain_tip_v2(
+            &t.recovery_material.rel_key,
+            &t.recovery_material.embedded_parent,
+            &t.recovery_material.counterparty_devid,
+            &t.recovery_material.operation_bytes,
+            &t.recovery_material.entropy,
+            None,
+        );
+        assert_eq!(
+            check_market_evidence(&t),
+            Err(EvidenceInvalid::FieldWidth {
+                field: "settler_public_key",
+                expected: AUTHORITY_KEY_LEN,
+                got: 16,
+            })
+        );
     }
 
     #[test]
