@@ -724,6 +724,13 @@ pub(crate) async fn is_external_commitment_visible(
 pub(crate) struct AmmVerifyOutcome {
     pub new_reserve_a: u64,
     pub new_reserve_b: u64,
+    /// The checked amounts, narrowed from the 16-byte wire ONCE — here, where
+    /// the check lives. 5c-2 Step 4 needs them to build the settle the trader
+    /// signs, and re-narrowing at the settlement boundary is exactly how the
+    /// difference gets minted (see the narrowing's own comment). Returning
+    /// them is the alternative to a second narrowing site.
+    pub input_amount: u64,
+    pub expected_output: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -870,6 +877,8 @@ pub(crate) fn verify_amm_swap_against_reserves(
     Ok(Some(AmmVerifyOutcome {
         new_reserve_a,
         new_reserve_b,
+        input_amount,
+        expected_output,
     }))
 }
 

@@ -1,28 +1,33 @@
 # SoFi LP Walkthrough — Alice's Journey
 
-> ## STATUS 2026-09-09 — the trade step is fail-closed today
+> ## STATUS 2026-09-10 — the trade binds but does not realize
 >
-> The trader's routed settlement (`dlv.unlockRouted`) is deliberately **fail-closed** on `main` and
-> refuses before binding anything:
+> `dlv.unlockRouted` now carries a trade all the way through publication, the
+> trader-parent fence and QuorumBind to a **committed binding**, and returns
+> `bound-unrealized:<bundle digest>`. 5c-2 Step 2 built the producer that made a
+> canonical market bundle constructible, and Step 4 wired the live path to it.
 >
-> > `dlv.unlockRouted: market settlement is deployment-blocked until 5c-2 Step 2 — a canonical`
-> > `market bundle needs the bundled trader successor evidence, which this device cannot produce`
-> > `before it advances; vault <id> parent <c_n> (generation <n>) was NOT bound and nothing moved`
+> **It stops there, deliberately.** The end state is BOUND-BUT-UNREALIZED:
 >
-> This is a **deployment block, not a bug and not a misconfiguration**. No setting lifts it. The
-> refusal fires *after* every eligibility gate passes, and nothing is stored, fenced, bound, signed
-> or advanced when it does: the trader's balances do not move and the vault generation stays free.
+> ```text
+> WHAT HAPPENS        the bundle publishes to a quorum of the vault's committed
+>                     storage set; the trader's own parent is fenced; the bundle
+>                     binds; the generation is occupied by that exact trade
+> WHAT DOES NOT       no balance moves, no head advances, no reserves move, no
+>                     receipt is published, and the fence is NOT released
+> ```
 >
-> The reason is an ordering one. A canonical market bundle must carry the trader's prepared
-> successor and its `0x0031` successor evidence, and today the trader binds BEFORE it advances, so
-> there is no signed successor to name and nothing may be fabricated in its place. 5c-2 Step 2 is
-> the only thing that lifts it.
+> That is not a failure and not a partial write. Binding a trade is not settling
+> it. Realization — the acceptance witness, the fence release, the receipt and
+> the realized frontier — waits on **2c-D**, by construction rather than by
+> configuration.
 >
-> **What still works:** vault creation and funding, routing advertisement, discovery, quoting, and
-> the **owner close path**, which is live and unaffected.
+> A re-submission of the same trade is accepted rather than refused: the
+> generation is bound by that very trade, and a trader retrying after a dropped
+> response must not be told the vault is taken by someone else.
 >
-> This document is about concepts, and the concepts are unchanged. Only the click-path note
-> that says the unlock proceeds is currently untrue on `main`.
+> **What still works exactly as written:** vault creation and funding, routing
+> advertisement, discovery and quoting. **The owner close path is unchanged.**
 
 
 A side-by-side narrative for liquidity providers transitioning from
