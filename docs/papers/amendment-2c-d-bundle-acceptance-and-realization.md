@@ -584,6 +584,41 @@ cannot proceed without.
    - a witness minted anywhere but §7 -> must not compile.
 ```
 
+### The boundary between item 8 and the cutover (owner ruling, 2026-09-10)
+
+**Item 8 completes the realization predicate. It does not make realization live.**
+
+#847 made `BundleAcceptanceWitness` constructible once §7 succeeds. Item 8 —
+Req 21.15's realize half and Req 21.16's independently-rooted receipt
+verification — finishes the *evidence*: after it, everything
+`IndependentRealization` requires is checkable. Nothing about that changes what
+the system does.
+
+```text
+Req 21.15 realize-half + Req 21.16          verification machinery
+        |
+        v
+all evidence required for IndependentRealization is CHECKABLE
+        |
+        v
+realization / fence-release cutover         the behavioural change
+        |
+        v
+the live composition walk may actually realize,
+release the trader fence, and permit final receipt publication
+```
+
+**Why this is a rule and not a preference.** If the first live behaviour change
+is smeared across two changes, it stops being provable that nothing releases
+early — a reviewer would have to establish the negative across both, and the
+one PR that flips market settlement from bound-but-unrealized to realized would
+no longer be identifiable. Keeping the cutover to exactly one change is what
+makes "nothing released before it" checkable rather than argued.
+
+So item 8 must add no fence release, no receipt publication, no promotion of a
+market fold out of `PartialPendingRealization`, and no call site that
+constructs an `IndependentRealization`. It adds the last verifier, and stops.
+
 ---
 
 ## §12 — Scope
