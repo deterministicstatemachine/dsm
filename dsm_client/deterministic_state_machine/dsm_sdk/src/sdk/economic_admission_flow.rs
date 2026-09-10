@@ -296,6 +296,7 @@ pub(crate) fn build_dsm_admission(
     facts: &CreditSourceFacts,
     authority: &AuthorityMaterial,
     extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+    context: &dsm::economic::write_set::EconomicWriteContext,
 ) -> Result<DsmAdmissionParts, DsmError> {
     let pre_root = tree.root();
     let c_dsm_plus = chain_state.compute_chain_tip();
@@ -311,6 +312,7 @@ pub(crate) fn build_dsm_admission(
         &pre_state.as_write_set_pre_state(),
         tree,
         facts,
+        context,
     )
     .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
     // THE DEBIT LOCATOR IS A TRANSFER FACT, AND ONLY A TRANSFER FACT. Its one
@@ -593,6 +595,7 @@ pub(crate) async fn admitted_self_loop_operation(
                 &facts,
                 &authority,
                 extra_artifacts,
+                &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
             )?;
             let coords = parts.coords;
             let artifacts = parts.artifacts.clone();
@@ -739,6 +742,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
                     &facts,
                     &authority,
                     extra_artifacts,
+                    &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
                 )?;
                 let coords = parts.coords;
                 let artifacts = parts.artifacts.clone();
@@ -812,9 +816,15 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
 /// trader's own chain accepted the successor; the market fold stays
 /// `PartialPendingRealization`.
 #[allow(clippy::too_many_arguments)]
+/// `bundle_id` is `b` — the identity of the exact canonical bundle this settle
+/// is composed around. Required, never optional: without it the write set
+/// cannot emit the acceptance leaf realization needs (2c-D producer adoption),
+/// and a settle that silently omitted it would sit at
+/// `PartialPendingRealization` forever.
 pub(crate) async fn admitted_dlv_settle<A>(
     core: &CoreSDK,
     operation: Operation,
+    bundle_id: [u8; 32],
     rel_key: [u8; 32],
     counterparty_devid: [u8; 32],
     initial_chain_tip: [u8; 32],
@@ -900,6 +910,13 @@ pub(crate) async fn admitted_dlv_settle<A>(
                     &facts,
                     &authority,
                     extra_artifacts,
+                    // THE SETTLE'S BUNDLE CONTEXT. `b` came from the
+                    // composition layer; the operation identity is derived
+                    // from the authenticated transition inside the builder.
+                    // Two facts, two origins — ruling D3's three-way binding
+                    // depends on that separation, so neither is derived from
+                    // the other here.
+                    &dsm::economic::write_set::EconomicWriteContext::DlvSettle { bundle_id },
                 )?;
                 let coords = parts.coords;
                 let artifacts = parts.artifacts.clone();
@@ -1872,6 +1889,7 @@ pub(crate) fn build_recipient_admission(
         &facts,
         &prereqs.authority,
         extra_artifacts,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )?;
 
     // ── The RELEASE: every field an output of THIS build, signed now,

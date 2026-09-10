@@ -121,6 +121,7 @@ fn round_trip(
         &EconomicPreState::balances_only(&balances),
         &mut tree,
         facts,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let witness = witness_for(pre_root, built, operation);
@@ -228,6 +229,7 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
         &EconomicPreState::balances_only(&balances),
         &mut tree,
         &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect_err("initial supply cannot be funded");
     assert_eq!(
@@ -249,6 +251,7 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
             &EconomicPreState::balances_only(&b),
             &mut t,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .unwrap();
         witness_for(pre, built, &burn(500, era()))
@@ -277,6 +280,7 @@ fn a_debit_with_an_extra_mutation_is_refused() {
         &EconomicPreState::balances_only(&balances),
         &mut tree,
         &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .unwrap();
     let mut mutations = built.mutations;
@@ -343,6 +347,7 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         &EconomicPreState::balances_only(&BTreeMap::new()),
         &mut tree,
         &facts,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .unwrap();
     // Strip the consumed-source mutation; keep only the balance credit and
@@ -408,6 +413,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &EconomicPreState::balances_only(&balances),
             &mut tree.clone(),
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect_err("a credit with no source is not fundable"),
         WriteSetError::FactsDoNotMatchOperation
@@ -423,6 +429,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: [0xA9; 32],
         },
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("issuance facts make the mint buildable");
     assert_eq!(built.mutations.len(), 1, "one balance credit, nothing else");
@@ -449,6 +456,7 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &CreditSourceFacts::AuthorizedIssuance {
                 issuance_authorization_addr: [0xA9; 32],
             },
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect_err("zero units is not issuance"),
         WriteSetError::NoEconomicWriteSet
@@ -467,6 +475,7 @@ fn insufficient_balance_refuses_the_exact_debit() {
             &EconomicPreState::balances_only(&balances),
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::InsufficientBalance {
             have: 10,
@@ -690,6 +699,7 @@ fn dlv_round_trip(
         },
         &mut tree,
         &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let witness = witness_for(pre_root, built, operation);
@@ -821,6 +831,7 @@ fn cross_paired_same_move_sources_are_refused() {
         },
         &mut tree,
         &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .unwrap();
     // Swap the two debit indices between the sources.
@@ -869,6 +880,7 @@ fn a_funded_create_builder_refuses_bad_pre_state() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::InsufficientBalance { .. })
     ));
@@ -887,6 +899,7 @@ fn a_funded_create_builder_refuses_bad_pre_state() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
@@ -944,6 +957,7 @@ fn a_close_builder_requires_the_exact_reserve_pre_state() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
@@ -961,6 +975,7 @@ fn a_close_builder_requires_the_exact_reserve_pre_state() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
@@ -1023,6 +1038,11 @@ fn the_dlv_value_write_sets_demand_their_facts() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            // Bundle context SUPPLIED, so the refusal below is about the facts
+            // and not about the context this settle is missing.
+            &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+                bundle_id: [0xBB; 32]
+            },
         ),
         Err(WriteSetError::FactsDoNotMatchOperation)
     ));
@@ -1040,6 +1060,7 @@ fn the_dlv_value_write_sets_demand_their_facts() {
             },
             &mut tree,
             &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::FactsDoNotMatchOperation)
     ));
