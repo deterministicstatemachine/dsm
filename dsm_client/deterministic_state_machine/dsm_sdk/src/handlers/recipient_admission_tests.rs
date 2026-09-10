@@ -244,6 +244,7 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
             peer_debit_mutation_index: 0,
             acceptance_evidence_addr: [0xAD; 32],
         },
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect_err("the consumed-source leaf is already present — a second credit must refuse");
     assert!(

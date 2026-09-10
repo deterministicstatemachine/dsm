@@ -1328,6 +1328,7 @@ impl AppRouterImpl {
                 &dsm::economic::write_set::CreditSourceFacts::None,
                 &econ_authority,
                 Vec::new(),
+                &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
             )?;
             let econ_debit_index = econ_parts.debit_mutation_index.ok_or_else(|| {
                 dsm::types::error::DsmError::invalid_operation(

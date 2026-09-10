@@ -398,6 +398,9 @@ fn fixture() -> Fixture {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
+        },
     )
     .expect("the settle write set builds");
     let witness = EconomicTransitionWitness::new(
@@ -896,6 +899,9 @@ fn a_noncanonical_committed_quorum_is_refused_before_the_cell_is_read() {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
+        },
     )
     .expect("builds");
     let witness = EconomicTransitionWitness::new(
@@ -1090,6 +1096,9 @@ fn a_second_settle_on_the_same_parent_is_refused_at_build() {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: fx.evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
+        },
     )
     .expect_err("a second settle on the same (vault, x) must refuse");
     assert!(
@@ -1123,6 +1132,9 @@ fn a_receipt_id_that_does_not_derive_from_vault_and_x_is_refused() {
         &CreditSourceFacts::DlvReserveConsumption {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: fx.evidence_addr,
+        },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
         },
     )
     .expect_err("a mismatched receipt id must refuse");
@@ -1205,6 +1217,9 @@ fn an_insufficient_output_reserve_is_refused() {
         &CreditSourceFacts::DlvReserveConsumption {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: evidence_addr,
+        },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
         },
     )
     .expect("builds");
@@ -1297,6 +1312,9 @@ fn an_artifact_proving_another_generation_selects_nothing() {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: evidence_addr,
         },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
+        },
     )
     .expect("builds");
     let witness = EconomicTransitionWitness::new(
@@ -1385,6 +1403,9 @@ fn proven_leaves_that_disagree_with_v_n_are_refused() {
         &CreditSourceFacts::DlvReserveConsumption {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: evidence_addr,
+        },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
         },
     )
     .expect("builds");
@@ -1480,6 +1501,9 @@ fn an_over_paying_trade_is_refused_by_re_simulation_alone() {
         &CreditSourceFacts::DlvReserveConsumption {
             owner_economic_position: OWNER_POSITION,
             reserve_consumption_evidence_addr: fx.evidence_addr,
+        },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
         },
     )
     .expect("builds");
