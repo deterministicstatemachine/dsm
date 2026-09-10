@@ -232,6 +232,60 @@ impl EconomicConsumedSourceState {
     }
 }
 
+/// `0x0032` schema 1 — the write-once record that one accepted economic
+/// transition committed one exact `SettlementBundle` (amendment 2c-D, registry
+/// §5.41).
+///
+/// **THE ONE LEAF WHOSE CONTENT A WRITE SET CANNOT CHECK.** Every other leaf
+/// here has its content bound to the operation by `verify_operation_write_set`
+/// — a settle is exactly one debit, one credit and one receipt insertion, and
+/// that receipt must equal the facts derived from the operation. This one
+/// structurally cannot be: `b` commits `trader_successor`, which is the chain
+/// tip taken over the operation's own bytes, so no `DlvSettle` can name the
+/// value this leaf carries. Amendment 2c §9.1 writes that down rather than
+/// letting it weaken the invariant invisibly, and replaces the missing binding
+/// with two conjuncts, neither sufficient alone: economic validity establishes
+/// presence, shape and cardinality here; `TA_B` realization separately
+/// establishes that the value is the exact `b`.
+///
+/// So the honest reading of a leaf on its own is narrow. **Holding one does
+/// NOT establish that the bundle it names is binding-final, accepted, or
+/// realized** — only that the identity whose tree it sits in wrote it at the
+/// position its own accepted transition fixes. The realization claim belongs
+/// to 2c-D §7's seven ordered conjuncts, and this type must never be read as a
+/// shortcut through them.
+///
+/// **`economic_operation_id` is not caller-authoritative** even though it is
+/// carried. §7 requires the three-way equality
+/// `leaf == witness == recompute(G, DevID, C_dsm+)`; the middle term alone
+/// would not do, because the witness's own id is authoritative only by being
+/// recomputed. Field 2 follows [`EconomicConsumedSourceState`]'s precedent,
+/// which carries the same id for attribution — here it also fixes the
+/// position. See [`crate::economic::keys::bundle_acceptance_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EconomicBundleAcceptanceState {
+    /// `b` — the exact `SettlementBundle` this acceptance realizes.
+    pub bundle: [u8; 32],
+    /// The authenticated economic operation identity this acceptance belongs
+    /// to. Must equal the enclosing witness's; checked, never trusted.
+    pub economic_operation_id: [u8; 32],
+}
+
+impl CcbObject for EconomicBundleAcceptanceState {
+    const CLASS: u16 = class::ECONOMIC_BUNDLE_ACCEPTANCE_STATE;
+    const SCHEMA: u16 = 1;
+}
+
+impl EconomicBundleAcceptanceState {
+    fn encode(&self) -> Result<Vec<u8>, CcbError> {
+        let mut out = Vec::new();
+        push_envelope::<Self>(&mut out);
+        push_digest32(&mut out, &self.bundle); // 1
+        push_digest32(&mut out, &self.economic_operation_id); // 2
+        Ok(out)
+    }
+}
+
 /// Any leaf of `R_econ`.
 ///
 /// The offline device-bound allocation is deliberately **not** a variant. It
@@ -244,6 +298,7 @@ pub enum EconomicLeafState {
     VaultReserve(EconomicVaultReserveState),
     SettlementReceipt(EconomicSettlementReceiptState),
     ConsumedSource(EconomicConsumedSourceState),
+    BundleAcceptance(EconomicBundleAcceptanceState),
 }
 
 impl EconomicLeafState {
@@ -255,6 +310,7 @@ impl EconomicLeafState {
             Self::VaultReserve(_) => EconomicVaultReserveState::CLASS,
             Self::SettlementReceipt(_) => EconomicSettlementReceiptState::CLASS,
             Self::ConsumedSource(_) => EconomicConsumedSourceState::CLASS,
+            Self::BundleAcceptance(_) => EconomicBundleAcceptanceState::CLASS,
         }
     }
 
@@ -265,6 +321,7 @@ impl EconomicLeafState {
             Self::VaultReserve(s) => s.encode(),
             Self::SettlementReceipt(s) => s.encode(),
             Self::ConsumedSource(s) => s.encode(),
+            Self::BundleAcceptance(s) => s.encode(),
         }
     }
 
@@ -288,7 +345,9 @@ impl EconomicLeafState {
         match self {
             Self::Balance(s) => Some(s.amount),
             Self::VaultReserve(s) => Some(s.amount),
-            Self::SettlementReceipt(_) | Self::ConsumedSource(_) => None,
+            Self::SettlementReceipt(_) | Self::ConsumedSource(_) | Self::BundleAcceptance(_) => {
+                None
+            }
         }
     }
 
@@ -304,6 +363,12 @@ impl EconomicLeafState {
             Self::VaultReserve(s) => (self.class(), vec![s.vault_id, s.policy_commit]),
             Self::SettlementReceipt(s) => (self.class(), vec![s.vault_id, s.receipt_id]),
             Self::ConsumedSource(s) => (self.class(), vec![s.source_id]),
+            // `bundle` is NOT position material: the content commits `b` while
+            // the position is the accepted transition's. Two acceptances of
+            // DIFFERENT bundles under one transition are the same position
+            // holding different values — a conflict, not two leaves. That is
+            // the property that makes "exactly one per operation" enforceable.
+            Self::BundleAcceptance(s) => (self.class(), vec![s.economic_operation_id]),
         }
     }
 
@@ -319,6 +384,9 @@ impl EconomicLeafState {
                 keys::settlement_receipt_key(genesis, device_id, &s.vault_id, &s.receipt_id)
             }
             Self::ConsumedSource(s) => keys::consumed_source_key(genesis, device_id, &s.source_id),
+            Self::BundleAcceptance(s) => {
+                keys::bundle_acceptance_key(genesis, device_id, &s.economic_operation_id)
+            }
         }
     }
 }

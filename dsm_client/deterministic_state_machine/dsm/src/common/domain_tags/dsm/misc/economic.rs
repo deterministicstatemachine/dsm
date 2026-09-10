@@ -52,6 +52,18 @@ pub const TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY: TaggedHashDomain<'static> =
 /// construction rather than by the tree being private.
 pub const TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-consumed-source-key/v1");
+/// `bundle_acceptance` leaf key:
+/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ economic_operation_id)`.
+///
+/// Amendment 2c-D §5 (ruling D3). The identifying field is the authenticated
+/// economic operation identity, which is itself
+/// `H(G ‖ DevID ‖ C_dsm+)` — so the position stays tied to the exact accepted
+/// transition even though the leaf's CONTENT commits `b`, which no operation
+/// can name. Keying on `operation_digest` would name what was performed but
+/// not which successor performed it; keying on `b` would make the position
+/// caller-chooseable, which amendment 2c §9.1 rules the worse defect.
+pub const TAG_DSM_ECONOMIC_BUNDLE_ACCEPTANCE_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-bundle-acceptance-key/v1");
 
 /// The signed preimage of an issuance authorization (class `0x0029`):
 /// `m = H(tag ‖ 0x00 ‖ CCB(IssuanceAuthorizationBody))`.

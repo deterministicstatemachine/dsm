@@ -213,9 +213,13 @@ pub(crate) fn producer_tree_and_pre_state(
                 pre.vault_reserves.insert((r.vault_id, r.policy_commit), r);
             }
             // Write-once records, inserted by a write set and never a
-            // predecessor it reads.
+            // predecessor it reads. The bundle-acceptance leaf (2c-D) belongs
+            // here for the same reason and one more: its `pre` is required to
+            // be `None`, so a pre-state that carried it would contradict the
+            // shape its own write-set arm enforces.
             dsm::economic::state::EconomicLeafState::SettlementReceipt(_)
-            | dsm::economic::state::EconomicLeafState::ConsumedSource(_) => {}
+            | dsm::economic::state::EconomicLeafState::ConsumedSource(_)
+            | dsm::economic::state::EconomicLeafState::BundleAcceptance(_) => {}
         }
     }
     if tree.root() != validated.economic_root() {
@@ -953,10 +957,18 @@ pub(crate) async fn admitted_dlv_settle<A>(
 /// and a consumed-source leaf its own spend marker: no evidence type asks a
 /// stranger to prove either, and each path costs 8 KiB, so publishing them
 /// would grow every admission by that much to prove something nothing reads.
+///
+/// The bundle-acceptance leaf (2c-D, `0x0032`) is citable for the strongest
+/// version of that reason: `TA_B` **is** the evidence type that asks a third
+/// party to verify this exact leaf's inclusion under `R_T^+`, carrying it
+/// inline with its 256-sibling path. Marking it uncitable would mean the path
+/// is never published, and a `TA_B` that cannot be constructed is a market
+/// settlement that can never be realized — a failure that would surface only
+/// at 2c-D §7 step 5, far from this line.
 fn leaf_is_externally_citable(state: &dsm::economic::state::EconomicLeafState) -> bool {
     use dsm::economic::state::EconomicLeafState as L;
     match state {
-        L::VaultReserve(_) | L::SettlementReceipt(_) => true,
+        L::VaultReserve(_) | L::SettlementReceipt(_) | L::BundleAcceptance(_) => true,
         L::Balance(_) | L::ConsumedSource(_) => false,
     }
 }
@@ -2011,4 +2023,78 @@ pub(crate) fn record_ble_ek_steps_from_receipt(
     }
     tx.commit().map_err(|e| storage_err("ek step commit", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod citability_tests {
+    use super::leaf_is_externally_citable;
+    use dsm::economic::state::{
+        EconomicBalanceState, EconomicBundleAcceptanceState, EconomicConsumedSourceState,
+        EconomicLeafState, EconomicSettlementReceiptState, EconomicVaultReserveState,
+    };
+
+    /// Every leaf class states its citability explicitly, so flipping one is a
+    /// red test rather than a silent change in what an admission publishes.
+    ///
+    /// This exists because the classification has no other coverage until a
+    /// write set actually produces a bundle-acceptance leaf: getting it wrong
+    /// for `0x0032` would mean the 256-sibling path is never published, and
+    /// the failure would surface as an unconstructible `TA_B` at 2c-D §7 step
+    /// 5 — far from the line that caused it.
+    #[test]
+    fn every_leaf_class_pins_whether_a_stranger_can_be_asked_to_prove_it() {
+        let citable: [(&str, EconomicLeafState, bool); 5] = [
+            (
+                "balance — this device's own spendable state",
+                EconomicLeafState::Balance(
+                    EconomicBalanceState::new([0x10; 32], 1).expect("nonzero"),
+                ),
+                false,
+            ),
+            (
+                "vault reserve — cited by 0x0026 to fund a trader's settle",
+                EconomicLeafState::VaultReserve(EconomicVaultReserveState {
+                    vault_id: [0x03; 32],
+                    policy_commit: [0x10; 32],
+                    amount: 1,
+                    vault_sequence: 1,
+                }),
+                true,
+            ),
+            (
+                "settlement receipt — cited by 0x0027 to fund an owner's apply",
+                EconomicLeafState::SettlementReceipt(
+                    EconomicSettlementReceiptState::new(
+                        [0x03; 32], [0xA0; 32], 1, 2, [0x10; 32], 1, [0x20; 32], 1,
+                    )
+                    .expect("consistent legs"),
+                ),
+                true,
+            ),
+            (
+                "consumed source — this device's own spend marker",
+                EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
+                    source_id: [0x40; 32],
+                    consumer_economic_operation_id: [0x50; 32],
+                }),
+                false,
+            ),
+            (
+                "bundle acceptance — TA_B asks a third party to prove exactly this",
+                EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
+                    bundle: [0xB0; 32],
+                    economic_operation_id: [0x50; 32],
+                }),
+                true,
+            ),
+        ];
+
+        for (why, state, expected) in citable {
+            assert_eq!(
+                leaf_is_externally_citable(&state),
+                expected,
+                "citability changed for {why}"
+            );
+        }
+    }
 }
