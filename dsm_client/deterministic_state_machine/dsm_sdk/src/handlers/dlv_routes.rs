@@ -12431,6 +12431,218 @@ mod funded_creation_tests {
         );
     }
 
+    /// SOVEREIGN FINANCE END TO END, EVERY STEP ADMITTED — the roadmap's
+    /// fresh-identity two-asset run, in-tree.
+    ///
+    /// Fresh identities only. The owner obtains two assets through the real
+    /// admitted origins — the ERA faucet (0x0030), then two user tokens created
+    /// and minted under 0x0029 authorized issuance — and four fresh traders are
+    /// funded by admitted transfers. Then, on one market:
+    ///
+    /// 1. the owner creates and advertises a funded vault (an admitted create);
+    /// 2. three traders settle while the owner is away (admitted settles,
+    ///    certified folds);
+    /// 3. a stranger composes the vault — from birth;
+    /// 4. the owner syncs: catch-up applies all three oldest-first (admitted
+    ///    applies), anchors a fresh baseline and moves the advertisement;
+    /// 5. the stranger now composes from that baseline to the same frontier, and
+    ///    a fourth trader settles off it — every earlier settle still
+    ///    re-validates, through the birth fallback;
+    /// 6. the owner syncs again and closes (an admitted close);
+    /// 7. the close's proceeds fund a second vault — an admitted create the
+    ///    pre-close balance could not fund.
+    ///
+    /// At every checkpoint each asset is conserved EXACTLY across the owner's
+    /// spendable balance, the vaults' reserves and every trader, and every
+    /// participant's ADMITTED economic balances equal its head's: no value is
+    /// head-only anywhere.
+    #[test]
+    #[serial]
+    fn a_fresh_two_asset_market_runs_its_whole_lifecycle_with_every_step_admitted() {
+        use prost::Message as _;
+        const TOTAL_A: u64 = 75_000;
+        const TOTAL_B: u64 = 20_000;
+        install_identity();
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, TOTAL_A, TOTAL_B);
+        let traders: Vec<_> = [
+            ("trader0", 0xA1u8),
+            ("trader1", 0xA2),
+            ("trader2", 0xA3),
+            ("trader3", 0xA4),
+        ]
+        .into_iter()
+        .map(|(slot, tag)| {
+            let t = participant(slot, tag);
+            owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+            t
+        })
+        .collect();
+        let stranger = participant("stranger", 0xA9);
+        let rt = crate::runtime::get_runtime();
+
+        // Each participant's ADMITTED balances equal its head's, and are returned.
+        let admitted = |dev: &crate::test_support::two_device::TestDevice, who: &str| {
+            dev.enter();
+            let head = dev.router().core_sdk.device_head().expect("head");
+            let (position, root) = crate::storage::client_db::economic_lineage::get_admitted()
+                .expect("admitted read")
+                .unwrap_or_else(|| panic!("{who} holds an admitted position"));
+            let validated =
+                dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                    position, root,
+                );
+            let (_, pre) =
+                crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated)
+                    .expect("the admitted pre-state recomputes the admitted root");
+            for pc in [&pc_a, &pc_b] {
+                assert_eq!(
+                    pre.balances.get(pc).copied().unwrap_or(0),
+                    head.balance(pc),
+                    "{who}: the admitted balance IS the head's balance"
+                );
+            }
+            (head.balance(&pc_a), head.balance(&pc_b))
+        };
+        // Both assets conserved exactly, given every vault's live reserves.
+        let conserved = |step: &str, reserves: &[(u64, u64)]| {
+            let mut sum = admitted(&owner_dev, "owner");
+            for r in reserves {
+                sum = (sum.0 + r.0, sum.1 + r.1);
+            }
+            for (i, t) in traders.iter().enumerate() {
+                let b = admitted(t, &format!("trader{i}"));
+                sum = (sum.0 + b.0, sum.1 + b.1);
+            }
+            assert_eq!(
+                sum,
+                (TOTAL_A, TOTAL_B),
+                "{step}: both assets are conserved exactly"
+            );
+        };
+
+        // ── 1. The admitted create, advertised. ─────────────────────────────
+        owner_dev.enter();
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: "sofi/spec/e2e".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = rt.block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "advertise: {:?}", res.error_message);
+        conserved("funded", &[(10_000, 5_000)]);
+
+        // ── 2. Three trades while the owner is away. ────────────────────────
+        market_moves(&vault_id, &pc_a, &pc_b, &traders[..3], &[1_000, 700, 400]);
+        stranger.enter();
+        let from_birth = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(from_birth.sequence, 3);
+        // ── 3. …and a stranger composes it from birth.
+        assert_eq!(
+            from_birth.folded_parents.len(),
+            3,
+            "a stranger replays from birth"
+        );
+        conserved(
+            "three trades, owner away",
+            &[(from_birth.reserves_a, from_birth.reserves_b)],
+        );
+
+        // ── 4. The owner syncs: catch-up, fresh baseline, the ad moves. ─────
+        rt.block_on(owner_dev.sync());
+        owner_dev.enter();
+        assert_eq!(
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (from_birth.reserves_a, from_birth.reserves_b, 3),
+            "the owner's reserve leaves ARE the composed frontier"
+        );
+        assert_eq!(baseline_generation(&vault_id), 3, "a fresh baseline at V_3");
+        assert_eq!(
+            advertisement(&vault_id, &pc_a, &pc_b).anchor_presentation_digest,
+            super::verified_baseline(&vault_id)
+                .expect("verified")
+                .presentation_inner
+                .to_vec(),
+            "the advertisement moved to it"
+        );
+
+        // ── 5. The stranger composes from V_3; a fourth trader settles. ─────
+        stranger.enter();
+        let from_anchor = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            (from_anchor.sequence, from_anchor.c_n),
+            (from_birth.sequence, from_birth.c_n),
+            "the same frontier"
+        );
+        assert!(
+            from_anchor.folded_parents.is_empty(),
+            "…composed from V_3, not birth"
+        );
+        settle_next(&traders[3], &vault_id, &pc_a, &pc_b, 3, 300, 0x74);
+        stranger.enter();
+        let after_fourth = composed_frontier(&vault_id, &pc_a, &pc_b);
+        conserved(
+            "a fourth trade off the fresh baseline",
+            &[(after_fourth.reserves_a, after_fourth.reserves_b)],
+        );
+
+        // ── 6. The owner syncs again and closes. ────────────────────────────
+        rt.block_on(owner_dev.sync());
+        owner_dev.enter();
+        assert_eq!(baseline_generation(&vault_id), 4);
+        let before_close = spendable(owner, &pc_a, &pc_b);
+        let res = close(owner, &vault_id);
+        assert!(res.success, "the admitted close: {:?}", res.error_message);
+        assert_eq!(
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (0, 0, 5),
+            "the vault is dead"
+        );
+        assert_eq!(
+            spendable(owner, &pc_a, &pc_b),
+            (
+                before_close.0 + after_fourth.reserves_a,
+                before_close.1 + after_fourth.reserves_b
+            ),
+            "the close returned exactly the reserves of the generation the market reached"
+        );
+        conserved("closed", &[]);
+
+        // ── 7. The proceeds fund a second vault. ────────────────────────────
+        // More B than the owner held before the close: only an ADMITTED close
+        // could have raised the admitted balance the create's sufficiency reads.
+        owner_dev.enter();
+        let second = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner,
+            &pc_a,
+            &pc_b,
+            1_000,
+            before_close.1 + 1,
+        );
+        assert_ne!(second, vault_id);
+        conserved(
+            "the proceeds funded a second vault",
+            &[(1_000, before_close.1 + 1)],
+        );
+    }
+
     // ── CLOSE / WITHDRAWAL ───────────────────────────────────────────────────
     // Invariant 4 at the ROUTE. The core arm proves the mutation is unforgeable;
     // these prove the route that drives it: what the owner gets back, when the
