@@ -673,20 +673,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
         &A,
     ) -> Result<(), DsmError>,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    let StagedAdmission {
-        network_id,
-        genesis,
-        devid,
-        set,
-        validated,
-        mut tree,
-        pre_state,
-        authority,
-        facts,
-        extra_artifacts,
-        prepared,
-        ..
-    } = stage_admission(core, &operation, |_| {
+    let staged = stage_admission(core, &operation, |_| {
         Ok((CreditSourceFacts::None, Vec::new()))
     })
     .await?;
@@ -712,7 +699,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
             (leg_a_policy_commit, *leg_a_amount),
             (leg_b_policy_commit, *leg_b_amount),
         ] {
-            let have = pre_state.balances.get(pc).copied().unwrap_or(0);
+            let have = staged.pre_state.balances.get(pc).copied().unwrap_or(0);
             if have < need {
                 return Err(DsmError::invalid_operation(format!(
                     "insufficient {} to encumber (need {need}, have {have} admitted)",
@@ -722,6 +709,136 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
         }
     }
 
+    admit_reserve_mutation(
+        core,
+        staged,
+        operation,
+        rel_key,
+        counterparty_devid,
+        initial_chain_tip,
+        reserve_mutation,
+        "funded create",
+        build_artifacts,
+        write_extra,
+    )
+    .await
+}
+
+/// The owner's settlement apply, admitted into `R_econ` (amendment 2c-G,
+/// ruling G1+G2).
+///
+/// A SYNCHRONIZATION STEP, never an authority. The settlement was realized on
+/// the trader's chain and certified by the composition walk before this runs;
+/// the apply moves the owner's two reserve leaves one generation to match what
+/// already happened. It moves no value a second time — conservation refuses any
+/// balance delta for it — and it can apply only the exact certified fold: the
+/// credit arm is `0x0027 ValidatedDlvSettlementPayment`, which proves the
+/// trader's own receipt leaf into the trader's validated root and checks it
+/// field by field against this operation.
+///
+/// `payment_evidence_bytes` is the `SettlementPaymentEvidenceV1` the
+/// settlement-payment producer built from the certified fold. It is frozen in
+/// the SAME transaction as the advance, as every admission's evidence is, and
+/// published before the root registers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admitted_dlv_owner_apply<A>(
+    core: &CoreSDK,
+    operation: Operation,
+    rel_key: [u8; 32],
+    counterparty_devid: [u8; 32],
+    initial_chain_tip: [u8; 32],
+    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
+    trader_genesis: [u8; 32],
+    trader_devid: [u8; 32],
+    trader_economic_position: u64,
+    payment_evidence_bytes: Vec<u8>,
+    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+    write_extra: impl Fn(
+        &rusqlite::Transaction<'_>,
+        &dsm::types::device_state::AdvanceOutcome,
+        &A,
+    ) -> Result<(), DsmError>,
+) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    if !matches!(operation, Operation::DlvOwnerApplyV2 { .. }) {
+        return Err(DsmError::invalid_operation(
+            "admitted_dlv_owner_apply takes a DlvOwnerApplyV2",
+        ));
+    }
+    let payment_evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
+        &payment_evidence_bytes,
+    );
+    let evidence_key = crate::sdk::economic_registers::immutable_object_key(
+        dsm::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
+        &payment_evidence_bytes,
+    );
+    let staged = stage_admission(core, &operation, |_position| {
+        Ok((
+            CreditSourceFacts::DlvSettlementPayment {
+                trader_genesis,
+                trader_devid,
+                trader_economic_position,
+                payment_evidence_addr,
+            },
+            vec![(
+                evidence_key,
+                payment_evidence_bytes,
+                "dlv-settlement-payment-evidence",
+            )],
+        ))
+    })
+    .await?;
+    admit_reserve_mutation(
+        core,
+        staged,
+        operation,
+        rel_key,
+        counterparty_devid,
+        initial_chain_tip,
+        reserve_mutation,
+        "owner apply",
+        build_artifacts,
+        write_extra,
+    )
+    .await
+}
+
+/// The advance and admission shared by the two reserve-mutation facades — a
+/// funded create and an owner apply. They differ only in their facts and their
+/// pre-checks; the ONE staged advance (the reserve mutation, the frozen
+/// evidence and the Prepared admission together) and the shared
+/// [`finish_admission`] are never duplicated per operation.
+#[allow(clippy::too_many_arguments)]
+async fn admit_reserve_mutation<A>(
+    core: &CoreSDK,
+    staged: StagedAdmission,
+    operation: Operation,
+    rel_key: [u8; 32],
+    counterparty_devid: [u8; 32],
+    initial_chain_tip: [u8; 32],
+    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
+    what: &'static str,
+    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+    write_extra: impl Fn(
+        &rusqlite::Transaction<'_>,
+        &dsm::types::device_state::AdvanceOutcome,
+        &A,
+    ) -> Result<(), DsmError>,
+) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    let StagedAdmission {
+        network_id,
+        genesis,
+        devid,
+        set,
+        validated,
+        mut tree,
+        pre_state,
+        authority,
+        facts,
+        extra_artifacts,
+        prepared,
+        ..
+    } = staged;
     let set_id = set.id();
     let op_for_build = operation.clone();
     let mut built: Option<DsmAdmissionParts> = None;
@@ -768,7 +885,7 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
 
     let pending = accepted_out.ok_or_else(|| {
         DsmError::storage(
-            "funded create committed without an accepted admission".to_string(),
+            format!("{what} committed without an accepted admission"),
             None::<std::io::Error>,
         )
     })?;

@@ -187,7 +187,7 @@ fn advance_with(
             },
         ]
     };
-    head.advance(
+    head.advance_admitted(
         compute_smt_key(&ACTOR, &ACTOR),
         ACTOR,
         op,
