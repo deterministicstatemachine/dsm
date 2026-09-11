@@ -20,8 +20,10 @@
     - REALIZE      prerequisites AND an ABSTRACT bundle-acceptance witness give
                    IndependentRealization. The witness is a parameter this
                    module never instantiates
-    - WITHHOLD     without that witness a market verdict folds and never
-                   certifies; the close arm certifies at binding finality with
+    - WITHHOLD     without that witness a market successor never certifies
+                   and is NOT folded -- the frontier stays at its bound parent,
+                   unrealized (2c-D §14, D-d: the walk folds exactly what
+                   certifies); the close arm certifies at binding finality with
                    no acceptance artifact at all
 
   What this module does NOT claim (2c-C4 §5, §8):
@@ -29,8 +31,8 @@
     * The 2c-D bundle-acceptance leaf is NOT modelled and NOT discharged. It
       appears only as an opaque `Prop` parameter `W`. Every realization theorem
       is stated `... -> W -> Realization`, so this module proves an implication
-      and never the antecedent. Instantiating `W` is 2c-D's, and no definition
-      here can produce one.
+      and never the antecedent. Instantiating `W` is 2c-D's -- DSMBundleAcceptance
+      models its §7 verification -- and no definition here can produce one.
     * `TokenPolicyValid` and the terminal close's exactly-once owner credit are
       external on 2c-C3's terms (rulings H, G) and are not modelled.
     * 2c-B's grammar and chain-tip conjuncts `G1`-`G4` are NOT modelled. They
@@ -58,8 +60,7 @@
             `a_claim_that_is_not_the_derived_root_refuses`.
 
     2. `verdictOf`'s market arm returning `.valid` without the witness
-         (`if witnessPresent then .valid else .partialPendingRealization`
-          replaced by `.valid`)
+         (`if witnessPresent then .valid else .refused` replaced by `.valid`)
          -> `the_separation_is_not_vacuous` is proved FALSE by the kernel, and
             `market_never_certifies_without_the_witness`,
             `close_certifies_market_does_not` and
@@ -455,66 +456,68 @@ theorem correspondence_alone_is_not_realization (pre : Prerequisites) :
 -- §6, §7 — the verdict, and what it unlocks
 -- ─────────────────────────────────────────────────────────────────────────────
 
-/-- The verdict a fold carries (2c-C3 / 2c-A.1 ruling 12), reduced to what C4
-needs: whether it may fold forward, and whether it may certify. -/
+/-- The verdict a fold carries (2c-C3 / 2c-A.1 ruling 12), as C2 leaves it
+(2c-D §14, D-d): a successor is folded only when it certifies, so there is no
+fold-without-certify verdict — `PartialPendingRealization` is deleted with its
+only constructor. -/
 inductive Verdict where
   /-- Every conjunct held. Reachable for a close, and for a market successor
   only with the 2c-D witness. -/
   | valid
-  /-- Every conjunct held including `VDS.COMMON.10.a`, and the realization fact
-  is 2c-C4/2c-D's. -/
-  | partialPendingRealization
-  /-- A conjunct decided against the successor, or its evidence is missing. -/
+  /-- A conjunct decided against the successor, or its evidence is missing —
+  including a market successor whose 2c-D witness is absent, which leaves the
+  frontier bound and unrealized rather than folding it. -/
   | refused
   deriving DecidableEq, Repr
-
-/-- 2c-A.1 ruling 12: the composition walk folds forward on `valid` and on
-`partialPendingRealization`. -/
-def mayFold : Verdict → Bool
-  | .valid => true
-  | .partialPendingRealization => true
-  | .refused => false
 
 /-- Only `valid` certifies. Every boundary in §7 reads this. -/
 def certifies : Verdict → Bool
   | .valid => true
-  | _ => false
+  | .refused => false
+
+/-- **The walk folds exactly what certifies** (C2, D-d): nothing uncertified is
+installed as composed state. -/
+def mayFold (v : Verdict) : Bool := certifies v
 
 /-- **The verdict a fold carries, by kind.** A close realizes at binding
-finality (Req 6.30): no acceptance artifact, no witness. A market fold carries
-`partialPendingRealization` unless the 2c-D witness is present — and this model
-has no way to present one, which is the point. -/
+finality (Req 6.30): no acceptance artifact, no witness. A market successor
+certifies only with the 2c-D witness, which this model can never produce. -/
 def verdictOf (k : Kind) (pre : Prerequisites) (witnessPresent : Bool) : Verdict :=
   if prerequisitesHold pre then
     match k with
     | .ownerClose => .valid
-    | .market => if witnessPresent then .valid else .partialPendingRealization
+    | .market => if witnessPresent then .valid else .refused
   else
     .refused
 
-/-- **WITHHOLD.** Without the 2c-D witness, a market fold never certifies —
+/-- **WITHHOLD.** Without the 2c-D witness, a market successor never certifies —
 however complete C4's own half is. -/
 theorem market_never_certifies_without_the_witness
     (pre : Prerequisites) :
     certifies (verdictOf .market pre false) = false := by
-  have h : verdictOf .market pre false = .refused
-      ∨ verdictOf .market pre false = .partialPendingRealization := by
-    unfold verdictOf
-    cases hb : prerequisitesHold pre
-    · left; simp
-    · right; simp
-  rcases h with h | h <;> rw [h] <;> rfl
+  unfold verdictOf
+  cases prerequisitesHold pre <;> rfl
 
-/-- …and it still FOLDS, which is the separation 2c-A.1 ruling 12 froze: the
-missing fact withholds the claim, it does not halt composition. -/
-theorem a_withheld_market_verdict_still_folds
+/-- …and it is NOT folded: the frontier stays at its bound parent, unrealized.
+C2 deleted the fold-without-certify verdict this used to be. -/
+theorem a_market_successor_without_the_witness_is_not_folded
+    (pre : Prerequisites) :
+    mayFold (verdictOf .market pre false) = false :=
+  market_never_certifies_without_the_witness pre
+
+/-- Folding and certifying are one decision. -/
+theorem the_walk_folds_exactly_what_certifies (v : Verdict) :
+    mayFold v = certifies v := rfl
+
+/-- **REALIZE, not vacuous.** With the witness, a market successor certifies. -/
+theorem with_the_witness_a_market_successor_certifies
     (pre : Prerequisites) (h : prerequisitesHold pre = true) :
-    mayFold (verdictOf .market pre false) = true := by
-  unfold verdictOf mayFold
+    certifies (verdictOf .market pre true) = true := by
+  unfold verdictOf certifies
   simp [h]
 
 /-- **KIND SPLIT.** On the same prerequisites, a close certifies where a market
-fold does not. Req 6.30's asymmetry, as a theorem rather than as prose. -/
+successor without the witness does not. Req 6.30's asymmetry, as a theorem. -/
 theorem close_certifies_market_does_not
     (pre : Prerequisites) (h : prerequisitesHold pre = true) :
     certifies (verdictOf .ownerClose pre false) = true
@@ -602,12 +605,15 @@ theorem the_sample_prerequisites_hold :
   decide
 
 /-- The separation, on a state where C4's half is complete: the close arm
-certifies, the market arm does not, and the market arm still folds. -/
+certifies; the market arm without the witness neither certifies nor folds; and
+with the witness it certifies — so the withholding is the witness, not a broken
+state. -/
 theorem the_separation_is_not_vacuous :
     certifies (verdictOf .ownerClose goodPrerequisites false) = true
       ∧ certifies (verdictOf .market goodPrerequisites false) = false
-      ∧ mayFold (verdictOf .market goodPrerequisites false) = true := by
-  refine ⟨by decide, by decide, by decide⟩
+      ∧ mayFold (verdictOf .market goodPrerequisites false) = false
+      ∧ certifies (verdictOf .market goodPrerequisites true) = true := by
+  refine ⟨by decide, by decide, by decide, by decide⟩
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Axiom report — per theorem, as the sibling modules do
@@ -633,7 +639,9 @@ theorem the_separation_is_not_vacuous :
 #print axioms realization_still_carries_the_witness
 #print axioms correspondence_alone_is_not_realization
 #print axioms market_never_certifies_without_the_witness
-#print axioms a_withheld_market_verdict_still_folds
+#print axioms a_market_successor_without_the_witness_is_not_folded
+#print axioms the_walk_folds_exactly_what_certifies
+#print axioms with_the_witness_a_market_successor_certifies
 #print axioms close_certifies_market_does_not
 #print axioms refused_prerequisites_neither_fold_nor_certify
 #print axioms no_market_boundary_opens_without_the_witness
