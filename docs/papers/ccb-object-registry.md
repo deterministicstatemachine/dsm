@@ -1599,6 +1599,15 @@ storage-object address (amendment 2c-C1 ruling A).
 | 7 | `trader_economic_position` | `u64` | **the schema-2 field** — an untrusted locator |
 | 8 | `payment_evidence_addr` | `digest32` | |
 
+**Producer (amendment 2c-G).** The owner's catch-up builds the `SettlementPaymentEvidenceV1`
+bundle (transport proto, no CCB class) from the certified fold: the exact `0x0021` leaf and
+256-sibling path the composition walk proved under the trader's validated `R_T^+` at the
+acceptance's position (Req 21.16), carried on the fold and never fetched again. Fields 5–7 are the
+walk's authenticated trader and that position. The producer mirrors the arm's leaf-equality and
+inclusion checks before signing — the arm runs after the advance commits, where a refusal would
+strand the admission — and the arm alone decides. `DlvOwnerApplyV2` is admission-fenced at the
+core chokepoint: an owner apply is admitted with this arm or it does not advance.
+
 **Two schema-2 arms, one reason.** Both carry a peer/owner `*_economic_position` that schema 1 did
 not, and both are labelled **untrusted locators**: they say where to start looking, never what is
 true. The verifier derives the position independently. That is the same locator-not-authority

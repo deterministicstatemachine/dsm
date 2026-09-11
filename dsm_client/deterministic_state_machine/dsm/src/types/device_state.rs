@@ -1843,13 +1843,24 @@ impl DeviceState {
         // raw operation and encumber reserves the economic lineage never saw,
         // leaving a head whose reserves `R_econ` cannot account for.
         //
-        // Deliberately NARROW. Settle, close and owner-apply are not fenced
-        // here: they consume or return an existing position rather than
-        // originating one, and their admission wiring is a separate cut with a
-        // separate evidence story. Widening this gate before those producers
-        // exist would strand the trader path with no replacement.
+        // Deliberately NARROW. Settle and close are not fenced here: they
+        // consume or return an existing position rather than originating one,
+        // and their admission wiring is a separate cut with a separate evidence
+        // story. Widening this gate before those producers exist would strand
+        // the trader path with no replacement.
         if matches!(operation, Operation::DlvCreateFundedV2 { .. }) {
             self.require_attached_dsm_admission(&operation, "a funded vault creation")?;
+        }
+
+        // THE OWNER APPLY (amendment 2c-G). `DlvOwnerApplyV2` moves both vault
+        // reserve leaves a generation, so an unadmitted apply leaves a head
+        // whose reserves `R_econ` never saw — and every later admission that
+        // reads those leaves (the next apply, the close) builds against a root
+        // that disagrees with the head. Its producer now exists: the owner's
+        // catch-up admits every apply with its `0x0027` settlement-payment
+        // evidence, so the raw doorway closes here.
+        if matches!(operation, Operation::DlvOwnerApplyV2 { .. }) {
+            self.require_attached_dsm_admission(&operation, "an owner apply")?;
         }
 
         // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
@@ -6914,7 +6925,7 @@ mod tests {
 
         // A third asset on the input side: refused, nothing moves.
         let root_before = funded.root();
-        let err = funded.advance(
+        let err = funded.advance_admitted(
             rk,
             funded.devid,
             apply_op(dbtc, rigb, out_amt),
@@ -6945,7 +6956,7 @@ mod tests {
 
         // The real settlement: legs move AND the vault-state leaf follows.
         let out = funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 apply_op(era, rigb, out_amt),
@@ -7227,7 +7238,7 @@ mod tests {
             signature: vec![],
             mode: TransactionMode::Unilateral,
         });
-        let err = funded.advance(
+        let err = funded.advance_admitted(
             rk,
             funded.devid,
             op,
@@ -7283,7 +7294,7 @@ mod tests {
             mode: TransactionMode::Unilateral,
         });
         let out = funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 op,
@@ -7309,6 +7320,112 @@ mod tests {
             .new_device_state;
         assert_eq!(out.vault_reserve(&vault, &era), 10_100);
         assert_eq!(out.vault_reserve(&vault, &rigb), 5_000 - out_amt);
+    }
+
+    /// THE OWNER APPLY IS ADMITTED OR IT DOES NOT HAPPEN (amendment 2c-G).
+    ///
+    /// The same matching, curve-priced v2 apply as the positive control above,
+    /// advanced RAW: no pending admission attached. It must be refused by the
+    /// fence's own precondition, with the reserves exactly where they were —
+    /// otherwise the head moves two reserve leaves `R_econ` never saw, and the
+    /// next admission that reads them builds against a root that disagrees
+    /// with the head. An admission bound to a DIFFERENT operation authorizes
+    /// nothing either.
+    ///
+    /// MUTATION CONTROL: delete the `DlvOwnerApplyV2` arm of the fence in
+    /// `advance` and the first assertion goes red by moving the reserves.
+    #[test]
+    fn an_owner_apply_is_refused_without_its_own_attached_admission() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD7, era, rigb, 10_000, 5_000);
+        let funded = funded.with_pending_economic_admission(None);
+        let out_amt = crate::dlv::route_commit::constant_product_output(100, 10_000, 5_000, 30)
+            .expect("curve");
+        let (parent_binding, parent_state) = parent_of(&funded, vault, vault_pair(era, rigb));
+        let op = sign_op(Operation::DlvOwnerApplyV2 {
+            vault_id: vault.to_vec(),
+            settlement_receipt_id: [0x21; 32],
+            pending_pointer_x: [0x22; 32],
+            parent_sequence: 0,
+            new_sequence: 1,
+            parent_binding,
+            input_policy_commit: era,
+            output_policy_commit: rigb,
+            input_amount: 100,
+            output_amount: out_amt,
+            fee_bps: 30,
+            signature: vec![],
+            mode: TransactionMode::Unilateral,
+        });
+        let mutation = || VaultReserveMutation::ApplySettlement {
+            vault_id: vault,
+            input_policy_commit: era,
+            input_amount: 100,
+            output_policy_commit: rigb,
+            output_amount: out_amt,
+            parent_sequence: 0,
+            new_sequence: 1,
+            pair: vault_pair(era, rigb),
+            parent_state: parent_state.clone(),
+        };
+        let root_before = funded.root();
+
+        // (1) No admission attached at all.
+        let err = format!(
+            "{}",
+            funded
+                .advance(
+                    rk,
+                    funded.devid,
+                    op.clone(),
+                    entropy(2),
+                    None,
+                    &[],
+                    Some(tip),
+                    None,
+                    None,
+                    Some(mutation()),
+                )
+                .expect_err("a raw owner apply must not move the reserves")
+        );
+        assert!(
+            err.contains("no pending economic admission"),
+            "the refusal is the fence's own, got: {err}"
+        );
+
+        // (2) An admission attached, but bound to a DIFFERENT operation.
+        let staged = funded.with_pending_economic_admission(Some(
+            crate::economic::admission::PendingEconomicAdmission::prepared(
+                crate::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                crate::economic::faucet::dsm_operation_digest(&Operation::Noop.to_bytes()),
+            ),
+        ));
+        let err = format!(
+            "{}",
+            staged
+                .advance(
+                    rk,
+                    staged.devid,
+                    op,
+                    entropy(2),
+                    None,
+                    &[],
+                    Some(tip),
+                    None,
+                    None,
+                    Some(mutation()),
+                )
+                .expect_err("an admission for another operation authorizes nothing")
+        );
+        assert!(
+            err.contains("does not match the pending economic admission"),
+            "the refusal names the digest mismatch, got: {err}"
+        );
+        assert_eq!(funded.root(), root_before, "nothing moved");
+        assert_eq!(funded.vault_reserve(&vault, &era), 10_000);
+        assert_eq!(funded.vault_reserve(&vault, &rigb), 5_000);
     }
 
     /// The head's OWN parent state for `vault` under `pair`: its commitment
@@ -7375,7 +7492,7 @@ mod tests {
         op: Operation,
         mutation: VaultReserveMutation,
     ) -> Result<AdvanceOutcome, DsmError> {
-        head.advance(
+        head.advance_admitted(
             rk,
             head.devid,
             op,
@@ -7728,7 +7845,7 @@ mod tests {
             mode: TransactionMode::Bilateral,
         });
         let traded = funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 apply,

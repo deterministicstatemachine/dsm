@@ -562,6 +562,17 @@ nor constitutes a new approval, veto, rollback, or ordering step. If a terminal 
 SoFi: Sovereign Deterministic Finance Revision 15
 has already become binding-final and folded under Requirement 6.30, the DLV is retired and no
 separate catch-up step is required for that closed vault.
+Implementation (amendment 2c-G, rulings G1 + G2). Catch-up applies each certified market
+successor V_g → V_n in causal order as one admitted DlvOwnerApplyV2 per generation: a
+synchronization step that consumes certified history and never creates it — no authority, no second
+value move, no re-certification, no new realization boundary, no veto and no ordering step. Each
+apply's input-reserve credit is funded by the trader's own admitted payment (0x0027), whose
+evidence is projected from the exact receipt leaf and path the composition walk proved under the
+trader's validated root when it certified that fold; the terminal owner reserve state equals the
+composed frontier. One engine runs it — automatically on storage.sync and on an explicit owner
+request — and it gates no trader settlement, market realization, composition, future admission,
+QuorumBind, fence release or close finality. A failure is local to its vault, and an interrupted
+catch-up resumes idempotently after its last durable apply.
 Requirement 4.6 (Governed reverse encumbrance; owner-local beta profile). The LP
 must not be able to move DLV reserves directly back into ordinary spendable owner balance merely
 by virtue of ownership. The vault birth state commits a release/withdraw/close policy PR. Any
@@ -1242,6 +1253,10 @@ already-verified market history when the owner participates, but it does not imp
 time or maximum number of market advances for which the owner may remain absent. A terminal
 owner close under Requirement 6.30 is itself the final owner/DLV state update and does not require
 a separate catch-up step.
+Status (amendment 2c-G, ruling G3). The catch-up of Requirement 4.5 is implemented; the fresh
+baseline this requirement demands — an AnchorPresentationV3 over exactly the caught-up V_n, built
+by the same owner-anchor machinery as the birth baseline — is not yet published. It is owed by the
+third 2c-G change, after the admitted terminal close (G4).
 7 Smart Commitments and Atomic Composition
 Definition 7.1 (Smart Commitment). A bounded deterministic predicate over committed
 inputs:

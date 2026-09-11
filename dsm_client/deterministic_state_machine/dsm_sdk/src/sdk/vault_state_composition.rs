@@ -122,6 +122,32 @@ pub(crate) struct FoldedParent {
     /// a close. Carried so the receipt is built from what certified, never
     /// from an acceptance fetched again afterwards.
     pub certified_acceptance: Option<dsm::economic::trader_acceptance::TraderAcceptance>,
+    /// For a CERTIFIED market fold, the trader's payment exactly as Req 21.16
+    /// proved it — what the owner's catch-up funds its `0x0027` apply from
+    /// (amendment 2c-G). `None` for a close.
+    pub certified_payment: Option<CertifiedPayment>,
+}
+
+/// The trader's settlement payment exactly as Req 21.16 proved it: the
+/// `0x0021` receipt leaf and its 256-sibling path under the VALIDATED `R_T^+`
+/// at the trader's own economic position (amendment 2c-G).
+///
+/// Carried on the certified fold for the reason `certified_acceptance` is:
+/// the owner's catch-up builds its `0x0027` evidence from the material
+/// certification checked, never from an inclusion proof fetched again
+/// afterwards. HOLDING ONE ASSERTS NOTHING — the `0x0027` arm re-derives the
+/// trader's root at `trader_economic_position` and re-proves the leaf into it.
+#[derive(Debug, Clone)]
+pub(crate) struct CertifiedPayment {
+    /// The trader as the walk authenticated it: the acceptance's genesis and
+    /// the bundle's own settler.
+    pub trader_genesis: [u8; 32],
+    pub trader_devid: [u8; 32],
+    /// The position whose validated root the walk proved the leaf under.
+    pub trader_economic_position: u64,
+    /// The exact leaf the trader's inclusion proof committed, and its path.
+    pub receipt: dsm::economic::state::EconomicSettlementReceiptState,
+    pub receipt_siblings: Box<[[u8; 32]; dsm::economic::tree::ECONOMIC_SMT_HEIGHT]>,
 }
 
 /// What the binding register — plus this device's own fence table — says about
@@ -758,9 +784,10 @@ async fn compose_vault_state_inner(
         // (2c-D §14, C2-R1 point 3): CORR.1–CORR.5, 2c-D §7's acceptance
         // witness, and Tier-1 intent satisfaction. Nothing uncertified is ever
         // installed as the composed state.
-        let (verdict, realized_trade, certified_acceptance) = match bound.shape {
+        let (verdict, realized_trade, certified_acceptance, certified_payment) = match bound.shape {
             dsm::dlv::settlement_bundle::BundleShape::OwnerClose => (
                 C3Verdict::Valid(CompleteValidity::from_close_witness(witness)),
+                None,
                 None,
                 None,
             ),
@@ -805,6 +832,7 @@ async fn compose_vault_state_inner(
                     C3Verdict::Valid(CompleteValidity::from_market_witness(witness, realization)),
                     Some(ev.receipt),
                     Some(ev.acceptance),
+                    Some(ev.payment),
                 )
             }
         };
@@ -823,6 +851,7 @@ async fn compose_vault_state_inner(
             verdict,
             realized_trade,
             certified_acceptance,
+            certified_payment,
         });
         let _ = transition;
         cursor_state = next_state;
@@ -906,6 +935,8 @@ struct EstablishedMarketEvidence {
     trader: ValidatedPeerTransition,
     intent: IntentSatisfaction,
     receipt: VerifiedReceipt,
+    /// The receipt leaf and path Req 21.16 just proved, for the fold.
+    payment: CertifiedPayment,
 }
 
 /// Gather and verify everything a market certification needs, in the order
@@ -1103,11 +1134,11 @@ async fn certify_market_evidence(
         ));
     }
     let receipt_id = derive_receipt_id(vault_id, &x);
-    let Some(path) = artifact.leaves.iter().find_map(|leaf| match &leaf.state {
+    let Some((receipt_leaf, path)) = artifact.leaves.iter().find_map(|leaf| match &leaf.state {
         dsm::economic::state::EconomicLeafState::SettlementReceipt(s)
             if s.vault_id == *vault_id && s.receipt_id == receipt_id =>
         {
-            Some(leaf.siblings.clone())
+            Some((s.clone(), leaf.siblings.clone()))
         }
         _ => None,
     }) else {
@@ -1130,6 +1161,16 @@ async fn certify_market_evidence(
         }
     };
 
+    // What the owner's apply is funded by (2c-G): the leaf and path just
+    // proven, at the position whose validated root they were proven under.
+    let payment = CertifiedPayment {
+        trader_genesis: acceptance.trader_genesis(),
+        trader_devid: settler_devid,
+        trader_economic_position: acceptance.economic_position(),
+        receipt: receipt_leaf,
+        receipt_siblings: path,
+    };
+
     MarketEvidence::Established(Box::new(EstablishedMarketEvidence {
         expected,
         accepted,
@@ -1138,6 +1179,7 @@ async fn certify_market_evidence(
         trader,
         intent,
         receipt,
+        payment,
     }))
 }
 

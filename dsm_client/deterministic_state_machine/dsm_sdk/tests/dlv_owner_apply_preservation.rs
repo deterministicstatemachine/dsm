@@ -191,7 +191,7 @@ fn try_apply_settlement(
     op: Operation,
 ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
     let rel = compute_smt_key(&OWNER, &OWNER);
-    head.advance(
+    head.advance_admitted(
         rel,
         OWNER,
         op,

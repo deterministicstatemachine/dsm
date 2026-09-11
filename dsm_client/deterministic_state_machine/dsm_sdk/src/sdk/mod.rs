@@ -115,6 +115,7 @@ pub mod reserve_consumption_producer;
 pub mod route_commit_sdk;
 pub mod routing_path_sdk;
 pub mod routing_sdk;
+pub(crate) mod settlement_payment_producer;
 pub mod settlement_receipt_codec;
 pub mod settlement_slot;
 pub mod smart_commitment_sdk;
