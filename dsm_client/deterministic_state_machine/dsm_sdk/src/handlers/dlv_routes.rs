@@ -3674,9 +3674,19 @@ impl AppRouterImpl {
                 // so the value it holds is foreign-verifiable. What has NOT
                 // happened: the market fold stays PartialPendingRealization,
                 // the vault's reserves have not moved, no Def 14.2 receipt is
-                // published, no bundle-acceptance witness exists to construct,
-                // and THE FENCE IS NOT RELEASED — Ruling V3 gates release on a
-                // certifying verdict, and ordinary DSM advancement is not one.
+                // published, and THE FENCE IS NOT RELEASED — Ruling V3 gates
+                // release on a certifying verdict, and ordinary DSM
+                // advancement is not one.
+                //
+                // The admission above now also PUBLISHES the canonical `TA_B`
+                // for `b` (2c-D §6, producer adoption), so the sentence that
+                // used to stand here — "no bundle-acceptance witness exists to
+                // construct" — would be read as still true and is not. Stated
+                // exactly: the ARTIFACT exists and is fetchable; the WITNESS
+                // does not, because `BundleAcceptanceWitness` has one
+                // constructor and it is 2c-D §7's verifier, which nothing on
+                // this path calls. Constructing one additionally needs the
+                // composed bundle and an independently established trader AK.
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
                     generated::AppStateResponse {
                         key: "dlv.unlockRouted".to_string(),
@@ -8399,6 +8409,164 @@ mod funded_creation_tests {
             (still.c_n, still.sequence),
             (bound.c_n, bound.sequence),
             "and the frontier did not move"
+        );
+    }
+
+    /// 2c-D PRODUCER ADOPTION, OVER THE LIVE ROUTE: a settled market publishes
+    /// the canonical `TA_B` for the bundle it accepted — and realizes nothing.
+    ///
+    /// The two halves are asserted together on purpose. Producing `TA_B` is the
+    /// step that makes realization *possible*, so the risk it introduces is
+    /// that something starts treating the artifact's existence as permission.
+    /// A test that only proved publication would not notice; a test that only
+    /// proved nothing released would pass just as well before the producer
+    /// existed. Paired, the failure mode is visible.
+    ///
+    /// `TA_B` is read back as BYTES. The type has no decoder — deliberately,
+    /// because a decoder without §7 behind it invites reading a decoded
+    /// acceptance as an accepted one — so the field offsets of registry §5.40
+    /// are what this test reads, and `b` is taken from the fence the binding
+    /// froze rather than from the artifact being checked.
+    #[test]
+    #[serial]
+    fn a_settled_market_publishes_a_trader_acceptance_and_realizes_nothing() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/ta-b", &[("trader0", 0x51)]);
+
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        // The parent the fence will be keyed by, captured BEFORE the advance:
+        // a successful settle moves the trader's chain tip, so reading the
+        // fence afterwards from the CURRENT tip finds nothing and would make
+        // the release assertion below vacuous.
+        let before = trader.core_sdk.device_head().expect("trader head");
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &trader_dev.device_id,
+            &trader_dev.device_id,
+        );
+        let fenced_parent = before.chain_tip(&rel_key).unwrap_or_else(|| {
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &trader_dev.device_id,
+                &trader_dev.device_id,
+            )
+        });
+
+        let (res, x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output"),
+            0x61,
+        );
+        assert!(res.success, "the settle binds: {:?}", res.error_message);
+
+        // `b`, from the fence the binding transaction froze — tx_id is the
+        // bundle digest. An independent source from the artifact under test.
+        let fence =
+            crate::storage::client_db::trader_parent_fence::active_fence(&rel_key, &fenced_parent)
+                .expect("fence read")
+                .expect("the settle fenced the trader's own parent");
+        let b = fence.tx_id;
+
+        // ── THE ARTIFACT REACHED THE FLEET ──────────────────────────────
+        let keys: std::collections::BTreeSet<String> =
+            crate::sdk::storage_io::fake_fleet::put_log()
+                .into_iter()
+                .map(|(_, key, _)| key)
+                .filter(|k| k.starts_with("immutable::DSM/trader-settlement-acceptance/v2::"))
+                .collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "a settled market publishes exactly one trader acceptance: {keys:?}"
+        );
+        let key = keys.iter().next().expect("one key").clone();
+        let bytes = &crate::sdk::storage_io::fake_fleet::any_member_holding(&key)
+            .expect("the acceptance is held by a member");
+        assert_eq!(
+            bytes.len(),
+            dsm::economic::trader_acceptance::TRADER_ACCEPTANCE_LEN,
+            "registry §5.40 pins 8,308 bytes"
+        );
+        assert_eq!(&bytes[0..4], &[0x00, 0x11, 0x00, 0x01], "0x0011 schema 1");
+        assert_eq!(
+            &bytes[4..36],
+            before.genesis_digest().as_slice(),
+            "the trader's own genesis, not a carried stranger's"
+        );
+        assert_eq!(
+            &bytes[44..48],
+            &[0x00, 0x32, 0x00, 0x01],
+            "field 3 is the complete nested 0x0032 CCB, envelope included"
+        );
+        assert_eq!(
+            &bytes[48..80],
+            b.as_slice(),
+            "the acceptance leaf commits the EXACT bundle the binding froze"
+        );
+        assert_eq!(
+            &bytes[112..116],
+            &[0x00, 0x00, 0x01, 0x00],
+            "u32_be(256) precedes the siblings"
+        );
+        // CONTENT-ADDRESSED, and by its own canonical identity: the key is
+        // derived from these exact bytes under this namespace, whose inner
+        // digest IS `ta_B` (pinned by
+        // `the_publication_address_is_the_canonical_identity`). So a Def 14.2
+        // receipt binding `ta_B` names the object at this key.
+        assert_eq!(
+            key,
+            format!(
+                "immutable::DSM/trader-settlement-acceptance/v2::{}",
+                crate::util::text_id::encode_base32_crockford(
+                    &dsm::storage_object::immutable_addr(
+                        dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+                        bytes,
+                    )
+                )
+            ),
+            "the published key must be the content address of the published bytes"
+        );
+
+        // ── AND NOTHING WAS REALIZED ────────────────────────────────────
+        assert!(
+            matches!(
+                fence.state,
+                dsm::dlv::trader_fence::FenceState::CommittedAwaitingAcceptance { .. }
+            ),
+            "the fence is committed and awaiting acceptance, not Released ({:?})",
+            fence.state
+        );
+        assert!(
+            matches!(
+                crate::runtime::get_runtime().block_on(
+                    crate::sdk::settlement_receipt_codec::fetch_verified_receipt(&vault_id, &x)
+                ),
+                crate::sdk::settlement_receipt_codec::ReceiptFetch::Absent
+            ),
+            "no Def 14.2 receipt was published merely because TA_B exists"
+        );
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        match after.frontier_binding {
+            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                route_set_commitment,
+                ..
+            } => assert_eq!(route_set_commitment, x, "still bound, still unrealized"),
+            other => panic!("expected BoundUnrealized, got {other:?}"),
+        }
+        assert_eq!(
+            (after.sequence, after.reserves_a, after.reserves_b),
+            (0, 10_000, 5_000),
+            "the frontier stops AT the bound parent: reserves move on realization"
         );
     }
 

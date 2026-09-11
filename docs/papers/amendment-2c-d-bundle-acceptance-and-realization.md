@@ -385,6 +385,51 @@ check is gone with both operands. `X` is inside `b`, `b` is inside the leaf, and
 authenticated under the root — the equality is established by the chain rather than asserted by the
 wrapper, which is Blocker 1's whole complaint.
 
+### Producer adoption — `TA_B` becomes reachable (owner ruling, 2026-09-10)
+
+The owner ruling on producer reachability decomposes the remaining work into three changes, and this
+is the second:
+
+```text
+PR A   bundle-aware settle write set; the 0x0032 leaf becomes mandatory
+       -> the acceptance leaf is guaranteed to EXIST
+PR B   construct and publish TA_B from the resulting economic post-state
+       -> TA_B is guaranteed to be CONSTRUCTIBLE and REACHABLE
+PR C   the realization / fence-release cutover
+       -> live realization is ALLOWED to consume it
+```
+
+**Where the path comes from, and where it must not.** `TA_B` proves the acceptance leaf's inclusion
+under `R_T^+`, so its path is the one that holds in the FINAL economic post-state. A mutation's own
+captured siblings are not that path: the write set captures mutation `i`'s siblings with mutations
+`0..i` applied, and the acceptance leaf's key is a hash, so nothing places it last. The producer
+therefore reads the finished tree — the same single snapshot whose root was registered, with no
+second read and no window in which the tree could move — and refuses when that tree is not the one
+the register committed.
+
+```text
+economic post-state containing 0x0032 obtained
+    -> ordered inclusion path for that leaf under R_T^+
+    -> TA_B built from the already-authenticated settlement facts
+    -> published through the durable publication path
+```
+
+**The identities are consumed, never chosen.** `b` and `economic_operation_id` arrive inside the
+emitted leaf, lifted out of the witness; there is no parameter through which a caller could supply
+either. `trader_genesis` is the authenticated local identity and `economic_position` the position
+the register just committed. A producer that reconstructed any of these would be asserting a second
+time what the transition already fixed.
+
+**What producing `TA_B` does not do.** It publishes an artifact. It does not call
+`CompleteValidity::from_market_witness`, release the trader fence, mark the settlement realized,
+advance the realized frontier, or publish a final realized receipt — and it constructs no
+`BundleAcceptanceWitness`, whose only constructor is §7's verifier and which additionally requires
+the composed bundle and an independently established trader AK. Those remain the dedicated
+behaviour-changing cutover, for the reason §11's boundary note gives: one change, so that *"nothing
+released before it"* stays checkable rather than argued.
+
+---
+
 ---
 
 ## §7 — Verification obligations, in order, all conjunctive
