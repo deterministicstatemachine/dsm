@@ -3631,10 +3631,11 @@ impl AppRouterImpl {
                 // bundle-acceptance leaf (2c-D producer adoption) and the
                 // response reports it; deriving it twice would be two chances
                 // to derive it differently.
-                let b = match dsm::dlv::settlement_bundle::canon(&bundle) {
-                    Ok(c) => dsm::dlv::settlement_bundle::bundle_digest(&c),
+                let bundle_canon = match dsm::dlv::settlement_bundle::canon(&bundle) {
+                    Ok(c) => c,
                     Err(e) => return err(format!("dlv.unlockRouted: canon: {e:?}")),
                 };
+                let b = dsm::dlv::settlement_bundle::bundle_digest(&bundle_canon);
                 // `expected_successor` is the exact successor the bundle was
                 // BOUND to. The advance refuses if it would commit any other,
                 // checked after the pure prepare and before anything is
@@ -3695,6 +3696,7 @@ impl AppRouterImpl {
                     },
                     receipt_id,
                     b,
+                    bundle: bundle_canon,
                     rel_key,
                     fenced_parent: embedded_parent,
                     permitted_successor: prepared.trader_successor(),
@@ -3811,6 +3813,9 @@ struct MarketCompletion {
     trade: dsm::dlv::settlement_receipt_leaf::SettledTrade,
     receipt_id: [u8; 32],
     b: [u8; 32],
+    /// `CCB(B)`, the exact bound bundle `b` names: what the Def 14.2 receipt
+    /// projects and publishes (2c-F).
+    bundle: Vec<u8>,
     /// The fence's coordinates, exactly as `bind_settlement` placed it.
     rel_key: [u8; 32],
     fenced_parent: [u8; 32],
@@ -3840,6 +3845,7 @@ enum CompletionOutcome {
 /// compose with that V1 as the candidate           the walk is the only certifier
 /// require a CERTIFIED fold for exactly b          may_certify(), or nothing
 /// freeze V1, sweep, require quorum                durable BEFORE release (point 4)
+/// freeze the Def 14.2 receipt closure for S_v     an obligation, NEVER a gate (2c-F R6)
 /// SuccessorAccepted at the exact placed fence     only now; twice is not an error
 /// ```
 ///
@@ -3926,12 +3932,14 @@ async fn complete_settlement(
         Ok(composed) => composed,
         Err(e) => return Pending(format!("the settlement is not certifiable yet: {e}")),
     };
-    let Some(certified) = composed
+    let Some(fold) = composed
         .folded_parents
         .iter()
         .find(|f| f.bound_by == c.b && f.verdict.may_certify())
-        .and_then(|f| f.realized_trade.as_ref())
     else {
+        return Pending("no certified fold for this bundle yet".into());
+    };
+    let Some(certified) = fold.realized_trade.as_ref() else {
         return Pending("no certified fold for this bundle yet".into());
     };
     if certified.vault_id() != c.vault_id
@@ -3946,6 +3954,29 @@ async fn complete_settlement(
     // released only once a quorum of that set holds the exact bytes. Freezing
     // the same bytes again is a no-op.
     let bytes = crate::sdk::settlement_receipt_codec::receipt_to_proto(&receipt).encode_to_vec();
+    // THE DEF 14.2 RECEIPT (2c-F) — an obligation this certification creates,
+    // never a condition of the release below (R6). Projected here and only
+    // here, from the certified fold's own acceptance; frozen for the vault's
+    // authenticated committed set; published by the same sweep. Any failure is
+    // reported and never holds the fence.
+    let sofi_closure = fold
+        .certified_acceptance
+        .as_ref()
+        .ok_or_else(|| "the certified fold carries no acceptance".to_string())
+        .and_then(|acceptance| {
+            crate::sdk::sofi_receipt_publication::closure(
+                &c.bundle,
+                acceptance,
+                composed.storage_set_id,
+            )
+        })
+        .and_then(|closure| {
+            if closure.receipt.bundle() == c.b {
+                Ok(closure)
+            } else {
+                Err("the carried bundle is not the one this settlement bound".to_string())
+            }
+        });
     {
         let binding = match crate::storage::client_db::get_connection() {
             Ok(binding) => binding,
@@ -3961,6 +3992,22 @@ async fn complete_settlement(
             "trader-settlement-receipt",
         ) {
             return Pending(format!("the settlement receipt could not be frozen: {e}"));
+        }
+        match &sofi_closure {
+            Ok(closure) => {
+                if let Err(e) =
+                    crate::sdk::sofi_receipt_publication::freeze_closure_with_conn(&conn, closure)
+                {
+                    log::error!(
+                        "[settlement completion] the Def 14.2 receipt could not be frozen ({e}); \
+                         the release does not wait for it"
+                    );
+                }
+            }
+            Err(e) => log::error!(
+                "[settlement completion] no Def 14.2 receipt for this settlement ({e}); the \
+                 release does not wait for it"
+            ),
         }
     }
     let receipt_published = |key: &str| fpa::is_artifact_published(key).unwrap_or(false);
@@ -4168,6 +4215,7 @@ pub(crate) async fn resume_settlement_completion(
         },
         receipt_id: settlement_receipt_id,
         b,
+        bundle: bytes,
         rel_key: stored.trader_chain_id,
         fenced_parent: stored.trader_parent_state_commitment,
         permitted_successor,
@@ -9407,6 +9455,205 @@ mod funded_creation_tests {
         );
     }
 
+    /// The Def 14.2 receipt closure of a realized settlement, read back from
+    /// what the fleet and the fold hold — never from the completion's own
+    /// return value.
+    fn realized_receipt_closure(
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        b: &[u8; 32],
+    ) -> (
+        crate::sdk::sofi_receipt_publication::ReceiptClosure,
+        crate::sdk::vault_state_composition::ComposedVaultState,
+        Vec<u8>,
+    ) {
+        let frontier = composed_frontier(vault_id, pc_a, pc_b);
+        let acceptance = frontier
+            .folded_parents
+            .iter()
+            .find(|f| f.bound_by == *b)
+            .and_then(|f| f.certified_acceptance.clone())
+            .expect("a certified market fold carries the acceptance §7 accepted");
+        let bundle = crate::runtime::get_runtime()
+            .block_on(crate::sdk::storage_io::fetch_immutable_payload(
+                dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+                b,
+            ))
+            .expect("bundle read")
+            .expect("the bound bundle is held");
+        let closure = crate::sdk::sofi_receipt_publication::closure(
+            &bundle,
+            &acceptance,
+            frontier.storage_set_id,
+        )
+        .expect("a certified market settlement has a receipt closure");
+        (closure, frontier, bundle)
+    }
+
+    /// 2c-F — a realized settlement's Def 14.2 receipt is exactly the
+    /// projection of `(B, the certified TA_B)`, frozen for the vault's OWN
+    /// committed set, and published there by the generic sweep.
+    #[test]
+    #[serial]
+    fn a_realized_settlement_publishes_its_def_14_2_receipt_on_the_vaults_set() {
+        use crate::sdk::sofi_receipt_publication::{publication, ClosurePublication};
+
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/sofi-receipt", &[("trader0", 0x51)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        let (res, x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0xF1,
+        );
+        assert!(res.success, "the settle realizes: {:?}", res.error_message);
+        let b = settle_outcome(&res, "realized");
+        crate::runtime::get_runtime()
+            .block_on(crate::handlers::artifact_republish::republish_unpublished_artifacts())
+            .expect("sweep");
+
+        let (closure, frontier, bundle) = realized_receipt_closure(&vault_id, &pc_a, &pc_b, &b);
+        assert_eq!(
+            publication(&closure).expect("publication state"),
+            ClosurePublication::Published,
+            "receipt, bundle and acceptance are each at quorum on the vault's own set"
+        );
+        let receipt_row = crate::storage::client_db::frozen_publication_artifact::get_artifact(
+            &closure.objects[0].key,
+            &crate::storage::client_db::frozen_publication_artifact::content_digest(
+                &closure.objects[0].key,
+                &closure.objects[0].bytes,
+            ),
+        )
+        .expect("row read")
+        .expect("the completion froze the receipt");
+        assert_eq!(
+            receipt_row.storage_set_id, frontier.storage_set_id,
+            "frozen for the set the composed V_n commits, not a locally chosen one"
+        );
+
+        // EXACTLY THE PROJECTION of the bound bundle and the certified acceptance.
+        let decoded = dsm::dlv::settlement_bundle::decode_canonical(&bundle).expect("canonical");
+        let a_b = frontier
+            .folded_parents
+            .iter()
+            .find(|f| f.bound_by == b)
+            .and_then(|f| f.certified_acceptance.as_ref())
+            .expect("acceptance")
+            .ta_b()
+            .expect("ta_b");
+        let receipt =
+            dsm::dlv::sofi_receipt::verify(&closure.objects[0].bytes, &decoded.bundle, a_b)
+                .expect("the published receipt is the projection");
+        assert_eq!(receipt.bundle(), b);
+        assert_eq!(receipt.route_commitment(), x, "the shipped X (2c-F R1)");
+        assert_eq!(receipt.trader_acceptance(), a_b);
+        assert_eq!(
+            receipt.successors(),
+            &[frontier.c_n],
+            "the realized successor"
+        );
+        assert_eq!(
+            crate::sdk::storage_io::fake_fleet::any_member_holding(&closure.objects[0].key),
+            Some(closure.objects[0].bytes.clone()),
+            "held at the receipt's own content address"
+        );
+    }
+
+    /// 2c-F R6 — the receipt NEVER gates the release. With every receipt PUT
+    /// refused the settlement still realizes and its fence releases, leaving
+    /// the receipt an owed obligation. Once healed, the sweep alone publishes
+    /// the same bytes: no binding round, no transition, no re-fence.
+    #[test]
+    #[serial]
+    fn the_def_14_2_receipt_never_gates_the_release_and_publishes_after_it() {
+        use crate::sdk::sofi_receipt_publication::{publication, ClosurePublication};
+
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/sofi-receipt-late", &[("trader0", 0x51)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let (rel_key, fenced_parent) = trader_position_of(trader_dev);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        const RECEIPT_KEYS: &str = "immutable::DSM/sofi-receipt/v1::";
+        crate::sdk::storage_io::fake_fleet::fail_keys_with_prefix(RECEIPT_KEYS);
+        let (res, _x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0xF2,
+        );
+        assert!(res.success, "the settle realizes: {:?}", res.error_message);
+        let b = settle_outcome(&res, "realized");
+        let fence_state = || {
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &fenced_parent, &b)
+                .expect("fence read")
+                .expect("the fence row")
+                .state
+        };
+        assert_eq!(
+            fence_state(),
+            dsm::dlv::trader_fence::FenceState::Released,
+            "released on C2's condition although the receipt is below quorum"
+        );
+        let (closure, _, _) = realized_receipt_closure(&vault_id, &pc_a, &pc_b, &b);
+        assert!(
+            matches!(
+                publication(&closure).expect("publication state"),
+                ClosurePublication::Pending(_)
+            ),
+            "the receipt is owed, not published"
+        );
+
+        // HEALED: the generic sweep finishes the obligation, and nothing else moves.
+        crate::sdk::storage_io::fake_fleet::heal_keys_with_prefix(RECEIPT_KEYS);
+        let root_before = trader.core_sdk.device_head().expect("trader head").root();
+        let binds_before = crate::sdk::binding_fleet_double::cas_log().len();
+        crate::runtime::get_runtime()
+            .block_on(crate::handlers::artifact_republish::republish_unpublished_artifacts())
+            .expect("sweep");
+        assert_eq!(
+            publication(&closure).expect("publication state"),
+            ClosurePublication::Published,
+            "the same frozen bytes, published after the release"
+        );
+        assert_eq!(fence_state(), dsm::dlv::trader_fence::FenceState::Released);
+        assert_eq!(
+            trader.core_sdk.device_head().expect("trader head").root(),
+            root_before,
+            "no transition and no admission"
+        );
+        assert_eq!(
+            crate::sdk::binding_fleet_double::cas_log().len(),
+            binds_before,
+            "no binding round"
+        );
+    }
+
     /// 2c-D §14, D-f (e): the continuation cannot operate on an UNCERTIFIED
     /// settlement. The acceptance's locator is withheld, so the settle binds
     /// and advances but the walk cannot find `TA_B` and certifies nothing.
@@ -9470,6 +9717,17 @@ mod funded_creation_tests {
         );
         held_fence(&rel_key, &fenced_parent, &b);
         assert!(no_receipt(), "and the resume froze no receipt for it");
+        // …NOR A DEF 14.2 RECEIPT: it is projected only from a certified fold
+        // (2c-F R6), so an uncertified settlement has none to publish.
+        assert!(
+            crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
+                "immutable::DSM/sofi-receipt/v1::",
+                crate::sdk::sofi_receipt_publication::RECEIPT_PURPOSE,
+            )
+            .expect("row read")
+            .is_none(),
+            "no Def 14.2 receipt exists for an uncertified settlement"
+        );
 
         let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
         match frontier.frontier_binding {
