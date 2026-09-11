@@ -1262,10 +1262,22 @@ already-verified market history when the owner participates, but it does not imp
 time or maximum number of market advances for which the owner may remain absent. A terminal
 owner close under Requirement 6.30 is itself the final owner/DLV state update and does not require
 a separate catch-up step.
-Status (amendment 2c-G, ruling G3). The catch-up of Requirement 4.5 is implemented; the fresh
-baseline this requirement demands — an AnchorPresentationV3 over exactly the caught-up V_n, built
-by the same owner-anchor machinery as the birth baseline — is not yet published. It is owed by the
-third 2c-G change, after the admitted terminal close (G4).
+Implementation (amendment 2c-G, ruling G3). After every catch-up — finished or stopped — the last
+fully materialized generation V_k becomes the owner's baseline: an AnchorPresentationV3 over exactly
+the walk's certified V_k, built by the same owner-anchor machinery as the birth baseline and verified
+as a stranger verifies it. The vault, generation, parent link, reserves (equal to the owner's
+admitted leaves), storage set and canonical encoding are all checked first; a generation the walk
+did not certify can never be absorbed. One transaction freezes the anchor and a reserve proof at the
+owner's admitted head and switches the owner's record, which is local bookkeeping. The routing
+advertisement moves to the new baseline — the anchor and the reserve-proof locator together, never
+an anchor its proof does not reach — only once both are quorum-durable; until then the old published
+baseline stays valid and trading continues. Re-anchoring is idempotent and never moves backwards,
+and composition reaches the same frontier from either baseline. The advertisement also names the
+vault's immutable birth anchor, which is set once and never moved (the G3 blocker ruling). A history
+walk that must reconstruct a generation older than the current anchor composes from that birth
+anchor instead, so a baseline that moved never makes an earlier settlement unverifiable. The birth
+anchor is discovery metadata, not authority: it is authenticated like any anchor, and one that is
+not the vault's birth state is refused.
 7 Smart Commitments and Atomic Composition
 Definition 7.1 (Smart Commitment). A bounded deterministic predicate over committed
 inputs:

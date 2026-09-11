@@ -323,6 +323,172 @@ and head-sync gate before merge.
 Do not start the next implementation against an unmerged predecessor branch.
 ```
 
+### G3 implementation rulings (2026-09-11), verbatim
+
+Asked while PR 3 was being designed: when the fresh baseline is built, whether the advertisement
+(strangers) moves in this PR, and when the owner's record switches.
+
+```text
+G3: when should the fresh owner baseline be built and frozen?
+
+Choose "Once, after the run (Recommended)" — option 1.
+
+That matches the frozen G3 ruling exactly. The fresh owner baseline is a
+post-catch-up baseline collapse, not something that should be rebuilt after
+every individual owner-apply.
+
+The semantics should be:
+
+* Catch up through the certified generations in order.
+* When that catch-up pass finishes, take the last fully materialized
+  generation V_k.
+* Build/freeze the fresh AnchorPresentationV3 for exactly V_k.
+* If catch-up only gets partway, it is valid to anchor that last fully
+  completed V_k; never anchor a partially applied generation.
+* Re-running it for the same V_k must be idempotent.
+* The anchor does not authorize, re-certify, or re-realize any trade. It just
+  creates a new authenticated owner baseline so future composition doesn't
+  have to replay everything from the older baseline.
+
+So do not choose "Inside every apply." That would unnecessarily make every
+individual catch-up application also perform baseline construction/publication
+and would couple two things we deliberately separated.
+```
+
+```text
+G3: should this PR also move strangers, i.e. the routing advertisement traders
+compose from?
+
+Choose Option 1: "Yes, anchor + proof together (Recommended)."
+
+This is the piece we were just talking about: how a stranger/trader learns
+where the new authenticated baseline is and can actually compose forward from
+it.
+
+If G3 only updates the owner locally, then the owner gets the benefit of
+baseline collapse, but everybody else still has to start from the original
+birth state and replay an ever-growing history. That defeats a major purpose of
+creating the fresh baseline.
+
+The important part is that the advertisement must move the anchor and the
+corresponding economic proof locator together. Not just the anchor.
+
+The intended flow becomes:
+
+old advertised baseline → owner catches up through V_k → fresh
+owner-authenticated baseline for V_k is created and durably published →
+corresponding proof/economic state is available → advertisement atomically
+points strangers at that new baseline + proof → new traders start composing
+from V_k.
+
+Until that new advertisement is safely published, the old advertisement
+remains valid, so there is no trading interruption.
+
+And make sure Claude preserves this distinction:
+
+The advertisement is discovery/routing information, not authority. A stranger
+does not trust the advertisement because it says "this is the latest state."
+They use it to find the candidate baseline and its proof material, then
+independently authenticate the owner anchor and verify the state/evidence
+before composing from it.
+
+So yes: move strangers too, in this PR. Anchor + proof together. That makes G3
+an actual system-wide baseline collapse instead of merely an owner-local
+optimization.
+```
+
+```text
+G3: when should the owner's vault record switch to the new baseline?
+
+Choose Option 1: "Same tx as the freeze (Recommended)."
+
+That is the cleaner crash-consistent design, with one important semantic
+guard:
+
+The owner's local vault record may switch to the newly frozen baseline in the
+same atomic transaction, but that does not make the baseline publicly usable or
+authoritative for strangers until the anchor + proof are durably published to
+the required quorum.
+
+So the sequence is:
+
+catch-up completes through V_k → freeze fresh anchor/proof for V_k + update
+owner's local vault record atomically → mark it publication-pending → publish
+anchor/proof → once quorum durability is established, republish the
+advertisement so strangers begin composing from V_k.
+
+Until that final publication/advertisement step, strangers keep using the old
+already-published baseline. Trading therefore keeps working and there is no
+discovery gap.
+
+Why I prefer option 1 over "Only after quorum" is recovery simplicity.
+Option 2 creates another intermediate state:
+
+new anchor exists and is published, but owner record still points at old
+baseline
+
+and then you need a second crash-recoverable transition just to switch the
+local record. Option 1 keeps the owner-side state transition atomic with
+creation of the new baseline object.
+
+The invariant I would give Claude is:
+
+> Switching the owner record at freeze is local bookkeeping, not publication
+> authority. A pending baseline MUST NOT become the stranger/composition
+> discovery baseline until its required objects are quorum-durable and the
+> advertisement is moved. The old published baseline remains valid until then.
+
+So: Option 1.
+```
+
+### G3 blocker ruling (2026-09-11), verbatim
+
+Raised while PR 3 was being tested. Moving the advertisement's anchor made earlier settles impossible to
+re-validate: lineage validation re-runs each past trader settle's reserve-provenance check, and that
+check composes history from the advertisement's CURRENT anchor, so it can no longer reach an older
+owner proof's generation (`HistoryMissesBaseline`).
+
+```text
+G3 BLOCKER RULING
+
+Choose: Keep birth anchor in the advertisement.
+
+Add the immutable vault birth-anchor digest as transport/discovery metadata.
+It is set once for the vault and never changes.
+
+Semantics:
+
+1. The current advertised anchor remains the preferred composition baseline
+   for new quotes, trades and verification at or after its generation.
+
+2. The birth anchor is only the immutable historical fallback when the
+   current baseline is newer than the generation that must be reconstructed.
+
+3. The birth-anchor field is discovery/provenance metadata, not authority.
+   A verifier must still fetch and authenticate the referenced anchor through
+   the existing anchor-validation machinery.
+
+4. Do not allow callers to substitute an arbitrary historical anchor.
+
+5. Moving the current advertisement to V_k must not invalidate the ability to
+   revalidate settlements from generations before V_k.
+
+6. Do not introduce an anchor chain unless the immutable birth fallback proves
+   insufficient. It adds unnecessary wire/history-resolution machinery.
+
+7. Keep the G3 stranger-facing baseline move. Do not revert to owner-local-only.
+
+8. The current anchor + economic-proof locator still move together only after
+   their required publication durability is established. The birth anchor
+   remains unchanged forever.
+
+This is a transport/discovery wire extension, not a new economic authority
+object and not a new settlement rule.
+```
+
+The owner's framing: **birth anchor = permanent historical root; current advertised anchor = efficient
+modern starting point.**
+
 ---
 
 ## 1. Existing normative state

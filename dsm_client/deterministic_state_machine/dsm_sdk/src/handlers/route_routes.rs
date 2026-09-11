@@ -607,6 +607,14 @@ impl AppRouterImpl {
             owner_public_key: &req.owner_public_key,
             vault_proto_bytes: &req.vault_proto_bytes,
             anchor_presentation_digest: presentation_digest,
+            // The IMMUTABLE birth anchor, recorded at dlv.create and never moved —
+            // the historical fallback a verifier composes from (2c-G, G3).
+            birth_anchor_presentation_digest:
+                crate::storage::client_db::amm_vault_records::get_birth_presentation_digest(
+                    &vault_id,
+                )
+                .ok()
+                .flatten(),
             // THE RESERVE-PROOF LOCATOR, from the vault's own record — the
             // same place the policy digest and the baseline come from, and
             // never from the request. The ad authenticates nothing, so this

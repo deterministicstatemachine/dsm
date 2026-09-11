@@ -187,13 +187,19 @@ pub trait ProvenanceResolver {
     ///
     /// Fails closed by default: a resolver that cannot compose answers
     /// `Incomplete`, so a post-baseline reserve is never provenanced by it.
+    ///
+    /// `from_generation` is the earliest generation the history must include —
+    /// the owner proof's baseline generation. A resolver composes from a
+    /// baseline at or before it, so a baseline that moved forward since
+    /// (amendment 2c-G, G3) never makes an earlier settle unverifiable.
     fn composed_vault_history(
         &self,
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &crate::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        let _ = (vault_id, target_c_n, parent);
+        let _ = (vault_id, target_c_n, parent, from_generation);
         Err(PeerLineageFailure::Incomplete(
             "this resolver cannot compose vault state".into(),
         ))
@@ -1218,7 +1224,7 @@ pub fn verify_credit_source(
             let history = match owner_leaves.first().map(|l| l.vault_sequence) {
                 Some(baseline) if baseline < *parent_sequence => Some(
                     resolver
-                        .composed_vault_history(&vault, parent_binding, &vn)
+                        .composed_vault_history(&vault, parent_binding, &vn, baseline)
                         .map_err(ProvenanceError::OwnerLineage)?,
                 ),
                 _ => None,

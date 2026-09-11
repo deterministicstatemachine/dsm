@@ -1214,6 +1214,94 @@ fn economic_proof_artifact_for(
     )))
 }
 
+/// The owner's reserve proof for one vault, at its ADMITTED HEAD (amendment
+/// 2c-G, G3).
+///
+/// A fresh owner baseline and the advertisement's reserve-proof locator must
+/// name the SAME generation. A trader's provenance reads the owner's backing
+/// from this proof and requires the composed history to pass through its
+/// generation, so an anchor ahead of its proof would refuse every settle. The
+/// proof of the admission that produced the anchored generation is not always
+/// still in hand — a crash between the last apply and its anchor loses it — so
+/// this builds the proof from the admitted state itself: the vault's two
+/// reserve leaves, with their paths, under the validated root at the admitted
+/// position. The one-snapshot rule is an admission's own:
+/// [`producer_tree_and_pre_state`] refuses a tree whose root is not the
+/// validated one. The artifact states only what that registered root commits.
+pub(crate) struct AdmittedReserveProof {
+    /// The frozen-artifact key and exact bytes of the `EconomicProofArtifactV1`.
+    pub key: String,
+    pub bytes: Vec<u8>,
+    /// Its content address, and the economic position whose root it names.
+    pub addr: [u8; 32],
+    pub position: u64,
+    pub root: [u8; 32],
+    /// The generation both legs stand at.
+    pub generation: u64,
+    /// The two reserve legs, ordered by policy commit.
+    pub legs: Vec<dsm::economic::state::EconomicVaultReserveState>,
+}
+
+pub(crate) fn vault_reserve_proof_at_admitted_head(
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    vault_id: &[u8; 32],
+) -> Result<AdmittedReserveProof, DsmError> {
+    use dsm::economic::proof_artifact::{EconomicProofArtifact, EconomicProofLeaf};
+    use dsm::economic::state::EconomicLeafState;
+    let (position, root) = economic_lineage::get_admitted()
+        .map_err(|e| storage_err("load admitted", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "reserve proof: this device has no admitted economic position",
+            )
+        })?;
+    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(position, root);
+    let (tree, pre) = producer_tree_and_pre_state(&validated)?;
+    let mut legs: Vec<dsm::economic::state::EconomicVaultReserveState> = pre
+        .vault_reserves
+        .values()
+        .filter(|r| r.vault_id == *vault_id)
+        .cloned()
+        .collect();
+    legs.sort_by_key(|r| r.policy_commit);
+    if legs.len() != 2 || legs[0].vault_sequence != legs[1].vault_sequence {
+        return Err(DsmError::invalid_operation(
+            "reserve proof: the admitted state does not hold this vault's two reserve legs at one \
+             generation",
+        ));
+    }
+    let leaves = legs
+        .iter()
+        .map(|r| {
+            let state = EconomicLeafState::VaultReserve(r.clone());
+            let key = state.leaf_key(genesis, devid);
+            EconomicProofLeaf {
+                state,
+                siblings: Box::new(tree.siblings(&key)),
+            }
+        })
+        .collect();
+    let artifact = EconomicProofArtifact::new(*genesis, *devid, position, root, leaves)
+        .map_err(|e| DsmError::invalid_operation(format!("reserve proof: {e}")))?;
+    let bytes = artifact.encode();
+    Ok(AdmittedReserveProof {
+        key: crate::sdk::economic_registers::immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &bytes,
+        ),
+        addr: immutable_inner(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &bytes,
+        ),
+        bytes,
+        position,
+        root,
+        generation: legs[0].vault_sequence,
+        legs,
+    })
+}
+
 /// The canonical `TA_B` for a transition that accepted a settlement bundle, or
 /// `None` when it accepted none.
 ///

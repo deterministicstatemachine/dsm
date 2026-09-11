@@ -191,6 +191,77 @@ pub fn update_economic_proof_locator(
     Ok(())
 }
 
+/// Record the vault's IMMUTABLE birth-anchor digest — the inner digest of the
+/// `AnchorPresentationV3` its birth published (amendment 2c-G, G3 blocker
+/// ruling). Written once, inside `dlv.create`'s own transaction; a second
+/// write that would CHANGE it is refused, so the historical fallback anchor
+/// can never be substituted after birth.
+pub fn set_birth_presentation_digest_with_conn(
+    tx: &rusqlite::Transaction<'_>,
+    vault_id: &[u8; 32],
+    digest: &[u8; 32],
+) -> Result<()> {
+    if *digest == [0u8; 32] {
+        anyhow::bail!("refusing to record a zero birth-anchor digest");
+    }
+    let changed = tx.execute(
+        "UPDATE amm_vault_records
+            SET birth_presentation_digest = ?2
+          WHERE vault_id = ?1
+            AND (length(birth_presentation_digest) = 0 OR birth_presentation_digest = ?2)",
+        params![vault_id.as_slice(), digest.as_slice()],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("the birth anchor is recorded once and never moved ({changed} rows)");
+    }
+    Ok(())
+}
+
+/// The vault's immutable birth-anchor digest, if its birth recorded one.
+pub fn get_birth_presentation_digest(vault_id: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in get_birth_presentation_digest, recovering");
+        poisoned.into_inner()
+    });
+    let bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT birth_presentation_digest FROM amm_vault_records WHERE vault_id = ?1",
+            params![vault_id.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(bytes.and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()))
+}
+
+/// [`update_economic_proof_locator`] inside an open transaction — the fresh
+/// owner baseline (amendment 2c-G, G3) moves the locator in the same
+/// transaction that freezes the proof and advances the baseline, so the record
+/// can never name an anchor its proof does not reach.
+pub fn update_economic_proof_locator_with_conn(
+    tx: &rusqlite::Transaction<'_>,
+    vault_id: &[u8; 32],
+    locator: &EconomicProofLocator,
+) -> Result<()> {
+    if locator.addr == [0u8; 32] {
+        anyhow::bail!("refusing to stamp a zero economic-proof address");
+    }
+    let changed = tx.execute(
+        "UPDATE amm_vault_records
+            SET economic_proof_addr = ?2, economic_proof_position = ?3
+          WHERE vault_id = ?1",
+        params![
+            vault_id.as_slice(),
+            locator.addr.as_slice(),
+            locator.position as i64
+        ],
+    )?;
+    if changed != 1 {
+        anyhow::bail!("economic-proof locator stamp touched {changed} rows for one vault id");
+    }
+    Ok(())
+}
+
 /// Stamp the vault's frozen `VaultPostProto` bytes onto its record. Runs once,
 /// at `dlv.create`, after the vault is finalized and its enforcement/policy
 /// digest are stamped — the earliest point at which the bytes are final.
