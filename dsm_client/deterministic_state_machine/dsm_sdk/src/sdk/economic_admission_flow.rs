@@ -1046,6 +1046,55 @@ fn economic_proof_artifact_for(
     )))
 }
 
+/// The canonical `TA_B` for a transition that accepted a settlement bundle, as
+/// a publishable artifact — or `None` when it accepted none.
+///
+/// **Built here for the same reason the inclusion proof is.** `TA_B` carries
+/// the acceptance leaf's path under `R_T^+`, and a mutation's own captured
+/// siblings are not that path: they hold with the earlier mutations applied,
+/// and the acceptance leaf is not last in key order by any rule. So the path
+/// must come from `tree` — the finished post-transition tree whose root was
+/// just registered — in the same single snapshot, with no second read and no
+/// window in which the tree could move.
+///
+/// **What publishing it does not do.** A `TA_B` on the fleet is an artifact a
+/// verifier can fetch. It realizes nothing: no fence is released, no frontier
+/// advances, no market fold leaves `PartialPendingRealization`, and nothing
+/// here constructs a `BundleAcceptanceWitness` — that type's only constructor
+/// is 2c-D §7's verifier, which needs the composed bundle and an
+/// independently established trader AK that this path does not have.
+fn trader_acceptance_artifact_for(
+    tree: &EconomicSmt,
+    witness: &EconomicTransitionWitness,
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    validated: &ValidatedEconomicRoot,
+) -> Result<Option<(String, Vec<u8>, &'static str)>, DsmError> {
+    let Some(acceptance) = dsm::economic::acceptance_produce::produce_trader_acceptance(
+        tree,
+        witness,
+        genesis,
+        devid,
+        validated.economic_root(),
+        validated.economic_position(),
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("trader acceptance: {e}")))?
+    else {
+        return Ok(None);
+    };
+    let bytes = acceptance
+        .encode()
+        .map_err(|e| storage_err("trader acceptance encode", e))?;
+    Ok(Some((
+        crate::sdk::economic_registers::immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+            &bytes,
+        ),
+        bytes,
+        "trader-settlement-acceptance",
+    )))
+}
+
 /// Everything after local acceptance. Separated so recovery re-enters here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_admission(
@@ -1244,6 +1293,37 @@ pub(crate) async fn finish_admission(
             }
             None => None,
         };
+
+    // ── THE TRADER ACCEPTANCE for the bundle this transition accepted ────
+    //
+    // Same snapshot, same reason: `TA_B`'s path is the acceptance leaf's
+    // under the root just registered, and only `tree` holds it. Built after
+    // the inclusion proof so both come from one tree that has been shown to
+    // be the registered one.
+    //
+    // `None` here is the ordinary answer — every non-settlement accepts no
+    // bundle. A market settle always writes exactly one acceptance leaf
+    // (2c-D §8's producer-adoption cardinality, enforced by the write set),
+    // so a settle reaching `None` would mean the leaf was never emitted, and
+    // `build_write_set` refuses that long before this line.
+    //
+    // A CRASH-RESUMED admission reaches here too, and produces the SAME
+    // artifact: `resume_pending_admission` replays the frozen witness onto
+    // the validated pre-tree, so the tree, the witness and the root are the
+    // ones the first attempt had. The object is content-addressed, so the
+    // republish is idempotent — and if a replay ever diverged, the root guard
+    // inside the producer would refuse rather than publish a path that folds
+    // to a root nothing registered.
+    // No locator is returned. `ta_B` IS the object's inner address under this
+    // namespace, and a Def 14.2 receipt binds `ta_B` — so a consumer already
+    // has the address from the artifact that names it, and a second copy
+    // threaded through the admission outcome would be one more place for it
+    // to disagree. PR C adds a fetch path together with the code that reads it.
+    if let Some((key, bytes, purpose)) =
+        trader_acceptance_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)?
+    {
+        post_admit_artifacts.push((key, bytes, purpose));
+    }
 
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
