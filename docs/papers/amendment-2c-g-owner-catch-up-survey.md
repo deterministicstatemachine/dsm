@@ -1,11 +1,327 @@
-# Amendment 2c-G — owner catch-up and owner-side economic admission: survey and rulings draft
+# Amendment 2c-G — owner catch-up and owner-side economic admission: survey and rulings
 
-> **STATUS: DRAFT FOR OWNER RULING. Nothing in this document is frozen, and it changes no code.**
+> **STATUS: FROZEN — owner rulings of 2026-09-11, recorded verbatim in §0.** §1–§7 are the survey as
+> it was put for ruling; where they differ from §0, §0 governs. Delivery is three sequential PRs,
+> each cut from updated `main` after its predecessor merges: PR 1 = G1 + G2, PR 2 = G4, PR 3 = G3.
 >
 > Base: `main` at `5133eaa2` (2c-F, #859 and #860).
 
 **Sources.** Revision 15 is quoted from `.github/instructions/sofispecs.instructions.md` as `spec:N`.
 Code paths are relative to `dsm_client/deterministic_state_machine/`.
+
+---
+
+## 0. Owner rulings (2026-09-11), verbatim
+
+### G1 + G2 — ordered admitted applies, as materialization only
+
+```text
+G1 + G2 RULING
+
+Choose option 1: Ordered admitted applies.
+
+Implement owner catch-up by applying the already-certified settlements in causal
+order, oldest generation first, using the existing DlvOwnerApplyV2 machinery.
+
+Do NOT introduce a new collapsing wire transition.
+
+However, freeze the semantics explicitly:
+
+- DlvOwnerApplyV2 during catch-up is a MATERIALIZATION / SYNCHRONIZATION step.
+- It does not authorize the underlying market transition.
+- It does not move value a second time.
+- It does not re-certify the settlement.
+- It does not create a new realization boundary.
+- It does not give the owner a veto over an already-realized market successor.
+- It does not change ordering; ordering comes from the already-certified DLV
+  history.
+- It does not make future trader admission depend on owner catch-up.
+- It cannot manufacture authority from an uncertified settlement.
+
+For a catch-up from owner baseline V_g to composed frontier V_n:
+
+1. Start from the owner's last authenticated baseline.
+2. Enumerate exactly the already-certified realized successors
+   V_(g+1) ... V_n in causal order.
+3. For each one, materialize the existing certified economic effect through the
+   existing owner-apply write-set machinery.
+4. Each step must be derived from the exact certified fold / Req 21.16 evidence
+   already accepted for that settlement.
+5. No fresh market choice, route choice, reserve choice, amount choice, fee
+   choice, successor choice, or storage-set choice is permitted.
+6. The terminal owner state must equal the current composed DLV frontier exactly.
+7. After completion, that terminal owner state becomes the new authenticated
+   owner baseline, collapsing the already-verified history for future reads.
+
+Failure partway through catch-up is local/recoverable:
+- resume from the last successfully materialized certified generation;
+- never replay an already-applied generation as new value movement;
+- never roll back the composed DLV frontier;
+- never affect trader settlement finality.
+
+Required invariant:
+
+    owner catch-up consumes certified history;
+    it never creates certified history.
+
+Add tests proving:
+- multiple generations can accumulate while LP is offline;
+- catch-up later applies them oldest-first;
+- final owner baseline equals composed frontier;
+- no owner action existed between those trades;
+- an uncertified generation cannot be materialized;
+- altered reserves / parent / generation / receipt evidence are refused;
+- partial catch-up resumes idempotently;
+- catch-up never changes the already-realized trader-visible frontier.
+```
+
+### G2 — when catch-up runs
+
+```text
+G2 RULING — WHEN OWNER CATCH-UP RUNS
+
+Choose option 1: Auto on sync + explicit.
+
+Use one shared idempotent catch-up core, reachable from:
+
+1. storage.sync / normal online synchronization; and
+2. an explicit owner-triggered catch-up operation/API.
+
+Automatic catch-up semantics:
+
+- When the owner is online and storage.sync discovers certified DLV generations
+  beyond the owner's current authenticated baseline, it should attempt catch-up.
+- Apply only already-certified realized successors, oldest generation first.
+- Stop at the current composed frontier that is actually available and certified.
+- A successful partial pass may advance the owner baseline through the generations
+  that were materialized successfully.
+- A later sync resumes from that new baseline.
+- Running sync repeatedly with nothing new is a no-op.
+
+Explicit catch-up semantics:
+
+- The explicit path invokes the exact same catch-up engine.
+- It does not have stronger authority than automatic sync.
+- It cannot choose different history, reserves, ordering, or successors.
+- It is useful for manual repair, diagnostics, and forcing synchronization now.
+
+CRITICAL AUTHORITY BOUNDARIES
+
+Catch-up must never gate:
+
+- trader settlement;
+- market realization;
+- composition;
+- future trader admission;
+- QuorumBind;
+- fence release;
+- close finality.
+
+Owner absence therefore remains harmless to continued delegated trading.
+
+Catch-up failure is LOCAL synchronization failure only.
+
+If automatic catch-up fails:
+- report/log the failure;
+- retain the last successfully materialized owner baseline;
+- do not roll back composed state;
+- do not invalidate already-realized settlements;
+- retry on a later sync or explicit request.
+
+Do not make "owner is online" a protocol precondition for anything.
+
+The automatic path must not create an infinite/re-entrant sync loop.
+storage.sync may invoke catch-up, but catch-up must not recursively invoke the
+same sync entrypoint.
+
+Use tests for:
+- owner offline through multiple trades, then sync catches up automatically;
+- explicit catch-up reaches the same exact state;
+- repeated automatic/explicit calls are idempotent;
+- partial failure resumes from the last applied generation;
+- catch-up failure does not affect trader-visible frontier;
+- nothing to catch up => no writes;
+- automatic and explicit paths produce byte-identical terminal owner state.
+```
+
+### G3 — a fresh owner baseline after every catch-up
+
+```text
+G3 RULING — FRESH OWNER BASELINE
+
+Choose option 1: publish a fresh owner baseline after every successful catch-up.
+
+After owner catch-up has materialized certified history through V_n:
+
+1. Construct a fresh AnchorPresentationV3 using the SAME canonical owner-anchor
+   machinery already used for the birth/owner baseline path.
+
+2. The new anchor MUST commit to exactly the terminal caught-up state V_n.
+
+3. Publish it only after the catch-up through V_n has completed successfully.
+
+4. Once authenticated and published, V_n becomes the new owner baseline for
+   future composition.
+
+5. Future composition may begin from that newest authenticated baseline rather
+   than replaying certified history from birth.
+
+CRITICAL SEMANTICS
+
+The new anchor is a baseline-collapse / synchronization artifact only.
+
+It does NOT:
+
+- authorize any of the settlements it summarizes;
+- re-certify them;
+- move value;
+- change their order;
+- create a second realization boundary;
+- permit rollback of the already-composed frontier;
+- give the owner a veto;
+- alter trader settlement finality.
+
+The authority chain remains:
+
+    old authenticated owner baseline
+        + ordered certified realized successors
+        -> exact caught-up V_n
+        -> fresh owner-authenticated baseline for V_n
+
+The fresh anchor may summarize that already-established history, but it may not
+change it.
+
+PARTIAL FAILURE
+
+If catch-up stops at V_k before reaching V_n:
+
+- publish a fresh baseline only for V_k if V_k was fully and successfully
+  materialized;
+- never anchor a partially applied generation;
+- later catch-up resumes from authenticated V_k;
+- the trader-visible composed frontier may remain ahead at V_n.
+
+Do not require the owner baseline to equal the current trader-visible frontier
+at every moment.
+
+ANCHOR VALIDITY
+
+Before accepting the new baseline:
+
+- exact vault identity must match;
+- generation must equal the successfully materialized generation;
+- parent/history linkage must correspond to the certified chain just consumed;
+- reserves and all canonical vault fields must equal the caught-up terminal state;
+- storage-set coordinates must be the authenticated ones for that state;
+- owner authentication/signature must verify under the existing owner identity;
+- canonical encoding and address/CCB checks must pass.
+
+No caller-supplied replacement reserves, generation, parent, or storage set.
+
+IDEMPOTENCE
+
+Re-running catch-up when the owner is already anchored at V_n:
+
+- performs no economic writes;
+- does not create a semantically different anchor;
+- does not move the baseline backwards;
+- does not replay settlements as value movement.
+
+TESTS
+
+Prove:
+
+- owner starts at V0;
+- several certified trades realize while owner remains offline;
+- catch-up materializes V1...Vn in order;
+- fresh anchor is published for exactly Vn;
+- subsequent composition starts from Vn rather than birth;
+- resulting composed frontier is identical either way;
+- partial catch-up anchors only the last fully applied generation;
+- stale/altered anchor data is refused;
+- an uncertified successor can never be absorbed into a fresh baseline;
+- repeated catch-up/re-anchor is idempotent.
+```
+
+### G4 and delivery — three sequential PRs
+
+```text
+G4 / DELIVERY RULING
+
+Choose option 1: three sequential PRs.
+
+PR 1 — G1 + G2
+Owner catch-up execution.
+
+Implement:
+- admitted ordered DlvOwnerApplyV2 catch-up;
+- automatic-on-sync + explicit catch-up entrypoints;
+- oldest-first consumption of already-certified realized successors;
+- idempotent partial-progress/restart behavior.
+
+This PR owns the executable catch-up semantics.
+
+Merge PR 1 before beginning the dependent G4 implementation.
+
+PR 2 — G4
+Admitted terminal close.
+
+Cut this branch from updated main AFTER PR 1 merges.
+
+Close must use the same corrected economic-admission foundation established by
+PR 1. Do not duplicate or bypass that machinery.
+
+Critical close boundaries:
+
+- close authority remains owner authority;
+- close cannot operate from a stale owner-materialized baseline while a newer
+  certified composed DLV frontier exists;
+- any required catch-up consumes the already-certified frontier and is not
+  owner approval of those settlements;
+- close admission must correspond to the exact current authoritative/composed
+  vault state;
+- no skipped realized generations;
+- no caller-selected reserves, generation, parent or storage set;
+- no close may erase, replace or roll back a realized market successor;
+- terminal close remains distinct from market realization;
+- existing QuorumBind / accepted-successor / close-auth rules remain intact.
+
+Add negative tests for stale-baseline close, skipped generation, altered
+reserves, wrong parent, uncertified predecessor and attempted close against a
+frontier that has not been correctly caught up/admitted.
+
+PR 3 — G3
+Fresh owner re-anchor / baseline collapse.
+
+Cut this branch from updated main AFTER PR 2 merges.
+
+Implement the fresh AnchorPresentationV3 baseline publication using the
+already-working catch-up path.
+
+This PR owns:
+- publishing the exact caught-up V_n as the new owner baseline;
+- restarting composition from that baseline;
+- partial catch-up anchoring only the last fully materialized generation;
+- idempotent re-anchor behavior.
+
+Do not make re-anchoring a prerequisite for trader execution or settlement.
+
+DELIVERY RULE
+
+These are sequential dependencies, not stacked review branches:
+
+    main
+      -> PR1 merge
+      -> updated main
+      -> PR2 merge
+      -> updated main
+      -> PR3 merge
+
+Each PR must independently pass its full tests, mutations, lint, safety checks
+and head-sync gate before merge.
+
+Do not start the next implementation against an unmerged predecessor branch.
+```
 
 ---
 
