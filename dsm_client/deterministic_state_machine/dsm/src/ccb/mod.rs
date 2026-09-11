@@ -145,6 +145,11 @@ pub mod class {
     /// is a single namespace.
     pub const TRADER_ACCEPTANCE: u16 = 0x0011;
 
+    /// `SofiReceipt`, the Def 14.2 settlement receipt — amendment 2c-F,
+    /// registry §5.42. Its encoder lives in `crate::dlv::sofi_receipt`: it is
+    /// a projection of `(B, TA_B)` and is not reachable from a `VaultStateV2`.
+    pub const SOFI_RECEIPT: u16 = 0x0034;
+
     /// A complete pre-root → post-root economic transition, carrying its
     /// mutations and its inline credit sources.
     pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
@@ -240,23 +245,15 @@ pub mod declared_unencoded {
     pub const FULFILLMENT_MECHANISM: u16 = 0x0006;
     /// §5.6.
     pub const MARKET_BOUNDS: u16 = 0x0008;
-    /// §5.14 `RouteSet` `R`, schema 2; schema 1 burned.
-    pub const ROUTE_SET: u16 = 0x000C;
     /// Blocked — §6.
     pub const TRADE_DIGEST: u16 = 0x0012;
     /// §5.8.
     pub const REFERENCE_WINDOW: u16 = 0x0013;
-    /// §5.12 `RouteCommitmentBody` `Q`, schema 2; schema 1 burned. `X` is
-    /// carried as a digest in `MarketTerms`; `Q` lives in the receipt
-    /// publication set (2c-A ruling 2).
-    pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
     pub const ALL: &[u16] = &[
         FULFILLMENT_MECHANISM,
         MARKET_BOUNDS,
-        ROUTE_SET,
         TRADE_DIGEST,
         REFERENCE_WINDOW,
-        ROUTE_COMMITMENT_BODY,
     ];
 
     pub fn is_declared_unencoded(object_class: u16) -> bool {
@@ -272,8 +269,22 @@ pub mod burned_class {
     pub const STORAGE_MEMBER_ID: u16 = 0x0003;
     /// `ExternalCommitmentBody` — §6a finding 3.
     pub const EXTERNAL_COMMITMENT_BODY: u16 = 0x0014;
+    /// `RouteSet` `R` — burned by amendment 2c-F R1. The shipped `X` commits
+    /// one signed route, never a set of alternatives, so nothing encodes `R`
+    /// at any schema; schema 2 never shipped an encoder.
+    pub const ROUTE_SET: u16 = 0x000C;
+    /// `RouteCommitmentBody` `Q` — burned by amendment 2c-F R1. `X` is
+    /// `H_dom(DSM/ext, RC*)` over the signed RouteCommit carried inside `B`
+    /// (registry §2.10), so no separate `Q` object exists; schema 2 never
+    /// shipped an encoder.
+    pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
 
-    pub const ALL: &[u16] = &[STORAGE_MEMBER_ID, EXTERNAL_COMMITMENT_BODY];
+    pub const ALL: &[u16] = &[
+        STORAGE_MEMBER_ID,
+        EXTERNAL_COMMITMENT_BODY,
+        ROUTE_SET,
+        ROUTE_COMMITMENT_BODY,
+    ];
 
     pub fn is_burned_class(object_class: u16) -> bool {
         ALL.contains(&object_class)
@@ -312,14 +323,14 @@ pub mod schema {
         (super::class::ENCUMBRANCE_CLAIM, 1),
         (super::class::ENCUMBRANCE_SET, 1),
         // The route family moved to schema 2 when `p_v` became `c_n` and legs
-        // began nesting by complete CCB (registry §5.10–§5.14). Recorded for
-        // the two classes this crate does not encode as well, so a schema-1
-        // envelope classifies as burned rather than unknown (2c-A.1 ruling 10).
-        (super::declared_unencoded::ROUTE_SET, 1),
+        // began nesting by complete CCB (registry §5.10–§5.14). Schema 1 of
+        // `R` and `Q` stays recorded (2c-A.1 ruling 10) now that 2c-F R1 has
+        // burned both classes outright.
+        (super::burned_class::ROUTE_SET, 1),
         (super::class::ROUTE, 1),
         (super::class::ALLOCATION, 1),
         (super::class::ALLOCATION_BUNDLE, 1),
-        (super::declared_unencoded::ROUTE_COMMITMENT_BODY, 1),
+        (super::burned_class::ROUTE_COMMITMENT_BODY, 1),
         // Amendment 2c-E cut `TradeIntent` to the exact-output model, and the
         // bump propagates by §2.7 nesting: `0x0033` carries the intent and
         // `0x000E` carries the terms. Recorded so a schema-1 envelope for any

@@ -356,6 +356,51 @@ fn market_identities_are_pinned_and_the_decoder_records_the_span() {
     assert_eq!(dsm::dlv::settlement_bundle::bundle_digest(&bytes), b);
 }
 
+// ── the Def 14.2 receipt of the market vector (amendment 2c-F, §5.42) ─────────
+
+/// `a_B` for the vector. The receipt binds the acceptance identity as a bare
+/// digest, so any 32 bytes exercise the layout; the walk, not this vector, is
+/// what says which acceptance a settlement has.
+const A_B: [u8; 32] = [0xAB; 32];
+
+#[test]
+fn the_market_vector_projects_the_frozen_receipt() {
+    // Expected bytes from the pinned identities and the independent encoder
+    // alone: `b` and `c_{n+1}` are the literals pinned above, never recomputed
+    // by the production helpers.
+    let expected = [
+        indep::envelope(0x0034, 1),
+        MARKET_B.to_vec(),
+        X.to_vec(),
+        A_B.to_vec(),
+        indep::u32be(1),
+        MARKET_C_NEXT.to_vec(),
+        vec![0x00], // witness_hash: absent in schema 1
+    ]
+    .concat();
+    assert_eq!(expected.len(), 137, "registry §5.42 pins 137 bytes");
+
+    let produced = dsm::dlv::sofi_receipt::SofiReceipt::project(&prod_market_bundle(), A_B)
+        .expect("a market bundle has a receipt");
+    assert_eq!(
+        produced.encode(),
+        expected,
+        "the production projection is frozen"
+    );
+
+    const TAG: &[u8] = b"DSM/sofi-receipt/v1";
+    let rho = indep::h_dom(TAG, &expected);
+    assert_eq!(produced.digest(), rho);
+    assert_eq!(produced.address(), indep::storage_addr(TAG, &rho));
+
+    let decoded = dsm::dlv::sofi_receipt::decode_sofi_receipt(&expected).expect("decodes");
+    assert_eq!(decoded, produced);
+    assert_eq!(
+        dsm::dlv::sofi_receipt::verify(&expected, &prod_market_bundle(), A_B),
+        Ok(produced)
+    );
+}
+
 // ── shape and structure vectors: hand-built bytes the decoder must refuse ─────
 
 #[test]
@@ -539,8 +584,11 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
         // `declared_unencoded` when its encoder landed, so it belongs here or
         // it belongs to no set at all.
         0x0031, 0x0032, 0x0033,
+        // 0x0034 is the Def 14.2 SofiReceipt (amendment 2c-F R4), allocated
+        // with its encoder.
+        0x0034,
     ];
-    for n in 0x0001u16..=0x0033 {
+    for n in 0x0001u16..=0x0034 {
         let sets = [
             encodable.contains(&n),
             reserved::is_reserved(n),
@@ -566,6 +614,15 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
             dsm::ccb::schema::is_burned(n, 1),
             "{n:#06x} schema 1 is burned"
         );
+    }
+    // 2c-F R1 ratified the shipped X, so `R` and `Q` have no encoder at ANY
+    // schema: both classes are burned outright, never merely unencoded.
+    for n in [0x000C, 0x0017] {
+        assert!(
+            burned_class::is_burned_class(n),
+            "{n:#06x} burned by 2c-F R1"
+        );
+        assert!(!declared_unencoded::is_declared_unencoded(n));
     }
     // 2c-E's burns: the intent cut, and the two classes it propagates through.
     // Recorded in the machine-readable table, not only in a comment, so a
