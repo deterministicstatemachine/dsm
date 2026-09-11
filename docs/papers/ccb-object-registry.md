@@ -286,10 +286,10 @@ but a serialized protobuf message is never a valid CCB blob and must never be ha
 as if it were. Protobuf field numbers and CCB field numbers are independent namespaces and
 need not agree.
 
-#### The one named exception — `BindingRecordWireV1`
+#### Named exception 1 — `BindingRecordWireV1`
 
-Amendment 2c-C2 ruling F freezes exactly one structure outside CCB, and names it so that it can
-never be cited as a general precedent.
+Amendment 2c-C2 ruling F freezes this structure outside CCB, and names it so that it can never be
+cited as a general precedent. (Amendment 2c-F R1 names a second, `RC*`, below, on its own ground.)
 
 ```text
 BindingRecordWireV1 is a frozen storage-layer canonical BYTE GRAMMAR.
@@ -316,6 +316,27 @@ protobuf library refactor MUST NOT silently change them.**
 
 This is a narrowly named storage-substrate exception. **It is not permission for arbitrary
 protobuf-derived identities**, and no other object may cite it.
+
+#### Named exception 2 — `RC*`, the RouteCommitV1 commitment form (amendment 2c-F R1)
+
+```text
+RC*  =  the proto3 binary encoding of RouteCommitV1 (proto/dsm_app.proto, version 2)
+        with initiator_signature empty: fields in ascending field number,
+        implicit-presence scalars equal to their default omitted, hops in carried
+        order with each RouteCommitHopV1 encoded likewise, no unknown fields
+X    =  H_dom(DSM/ext, RC*)
+```
+
+`RC*` is computed over the re-encoding of the decoded message. It is the preimage of `X` and of the
+initiator's SPHINCS+ signature, and it is **never** a CCB blob. The signed `RC` rides inside `B` as
+field 9 of the `DlvSettleOperationPreimageV1` in `MarketTerms.recovery_material.operation_bytes`
+(§5.23), so `X` is recomputable from `B` alone.
+
+2c-F R1 ratified it rather than cutting it to a CCB `Q` because it shipped: the settler's operation
+signature, `b`, the `0x0021` leaves and every owner apply already commit to this `X`. That is its
+own ground, not a citation of exception 1. It permits no other protobuf-derived identity. The
+grammar is pinned by bytes, not by `prost`, in `dsm/tests/route_commitment_x_conformance.rs`: the
+expected bytes there are written by hand, so a protobuf-library refactor that moved them is caught.
 
 ### 2.11 Authenticated retrieval — the retrieval obligation
 
@@ -388,8 +409,8 @@ storage address, a resource key or an authority check appears here.
 | `0x0009` | `ReleasePolicy` (`P_R`) | 1 | nested in `0x0001` | §5.4 defined |
 | `0x000A` | `FeePolicy` (`Φ`) | 1 | nested in `0x0001` | §5.9 defined |
 | `0x000B` | `TradeIntent` | **2** | `I = H(DSM/intent ‖ CCB)` | §5.5 defined; schema 1 burned by 2c-E |
-| `0x000C` | `RouteSet` (`R`) | **2** | nested in `0x0017` | §5.14 defined; schema 1 **burned** |
-| `0x000D` | `Route` (`r_i`) | **2** | set element of `0x000C` | §5.13 defined; schema 1 **burned** |
+| `0x000C` | ~~`RouteSet`~~ | — | — | **BURNED by 2c-F R1** — schema 1 burned by the route cut; schema 2 never encoded |
+| `0x000D` | `Route` (`r_i`) | **2** | nested in `0x0033` field 3 | §5.13 defined; schema 1 **burned** |
 | `0x000E` | `SettlementBundle` (`B`) | **2** | `b = H(DSM/settlement-bundle ‖ CCB)` | §5.19 defined; schema 1 burned by 2c-E's transitive bump |
 | `0x000F` | `ConsumedDlvTransition` (`T_v`) | 1 | nested in `0x000E` | §5.21 defined |
 | `0x0010` | `DlvProofMaterial` (`P_v`) | 1 | nested in `0x000F` | §5.22 defined; zero fields in schema 1 |
@@ -397,7 +418,7 @@ storage address, a resource key or an authority check appears here.
 | `0x0012` | `TradeDigest` | 1 | `d = H(DSM/digest ‖ CCB)` | **blocked, see §6** |
 | `0x0013` | `ReferenceWindow` (`{d_i}`) | 1 | `W = H(DSM/ref-window ‖ pair_id ‖ CCB)` | §5.8 defined |
 | `0x0014` | ~~`ExternalCommitmentBody`~~ | — | — | **BURNED — §6a finding 3** |
-| `0x0017` | `RouteCommitmentBody` (`Q`) | **2** | `X = H(DSM/route-set ‖ CCB(Q))` | §5.12 defined; schema 1 **burned** |
+| `0x0017` | ~~`RouteCommitmentBody`~~ | — | — | **BURNED by 2c-F R1** — `X = H_dom(DSM/ext, RC*)` (§2.10); schema 2 never encoded |
 | `0x0015` | `Allocation` (`a`) | **2** | leg element; nested in `0x000D` | §5.10 defined; schema 1 **burned** |
 | `0x0016` | `AllocationBundle` (`AB_{A→B}`) | **2** | leg element; nested in `0x000D` | §5.11 defined; schema 1 **burned** |
 | `0x0018` | **substrate** `GenesisParamsV3` | 1 | `G = H(DSM/genesis/v3 ‖ CCB)` | §5.15 defined |
@@ -405,6 +426,7 @@ storage address, a resource key or an authority check appears here.
 | `0x001A` | **substrate** `DeviceTreeRootTransition` (`T_j`) | 1 | `t_j = H(DSM/devtree-transition ‖ CCB)`, and the delegate-signed bytes | §5.17 defined |
 | `0x0031` | **substrate** `DsmSuccessorEvidence` | 1 | `evidence_addr = H(DSM/economic-dsm-successor-evidence/v1 ‖ CCB)`; nested in `0x0033` | §5.23 defined |
 | `0x0033` | `MarketTerms` | **2** | nested in `0x000E` | §5.20 defined; schema 1 burned by 2c-E's transitive bump |
+| `0x0034` | `SofiReceipt` (Def 14.2 Receipt) | 1 | `ρ_B = H_dom(DSM/sofi-receipt/v1, CCB)` | §5.42 defined by 2c-F |
 | `0x001B` | **substrate** `EconomicRootClaimBody` | 1 | signed over `H_dom(DSM/economic-root-claim-sign/v1, CCB)` | §5.24 defined |
 | `0x001C` | **substrate** `EconomicAdmissionManifest` | 1 | inner `H_dom(N, P)`; named by `0x001B` field 5 | §5.25 defined |
 | `0x001D` | **substrate** `EconomicTransitionWitness` | 1 | inner identity; named by `0x001C` field 2 | §5.26 defined |
@@ -441,7 +463,8 @@ tuple's `enc(entry)` inline, so it still needs no class of its own. Per §2.8 a 
 is never re-assigned. `0xFF00`–`0xFFFF` reserved for test classes.
 
 **Burned schema versions.** `0x0004`, `0x0005`, `0x000C`, `0x000D`, `0x0015`, `0x0016` and
-`0x0017` have schema 1 burned by the state/route identity cut. `0x000B`, `0x0033` and `0x000E` have
+`0x0017` have schema 1 burned by the state/route identity cut; amendment 2c-F R1 has since burned
+`0x000C` and `0x0017` outright. `0x000B`, `0x0033` and `0x000E` have
 **schema 1 burned by amendment 2c-E** — `0x000B` because the exact-output cut changed its members,
 and the other two transitively, because §2.7 nests by complete CCB. No production path decodes,
 accepts, emits or falls back to any of the three, and schema-1 bytes must be refused as **burned**
@@ -604,12 +627,13 @@ normative network parameters (§3.2) and the one named non-CCB grammar (§2.10),
 `signature_alg` member — framework and namespace content, not object classes. No field table was
 added, changed or burned.
 
-Of the **twenty-two live** object classes above — `0x0014` is burned and not counted, and
-`0x0033` `MarketTerms` was added by amendment 2c-A:
+Of the **twenty-one live** object classes above — `0x0014`, `0x000C` and `0x0017` are burned and
+not counted; `0x0033` `MarketTerms` was added by amendment 2c-A and `0x0034` `SofiReceipt` by
+amendment 2c-F:
 
-- **19 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
-  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000C`, `0x000D`, `0x000E`, `0x000F`, `0x0010`,
-  `0x0013`, `0x0015`, `0x0016`, `0x0017`, `0x0033`. (Substrate `0x0031` is defined at §5.23 and,
+- **18 are fully specified** in §5 — `0x0001`, `0x0002`, `0x0004`, `0x0005`, `0x0007`,
+  `0x0008`, `0x0009`, `0x000A`, `0x000B`, `0x000D`, `0x000E`, `0x000F`, `0x0010`,
+  `0x0013`, `0x0015`, `0x0016`, `0x0033`, `0x0034`. (Substrate `0x0031` is defined at §5.23 and,
   like `0x0018`–`0x001A`, is **outside** this count.)
 - **Encoding closure for the settlement bundle is ACHIEVED.** 2c-B closed `MarketTerms` field 6, so
   a conformant market `b` is constructible; the owner-close shape is encodable once the exact
@@ -954,7 +978,11 @@ are distinct DLVs when the `vault_id` values recovered from their bound `V_n` di
 duplicate identifier inside the allocation purely to preserve a sorting explanation would be the
 alias this cut removes.
 
-### 5.12 `RouteCommitmentBody` — class `0x0017`, schema 2
+### 5.12 `RouteCommitmentBody` — class `0x0017` — **BURNED by 2c-F R1**
+
+> **Burned 2026-09-11.** The shipped `X` is `H_dom(DSM/ext, RC*)` over the signed RouteCommit that
+> `B` carries (§2.10), so no `Q` object exists and nothing encodes this class at any schema. What
+> follows is the record of what was defined, not a live layout.
 
 `X = H(DSM/route-set ‖ CCB(Q))`. Replaces the four-operand concatenation of §9.3.
 
@@ -993,8 +1021,10 @@ a same-pair allocation bundle", `r_i = ⟨A_{i,1},…,A_{i,h}⟩`, `h ≤ max_ho
 **Schema 2, schema 1 burned.** Both leg classes moved to schema 2 and legs nest by complete CCB, so
 this object's bytes changed even though its single field did not.
 
-One field, deliberately. `max_hops` is not carried: it is authoritative in `TradeIntent`
-field 6, and route validity checks `len(legs) ≤ max_hops` against the intent the route serves.
+One field, deliberately. `max_hops` is not carried — and since 2c-E it is not a `TradeIntent`
+member either: schema 1, which carried it, is burned. The beta route is exactly one leg (2c-A ruling
+3), and what now protects each dropped bound is 2c-E §5's. *(Corrected by 2c-F finding I-1: this
+sentence cited `TradeIntent` field 6, which is `nonce` in schema 2.)*
 
 **Sequence, not set** — this is the distinction §2.5 exists for. A route's hops are ordered by
 execution; reordering them is a *different route*, not the same one written differently.
@@ -1009,7 +1039,12 @@ disagree.
 A leg count of zero is invalid: a route with no legs executes nothing and would give the empty
 sequence a meaning the specification does not define.
 
-### 5.14 `RouteSet` — class `0x000C`, schema 2
+### 5.14 `RouteSet` — class `0x000C` — **BURNED by 2c-F R1**
+
+> **Burned 2026-09-11.** One signature binds one route, so the committed route set is the singleton
+> selected route and no `R` object exists. What follows is the record of what was defined, not a
+> live layout. Its reference to `TradeIntent` field 8 was stale even before the burn: schema 2 has
+> no field 8 (2c-F finding I-1).
 
 §9.3: `R = {r_1,…,r_k}`, "canonicalized by route CCB ascending", with `k` bounded by
 `TradeIntent.k`.
@@ -1168,7 +1203,7 @@ differ per vault and `V_n` has no other field forcing it to.
 [amendment 2c-A](amendment-2c-a-bundle-and-transition.md), which carries the reasoning, the
 seven owner rulings and the full verification obligations. This registry supplies their bytes.*
 
-### 5.19 `SettlementBundle` — class `0x000E`, schema 1
+### 5.19 `SettlementBundle` — class `0x000E`, schema 2
 
 `b = H_dom(DSM/settlement-bundle, CCB(SettlementBundle))`, and `tx_id = value_digest = b`.
 
@@ -1215,7 +1250,7 @@ hashes protobuf bytes, which §2.10 says is never a CCB blob. No current identif
 > `H_dom(DSM/settlement-bundle, CCB(B))` over canonical bytes. No prost-era identifier is
 > grandfathered — the cut is a reprovision (2c-A.1 ruling 4), owed at deployment.
 
-### 5.20 `MarketTerms` — class `0x0033`, schema 1
+### 5.20 `MarketTerms` — class `0x0033`, schema 2
 
 Everything a market settlement has and an owner close does not. Nested by value in `0x000E` field 1
 and never separately content-addressed, so it adds **no entry to §15.8's canonical immutable-object
@@ -1231,7 +1266,7 @@ inventory** — the same footing as `MarketPolicy`, `FeePolicy`, `Route` and `Tr
 | # | Field | Type | Notes |
 |---|---|---|---|
 | 1 | `intent` | nested `0x000B` schema 2 | the complete `TradeIntent`; `I = H_dom(DSM/intent, CCB(field 1))` is **derived, never carried** |
-| 2 | `route_set_commitment` (`X`) | `digest32` | `H_dom(DSM/route-set, CCB(Q))` |
+| 2 | `route_set_commitment` (`X`) | `digest32` | `H_dom(DSM/ext, RC*)` (2c-F R1, §2.10); `RC` itself rides in field 6's `operation_bytes` (`DlvSettleOperationPreimageV1` field 9) |
 | 3 | `selected_route` (`r`) | nested `0x000D` schema 2 | the complete executed route, inline by value |
 | 4 | `trader_parent` | `digest32` | exact ordinary-DSM bilateral parent-state commitment |
 | 5 | `trader_successor` | `digest32` | exact prepared `C_dsm+` |
@@ -1697,6 +1732,41 @@ post-state fact not derivable from `Operation::DlvSettle`, so the content-to-ope
 other leaf enjoys structurally cannot apply, and an arm that appears to check it is worse than one
 that visibly declines to. Amendment 2c §9.1's two-conjunct rule is what replaces it.
 
+### 5.42 `SofiReceipt` — class `0x0034`, schema 1
+
+The Def 14.2 settlement receipt, frozen by
+[amendment 2c-F](amendment-2c-f-sofi-receipt-rulings.md). `ρ_B = H_dom(DSM/sofi-receipt/v1,
+CCB(SofiReceipt))`; stored under `immutable_addr(DSM/sofi-receipt/v1, CCB)` per §2.11. **137 bytes**
+at beta cardinality: 4 envelope + 3×32 + 4 count + one 33-byte entry. Its encoder lives in
+`dsm::dlv::sofi_receipt`: it is a projection of `(B, TA_B)`, not reachable from a `VaultStateV2`.
+
+| # | Field | Type | Notes |
+|---|---|---|---|
+| 1 | `bundle` (`b`) | `digest32` | `H_dom(DSM/settlement-bundle, CCB(B))`; `B` must be Market shape |
+| 2 | `route_commitment` (`X`) | `digest32` | must equal `B.market_terms.route_set_commitment` |
+| 3 | `trader_acceptance` (`a_B`) | `digest32` | `H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B))`: the **inner identity**, never the storage address |
+| 4 | `transitions` | set of inline `enc(entry)` | `enc(entry) = successor_hash: digest32 ‖ witness_hash: optional digest32` (§2.3), declared inline as §5.2 declares its tuple; one entry per `T_v`; §2.4 order; count `== |B.transitions|` |
+
+`successor_hash = H_dom(DSM/vault-state, CCB(T_v.successor))`, the successor's existing identity.
+**`witness_hash` is always absent in schema 1.** Proof material in `B` never makes a receipt
+unconstructible, and the receipt adds no witness-validity rule (2c-F ruling on R3).
+
+**Deliberately not fields.** No `vault_id` or parent `c_n`: `V_{n+1}` commits both. No
+`economic_operation_id`: it is bound through `a_B` (`TA_B` field 3 → `0x0032` field 2), and 2c-D
+D3's three-way equality is the check. No `settlement_receipt_id`: that is the V1 / economic family.
+No `storage_set_id` or `q`: those are the authenticated parent's. No signature, so §2.9 applies
+vacuously. No timestamp, sequence or node order (Req 14.3).
+
+**Validity, stated as rejections.** A wrong class or schema; a count of 0, or a count
+`≠ |B.transitions|`; a `witness_hash` marker `0x01`, or any marker but `0x00`/`0x01`; misordered or
+duplicate entries; trailing bytes; any field `≠` its re-derivation from `(B, TA_B)`; `B` not Market
+shape. The strict decoder refuses the layout failures, and an exact-length parse of this layout is
+the canonical encoding. §2.11 re-hash comes **before** any field is read.
+
+**Not authority.** No composition, admission, realization, fence, certification or
+reserve-provenance rule may take a `SofiReceipt`, its address, its presence or its publication
+state as input (2c-F R7).
+
 ## 6. Blocked objects — what each one needs
 
 These object classes are assigned but cannot be given field tables from Revision 15 as
@@ -1811,6 +1881,13 @@ and §2.8 forbids reassigning a shipped identity to different semantics. An assi
 not become vacant because it never received a field table. `RouteCommitmentBody` takes a fresh
 `0x0017`.
 
+> **Superseded in part by amendment 2c-F R1 (2026-09-11).** `X` stays one 32-byte digest and
+> `Canon(X)` stays gone. But the body is `RC*`, the signed RouteCommit's commitment form (§2.10),
+> not a CCB `Q`, and `ExtCommit(X)` folds into `X` itself. `0x0017` and `0x000C` are burned. This
+> finding's objection to preserving a preimage concerned the four-operand concatenation; R1 does not
+> revive it. It ratifies a single-body preimage that shipped, that two parties sign, and that `b`
+> carries.
+
 ### Finding 4 — `A_B` denoted two objects; both renamed (settled)
 
 Def 6.26's trader-acceptance artifact and Def 9.2's allocation bundle shared one symbol with
@@ -1922,8 +1999,9 @@ In order, and not combined:
 
    **2b. Routing and commitment profile — COMPLETE.** `Route` `0x000D`, `RouteSet` `0x000C`,
    `Allocation` `0x0015`, `AllocationBundle` `0x0016` and `RouteCommitmentBody` `0x0017` are
-   specified; `ExternalCommitmentBody` `0x0014` is burned. The original framing follows, kept
-   for the record:
+   specified; `ExternalCommitmentBody` `0x0014` is burned. (Amendment 2c-F R1 later burned
+   `0x000C` and `0x0017`: the shipped `X` commits the signed RouteCommit, §2.10.) The original
+   framing follows, kept for the record:
 
    **2b (as originally scoped).** `Route` `0x000D`, `RouteSet` `0x000C`,
    `ExternalCommitmentBody` `0x0014`, `TradeDigest` `0x0012`. One dependency cluster:
@@ -2166,5 +2244,5 @@ be *implemented* is step 3 of this list, not another normative amendment: an enc
 `CCB(VaultStateV2)` and is checked against an independent one.
 
 The one still-blocked class — `0x0012` — belongs to the remaining settlement sub-amendments and
-does not gate Anchor V2. (`0x0011` was the second until 2c-D defined it at §5.40; `0x000C`,
-`0x000D` and `0x0010` are now defined, and `0x0014` is burned.)
+does not gate Anchor V2. (`0x0011` was the second until 2c-D defined it at §5.40; `0x000D` and
+`0x0010` are now defined; `0x0014` is burned, and 2c-F burned `0x000C` and `0x0017`.)
