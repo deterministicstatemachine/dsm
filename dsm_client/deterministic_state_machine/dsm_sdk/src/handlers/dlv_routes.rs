@@ -4267,6 +4267,23 @@ impl AppRouterImpl {
         }
         Ok(realized)
     }
+
+    /// 2c-F's recovery pass: every settlement of THIS device whose fence is
+    /// released but whose Def 14.2 receipt obligation was never recorded —
+    /// its closure freeze failed and did not hold the fence (R6) — rebuilt
+    /// from durable facts and frozen. Returns how many were frozen.
+    ///
+    /// Needs no signing authority and re-decides nothing: the released fence
+    /// is the durable record that certification happened, and the pass never
+    /// composes, binds, advances, admits or touches a fence.
+    pub(crate) async fn resume_receipt_publications(&self) -> Result<u32, String> {
+        let Some(head) = self.core_sdk.device_head() else {
+            return Ok(0);
+        };
+        let chain =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&head.devid(), &head.devid());
+        crate::sdk::sofi_receipt_publication::recover_owed_receipts(&chain).await
+    }
 }
 
 /// Purpose label frozen on a vault's birth objects (opaque to the
@@ -9652,6 +9669,256 @@ mod funded_creation_tests {
             binds_before,
             "no binding round"
         );
+    }
+
+    /// A certified, realized settlement whose receipt closure freeze FAILED:
+    /// the completion's own freeze consumes the injected failure. Returns the
+    /// fence coordinates, `b`, and both devices — kept alive for the test.
+    fn realized_with_a_lost_receipt(
+        slug: &str,
+        nonce: u8,
+    ) -> (
+        [u8; 32],
+        ([u8; 32], [u8; 32]),
+        [u8; 32],
+        [u8; 32],
+        [u8; 32],
+        crate::test_support::two_device::TestDevice,
+        crate::test_support::two_device::TestDevice,
+    ) {
+        use crate::sdk::sofi_receipt_publication::FAIL_NEXT_CLOSURE_FREEZE;
+        use std::sync::atomic::Ordering::SeqCst;
+
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, mut traders) =
+            market_with_traders(slug, &[("trader0", 0x51)]);
+        let trader_dev = traders.remove(0);
+        trader_dev.enter();
+        let (rel_key, fenced_parent) = trader_position_of(&trader_dev);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        FAIL_NEXT_CLOSURE_FREEZE.store(true, SeqCst);
+        let (res, _x) = trader_settles(
+            trader_dev.router(),
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            nonce,
+        );
+        assert!(res.success, "the settle realizes: {:?}", res.error_message);
+        let b = settle_outcome(&res, "realized");
+        assert!(
+            !FAIL_NEXT_CLOSURE_FREEZE.load(SeqCst),
+            "the completion's own closure freeze met the injected failure"
+        );
+        (
+            vault_id,
+            (pc_a, pc_b),
+            rel_key,
+            fenced_parent,
+            b,
+            trader_dev,
+            owner_dev,
+        )
+    }
+
+    /// **2c-F — the owner's merge condition on #859.** A certified settlement
+    /// whose receipt closure fails to freeze still releases its fence, and its
+    /// publication obligation is NOT lost. After a restart, the recovery pass
+    /// rediscovers it from the released fence, rebuilds the byte-identical
+    /// closure without re-certifying, and the sweep publishes it on the vault's
+    /// own set. Nothing about realization or the fence moves.
+    #[test]
+    #[serial]
+    fn a_receipt_whose_freeze_failed_is_recovered_after_release_and_restart() {
+        use crate::sdk::sofi_receipt_publication::{publication, ClosurePublication, RECEIPT_PURPOSE};
+        use crate::storage::client_db::frozen_publication_artifact as fpa;
+
+        // (A) certification succeeds; (B) the closure freeze fails.
+        let (vault_id, (pc_a, pc_b), rel_key, fenced_parent, b, trader_dev, _owner_dev) =
+            realized_with_a_lost_receipt("sofi/spec/sofi-receipt-lost", 0xF3);
+        let receipt_row =
+            || fpa::find_artifact_by_purpose_and_bound_root(RECEIPT_PURPOSE, &b).expect("row read");
+        assert!(receipt_row().is_none(), "the obligation was not recorded");
+
+        // (C) the fence released anyway: the receipt does not gate it.
+        let fence_state = || {
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &fenced_parent, &b)
+                .expect("fence read")
+                .expect("the fence row")
+                .state
+        };
+        assert_eq!(fence_state(), dsm::dlv::trader_fence::FenceState::Released);
+        let before = composed_frontier(&vault_id, &pc_a, &pc_b);
+        let root_before = trader_dev
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("trader head")
+            .root();
+        let binds_before = crate::sdk::binding_fleet_double::cas_log().len();
+
+        // (D) a restart: a second router over the same database. Nothing the
+        // settle held in memory survives into what follows.
+        let restarted = crate::economic_fixtures::restart_router();
+
+        // (E) rediscovered from the released fence and rebuilt — the pass never
+        // composes, binds, advances or admits.
+        let n = crate::runtime::get_runtime()
+            .block_on(restarted.resume_receipt_publications())
+            .expect("recovery pass");
+        assert_eq!(n, 1, "exactly the one lost obligation is rebuilt");
+
+        // (F) byte-identical to what the completion would have frozen.
+        let (expected, frontier, _) = realized_receipt_closure(&vault_id, &pc_a, &pc_b, &b);
+        assert_eq!(
+            receipt_row().expect("the recovered receipt row").payload,
+            expected.objects[0].bytes,
+            "the recovered receipt is the certified settlement's receipt, byte for byte"
+        );
+
+        // (G) the exact {SofiReceipt, B, TA_B}, published on the authenticated set.
+        crate::runtime::get_runtime()
+            .block_on(crate::handlers::artifact_republish::republish_unpublished_artifacts())
+            .expect("sweep");
+        assert_eq!(expected.storage_set_id, frontier.storage_set_id);
+        assert_eq!(
+            publication(&expected).expect("publication state"),
+            ClosurePublication::Published
+        );
+
+        // (H) idempotent: a second pass finds it recorded and sends nothing.
+        let puts = crate::sdk::storage_io::fake_fleet::put_log().len();
+        assert_eq!(
+            crate::runtime::get_runtime()
+                .block_on(restarted.resume_receipt_publications())
+                .expect("recovery pass"),
+            0
+        );
+        assert_eq!(crate::sdk::storage_io::fake_fleet::put_log().len(), puts);
+
+        // (J) the receipt's absence, then presence, moved nothing.
+        assert_eq!(fence_state(), dsm::dlv::trader_fence::FenceState::Released);
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            (
+                after.sequence,
+                after.reserves_a,
+                after.reserves_b,
+                after.c_n
+            ),
+            (
+                before.sequence,
+                before.reserves_a,
+                before.reserves_b,
+                before.c_n
+            ),
+            "realization is untouched"
+        );
+        assert_eq!(
+            trader_dev
+                .router()
+                .core_sdk
+                .device_head()
+                .expect("trader head")
+                .root(),
+            root_before,
+            "no transition and no admission"
+        );
+        assert_eq!(
+            crate::sdk::binding_fleet_double::cas_log().len(),
+            binds_before,
+            "no binding round"
+        );
+    }
+
+    /// **2c-F (I)** — recovery rebuilds THIS settlement's closure or nothing.
+    /// Refused, with nothing frozen: a fence naming another bundle address,
+    /// another storage set, or a locator naming an acceptance of another bundle.
+    #[test]
+    #[serial]
+    fn a_recovered_receipt_cannot_be_rebuilt_from_substituted_facts() {
+        use crate::sdk::sofi_receipt_publication::{
+            recover_owed_receipt, ReceiptRecovery, RECEIPT_PURPOSE,
+        };
+        use crate::storage::client_db::frozen_publication_artifact as fpa;
+        use crate::storage::client_db::trader_parent_fence::TraderFence;
+
+        let (_vault_id, _pair, rel_key, fenced_parent, b, _trader_dev, _owner_dev) =
+            realized_with_a_lost_receipt("sofi/spec/sofi-receipt-substituted", 0xF4);
+        let fence =
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &fenced_parent, &b)
+                .expect("fence read")
+                .expect("the released fence");
+        let refused = |f: &TraderFence, what: &str| {
+            let out = crate::runtime::get_runtime().block_on(recover_owed_receipt(f));
+            assert!(
+                matches!(out, ReceiptRecovery::Refused(_)),
+                "{what}: must be refused, got {out:?}"
+            );
+            assert!(
+                fpa::find_artifact_by_purpose_and_bound_root(RECEIPT_PURPOSE, &b)
+                    .expect("row read")
+                    .is_none(),
+                "{what}: nothing may be frozen"
+            );
+        };
+
+        let mut moved = fence.clone();
+        moved.value_addr[0] ^= 0x01;
+        refused(&moved, "a fence naming another bundle address");
+
+        let mut other_set = fence.clone();
+        other_set.storage_set_id[0] ^= 0x01;
+        refused(&other_set, "a fence naming another storage set");
+
+        // This device's locator for b now names a TA_B that accepts ANOTHER bundle.
+        let foreign = dsm::economic::trader_acceptance::TraderAcceptance::new(
+            [0x11; 32],
+            3,
+            dsm::economic::state::EconomicBundleAcceptanceState {
+                bundle: [0x99; 32],
+                economic_operation_id: [0x50; 32],
+            },
+            vec![[0x00; 32]; dsm::economic::tree::ECONOMIC_SMT_HEIGHT],
+        )
+        .expect("well formed");
+        let foreign_bytes = foreign.encode().expect("encode");
+        {
+            let binding = crate::storage::client_db::get_connection().expect("db");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            fpa::freeze_artifact_with_conn(
+                &conn,
+                &fence.storage_set_id,
+                &crate::sdk::economic_registers::immutable_object_key(
+                    dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+                    &foreign_bytes,
+                ),
+                &foreign_bytes,
+                &[0u8; 32],
+                "test-substituted-acceptance",
+            )
+            .expect("freeze the substitute");
+            fpa::freeze_artifact_with_conn(
+                &conn,
+                &fence.storage_set_id,
+                &crate::sdk::trader_acceptance_locator::locator_key(&b),
+                &crate::sdk::trader_acceptance_locator::encode_locator(
+                    &foreign.ta_b().expect("ta_b"),
+                    &[0x33; 32],
+                ),
+                &[0u8; 32],
+                "test-substituted-locator",
+            )
+            .expect("freeze the substituted locator");
+        }
+        refused(&fence, "a locator naming an acceptance of another bundle");
     }
 
     /// 2c-D §14, D-f (e): the continuation cannot operate on an UNCERTIFIED

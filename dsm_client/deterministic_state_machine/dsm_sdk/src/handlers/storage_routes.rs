@@ -2986,6 +2986,16 @@ impl AppRouterImpl {
                             errors.push(format!("settlement completion resume failed: {e}"));
                         }
                     }
+                    // A released settlement whose Def 14.2 receipt obligation
+                    // was never recorded (2c-F). Rebuilds the record from
+                    // durable facts; never re-certifies, never touches a fence.
+                    match self.resume_receipt_publications().await {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] receipt recovery errored: {e}");
+                            errors.push(format!("receipt recovery failed: {e}"));
+                        }
+                    }
                 }
 
                 // Record network success for connectivity monitoring
