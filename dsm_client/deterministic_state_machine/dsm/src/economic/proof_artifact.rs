@@ -442,4 +442,24 @@ mod tests {
             decode_economic_proof_artifact(&wrong.encode_to_vec()).expect("shape is still valid");
         assert!(decoded.verify_against(&G, &D, 7, &tree.root()).is_err());
     }
+
+    /// #852 REGRESSION. A settle's inclusion proof carries the bundle-acceptance
+    /// leaf (it is citable: `TA_B` asks a stranger to verify it), so the
+    /// artifact must decode and verify with that leaf in it.
+    #[test]
+    fn an_artifact_proving_a_bundle_acceptance_leaf_decodes_and_verifies() {
+        let acceptance = EconomicLeafState::BundleAcceptance(
+            crate::economic::state::EconomicBundleAcceptanceState {
+                bundle: [0xB0; 32],
+                economic_operation_id: [0x50; 32],
+            },
+        );
+        let (tree, artifact) = published(&[reserve(0xA1, 10_000, 0), acceptance]);
+        let decoded = decode_economic_proof_artifact(&artifact.encode())
+            .expect("a settle's proof artifact decodes");
+        decoded
+            .verify_against(&G, &D, 7, &tree.root())
+            .expect("and verifies against the root the reader names");
+        assert_eq!(decoded.states().count(), 2);
+    }
 }
