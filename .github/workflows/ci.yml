@@ -509,7 +509,7 @@ jobs:
   # Lean 4: kernel-check the proof tree. No untrusted GitHub event inputs are
   # used.
   #
-  # There is no Lake project — lean4/ is 10 loose modules with a lean-toolchain
+  # There is no Lake project — lean4/ is loose modules with a lean-toolchain
   # and no lakefile, and they import nothing outside Lean core. So each file is
   # checked directly rather than via `lake build`.
   #
@@ -553,7 +553,7 @@ jobs:
       - name: Kernel-check every module, sorry-free
         run: |
           set -euo pipefail
-          expected=16
+          expected=18
           found=$(ls lean4/*.lean | wc -l)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::lean4/ has $found modules, expected $expected."

@@ -973,7 +973,8 @@ The resume creates no binding round, no transition, no admission and no other se
 fact, and never releases on a cached status or a timeout: the fence row locates the work and is not
 authority. Receipt publication precedes fence release on both paths. Absent, unavailable or
 below-quorum evidence leaves the fence held and the outcome pending — never INVALID; coordinates or
-facts that do not match are refused, and the fence stays held.
+facts that do not match are refused, and the fence stays held. The ordering, idempotence and exactness are
+machine-checked in `lean4/DSMSettlementCompletion.lean`.
 
 **D-g. Later generations draw reserve provenance from the composed frontier (conformance repair).**
 This is not a new protocol rule; it restores the normative SoFi composed-state model, in which the
@@ -991,7 +992,9 @@ authorizes the next generation. Composition for this purpose stops AT the reques
 reads the binding there, so the provenance of settlement n never depends on settlement n: certifying
 settlement n establishes `V_{n+1}`, admitting settlement n+1 consumes it, and the recursion runs
 strictly down the generations. Owner catch-up remains optional synchronization of already-realized
-history; it authorizes nothing.
+history; it authorizes nothing. The rule, its soundness, each conjunct's necessity and the stop-at-target
+composition are machine-checked in `lean4/DSMComposedReserveProvenance.lean`, and
+`lean4/DSMAcceptedSuccessorWalk.lean` now states that the walk folds exactly what certifies (D-d).
 
 The settle route runs that one rule — `check_composed_reserve_provenance` — BEFORE `bind_settlement`,
 over the same owner proof and the same composed history, and refuses there. Previously the route
