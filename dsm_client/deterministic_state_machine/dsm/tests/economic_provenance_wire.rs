@@ -23,8 +23,8 @@ use dsm::economic::credit::{
 use dsm::economic::decode::{decode_credit_source, decode_leaf_state, decode_transition_witness};
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
+    EconomicBalanceState, EconomicBundleAcceptanceState, EconomicConsumedSourceState,
+    EconomicLeafState, EconomicSettlementReceiptState, EconomicVaultReserveState,
 };
 use dsm::economic::tree::ECONOMIC_SMT_HEIGHT;
 use dsm::economic::witness::EconomicTransitionWitness;
@@ -347,6 +347,55 @@ fn a_receipt_cannot_assert_a_receipt_id_its_contents_do_not_produce() {
         ),
         other => panic!("a forged receipt_id must not decode, got {other:?}"),
     }
+}
+
+/// EVERY leaf class the tree can hold decodes back to itself.
+///
+/// The `match` has no wildcard ON PURPOSE: a sixth `EconomicLeafState` arm
+/// fails to COMPILE here until a sample of it is added — and the sample then
+/// fails at runtime until the decoder has an arm for it. #852 added the fifth
+/// arm's encoder, key, value and pre-state handling but not its decoder, and
+/// nothing noticed, because no test decoded one. This is that test.
+#[test]
+fn every_leaf_class_round_trips_through_the_decoder() {
+    let samples = [
+        EconomicLeafState::Balance(EconomicBalanceState::new(ERA, 10).expect("balance")),
+        EconomicLeafState::VaultReserve(EconomicVaultReserveState {
+            vault_id: VAULT,
+            policy_commit: ERA,
+            amount: 5,
+            vault_sequence: 2,
+        }),
+        EconomicLeafState::SettlementReceipt(
+            EconomicSettlementReceiptState::new(VAULT, [7; 32], 4, 5, ERA, 10, SOFI, 9)
+                .expect("valid"),
+        ),
+        EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
+            source_id: [1; 32],
+            consumer_economic_operation_id: [2; 32],
+        }),
+        EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
+            bundle: [0xB0; 32],
+            economic_operation_id: [0x50; 32],
+        }),
+    ];
+    let mut covered = [false; 5];
+    for state in &samples {
+        let slot = match state {
+            EconomicLeafState::Balance(_) => 0,
+            EconomicLeafState::VaultReserve(_) => 1,
+            EconomicLeafState::SettlementReceipt(_) => 2,
+            EconomicLeafState::ConsumedSource(_) => 3,
+            EconomicLeafState::BundleAcceptance(_) => 4,
+        };
+        covered[slot] = true;
+        let bytes = state.encode().expect("encodable");
+        assert_eq!(
+            &decode_leaf_state(&bytes).expect("every leaf the encoder emits must decode"),
+            state
+        );
+    }
+    assert!(covered.iter().all(|c| *c), "one sample per leaf class");
 }
 
 // ── The manifest's derived provenance index ────────────────────────────────

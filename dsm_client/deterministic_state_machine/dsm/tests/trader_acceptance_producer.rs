@@ -409,3 +409,24 @@ fn the_publication_address_is_the_canonical_identity() {
         "the namespace's inner digest must be ta_B itself"
     );
 }
+
+/// #852 REGRESSION. The settle's own witness — what the resume path decodes
+/// from frozen state and what every foreign lineage walk decodes from the
+/// fleet — carries the bundle-acceptance leaf, and must decode to itself.
+#[test]
+fn a_settle_witness_carrying_the_acceptance_leaf_decodes_to_itself() {
+    let (witness, _) = settled();
+    assert!(
+        witness
+            .mutations
+            .iter()
+            .any(|m| matches!(m.post_state, Some(EconomicLeafState::BundleAcceptance(_)))),
+        "the fixture must actually carry the leaf, or this test proves nothing"
+    );
+    let bytes = witness.encode().expect("encodable");
+    assert_eq!(
+        dsm::economic::decode::decode_transition_witness(&bytes)
+            .expect("a market settle's witness decodes"),
+        witness
+    );
+}

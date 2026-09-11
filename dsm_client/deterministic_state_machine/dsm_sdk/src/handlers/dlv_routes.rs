@@ -8412,6 +8412,51 @@ mod funded_creation_tests {
         );
     }
 
+    /// #852 REGRESSION, END TO END: a trader that settled must still be able to
+    /// start its NEXT economic admission.
+    ///
+    /// Every admission begins by rebuilding its pre-state from this device's
+    /// leaf cache, and after a market settle that cache holds the
+    /// bundle-acceptance leaf. With no decoder arm for it the rebuild failed
+    /// at the first cached leaf, so a trader who settled once could admit
+    /// nothing — no send, no second trade — ever again.
+    #[test]
+    #[serial]
+    fn a_trader_that_settled_can_still_build_its_next_pre_state() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/next-pre-state", &[("trader0", 0x51)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let (res, _x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output"),
+            0x71,
+        );
+        assert!(res.success, "the settle binds: {:?}", res.error_message);
+
+        let validated =
+            crate::sdk::economic_admission_flow::validated_root_or_activate(&trader.core_sdk)
+                .expect("the settle admitted a root");
+        let (_tree, pre) =
+            crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated)
+                .expect("the next admission can rebuild its pre-state from the leaf cache");
+        assert!(
+            !pre.balances.is_empty(),
+            "and the rebuilt pre-state carries the trader's balances"
+        );
+    }
+
     /// 2c-D PRODUCER ADOPTION, OVER THE LIVE ROUTE: a settled market publishes
     /// the canonical `TA_B` for the bundle it accepted — and realizes nothing.
     ///

@@ -335,6 +335,25 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 },
             ))
         }
+        // The fifth arm (2c-D, `0x0032`). Missing from #852, which added the
+        // encoder, the key, the value and the pre-state match arm but not
+        // this one — so every market settle's witness, inclusion proof and
+        // cached leaf became undecodable. Mirrors the encoder exactly: two
+        // `digest32` and no rejection, because the encoder refuses nothing
+        // and a decoder stricter than its encoder makes valid leaves
+        // unreadable.
+        class::ECONOMIC_BUNDLE_ACCEPTANCE_STATE => {
+            c.envelope(
+                crate::economic::state::EconomicBundleAcceptanceState::CLASS,
+                crate::economic::state::EconomicBundleAcceptanceState::SCHEMA,
+            )?;
+            Ok(EconomicLeafState::BundleAcceptance(
+                crate::economic::state::EconomicBundleAcceptanceState {
+                    bundle: c.digest32()?,
+                    economic_operation_id: c.digest32()?,
+                },
+            ))
+        }
         got => Err(DecodeError::WrongClass { got }),
     }
 }
