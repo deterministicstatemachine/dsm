@@ -1670,32 +1670,23 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
-    /// dlv.unlockRouted — atomic-route unlock path for SoFi (chunk #4).
+    /// `dlv.reconcile` — the OWNER's explicit catch-up (amendment 2c-G, ruling
+    /// G2).
     ///
-    /// Decodes a `DlvUnlockRoutedV1` carrying a typed `RouteCommitV1`,
-    /// runs the SDK eligibility check (vault_id ∈ RouteCommit AND
-    /// `is_external_commitment_visible(X)` returns Ok(true)) before
-    /// emitting the standard `Operation::DlvUnlock` on the unlocker's
-    /// self-loop.  No new on-chain operation type — atomicity is
-    /// achieved off-chain via the visibility of X (SoFi spec §3.2,
-    /// §5.1; the state machine does not know about routing).
+    /// The trader's credit was final at the trader's own advance and the
+    /// composition walk certified it, so this is the owner learning what already
+    /// happened: it AUTHORIZES nothing. The request names one settlement `x`;
+    /// the owner applies every certified settlement it has not yet applied,
+    /// oldest first, up to and including that one — through the SAME engine the
+    /// `storage.sync` pass runs to the frontier. A fold consumes exactly the
+    /// current parent, so a later settlement is never applied over a state that
+    /// has not received the earlier ones. Every trade fact comes from the
+    /// certified fold (2c-D §14, C2-R1 point 6), never from a receipt read on
+    /// the side, and every apply is admitted into `R_econ`.
     ///
-    /// Failure modes are typed via `RouteCommitVerifyError` so a
-    /// failed verification returns a precise error (rather than a
-    /// generic `dlv.unlock failed`) — this is what unlocks
-    /// fail-closed semantics for vault owners that haven't yet seen
-    /// the trader's anchor publish.
-    /// `dlv.reconcile` — the OWNER folds a verified settlement into its reserves.
-    ///
-    /// The trader's credit was final at the trader's own advance. This is the
-    /// owner learning what already happened, so it AUTHORIZES nothing: every
-    /// value acted on is re-derived from the receipt fetched under `(vault, x)`
-    /// The request says only which settlement to look at; the trade applied
-    /// is the one the composition walk CERTIFIED (2c-D §14, C2-R1 point 6).
-    ///
-    /// Idempotent. Folding the same receipt twice would move the reserves twice
-    /// on a trade that happened once, so a receipt whose sequence step the vault
-    /// has already taken applies nothing and reports success.
+    /// Idempotent. A settlement already applied is recognised by its
+    /// consume-once claim and applies nothing; a request with nothing owed
+    /// writes nothing.
     async fn dlv_reconcile(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -1711,276 +1702,27 @@ impl AppRouterImpl {
         ) else {
             return err("dlv.reconcile: vault_id and x must both be 32 bytes".into());
         };
-
-        // THE CERTIFIED FOLD IS THE AUTHORITY (2c-D §14, C2-R1 point 6). A
-        // receipt is Req 21.16's evidence inside the composition walk and never
-        // settlement: this route acts only on the exact fold the walk certified
-        // for this commitment and takes every trade fact from it. An owner
-        // apply therefore cannot invent or modify economics — it can only apply
-        // what was certified.
         let vault_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
-
-        // Precondition: a reconcile needs a device head to advance.
-        if self.core_sdk.device_head().is_none() {
-            return err("dlv.reconcile: no device head".into());
+        // The explicit request WAITS for a running sync pass rather than racing
+        // it; the sync pass skips while this runs.
+        let _one_at_a_time = owner_catch_up_lock().lock().await;
+        let report = self
+            .catch_up_owner_vault_locked(&vault_id, CatchUpTarget::Through(x))
+            .await;
+        match report.stopped {
+            None => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                generated::AppStateResponse {
+                    key: "dlv.reconcile".to_string(),
+                    value: Some(vault_b32),
+                },
+            )),
+            // The applies that landed before the stop stay durable; the next
+            // request resumes after them.
+            Some(e) => err(format!(
+                "dlv.reconcile: vault {vault_b32}: {} applied, then stopped: {e}",
+                report.applied
+            )),
         }
-        let composed = match compose_own_vault(&vault_id).await {
-            Ok(c) => c,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: cannot compose the vault to find its certified settlement: {e}"
-                ))
-            }
-        };
-        // 2c-C3.1 ruling D, effect 4: independent of the walk.
-        if let Err(e) =
-            refuse_quarantined_lineage("dlv.reconcile", &vault_id, composed.sequence, &composed.c_n)
-        {
-            return err(e);
-        }
-        let Some((fold, certified)) =
-            composed
-                .folded_parents
-                .iter()
-                .find_map(|f| match (&f.bound_kind, &f.realized_trade) {
-                    (dsm::dlv::settlement_bundle::BundleShape::Market, Some(t))
-                        if f.verdict.may_certify() && t.trade().x == x =>
-                    {
-                        Some((f, t))
-                    }
-                    _ => None,
-                })
-        else {
-            return err(format!(
-                "dlv.reconcile: vault {vault_b32} has no CERTIFIED settlement at that commitment — \
-                 a receipt is evidence, never settlement (2c-D §14, C2-R1)"
-            ));
-        };
-        let receipt_id = certified.receipt_id();
-        let trade = certified.trade();
-
-        // CONSUME-ONCE, by settlement IDENTITY — not by sequence alone. The
-        // reserve leaf carries the generation but not WHICH settlement produced
-        // it, so a sequence-only check cannot tell the winner's idempotent
-        // replay from a DIFFERENT settlement that raced the same parent. The
-        // durable consume-once claim can tell them apart.
-        match crate::storage::client_db::load_vault_generation_consumer(
-            &vault_id,
-            trade.parent_sequence,
-        ) {
-            Ok(Some(existing)) => {
-                if existing.source_commitment == receipt_id {
-                    // The SAME settlement, already applied: idempotent success.
-                    return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
-                        generated::AppStateResponse {
-                            key: "dlv.reconcile".to_string(),
-                            value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
-                        },
-                    ));
-                }
-                return err(format!(
-                    "dlv.reconcile: vault {vault_b32} generation {} was already consumed by a \
-                     different settlement — this settlement cannot consume it",
-                    trade.parent_sequence,
-                ));
-            }
-            Ok(None) => {}
-            Err(e) => return err(format!("dlv.reconcile: consumption lookup failed: {e}")),
-        }
-
-        // THE PARENT STATE is the certified fold's own: the state the walk
-        // consumed at this generation — never a local record, never a receipt.
-        let parent_state: dsm::ccb::VaultStateV2 = fold.state.clone();
-        let parent_binding = match dsm::ccb::vault_state_commitment(&parent_state) {
-            Ok(c) => c,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: the parent state does not commit: {e}"
-                ))
-            }
-        };
-        let parent_state_bytes = match parent_state.encode() {
-            Ok(b) => b,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: the parent state does not encode: {e}"
-                ))
-            }
-        };
-        let fee_bps = parent_state.fee_policy.fee_bps();
-        let pair = match dsm::types::device_state::VaultStatePair::new(
-            *parent_state.market_policy.token_a(),
-            *parent_state.market_policy.token_b(),
-            fee_bps,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: the parent state's pair is not canonical: {e}"
-                ))
-            }
-        };
-
-        // THE PRE-SIGN MIRROR of the core check — an early refusal, not an
-        // authority: `advance` re-derives every one of these facts from the
-        // leaves it consumes and would refuse the same fold after signing.
-        // Refusing HERE keeps the owner from ever signing arithmetic it has not
-        // checked. A certified fold already satisfies it — CORR.5 derived this
-        // output — so only a defect upstream of the walk could reach it. Same inputs as core, in the same order: the parent state's
-        // committed pair and fee, the reserve of the asset the trader paid as
-        // the input reserve (by asset identity, never by pair order), the one
-        // canonical curve, exact equality.
-        let (reserve_in, reserve_out) = if trade.input_policy_commit == pair.a()
-            && trade.output_policy_commit == pair.b()
-        {
-            (parent_state.reserve_a, parent_state.reserve_b)
-        } else if trade.input_policy_commit == pair.b() && trade.output_policy_commit == pair.a() {
-            (parent_state.reserve_b, parent_state.reserve_a)
-        } else {
-            return err(
-                "dlv.reconcile: the receipt's legs are not this vault's pair — refusing before \
-                 signing"
-                    .into(),
-            );
-        };
-        match crate::sdk::routing_path_sdk::constant_product_output(
-            trade.input_amount,
-            reserve_in,
-            reserve_out,
-            fee_bps,
-        ) {
-            Some(curve) if curve == trade.output_amount => {}
-            Some(curve) => {
-                return err(format!(
-                    "dlv.reconcile: the receipt's output is not what this vault's curve yields \
-                     from the parent state's reserves (curve {curve}, receipt {}) — refusing \
-                     before signing",
-                    trade.output_amount,
-                ))
-            }
-            None => {
-                return err(
-                    "dlv.reconcile: the receipt's trade does not simulate against the parent \
-                     state's reserves — refusing before signing"
-                        .into(),
-                )
-            }
-        }
-        let op = dsm::types::operations::Operation::DlvOwnerApplyV2 {
-            vault_id: vault_id.to_vec(),
-            settlement_receipt_id: receipt_id,
-            pending_pointer_x: x,
-            parent_sequence: trade.parent_sequence,
-            new_sequence: trade.new_sequence,
-            parent_binding,
-            input_policy_commit: trade.input_policy_commit,
-            output_policy_commit: trade.output_policy_commit,
-            input_amount: trade.input_amount,
-            output_amount: trade.output_amount,
-            // The parent state's committed fee — the same one the curve above ran on.
-            fee_bps,
-            signature: Vec::new(),
-            mode: dsm::types::operations::TransactionMode::Unilateral,
-        };
-
-        // Sign BEFORE the advance, for the same reason as `DlvSettle`: the signature is
-        // inside the committed operation bytes and therefore inside the chain tip.
-        let op = match self.core_sdk.sign_operation_sphincs(op) {
-            Ok(signed) => signed,
-            Err(e) => {
-                return err(format!(
-                    "dlv.reconcile: failed to sign DlvOwnerApplyV2: {e}"
-                ))
-            }
-        };
-        // The fold moves reserve value under both pair assets; each must
-        // satisfy the applicable token policy before the apply is derived.
-        for pc in [pair.a(), pair.b()] {
-            if let Err(e) = require_rooted_market_leg("dlv.reconcile", &pc).await {
-                return err(e);
-            }
-        }
-
-        let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
-            vault_id,
-            input_policy_commit: trade.input_policy_commit,
-            input_amount: trade.input_amount,
-            output_policy_commit: trade.output_policy_commit,
-            output_amount: trade.output_amount,
-            parent_sequence: trade.parent_sequence,
-            new_sequence: trade.new_sequence,
-            pair,
-            parent_state: parent_state_bytes,
-        };
-
-        let reference_state = match self.core_sdk.get_current_state() {
-            Ok(s) => s,
-            Err(e) => return err(format!("dlv.reconcile: get_current_state failed: {e}")),
-        };
-        let actor = reference_state.device_info.device_id;
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &actor, &actor,
-        );
-        // The consume-once claim is written INSIDE the fold's advance
-        // transaction, so the claim and the reserve move commit together or not at
-        // all. `UNIQUE(vault_id, parent_sequence)` decides a race that slipped past
-        // the pre-check above: a losing racer's claim resolves to `Conflict`, which
-        // this closure turns into an error, rolling back the whole advance so the
-        // loser moves no reserve.
-        let claim_vault = vault_id;
-        let claim_parent = trade.parent_sequence;
-        let claim_child = trade.new_sequence;
-        let claim_source = receipt_id;
-        let record_consumption = move |tx: &rusqlite::Transaction<'_>,
-                                       _outcome: &dsm::types::device_state::AdvanceOutcome|
-              -> Result<(), dsm::types::error::DsmError> {
-            use crate::storage::client_db::{
-                cas_consume_vault_generation_with_conn, VaultGenerationConsumeOutcome,
-            };
-            match cas_consume_vault_generation_with_conn(
-                tx,
-                &claim_vault,
-                claim_parent,
-                claim_child,
-                &claim_source,
-            )
-            .map_err(|e| {
-                dsm::types::error::DsmError::storage(
-                    format!("dlv.reconcile: consume-once claim failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })? {
-                VaultGenerationConsumeOutcome::Consumed
-                | VaultGenerationConsumeOutcome::AlreadyConsumedSameSettlement => Ok(()),
-                VaultGenerationConsumeOutcome::Conflict { .. } => {
-                    Err(dsm::types::error::DsmError::invalid_operation(
-                        "dlv.reconcile: this vault generation was consumed by a different \
-                         settlement (race) — rolling back the fold",
-                    ))
-                }
-            }
-        };
-        // EMPTY deltas: the owner's spendable balance is not part of a
-        // settlement. Only the reserve leaves move, in this same advance.
-        if let Err(e) = self.core_sdk.execute_on_relationship_with_reserve_mutation(
-            rel_key,
-            actor,
-            op,
-            &[],
-            Some(init_tip),
-            Some(mutation),
-            Some(&record_consumption),
-        ) {
-            return err(format!("dlv.reconcile: advance failed: {e}"));
-        }
-
-        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
-            generated::AppStateResponse {
-                key: "dlv.reconcile".to_string(),
-                value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
-            },
-        ))
     }
 
     /// Commit the canonical close: ONE staged advance in which the release, the
@@ -2961,6 +2703,21 @@ impl AppRouterImpl {
         ))
     }
 
+    /// dlv.unlockRouted — atomic-route unlock path for SoFi (chunk #4).
+    ///
+    /// Decodes a `DlvUnlockRoutedV1` carrying a typed `RouteCommitV1`,
+    /// runs the SDK eligibility check (vault_id ∈ RouteCommit AND
+    /// `is_external_commitment_visible(X)` returns Ok(true)) before
+    /// emitting the standard `Operation::DlvUnlock` on the unlocker's
+    /// self-loop.  No new on-chain operation type — atomicity is
+    /// achieved off-chain via the visibility of X (SoFi spec §3.2,
+    /// §5.1; the state machine does not know about routing).
+    ///
+    /// Failure modes are typed via `RouteCommitVerifyError` so a
+    /// failed verification returns a precise error (rather than a
+    /// generic `dlv.unlock failed`) — this is what unlocks
+    /// fail-closed semantics for vault owners that haven't yet seen
+    /// the trader's anchor publish.
     async fn dlv_unlock_routed(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -4283,6 +4040,423 @@ impl AppRouterImpl {
         let chain =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&head.devid(), &head.devid());
         crate::sdk::sofi_receipt_publication::recover_owed_receipts(&chain).await
+    }
+
+    /// Amendment 2c-G's catch-up pass, run by `storage.sync` (ruling G2): for
+    /// every vault THIS device owns, every certified settlement it has not
+    /// applied, oldest first, to the composed frontier. Returns how many applies
+    /// it admitted.
+    ///
+    /// It GATES NOTHING. It runs after every other sync pass, a failure is local
+    /// to its vault and retried on a later sync, and nothing a trader, a
+    /// binding, a fence or a close does waits for it. It never calls
+    /// `storage.sync`, and it skips outright while another catch-up holds the
+    /// device's catch-up lock, so it cannot re-enter itself.
+    pub(crate) async fn resume_owner_catch_up(&self) -> Result<u32, String> {
+        let Some(head) = self.core_sdk.device_head() else {
+            return Ok(0);
+        };
+        // A locked wallet cannot sign an apply: leave every vault as it is.
+        if !crate::sdk::signing_authority::can_sign() {
+            return Ok(0);
+        }
+        let Ok(_one_at_a_time) = owner_catch_up_lock().try_lock() else {
+            log::info!("[owner catch-up] a catch-up is already running; this pass skips");
+            return Ok(0);
+        };
+        let records = crate::storage::client_db::amm_vault_records::list_amm_vault_records()
+            .map_err(|e| format!("reading vault records failed: {e}"))?;
+        let mut applied = 0u32;
+        for rec in &records {
+            // Only a vault this device owns is this device's to apply.
+            if crate::sdk::vault_rehydration::rehydrate_amm_vault(rec, &head).is_err() {
+                continue;
+            }
+            let b32 = crate::util::text_id::encode_base32_crockford(&rec.vault_id);
+            let report = self
+                .catch_up_owner_vault_locked(&rec.vault_id, CatchUpTarget::Frontier)
+                .await;
+            // Counted whether or not the run finished: each is durable.
+            applied += report.applied;
+            match &report.stopped {
+                Some(why) => log::warn!(
+                    "[owner catch-up] vault {b32}: {} applied, then not caught up this pass — \
+                     {why}",
+                    report.applied
+                ),
+                None if report.applied > 0 => log::info!(
+                    "[owner catch-up] vault {b32}: {} applied, {} already applied",
+                    report.applied,
+                    report.already_applied
+                ),
+                None => {}
+            }
+        }
+        Ok(applied)
+    }
+
+    /// THE catch-up engine (amendment 2c-G, rulings G1 + G2) — the one both
+    /// entrypoints drive. The caller holds [`owner_catch_up_lock`].
+    ///
+    /// Consumes certified history and creates none: it composes the vault
+    /// through the same walk a stranger runs, takes the certified market folds
+    /// that walk produced, and applies the owed ones oldest first. A fold
+    /// already applied is recognised by its consume-once claim; a generation
+    /// consumed by a DIFFERENT settlement stops the catch-up. An interruption
+    /// leaves every completed apply durable, and the next run resumes after it.
+    ///
+    /// The report is returned whether or not the run finished: `applied`
+    /// counts every apply that landed, and `stopped` says why a run ended
+    /// early. A stop never hides an apply that is already durable.
+    async fn catch_up_owner_vault_locked(
+        &self,
+        vault_id: &[u8; 32],
+        target: CatchUpTarget,
+    ) -> CatchUpReport {
+        let mut report = CatchUpReport::default();
+        if let Err(why) = self.catch_up_into(vault_id, target, &mut report).await {
+            report.stopped = Some(why);
+        }
+        report
+    }
+
+    /// The engine's body. Progress is recorded in `report` as each apply
+    /// lands, so an error returned from here stops the run without erasing it.
+    async fn catch_up_into(
+        &self,
+        vault_id: &[u8; 32],
+        target: CatchUpTarget,
+        report: &mut CatchUpReport,
+    ) -> Result<(), String> {
+        if self.core_sdk.device_head().is_none() {
+            return Err("no device head".into());
+        }
+        let composed = compose_own_vault(vault_id).await.map_err(|e| {
+            format!("cannot compose the vault to find its certified settlements: {e}")
+        })?;
+        // 2c-C3.1 ruling D, effect 4: independent of the walk.
+        refuse_quarantined_lineage("owner catch-up", vault_id, composed.sequence, &composed.c_n)?;
+        for fold in owed_certified_folds(&composed, target)? {
+            let Some(certified) = fold.realized_trade.as_ref() else {
+                continue;
+            };
+            let trade = certified.trade();
+            // CONSUME-ONCE, by settlement IDENTITY — not by sequence alone. The
+            // reserve leaf carries the generation but not WHICH settlement
+            // produced it; the durable claim tells a replay from a race.
+            match crate::storage::client_db::load_vault_generation_consumer(
+                vault_id,
+                trade.parent_sequence,
+            ) {
+                Ok(Some(existing)) if existing.source_commitment == certified.receipt_id() => {
+                    report.already_applied += 1;
+                    continue;
+                }
+                Ok(Some(_)) => {
+                    return Err(format!(
+                        "generation {} was already consumed by a different settlement — this \
+                         settlement cannot consume it",
+                        trade.parent_sequence
+                    ))
+                }
+                Ok(None) => {}
+                Err(e) => return Err(format!("consumption lookup failed: {e}")),
+            }
+            #[cfg(test)]
+            take_catch_up_apply_budget()?;
+            self.apply_certified_fold(vault_id, fold).await?;
+            report.applied += 1;
+        }
+        Ok(())
+    }
+
+    /// Apply ONE certified fold: the owner's `DlvOwnerApplyV2`, admitted with
+    /// its `0x0027` evidence, the consume-once claim written inside the same
+    /// advance.
+    ///
+    /// THE CERTIFIED FOLD IS THE AUTHORITY (2c-D §14, C2-R1 point 6): the
+    /// parent state is the state the walk consumed at this generation, every
+    /// trade fact is the one it certified, and the evidence is the payment it
+    /// proved. An apply therefore cannot invent or modify economics — it can
+    /// only materialize what was certified.
+    async fn apply_certified_fold(
+        &self,
+        vault_id: &[u8; 32],
+        fold: &crate::sdk::vault_state_composition::FoldedParent,
+    ) -> Result<(), String> {
+        let (Some(certified), Some(payment)) = (
+            fold.realized_trade.as_ref(),
+            fold.certified_payment.as_ref(),
+        ) else {
+            return Err("the fold carries no certified settlement".into());
+        };
+        let vault_id = *vault_id;
+        let receipt_id = certified.receipt_id();
+        let trade = certified.trade();
+
+        // THE 0x0027 EVIDENCE, first: projected from the payment certification
+        // proved, so a fold whose evidence the arm would refuse is refused
+        // before anything is signed.
+        let payment_evidence =
+            crate::sdk::settlement_payment_producer::build_settlement_payment_evidence(
+                certified, payment,
+            )
+            .map_err(|e| e.to_string())?;
+
+        // THE PARENT STATE is the certified fold's own: the state the walk
+        // consumed at this generation — never a local record, never a receipt.
+        let parent_state: dsm::ccb::VaultStateV2 = fold.state.clone();
+        let parent_binding = dsm::ccb::vault_state_commitment(&parent_state)
+            .map_err(|e| format!("the parent state does not commit: {e}"))?;
+        let parent_state_bytes = parent_state
+            .encode()
+            .map_err(|e| format!("the parent state does not encode: {e}"))?;
+        let fee_bps = parent_state.fee_policy.fee_bps();
+        let pair = dsm::types::device_state::VaultStatePair::new(
+            *parent_state.market_policy.token_a(),
+            *parent_state.market_policy.token_b(),
+            fee_bps,
+        )
+        .map_err(|e| format!("the parent state's pair is not canonical: {e}"))?;
+
+        // THE PRE-SIGN MIRROR of the core check — an early refusal, not an
+        // authority: `advance` re-derives every one of these facts from the
+        // leaves it consumes and would refuse the same fold after signing.
+        // Refusing HERE keeps the owner from ever signing arithmetic it has not
+        // checked. A certified fold already satisfies it — CORR.5 derived this
+        // output — so only a defect upstream of the walk could reach it. Same
+        // inputs as core, in the same order: the parent state's committed pair
+        // and fee, the reserve of the asset the trader paid as the input
+        // reserve (by asset identity, never by pair order), the one canonical
+        // curve, exact equality.
+        let (reserve_in, reserve_out) = if trade.input_policy_commit == pair.a()
+            && trade.output_policy_commit == pair.b()
+        {
+            (parent_state.reserve_a, parent_state.reserve_b)
+        } else if trade.input_policy_commit == pair.b() && trade.output_policy_commit == pair.a() {
+            (parent_state.reserve_b, parent_state.reserve_a)
+        } else {
+            return Err(
+                "the certified trade's legs are not this vault's pair — refusing before signing"
+                    .into(),
+            );
+        };
+        match crate::sdk::routing_path_sdk::constant_product_output(
+            trade.input_amount,
+            reserve_in,
+            reserve_out,
+            fee_bps,
+        ) {
+            Some(curve) if curve == trade.output_amount => {}
+            Some(curve) => {
+                return Err(format!(
+                    "the certified output is not what this vault's curve yields from the parent \
+                     state's reserves (curve {curve}, certified {}) — refusing before signing",
+                    trade.output_amount,
+                ))
+            }
+            None => {
+                return Err(
+                    "the certified trade does not simulate against the parent state's reserves \
+                     — refusing before signing"
+                        .into(),
+                )
+            }
+        }
+        let op = dsm::types::operations::Operation::DlvOwnerApplyV2 {
+            vault_id: vault_id.to_vec(),
+            settlement_receipt_id: receipt_id,
+            pending_pointer_x: trade.x,
+            parent_sequence: trade.parent_sequence,
+            new_sequence: trade.new_sequence,
+            parent_binding,
+            input_policy_commit: trade.input_policy_commit,
+            output_policy_commit: trade.output_policy_commit,
+            input_amount: trade.input_amount,
+            output_amount: trade.output_amount,
+            // The parent state's committed fee — the same one the curve above ran on.
+            fee_bps,
+            signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+
+        // Sign BEFORE the advance, for the same reason as `DlvSettle`: the
+        // signature is inside the committed operation bytes and therefore
+        // inside the chain tip.
+        let op = self
+            .core_sdk
+            .sign_operation_sphincs(op)
+            .map_err(|e| format!("failed to sign DlvOwnerApplyV2: {e}"))?;
+        // The fold moves reserve value under both pair assets; each must
+        // satisfy the applicable token policy before the apply is derived.
+        for pc in [pair.a(), pair.b()] {
+            require_rooted_market_leg("owner catch-up", &pc).await?;
+        }
+
+        let mutation = dsm::types::device_state::VaultReserveMutation::ApplySettlement {
+            vault_id,
+            input_policy_commit: trade.input_policy_commit,
+            input_amount: trade.input_amount,
+            output_policy_commit: trade.output_policy_commit,
+            output_amount: trade.output_amount,
+            parent_sequence: trade.parent_sequence,
+            new_sequence: trade.new_sequence,
+            pair,
+            parent_state: parent_state_bytes,
+        };
+
+        let reference_state = self
+            .core_sdk
+            .get_current_state()
+            .map_err(|e| format!("get_current_state failed: {e}"))?;
+        let actor = reference_state.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
+        // The consume-once claim is written INSIDE the apply's advance
+        // transaction, so the claim and the reserve move commit together or
+        // not at all. `UNIQUE(vault_id, parent_sequence)` decides a race that
+        // slipped past the engine's pre-check: a losing racer's claim resolves
+        // to `Conflict`, which this closure turns into an error, rolling back
+        // the whole advance so the loser moves no reserve.
+        let (claim_parent, claim_child) = (trade.parent_sequence, trade.new_sequence);
+        let record_consumption = move |tx: &rusqlite::Transaction<'_>,
+                                       _outcome: &dsm::types::device_state::AdvanceOutcome,
+                                       _artifacts: &()|
+              -> Result<(), dsm::types::error::DsmError> {
+            use crate::storage::client_db::{
+                cas_consume_vault_generation_with_conn, VaultGenerationConsumeOutcome,
+            };
+            match cas_consume_vault_generation_with_conn(
+                tx,
+                &vault_id,
+                claim_parent,
+                claim_child,
+                &receipt_id,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("owner catch-up: consume-once claim failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })? {
+                VaultGenerationConsumeOutcome::Consumed
+                | VaultGenerationConsumeOutcome::AlreadyConsumedSameSettlement => Ok(()),
+                VaultGenerationConsumeOutcome::Conflict { .. } => {
+                    Err(dsm::types::error::DsmError::invalid_operation(
+                        "owner catch-up: this vault generation was consumed by a different \
+                         settlement (race) — rolling back the apply",
+                    ))
+                }
+            }
+        };
+        // EMPTY deltas inside the facade: the owner's spendable balance is not
+        // part of a settlement. Only the reserve leaves move, in this advance.
+        crate::sdk::economic_admission_flow::admitted_dlv_owner_apply(
+            &self.core_sdk,
+            op,
+            rel_key,
+            actor,
+            init_tip,
+            mutation,
+            payment.trader_genesis,
+            payment.trader_devid,
+            payment.trader_economic_position,
+            payment_evidence,
+            |_outcome: &dsm::types::device_state::AdvanceOutcome| Ok(()),
+            record_consumption,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("the admitted apply failed: {e}"))
+    }
+}
+
+/// Where an owner catch-up stops (amendment 2c-G, ruling G2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatchUpTarget {
+    /// Every certified settlement the owner has not applied: the composed
+    /// frontier. What the `storage.sync` pass asks for.
+    Frontier,
+    /// The owed prefix that ends at the settlement committed as `x`. What
+    /// `dlv.reconcile` asks for.
+    Through([u8; 32]),
+}
+
+/// What one catch-up did to one vault. Every apply counted is durable, whether
+/// or not the run finished.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CatchUpReport {
+    pub applied: u32,
+    pub already_applied: u32,
+    /// Why the run ended before its target, if it did.
+    pub stopped: Option<String>,
+}
+
+/// ONE catch-up at a time on this device: an explicit request waits for a
+/// running sync pass, and a sync pass skips while any catch-up runs.
+fn owner_catch_up_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// The certified settlements a catch-up to `target` consumes, oldest first.
+///
+/// A pure function of the composition, which is what makes the two
+/// entrypoints agree: `Through(x)` is exactly the prefix of `Frontier` that
+/// ends at `x`. Only a certified MARKET fold counts — the walk installs
+/// nothing uncertified, and a close is the owner's own terminal act rather
+/// than a settlement to apply.
+fn owed_certified_folds(
+    composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    target: CatchUpTarget,
+) -> Result<Vec<&crate::sdk::vault_state_composition::FoldedParent>, String> {
+    let mut owed: Vec<_> = composed
+        .folded_parents
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.bound_kind,
+                dsm::dlv::settlement_bundle::BundleShape::Market
+            ) && f.verdict.may_certify()
+                && f.realized_trade.is_some()
+        })
+        .collect();
+    // A fold consumes exactly the current parent: generation order is the only
+    // order in which the applies can land.
+    owed.sort_by_key(|f| f.generation);
+    if let CatchUpTarget::Through(x) = target {
+        let Some(end) = owed
+            .iter()
+            .position(|f| f.realized_trade.as_ref().is_some_and(|t| t.trade().x == x))
+        else {
+            return Err(
+                "no CERTIFIED settlement at that commitment — a receipt is evidence, never \
+                 settlement (2c-D §14, C2-R1)"
+                    .into(),
+            );
+        };
+        owed.truncate(end + 1);
+    }
+    Ok(owed)
+}
+
+/// TEST-ONLY: how many applies a catch-up may still make before the next is
+/// refused as an interruption between applies. Negative means unlimited.
+#[cfg(test)]
+static CATCH_UP_APPLY_BUDGET: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+#[cfg(test)]
+fn take_catch_up_apply_budget() -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    match CATCH_UP_APPLY_BUDGET.load(Ordering::SeqCst) {
+        0 => Err("interrupted between applies (test injection)".into()),
+        n if n > 0 => {
+            CATCH_UP_APPLY_BUDGET.store(n - 1, Ordering::SeqCst);
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -7096,6 +7270,20 @@ mod funded_creation_tests {
         assert!(
             !reconcile(r, &vault_id, &x_b).success,
             "the loser's replay stays refused"
+        );
+        // And the storage.sync pass finds nothing owed: a receipt with no
+        // certified fold behind it is not a settlement to catch up on.
+        assert_eq!(
+            crate::runtime::get_runtime()
+                .block_on(r.resume_owner_catch_up())
+                .expect("the sync pass"),
+            0,
+            "nothing uncertified is ever owed"
+        );
+        assert_eq!(
+            r.core_sdk.device_head().expect("head").root(),
+            root_before,
+            "and the pass wrote nothing"
         );
     }
 
@@ -10351,7 +10539,7 @@ mod funded_creation_tests {
     /// the probes go through the same route.
     #[test]
     #[serial]
-    fn lp_offline_market_advances_three_generations_and_lp_reconciles_each_once() {
+    fn lp_offline_market_advances_three_generations_and_lp_catches_up_oldest_first() {
         use prost::Message as _;
 
         install_identity();
@@ -10602,49 +10790,45 @@ mod funded_creation_tests {
             0
         );
 
-        // Folding out of order is REFUSED: generation 1 is not current.
+        // An explicit catch-up THROUGH generation 1 applies generation 0 first:
+        // a fold consumes exactly the current parent, so generation 1 is never
+        // applied over a state that has not received generation 0 (2c-G, G2).
         let res = reconcile(owner, &vault_id, &xs[1]);
         assert!(
-            !res.success,
-            "folding generation 1->2 before 0->1 must be refused (parent not current)"
+            res.success,
+            "catch-up through generation 1: {:?}",
+            res.error_message
         );
-        let h = owner.core_sdk.device_head().expect("owner head");
+        let mut expect = (10_000u64, 5_000u64);
+        for &input in &inputs[..2] {
+            let out = cp(input, expect.0, expect.1);
+            expect = (expect.0 + input, expect.1 - out);
+        }
         assert_eq!(
-            h.vault_reserve(&vault_id, &pc_a),
-            10_000,
-            "a refused fold moved nothing"
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (expect.0, expect.1, 2),
+            "generations 0 and 1 applied, in order, and nothing past the named settlement"
         );
 
-        // In order, each fold consumes exactly the next parent, once.
-        let mut expect = (10_000u64, 5_000u64);
-        for (i, &input) in inputs.iter().enumerate() {
-            let out = cp(input, expect.0, expect.1);
-            let res = reconcile(owner, &vault_id, &xs[i]);
-            assert!(res.success, "fold {i} failed: {:?}", res.error_message);
-            expect = (expect.0 + input, expect.1 - out);
-            let h = owner.core_sdk.device_head().expect("owner head");
-            assert_eq!(
-                (
-                    h.vault_reserve(&vault_id, &pc_a),
-                    h.vault_reserve(&vault_id, &pc_b)
-                ),
-                expect,
-                "after fold {i} the reserves reflect exactly generations 0..={i}"
-            );
-            assert_eq!(
-                h.vault_reserve_entry(&vault_id, &pc_a)
-                    .expect("leg")
-                    .sequence,
-                i as u64 + 1,
-                "each fold advances the generation by exactly one"
-            );
+        // The storage.sync pass finishes what is still owed, and only that.
+        let n = crate::runtime::get_runtime()
+            .block_on(owner.resume_owner_catch_up())
+            .expect("the sync pass");
+        assert_eq!(n, 1, "only generation 2 was still owed");
+        let out = cp(inputs[2], expect.0, expect.1);
+        expect = (expect.0 + inputs[2], expect.1 - out);
+        assert_eq!(
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (expect.0, expect.1, 3)
+        );
+        for (i, x) in xs.iter().enumerate() {
             let consumer =
                 crate::storage::client_db::load_vault_generation_consumer(&vault_id, i as u64)
                     .expect("load")
                     .expect("generation consumed");
             assert_eq!(
                 consumer.source_commitment,
-                dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, &xs[i]),
+                dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, x),
                 "generation {i} is recorded as consumed by trader {i}'s settlement"
             );
         }
@@ -10668,6 +10852,374 @@ mod funded_creation_tests {
         assert!(res.success, "replaying the last fold must not error");
         assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
     }
+    /// The market moves the vault while its owner is away: trader `i` settles
+    /// `inputs[i]` of A against the reserves the COMPOSED state holds at
+    /// generation `i`. Returns each settlement's commitment `x`, oldest first.
+    fn market_moves(
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        traders: &[crate::test_support::two_device::TestDevice],
+        inputs: &[u64],
+    ) -> Vec<[u8; 32]> {
+        let mut xs = Vec::new();
+        for (i, (t, &input)) in traders.iter().zip(inputs).enumerate() {
+            t.enter();
+            let (gen, ra, rb) = composed(vault_id, pc_a, pc_b);
+            assert_eq!(gen, i as u64, "trader {i} settles the next generation");
+            let out = crate::sdk::routing_path_sdk::constant_product_output(input, ra, rb, 30)
+                .expect("curve output");
+            let (res, x) = trader_settles(
+                t.router(),
+                &t.ak_pk,
+                &t.device_id,
+                vault_id,
+                pc_a,
+                pc_b,
+                gen,
+                (ra, rb),
+                input,
+                out,
+                0x40 + i as u8,
+            );
+            assert!(res.success, "trader {i} settles: {:?}", res.error_message);
+            settle_outcome(&res, "realized");
+            xs.push(x);
+        }
+        xs
+    }
+
+    /// AMENDMENT 2c-G, G1 + G2, on the REAL `storage.sync`.
+    ///
+    /// An owner offline for two generations comes back and syncs. The sync pass
+    /// applies both certified settlements, oldest first, admitted, and the
+    /// owner's reserve leaves are then EXACTLY the composed frontier. Both
+    /// entrypoints plan the same certified history (an explicit catch-up
+    /// through the last settlement IS the frontier), the catch-up creates no
+    /// certified history (the composed frontier and every trader head are
+    /// untouched), and a catch-up with nothing owed writes nothing.
+    ///
+    /// MUTATION CONTROL: remove the owner catch-up pass from `storage.sync` and
+    /// the frontier assertion goes red with the leaves still at generation 0.
+    #[test]
+    #[serial_test::serial]
+    fn an_offline_owner_catches_up_on_sync_to_exactly_the_composed_frontier() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/catch-up-sync",
+            &[("trader0", 0xD1), ("trader1", 0xD2)],
+        );
+        let xs = market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000, 700]);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            frontier.sequence, 2,
+            "the market moved the vault two generations"
+        );
+        let trader_roots: Vec<_> = traders
+            .iter()
+            .map(|t| {
+                t.enter();
+                t.router()
+                    .core_sdk
+                    .device_head()
+                    .expect("trader head")
+                    .root()
+            })
+            .collect();
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        // THE SAME ENGINE: the explicit plan through the LAST settlement is the
+        // frontier plan, oldest first; through the first it stops there.
+        let own = crate::runtime::get_runtime()
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes its own vault");
+        let plan = |t: super::CatchUpTarget| -> Vec<(u64, [u8; 32])> {
+            super::owed_certified_folds(&own, t)
+                .expect("plan")
+                .iter()
+                .map(|f| {
+                    let trade = f.realized_trade.as_ref().expect("certified").trade();
+                    (f.generation, trade.x)
+                })
+                .collect()
+        };
+        assert_eq!(
+            plan(super::CatchUpTarget::Frontier),
+            vec![(0, xs[0]), (1, xs[1])]
+        );
+        assert_eq!(
+            plan(super::CatchUpTarget::Through(xs[1])),
+            plan(super::CatchUpTarget::Frontier)
+        );
+        assert_eq!(plan(super::CatchUpTarget::Through(xs[0])), vec![(0, xs[0])]);
+
+        let spendable_before = spendable(owner, &pc_a, &pc_b);
+        let resp = crate::runtime::get_runtime().block_on(owner_dev.sync());
+        assert!(
+            !resp.errors.iter().any(|e| e.contains("owner catch-up")),
+            "the pass ran clean: {:?}",
+            resp.errors
+        );
+        assert_eq!(
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (frontier.reserves_a, frontier.reserves_b, frontier.sequence),
+            "the owner's reserve leaves ARE the composed frontier"
+        );
+        for (i, x) in xs.iter().enumerate() {
+            assert_eq!(
+                crate::storage::client_db::load_vault_generation_consumer(&vault_id, i as u64)
+                    .expect("load")
+                    .expect("generation consumed")
+                    .source_commitment,
+                dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, x),
+                "generation {i} consumed by its certified settlement"
+            );
+        }
+        assert_eq!(
+            spendable(owner, &pc_a, &pc_b),
+            spendable_before,
+            "a synchronization step moves no value a second time"
+        );
+
+        // It CONSUMED certified history and created none.
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            (after.sequence, after.c_n),
+            (frontier.sequence, frontier.c_n)
+        );
+        for (t, root) in traders.iter().zip(&trader_roots) {
+            t.enter();
+            assert_eq!(
+                t.router()
+                    .core_sdk
+                    .device_head()
+                    .expect("trader head")
+                    .root(),
+                *root,
+                "the trader's frontier is untouched by the owner's catch-up"
+            );
+        }
+
+        // NOTHING OWED WRITES NOTHING, through either entrypoint.
+        owner_dev.enter();
+        let root = owner.core_sdk.device_head().expect("head").root();
+        let puts = crate::sdk::storage_io::fake_fleet::put_log().len();
+        let n = crate::runtime::get_runtime()
+            .block_on(owner.resume_owner_catch_up())
+            .expect("the sync pass");
+        assert_eq!(n, 0, "nothing was owed");
+        let res = reconcile(owner, &vault_id, &xs[1]);
+        assert!(res.success, "an explicit replay: {:?}", res.error_message);
+        assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
+        assert_eq!(
+            crate::sdk::storage_io::fake_fleet::put_log().len(),
+            puts,
+            "and published nothing"
+        );
+    }
+
+    /// Resets the catch-up interruption budget even when an assertion fails.
+    struct UnlimitedCatchUpOnDrop;
+    impl Drop for UnlimitedCatchUpOnDrop {
+        fn drop(&mut self) {
+            super::CATCH_UP_APPLY_BUDGET.store(-1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// AN INTERRUPTED CATCH-UP RESUMES AFTER ITS LAST DURABLE APPLY (ruling G1).
+    ///
+    /// Three generations owed; the pass is interrupted after one apply. That
+    /// apply is durable, nothing past it moved, and the next pass applies only
+    /// what is still owed — generation 0 is never applied a second time — and
+    /// ends at the composed frontier.
+    #[test]
+    #[serial_test::serial]
+    fn an_interrupted_catch_up_resumes_without_applying_anything_twice() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/catch-up-resume",
+            &[("trader0", 0xD5), ("trader1", 0xD6), ("trader2", 0xD7)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000, 700, 400]);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let _reset = UnlimitedCatchUpOnDrop;
+        super::CATCH_UP_APPLY_BUDGET.store(1, std::sync::atomic::Ordering::SeqCst);
+        let n = crate::runtime::get_runtime()
+            .block_on(owner.resume_owner_catch_up())
+            .expect("the interrupted pass still reports");
+        assert_eq!(n, 1, "one apply landed before the interruption");
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b).2, 1);
+        assert!(
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 1)
+                .expect("load")
+                .is_none(),
+            "nothing past the interruption moved"
+        );
+        let first = crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+            .expect("load")
+            .expect("generation 0 consumed");
+
+        super::CATCH_UP_APPLY_BUDGET.store(-1, std::sync::atomic::Ordering::SeqCst);
+        let n = crate::runtime::get_runtime()
+            .block_on(owner.resume_owner_catch_up())
+            .expect("the resumed pass");
+        assert_eq!(n, 2, "the resumed pass applies only what is still owed");
+        assert_eq!(
+            leaves(owner, &vault_id, &pc_a, &pc_b),
+            (frontier.reserves_a, frontier.reserves_b, frontier.sequence)
+        );
+        assert_eq!(
+            crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                .expect("load")
+                .expect("generation 0 consumed")
+                .source_commitment,
+            first.source_commitment,
+            "generation 0 was never applied again"
+        );
+    }
+
+    /// AN APPLY MATERIALIZES THE CERTIFIED FOLD OR NOTHING (ruling G1).
+    ///
+    /// The certified fold with one fact altered at a time — the receipt leaf,
+    /// its inclusion path, the parent's reserves, the parent's generation — is
+    /// refused, and the refusal writes nothing: the owner's root, its
+    /// consume-once claims and the fleet are untouched. The honest fold then
+    /// applies. The leaf and path refusals are the 0x0027 producer's mirror of
+    /// the arm, BEFORE signing: the arm itself runs only after the advance
+    /// commits, where a refusal would strand the admission.
+    ///
+    /// MUTATION CONTROL: delete either check in
+    /// `build_settlement_payment_evidence` and the matching case goes red.
+    #[test]
+    #[serial_test::serial]
+    fn a_certified_fold_with_any_fact_altered_is_refused_and_writes_nothing() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) =
+            market_with_traders("sofi/spec/catch-up-altered", &[("trader0", 0xD9)]);
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000]);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let own = crate::runtime::get_runtime()
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes its own vault");
+        let fold = super::owed_certified_folds(&own, super::CatchUpTarget::Frontier).expect("plan")
+            [0]
+        .clone();
+
+        let mut altered_leaf = fold.clone();
+        altered_leaf
+            .certified_payment
+            .as_mut()
+            .expect("payment")
+            .receipt
+            .output_amount += 1;
+        let mut altered_path = fold.clone();
+        altered_path
+            .certified_payment
+            .as_mut()
+            .expect("payment")
+            .receipt_siblings[0][0] ^= 0x01;
+        let mut altered_reserves = fold.clone();
+        altered_reserves.state.reserve_a += 1_000;
+        altered_reserves.state.reserve_b += 1_000;
+        let mut altered_generation = fold.clone();
+        altered_generation.state.generation += 1;
+
+        let root = owner.core_sdk.device_head().expect("head").root();
+        let puts = crate::sdk::storage_io::fake_fleet::put_log().len();
+        for (what, altered, needle) in [
+            (
+                "receipt leaf",
+                altered_leaf,
+                "does not state this settlement",
+            ),
+            (
+                "inclusion path",
+                altered_path,
+                "does not prove into the root",
+            ),
+            (
+                "parent reserves",
+                altered_reserves,
+                "refusing before signing",
+            ),
+            ("parent generation", altered_generation, ""),
+        ] {
+            let e = crate::runtime::get_runtime()
+                .block_on(owner.apply_certified_fold(&vault_id, &altered))
+                .expect_err(what);
+            assert!(e.contains(needle), "{what}: {e}");
+            assert_eq!(
+                owner.core_sdk.device_head().expect("head").root(),
+                root,
+                "{what}: the refused apply moved nothing"
+            );
+            assert!(
+                crate::storage::client_db::load_vault_generation_consumer(&vault_id, 0)
+                    .expect("load")
+                    .is_none(),
+                "{what}: and claimed no generation"
+            );
+            assert_eq!(
+                crate::sdk::storage_io::fake_fleet::put_log().len(),
+                puts,
+                "{what}: and published nothing"
+            );
+        }
+        crate::runtime::get_runtime()
+            .block_on(owner.apply_certified_fold(&vault_id, &fold))
+            .expect("the certified fold itself applies");
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b).2, 1);
+    }
+
+    /// NO RE-ENTRANT CATCH-UP (ruling G2): a sync pass that finds a catch-up
+    /// already running returns at once and writes nothing, rather than waiting
+    /// on it or running beside it; once the lock is free it runs.
+    ///
+    /// MUTATION CONTROL: make the pass wait on the lock (`lock().await`) and the
+    /// timeout goes red.
+    #[test]
+    #[serial_test::serial]
+    fn a_sync_pass_skips_while_another_catch_up_runs() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) =
+            market_with_traders("sofi/spec/catch-up-lock", &[("trader0", 0xDB)]);
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000]);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let root = owner.core_sdk.device_head().expect("head").root();
+        let rt = crate::runtime::get_runtime();
+        let running = super::owner_catch_up_lock()
+            .try_lock()
+            .expect("no catch-up is running yet");
+        let n = rt
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    owner.resume_owner_catch_up(),
+                )
+                .await
+            })
+            .expect("the pass returns at once rather than waiting on the running catch-up")
+            .expect("the pass");
+        assert_eq!(n, 0);
+        assert_eq!(owner.core_sdk.device_head().expect("head").root(), root);
+        drop(running);
+        assert_eq!(
+            rt.block_on(owner.resume_owner_catch_up())
+                .expect("the pass"),
+            1,
+            "and runs once the lock is free"
+        );
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b).2, 1);
+    }
+
     // ── CLOSE / WITHDRAWAL ───────────────────────────────────────────────────
     // Invariant 4 at the ROUTE. The core arm proves the mutation is unforgeable;
     // these prove the route that drives it: what the owner gets back, when the

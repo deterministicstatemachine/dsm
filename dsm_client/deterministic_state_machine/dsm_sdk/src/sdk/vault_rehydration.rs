@@ -433,7 +433,7 @@ mod tests {
             dsm::crypto::sphincs::sphincs_sign(sk, &unsigned.with_cleared_signature().to_bytes())
                 .expect("sign the owner apply");
         let head = head
-            .advance(
+            .advance_admitted(
                 rel_key,
                 DEVID,
                 unsigned.with_signature(signature),

@@ -2996,6 +2996,19 @@ impl AppRouterImpl {
                             errors.push(format!("receipt recovery failed: {e}"));
                         }
                     }
+                    // OWNER CATCH-UP (amendment 2c-G, ruling G2): every
+                    // certified settlement traders realized against this
+                    // device's own vaults while it was away, applied oldest
+                    // first and admitted. LAST, and it gates nothing: a failure
+                    // is local to its vault and retried on a later sync, and it
+                    // never calls sync, so there is no loop.
+                    match self.resume_owner_catch_up().await {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] owner catch-up errored: {e}");
+                            errors.push(format!("owner catch-up failed: {e}"));
+                        }
+                    }
                 }
 
                 // Record network success for connectivity monitoring
