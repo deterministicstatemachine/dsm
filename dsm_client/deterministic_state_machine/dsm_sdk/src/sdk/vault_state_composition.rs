@@ -1225,10 +1225,17 @@ pub(crate) async fn compose_vault_history_until(
     token_b: &[u8],
     fee_bps: u32,
     target_c_n: [u8; 32],
+    from_generation: u64,
 ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, CompositionError> {
-    let composed =
-        compose_discovered_inner(vault_id, token_a, token_b, fee_bps, None, Some(target_c_n))
-            .await?;
+    let composed = compose_discovered_inner(
+        vault_id,
+        token_a,
+        token_b,
+        fee_bps,
+        None,
+        Some((target_c_n, from_generation)),
+    )
+    .await?;
     let mut states: Vec<VaultStateV2> = composed
         .folded_parents
         .iter()
@@ -1246,8 +1253,9 @@ async fn compose_discovered_inner(
     token_b: &[u8],
     fee_bps: u32,
     receipt_candidate: Option<&SignedTraderSettlementReceipt>,
-    stop_at: Option<[u8; 32]>,
+    history: Option<([u8; 32], u64)>,
 ) -> Result<ComposedVaultState, CompositionError> {
+    let stop_at = history.map(|(target, _)| target);
     let ad_key = crate::sdk::routing_sdk::advertisement_key(token_a, token_b, vault_id);
     let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key)
         .await
@@ -1265,26 +1273,47 @@ async fn compose_discovered_inner(
             "advertisement carries no presentation digest".into(),
         ));
     };
-    let presentation =
-        crate::sdk::vault_state_v3_codec::fetch_anchor_presentation(&presentation_digest)
-            .await
-            .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
-            .ok_or_else(|| {
-                CompositionError::InvalidBaselinePresentation(
-                    "presentation not resolvable at its advertised digest".into(),
-                )
-            })?;
-    let Ok(c_n) = <[u8; 32]>::try_from(presentation.state_commitment.as_slice()) else {
-        return Err(CompositionError::InvalidBaselinePresentation(
-            "presentation carries a malformed state commitment".into(),
-        ));
-    };
-    let vn_bytes = crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&c_n)
-        .await
-        .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
-        .ok_or_else(|| {
-            CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
+    let (mut presentation, mut vn_bytes) = fetch_advertised_baseline(&presentation_digest).await?;
+    // THE HISTORICAL FALLBACK (amendment 2c-G, G3 blocker ruling). The current
+    // anchor moves forward; a history walk that must include a generation OLDER
+    // than it composes from the vault's immutable BIRTH anchor instead, so a
+    // baseline that moved never makes an earlier settle unverifiable. The birth
+    // field is discovery only: the anchor is authenticated by the same P0-P6
+    // verification below, and one that is not this vault's birth state is
+    // refused rather than composed from.
+    if let Some((_, needed)) = history {
+        let current = dsm::ccb::decode_vault_state(&vn_bytes).map_err(|e| {
+            CompositionError::InvalidBaselinePresentation(format!("advertised baseline: {e}"))
         })?;
+        if current.generation > needed {
+            let Ok(birth_digest) =
+                <[u8; 32]>::try_from(ad.birth_anchor_presentation_digest.as_slice())
+            else {
+                return Err(CompositionError::InvalidBaselinePresentation(format!(
+                    "the current anchor stands at generation {}, after generation {needed} this \
+                     history must include, and the advertisement names no birth anchor",
+                    current.generation
+                )));
+            };
+            let (birth_presentation, birth_bytes) =
+                fetch_advertised_baseline(&birth_digest).await?;
+            let birth = dsm::ccb::decode_vault_state(&birth_bytes).map_err(|e| {
+                CompositionError::InvalidBaselinePresentation(format!("birth anchor: {e}"))
+            })?;
+            if birth.vault_id != *vault_id
+                || birth.generation != 0
+                || birth.parent_state_commitment != dsm::ccb::genesis_parent_commitment(vault_id)
+            {
+                return Err(CompositionError::InvalidBaselinePresentation(
+                    "the advertised birth anchor is not this vault's birth state — refusing a \
+                     substituted historical anchor"
+                        .into(),
+                ));
+            }
+            presentation = birth_presentation;
+            vn_bytes = birth_bytes;
+        }
+    }
     let mut composed = compose_vault_state_inner(
         vault_id,
         &presentation,
@@ -1311,6 +1340,34 @@ async fn compose_discovered_inner(
             position: ad.economic_proof_position,
         });
     Ok(composed)
+}
+
+/// The `AnchorPresentationV3` at an advertised digest and the exact `CCB(V_n)`
+/// it anchors — fetched, never trusted: the walk authenticates both.
+async fn fetch_advertised_baseline(
+    presentation_digest: &[u8; 32],
+) -> Result<(crate::generated::AnchorPresentationV3, Vec<u8>), CompositionError> {
+    let presentation =
+        crate::sdk::vault_state_v3_codec::fetch_anchor_presentation(presentation_digest)
+            .await
+            .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
+            .ok_or_else(|| {
+                CompositionError::InvalidBaselinePresentation(
+                    "presentation not resolvable at its advertised digest".into(),
+                )
+            })?;
+    let Ok(c_n) = <[u8; 32]>::try_from(presentation.state_commitment.as_slice()) else {
+        return Err(CompositionError::InvalidBaselinePresentation(
+            "presentation carries a malformed state commitment".into(),
+        ));
+    };
+    let vn_bytes = crate::sdk::vault_state_v3_codec::fetch_vault_state_bytes(&c_n)
+        .await
+        .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?
+        .ok_or_else(|| {
+            CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
+        })?;
+    Ok((presentation, vn_bytes))
 }
 
 #[cfg(test)]

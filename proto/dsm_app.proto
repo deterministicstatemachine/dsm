@@ -1971,6 +1971,13 @@ message RoutingVaultAdvertisementV1 {
   // P0–P6 and the c_n it carries resolves the exact `CCB(V_n)` bytes. A
   // trader quotes against NOTHING from this ad — reserves here are hints.
   bytes  anchor_presentation_digest = 19 [(dsm_fixed_len)=32];
+  // The vault's IMMUTABLE birth anchor (amendment 2c-G, G3 blocker ruling):
+  // the inner digest of the AnchorPresentationV3 its birth published. Set
+  // once, never moved. Discovery metadata, not authority: the historical
+  // fallback a verifier composes from when the current anchor (field 19) is
+  // newer than the generation it must reconstruct. The verifier still
+  // authenticates the anchor and refuses one that is not a birth state.
+  bytes  birth_anchor_presentation_digest = 20 [(dsm_fixed_len)=32];
   // WHERE THE OWNER'S RESERVE PROOF LIVES: the content address of the
   // `EconomicProofArtifactV1` published by the admission that wrote this
   // vault's reserve leaves, and the economic position whose registered root

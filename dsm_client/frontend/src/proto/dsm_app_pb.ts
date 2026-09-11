@@ -11164,6 +11164,18 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
   anchorPresentationDigest = new Uint8Array(0);
 
   /**
+   * The vault's IMMUTABLE birth anchor (amendment 2c-G, G3 blocker ruling):
+   * the inner digest of the AnchorPresentationV3 its birth published. Set
+   * once, never moved. Discovery metadata, not authority: the historical
+   * fallback a verifier composes from when the current anchor (field 19) is
+   * newer than the generation it must reconstruct. The verifier still
+   * authenticates the anchor and refuses one that is not a birth state.
+   *
+   * @generated from field: bytes birth_anchor_presentation_digest = 20;
+   */
+  birthAnchorPresentationDigest = new Uint8Array(0);
+
+  /**
    * WHERE THE OWNER'S RESERVE PROOF LIVES: the content address of the
    * `EconomicProofArtifactV1` published by the admission that wrote this
    * vault's reserve leaves, and the economic position whose registered root
@@ -11208,6 +11220,7 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
     { no: 13, name: "lifecycle_state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 14, name: "updated_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 19, name: "anchor_presentation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 20, name: "birth_anchor_presentation_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "economic_proof_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 16, name: "economic_proof_position", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);

@@ -1448,6 +1448,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- publication never ran; consumers fail closed rather than guess.
             economic_proof_addr     BLOB NOT NULL DEFAULT X'',
             economic_proof_position INTEGER NOT NULL DEFAULT 0,
+            -- The inner digest of the vault's BIRTH AnchorPresentationV3,
+            -- written once at `dlv.create` and never moved (amendment 2c-G, G3
+            -- blocker ruling). The baseline columns above move forward; this
+            -- is what the routing advertisement names as the immutable
+            -- historical fallback anchor. Derived at birth, never supplied.
+            birth_presentation_digest BLOB NOT NULL DEFAULT X'',
             created_at          INTEGER NOT NULL
         );
 
