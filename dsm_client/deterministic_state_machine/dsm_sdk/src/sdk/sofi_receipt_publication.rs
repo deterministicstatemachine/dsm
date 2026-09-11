@@ -17,6 +17,27 @@
 //! alone, and a closure below quorum is a pending obligation — never a reason
 //! to re-fence, re-bind, re-admit or re-certify (the ruling on R6).
 //!
+//! NEVER LOST (the owner's merge condition on #859). A projection or freeze
+//! that fails in the completion pass does not hold the fence. If the fence then
+//! releases and the process dies, the obligation is rediscovered from durable
+//! facts alone, by [`recover_owed_receipts`]:
+//!
+//! ```text
+//! a released trader fence    Released is reachable only through
+//!                            SuccessorAccepted, recorded only by the
+//!                            certified completion: the durable record that
+//!                            certification happened. Carries addr(B) and S_v.
+//! CCB(B)                     at quorum since pre-bind; fetched by b, re-hashed,
+//!                            and required to sit at the fence's addr(B)
+//! this device's TA_B         frozen locally by its own admission, reached
+//!                            through its own locator for b, and required to
+//!                            accept exactly b
+//! ```
+//!
+//! Recovery rebuilds the byte-identical closure and freezes it. It never
+//! composes, walks, binds, advances, admits or touches the fence: it rebuilds
+//! the record of what certification already decided, and re-decides nothing.
+//!
 //! NOTHING READS THIS AS AUTHORITY (R7). [`publication`] reports whether the
 //! obligation is met, and nothing more. No composition, admission,
 //! realization, fence, certification or reserve-provenance path may consult it.
@@ -28,20 +49,29 @@
 //! set's quorum as `S_v`'s. Every beta consumer resolves the one catalog set,
 //! so beta never reaches that arm.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dsm::common::domain_tags::{
     TAG_DSM_SETTLEMENT_BUNDLE, TAG_DSM_SOFI_RECEIPT_V1, TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
 };
 use dsm::dlv::sofi_receipt::SofiReceipt;
+use dsm::dlv::trader_fence::FenceState;
 use dsm::economic::trader_acceptance::TraderAcceptance;
 
-use crate::sdk::economic_registers::immutable_object_key;
+use crate::sdk::economic_registers::{immutable_object_key, immutable_object_key_for_inner};
+use crate::sdk::trader_acceptance_locator::{decode_locator, locator_key, LocatorFetch};
 use crate::storage::client_db::frozen_publication_artifact as fpa;
+use crate::storage::client_db::trader_parent_fence::{list_released_fences, TraderFence};
 
 /// The frozen-artifact purpose of the receipt row itself.
 pub(crate) const RECEIPT_PURPOSE: &str = "sofi-receipt";
 const BUNDLE_PURPOSE: &str = "sofi-receipt-bundle";
 const ACCEPTANCE_PURPOSE: &str = "sofi-receipt-acceptance";
+
+/// Test-only: make the next closure freeze fail, the way a local storage fault
+/// would. Consumed by the freeze it fails.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_CLOSURE_FREEZE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// One member of the publication set: the exact bytes and the immutable key
 /// they travel under.
@@ -105,14 +135,25 @@ pub(crate) fn closure(
     })
 }
 
-/// Freeze every member of `closure` for its set. Re-freezing identical bytes
-/// is a no-op, so this is safe on every completion pass.
+/// Freeze every member of `closure` for its set — all three rows, or none.
+///
+/// All-or-none is what makes the receipt row a sound marker: recovery treats
+/// "a receipt row is frozen for `b`" as "the obligation is recorded", so a
+/// receipt row must never exist without its bundle and acceptance rows.
+/// Re-freezing identical bytes is a no-op, so this is safe on every pass.
 pub(crate) fn freeze_closure_with_conn(
     conn: &rusqlite::Connection,
     closure: &ReceiptClosure,
 ) -> Result<()> {
+    #[cfg(test)]
+    {
+        if FAIL_NEXT_CLOSURE_FREEZE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("injected closure freeze failure"));
+        }
+    }
     let b = closure.receipt.bundle();
-    for o in &closure.objects {
+    conn.execute_batch("SAVEPOINT sofi_receipt_closure")?;
+    let frozen = closure.objects.iter().try_for_each(|o| {
         fpa::freeze_artifact_with_conn(
             conn,
             &closure.storage_set_id,
@@ -120,9 +161,20 @@ pub(crate) fn freeze_closure_with_conn(
             &o.bytes,
             &b,
             o.purpose,
-        )?;
+        )
+        .map(|_| ())
+    });
+    match frozen {
+        Ok(()) => {
+            conn.execute_batch("RELEASE sofi_receipt_closure")?;
+            Ok(())
+        }
+        Err(e) => {
+            conn.execute_batch("ROLLBACK TO sofi_receipt_closure; RELEASE sofi_receipt_closure")
+                .map_err(|r| anyhow!("{e}; and rolling the partial closure back failed: {r}"))?;
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 /// Where the obligation stands.
@@ -165,6 +217,151 @@ pub(crate) fn publication(closure: &ReceiptClosure) -> Result<ClosurePublication
     Ok(ClosurePublication::Published)
 }
 
+/// What recovering one released settlement's receipt established. Nothing
+/// here moves anything but frozen rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReceiptRecovery {
+    /// The receipt row for this bundle is already frozen: the sweep owns it.
+    AlreadyRecorded,
+    /// The exact closure was rebuilt from durable facts and frozen now.
+    Frozen,
+    /// A durable fact is not reachable now (the bundle, or a local read).
+    /// Retried on the next pass.
+    Pending(String),
+    /// The durable facts do not reconstruct THIS settlement's closure — a
+    /// substituted bundle, set or acceptance. Nothing is frozen.
+    Refused(String),
+}
+
+/// **Rediscover and rebuild one released settlement's receipt obligation.**
+///
+/// `fence` is a `Released` row on this device's own market chain. Every input
+/// is a durable fact that existed before the release, and each is checked
+/// against the others before anything is frozen:
+///
+/// ```text
+/// B      fetched by b = fence.tx_id, re-hashed, at the fence's addr(B)
+/// S_v    the fence's set, and the set B's successor commits
+/// TA_B   this device's own locator for b, its own frozen bytes at the
+///        locator's ta_B, re-hashed, accepting exactly b
+/// ```
+pub(crate) async fn recover_owed_receipt(fence: &TraderFence) -> ReceiptRecovery {
+    use ReceiptRecovery::{AlreadyRecorded, Frozen, Pending, Refused};
+
+    if fence.state != FenceState::Released {
+        return Refused("the fence is not released; its completion owns it".into());
+    }
+    let b = fence.tx_id;
+    match fpa::find_artifact_by_purpose_and_bound_root(RECEIPT_PURPOSE, &b) {
+        Ok(Some(_)) => return AlreadyRecorded,
+        Ok(None) => {}
+        Err(e) => return Pending(format!("the frozen rows could not be read: {e}")),
+    }
+
+    // B — by its identity, at the address the fence bound.
+    let bundle = match crate::sdk::storage_io::fetch_immutable_payload(
+        TAG_DSM_SETTLEMENT_BUNDLE,
+        &b,
+    )
+    .await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Pending("the bound bundle is not retrievable yet".into()),
+        Err(e) => return Pending(format!("the bound bundle could not be read: {e}")),
+    };
+    if dsm::dlv::settlement_bundle::bundle_digest(&bundle) != b
+        || dsm::dlv::settlement_bundle::bundle_addr(&bundle) != fence.value_addr
+    {
+        return Refused("the bundle is not the one this fence bound".into());
+    }
+    let decoded = match dsm::dlv::settlement_bundle::decode_canonical(&bundle) {
+        Ok(decoded) => decoded,
+        Err(e) => return Refused(format!("the bound bundle does not decode: {e}")),
+    };
+
+    // S_v — the set the fence was bound under, and the set the bundle's own
+    // successor commits (equal to the parent's by bundle validity).
+    let [transition] = decoded.bundle.transitions() else {
+        return Refused("the bound bundle is not a beta bundle".into());
+    };
+    match dsm::ccb::storage_set_id(&transition.successor.storage_set) {
+        Ok(id) if id == fence.storage_set_id => {}
+        _ => return Refused("the fence's storage set is not the one the bundle commits".into()),
+    }
+
+    // TA_B — this device's own admission artifacts for exactly b.
+    let ta_b = match fpa::get_current_artifact_payload(&locator_key(&b)) {
+        Ok(Some(bytes)) => match decode_locator(&bytes) {
+            LocatorFetch::Found { ta_b, .. } => ta_b,
+            _ => return Refused("this device's locator for the bundle is malformed".into()),
+        },
+        Ok(None) => {
+            return Refused("this device holds no acceptance locator for the bundle".into())
+        }
+        Err(e) => return Pending(format!("the locator row could not be read: {e}")),
+    };
+    let ta_bytes = match fpa::get_current_artifact_payload(&immutable_object_key_for_inner(
+        TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+        &ta_b,
+    )) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Refused("this device holds no acceptance bytes at its locator".into()),
+        Err(e) => return Pending(format!("the acceptance row could not be read: {e}")),
+    };
+    if dsm::storage_object::immutable_inner(TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE, &ta_bytes) != ta_b
+    {
+        return Refused("the held acceptance bytes are not the ones the locator names".into());
+    }
+    let acceptance = match dsm::economic::trader_acceptance::decode_trader_acceptance(&ta_bytes) {
+        Ok(acceptance) => acceptance,
+        Err(e) => return Refused(format!("the held acceptance does not decode: {e}")),
+    };
+    if acceptance.acceptance_leaf().bundle != b {
+        return Refused("the held acceptance accepts another bundle".into());
+    }
+
+    let closure = match closure(&bundle, &acceptance, fence.storage_set_id) {
+        Ok(closure) => closure,
+        Err(e) => return Refused(format!("no receipt for this settlement: {e}")),
+    };
+    let binding = match crate::storage::client_db::get_connection() {
+        Ok(binding) => binding,
+        Err(e) => return Pending(format!("database: {e}")),
+    };
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    match freeze_closure_with_conn(&conn, &closure) {
+        Ok(()) => Frozen,
+        Err(e) => Pending(format!("the receipt closure could not be frozen: {e}")),
+    }
+}
+
+/// **The recovery pass**: every released settlement on `own_chain` whose
+/// receipt obligation was never recorded, rebuilt and frozen. Returns how many
+/// were frozen. Runs from `storage.sync`, beside D-f.
+pub(crate) async fn recover_owed_receipts(
+    own_chain: &[u8; 32],
+) -> std::result::Result<u32, String> {
+    let fences = list_released_fences(own_chain).map_err(|e| format!("released fences: {e}"))?;
+    let mut frozen = 0u32;
+    for fence in &fences {
+        match recover_owed_receipt(fence).await {
+            ReceiptRecovery::Frozen => frozen += 1,
+            ReceiptRecovery::AlreadyRecorded => {}
+            ReceiptRecovery::Pending(why) => {
+                log::info!("[receipt recovery] pending, retried next pass: {why}")
+            }
+            ReceiptRecovery::Refused(why) => log::warn!("[receipt recovery] refused: {why}"),
+        }
+    }
+    if frozen > 0 {
+        if let Err(e) = crate::handlers::artifact_republish::republish_unpublished_artifacts().await
+        {
+            log::warn!("[receipt recovery] publication pass failed (retried by the sweep): {e}");
+        }
+    }
+    Ok(frozen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,10 +402,15 @@ mod tests {
         closure(&canon, &acceptance(b), set).expect("closure")
     }
 
-    fn freeze(closure: &ReceiptClosure) {
+    fn freeze(closure: &ReceiptClosure) -> Result<()> {
         let binding = get_connection().expect("db");
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        freeze_closure_with_conn(&conn, closure).expect("freeze");
+        freeze_closure_with_conn(&conn, closure)
+    }
+
+    fn receipt_row(closure: &ReceiptClosure) -> Option<fpa::FrozenArtifact> {
+        fpa::find_artifact_by_purpose_and_bound_root(RECEIPT_PURPOSE, &closure.receipt.bundle())
+            .expect("row read")
     }
 
     #[test]
@@ -240,6 +442,15 @@ mod tests {
         ]) {
             assert_eq!(o.key, immutable_object_key(ns, &o.bytes));
         }
+        // The key from the inner identity is the same key.
+        let a = &one.objects[2];
+        assert_eq!(
+            a.key,
+            immutable_object_key_for_inner(
+                TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+                &one.receipt.trader_acceptance()
+            )
+        );
     }
 
     #[test]
@@ -252,12 +463,12 @@ mod tests {
             publication(&c).unwrap(),
             ClosurePublication::Pending(_)
         ));
-        freeze(&c);
+        freeze(&c).expect("freeze");
         assert!(
             matches!(publication(&c).unwrap(), ClosurePublication::Pending(_)),
             "frozen is owed, not published"
         );
-        freeze(&c); // idempotent
+        freeze(&c).expect("idempotent");
         for o in &c.objects {
             fpa::upsert_artifact_publication_state(
                 &o.key,
@@ -268,6 +479,40 @@ mod tests {
             .expect("mark published");
         }
         assert_eq!(publication(&c).unwrap(), ClosurePublication::Published);
+    }
+
+    /// All three rows or none: a closure whose LAST member cannot be frozen
+    /// leaves no receipt row behind to be mistaken for a recorded obligation.
+    #[test]
+    #[serial]
+    fn a_closure_that_fails_part_way_freezes_nothing() {
+        reset_database_for_tests();
+        init_database().expect("init");
+        let mut c = fixture_closure(SET);
+        c.objects[2].bytes.clear(); // an empty payload is refused by the freeze
+        assert!(freeze(&c).is_err());
+        assert!(
+            receipt_row(&c).is_none(),
+            "the receipt row was rolled back with the failed member"
+        );
+        let whole = fixture_closure(SET);
+        assert!(
+            matches!(publication(&whole).unwrap(), ClosurePublication::Pending(ref w) if w.contains("not frozen")),
+            "and nothing of the closure was left frozen"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn an_injected_freeze_failure_freezes_nothing_and_is_consumed() {
+        reset_database_for_tests();
+        init_database().expect("init");
+        let c = fixture_closure(SET);
+        FAIL_NEXT_CLOSURE_FREEZE.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(freeze(&c).is_err());
+        assert!(receipt_row(&c).is_none());
+        freeze(&c).expect("the next freeze is not failed");
+        assert!(receipt_row(&c).is_some());
     }
 
     /// The honesty arm: a member frozen for ANOTHER set is reported, never
@@ -292,7 +537,7 @@ mod tests {
             )
             .expect("admission freeze");
         }
-        freeze(&c);
+        freeze(&c).expect("freeze");
         for o in &c.objects {
             fpa::upsert_artifact_publication_state(
                 &o.key,
