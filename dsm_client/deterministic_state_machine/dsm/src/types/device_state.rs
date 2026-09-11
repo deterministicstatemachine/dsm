@@ -4849,19 +4849,17 @@ mod tests {
         );
     }
 
-    /// END TO END: a settling advance writes its own receipt leaf, and a
-    /// receipt built from that advance's post-root verifies for a third party.
+    /// A settling advance writes its receipt leaf into the SAME root as the
+    /// relationship leaf — one batch, not two — and the leaf replays on
+    /// restore.
     ///
-    /// This is the join between the two halves. The conservation arm proves the
-    /// right balances moved; the receipt is what lets the VAULT OWNER — who
-    /// never saw this advance — know that they did. Without the leaf landing in
-    /// the same root, the owner would be back to trusting a published claim.
+    /// This is the device's own bookkeeping for V1's legacy fields, not
+    /// third-party evidence: a device root is the trader's to choose, and what
+    /// establishes a settlement is Req 21.16 under the validated economic root
+    /// (2c-D §14, C2-R1 point 7).
     #[test]
-    fn a_settling_advance_emits_a_verifiable_receipt() {
-        use crate::dlv::settlement_receipt_leaf::{
-            settlement_receipt_key, sign_trader_settlement_receipt,
-            verify_trader_settlement_receipt, SettledTrade,
-        };
+    fn a_settling_advance_commits_its_receipt_leaf_under_its_post_root() {
+        use crate::dlv::settlement_receipt_leaf::{settlement_receipt_key, SettledTrade};
 
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let trader = fresh_device(0xB7)
@@ -4925,28 +4923,21 @@ mod tests {
         };
         let key = settlement_receipt_key(&after.genesis, &after.devid, &vault, &receipt_id);
         let post_root = *after.smt.root();
-        let siblings = after
-            .smt
-            .get_inclusion_proof(&key, 256)
-            .expect("receipt proof")
-            .siblings;
-
-        let (tpk, tsk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
-        let receipt = sign_trader_settlement_receipt(
-            &vault,
-            &receipt_id,
-            trade,
-            &after.genesis,
-            &after.devid,
-            &post_root,
-            siblings,
-            &tpk,
-            &tsk,
-        )
-        .expect("sign the receipt");
-
-        verify_trader_settlement_receipt(&receipt)
-            .expect("a third party must be able to verify a settlement that really happened");
+        let proof = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
+            key,
+            value: Some(crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade)),
+            siblings: after
+                .smt
+                .get_inclusion_proof(&key, 256)
+                .expect("receipt proof")
+                .siblings,
+        };
+        assert!(
+            crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
+                &proof, &post_root
+            ),
+            "the post-advance root commits exactly this trade's receipt leaf"
+        );
 
         // And the leaf replays on restore, or a reloaded device would root-mismatch.
         assert_eq!(

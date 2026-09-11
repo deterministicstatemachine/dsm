@@ -283,92 +283,35 @@ pub(crate) fn rehydrate_all_amm_vaults(head: &DeviceState) -> Vec<RehydratedVaul
     out
 }
 
-/// The external commitments of settlements published against `vault_id` that
-/// this owner has not folded yet.
+/// Settlements the composition walk CERTIFIED that this owner has not yet
+/// applied, ordered by generation — 2c-D §14, ruling C2-R1 point 6.
 ///
-/// "Unapplied" is read from the LEAVES, the same way `dlv.reconcile` decides
-/// idempotence: a settlement counts while the reserve leaf still sits below the
-/// sequence its receipt would advance to. There is no bookkeeping table to
-/// drift out of step with the state.
-///
-/// A pointer with no valid receipt is skipped, not counted. Publishing a
-/// pointer must never, by itself, make an owner believe value is owed — that is
-/// the whole reason pointers are inert until a receipt witnesses them.
-///
-/// A storage failure yields an empty list and a warning: the owner is told
-/// nothing is outstanding only when nothing could be READ, which understates
-/// rather than invents. Reconciliation is not time-critical, and inventing a
-/// settlement is worse than showing one late.
-pub(crate) async fn unapplied_settlements_for_vault(
-    vault_id: &[u8; 32],
+/// Only a certified market fold counts. A receipt, a pending pointer, or a
+/// parent that is bound but unrealized is never "owed": realization is the
+/// walk's verdict, and inventing a settlement is worse than showing one late.
+/// Idempotence is read off the owner's own reserve leaf, which sits below the
+/// generation a settlement advances to until the owner applies it.
+pub(crate) fn unapplied_settlements_for_vault(
+    composed: &crate::sdk::vault_state_composition::ComposedVaultState,
     head: &DeviceState,
 ) -> Vec<[u8; 32]> {
-    use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
-    let prefix = crate::sdk::route_commit_sdk::vault_pending_prefix(vault_id);
-    let mut cursor: Option<String> = None;
-    // (new_sequence, x): ORDERED by generation before returning. A fold consumes
-    // exactly the current parent (the reserve leaf's `parent_sequence` claim),
-    // so the owner must fold generation N before N+1; the storage key layout
-    // happens to sort that way, but the order is a protocol requirement, not a
-    // property of a path string, so it is made explicit here.
+    // (new_sequence, x): ORDERED by generation. A fold consumes exactly the
+    // current parent, so the owner must apply generation N before N+1.
     let mut out: Vec<(u64, [u8; 32])> = Vec::new();
-    loop {
-        let resp = match BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), 256).await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("[vault-pending] listing {prefix} failed, reporting none: {e}");
-                return Vec::new();
-            }
-        };
-        for item in &resp.items {
-            // The trade is the last path segment.
-            let Some(seg) = item.key.rsplit('/').next() else {
-                continue;
-            };
-            let Some(x_bytes) = crate::util::text_id::decode_base32_crockford(seg) else {
-                continue;
-            };
-            let Ok(x) = <[u8; 32]>::try_from(x_bytes.as_slice()) else {
-                continue;
-            };
-            use crate::sdk::settlement_receipt_codec::ReceiptFetch;
-            let receipt = match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(
-                vault_id, &x,
-            )
-            .await
-            {
-                ReceiptFetch::Verified(r) => *r,
-                // Nothing to apply, or nothing learned. Inert either way.
-                ReceiptFetch::Absent | ReceiptFetch::Unavailable(_) => continue,
-                // Present and WRONG. Not an unapplied settlement — but not
-                // silently nothing either: named, then skipped.
-                ReceiptFetch::Malformed(why) => {
-                    log::warn!(
-                        "[vault-pending] receipt at {} is malformed, not an unapplied settlement: {why}",
-                        crate::util::text_id::encode_base32_crockford(&x)
-                    );
-                    continue;
-                }
-                ReceiptFetch::Invalid(e) => {
-                    log::warn!(
-                        "[vault-pending] receipt at {} FAILS VERIFICATION, not an unapplied settlement: {e}",
-                        crate::util::text_id::encode_base32_crockford(&x)
-                    );
-                    continue;
-                }
-            };
-            let applied = head
-                .vault_reserve_entry(vault_id, &receipt.trade.input_policy_commit)
-                .map(|e| e.sequence >= receipt.trade.new_sequence)
-                .unwrap_or(false);
-            if !applied && !out.iter().any(|(_, seen)| *seen == x) {
-                out.push((receipt.trade.new_sequence, x));
-            }
+    for fold in &composed.folded_parents {
+        if !fold.verdict.may_certify() {
+            continue;
         }
-        match resp.next_cursor {
-            Some(c) if !c.is_empty() => cursor = Some(c),
-            _ => break,
+        let Some(certified) = &fold.realized_trade else {
+            continue;
+        };
+        let trade = certified.trade();
+        let applied = head
+            .vault_reserve_entry(&certified.vault_id(), &trade.input_policy_commit)
+            .map(|e| e.sequence >= trade.new_sequence)
+            .unwrap_or(false);
+        if !applied && !out.iter().any(|(_, seen)| *seen == trade.x) {
+            out.push((trade.new_sequence, trade.x));
         }
     }
     out.sort_by_key(|(seq, _)| *seq);

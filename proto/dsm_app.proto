@@ -1261,6 +1261,23 @@ message SettlementPaymentEvidenceV1 {
   repeated bytes receipt_siblings = 2 [(dsm_fixed_len)=32];
 }
 
+// 2c-D §14 (D-c): the NON-AUTHORITATIVE locator for a trader's acceptance of
+// one settlement bundle `b` — transport proto, no CCB class, stored under the
+// labeled key sofi/trader-acceptance/{b}. `B` is bound before `TA_B` exists, so
+// `B` cannot name it; this record lets a composition walk find both artifacts.
+// Neither field is believed: `TA_B` is fetched by content address and must
+// pass 2c-D §7 against `b`, and the proof artifact is re-verified against the
+// root the trader's own register cell names. A locator naming wrong bytes fails
+// verification; it is never trusted.
+message TraderAcceptanceLocatorV1 {
+  // ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B)) — the inner
+  // address of the TA_B object.
+  bytes ta_b                      = 1 [(dsm_fixed_len)=32];
+  // Inner address of the settle admission's EconomicProofArtifactV1, which
+  // carries the acceptance leaf and the settlement-receipt leaf under R_T^+.
+  bytes economic_proof_addr       = 2 [(dsm_fixed_len)=32];
+}
+
 // THE GENERIC ECONOMIC-INCLUSION PROOF — transport proto, no CCB class,
 // frozen under namespace DSM/economic-proof-artifact/v1.
 //

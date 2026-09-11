@@ -8743,6 +8743,64 @@ export class SettlementPaymentEvidenceV1 extends Message<SettlementPaymentEviden
 }
 
 /**
+ * 2c-D §14 (D-c): the NON-AUTHORITATIVE locator for a trader's acceptance of
+ * one settlement bundle `b` — transport proto, no CCB class, stored under the
+ * labeled key sofi/trader-acceptance/{b}. `B` is bound before `TA_B` exists, so
+ * `B` cannot name it; this record lets a composition walk find both artifacts.
+ * Neither field is believed: `TA_B` is fetched by content address and must
+ * pass 2c-D §7 against `b`, and the proof artifact is re-verified against the
+ * root the trader's own register cell names. A locator naming wrong bytes fails
+ * verification; it is never trusted.
+ *
+ * @generated from message dsm.TraderAcceptanceLocatorV1
+ */
+export class TraderAcceptanceLocatorV1 extends Message<TraderAcceptanceLocatorV1> {
+  /**
+   * ta_B = H_dom(DSM/trader-settlement-acceptance/v2, CCB(TA_B)) — the inner
+   * address of the TA_B object.
+   *
+   * @generated from field: bytes ta_b = 1;
+   */
+  taB = new Uint8Array(0);
+
+  /**
+   * Inner address of the settle admission's EconomicProofArtifactV1, which
+   * carries the acceptance leaf and the settlement-receipt leaf under R_T^+.
+   *
+   * @generated from field: bytes economic_proof_addr = 2;
+   */
+  economicProofAddr = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<TraderAcceptanceLocatorV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TraderAcceptanceLocatorV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ta_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "economic_proof_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TraderAcceptanceLocatorV1 {
+    return new TraderAcceptanceLocatorV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TraderAcceptanceLocatorV1 {
+    return new TraderAcceptanceLocatorV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TraderAcceptanceLocatorV1 {
+    return new TraderAcceptanceLocatorV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TraderAcceptanceLocatorV1 | PlainMessage<TraderAcceptanceLocatorV1> | undefined, b: TraderAcceptanceLocatorV1 | PlainMessage<TraderAcceptanceLocatorV1> | undefined): boolean {
+    return proto3.util.equals(TraderAcceptanceLocatorV1, a, b);
+  }
+}
+
+/**
  * THE GENERIC ECONOMIC-INCLUSION PROOF — transport proto, no CCB class,
  * frozen under namespace DSM/economic-proof-artifact/v1.
  *

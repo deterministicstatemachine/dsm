@@ -228,6 +228,7 @@ impl ProvenanceResolver for ApplyResolver {
                 witness,
                 proven_ak: vec![0xAA; 64],
                 c_dsm_plus: [0xC5; 32],
+                embedded_parent: [0xC1; 32],
                 verified_operation: Operation::Noop,
             })
         } else {
