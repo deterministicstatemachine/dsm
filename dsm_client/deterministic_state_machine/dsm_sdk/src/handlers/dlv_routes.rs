@@ -1734,21 +1734,32 @@ impl AppRouterImpl {
     /// Shared by `dlv.close` and by recovery, so a resumed close commits through
     /// exactly the same path (with the same frozen operation bytes) as the
     /// original attempt.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// ADMITTED, AND DERIVED (amendment 2c-G, G4). The advance is the admitted
+    /// close, so the proceeds exist in `R_econ`. Every fact it consumes — parent,
+    /// generation, reserves, parent binding, storage set — is read off
+    /// `composed` by [`close_plan`], which holds the signed operation to them;
+    /// no caller supplies one, and a close the market has moved past, one that
+    /// skips a generation, one with other amounts, or one whose parent another
+    /// candidate holds never reaches the advance.
     async fn commit_canonical_close(
         &self,
         vault_id: &[u8; 32],
-        parent_sequence: u64,
-        new_sequence: u64,
-        pair: &dsm::types::device_state::VaultStatePair,
-        storage_set_id: &[u8; 32],
+        composed: &crate::sdk::vault_state_composition::ComposedVaultState,
         close_commitment: &[u8; 32],
         op: dsm::types::operations::Operation,
-        reserve_a: u64,
-        reserve_b: u64,
-        parent_binding: [u8; 32],
     ) -> Result<(), String> {
         use crate::storage::client_db::dlv_close_intent as intent_db;
+        let ClosePlan {
+            pair,
+            parent_sequence,
+            new_sequence,
+            reserve_a,
+            reserve_b,
+            parent_binding,
+            storage_set_id,
+        } = close_plan(vault_id, composed, &op).map_err(|e| format!("dlv.close: {e}"))?;
+        let (pair, storage_set_id) = (&pair, &storage_set_id);
         // One staged advance: the release, the consume-once claim for this
         // generation, and the FIVE frozen terminal objects commit together, or
         // none of them do. Value is spendable at this commit — and durable,
@@ -1865,19 +1876,24 @@ impl AppRouterImpl {
             })?;
             Ok(())
         };
-        if let Err(e) = self
-            .core_sdk
-            .execute_on_relationship_staged_with_reserve_mutation(
-                rel_key,
-                actor,
-                op,
-                &[],
-                Some(init_tip),
-                Some(mutation),
-                build,
-                write,
-            )
+        if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_close(
+            &self.core_sdk,
+            op,
+            rel_key,
+            actor,
+            init_tip,
+            mutation,
+            build,
+            write,
+        )
+        .await
         {
+            // An admission that stops AFTER its advance committed (evidence
+            // below quorum, a register miss) is held, not lost: the close and
+            // its terminal objects are durable, and the sync pass resumes the
+            // pending admission. What follows concerns a close that did not
+            // commit.
+            //
             // NOT abandoned here. This error can be transient (a busy database,
             // a lock) or permanent (the owner folded a settlement in between, so
             // the generation moved and the reserve arm refuses). Abandoning on
@@ -2098,10 +2114,6 @@ impl AppRouterImpl {
                 abandon("the frozen close operation no longer decodes");
                 continue;
             };
-            let Some(new_sequence) = intent.parent_sequence.checked_add(1) else {
-                abandon("sequence overflow");
-                continue;
-            };
             // The permitted continuation this close prepared: `c_{n+1}` of the
             // exact drained successor the owner authorized (2c-A.1 ruling 3).
             // Recorded, never re-derived — a re-derivation could name a
@@ -2111,13 +2123,8 @@ impl AppRouterImpl {
                 .finish_prepared_close(
                     &intent.vault_id,
                     intent.parent_sequence,
-                    new_sequence,
-                    &pair,
-                    &composed.storage_set_id,
                     &close_commitment,
                     op,
-                    live.reserve_a,
-                    live.reserve_b,
                 )
                 .await
             {
@@ -2140,18 +2147,12 @@ impl AppRouterImpl {
     /// claim must never be, and keeping the key out of that scope is what makes
     /// "never" a property of the code rather than of the current author's
     /// discipline.
-    #[allow(clippy::too_many_arguments)]
     async fn finish_prepared_close(
         &self,
         vault_id: &[u8; 32],
         parent_sequence: u64,
-        new_sequence: u64,
-        pair: &dsm::types::device_state::VaultStatePair,
-        storage_set_id: &[u8; 32],
         close_commitment: &[u8; 32],
         op: dsm::types::operations::Operation,
-        reserve_a: u64,
-        reserve_b: u64,
     ) -> Result<(), String> {
         // The terminal state's predecessor edge: the c_n of the frontier this
         // close consumes, recomputed from the vault's own published baseline.
@@ -2167,9 +2168,7 @@ impl AppRouterImpl {
         // it on the way through — it is the folded parent binding for exactly
         // this generation. Any other composed generation means the vault moved
         // for some other reason and the close must not proceed blind.
-        let parent_binding = if composed.sequence == parent_sequence {
-            composed.c_n
-        } else if composed.sequence == parent_sequence.saturating_add(1) {
+        if composed.sequence == parent_sequence.saturating_add(1) {
             let folded = composed
                 .folded_parents
                 .iter()
@@ -2230,27 +2229,18 @@ impl AppRouterImpl {
                      else's transaction"
                 ));
             }
-            folded.c_n
-        } else {
+        } else if composed.sequence != parent_sequence {
             return Err(format!(
                 "resumed close: the composed state is at generation {} but this close \
                  consumes {parent_sequence} — reconcile first",
                 composed.sequence
             ));
-        };
-        self.commit_canonical_close(
-            vault_id,
-            parent_sequence,
-            new_sequence,
-            pair,
-            storage_set_id,
-            close_commitment,
-            op,
-            reserve_a,
-            reserve_b,
-            parent_binding,
-        )
-        .await
+        }
+        // The parent binding, the reserves and the storage set are the
+        // composition's, derived inside the commit by `close_plan` — the same
+        // derivation a fresh close runs.
+        self.commit_canonical_close(vault_id, &composed, close_commitment, op)
+            .await
     }
 
     /// `dlv.close` — the owner withdraws ALL remaining liquidity and retires the
@@ -2678,18 +2668,7 @@ impl AppRouterImpl {
         }
 
         if let Err(e) = self
-            .commit_canonical_close(
-                &vault_id,
-                parent_sequence,
-                new_sequence,
-                &pair,
-                &storage_set_id,
-                &close_commitment,
-                op,
-                live.reserve_a,
-                live.reserve_b,
-                composed.c_n,
-            )
+            .commit_canonical_close(&vault_id, &composed, &close_commitment, op)
             .await
         {
             return err(e);
@@ -4465,6 +4444,133 @@ fn take_catch_up_apply_budget() -> Result<(), String> {
 const BIRTH_ARTIFACT_PURPOSE: &str = "dlv-birth";
 /// Purpose label frozen on a vault's TERMINAL objects.
 const TERMINAL_ARTIFACT_PURPOSE: &str = "dlv-terminal";
+
+/// What a close consumes, read off the composition — never supplied by a
+/// caller (amendment 2c-G, G4).
+struct ClosePlan {
+    pair: dsm::types::device_state::VaultStatePair,
+    parent_sequence: u64,
+    new_sequence: u64,
+    reserve_a: u64,
+    reserve_b: u64,
+    parent_binding: [u8; 32],
+    storage_set_id: [u8; 32],
+}
+
+/// Derive the parent a close consumes from the composed vault state, and hold
+/// the signed operation to it field by field.
+///
+/// The parent is the composed frontier — free, or fenced by this device's own
+/// close — or, once this close has bound and folded, the parent the walk folded
+/// it from. Anything else is a close the market has moved past: a realized
+/// market successor consumed that generation (a close may not erase it), later
+/// generations exist (a close may not skip them), the generation lies beyond
+/// the frontier (a close may not skip ahead), or another candidate holds the
+/// parent unrealized (an uncertified predecessor blocks the close). The owner
+/// being caught up to that parent is the admission's precondition, checked
+/// against `R_econ`, not this function's.
+fn close_plan(
+    vault_id: &[u8; 32],
+    composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    op: &dsm::types::operations::Operation,
+) -> Result<ClosePlan, String> {
+    use crate::sdk::vault_state_composition::FrontierBinding;
+    use dsm::dlv::settlement_bundle::BundleShape;
+    let dsm::types::operations::Operation::DlvClose {
+        vault_id: op_vault,
+        leg_a_policy_commit,
+        leg_a_amount,
+        leg_b_policy_commit,
+        leg_b_amount,
+        parent_sequence,
+        new_sequence,
+        fee_bps,
+        ..
+    } = op
+    else {
+        return Err("the close commit takes a DlvClose".into());
+    };
+    let parent = *parent_sequence;
+    let (parent_state, parent_binding) = if composed.sequence == parent {
+        match composed.frontier_binding {
+            FrontierBinding::Free | FrontierBinding::LocallyFenced { .. } => {
+                (&composed.state, composed.c_n)
+            }
+            FrontierBinding::BoundUnrealized { .. } => {
+                return Err(format!(
+                    "another candidate holds generation {parent} unrealized — an uncertified \
+                     predecessor blocks the close"
+                ))
+            }
+            FrontierBinding::NotObserved => {
+                return Err(
+                    "the composition did not observe the frontier this close consumes".into(),
+                )
+            }
+        }
+    } else if composed.sequence == parent.saturating_add(1) {
+        match composed
+            .folded_parents
+            .iter()
+            .find(|f| f.generation == parent)
+        {
+            Some(f) if f.bound_kind == BundleShape::OwnerClose => (&f.state, f.c_n),
+            Some(_) => {
+                return Err(format!(
+                    "a realized market successor consumed generation {parent} — a close may not \
+                     erase it"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "the composition names no parent for generation {parent}"
+                ))
+            }
+        }
+    } else if composed.sequence > parent {
+        return Err(format!(
+            "the market realized generations past {parent} (the composed frontier is {}) — a \
+             close may not erase or skip them",
+            composed.sequence
+        ));
+    } else {
+        return Err(format!(
+            "generation {parent} lies beyond the composed frontier {} — a close may not skip a \
+             generation",
+            composed.sequence
+        ));
+    };
+    let pair = dsm::types::device_state::VaultStatePair::new(
+        *parent_state.market_policy.token_a(),
+        *parent_state.market_policy.token_b(),
+        parent_state.fee_policy.fee_bps(),
+    )
+    .map_err(|e| format!("the parent state's pair is not canonical: {e}"))?;
+    if parent_state.vault_id != *vault_id
+        || op_vault.as_slice() != vault_id.as_slice()
+        || parent_state.generation != parent
+        || parent.checked_add(1) != Some(*new_sequence)
+        || *leg_a_policy_commit != pair.a()
+        || *leg_b_policy_commit != pair.b()
+        || *leg_a_amount != parent_state.reserve_a
+        || *leg_b_amount != parent_state.reserve_b
+        || *fee_bps != pair.fee_bps()
+    {
+        return Err(format!(
+            "the signed close does not drain exactly the composed generation {parent} — its \
+             vault, legs, amounts, fee or generation step differ"
+        ));
+    }
+    Ok(ClosePlan {
+        pair,
+        parent_sequence: parent,
+        new_sequence: *new_sequence,
+        reserve_a: parent_state.reserve_a,
+        reserve_b: parent_state.reserve_b,
+        parent_binding,
+        storage_set_id: composed.storage_set_id,
+    })
+}
 
 /// A vault generation's publication set, built and signed off ONE
 /// `AdvanceOutcome` — the exact reserves the advance landed — before anything
@@ -11547,6 +11653,275 @@ mod funded_creation_tests {
             "the close returns the TRADED reserves, not the funded ones"
         );
         assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b), (0, 0, 2));
+    }
+
+    /// G4 — BELOW THE ROUTE'S GATE, A CLOSE STILL DRAINS EXACTLY THE CAUGHT-UP
+    /// FRONTIER, OR NOTHING.
+    ///
+    /// The route refuses a stale close before recording anything
+    /// (`a_close_is_refused_while_a_settlement_is_unreconciled`), and a parent
+    /// another candidate holds refuses it too
+    /// (`a_contested_parent_refuses_the_close_and_moves_nothing`). This drives
+    /// the ONE close commit directly, as a defect upstream of the gate would:
+    ///
+    /// - the owner's stale baseline — generation 0, which a certified market
+    ///   successor already consumed — is refused by `close_plan`: a close may
+    ///   not erase a realized successor;
+    /// - the composed frontier, while the owner has NOT caught up to it, is
+    ///   refused by the admitted advance: `R_econ` and the head hold generation
+    ///   0, not the parent the close drains;
+    ///
+    /// and each writes nothing. Caught up by the sync pass, the route's close
+    /// succeeds, and its proceeds are ADMITTED: they fund a second vault the
+    /// pre-close admitted balance could not.
+    ///
+    /// MUTATION CONTROL: commit the close through the unadmitted staged advance
+    /// (with the core fence's close arm removed) and the final create is
+    /// refused as insufficient — the proceeds never reached `R_econ`.
+    #[test]
+    #[serial]
+    fn a_close_below_the_gate_drains_exactly_the_caught_up_frontier_or_nothing() {
+        install_identity();
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        // 55_000/20_000: after the 10_000/5_000 legs and the 5_000 sent to the
+        // trader, the owner holds (40_000, 15_000) admitted.
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
+        let (vault_id, reserves, _x) = vault_after_one_trade(&owner_dev, &pc_a, &pc_b, false);
+        assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b), (10_000, 5_000, 0));
+
+        let rt = crate::runtime::get_runtime();
+        let composed = rt
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes its own vault");
+        assert_eq!(
+            composed.sequence, 1,
+            "the market moved the vault a generation"
+        );
+        // A signed close of `state` at its own generation, with the commitment
+        // of its drained successor — exactly what a caller below the gate could
+        // hand the commit.
+        let close_of = |state: &dsm::ccb::VaultStateV2, c_n: [u8; 32]| {
+            let next = match dsm::dlv::successor_validity::derive_close_successor(state, c_n) {
+                dsm::dlv::successor_validity::DeriveExpected::Derived(v) => *v,
+                dsm::dlv::successor_validity::DeriveExpected::Refused(r) => {
+                    panic!("the successor predicate refused the close: {r}")
+                }
+            };
+            let commitment = dsm::ccb::vault_state_commitment(&next).expect("c_{n+1}");
+            let op = owner
+                .core_sdk
+                .sign_operation_sphincs(dsm::types::operations::Operation::DlvClose {
+                    vault_id: vault_id.to_vec(),
+                    leg_a_policy_commit: *state.market_policy.token_a(),
+                    leg_a_amount: state.reserve_a,
+                    leg_b_policy_commit: *state.market_policy.token_b(),
+                    leg_b_amount: state.reserve_b,
+                    parent_sequence: state.generation,
+                    new_sequence: state.generation + 1,
+                    fee_bps: state.fee_policy.fee_bps(),
+                    signature: Vec::new(),
+                    mode: dsm::types::operations::TransactionMode::Unilateral,
+                })
+                .expect("sign the close");
+            (commitment, op)
+        };
+        let root = owner.core_sdk.device_head().expect("head").root();
+        let spend = spendable(owner, &pc_a, &pc_b);
+        let nothing_written = |what: &str| {
+            assert_eq!(
+                owner.core_sdk.device_head().expect("head").root(),
+                root,
+                "{what}: the root did not move"
+            );
+            assert_eq!(
+                spendable(owner, &pc_a, &pc_b),
+                spend,
+                "{what}: nothing was credited"
+            );
+            assert_eq!(
+                leaves(owner, &vault_id, &pc_a, &pc_b),
+                (10_000, 5_000, 0),
+                "{what}: the leaves did not move"
+            );
+            for g in [0u64, 1] {
+                assert!(
+                    crate::storage::client_db::load_vault_generation_consumer(&vault_id, g)
+                        .expect("load")
+                        .is_none(),
+                    "{what}: generation {g} was not claimed"
+                );
+            }
+        };
+
+        // (1) The stale baseline: generation 0, which the market consumed.
+        let stale = composed
+            .folded_parents
+            .iter()
+            .find(|f| f.generation == 0)
+            .expect("the folded parent");
+        let (commitment, op) = close_of(&stale.state, stale.c_n);
+        let e = rt
+            .block_on(owner.commit_canonical_close(&vault_id, &composed, &commitment, op))
+            .expect_err("a close of the stale baseline");
+        assert!(
+            e.contains("a realized market successor consumed generation 0"),
+            "the refusal names the erased successor: {e}"
+        );
+        nothing_written("stale baseline");
+
+        // (2) The composed frontier, which the owner has not caught up to.
+        let (commitment, op) = close_of(&composed.state, composed.c_n);
+        let e = rt
+            .block_on(owner.commit_canonical_close(&vault_id, &composed, &commitment, op))
+            .expect_err("a close of a frontier the owner has not caught up to");
+        nothing_written(&format!("uncaught frontier ({e})"));
+
+        // Caught up by the sync pass, the route closes it — admitted.
+        let n = rt
+            .block_on(owner.resume_owner_catch_up())
+            .expect("the sync pass");
+        assert_eq!(n, 1, "the one owed settlement is applied");
+        let res = close(owner, &vault_id);
+        assert!(
+            res.success,
+            "the caught-up vault closes: {:?}",
+            res.error_message
+        );
+        let after = spendable(owner, &pc_a, &pc_b);
+        assert_eq!(after, (spend.0 + reserves.0, spend.1 + reserves.1));
+
+        // THE PROCEEDS ARE IN R_econ. A second vault funded with more B than the
+        // owner held before the close is admitted: its sufficiency check reads
+        // the ADMITTED balances, which only an admitted close could have raised.
+        assert!(reserves.1 > 0, "the close returned some B");
+        let second = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner,
+            &pc_a,
+            &pc_b,
+            1_000,
+            spend.1 + 1,
+        );
+        assert_ne!(second, vault_id);
+    }
+
+    /// `close_plan` TAKES EVERY FACT OF A CLOSE FROM THE COMPOSITION (G4).
+    ///
+    /// Pure, over one real composition: a funded vault one market generation
+    /// on. The exact frontier close plans, and its plan IS the composition's
+    /// parent, reserves, parent binding and storage set. Every other close is
+    /// refused by name: the stale baseline a realized successor consumed, a
+    /// skipped generation, an older parent with later generations realized,
+    /// altered reserves, another vault, and a parent another candidate holds
+    /// unrealized (an uncertified predecessor).
+    ///
+    /// MUTATION CONTROL: let `close_plan` fold from a MARKET-consumed parent and
+    /// the stale-baseline case goes red.
+    #[test]
+    #[serial]
+    fn close_plan_takes_every_fact_of_a_close_from_the_composition() {
+        install_identity();
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
+        let (vault_id, _reserves, _x) = vault_after_one_trade(&owner_dev, &pc_a, &pc_b, false);
+        let composed = crate::runtime::get_runtime()
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes its own vault");
+        assert_eq!(composed.sequence, 1);
+        let s = composed.state.clone();
+        let close = |parent: u64, ra: u64, rb: u64, vault: [u8; 32]| {
+            dsm::types::operations::Operation::DlvClose {
+                vault_id: vault.to_vec(),
+                leg_a_policy_commit: *s.market_policy.token_a(),
+                leg_a_amount: ra,
+                leg_b_policy_commit: *s.market_policy.token_b(),
+                leg_b_amount: rb,
+                parent_sequence: parent,
+                new_sequence: parent + 1,
+                fee_bps: s.fee_policy.fee_bps(),
+                signature: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            }
+        };
+
+        let plan = super::close_plan(
+            &vault_id,
+            &composed,
+            &close(1, s.reserve_a, s.reserve_b, vault_id),
+        )
+        .expect("the exact frontier close plans");
+        assert_eq!(
+            (
+                plan.parent_sequence,
+                plan.new_sequence,
+                plan.reserve_a,
+                plan.reserve_b
+            ),
+            (1, 2, s.reserve_a, s.reserve_b)
+        );
+        assert_eq!(plan.parent_binding, composed.c_n);
+        assert_eq!(plan.storage_set_id, composed.storage_set_id);
+        assert_eq!(
+            (plan.pair.a(), plan.pair.b()),
+            (*s.market_policy.token_a(), *s.market_policy.token_b())
+        );
+
+        let refused = |what: &str,
+                       c: &crate::sdk::vault_state_composition::ComposedVaultState,
+                       op: dsm::types::operations::Operation,
+                       needle: &str| {
+            match super::close_plan(&vault_id, c, &op) {
+                Ok(_) => panic!("{what} must not plan"),
+                Err(e) => assert!(e.contains(needle), "{what}: {e}"),
+            }
+        };
+        refused(
+            "the stale baseline",
+            &composed,
+            close(0, 10_000, 5_000, vault_id),
+            "a realized market successor consumed generation 0",
+        );
+        refused(
+            "a skipped generation",
+            &composed,
+            close(2, s.reserve_a, s.reserve_b, vault_id),
+            "beyond the composed frontier",
+        );
+        refused(
+            "altered reserves",
+            &composed,
+            close(1, s.reserve_a + 1, s.reserve_b, vault_id),
+            "does not drain exactly",
+        );
+        refused(
+            "another vault",
+            &composed,
+            close(1, s.reserve_a, s.reserve_b, [0xEE; 32]),
+            "does not drain exactly",
+        );
+        let mut ahead = composed.clone();
+        ahead.sequence = 3;
+        refused(
+            "an older parent with later generations realized",
+            &ahead,
+            close(1, s.reserve_a, s.reserve_b, vault_id),
+            "realized generations past 1",
+        );
+        let mut held = composed.clone();
+        held.frontier_binding =
+            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                bundle_digest: [0x11; 32],
+                route_set_commitment: [0x22; 32],
+            };
+        refused(
+            "an uncertified predecessor",
+            &held,
+            close(1, s.reserve_a, s.reserve_b, vault_id),
+            "uncertified predecessor",
+        );
     }
 
     /// A CONTESTED PARENT. Exclusivity over a generation belongs to the quorum

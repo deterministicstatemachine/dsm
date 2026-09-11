@@ -803,9 +803,62 @@ pub(crate) async fn admitted_dlv_owner_apply<A>(
     .await
 }
 
-/// The advance and admission shared by the two reserve-mutation facades — a
-/// funded create and an owner apply. They differ only in their facts and their
-/// pre-checks; the ONE staged advance (the reserve mutation, the frozen
+/// The owner's terminal close, admitted into `R_econ` (amendment 2c-G, G4).
+///
+/// The close drains both vault reserve leaves into spendable balance. Its write
+/// set reads the ADMITTED reserve leaves at exactly the parent generation and
+/// funds each balance credit by the reserve it drains — two `0x0024`
+/// same-transition moves the builder derives itself — so the facts are fixed at
+/// `CreditSourceFacts::None` and are not a parameter. Admitting it is what makes
+/// the proceeds real in the owner's economic lineage, spendable by the next
+/// admitted operation, and what makes a close at a generation `R_econ` does not
+/// hold unbuildable.
+///
+/// Close authority stays the owner's and binding stays QuorumBind's: this runs
+/// only through the one canonical close commit, after the route or the resume
+/// pass has established both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admitted_dlv_close<A>(
+    core: &CoreSDK,
+    operation: Operation,
+    rel_key: [u8; 32],
+    counterparty_devid: [u8; 32],
+    initial_chain_tip: [u8; 32],
+    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
+    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+    write_extra: impl Fn(
+        &rusqlite::Transaction<'_>,
+        &dsm::types::device_state::AdvanceOutcome,
+        &A,
+    ) -> Result<(), DsmError>,
+) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    if !matches!(operation, Operation::DlvClose { .. }) {
+        return Err(DsmError::invalid_operation(
+            "admitted_dlv_close takes a DlvClose",
+        ));
+    }
+    let staged = stage_admission(core, &operation, |_| {
+        Ok((CreditSourceFacts::None, Vec::new()))
+    })
+    .await?;
+    admit_reserve_mutation(
+        core,
+        staged,
+        operation,
+        rel_key,
+        counterparty_devid,
+        initial_chain_tip,
+        reserve_mutation,
+        "close",
+        build_artifacts,
+        write_extra,
+    )
+    .await
+}
+
+/// The advance and admission shared by the three reserve-mutation facades — a
+/// funded create, an owner apply and a close. They differ only in their facts
+/// and their pre-checks; the ONE staged advance (the reserve mutation, the frozen
 /// evidence and the Prepared admission together) and the shared
 /// [`finish_admission`] are never duplicated per operation.
 #[allow(clippy::too_many_arguments)]

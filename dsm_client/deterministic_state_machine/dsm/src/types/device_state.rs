@@ -1843,11 +1843,11 @@ impl DeviceState {
         // raw operation and encumber reserves the economic lineage never saw,
         // leaving a head whose reserves `R_econ` cannot account for.
         //
-        // Deliberately NARROW. Settle and close are not fenced here: they
-        // consume or return an existing position rather than originating one,
-        // and their admission wiring is a separate cut with a separate evidence
-        // story. Widening this gate before those producers exist would strand
-        // the trader path with no replacement.
+        // Deliberately NARROW. Settle is not fenced here: it consumes an
+        // existing position rather than originating one, and its admission
+        // wiring is a separate cut with a separate evidence story. Widening this
+        // gate before a producer exists would strand the trader path with no
+        // replacement.
         if matches!(operation, Operation::DlvCreateFundedV2 { .. }) {
             self.require_attached_dsm_admission(&operation, "a funded vault creation")?;
         }
@@ -1861,6 +1861,17 @@ impl DeviceState {
         // evidence, so the raw doorway closes here.
         if matches!(operation, Operation::DlvOwnerApplyV2 { .. }) {
             self.require_attached_dsm_admission(&operation, "an owner apply")?;
+        }
+
+        // THE TERMINAL CLOSE (amendment 2c-G, G4). `DlvClose` drains both vault
+        // reserve leaves into spendable balance. Unadmitted, that balance is
+        // head-only — `R_econ` never withdraws the reserve leaf nor credits the
+        // balance, so the proceeds can fund no admitted operation — and a close
+        // at a generation `R_econ` does not hold would retire a vault whose
+        // economic lineage never reached it. Admitted, its write set drains
+        // exactly the `R_econ` reserve leaves at exactly the parent generation.
+        if matches!(operation, Operation::DlvClose { .. }) {
+            self.require_attached_dsm_admission(&operation, "a vault close")?;
         }
 
         // THE SECOND ISSUANCE OPERATION. `CreateToken` carries an issuance leg,
@@ -7428,6 +7439,75 @@ mod tests {
         assert_eq!(funded.vault_reserve(&vault, &rigb), 5_000);
     }
 
+    /// THE CLOSE IS ADMITTED OR IT DOES NOT HAPPEN (amendment 2c-G, G4).
+    ///
+    /// A matching close of a funded vault, advanced RAW, is refused by the
+    /// fence's own precondition, with the reserves and the balances exactly
+    /// where they were: unadmitted, the proceeds would exist on the head and
+    /// nowhere in `R_econ`. The same close with its own admission attached
+    /// drains the vault — the positive control that makes the refusal the
+    /// fence's.
+    ///
+    /// MUTATION CONTROL: delete the `DlvClose` arm of the fence in `advance`
+    /// and the first assertion goes red by crediting the reserves to balance.
+    #[test]
+    fn a_close_is_refused_without_its_own_attached_admission() {
+        let (era, rigb) = (pc(0xE0), pc(0xF0));
+        let (funded, vault, rk, tip) = funded_for_close(0xD8, era, rigb, 7_000, 3_000);
+        let funded = funded.with_pending_economic_admission(None);
+        let root_before = funded.root();
+        let (free_a, free_b) = (funded.balance(&era), funded.balance(&rigb));
+
+        let err = format!(
+            "{}",
+            funded
+                .advance(
+                    rk,
+                    funded.devid,
+                    dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
+                    entropy(2),
+                    None,
+                    &[],
+                    Some(tip),
+                    None,
+                    None,
+                    Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
+                )
+                .expect_err("a raw close must not credit the reserves")
+        );
+        assert!(
+            err.contains("no pending economic admission"),
+            "the refusal is the fence's own, got: {err}"
+        );
+        assert_eq!(funded.root(), root_before, "nothing moved");
+        assert_eq!(funded.vault_reserve(&vault, &era), 7_000);
+        assert_eq!(
+            (funded.balance(&era), funded.balance(&rigb)),
+            (free_a, free_b)
+        );
+
+        let closed = funded
+            .advance_admitted(
+                rk,
+                funded.devid,
+                dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
+                entropy(2),
+                None,
+                &[],
+                Some(tip),
+                None,
+                None,
+                Some(withdraw_mutation(vault, era, 7_000, rigb, 3_000, 0, 1)),
+            )
+            .expect("the admitted close advances")
+            .new_device_state;
+        assert_eq!(closed.vault_reserve(&vault, &era), 0);
+        assert_eq!(
+            (closed.balance(&era), closed.balance(&rigb)),
+            (free_a + 7_000, free_b + 3_000)
+        );
+    }
+
     /// The head's OWN parent state for `vault` under `pair`: its commitment
     /// (what the owner signs as `parent_binding`) and its bytes (what the
     /// mutation carries). Exactly what `dlv.reconcile` derives from the
@@ -7744,7 +7824,7 @@ mod tests {
         let (free_a_before, free_b_before) = (funded.balance(&era), funded.balance(&rigb));
 
         let out = funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 dlv_close_op(vault, era, 10_000, rigb, 5_000, 0, 1),
@@ -7780,7 +7860,7 @@ mod tests {
         // SINGLE USE. A second close is refused (already zero), and re-funding
         // is refused because the leaves EXIST — not because an amount is
         // non-zero.
-        let second = after.advance(
+        let second = after.advance_admitted(
             rk,
             after.devid,
             dlv_close_op(vault, era, 0, rigb, 0, 1, 2),
@@ -7872,7 +7952,7 @@ mod tests {
         let (free_a, free_b) = (traded.balance(&era), traded.balance(&rigb));
 
         // Closing at the FUNDING amounts is refused: they are not the leaves.
-        let stale = traded.advance(
+        let stale = traded.advance_admitted(
             rk,
             traded.devid,
             dlv_close_op(vault, era, 10_000, rigb, 5_000, 1, 2),
@@ -7888,7 +7968,7 @@ mod tests {
         assert!(e.contains("exactly the leaf's amount"), "got: {e}");
 
         let after = traded
-            .advance(
+            .advance_admitted(
                 rk,
                 traded.devid,
                 dlv_close_op(vault, era, 11_000, rigb, 5_000 - out_amt, 1, 2),
@@ -8057,8 +8137,11 @@ mod tests {
             ),
         ];
 
+        // Each malformed close carries its own admission, so every case is
+        // refused by the check it names — not by the missing-admission fence
+        // (pinned separately by `a_close_is_refused_without_its_own_attached_admission`).
         for case in attempts {
-            let res = funded.advance(
+            let res = funded.advance_admitted(
                 rk,
                 funded.devid,
                 case.op,
@@ -8168,7 +8251,7 @@ mod tests {
         // Same head, same operation, no pending admission: it succeeds. This
         // is what makes the assertion above about the fence specifically.
         funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),
@@ -8426,7 +8509,7 @@ mod tests {
         let (era, rigb) = (pc(0xE0), pc(0xF0));
         let (funded, vault, rk, tip) = funded_for_close(0xD4, era, rigb, 7_000, 3_000);
         let closed = funded
-            .advance(
+            .advance_admitted(
                 rk,
                 funded.devid,
                 dlv_close_op(vault, era, 7_000, rigb, 3_000, 0, 1),

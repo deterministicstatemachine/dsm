@@ -1564,6 +1564,12 @@ storage-object address (amendment 2c-C1 ruling A).
 | 1 | `credit_mutation_index` | `u32` | **must differ from field 2** |
 | 2 | `debit_mutation_index` | `u32` | a transition cannot fund itself from itself |
 
+**Producers.** The write-set builder derives `0x0024` itself; no caller supplies it. It funds a
+funded create's reserve credits from the balances it debits and a close's balance credits from the
+reserves it drains. Since amendment 2c-G (G4) `DlvClose` is admission-fenced at the core chokepoint,
+like `DlvCreateFundedV2` and `DlvOwnerApplyV2`: a close's proceeds exist in `R_econ`, or the close
+does not advance.
+
 **§5.35 — `0x0025 CreditSourceValidatedPeerDebit`**, schema 1
 
 | # | Field | Type | Notes |
