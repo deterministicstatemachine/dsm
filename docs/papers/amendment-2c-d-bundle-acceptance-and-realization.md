@@ -781,7 +781,9 @@ receipt objects
                                 three live consumers, all on the legacy self-verifying check:
                                   the walk's 5-c-1 gate, dlv_reconcile (owner apply),
                                   unapplied_settlements_for_vault (owner display)
-    Def 14.2 public receipt     binds ta_B; NOT implemented; the Rev 15 text is not in-repo
+    Def 14.2 public receipt     binds ta_B; NOT implemented at C2 (since: amendment 2c-F);
+                                the Rev 15 text IS in-repo, at
+                                .github/instructions/sofispecs.instructions.md (2c-F I-3)
 CORR.4                          frozen as semantics only; the two digests carrying it have
                                 no production producer, so CORR.4 is unreachable live
 Tier-1 intent satisfaction      NOT enforced on any live path; the 5-c-1 RouteCommit gate
@@ -852,6 +854,10 @@ make V1 live, so C2 closes it.
 > 9. The Def 14.2 receipt and Q publication remain separately owed and C2 must
 >    not claim that publishing V1 satisfies those requirements.
 > ```
+
+*Point 9 is discharged by [amendment 2c-F](amendment-2c-f-sofi-receipt-rulings.md): the Def 14.2
+receipt is `0x0034 SofiReceipt`, and "Q" is the signed RouteCommit that `B` already carries. V1 is
+unchanged and still is not that receipt.*
 
 **Why publication precedes release (point 4).** A same-step publish-and-release is not atomic across
 a distributed boundary. If the fence released and the process died before V1 became discoverable,

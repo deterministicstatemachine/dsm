@@ -198,6 +198,12 @@ The boundary is:
 > **`B` proves exactly which route was executed. The receipt/evidence set proves that route came
 > from the exact committed choice set and intent.**
 
+> **Amended by [2c-F](amendment-2c-f-sofi-receipt-rulings.md) R1 (2026-09-11).** `Q` is `RC`, the
+> signed RouteCommit that `B` already carries, and `0x0017` is burned. The proof that the executed
+> route came from the committed choice is `B`-internal: the RC signature and hop (provenance step
+> 7), the recomputation of `X`, CORR.2, and Tier-1 SAT over `MarketTerms.intent`,
+> `MarketTerms.selected_route` and RC. No separate `Q` object is published.
+
 ---
 
 ## Ruling 3 — beta carries exactly one `T_v`, but the field remains a set

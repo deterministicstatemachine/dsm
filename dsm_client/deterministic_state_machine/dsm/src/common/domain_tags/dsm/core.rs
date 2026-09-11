@@ -97,6 +97,15 @@ pub const TAG_SETTLEMENT_RECEIPT_COMMIT: TaggedHashDomain<'static> =
 /// in for an acceptance's.
 pub const TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/trader-settlement-acceptance/v2");
+/// `ρ_B = H(tag ‖ 0x00 ‖ CCB(SofiReceipt))` — the identity of the Def 14.2
+/// settlement receipt (class `0x0034`, amendment 2c-F R2, registry §5.42).
+///
+/// Fresh on purpose. `DSM/receipt` is the stitched receipt, and its recovery
+/// rollup already reaches sealed capsules and signed tombstones; the
+/// `settlement-receipt` family above names the V1 / economic receipt. A
+/// Def 14.2 receipt is neither, and must not share a domain with either.
+pub const TAG_DSM_SOFI_RECEIPT_V1: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi-receipt/v1");
 /// Deterministic receipt id: `H(tag ‖ vault_id ‖ x)`. Derived, not chosen, so the pointer
 /// publisher and the settling advance agree on it without coordinating.
 pub const TAG_SETTLEMENT_RECEIPT_ID: TaggedHashDomain<'static> =
@@ -146,6 +155,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_SETTLEMENT_RECEIPT_LEAF,
     TAG_SETTLEMENT_RECEIPT_STATE,
     TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+    TAG_DSM_SOFI_RECEIPT_V1,
     TAG_SETTLEMENT_RECEIPT_SIGN,
     TAG_SETTLEMENT_RECEIPT_COMMIT,
     TAG_SETTLEMENT_RECEIPT_ID,
