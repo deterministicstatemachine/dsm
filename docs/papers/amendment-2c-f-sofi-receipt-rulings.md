@@ -440,7 +440,9 @@ economic family.
   receipt: it is refused, and is **never** a `SAFETY_VIOLATION` or a quarantine trigger, so forged
   evidence cannot be used for denial of service.
 - **Recovery.** *(ruled)* Certification creates the obligation once, as frozen bytes. Recovery is
-  the generic sweep replaying exactly those bytes until a quorum of `S_v` holds each. It never
+  the generic sweep replaying exactly those bytes until a quorum of `S_v` holds each. If recording
+  the obligation itself failed — the freeze does not hold the fence — it is **rediscovered** from
+  the released trader fence and rebuilt byte-identically from durable facts (§7.3). Recovery never
   re-certifies, re-binds, re-advances, re-admits, re-fences or alters `b`, and it never undoes
   realization. Below quorum, the receipt stays pending and is retried. The settlement is unaffected
   throughout.
@@ -585,8 +587,12 @@ DSM/sofi-receipt/v1     Def 14.2 SofiReceipt identity ρ_B
 > refused, and never a safety violation.
 >
 > **Req 14.9 (Recovery).** Certification creates the publication obligation once, as frozen bytes;
-> recovery replays exactly those bytes. A publication failure never undoes realization, re-fences the
-> trader, re-binds, re-admits or re-certifies.
+> recovery replays exactly those bytes. Once a settlement has certified, a failure to construct,
+> freeze or publish its receipt may delay evidence availability but never loses the obligation: a
+> released trader fence — the durable record that certification happened — lets it be rebuilt
+> byte-identically from `B`, the trader's own acceptance artifact and the fence's committed set. A
+> publication failure never undoes realization, re-fences the trader, re-binds, re-admits or
+> re-certifies.
 >
 > **Req 14.10 (Non-authority).** No composition, admission, realization, fence, certification or
 > reserve-provenance rule may take a `SofiReceipt`, its address, its presence or its publication
@@ -654,7 +660,8 @@ DSM/sofi-receipt/v1     Def 14.2 SofiReceipt identity ρ_B
 | R1, R4 | `dsm/tests/settlement_bundle_conformance.rs`, `dsm/tests/route_commitment_x_conformance.rs` | class-1 vectors: the 137-byte receipt of the pinned market bundle, and `RC*` → `X` from hand-written protobuf bytes |
 | R6 | `dsm_sdk/src/sdk/vault_state_composition.rs` | a certified market fold carries the exact `TA_B` §7 accepted, so the receipt is built from what certified |
 | R5, R6 | `dsm_sdk/src/sdk/sofi_receipt_publication.rs`, `handlers/dlv_routes.rs` | `complete_settlement` projects the closure from the certified fold and freezes it for the composed `V_n`'s set, before the release and never gating it; the generic sweep publishes it. `publication()` reports `BoundToAnotherSet` rather than counting another set's quorum |
-| R6 | `lean4/DSMSofiReceipt.lean` (19th module) | the fence follows C2's rule alone; a receipt exists only after certification; the sweep alone finishes it, after the release; idempotence |
+| R6, merge condition | `sofi_receipt_publication.rs` (`recover_owed_receipts`), `trader_parent_fence.rs` (`list_released_fences`), `frozen_publication_artifact.rs`, `storage_routes.rs` | a lost obligation is rediscovered from the released fence and rebuilt byte-identically after a restart, from `storage.sync`, beside D-f (§7.3). The three-row freeze is atomic, so a receipt row always means all three are recorded |
+| R6 | `lean4/DSMSofiReceipt.lean` (19th module) | the fence follows C2's rule alone, whether or not the freeze succeeds; a receipt exists only after certification; once released, recovery records a lost obligation; the sweep alone finishes it; idempotence |
 | — | spec, registry, 2c-D | §6 applied: Def 14.2, Req 14.6–14.10, §7.2, §9.3, §16.2; registry §2.10 exception 2, §3, §4, §5.12–§5.14, §5.20, §5.42, §6a F3; I-1, I-2 and I-3 corrected |
 
 **Mutation controls — executed.** Each removes or weakens one property. A **named** test then goes
@@ -668,6 +675,11 @@ red by performing the forbidden action. Each source was restored from a byte cop
 | MS3 | the receipt binds an `a_B` other than the certified acceptance's | the same, at `verify`; and `a_closure_is_a_pure_projection_of_its_inputs` |
 | L1 | Lean: the release also waits for the receipt | `the_release_does_not_wait_for_the_receipt` proved **false**, and both never-gate theorems fail |
 | L2 | Lean: the obligation is created without certification | `an_uncertified_settlement_has_no_receipt` proved **false** |
+| L3 | Lean: the recovery pass removed | `a_lost_obligation_is_rebuilt_after_release` proved **false**, and `the_obligation_is_never_lost` fails |
+| MR1 | the rediscovery hook removed (the pass returns 0) | `a_receipt_whose_freeze_failed_is_recovered_after_release_and_restart`: "exactly the one lost obligation is rebuilt" |
+| MR2 | recovery no longer requires the acceptance to accept exactly `b` | `a_recovered_receipt_cannot_be_rebuilt_from_substituted_facts`, at the substituted-locator case |
+| MR3 | recovery no longer requires the fence's set to be the one `B` commits | the same test, at the other-storage-set case |
+| MR4 | recovery no longer requires `B` to sit at the fence's `addr(B)` | the same test, at the other-bundle-address case |
 
 That the receipt is built only from a certified fold is also **structural**. The acceptance it binds
 exists only on a certified market fold (`FoldedParent::certified_acceptance`), so there is nothing
@@ -680,6 +692,58 @@ backfilled.
 **Owed, not done here:** per-set frozen rows (I-5). They matter only when a vault's committed set
 differs from the network set `TA_B` was admitted under. That cannot happen in beta, and outside
 beta it is reported, never counted.
+
+### 7.3 The merge condition on #859 — a lost obligation is never lost
+
+The owner's condition: *"Once a settlement has certified, failure to construct/freeze/publish the
+Def 14.2 receipt may delay evidence availability, but may never permanently lose the publication
+obligation."* It was put as one question, answered here from source before any code changed.
+
+> *After certification succeeds and the receipt write fails, the fence releases and the process
+> crashes: what durable object lets the next process discover that this settlement still owes a
+> SofiReceipt publication?*
+
+**The durable facts already existed. Nothing read them for this purpose.**
+
+| Fact that survives the crash | Why it is authoritative enough |
+|---|---|
+| A `trader_parent_fence` row on this device's own market chain, keyed `(chain, trader parent, tx_id = b)`, in state `released` | `Released` is reachable only from `CommittedAwaitingAcceptance` through `SuccessorAccepted` carrying the exact permitted successor (`dsm::dlv::trader_fence::next_state`). The one production caller is `complete_settlement`'s release step, reached only after `may_certify()` for exactly `b`. Rows are never deleted. It carries `value_addr = addr(B)` and `storage_set_id`, the bind set resolved from the composed `V_n`'s committed set. |
+| `CCB(B)` at quorum on that set | pre-bind durability (FB-4); fetched by `b` and re-hashed |
+| This device's `TA_B` bytes and its locator for `b` | frozen as local rows in the ADMIT transaction, before completion runs |
+
+Before this change, `resume_settlement_completions` listed only `committed_awaiting_acceptance`
+fences, `resume_settlement_completion` stopped at `AlreadyReleased`, and the sweep replayed only rows
+already frozen. **A failed freeze followed by a release and a crash lost the obligation.**
+
+**The mechanism.** `recover_owed_receipts` runs from `storage.sync`, beside D-f. It takes every
+`released` fence on the device's own market chain whose receipt row, looked up by purpose and
+`bound_root = b`, is absent. For each, it rebuilds the closure from the durable facts alone, with
+every input checked against the others:
+
+```text
+B      fetched by b, re-hashed, and at the fence's addr(B)
+S_v    the fence's set, and equal to the set B's successor commits
+TA_B   this device's own locator for b -> its own frozen bytes at ta_B,
+       re-hashed, and accepting exactly b
+```
+
+It never composes, walks, binds, advances, admits or touches a fence. The freeze of the three rows
+is **atomic**, via a savepoint, so a receipt row is a sound marker that all three are recorded. No
+signing authority is needed.
+
+**Tests (the owner's list).**
+
+| | Where it is shown |
+|---|---|
+| A–C | `a_receipt_whose_freeze_failed_is_recovered_after_release_and_restart`: certification succeeds, the injected freeze failure is consumed by the completion, and the fence is `Released` with no receipt row |
+| D | a second router over the same database (`economic_fixtures::restart_router`) runs the pass |
+| E | the pass rebuilds the one lost obligation. It cannot re-certify: the recovery module has no path into composition |
+| F | the recovered receipt row equals, byte for byte, the closure the certified fold projects |
+| G | after the sweep, `{SofiReceipt, B, TA_B}` are published on the composed `V_n`'s set |
+| H | a second pass finds the row and sends nothing |
+| I | `a_recovered_receipt_cannot_be_rebuilt_from_substituted_facts`: a fence naming another `addr(B)`, another storage set, or a locator naming an acceptance of another bundle is refused, and nothing is frozen |
+| J | fence, composed frontier, trader head and binding log are identical before and after |
+| atomicity | `a_closure_that_fails_part_way_freezes_nothing` |
 
 ### 7.2 The plan as drafted (superseded where §7.1 differs)
 

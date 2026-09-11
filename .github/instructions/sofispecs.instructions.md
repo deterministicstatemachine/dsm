@@ -1570,8 +1570,12 @@ Requirement 14.8 (Determinism and duplicates; 2c-F). SofiReceipt is a pure funct
 A receipt whose fields do not re-derive from B and a certifying AB is invalid evidence: it is
 refused, and never a safety violation.
 Requirement 14.9 (Recovery; 2c-F). Certification creates the publication obligation once, as
-frozen bytes; recovery replays exactly those bytes. A publication failure never undoes
-realization, re-fences the trader, re-binds, re-admits or re-certifies.
+frozen bytes; recovery replays exactly those bytes. Once a settlement has certified, a failure to
+construct, freeze or publish its receipt may delay evidence availability but never loses the
+obligation: the released trader fence — the durable record that certification happened — lets it be
+rebuilt byte-identically from B, the trader's own acceptance artifact and the fence's committed set.
+A publication failure never undoes realization, re-fences the trader, re-binds, re-admits or
+re-certifies.
 Requirement 14.10 (Non-authority; 2c-F). No composition, admission, realization, fence,
 certification or reserve-provenance rule may take a SofiReceipt, its address, its presence or its
 publication state as input.

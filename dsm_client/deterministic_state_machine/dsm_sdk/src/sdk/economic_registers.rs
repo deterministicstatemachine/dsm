@@ -979,7 +979,19 @@ pub(crate) fn immutable_object_key(
     namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
     payload: &[u8],
 ) -> String {
-    let addr = dsm::storage_object::immutable_addr(namespace, payload);
+    immutable_object_key_for_inner(
+        namespace,
+        &dsm::storage_object::immutable_inner(namespace, payload),
+    )
+}
+
+/// The same key from an already-known inner identity — how a holder of `ta_B`,
+/// and not its bytes, names the frozen row that carries them.
+pub(crate) fn immutable_object_key_for_inner(
+    namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    inner: &[u8; 32],
+) -> String {
+    let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
     format!(
         "immutable::{}::{}",
         String::from_utf8_lossy(namespace.source_bytes()),

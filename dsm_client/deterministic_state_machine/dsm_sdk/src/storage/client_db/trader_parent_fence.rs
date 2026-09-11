@@ -288,16 +288,31 @@ pub fn list_binding_recovery_fences() -> Result<Vec<TraderFence>> {
 /// 2c-D §14's D-f: each is an already-bound settlement awaiting only its
 /// completion. A row here says where work is, never that it may be released.
 pub fn list_acceptance_pending_fences(trader_chain_id: &[u8; 32]) -> Result<Vec<TraderFence>> {
+    list_fences_in_state(trader_chain_id, "committed_awaiting_acceptance")
+}
+
+/// The fences on `trader_chain_id` whose exact permitted successor was
+/// ACCEPTED, oldest first — every settlement this device's completion
+/// certified and released. The work list of 2c-F's receipt recovery.
+///
+/// `Released` is reachable only through `SuccessorAccepted`, and only the
+/// certified completion records that, so a row here is the durable record
+/// that certification happened. It is never authority for anything else.
+pub fn list_released_fences(trader_chain_id: &[u8; 32]) -> Result<Vec<TraderFence>> {
+    list_fences_in_state(trader_chain_id, "released")
+}
+
+fn list_fences_in_state(trader_chain_id: &[u8; 32], state: &str) -> Result<Vec<TraderFence>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLS} FROM trader_parent_fence
-          WHERE state = 'committed_awaiting_acceptance'
-            AND trader_chain_id = ?1
+          WHERE state = ?1
+            AND trader_chain_id = ?2
           ORDER BY insertion_ordinal ASC"
     ))?;
     let rows = stmt
-        .query_map(params![trader_chain_id.as_slice()], |r| {
+        .query_map(params![state, trader_chain_id.as_slice()], |r| {
             row_to_fence(r).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))
         })?
         .filter_map(|r| r.ok())
