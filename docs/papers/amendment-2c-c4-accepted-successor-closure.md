@@ -527,11 +527,12 @@ Req 21.15 half-completion — THE WITHHOLD HALF, owed here: bind, withhold the
 Req 21.16 receipt-verifier — OWED BY 2c-D in full: no TA_B can be parsed here.
     When it lands it must establish, from the published receipt set alone: retrieve
     and verify TA_B; prove the commitment carries the exact bundled trader
-    parent/successor; verify sigma_dsm directly over it; verify the receipt leaf's
-    inclusion proof under the INDEPENDENTLY DERIVED/AUTHENTICATED TRADER `post_root`
-    (see the disambiguation below); match (b, X); and reproduce the DLV reserve
-    deltas — with removal or substitution of TA_B, C_dsm+, sigma_dsm or the
-    inclusion proof each failing closed.
+    parent/successor; verify sigma_dsm directly over it; verify the receipt's
+    facts as the EconomicSettlementReceiptState leaf the settle write set
+    committed, included under the INDEPENDENTLY VALIDATED economic root R_T^+
+    (see the disambiguation below, as CORRECTED 2026-09-11); match (b, X); and
+    reproduce the DLV reserve deltas — with removal or substitution of TA_B,
+    C_dsm+, sigma_dsm or the inclusion proof each failing closed.
 ```
 
 ### Which root — a normative clarification (owner ruling, 2026-09-10)
@@ -607,6 +608,131 @@ That is also why the existing warning on that type is correct rather than pessim
 establish that the exact bundle was economically accepted; Req 21.16 then establishes
 that the published receipt corresponds to the authenticated device post-state rather
 than being a plausible standalone object.
+
+### Corrected 2026-09-11 — the root D4 names has no independent source (owner ruling)
+
+**D4 is corrected, not reversed.** Its invariant stands exactly: *the verifier must anchor
+to a root established independently of the receipt being verified.* What was wrong is
+*which* root. Implementing PR C exposed that the source D4 names — *"obtained from the
+already validated successor/economic-admission path"* — never produces a DEVICE root:
+
+```text
+C_T^+     = relationship_chain_tip_v2(rel_key, embedded_parent, counterparty_devid,
+                                      operation_bytes, entropy, encapsulated_entropy)
+            -> commits no root at all
+sigma_dsm   signs H(G ‖ DevID ‖ C_dsm+ ‖ operation_digest)       -> no root
+0x0031      the settle's admission substrate                     -> no root
+AdvanceOutcome.child_r_a                    discarded by the route; never published
+device SMT  a bounded cache with NO validity replay
+```
+
+A root carried by the receipt is self-authenticating, and a trader signature over a
+device root would establish *provenance* but never *validity* — the device SMT has no
+replay that could make it so. That is the gap Rev 15 spec:971-976 names: *a Merkle proof
+authenticates membership relative to a root; it does not authenticate the provenance of
+that root.* The Rev 15 conformance delta (2026-08-21, §5) had already recorded the same
+divergence: Rev 15 requires `C_T^+` to commit the post-advance root, and this
+implementation's does not.
+
+The one independently VALIDATED root on the settle path is `R_T^+`, and the settle write
+set already commits the receipt's facts under it as an `EconomicSettlementReceiptState`
+leaf. So Req 21.16 anchors there:
+
+> ```text
+> RULING — D4 / Req 21.16 root correction
+>
+> Choose Option 1.
+>
+> Amend D4.
+>
+> The previous requirement that Req 21.16 verify the legacy device-SMT
+> receipt leaf under an independently established DEVICE post_root is not
+> implementable under the current protocol:
+>
+>     * the device SMT has no validity replay;
+>     * no independently validated device post_root exists on the settle path;
+>     * a root carried by the receipt is self-authenticating and therefore
+>       insufficient;
+>     * a trader signature over such a root establishes provenance only,
+>       not validity.
+>
+> Do NOT add a signed-device-root artifact merely to satisfy the wording.
+>
+> Req 21.16 instead verifies the published receipt's economically relevant
+> facts against the existing EconomicSettlementReceiptState leaf committed
+> by the settle write set under the independently validated economic root
+> R_T^+.
+>
+> Required chain:
+>
+>     authenticated / validated settle
+>         -> deterministic economic write set
+>         -> EconomicSettlementReceiptState
+>         -> inclusion under independently validated R_T^+
+>         -> receipt correspondence
+>         -> VerifiedReceipt
+>
+> The verifier MUST:
+>
+> 1. Take R_T^+ from the already validated economic advancement path.
+>    It MUST NOT accept a root supplied by the receipt itself.
+>
+> 2. Reconstruct the expected EconomicSettlementReceiptState from the
+>    authenticated settlement facts / exact receipt facts required by
+>    Def 14.2.
+>
+> 3. Derive its canonical economic-SMT key independently.
+>
+> 4. Verify the ordered inclusion path under R_T^+.
+>
+> 5. Require exact correspondence between the published receipt and the
+>    authenticated economic receipt state for every realization-relevant
+>    field.
+>
+> 6. Reject altered settlement identity, operation identity, amounts,
+>    assets, parties, key/position, path, or any other field covered by
+>    the economic receipt state.
+>
+> 7. Return a typed verified-receipt fact only after the inclusion and
+>    correspondence checks succeed.
+>
+> The existing DEVICE-SMT receipt leaf remains legacy state/cache material.
+> It is NOT realization evidence and MUST NOT be used to certify value
+> movement.
+>
+> This is a correction to D4, not a substitution of an arbitrary economic
+> root for a device root. R_T^+ is appropriate because the receipt facts
+> being certified are already represented by the economic receipt leaf
+> inside the validated economic state transition.
+>
+> Do not change relationship_chain_tip_v2.
+> Do not add a new signed-device-root artifact.
+> Do not defer Req 21.16 from realization.
+> ```
+
+The three rejected options are recorded with their reasons, because each will be proposed
+again. **A signed device-root artifact** repairs the wording and not the defect: it proves
+who signed a root, never that the root is the state a valid transition produced.
+**Deferring Req 21.16** would weaken the cutover for no reason once a validated
+representation of the receipt's facts is known to exist. **Making `C_T^+` commit the root**
+is the Rev 15 literal and rewrites a foundational DSM commitment — every chain tip — to
+accommodate one verifier.
+
+```text
+wrong               receipt -> the receipt's claimed device root -> "verified"
+insufficient        receipt -> a trader-signed device root -> provenance, not validity
+right               validated economic transition -> R_T^+
+                        -> committed EconomicSettlementReceiptState
+                        <- exact correspondence -> published receipt
+```
+
+**What the correction does NOT do.** It does not put the receipt leaf into the economic
+SMT: the settle write set already writes `EconomicSettlementReceiptState` there, and did
+before D4 was taken. It does not collapse the two trees §7 and Req 21.16 read — they now
+read two different leaves (`0x0032` and the settlement receipt) under ONE validated root,
+which is the honest statement of what the settle path actually authenticates. And the
+device-SMT receipt leaf is not deleted: it remains the trader's local state, carries no
+evidential weight, and nothing may read it as evidence that value moved.
 
 ## Mutation controls
 
