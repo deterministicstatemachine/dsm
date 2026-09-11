@@ -29,8 +29,8 @@ use crate::sdk::routing_path_sdk::Path;
 use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag for the external commitment derivation
-/// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))`.
-/// Matches SoFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
+/// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))` — Rev 15 §9.3 as
+/// amended by 2c-F R1: `X` IS the external commitment, with no second digest.
 pub(crate) const EXT_COMMIT_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
     dsm::common::domain_tags::TAG_DSM_EXT_COMMIT;
 

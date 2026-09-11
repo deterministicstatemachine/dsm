@@ -118,6 +118,7 @@ pub mod routing_sdk;
 pub mod settlement_receipt_codec;
 pub mod settlement_slot;
 pub mod smart_commitment_sdk;
+pub(crate) mod sofi_receipt_publication;
 pub mod trader_acceptance_locator;
 pub mod transfer_hooks;
 pub mod vault_rehydration;

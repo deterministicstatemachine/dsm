@@ -419,13 +419,14 @@ DSM/fulfillment owner-committed fulfillment mechanism
 DSM/enc encumbrance set
 DSM/enc-claim encumbrance claim identifier
 DSM/intent trade intent
-DSM/route-set route-set external commitment
+DSM/route-set RETIRED by amendment 2c-F R1 — never reused
 DSM/allocation canonical same-pair allocation bundle
-DSM/ext external commitment
+DSM/ext external commitment X = H(DSM/ext ∥ RC*) (amendment 2c-F R1)
 DSM/digest trade digest
 DSM/ref-window reference window
 DSM/ref-rule unilateral reference rule
 DSM/receipt stitched receipt
+DSM/sofi-receipt/v1 Def 14.2 SofiReceipt identity ρ_B (amendment 2c-F R2)
 DSM/settlement-bundle complete signed settlement bundle
 DSM/trader-settlement-acceptance/v2 canonical trader post-advance acceptance artifact
 DSM/binding-tx client-driven opaque quorum transaction identifier
@@ -1256,10 +1257,9 @@ i,t + ∑︂ int−feet.
 i
 Checked unsigned arithmetic is used throughout.
 7.2 External commitments
-ExtCommit(X) = H(DSM/ext ∥X).
-There is no Canon(X): X is already a 32-byte digest, and a digest is a primitive with no canonical
-form of its own. X binds the entire user intent, route set, allocation bundles and every distinct
-vault parent identity cn . It does NOT bind a separate encumbrance commitment: the deleted {ECv }
+X is itself the external commitment (amendment 2c-F R1): X = H(DSM/ext ∥ RC*), fixed by §9.3.
+There is no second ExtCommit(X) digest and no Canon(X). X binds the one signed route, its
+allocations, the exact amounts and fee, and every distinct vault parent identity cn . It does NOT bind a separate encumbrance commitment: the deleted {ECv }
 operand was the only one, and each cn commits its vault's encumbrance set directly. A participating
 vault must reject a hop not bound by the same X.
 Requirement 7.2. Multi-vault execution is all-or-none. No Class C verifier may accept a subset
@@ -1349,15 +1349,16 @@ independent even when one trade atomically consumes several of them.
 A route is a sequence of logical legs, each leg being either a one-vault allocation or a same-pair
 allocation bundle:
 ri = ⟨Ai,1,Ai,2,...,Ai,h⟩, h≤maxhops.
-The route set is
-R= {r1,...,rk},
-canonicalized by route CCB ascending.
-The route commitment is
-X= H(DSM/route-set ∥CCB(Q)),
-where Q is the canonical RouteCommitmentBody carrying the trade intent I, the route set R,
-and nonceX . X is always a 32-byte digest;
-there is no Canon(X), because a digest is already a primitive, and §7.2's external commitment
-is ExtCommit(X) = H(DSM/ext ∥X) over that digest.
+The route commitment is (amendment 2c-F R1)
+X= H(DSM/ext ∥RC*),
+where RC is the initiating trader's signed RouteCommitV1 (version 2) and RC* is its commitment
+form (registry §2.10): RC with initiator_signature cleared. RC binds exactly one route, so the
+committed route set of this profile is the singleton R = {selected_route}; a different route is a
+fresh quote under a fresh RC, never a pre-committed alternative. X is always a 32-byte digest and is
+itself the external commitment: there is no Canon(X) and no second ExtCommit(X). X is carried in B
+as MarketTerms.route_set_commitment, and RC is carried in B as field 9 of the
+DlvSettleOperationPreimageV1 in MarketTerms.recovery_material.operation_bytes, so a verifier
+recomputes X from B alone.
 Why {ECv } is DELETED. It was carried because every allocation named pv , and pv committed the
 PARENT state commitment hn and the reserves digest but not the CURRENT generation's
 encumbrance set. That justification was conditional on pv . Allocations now name cn , and E is a
@@ -1510,17 +1511,20 @@ T and cannot substitute for σ+
 T. AB therefore adds no market-specific
 authorization payload or signing round; it packages the ordinary DSM authenticated successor-state
 evidence and binds it to the exact (b,X) market execution.
-Definition 14.2 (Settlement receipt). A successful SoFi receipt is a compact content-
-addressed projection of one realized SettlementBundle:
-Receipt= H(DSM/receipt ∥b∥X ∥aB ∥Canon({successor
-_
-hashv ,witness_
-hashv }v∈B )).
+Definition 14.2 (Settlement receipt; amended by 2c-F). A successful SoFi receipt is the
+canonical object SofiReceipt (CCB class 0x0034) projecting one realized Market-shape
+SettlementBundle B:
+SofiReceipt = (b, X, aB , {(successor_hashv , witness_hashv ) : Tv ∈ B.transitions})
+ρB = H(DSM/sofi-receipt/v1 ∥CCB(SofiReceipt))
+where b = H(DSM/settlement-bundle ∥CCB(B)); X = B.market_terms.route_set_commitment; aB is
+Definition 14.1's; successor_hashv = H(DSM/vault-state ∥CCB(Tv .successor)); and witness_hashv is
+always absent in schema 1. Proof material in B never makes a receipt unconstructible, and the
+receipt adds no witness-validity rule.
 31
 SoFi: Sovereign Deterministic Finance Revision 15
-The publication set for a successful receipt must include the immutable bytes of B, the immutable
-bytes of AB , and the DLV successor/witness objects needed by the verifier. A digest without
-retrievable acceptance bytes is insufficient evidence of bilateral completion.
+The publication set is exactly P(ρB ) = {CCB(SofiReceipt), CCB(B), CCB(AB )}. RC, the DLV
+successors and their proof material are carried inside CCB(B), so no separate object is needed. A
+digest without retrievable acceptance bytes is insufficient evidence of bilateral completion.
 A receipt is evidence and an index object. It does not create DLV binding Finality, trader
 acceptance, or realization. A verifier that needs the full settlement follows the receipt to b and aB ,
 verifies the bundle, establishes the DLV binding decision, verifies AB against the exact bundled
@@ -1550,6 +1554,27 @@ T , and verifying the settlement
 inclusion proof under that authenticated root, and (d) equality between the trader exchange proved
 by AB and the DLV reserve deltas committed by B. If any of these facts cannot be established, the
 verifier must not report a completed trade.
+Requirement 14.6 (Quorum publication; 2c-F). ρB is published iff every member of P(ρB ) has
+been accepted, at its canonical content address, by at least qv distinct authenticated members of
+exactly Sv , for every Tv ∈ B.transitions. Sv and qv are the committed storage set and threshold
+of the authenticated consumed parent Vn , established by the DLV state and lineage — never taken
+from B's proposed successor and never from local configuration. Counting follows Requirement 15.8.
+B's existing pre-bind durability counts when it was achieved over that Sv . No quorum certificate
+exists; publication is re-observable, never carried.
+Requirement 14.7 (Ordering; 2c-F). SofiReceipt is constructed only after the composition walk
+certifies exactly b, and only from that certified fold. It does not gate trader-fence release: it
+may be published after the release, and C2's completion and release ordering is unchanged. B's
+pre-bind durability before a mutating QuorumBind is a separate obligation and stays pre-bind.
+Requirement 14.8 (Determinism and duplicates; 2c-F). SofiReceipt is a pure function of
+(CCB(B), CCB(AB )). Any holder may publish it, and re-publication of identical bytes is idempotent.
+A receipt whose fields do not re-derive from B and a certifying AB is invalid evidence: it is
+refused, and never a safety violation.
+Requirement 14.9 (Recovery; 2c-F). Certification creates the publication obligation once, as
+frozen bytes; recovery replays exactly those bytes. A publication failure never undoes
+realization, re-fences the trader, re-binds, re-admits or re-certifies.
+Requirement 14.10 (Non-authority; 2c-F). No composition, admission, realization, fence,
+certification or reserve-provenance rule may take a SofiReceipt, its address, its presence or its
+publication state as input.
 15 Storage Node Specification
 Storage nodes are non-authoritative byte persistence, byte retrieval, and generic storage-engine
 state. They do not validate market economics, construct routes, calculate a quorum, or choose a
@@ -1768,7 +1793,7 @@ function verifyBindAndMaterialize(route, X, intent):
 2. verify ALL history-bound state/proof/anchor bindings
 3. verify ALL owner-authority forms and concrete successor signatures
 4. verify ALL encumbrance availability, solvency, and exact consumption
-5. verify Member(route, R) and ExtCommit(X)
+5. verify the signed RC and X = H(DSM/ext ∥ RC*) (amendment 2c-F R1)
 6. deterministically re-simulate EVERY allocation and hop
 7. verify route-wide conservation
 8. enforce total_out >= intent.min_out and total_fee <= intent.max_fee
@@ -1791,8 +1816,8 @@ return SUCCESS
 15. if ABORTED(B) or CONFLICT_FINAL(other):
 fold NO DLV successor from B
 release the trader-parent fence without bilateral advancement
-choose the next admissible route already in R
-retry from step 1
+return NO_ADMISSIBLE_ROUTE: R is the singleton {selected_route} (amendment 2c-F R1),
+and a new route is a fresh quote under a fresh RC
 16. if RECOVERING or INDETERMINATE:
 recover THIS transaction to a terminal outcome
 keep trader_parent fenced; do NOT permit any different successor from it

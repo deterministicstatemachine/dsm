@@ -117,6 +117,11 @@ pub(crate) struct FoldedParent {
     /// close. This is what an owner's reconcile acts on (2c-D §14, C2-R1
     /// point 6): the exact certified fold, never a receipt read on the side.
     pub realized_trade: Option<VerifiedReceipt>,
+    /// For a CERTIFIED market fold, the exact `TA_B` 2c-D §7 accepted for it —
+    /// the acceptance the Def 14.2 receipt binds (amendment 2c-F). `None` for
+    /// a close. Carried so the receipt is built from what certified, never
+    /// from an acceptance fetched again afterwards.
+    pub certified_acceptance: Option<dsm::economic::trader_acceptance::TraderAcceptance>,
 }
 
 /// What the binding register — plus this device's own fence table — says about
@@ -753,9 +758,10 @@ async fn compose_vault_state_inner(
         // (2c-D §14, C2-R1 point 3): CORR.1–CORR.5, 2c-D §7's acceptance
         // witness, and Tier-1 intent satisfaction. Nothing uncertified is ever
         // installed as the composed state.
-        let (verdict, realized_trade) = match bound.shape {
+        let (verdict, realized_trade, certified_acceptance) = match bound.shape {
             dsm::dlv::settlement_bundle::BundleShape::OwnerClose => (
                 C3Verdict::Valid(CompleteValidity::from_close_witness(witness)),
+                None,
                 None,
             ),
             dsm::dlv::settlement_bundle::BundleShape::Market => {
@@ -798,6 +804,7 @@ async fn compose_vault_state_inner(
                 (
                     C3Verdict::Valid(CompleteValidity::from_market_witness(witness, realization)),
                     Some(ev.receipt),
+                    Some(ev.acceptance),
                 )
             }
         };
@@ -815,6 +822,7 @@ async fn compose_vault_state_inner(
             bound_kind: bound.shape,
             verdict,
             realized_trade,
+            certified_acceptance,
         });
         let _ = transition;
         cursor_state = next_state;

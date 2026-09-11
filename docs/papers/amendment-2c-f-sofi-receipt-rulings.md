@@ -1,12 +1,44 @@
-# Amendment 2c-F — the Def 14.2 settlement receipt: survey and rulings draft
+# Amendment 2c-F — the Def 14.2 settlement receipt: survey and rulings
 
-> **STATUS: DRAFT FOR OWNER RULING. Nothing in this document is frozen.**
-> It changes no code, no registry row, no domain tag and no formal model. §6 is the text proposed for
-> freezing **if** the recommended rulings are taken; §5 holds the real alternatives. The registry
-> entries in §6.5–§6.6 are proposals and have **not** been applied.
+> **STATUS: FROZEN — owner rulings of 2026-09-11, recorded verbatim below, and IMPLEMENTED by the
+> change that carries this text (§7).** §1–§5 are the survey as it was put for ruling. Where they
+> differ from the rulings, the rulings govern; the two corrections the rulings forced are applied in
+> place and marked *(ruled)*. §6 is the text as frozen; the spec, the registry and 2c-D now carry it.
 >
-> Base: `main` at `e58340cf` (C2, #856). PR #857 (C2 formal alignment) is independent of this
-> document: it models V1 completion and composed reserves and decides none of the questions below.
+> The draft merged as #858 (`b2271d7a`) as a draft. Merging it was not a ruling; the rulings below are.
+
+## Owner rulings (2026-09-11)
+
+Put to the owner as four questions; the answers, verbatim:
+
+- **R1 — X:** ratify the shipped X.
+- **FB-4 — publication timing:** *"Pre-bind B durability stays pre-bind. B, including the embedded
+  RouteCommit, must already satisfy the existing quorum durability requirement before mutating
+  QuorumBind. The “after certification” requirement applies to the new Def. 14.2 SofiReceipt, not to
+  B's pre-bind availability. These are two different publication obligations."*
+- **R6 — fence ordering:** *"The Def. 14.2 SofiReceipt does not gate trader-fence release. C2's
+  existing completion/fence-release ordering remains untouched. Construct the public SofiReceipt
+  only after full certification; it may be published after the existing C2 fence-release boundary.
+  Publication failure creates an idempotent recoverable publication obligation, but does not undo
+  realization, re-fence the trader, re-bind, re-admit, or re-certify."*
+- **R3/R5 — TA_B and witness:** *"TA_B must satisfy publication durability over the authenticated
+  committed vault storage set S_v and threshold q_v established by the DLV state/lineage—not a set
+  chosen merely because B names it. Existing B durability can count if already sufficient. For
+  schema 1, witness_hash_v is always absent. Do not reject an otherwise certified settlement merely
+  because optional proof material exists. The public receipt must not create a new witness-validity
+  rule."*
+
+**Two corrections to the draft follow, and are applied below.**
+- `S_v` is the authenticated consumed parent's committed set, established by the DLV state and
+  lineage. It is never the set `B`'s proposed successor names; the draft's "derivable from `B`
+  alone" is withdrawn. Registry §5.19 already said the proposed successor is never authoritative for
+  its own quorum.
+- Proof material never refuses a receipt. The draft's "`P_v` present makes the receipt
+  unconstructible" is withdrawn.
+
+**Not separately put:** R2 (the fresh tag), R4 (class `0x0034`) and R7 (non-authority) had no
+competing option in the draft. They are adopted as proposed and remain open to the owner's
+objection before this change merges.
 
 **Sources.** Revision 15 is quoted from `.github/instructions/sofispecs.instructions.md` as
 `spec:N` (line numbers). The registry is `docs/papers/ccb-object-registry.md` (`reg §N`). Code is
@@ -348,10 +380,9 @@ SAT, §7 or Req 21.16 compute moves (FB-1, 6, 7, 8). No owner action is added (F
 - `v` ranges over the elements of `B.transitions` (reg §5.19 field 2). Beta: exactly one.
 - `successor_hash_v := c_{v,n+1} = H(DSM/vault-state ∥ CCB(T_v.successor))`. This is the successor's
   existing registered identity; no new tag.
-- `witness_hash_v` is an optional `digest32` and **must be absent** in schema 1. Receipt-bearing
-  bundles are Market shape, where `close_authorization` is absent, and beta `P_v` is absent. A `T_v`
-  carrying `P_v` makes the receipt **unconstructible** (a refusal, never an omission) until an
-  amendment gives `P_v` an identity under a new schema.
+- `witness_hash_v` is an optional `digest32` and is **always absent** in schema 1. *(ruled)* Proof
+  material in `B` never makes a receipt unconstructible: the receipt does not commit to it and adds
+  no witness-validity rule. Giving `P_v` a receipt commitment would need a new schema.
 - Entry encoding is inline (reg §5.2 precedent): `enc(entry) = successor_hash ‖ opt(witness_hash)`.
   Entries are sorted by `enc(entry)` per §2.4; duplicates are invalid; the count equals
   `|B.transitions|`.
@@ -376,9 +407,11 @@ economic family.
 **R5 — `Q` and quorum publication.**
 - *What `Q` means:* the route-commitment body. Under R1 it is RC, carried in `CCB(B)`; there is no
   separate `Q` object and no separate `Q` publication act.
-- *Storage set:* for each `v`, `S_v := V_{n+1}.storage_set` and `q_v := V_{n+1}.quorum` of
-  `T_v.successor`, which bundle validity makes equal to `V_n`'s. `S_v` is **derivable from `B`
-  alone**, and resolved through the catalog, never from local fleet configuration.
+- *Storage set:* *(ruled)* for each `v`, `S_v` and `q_v` are the committed storage set and
+  threshold of the **authenticated consumed parent** `V_n`, established by the DLV state and lineage
+  — the composed `V_n` that `c_n` names. They are never the set `B`'s proposed successor names, and
+  never local fleet configuration. `B`'s existing pre-bind durability counts when it was achieved over
+  that same `S_v`.
 - *Attributable successful publication of `p`:* at least `q_v` distinct authenticated members of
   exactly `S_v`, each echoing its own member identity, have accepted the exact bytes of `p` at
   `addr(N_p, p)` (Req 15.8, 15.2). This is the existing `put_immutable_to_all_members` and
@@ -398,16 +431,19 @@ economic family.
   holds for exactly `b`, from that pass's certified fold. It is never constructed otherwise.
 - **Independent of fence release (O2).** Receipt construction and publication are neither a
   precondition nor a consequence of fence release. C2's pass is unchanged: certify, V1 at quorum,
-  release. The receipt step follows it in the same pass and in every D-f resume pass. This restores
+  release. *(ruled)* The receipt closure is frozen in that same certified pass, before the release
+  step, so the obligation is durable before anything is released. A failure to project or freeze it
+  is logged and never holds the fence, and publication may land after the release. This restores
   Rev 15 §16.2's order for this object (I-4).
 - **Duplicates.** Identical bytes: `PutImmutable` and freeze are idempotent. Different bytes for the
   same `b` can differ only in field 3. A different `a_B` that does not certify `b` makes an invalid
   receipt: it is refused, and is **never** a `SAFETY_VIOLATION` or a quarantine trigger, so forged
   evidence cannot be used for denial of service.
-- **Recovery.** Any partial state (receipt unfrozen, frozen and pending, or `TA_B` pending on `S_v`)
-  is finished by the D-f pass: re-certify, recompute (identical bytes), freeze (a no-op if already
-  frozen), sweep. It never re-binds, re-advances or alters `b`. Below quorum, the receipt stays
-  pending and is retried. The settlement is unaffected throughout.
+- **Recovery.** *(ruled)* Certification creates the obligation once, as frozen bytes. Recovery is
+  the generic sweep replaying exactly those bytes until a quorum of `S_v` holds each. It never
+  re-certifies, re-binds, re-advances, re-admits, re-fences or alters `b`, and it never undoes
+  realization. Below quorum, the receipt stays pending and is retried. The settlement is unaffected
+  throughout.
 
 **R7 — non-authority.** No composition, admission, realization, fence, certification or
 reserve-provenance predicate may take a `0x0034` object, its address, its presence or its
@@ -456,9 +492,10 @@ used nowhere else is rejected.
 
 ### 5.5 Where `TA_B`'s durability is measured
 
-- **L-1 (recommended):** every member of `P` is at quorum on `S_v`, including `TA_B`. `S_v` is
-  derivable from `B`, so Req 21.16's third party learns the set from the receipt set itself. Cost:
-  one extra freeze of `TA_B` for `S_v` when it differs from the network set (I-5).
+- **L-1 (recommended, and ruled):** every member of `P` is at quorum on `S_v`, including `TA_B`.
+  *(ruled)* `S_v` is the authenticated consumed parent's committed set, not one read off `B`. Cost:
+  `TA_B` needs a row bound to `S_v` when its admission froze it for a different set (I-5). Until
+  per-set rows exist, that case is reported as not published and never counted.
 - **L-2:** accept `TA_B`'s admission durability on the network root-register set. This is smaller
   in code, but the verifier must learn a second set that `B` does not name.
 - **L-3 (reject):** replicate `Λ` to `S_v`. It is unbounded (the whole trader lineage).
@@ -533,9 +570,10 @@ DSM/sofi-receipt/v1     Def 14.2 SofiReceipt identity ρ_B
 
 > **Req 14.6 (Quorum publication).** `ρ_B` is *published* iff every member of `P(ρ_B)` has been
 > accepted, at its canonical content address, by at least `q_v` distinct authenticated members of
-> exactly `S_v`, for every `T_v ∈ B.transitions`. Here `S_v` and `q_v` are the successor's
-> committed storage set and threshold. Counting follows Req 15.8. No quorum certificate exists;
-> publication is re-observable, never carried.
+> exactly `S_v`, for every `T_v ∈ B.transitions`. Here `S_v` and `q_v` are the committed storage
+> set and threshold of the authenticated consumed parent `V_n`, established by the DLV state and
+> lineage. Counting follows Req 15.8. `B`'s pre-bind durability counts when it was achieved over
+> that `S_v`. No quorum certificate exists; publication is re-observable, never carried.
 >
 > **Req 14.7 (Ordering).** `SofiReceipt` is constructed only after the composition walk certifies
 > exactly `b`, and only from that certified fold. Its construction and publication are neither a
@@ -546,9 +584,9 @@ DSM/sofi-receipt/v1     Def 14.2 SofiReceipt identity ρ_B
 > receipt whose fields do not re-derive from `B` and a certifying `TA_B` is invalid evidence: it is
 > refused, and never a safety violation.
 >
-> **Req 14.9 (Recovery).** A partially published receipt is completed by recomputation and
-> re-publication of identical bytes. Recovery never re-binds, re-advances or alters `b`, and a
-> receipt below quorum leaves the settlement unchanged.
+> **Req 14.9 (Recovery).** Certification creates the publication obligation once, as frozen bytes;
+> recovery replays exactly those bytes. A publication failure never undoes realization, re-fences the
+> trader, re-binds, re-admits or re-certifies.
 >
 > **Req 14.10 (Non-authority).** No composition, admission, realization, fence, certification or
 > reserve-provenance rule may take a `SofiReceipt`, its address, its presence or its publication
@@ -604,7 +642,46 @@ DSM/sofi-receipt/v1     Def 14.2 SofiReceipt identity ρ_B
 
 ---
 
-## 7. Exact implementation work unlocked by those rulings (NOT started)
+## 7. Implementation
+
+### 7.1 What the adopting change implements
+
+| Ruling | Where | What |
+|---|---|---|
+| R2 | `dsm/src/common/domain_tags/dsm/core.rs` | `TAG_DSM_SOFI_RECEIPT_V1 = "DSM/sofi-receipt/v1"`, registered, so the uniqueness and prefix-freedom checks cover it |
+| R1, R4 | `dsm/src/ccb/mod.rs` | class `0x0034` allocated; `0x000C` and `0x0017` moved from `declared_unencoded` to `burned_class` |
+| R3, R4, R7 | `dsm/src/dlv/sofi_receipt.rs` | `SofiReceipt::project(B, a_B)`, a strict decoder, and `verify`, which re-derives and compares field by field. There is no `P_v` refusal *(ruled)*. Nothing returned can serve as authority |
+| R1, R4 | `dsm/tests/settlement_bundle_conformance.rs`, `dsm/tests/route_commitment_x_conformance.rs` | class-1 vectors: the 137-byte receipt of the pinned market bundle, and `RC*` → `X` from hand-written protobuf bytes |
+| R6 | `dsm_sdk/src/sdk/vault_state_composition.rs` | a certified market fold carries the exact `TA_B` §7 accepted, so the receipt is built from what certified |
+| R5, R6 | `dsm_sdk/src/sdk/sofi_receipt_publication.rs`, `handlers/dlv_routes.rs` | `complete_settlement` projects the closure from the certified fold and freezes it for the composed `V_n`'s set, before the release and never gating it; the generic sweep publishes it. `publication()` reports `BoundToAnotherSet` rather than counting another set's quorum |
+| R6 | `lean4/DSMSofiReceipt.lean` (19th module) | the fence follows C2's rule alone; a receipt exists only after certification; the sweep alone finishes it, after the release; idempotence |
+| — | spec, registry, 2c-D | §6 applied: Def 14.2, Req 14.6–14.10, §7.2, §9.3, §16.2; registry §2.10 exception 2, §3, §4, §5.12–§5.14, §5.20, §5.42, §6a F3; I-1, I-2 and I-3 corrected |
+
+**Mutation controls — executed.** Each removes or weakens one property. A **named** test then goes
+red by performing the forbidden action. Each source was restored from a byte copy and checked with
+`cmp`.
+
+| # | Mutation | Named test red |
+|---|---|---|
+| MS1 | the release waits for the receipt closure at quorum | `the_def_14_2_receipt_never_gates_the_release_and_publishes_after_it` |
+| MS2 | the closure is frozen for a set the vault does not commit | `a_realized_settlement_publishes_its_def_14_2_receipt_on_the_vaults_set` |
+| MS3 | the receipt binds an `a_B` other than the certified acceptance's | the same, at `verify`; and `a_closure_is_a_pure_projection_of_its_inputs` |
+| L1 | Lean: the release also waits for the receipt | `the_release_does_not_wait_for_the_receipt` proved **false**, and both never-gate theorems fail |
+| L2 | Lean: the obligation is created without certification | `an_uncertified_settlement_has_no_receipt` proved **false** |
+
+That the receipt is built only from a certified fold is also **structural**. The acceptance it binds
+exists only on a certified market fold (`FoldedParent::certified_acceptance`), so there is nothing
+to build it from otherwise. `an_uncertified_settlement_cannot_be_resumed_into_a_release` asserts that
+no receipt row exists.
+
+**Settlements completed before this change** carry no receipt. Beta is a clean cut, so nothing is
+backfilled.
+
+**Owed, not done here:** per-set frozen rows (I-5). They matter only when a vault's committed set
+differs from the network set `TA_B` was admitted under. That cannot happen in beta, and outside
+beta it is reported, never counted.
+
+### 7.2 The plan as drafted (superseded where §7.1 differs)
 
 **Core (`dsm`).**
 1. `TAG_DSM_SOFI_RECEIPT_V1 = "DSM/sofi-receipt/v1"`, covered by

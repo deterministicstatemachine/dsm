@@ -340,8 +340,9 @@ impl DsmSuccessorEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketTerms {
     pub intent: TradeIntent,
-    /// `X = H_dom(DSM/route-set, CCB(Q))`; `Q` itself lives in the receipt
-    /// publication set (2c-A ruling 2).
+    /// `X = H_dom(DSM/ext, RC*)` (amendment 2c-F R1, registry §2.10): the
+    /// signed RouteCommit's commitment form. `RC` itself rides in
+    /// `recovery_material.operation_bytes`, so `X` is recomputable from `B`.
     pub route_set_commitment: [u8; 32],
     pub selected_route: Route,
     /// The exact ordinary-DSM bilateral parent-state commitment of the TRADER
