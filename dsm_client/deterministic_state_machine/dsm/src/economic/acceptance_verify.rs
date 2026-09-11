@@ -401,13 +401,22 @@ mod tests {
                 c_dsm_plus: [0xC5; 32],
                 external_commitment_x: X,
                 parent_binding: [0xC0; 32],
-                effects_digest: [0xEF; 32],
+                parent_sequence: 7,
+                input_policy_commit: [0x10; 32],
+                input_amount: 1_000,
+                output_policy_commit: [0x20; 32],
+                output_amount: 900,
+                fee_bps: 30,
             },
             &BundleCoordinates {
                 trader_parent: [0xC1; 32],
                 trader_successor: [0xC5; 32],
                 route_set_commitment: X,
-                route_effects_digest: [0xEF; 32],
+                leg_parent_binding: [0xC0; 32],
+                leg_delta_in: 1_000,
+                leg_delta_out: 900,
+                leg_fee_bps: 30,
+                transition_parent_binding: [0xC0; 32],
             },
             [0xC0; 32],
             witness,
@@ -485,6 +494,41 @@ mod tests {
             ),
             Err(AcceptanceInvalid::LeafNamesAnotherBundle { .. })
         ));
+    }
+
+    /// §7 STEP 5, THE OPERATION IDENTITY. A leaf naming ANOTHER economic
+    /// operation is refused even when it sits exactly where this operation's
+    /// leaf belongs under the validated root — there the fold alone would
+    /// accept it, so only the three-way identity equality refuses.
+    #[test]
+    fn an_acceptance_naming_another_economic_operation_is_refused() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (terms, c_dsm_plus) = terms_signed_by(&sk, DEV, DEV);
+        let recomputed = dsm_economic_operation_id(&G, &DEV, &c_dsm_plus);
+        let other = [0xEE; 32];
+        assert_ne!(other, recomputed);
+        let leaf = EconomicBundleAcceptanceState {
+            bundle: B,
+            economic_operation_id: other,
+        };
+        let key = bundle_acceptance_key(&G, &DEV, &recomputed);
+        let mut tree = EconomicSmt::new();
+        let path = tree.siblings(&key).to_vec();
+        tree.insert(
+            key,
+            EconomicLeafState::BundleAcceptance(leaf.clone())
+                .leaf_value()
+                .expect("value"),
+        );
+        let acceptance = TraderAcceptance::new(G, 3, leaf, path).expect("well formed");
+        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(3, tree.root());
+        assert_eq!(
+            verify_trader_acceptance(&acceptance, &terms, B, &correspondence(), &validated, &pk),
+            Err(AcceptanceInvalid::OperationIdentityDisagrees {
+                leaf: other,
+                recomputed,
+            })
+        );
     }
 
     /// A path that folds somewhere other than the validated root is refused,

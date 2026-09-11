@@ -497,6 +497,7 @@ impl SettleResolver {
             witness,
             proven_ak: ow.ak_public.clone(),
             c_dsm_plus: [0xC5; 32],
+            embedded_parent: [0xC1; 32],
             verified_operation: Operation::Noop,
         }
     }
@@ -1254,12 +1255,12 @@ fn an_insufficient_output_reserve_is_refused() {
 }
 
 #[test]
-fn an_artifact_proving_another_generation_selects_nothing() {
-    // THE SELECTION CONTROL. A valid proof by the same owner, of the same
-    // vault, at a DIFFERENT generation is a valid proof of something else.
-    // The arm selects by exact vault and exact generation, so it finds no
-    // legs at all rather than the nearest usable pair — a settlement is never
-    // funded by evidence about another state.
+fn an_artifact_proving_a_later_generation_cannot_back_the_parent() {
+    // THE BASELINE-ORDER CONTROL (SoFi composed-state rule, 2c-D §14 D-g).
+    // A valid proof by the same owner, of the same vault, at a LATER
+    // generation than the parent cannot back it: the owner's baseline
+    // precedes every successor composed from it, so a baseline past the
+    // parent is evidence about another state.
     let fx = fixture();
     let ow = owner();
     let mut owner_tree = EconomicSmt::new();
@@ -1338,10 +1339,99 @@ fn an_artifact_proving_another_generation_selects_nothing() {
     };
     match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
         Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
-            m.contains("not the pair this settlement consumes"),
-            "expected the selection refusal, got: {m}"
+            m.contains("past the parent"),
+            "expected the baseline-order refusal, got: {m}"
         ),
-        other => panic!("expected the selection refusal, got {other:?}"),
+        other => panic!("expected the baseline-order refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_older_baseline_without_a_composed_history_is_incomplete_never_accepted() {
+    // THE FAIL-CLOSED CONTROL (2c-D §14 D-g). A proof at an OLDER generation
+    // is the legitimate case — the parent is a composed successor of that
+    // baseline — but only the composition walk can say which state that is.
+    // This resolver cannot compose, so the arm must answer INCOMPLETE:
+    // retryable, never a credit, never a forgery verdict.
+    let fx = fixture();
+    let ow = owner();
+    let mut owner_tree = EconomicSmt::new();
+    let mut leg_a = fx.reserve_a.0.clone();
+    let mut leg_b = fx.reserve_b.0.clone();
+    leg_a.vault_sequence -= 1;
+    leg_b.vault_sequence -= 1;
+    for l in [&leg_a, &leg_b] {
+        let state = EconomicLeafState::VaultReserve(l.clone());
+        owner_tree.insert(
+            state.leaf_key(&ow.g, &ow.devid),
+            state.leaf_value().expect("leaf value"),
+        );
+    }
+    let (proof_bytes, proof_addr) = owner_proof(
+        &owner_tree,
+        &ow.g,
+        &ow.devid,
+        OWNER_POSITION,
+        &[leg_a.clone(), leg_b.clone()],
+    );
+    let evidence = dsm::types::proto::ReserveConsumptionEvidenceV1 {
+        exact_vault_state_ccb: fx.vn.encode().expect("vn encode"),
+        owner_authority_evidence: ow.authority_evidence.clone(),
+        economic_proof_addr: proof_addr.to_vec(),
+    };
+    let evidence_bytes = evidence.encode_to_vec();
+    let evidence_addr = dsm::storage_object::immutable_inner(
+        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &evidence_bytes,
+    );
+    let mut tree = EconomicSmt::new();
+    let funded =
+        EconomicLeafState::Balance(EconomicBalanceState::new(pc_a(), 5_000).expect("balance"));
+    tree.insert(
+        funded.leaf_key(&G_TRADER, &DEV_TRADER),
+        funded.leaf_value().expect("value"),
+    );
+    let mut balances = std::collections::BTreeMap::new();
+    balances.insert(pc_a(), 5_000u64);
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &fx.settle,
+        &G_TRADER,
+        &DEV_TRADER,
+        &[0xEE; 32],
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: OWNER_POSITION,
+            reserve_consumption_evidence_addr: evidence_addr,
+        },
+        &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
+            bundle_id: [0xBB; 32],
+        },
+    )
+    .expect("builds");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        [0xEE; 32],
+        dsm::economic::faucet::dsm_operation_digest(&fx.settle.to_bytes()),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("witness");
+    let resolver = SettleResolver {
+        owner_root: owner_tree.root(),
+        objects: vec![
+            (evidence_addr, evidence_bytes),
+            (proof_addr, proof_bytes),
+            (fx.bundle_digest, fx.bundle_bytes.clone()),
+        ],
+        key: dsm::dlv::settlement_bundle::resource_key(&fx.c_n),
+        bound: Some((fx.bundle_digest, fx.bundle_addr)),
+    };
+    match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
+        Err(ProvenanceError::OwnerLineage(PeerLineageFailure::Incomplete(_))) => {}
+        other => panic!("expected INCOMPLETE from a resolver that cannot compose, got {other:?}"),
     }
 }
 
@@ -1430,7 +1520,7 @@ fn proven_leaves_that_disagree_with_v_n_are_refused() {
     };
     match verify_transition_provenance(&witness, &resolver, &ctx_for(&fx)) {
         Err(ProvenanceError::DlvReserveConsumptionInvalid(m)) => assert!(
-            m.contains("disagree with V_n's reserves"),
+            m.contains("disagree with the vault's state"),
             "expected the disagreement refusal, got: {m}"
         ),
         other => panic!("expected the disagreement refusal, got {other:?}"),

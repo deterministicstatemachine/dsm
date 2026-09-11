@@ -109,6 +109,20 @@ pub trait PeerEvidenceFetcher {
         &self,
         policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
+    /// The vault's composed history up to `target_c_n` — see
+    /// [`ProvenanceResolver::composed_vault_history`]. Fails closed by
+    /// default.
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &crate::ccb::VaultStateV2,
+    ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        let _ = (vault_id, target_c_n, parent);
+        Err(PeerLineageFailure::Incomplete(
+            "this fetcher cannot compose vault state".into(),
+        ))
+    }
 }
 
 /// A trusted starting memo: a coordinate THIS verifier validated earlier
@@ -199,6 +213,16 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.fetcher.anchored_policy_bytes(policy_commit)
+    }
+
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &crate::ccb::VaultStateV2,
+    ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        self.fetcher
+            .composed_vault_history(vault_id, target_c_n, parent)
     }
 }
 
@@ -318,6 +342,7 @@ fn walk_positions(
         EconomicTransitionWitness,
         Vec<u8>,
         crate::types::operations::Operation,
+        [u8; 32],
         [u8; 32],
     )> = None;
     for position in first_position..=target_position {
@@ -467,12 +492,14 @@ fn walk_positions(
             facts.proven_ak.clone(),
             verified.operation,
             verified.c_dsm_plus,
+            verified.embedded_parent,
         ));
     }
 
-    let (witness, proven_ak, verified_operation, c_dsm_plus) = last.ok_or_else(|| {
-        incomplete("walk had no steps — the start memo already covers the target")
-    })?;
+    let (witness, proven_ak, verified_operation, c_dsm_plus, embedded_parent) =
+        last.ok_or_else(|| {
+            incomplete("walk had no steps — the start memo already covers the target")
+        })?;
     Ok(ValidatedPeerTransition {
         peer_genesis: *peer_genesis,
         peer_devid: *peer_devid,
@@ -480,6 +507,7 @@ fn walk_positions(
         witness,
         proven_ak,
         c_dsm_plus,
+        embedded_parent,
         verified_operation,
     })
 }

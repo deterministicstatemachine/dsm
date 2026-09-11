@@ -37,10 +37,10 @@
 //! ## What producing a `TA_B` does NOT do
 //!
 //! Nothing. It publishes an artifact. It does not realize the settlement,
-//! release the trader fence, advance the realized frontier, or promote any
-//! market fold out of `PartialPendingRealization` — those remain the dedicated
-//! cutover, and 2c-D §11's boundary note is why they are one change and not
-//! several. A `TA_B` existing is a precondition of realization, never its
+//! release the trader fence, advance the realized frontier, or certify any
+//! market fold — the composition walk does, with §7 over this artifact as one
+//! conjunct among several (2c-D §14). A `TA_B` existing is a precondition of
+//! realization, never its
 //! trigger.
 
 use crate::economic::state::{EconomicBundleAcceptanceState, EconomicLeafState};

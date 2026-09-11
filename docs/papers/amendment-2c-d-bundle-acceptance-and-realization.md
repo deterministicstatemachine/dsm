@@ -762,3 +762,239 @@ therefore **not** a class-1 source — but its `live_schemas_match_the_registry_
 pins live `(class, schema)` pairs, and adding `0x0032` without updating that table is how a green
 branch reddens `main`. That has happened once already (#829, corrected by #830): the sweep looked
 for tests pinning BYTES and missed the one pinning SCHEMA NUMBERS.
+
+---
+
+## §14 — The realization cutover (C2): owner rulings, 2026-09-11
+
+PR C is split in two. C1 (#854) corrected Req 21.16's root (2c-C4 §9, D4 as corrected). C2 is the
+one behavioural change: the first change that may move a bound market settlement from
+bound-but-unrealized to realized. Before any live path was edited, a source survey answered the two
+questions the cutover could not assume, and the owner ruled on the answers.
+
+**What the survey established.**
+
+```text
+receipt objects
+    TraderSettlementReceiptV1   the ONLY receipt-shaped object in code; stored at
+                                sofi/vault-receipt/{vault}/{x}; NO production producer;
+                                three live consumers, all on the legacy self-verifying check:
+                                  the walk's 5-c-1 gate, dlv_reconcile (owner apply),
+                                  unapplied_settlements_for_vault (owner display)
+    Def 14.2 public receipt     binds ta_B; NOT implemented; the Rev 15 text is not in-repo
+CORR.4                          frozen as semantics only; the two digests carrying it have
+                                no production producer, so CORR.4 is unreachable live
+Tier-1 intent satisfaction      NOT enforced on any live path; the 5-c-1 RouteCommit gate
+                                C2 deletes is its only enforcement point
+storage_put_bytes               returns Ok when ONE node accepts; not quorum-durable
+```
+
+`dlv_reconcile` is a live receipt-as-authority path independent of C2: a forged, internally
+consistent V1 that prices correctly against the owner's composed parent would drive an owner
+`DlvOwnerApplyV2`, move the owner's reserves (no economic admission runs on that path), and consume
+the generation's consume-once claim. It is latent only because nothing produces V1 live. C2 would
+make V1 live, so C2 closes it.
+
+### Ruling C2-R1 — post-certification receipt handling
+
+> ```text
+> RULING — C2-R1: post-certification receipt handling
+>
+> TraderSettlementReceiptV1 (SignedTraderSettlementReceipt) is the existing
+> Req 21.16 correspondence artifact stored at
+> sofi/vault-receipt/{vault}/{x}.
+>
+> It is NOT identified with the Def 14.2 public receipt. Def 14.2 remains a
+> separate owed publication artifact because its frozen construction binds ta_B
+> and no such construction presently exists in production code.
+>
+> For C2:
+>
+> 1. The settling trader may construct TraderSettlementReceiptV1 locally before
+>    publication solely so the composition walk can run Req 21.16 against the
+>    independently validated R_T^+.
+>
+> 2. The walk remains the only certifier. The locally constructed receipt is
+>    evidence to Req 21.16, never authority and never self-certification.
+>
+> 3. A market fold may reach may_certify() only after Req 21.16 and every other
+>    required correspondence/validity predicate succeeds.
+>
+> 4. After may_certify(), TraderSettlementReceiptV1 MUST be durably published
+>    before the trader fence is released or the realized/composed frontier is
+>    allowed to advance past the settlement.
+>
+>    Publication failure therefore leaves the settlement bound but unrealized
+>    and the fence held. A receipt already published before a crash is harmless:
+>    it carries no independent authority and another walk must still certify it.
+>
+> 5. A foreign walk with no published V1 returns ABSENT / pending realization,
+>    not INVALID and not realized.
+>
+> 6. No live consumer may treat V1 as settlement authority:
+>       composition walk                Req 21.16 evidence only
+>       dlv_reconcile                   exact certified fold only
+>       unapplied_settlements_for_vault certified-but-unapplied folds only
+>
+>    Receipt existence alone MUST NOT constitute "certified". Certification must
+>    originate from the validated composition walk or from a durable local cache
+>    whose contents are tied to that exact certified fold and are not themselves
+>    authority.
+>
+> 7. The legacy V1 fields post_root, smt_siblings, trader_public_key and
+>    trader_signature may remain populated for compatibility, but C2 validity
+>    does not depend on them after #854.
+>
+> 8. verify_trader_settlement_receipt is removed from the authority path.
+>    fetch_verified_receipt becomes transport/decoding only:
+>    Absent / Unavailable / Malformed / Decoded.
+>
+> 9. The Def 14.2 receipt and Q publication remain separately owed and C2 must
+>    not claim that publishing V1 satisfies those requirements.
+> ```
+
+**Why publication precedes release (point 4).** A same-step publish-and-release is not atomic across
+a distributed boundary. If the fence released and the process died before V1 became discoverable,
+every foreign composer would lose the evidence R1 itself requires. Publishing first is safe because
+the receipt is non-authoritative; a crash afterward leaves a discoverable receipt and a still-held
+fence, which recovery can finish.
+
+### Ruling C2-R2 — CORR.4, typed
+
+> ```text
+> RULING — C2-R2: CORR.4, typed
+>
+> CORR.4 compares typed values, not digests. effects_digest and
+> route_effects_digest are removed from AcceptedTransition and BundleCoordinates.
+> No domain tag is added.
+>
+> LEFT (the accepted operation's balance effects): the DlvSettle returned by the
+> lineage walk (ValidatedPeerTransition.verified_operation). It is never taken
+> from the bundle's recovery_material and never from the published receipt.
+>
+> RIGHT (the selected route's T_v economics): in beta (2c-A ruling 3) the route
+> must be exactly one RouteLeg::Single(alloc), and |{T_v}| must be 1. Any other
+> shape is INVALID, as not specified for this profile.
+>
+> CORR.4 requires each of these equalities separately:
+>     alloc.parent_binding  == op.parent_binding == T_v.parent_binding
+>     alloc.delta_in        == op.input_amount
+>     alloc.delta_out       == op.output_amount
+>     alloc.fee_policy bps  == op.fee_bps
+>
+> Before successor derivation succeeds:
+>
+>     {op.input_policy_commit, op.output_policy_commit}
+>     MUST equal the cursor's canonical market pair in one permitted orientation,
+>     and derive_direction MUST succeed for that exact orientation.
+>
+>     No unknown asset, same-side asset, reversed-disallowed direction, or foreign
+>     policy commitment may reach successor comparison.
+>
+> Pricing and the T_v movement belong to CORR.5, through the existing
+> derivation:
+>     expected = derive_market_successor(cursor, c_n,
+>                  { op.input_policy_commit, op.output_policy_commit,
+>                    op.input_amount, cursor.fee_bps })
+>     op.fee_bps          == cursor.fee_bps
+>     op.parent_sequence  == cursor.generation
+>     derived output      == op.output_amount
+>     Canon(expected)     == T_v.successor bytes          (10.a)
+>
+> CORR.4 ties the operation to the route; CORR.5 ties the operation to T_v.
+> Neither one alone establishes "priced as B's route says."
+>
+> Intent satisfaction is not part of CORR.4.
+>
+> However, may_certify() MUST remain unreachable unless the existing Req 14.x
+> Tier-1 intent-satisfaction predicate has succeeded for the authenticated
+> TradeIntent and selected route.
+>
+> If that predicate is already live in the composition walk, C2 reuses it.
+> If deleting 5-c-1 removes its only live enforcement point, C2 MUST re-source
+> it before enabling realization.
+>
+> Lean: 2c-C4's balanceEffects == routeEconomics over abstract values is
+> unchanged, because typed field equality refines it. No Lean change.
+> ```
+
+**The owner-apply boundary.** The owner's apply bypassing economic admission may remain separately
+owed only if C2 proves it cannot invent or modify economics: it may do nothing except apply the exact
+already-certified fold. C2 carries a regression test for that invariant even though the admission
+refactor itself stays outside C2.
+
+### Determinations under these rulings (source facts, not new rulings)
+
+**D-a. Tier 1 is re-sourced.** No live path enforces intent satisfaction; the 5-c-1 RouteCommit gate
+C2 deletes is its only enforcement point. Under C2-R2's conditional clause C2 therefore re-sources it,
+and the predicate is 2c-E §6's SAT.1–SAT.6 transcribed — not 2c-A's original Tier 1, whose
+`min_out`, `max_fee`, `max_hops`, `max_fanout` and `k` 2c-E removed from `TradeIntent`. The signed
+RouteCommit SAT.2–SAT.4 read is the lineage-verified operation's own `route_commit_bytes`, which
+`sigma_dsm` covers — never a RouteCommit fetched under a storage key.
+
+**D-b. "Durably published" is quorum publication.** `storage_put_bytes` returns `Ok` when one node
+accepts, so it cannot discharge C2-R1 point 4. V1 is frozen as a publication artifact under
+`sofi/vault-receipt/{vault}/{x}` for the vault's canonical storage set, and is durably published when
+`is_artifact_published` holds — at least `set.quorum()` members of that set accepted the exact bytes.
+The fence is not released before that.
+
+**D-c. `TA_B` is located, not named.** `B` is bound before `TA_B` exists, so the walk locates it
+through a non-authoritative locator keyed by `b`, carrying `ta_B` and the address of the admission's
+economic proof artifact (which holds both the acceptance leaf and the settlement-receipt leaf with
+their paths under `R_T^+`). It is frozen with `TA_B` at admission. It is evidence for finding the
+artifacts, not the receipt publication §7 of 2c-C4 gates, and a locator naming wrong bytes fails at
+§7 or at Req 21.16 rather than being believed.
+
+**D-d. `PartialPendingRealization` is deleted.** Its only constructor was the 5-c-1 market arm C2
+deletes. The walk folds only what `may_certify()`: a market parent whose evidence is absent or
+unavailable is the bound-but-unrealized frontier, not a provisional fold, and present-and-failing
+evidence is INVALID. `may_fold()`, which differed from `may_certify()` only on that variant, goes
+with it, and `C3Verdict::class()` becomes total.
+
+**D-e. The self-referential receipt verifier is deleted.** C2-R1 point 8 takes it off the authority
+path and no other path calls it, so `verify_trader_settlement_receipt` is removed together with the
+two `ReceiptError` variants only it produced. `fetch_receipt` is the one read of V1 — Absent /
+Unavailable / Malformed / Decoded — and Req 21.16 (`verify_published_receipt`) is the only receipt
+verifier.
+
+**D-f. The completion resumes; it never retries.** A settlement whose V1 misses quorum returns
+bound-unrealized with its fence held. `resume_settlement_completion` finishes that SAME settlement and
+nothing else. Its work list is this device's fences whose binding COMMITTED and whose exact successor
+is not yet released (`list_acceptance_pending_fences`), run from the storage sync beside the
+close-intent resume. For each it re-reads the fence at exactly (chain, parent, `tx_id`), fetches the
+bound bundle by `b` and re-hashes it (digest = `b`, address = the fence's `value_addr`), requires the
+bundle's own parent and successor to be the fence's, and takes the trade from the bound operation —
+never from a receipt. Completion then runs the one path the settle route runs: the exact frozen V1 is
+recovered when one exists and built once otherwise; the walk re-certifies with it as Req 21.16's
+evidence; V1 reaches quorum, and an exact V1 already at quorum is not re-sent; only then is the exact
+fence released, and releasing a fence already released is not an error.
+
+The resume creates no binding round, no transition, no admission and no other settlement, changes no
+fact, and never releases on a cached status or a timeout: the fence row locates the work and is not
+authority. Receipt publication precedes fence release on both paths. Absent, unavailable or
+below-quorum evidence leaves the fence held and the outcome pending — never INVALID; coordinates or
+facts that do not match are refused, and the fence stays held.
+
+**D-g. Later generations draw reserve provenance from the composed frontier (conformance repair).**
+This is not a new protocol rule; it restores the normative SoFi composed-state model, in which the
+current DLV state is the latest authenticated owner baseline plus every subsequently realized market
+successor, folded in order, and the LP need not return between generations. The implementation had
+drifted from it: `DlvReserveConsumption` provenance accepted only owner vault-reserve leaves at
+exactly the consumed generation, and only the owner's own admitted apply produces those, so a
+delegated market could not advance past generation 0 while its LP was absent. The same rule now
+holds at every generation: the owner's proof backs the reserves at ONE baseline generation `g`; at
+`g` the parent states exactly those reserves; past `g` the parent must be exactly the state the
+composition walk reaches at its commitment from that baseline, passing through `g` with the owner's
+reserves, one linked generation at a time. The walk folds a market successor only once the full C2
+certification boundary holds, so an uncertified, merely bound or merely published successor never
+authorizes the next generation. Composition for this purpose stops AT the requested state and never
+reads the binding there, so the provenance of settlement n never depends on settlement n: certifying
+settlement n establishes `V_{n+1}`, admitting settlement n+1 consumes it, and the recursion runs
+strictly down the generations. Owner catch-up remains optional synchronization of already-realized
+history; it authorizes nothing.
+
+The settle route runs that one rule — `check_composed_reserve_provenance` — BEFORE `bind_settlement`,
+over the same owner proof and the same composed history, and refuses there. Previously the route
+bound first and only then discovered that admission would refuse, leaving the generation bound with
+no admissible continuation. A qualifying COMMIT, once reached, remains authoritative; the preflight
+only ensures one is never reached for a trade admission would deterministically refuse.

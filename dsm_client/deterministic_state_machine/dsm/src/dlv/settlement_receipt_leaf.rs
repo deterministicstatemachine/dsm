@@ -18,34 +18,24 @@
 //!
 //! ## What this does NOT establish
 //!
-//! **Retracted claim.** This header previously said "the griefer cannot
-//! manufacture one without actually paying the input". That is false, and the
-//! text is corrected rather than softened because a verifier that believes it
-//! checked an advance when it checked a signature is exactly the failure this
-//! subsystem exists to prevent.
+//! A receipt is evidence, never authority (2c-D §14, ruling C2-R1). Every
+//! field of it — `trader_public_key`, `trader_genesis`, `trader_devid` and
+//! `post_root` included — is chosen by whoever built it, and the cheapest
+//! device tree whose root includes its leaf has ONE leaf, so an honest receipt
+//! and a forgery are byte-identical constructions. A check that reads those
+//! fields out of the receipt and tests them against each other establishes
+//! serialization authenticity and nothing about settlement; that verifier is
+//! deleted.
 //!
-//! [`verify_trader_settlement_receipt`] reads `trader_public_key`,
-//! `trader_genesis`, `trader_devid` and `post_root` **out of the receipt
-//! itself**. It confirms those fields are internally consistent: the signature
-//! verifies under the key the receipt names, and the recomputed leaf is included
-//! under the root the receipt names. Nothing binds that root to a published
-//! device root, and nothing binds that key to a device. The cheapest tree
-//! satisfying the inclusion check has ONE leaf, so the honest-path fixture and a
-//! forgery are byte-identical constructions — anyone holding a SPHINCS+ keypair
-//! can build both.
-//!
-//! So the griefing property above holds against a trader who runs this software,
-//! and does not hold against one who does not. The same limitation is symmetric
-//! on the owner's side (see [`crate::dlv::vault_reserve_inclusion`], whose
-//! `smt_root` is likewise owner-chosen).
-//!
-//! Closing this requires binding `post_root` to an independently verifiable
-//! trader state transition. That work is specified but not implemented; until it
-//! lands, **do not read this type as evidence that value moved.**
+//! The one verifier is Req 21.16,
+//! [`crate::dlv::published_receipt::verify_published_receipt`]: it rebuilds
+//! the settlement-receipt leaf from the receipt's trade facts and requires it
+//! under the trader's INDEPENDENTLY VALIDATED economic root `R_T^+`, inside
+//! the composition walk. The device-SMT fields here stay populated for wire
+//! compatibility and carry no weight (C2-R1 point 7).
 //!
 //! Shape is cloned from [`crate::dlv::vault_smt_leaf`] (signature over the
-//! committed tuple, then a 256-sibling SMT path re-verified from a recomputed
-//! leaf) and [`crate::dlv::vault_reserve_leaf`] (per-`(device, subject)` keying
+//! committed tuple, and a 256-sibling SMT path for a recomputed leaf) and [`crate::dlv::vault_reserve_leaf`] (per-`(device, subject)` keying
 //! outside `balances`). Both are proven; a third mechanism for the same shape is
 //! how the three would drift.
 //!
@@ -56,16 +46,14 @@
 //! at that same key, so the conflict is visible as a value mismatch rather than
 //! silently overwriting.
 //!
-//! Verification is stateless: a third party runs it against published bytes with
-//! no access to the trader's device. All hashing is domain-separated BLAKE3,
-//! signatures are SPHINCS+. No JSON, no hex, no wall-clock.
+//! All hashing is domain-separated BLAKE3, signatures are SPHINCS+. No JSON, no
+//! hex, no wall-clock.
 
 use crate::common::domain_tags::{
     TAG_SETTLEMENT_RECEIPT_COMMIT, TAG_SETTLEMENT_RECEIPT_ID, TAG_SETTLEMENT_RECEIPT_LEAF,
     TAG_SETTLEMENT_RECEIPT_SIGN, TAG_SETTLEMENT_RECEIPT_STATE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
 
 /// 256-bit SMT key of a settlement receipt leaf:
 /// `H("DSM/settlement-receipt/v1" ‖ genesis_id ‖ device_id ‖ vault_id ‖ receipt_id)`.
@@ -142,18 +130,11 @@ pub struct SignedTraderSettlementReceipt {
     pub trader_signature: Vec<u8>,
 }
 
-/// Errors from settlement-receipt signing / verification.
+/// Errors from signing a settlement receipt.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReceiptError {
-    /// SPHINCS+ signature verification failed: bad signature, wrong key, or a
-    /// tampered field inside the signed tuple.
-    SignatureInvalid,
     /// Underlying SPHINCS+ sign call failed.
     SignFailed(String),
-    /// The SMT path does not carry the recomputed receipt leaf up to
-    /// `post_root`. The trader signed a settlement its own chain does not
-    /// commit — which is exactly the unbacked claim this type exists to reject.
-    InclusionProofRejected,
     /// Sibling vector length is not exactly 256.
     BadSiblingCount { expected: usize, actual: usize },
     /// `new_sequence != parent_sequence + 1`, or the parent cannot be advanced.
@@ -164,20 +145,15 @@ pub enum ReceiptError {
         new_sequence: u64,
     },
     /// A settlement must name two distinct assets and move a non-zero amount of
-    /// each. Rejected here as well as at the core chokepoint, because this
-    /// verifier runs on a device that never saw the trader's advance.
+    /// each. Refused at signing as well as at the core chokepoint, so a
+    /// degenerate receipt is never produced.
     DegenerateTrade,
 }
 
 impl core::fmt::Display for ReceiptError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            ReceiptError::SignatureInvalid => write!(f, "receipt signature verification failed"),
             ReceiptError::SignFailed(msg) => write!(f, "sphincs sign failed: {msg}"),
-            ReceiptError::InclusionProofRejected => write!(
-                f,
-                "receipt leaf is not committed in the trader's post-advance root",
-            ),
             ReceiptError::BadSiblingCount { expected, actual } => {
                 write!(f, "SMT siblings must have length {expected}, got {actual}")
             }
@@ -248,10 +224,9 @@ pub fn derive_receipt_id(vault_id: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {
 /// and that is what this covers.
 ///
 /// Nothing is lost by the exclusion. The pointer pins which trade may activate
-/// it; the receipt independently proves that trade is committed under a root
-/// the trader signed. A griefer can match this commitment trivially — it is
-/// derived from their own published pointer — but cannot produce the inclusion
-/// path without actually settling.
+/// it; whether that trade settled is Req 21.16's question, answered under the
+/// validated economic root — never by this commitment, which anyone can compute
+/// from the pointer.
 pub fn receipt_commitment(
     vault_id: &[u8; 32],
     receipt_id: &[u8; 32],
@@ -340,91 +315,11 @@ pub fn sign_trader_settlement_receipt(
     })
 }
 
-/// Check a settlement receipt for INTERNAL CONSISTENCY: trade shape, then the
-/// signature under the key the receipt names, then SMT inclusion of the
-/// recomputed leaf under the root the receipt names.
-///
-/// # What passing means
-///
-/// Only that those three facts agree with each other. `trader_public_key`,
-/// `trader_genesis`, `trader_devid` and `post_root` are all read OUT OF THE
-/// RECEIPT, so a passing result is a statement the receipt makes about itself.
-///
-/// # What passing does NOT mean
-///
-/// **Retracted claim.** This doc previously said passing meant "the input was
-/// paid and the output taken on a chain the trader signed". It does not:
-///
-/// - `post_root` is not bound to any published device root. The cheapest tree
-///   satisfying the inclusion check has one leaf, and the test fixture in this
-///   module builds exactly that — the honest construction and a forgery are
-///   byte-identical.
-/// - `trader_public_key` is not bound to `trader_devid` or `trader_genesis`. No
-///   `AttA` is carried and the authority resolver is never invoked, so an
-///   attacker needs no real identity — a fresh keypair and two arbitrary 32-byte
-///   strings satisfy every check here.
-/// - Nothing establishes that the units debited existed or were legitimately
-///   issued.
-///
-/// Against a trader running this software the receipt is still the witness the
-/// composer wants, because an honest client produces one only after its advance
-/// commits. Against a trader who does not, it establishes nothing. Callers must
-/// not treat a pass as evidence that value moved.
-///
-/// Stateless and fail-closed. It also does not establish that `post_root` is the
-/// trader's *current* root — that one is by design, since a committed settlement
-/// stays committed.
-pub fn verify_trader_settlement_receipt(
-    receipt: &SignedTraderSettlementReceipt,
-) -> Result<(), ReceiptError> {
-    check_trade_shape(&receipt.trade)?;
-    if receipt.smt_siblings.len() != 256 {
-        return Err(ReceiptError::BadSiblingCount {
-            expected: 256,
-            actual: receipt.smt_siblings.len(),
-        });
-    }
-    let payload = receipt_sign_payload(
-        &receipt.vault_id,
-        &receipt.receipt_id,
-        &receipt.trade,
-        &receipt.trader_genesis,
-        &receipt.trader_devid,
-        &receipt.post_root,
-    );
-    let ok = crate::crypto::sphincs::sphincs_verify(
-        &receipt.trader_public_key,
-        &payload,
-        &receipt.trader_signature,
-    )
-    .map_err(|_| ReceiptError::SignatureInvalid)?;
-    if !ok {
-        return Err(ReceiptError::SignatureInvalid);
-    }
-
-    let key = settlement_receipt_key(
-        &receipt.trader_genesis,
-        &receipt.trader_devid,
-        &receipt.vault_id,
-        &receipt.receipt_id,
-    );
-    let value = settlement_receipt_value(&receipt.trade);
-    let proof = SmtInclusionProof {
-        key,
-        value: Some(value),
-        siblings: receipt.smt_siblings.clone(),
-    };
-    if SparseMerkleTree::verify_proof_against_root(&proof, &receipt.post_root) {
-        Ok(())
-    } else {
-        Err(ReceiptError::InclusionProofRejected)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::sphincs::generate_sphincs_keypair;
+    use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
 
     fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
         ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32])
@@ -478,138 +373,35 @@ mod tests {
         (r, sk)
     }
 
+    /// A non-unit sequence step is refused at SIGNING, so a receipt that
+    /// skips generations is never produced.
     #[test]
-    fn a_real_settlement_verifies() {
-        let (r, _) = signed();
-        verify_trader_settlement_receipt(&r).expect("a committed settlement must verify");
-    }
-
-    /// THE GRIEFING CASE. A receipt whose settlement is not actually in the
-    /// trader's root must fail — that is the entire point of the type. Signature
-    /// alone is not enough: the griefer holds their own key and can sign
-    /// anything.
-    #[test]
-    fn a_signature_over_a_settlement_the_chain_does_not_commit_is_rejected() {
+    fn a_non_unit_step_cannot_be_signed() {
         let (genesis, devid, vault, receipt_id) = ids();
-        let t = trade();
-        let (real_root, sibs) = fixture(&genesis, &devid, &vault, &receipt_id, &t);
         let (pk, sk) = generate_sphincs_keypair().expect("keypair");
-
-        // Claim a root that this leaf does not belong to, and sign it honestly.
-        let mut fake_root = real_root;
-        fake_root[0] ^= 0xff;
-        let forged = sign_trader_settlement_receipt(
-            &vault,
-            &receipt_id,
-            t,
-            &genesis,
-            &devid,
-            &fake_root,
-            sibs,
-            &pk,
-            &sk,
-        )
-        .expect("signing a lie succeeds; verifying it must not");
-
-        assert_eq!(
-            verify_trader_settlement_receipt(&forged),
-            Err(ReceiptError::InclusionProofRejected),
-            "an unbacked settlement must not verify even with a valid signature"
-        );
-    }
-
-    /// Every settled quantity is covered. Moving any of them must break the
-    /// receipt — otherwise a trader could publish a pointer for one trade and
-    /// activate it with a receipt for a cheaper one.
-    #[test]
-    fn every_settled_quantity_is_covered() {
-        let (r, _) = signed();
-        /// One named tamper: a label for the failure message, and the mutation
-        /// that corrupts exactly one field.
-        type ReceiptTamper = (
-            &'static str,
-            Box<dyn Fn(&mut SignedTraderSettlementReceipt)>,
-        );
-
-        let mutations: Vec<ReceiptTamper> = vec![
-            (
-                "x",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.trade.x[0] ^= 0xff),
-            ),
-            (
-                "input amount",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.trade.input_amount -= 1),
-            ),
-            (
-                "output amount",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.trade.output_amount += 1),
-            ),
-            (
-                "input asset",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| {
-                    r.trade.input_policy_commit[0] ^= 0xff
-                }),
-            ),
-            (
-                "output asset",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| {
-                    r.trade.output_policy_commit[0] ^= 0xff
-                }),
-            ),
-            (
-                "vault id",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.vault_id[0] ^= 0xff),
-            ),
-            (
-                "receipt id",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.receipt_id[0] ^= 0xff),
-            ),
-            (
-                "trader devid",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.trader_devid[0] ^= 0xff),
-            ),
-            (
-                "trader genesis",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.trader_genesis[0] ^= 0xff),
-            ),
-            (
-                "post root",
-                Box::new(|r: &mut SignedTraderSettlementReceipt| r.post_root[0] ^= 0xff),
-            ),
-        ];
-        for (what, mutate) in mutations {
-            let mut tampered = r.clone();
-            mutate(&mut tampered);
-            assert!(
-                verify_trader_settlement_receipt(&tampered).is_err(),
-                "tampering the {what} must invalidate the receipt"
-            );
-        }
-    }
-
-    /// The sequence pair moves together, so tampering it breaks the signature
-    /// rather than tripping the shape check — either way it must reject.
-    #[test]
-    fn the_sequence_step_is_covered_and_must_be_a_unit_step() {
-        let (r, _) = signed();
-        let mut shifted = r.clone();
-        shifted.trade.parent_sequence = 8;
-        shifted.trade.new_sequence = 9;
-        assert!(
-            verify_trader_settlement_receipt(&shifted).is_err(),
-            "a re-sequenced receipt must not verify"
-        );
-
-        let mut skipped = r.clone();
-        skipped.trade.new_sequence = 10;
+        let skipped = SettledTrade {
+            new_sequence: 10,
+            ..trade()
+        };
+        let (root, sibs) = fixture(&genesis, &devid, &vault, &receipt_id, &skipped);
         assert!(matches!(
-            verify_trader_settlement_receipt(&skipped),
+            sign_trader_settlement_receipt(
+                &vault,
+                &receipt_id,
+                skipped,
+                &genesis,
+                &devid,
+                &root,
+                sibs,
+                &pk,
+                &sk,
+            ),
             Err(ReceiptError::NonUnitStep { .. })
         ));
     }
 
     #[test]
-    fn a_degenerate_trade_cannot_be_signed_or_verified() {
+    fn a_degenerate_trade_cannot_be_signed() {
         let (genesis, devid, vault, receipt_id) = ids();
         let (pk, sk) = generate_sphincs_keypair().expect("keypair");
         for bad in [
@@ -646,29 +438,28 @@ mod tests {
     }
 
     #[test]
-    fn another_key_cannot_sign_for_this_trader() {
-        let (mut r, _) = signed();
-        let (other_pk, _) = generate_sphincs_keypair().expect("keypair");
-        r.trader_public_key = other_pk;
-        assert_eq!(
-            verify_trader_settlement_receipt(&r),
-            Err(ReceiptError::SignatureInvalid)
-        );
-    }
-
-    #[test]
-    fn a_short_or_absent_path_fails_closed() {
-        let (mut r, _) = signed();
-        r.smt_siblings.truncate(255);
-        assert!(matches!(
-            verify_trader_settlement_receipt(&r),
-            Err(ReceiptError::BadSiblingCount { .. })
-        ));
-        r.smt_siblings.clear();
-        assert!(matches!(
-            verify_trader_settlement_receipt(&r),
-            Err(ReceiptError::BadSiblingCount { .. })
-        ));
+    fn a_short_or_absent_path_cannot_be_signed() {
+        let (genesis, devid, vault, receipt_id) = ids();
+        let (pk, sk) = generate_sphincs_keypair().expect("keypair");
+        let t = trade();
+        let (root, mut short) = fixture(&genesis, &devid, &vault, &receipt_id, &t);
+        short.truncate(255);
+        for path in [short, Vec::new()] {
+            assert!(matches!(
+                sign_trader_settlement_receipt(
+                    &vault,
+                    &receipt_id,
+                    t,
+                    &genesis,
+                    &devid,
+                    &root,
+                    path,
+                    &pk,
+                    &sk,
+                ),
+                Err(ReceiptError::BadSiblingCount { .. })
+            ));
+        }
     }
 
     /// The pointer's commitment must name exactly one receipt. Two receipts

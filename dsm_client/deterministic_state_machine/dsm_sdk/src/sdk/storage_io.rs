@@ -788,6 +788,10 @@ pub(crate) mod fake_fleet {
         registers: HashMap<String, HashMap<([u8; 32], u64), (Vec<u8>, [u8; 32])>>,
         /// members whose next PUTs fail (persistent until cleared)
         failing: HashSet<String>,
+        /// key prefixes whose PUTs fail on EVERY member — one object class
+        /// withheld while the rest of the fleet works (a settlement receipt
+        /// below quorum while its bundle and acceptance publish).
+        failing_prefixes: Vec<String>,
         /// members that SERVE READS but refuse register writes — a node that
         /// is reachable and answering while unable to accept new state (a
         /// read-only mount, a full disk). Distinct from `failing`, because a
@@ -861,6 +865,15 @@ pub(crate) mod fake_fleet {
 
     pub(crate) fn heal_member(member_id: &str) {
         state().failing.remove(member_id);
+    }
+
+    /// Every member refuses PUTs of keys starting with `prefix`, until healed.
+    pub(crate) fn fail_keys_with_prefix(prefix: &str) {
+        state().failing_prefixes.push(prefix.to_string());
+    }
+
+    pub(crate) fn heal_keys_with_prefix(prefix: &str) {
+        state().failing_prefixes.retain(|p| p != prefix);
     }
 
     /// `member_id` answers reads but refuses register writes.
@@ -1012,7 +1025,12 @@ pub(crate) mod fake_fleet {
                 key.to_string(),
                 *blake3::hash(payload).as_bytes(),
             ));
-            if st.failing.contains(&m.member_id) {
+            if st.failing.contains(&m.member_id)
+                || st
+                    .failing_prefixes
+                    .iter()
+                    .any(|p| key.starts_with(p.as_str()))
+            {
                 outcomes.push(MemberPutOutcome {
                     member_id: m.member_id.clone(),
                     endpoint: m.endpoint.clone(),

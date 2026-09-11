@@ -80,6 +80,11 @@ pub struct ValidatedPeerTransition {
     /// The peer's verified successor commitment — what the acceptance
     /// evidence's receipt `child_tip` must equal ("same bilateral step").
     pub c_dsm_plus: [u8; 32],
+    /// The verified successor's own parent on the peer's bilateral chain —
+    /// the other half of the `(embedded_parent, C_dsm+)` pair CORR.1 compares
+    /// with a bundle's `(trader_parent, trader_successor)`. From the VERIFIED
+    /// substrate, never from the bundle.
+    pub embedded_parent: [u8; 32],
     /// The exact operation the peer's VERIFIED successor evidence carried.
     /// The peer-debit predicate reasons about it directly (Transfer-only,
     /// online mode, addressed to the consumer) instead of trusting the
@@ -168,6 +173,31 @@ pub trait ProvenanceResolver {
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure>;
+
+    /// The vault's COMPOSED history from its owner baseline up to and
+    /// including the state committed as `target_c_n` — the SoFi composed-state
+    /// rule, produced by the composition walk, which folds a market successor
+    /// only once the full C2 certification boundary holds (2c-D §14).
+    ///
+    /// Composition STOPS at the target and never reads the binding AT it, so
+    /// the provenance of settlement n never depends on settlement n: the
+    /// recursion runs strictly down the generations. `parent` is the carried
+    /// `V_n`; its pair and fee locate the vault, and its reserves are what the
+    /// history is checked against, never an input to it.
+    ///
+    /// Fails closed by default: a resolver that cannot compose answers
+    /// `Incomplete`, so a post-baseline reserve is never provenanced by it.
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &crate::ccb::VaultStateV2,
+    ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        let _ = (vault_id, target_c_n, parent);
+        Err(PeerLineageFailure::Incomplete(
+            "this resolver cannot compose vault state".into(),
+        ))
+    }
 
     /// The winning claim for one faucet ticket, from a LIVE quorum read
     /// against the CANONICAL set — q members returning byte-identical winner
@@ -1168,49 +1198,43 @@ pub fn verify_credit_source(
                     &owner_root,
                 )
                 .map_err(invalid)?;
-            // EXACTLY the two leaves this settlement consumes: this vault, at
-            // the generation it names. An artifact proving a different
-            // generation, or another vault of the same owner, is a valid proof
-            // of something else — it says nothing about this trade, so the
-            // selection is an equality on both coordinates and a count, never
-            // a search for something usable.
-            let mut legs: Vec<&crate::economic::state::EconomicVaultReserveState> = artifact
+            // THE COMPOSED-STATE RULE (SoFi; 2c-D §14, conformance repair).
+            // The owner's proof backs the vault's reserves at ONE baseline
+            // generation. At the baseline V_n states exactly those reserves;
+            // past it, V_n must be exactly the state the composition walk
+            // reaches at c_n from that baseline, every step certified. The
+            // owner does not act between generations.
+            let owner_leaves: Vec<crate::economic::state::EconomicVaultReserveState> = artifact
                 .states()
                 .filter_map(|s| match s {
                     crate::economic::state::EconomicLeafState::VaultReserve(v)
-                        if v.vault_id == vault && v.vault_sequence == *parent_sequence =>
+                        if v.vault_id == vault =>
                     {
-                        Some(v)
+                        Some(v.clone())
                     }
                     _ => None,
                 })
                 .collect();
-            if legs.len() != 2 {
-                return Err(invalid(format!(
-                    "the owner's proof carries {} reserve leaves for this vault at generation \
-                     {parent_sequence}, not the pair this settlement consumes",
-                    legs.len()
-                )));
-            }
-            legs.sort_by_key(|l| l.policy_commit);
-            let (pc_a, amount_a) = (legs[0].policy_commit, legs[0].amount);
-            let (pc_b, amount_b) = (legs[1].policy_commit, legs[1].amount);
-            if pc_a != *lo || pc_b != *hi {
-                return Err(invalid(
-                    "the proven reserve legs are not V_n's pair in canonical order".into(),
-                ));
-            }
-            // The PROVEN leaves must equal V_n's own reserve statement — the
-            // two representations of one fact may not disagree.
-            if amount_a != vn.reserve_a || amount_b != vn.reserve_b {
-                return Err(invalid(
-                    "the proven reserve leaves disagree with V_n's reserves".into(),
-                ));
-            }
-            let (reserve_in, reserve_out) = if *input_policy_commit == pc_a {
-                (amount_a, amount_b)
+            let history = match owner_leaves.first().map(|l| l.vault_sequence) {
+                Some(baseline) if baseline < *parent_sequence => Some(
+                    resolver
+                        .composed_vault_history(&vault, parent_binding, &vn)
+                        .map_err(ProvenanceError::OwnerLineage)?,
+                ),
+                _ => None,
+            };
+            crate::dlv::composed_history::check_composed_reserve_provenance(
+                &owner_leaves,
+                &vn,
+                history.as_ref(),
+            )
+            .map_err(|r| invalid(r.to_string()))?;
+            // V_n's reserves are now provenanced — by the owner at the
+            // baseline, by composition past it — and are what this trade meets.
+            let (reserve_in, reserve_out) = if input_policy_commit == vn.market_policy.token_a() {
+                (vn.reserve_a, vn.reserve_b)
             } else {
-                (amount_b, amount_a)
+                (vn.reserve_b, vn.reserve_a)
             };
             // ── 6. Sufficiency ────────────────────────────────────────────
             if reserve_out < *output_amount {

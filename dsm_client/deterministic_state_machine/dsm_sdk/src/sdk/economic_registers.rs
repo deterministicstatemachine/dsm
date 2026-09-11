@@ -341,7 +341,51 @@ impl LiveRegisterResolver<'_> {
     }
 }
 
+/// The vault's composed history for reserve provenance, through the SAME walk
+/// the route and the owner run (2c-D §14). A walk that cannot compose is
+/// `Incomplete`; an invalid successor or a safety violation says so, and is
+/// never read as an absence.
+fn composed_history_via_walk(
+    runtime: &tokio::runtime::Handle,
+    vault_id: &[u8; 32],
+    target_c_n: &[u8; 32],
+    parent: &dsm::ccb::VaultStateV2,
+) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+    use crate::sdk::vault_state_composition::{compose_vault_history_until, CompositionError};
+    let (token_a, token_b) = (
+        *parent.market_policy.token_a(),
+        *parent.market_policy.token_b(),
+    );
+    let fee_bps = parent.fee_policy.fee_bps();
+    tokio::task::block_in_place(|| {
+        runtime.block_on(compose_vault_history_until(
+            vault_id,
+            &token_a,
+            &token_b,
+            fee_bps,
+            *target_c_n,
+        ))
+    })
+    .map_err(|e| {
+        let why = e.to_string();
+        match e {
+            CompositionError::SafetyViolation { .. } => PeerLineageFailure::Quarantined(why),
+            CompositionError::SuccessorInvalid { .. } => PeerLineageFailure::Invalid(why),
+            _ => PeerLineageFailure::Incomplete(why),
+        }
+    })
+}
+
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'_> {
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &dsm::ccb::VaultStateV2,
+    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent)
+    }
+
     /// The network's root-register set as THIS device's catalog resolves it.
     ///
     /// Candidates, not authority: the caller re-derives the id from these
@@ -579,6 +623,17 @@ impl<'a> RecordingResolver<'a> {
 }
 
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> {
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &dsm::ccb::VaultStateV2,
+    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::composed_vault_history(
+            self.inner, vault_id, target_c_n, parent,
+        )
+    }
+
     fn root_register_candidate_set(
         &self,
         network_id: &[u8],
@@ -654,6 +709,15 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
+    fn composed_vault_history(
+        &self,
+        vault_id: &[u8; 32],
+        target_c_n: &[u8; 32],
+        parent: &dsm::ccb::VaultStateV2,
+    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
+        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent)
+    }
+
     /// The network's root-register set as THIS device's catalog resolves it.
     ///
     /// Candidates, not authority: the caller re-derives the id from these

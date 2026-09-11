@@ -811,16 +811,14 @@ pub(crate) async fn admitted_dlv_create_funded<A>(
 ///
 /// WHAT THIS DOES NOT DO. It does not release the trader fence, publish a Def
 /// 14.2 receipt, advance the realized frontier, or construct a
-/// bundle-acceptance witness. Ruling V3 gates release on a certifying verdict
-/// and Ruling R1 puts that behind 2c-D. A committed advance here means the
-/// trader's own chain accepted the successor; the market fold stays
-/// `PartialPendingRealization`.
+/// bundle-acceptance witness. A committed advance here means the trader's own
+/// chain accepted the successor; the settlement is realized only when the
+/// composition walk certifies it and the route completes (2c-D §14).
 #[allow(clippy::too_many_arguments)]
 /// `bundle_id` is `b` — the identity of the exact canonical bundle this settle
 /// is composed around. Required, never optional: without it the write set
 /// cannot emit the acceptance leaf realization needs (2c-D producer adoption),
-/// and a settle that silently omitted it would sit at
-/// `PartialPendingRealization` forever.
+/// and a settle that silently omitted it would stay bound-unrealized forever.
 pub(crate) async fn admitted_dlv_settle<A>(
     core: &CoreSDK,
     operation: Operation,
@@ -1046,8 +1044,8 @@ fn economic_proof_artifact_for(
     )))
 }
 
-/// The canonical `TA_B` for a transition that accepted a settlement bundle, as
-/// a publishable artifact — or `None` when it accepted none.
+/// The canonical `TA_B` for a transition that accepted a settlement bundle, or
+/// `None` when it accepted none.
 ///
 /// **Built here for the same reason the inclusion proof is.** `TA_B` carries
 /// the acceptance leaf's path under `R_T^+`, and a mutation's own captured
@@ -1057,20 +1055,18 @@ fn economic_proof_artifact_for(
 /// just registered — in the same single snapshot, with no second read and no
 /// window in which the tree could move.
 ///
-/// **What publishing it does not do.** A `TA_B` on the fleet is an artifact a
-/// verifier can fetch. It realizes nothing: no fence is released, no frontier
-/// advances, no market fold leaves `PartialPendingRealization`, and nothing
-/// here constructs a `BundleAcceptanceWitness` — that type's only constructor
-/// is 2c-D §7's verifier, which needs the composed bundle and an
-/// independently established trader AK that this path does not have.
-fn trader_acceptance_artifact_for(
+/// **What publishing it does not do.** A `TA_B` on the fleet is evidence a
+/// verifier can fetch. It realizes nothing: 2c-D §7 in the composition walk is
+/// what turns it into a `BundleAcceptanceWitness`, and only together with the
+/// other certification predicates (2c-D §14, C2-R1).
+fn trader_acceptance_for(
     tree: &EconomicSmt,
     witness: &EconomicTransitionWitness,
     genesis: &[u8; 32],
     devid: &[u8; 32],
     validated: &ValidatedEconomicRoot,
-) -> Result<Option<(String, Vec<u8>, &'static str)>, DsmError> {
-    let Some(acceptance) = dsm::economic::acceptance_produce::produce_trader_acceptance(
+) -> Result<Option<dsm::economic::trader_acceptance::TraderAcceptance>, DsmError> {
+    dsm::economic::acceptance_produce::produce_trader_acceptance(
         tree,
         witness,
         genesis,
@@ -1078,21 +1074,7 @@ fn trader_acceptance_artifact_for(
         validated.economic_root(),
         validated.economic_position(),
     )
-    .map_err(|e| DsmError::invalid_operation(format!("trader acceptance: {e}")))?
-    else {
-        return Ok(None);
-    };
-    let bytes = acceptance
-        .encode()
-        .map_err(|e| storage_err("trader acceptance encode", e))?;
-    Ok(Some((
-        crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
-            &bytes,
-        ),
-        bytes,
-        "trader-settlement-acceptance",
-    )))
+    .map_err(|e| DsmError::invalid_operation(format!("trader acceptance: {e}")))
 }
 
 /// Everything after local acceptance. Separated so recovery re-enters here.
@@ -1314,15 +1296,50 @@ pub(crate) async fn finish_admission(
     // republish is idempotent — and if a replay ever diverged, the root guard
     // inside the producer would refuse rather than publish a path that folds
     // to a root nothing registered.
-    // No locator is returned. `ta_B` IS the object's inner address under this
-    // namespace, and a Def 14.2 receipt binds `ta_B` — so a consumer already
-    // has the address from the artifact that names it, and a second copy
-    // threaded through the admission outcome would be one more place for it
-    // to disagree. PR C adds a fetch path together with the code that reads it.
-    if let Some((key, bytes, purpose)) =
-        trader_acceptance_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)?
+    //
+    // AND ITS LOCATOR (2c-D §14, D-c). `B` was bound before `TA_B` existed, so
+    // `B` cannot name it, and nothing a composer holds lets it derive `ta_B`.
+    // The locator is keyed by `b` and names two content addresses: `TA_B`, and
+    // the inclusion proof built above, which carries both the acceptance leaf
+    // and the settlement-receipt leaf under `R_T^+` — Req 21.16's path. It is
+    // non-authoritative: what it names is fetched by content address and
+    // verified, never believed. (An earlier comment here said a Def 14.2
+    // receipt binds `ta_B` and would locate it; C2-R1 established that the
+    // receipt this code publishes does not, which is why the locator exists.)
+    if let Some(acceptance) =
+        trader_acceptance_for(&tree, &witness, &genesis, &devid, &new_validated)?
     {
-        post_admit_artifacts.push((key, bytes, purpose));
+        let bytes = acceptance
+            .encode()
+            .map_err(|e| storage_err("trader acceptance encode", e))?;
+        let ta_b = dsm::storage_object::immutable_inner(
+            dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+            &bytes,
+        );
+        // The acceptance leaf is externally citable, so the proof artifact
+        // above MUST exist for a settle. Refused rather than published
+        // half-located: a locator that could never name Req 21.16's path would
+        // strand the settlement bound-but-unrealized for no protocol reason.
+        let proof_addr = economic_proof_addr.ok_or_else(|| {
+            DsmError::invalid_operation(
+                "trader acceptance: the settle wrote an acceptance leaf but no inclusion proof \
+                 exists to locate — refusing to publish an acceptance nothing can verify",
+            )
+        })?;
+        let b = acceptance.acceptance_leaf().bundle;
+        post_admit_artifacts.push((
+            crate::sdk::economic_registers::immutable_object_key(
+                dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+                &bytes,
+            ),
+            bytes,
+            "trader-settlement-acceptance",
+        ));
+        post_admit_artifacts.push((
+            crate::sdk::trader_acceptance_locator::locator_key(&b),
+            crate::sdk::trader_acceptance_locator::encode_locator(&ta_b, &proof_addr),
+            "trader-acceptance-locator",
+        ));
     }
 
     let had_post_admit = !post_admit_artifacts.is_empty();
