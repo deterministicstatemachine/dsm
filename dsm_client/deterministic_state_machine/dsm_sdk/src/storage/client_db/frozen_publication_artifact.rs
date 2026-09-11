@@ -307,6 +307,29 @@ pub fn get_latest_artifact_for_key(object_key: &str) -> Result<Option<FrozenArti
     Ok(rec)
 }
 
+/// The current (non-superseded) row frozen with `purpose` and bound to
+/// `bound_root`, if any — how an obligation keyed by the root it commits to is
+/// found without first rebuilding its bytes.
+pub fn find_artifact_by_purpose_and_bound_root(
+    purpose: &str,
+    bound_root: &[u8; 32],
+) -> Result<Option<FrozenArtifact>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let rec = conn
+        .query_row(
+            &format!(
+                "SELECT {SELECT_COLS} FROM frozen_publication_artifact
+                  WHERE purpose = ?1 AND bound_root = ?2 AND state != 'superseded'
+                  ORDER BY insertion_ordinal DESC LIMIT 1"
+            ),
+            params![purpose, bound_root.as_slice()],
+            row_to_artifact,
+        )
+        .optional()?;
+    Ok(rec)
+}
+
 /// Every artifact still owed to its quorum, oldest first, bounded. Superseded
 /// and published rows are excluded — nothing here is ever a second copy of a
 /// fact, only bytes not yet delivered.
