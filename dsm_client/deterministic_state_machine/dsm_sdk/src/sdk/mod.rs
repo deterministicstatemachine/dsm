@@ -118,6 +118,7 @@ pub mod routing_sdk;
 pub mod settlement_receipt_codec;
 pub mod settlement_slot;
 pub mod smart_commitment_sdk;
+pub mod trader_acceptance_locator;
 pub mod transfer_hooks;
 pub mod vault_rehydration;
 pub mod vault_state_composition;

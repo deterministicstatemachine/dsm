@@ -2,19 +2,18 @@
 
 //! Wire codec + storage access for `TraderSettlementReceiptV1`.
 //!
-//! The receipt is what turns a published pending pointer from a claim into a
-//! consumable fact. This module is only the transport: it moves receipts to and
-//! from storage and converts between the proto and the typed core struct. Every
-//! judgement about whether a receipt is *good* lives in
-//! [`dsm::dlv::settlement_receipt_leaf::verify_trader_settlement_receipt`], so
-//! there is one verifier rather than one per caller.
+//! TRANSPORT ONLY (2c-D §14, ruling C2-R1 point 8). This module moves receipts
+//! to and from storage and converts between the proto and the typed core
+//! struct. It never judges whether a receipt is true: that is Req 21.16
+//! ([`dsm::dlv::published_receipt::verify_published_receipt`]), which the
+//! composition walk runs against the trader's validated `R_T^+`. A decoded
+//! receipt is evidence, never settlement.
 //!
 //! Storage keys are untrusted labels. A receipt fetched from
 //! `sofi/vault-receipt/{vault}/{x}` is re-checked against the vault and X the
 //! caller actually asked about — a storage node that serves the wrong bytes
 //! under the right key changes nothing.
 
-use dsm::dlv::settlement_receipt_leaf::ReceiptError;
 use dsm::dlv::settlement_receipt_leaf::{SettledTrade, SignedTraderSettlementReceipt};
 use dsm::types::proto as generated;
 use prost::Message;
@@ -101,9 +100,12 @@ pub(crate) fn receipt_to_proto(
     }
 }
 
-/// Publish a receipt. Called by the trader AFTER its settling advance commits —
-/// the credit is already final at that point, so this write is what makes the
-/// consumption visible to everyone else, not what authorizes it.
+/// TEST FIXTURE: plant a receipt at its key. Not the production path — it
+/// returns `Ok` when ONE node accepts, which cannot discharge 2c-D §14 C2-R1
+/// point 4. The settling trader publishes its receipt as a frozen publication
+/// artifact and releases its fence only once that artifact is published at
+/// quorum (D-b).
+#[cfg(test)]
 pub(crate) async fn publish_settlement_receipt(
     receipt: &SignedTraderSettlementReceipt,
 ) -> Result<(), dsm::types::error::DsmError> {
@@ -114,53 +116,24 @@ pub(crate) async fn publish_settlement_receipt(
         .map(|_| ())
 }
 
-/// What fetching the receipt at `(vault, x)` established.
-///
-/// This used to be an `Option`, and its doc argued the collapse was deliberate:
-/// "the only decision downstream is whether the pointer may be folded, and
-/// every one of these says it may not." That is true of FOLDING and false of
-/// CLASSIFICATION. Fourteen distinct causes — a storage miss, a transport
-/// fault, a truncated record, a receipt served for another settlement, and a
-/// SPHINCS+ signature that does not verify — were reduced to one bit, and that
-/// bit became `MarketRealization::Absent`, which `break`s the composition walk
-/// and returns `Ok(...)`. A forged receipt was not an error at all.
-///
-/// Follows `ResolveFailure`'s shape. `Absent` is ONE node's answer where this
-/// reader looked, never a quorum observation.
+/// What READING the receipt at `(vault, x)` established — transport and
+/// decoding only (2c-D §14, ruling C2-R1 point 8). Nothing here says whether the
+/// receipt is TRUE: that is Req 21.16's, against the validated `R_T^+`, inside
+/// the composition walk.
 #[derive(Debug)]
 pub(crate) enum ReceiptFetch {
-    /// No object at the key. Not an error — the trade may simply not have
-    /// settled yet.
+    /// No object at the key — not published yet.
     Absent,
-    /// Could not read: storage config, transport, node fault. Retryable, and
-    /// establishes NOTHING about whether a receipt exists.
+    /// Could not read. Retryable, and establishes nothing.
     Unavailable(String),
-    /// Bytes were served but are not a receipt for this settlement:
-    /// undecodable, a field of the wrong width, or a record for another vault
-    /// or `x`.
+    /// Bytes are present and are not a receipt for this settlement.
     Malformed(&'static str),
-    /// A well-formed receipt that FAILS verification. INVALID — never absence.
-    Invalid(ReceiptError),
-    /// A receipt that verifies. Per `settlement_receipt_leaf`'s own header this
-    /// is a statement the receipt makes about itself, not proof value moved.
-    Verified(Box<SignedTraderSettlementReceipt>),
+    /// A decoded receipt, with no verification of any kind applied.
+    Decoded(Box<SignedTraderSettlementReceipt>),
 }
 
-impl ReceiptFetch {
-    /// The verified receipt, or `None` for every other outcome — for callers
-    /// whose only question is "did it verify". Production paths that must tell
-    /// the outcomes apart match on the enum instead.
-    pub(crate) fn verified(self) -> Option<SignedTraderSettlementReceipt> {
-        match self {
-            Self::Verified(r) => Some(*r),
-            _ => None,
-        }
-    }
-}
-
-/// Fetch the receipt witnessing the settlement at `(vault, x)` and say exactly
-/// what was found. No `.ok()?` at any step: every failure keeps its class.
-pub(crate) async fn fetch_verified_receipt(vault_id: &[u8; 32], x: &[u8; 32]) -> ReceiptFetch {
+/// Read and decode the receipt at `(vault, x)`. Transport only.
+pub(crate) async fn fetch_receipt(vault_id: &[u8; 32], x: &[u8; 32]) -> ReceiptFetch {
     let key = vault_receipt_key(vault_id, x);
     let bytes = match BitcoinTapSdk::storage_get_bytes_opt(&key).await {
         Ok(Some(b)) => b,
@@ -173,16 +146,10 @@ pub(crate) async fn fetch_verified_receipt(vault_id: &[u8; 32], x: &[u8; 32]) ->
     let Some(receipt) = receipt_from_proto(&proto) else {
         return ReceiptFetch::Malformed("a receipt field is not 32 bytes");
     };
-    // The key is a label the storage node chose to serve these bytes under; the
-    // record's own fields are the claim. Require them to agree, or a node could
-    // answer a query about one settlement with a receipt for another.
     if receipt.vault_id != *vault_id || receipt.trade.x != *x {
         return ReceiptFetch::Malformed("the served receipt is for another vault or settlement");
     }
-    match dsm::dlv::settlement_receipt_leaf::verify_trader_settlement_receipt(&receipt) {
-        Ok(()) => ReceiptFetch::Verified(Box::new(receipt)),
-        Err(e) => ReceiptFetch::Invalid(e),
-    }
+    ReceiptFetch::Decoded(Box::new(receipt))
 }
 
 #[cfg(test)]
@@ -190,7 +157,6 @@ mod tests {
     use super::*;
     use dsm::dlv::settlement_receipt_leaf::{
         settlement_receipt_key, settlement_receipt_value, sign_trader_settlement_receipt,
-        verify_trader_settlement_receipt,
     };
     use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
 
@@ -227,8 +193,8 @@ mod tests {
     }
 
     /// The wire round-trip must preserve every settled quantity — a receipt that
-    /// loses a field on the wire would either fail to verify (best case) or
-    /// verify against a different trade than the one that happened.
+    /// loses a field on the wire would be checked by Req 21.16 against a
+    /// different trade than the one that happened.
     #[test]
     fn round_trip_preserves_the_whole_settlement() {
         let r = sample();
@@ -246,10 +212,6 @@ mod tests {
         assert_eq!(back.smt_siblings, r.smt_siblings);
         assert_eq!(back.trader_public_key, r.trader_public_key);
         assert_eq!(back.trader_signature, r.trader_signature);
-
-        // And it still verifies after the trip, which the field-by-field
-        // comparison above does not by itself establish.
-        verify_trader_settlement_receipt(&back).expect("survives the wire");
     }
 
     /// A malformed record must not decode into a struct wearing zeroed defaults.
@@ -281,20 +243,6 @@ mod tests {
                 "{what} must decode to None, not to a default-filled struct"
             );
         }
-    }
-
-    /// Sibling count is not checked by the codec — it is the verifier's call —
-    /// but a truncated path must still be rejected end to end.
-    #[test]
-    fn a_truncated_path_survives_decoding_and_dies_at_verification() {
-        let r = sample();
-        let mut p = receipt_to_proto(&r);
-        p.smt_siblings.truncate(255);
-        let typed = receipt_from_proto(&p).expect("well-formed fields, wrong count");
-        assert!(
-            verify_trader_settlement_receipt(&typed).is_err(),
-            "a 255-sibling path must not verify"
-        );
     }
 
     #[test]

@@ -264,7 +264,8 @@ pub fn active_verdict(
 /// Handing a committed fence back to the binding driver re-runs a full Paxos
 /// round for a decision that is already made: it re-commits, burns a ballot,
 /// and re-fetches the bundle — once per completed settlement, on every sync,
-/// forever. Acceptance is owned by a separate continuation path.
+/// forever. Acceptance is owned by a separate continuation path:
+/// [`list_acceptance_pending_fences`] and 2c-D §14's D-f.
 pub fn list_binding_recovery_fences() -> Result<Vec<TraderFence>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -275,6 +276,28 @@ pub fn list_binding_recovery_fences() -> Result<Vec<TraderFence>> {
     ))?;
     let rows = stmt
         .query_map([], |r| {
+            row_to_fence(r).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// The fences on `trader_chain_id` whose binding COMMITTED and whose exact
+/// permitted successor is not yet released, oldest first — the work list of
+/// 2c-D §14's D-f: each is an already-bound settlement awaiting only its
+/// completion. A row here says where work is, never that it may be released.
+pub fn list_acceptance_pending_fences(trader_chain_id: &[u8; 32]) -> Result<Vec<TraderFence>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM trader_parent_fence
+          WHERE state = 'committed_awaiting_acceptance'
+            AND trader_chain_id = ?1
+          ORDER BY insertion_ordinal ASC"
+    ))?;
+    let rows = stmt
+        .query_map(params![trader_chain_id.as_slice()], |r| {
             row_to_fence(r).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))
         })?
         .filter_map(|r| r.ok())

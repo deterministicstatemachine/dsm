@@ -4,16 +4,16 @@
 //! INDEPENDENTLY VALIDATED economic root `R_T^+` (amendment 2c-D; owner ruling
 //! D4 as corrected 2026-09-11, recorded at 2c-C4 §9).
 //!
-//! ## Why this exists beside [`verify_trader_settlement_receipt`]
+//! ## Why the receipt's own fields are not evidence
 //!
-//! That function reads `trader_genesis`, `trader_devid`, `trader_public_key`
-//! and `post_root` **out of the receipt** and then checks the receipt against
-//! them. Its own banner records what that is worth: *"the cheapest tree
-//! satisfying the inclusion check has ONE leaf, so the honest-path fixture and
-//! a forgery are byte-identical constructions — anyone holding a SPHINCS+
-//! keypair can build both."* It establishes that a receipt is internally
-//! consistent, which is **serialization authenticity, not settlement
-//! authenticity**.
+//! `trader_genesis`, `trader_devid`, `trader_public_key` and `post_root` are
+//! written by whoever built the receipt. A check that reads them **out of the
+//! receipt** and tests the receipt against them establishes only that the
+//! receipt is internally consistent — **serialization authenticity, not
+//! settlement authenticity** — because the cheapest device tree including its
+//! leaf has ONE leaf, so an honest receipt and a forgery are byte-identical
+//! constructions. That self-referential verifier is deleted (2c-D §14, D-e);
+//! this is the only receipt verifier.
 //!
 //! ## Which root, and why it is not the device `post_root`
 //!
@@ -49,11 +49,11 @@
 //!
 //! ## What a `VerifiedReceipt` is NOT
 //!
-//! It is not realization. Amendment 2c-D §11's boundary is explicit: this is
-//! verification machinery, and the behavioural cutover is a separate change.
-//! Holding one does **not** release a fence, publish anything, promote a
-//! market fold out of `PartialPendingRealization`, or construct an
-//! [`crate::dlv::successor_validity::IndependentRealization`].
+//! It is not realization. It is one input to the composition walk's
+//! certification (2c-D §14, C2-R1): only the walk combines it with
+//! correspondence, the §7 bundle acceptance and intent satisfaction into an
+//! [`crate::dlv::successor_validity::IndependentRealization`]. Holding one
+//! releases no fence and certifies nothing on its own.
 
 use crate::ccb::CcbError;
 use crate::dlv::settlement_receipt_leaf::{SettledTrade, SignedTraderSettlementReceipt};
@@ -303,14 +303,14 @@ mod tests {
 
     use crate::dlv::settlement_receipt_leaf::{
         derive_receipt_id, settlement_receipt_key, settlement_receipt_value,
-        sign_trader_settlement_receipt, verify_trader_settlement_receipt,
+        sign_trader_settlement_receipt,
     };
     use crate::economic::state::EconomicBalanceState;
     use crate::economic::tree::EconomicSmt;
     use crate::economic::write_set::{
         build_write_set, CreditSourceFacts, EconomicPreState, EconomicWriteContext,
     };
-    use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
+    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
     use crate::types::operations::{Operation, TransactionMode};
 
     const G: [u8; 32] = [0x11; 32];
@@ -457,19 +457,24 @@ mod tests {
 
     /// **THE DEFECT THIS FUNCTION EXISTS TO REMOVE.** A receipt claiming a
     /// trade the trader never committed — here, a better output — is
-    /// internally consistent over its own device tree, and the legacy
-    /// verifier accepts it. Req 21.16 refuses it, because the validated
-    /// economic state does not commit those facts.
+    /// internally consistent over its own device tree: its own path proves
+    /// its leaf under the root it names. Req 21.16 refuses it, because the
+    /// validated economic state does not commit those facts.
     #[test]
-    fn a_self_rooted_receipt_is_refused_though_the_legacy_verifier_accepts_it() {
+    fn a_self_rooted_receipt_is_refused_though_its_own_device_path_proves_it() {
         let mut f = honest();
         let mut inflated = trade();
         inflated.output_amount = 950;
         f.receipt = legacy_receipt(G, DEV, inflated);
 
+        let own = SmtInclusionProof {
+            key: settlement_receipt_key(&G, &DEV, &VAULT, &f.receipt.receipt_id),
+            value: Some(settlement_receipt_value(&inflated)),
+            siblings: f.receipt.smt_siblings.clone(),
+        };
         assert!(
-            verify_trader_settlement_receipt(&f.receipt).is_ok(),
-            "the self-referential check passes, which is exactly the problem"
+            SparseMerkleTree::verify_proof_against_root(&own, &f.receipt.post_root),
+            "the receipt is internally consistent, which is exactly the problem"
         );
         assert!(matches!(
             verify(&f),

@@ -1538,7 +1538,7 @@ pub fn verify_operation_write_set(
             // EXACTLY ONE bundle-acceptance leaf. #845's transitional rule was
             // `<= 1`, correct while nothing could produce one; leaving it there
             // now would preserve a legal settle that can never obtain a `TA_B`
-            // and would sit at `PartialPendingRealization` forever.
+            // and would stay bound-unrealized forever.
             expect_exactly_one_acceptance(&acceptances, witness.economic_operation_id)?;
             if witness.mutations.len() != 4 || balances.len() != 2 || receipts.len() != 1 {
                 return Err(WriteSetError::WrongWriteSet {

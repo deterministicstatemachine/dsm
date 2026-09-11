@@ -420,6 +420,95 @@ pub fn derive_direction(
     }
 }
 
+/// **The asset pair and orientation, as an explicit predicate** (2c-D §14,
+/// C2-R2).
+///
+/// `{input, output}` must be the parent's committed market pair in one
+/// permitted orientation, and [`derive_direction`] must succeed for exactly
+/// that orientation. No unknown asset, same-side asset, or foreign policy
+/// commitment reaches successor comparison. Stated here rather than left to
+/// the helper so the asset binding is auditable at the point it is required;
+/// both constant-product orientations are permitted in beta, so no direction
+/// is disallowed.
+pub fn check_market_orientation(
+    parent: &VaultStateV2,
+    input_policy_commit: &[u8; 32],
+    output_policy_commit: &[u8; 32],
+) -> Result<Direction, Reason> {
+    let pair = [
+        parent.market_policy.token_a(),
+        parent.market_policy.token_b(),
+    ];
+    if input_policy_commit == output_policy_commit
+        || !pair.contains(&input_policy_commit)
+        || !pair.contains(&output_policy_commit)
+    {
+        return Err(Reason::PairNotVaultPair);
+    }
+    derive_direction(
+        &parent.market_policy,
+        input_policy_commit,
+        output_policy_commit,
+    )
+    .ok_or(Reason::PairNotVaultPair)
+}
+
+/// **CORR.5's derivation for a market successor** (2c-D §14, C2-R2), from the
+/// ACCEPTED operation the lineage walk verified.
+///
+/// ```text
+/// orientation            check_market_orientation, before anything is derived
+/// op.parent_sequence  == parent.generation
+/// op.fee_bps          == Φ(V_n)
+/// derive_market_successor(parent, c_n, {op pair, op.input_amount, Φ(V_n)})
+/// derived output      == op.output_amount
+/// ```
+///
+/// The caller then compares `Canon(expected)` with `T_v.successor` (`10.a`).
+/// CORR.4 ties the operation to the route; this ties it to `T_v`.
+pub fn derive_accepted_market_successor(
+    parent: &VaultStateV2,
+    c_n: [u8; 32],
+    accepted: &AcceptedTransition,
+) -> DeriveExpected {
+    let direction = match check_market_orientation(
+        parent,
+        &accepted.input_policy_commit,
+        &accepted.output_policy_commit,
+    ) {
+        Ok(d) => d,
+        Err(r) => return DeriveExpected::Refused(r),
+    };
+    if accepted.parent_sequence != parent.generation {
+        return DeriveExpected::Refused(Reason::GenerationMismatch);
+    }
+    let phi = parent.fee_policy.fee_bps();
+    if accepted.fee_bps != phi {
+        return DeriveExpected::Refused(Reason::RealizationEvidenceInvalid);
+    }
+    let next = match derive_market_successor(
+        parent,
+        c_n,
+        &MarketTerms {
+            input_policy_commit: accepted.input_policy_commit,
+            output_policy_commit: accepted.output_policy_commit,
+            input_amount: accepted.input_amount,
+            fee_bps: phi,
+        },
+    ) {
+        DeriveExpected::Derived(next) => next,
+        refused => return refused,
+    };
+    let (out_before, out_after) = match direction {
+        Direction::AtoB => (parent.reserve_b, next.reserve_b),
+        Direction::BtoA => (parent.reserve_a, next.reserve_a),
+    };
+    match out_before.checked_sub(out_after) {
+        Some(paid) if paid == accepted.output_amount => DeriveExpected::Derived(next),
+        _ => DeriveExpected::Refused(Reason::RealizationEvidenceInvalid),
+    }
+}
+
 // ============================================================
 // Ruling F — the budget rule
 // ============================================================
@@ -473,41 +562,37 @@ impl DeriveExpected {
 
 /// The fact that a market settlement ACTUALLY OCCURRED.
 ///
-/// **There is deliberately no constructor, here or anywhere else yet.**
+/// A trader settlement receipt cannot establish this on its own: the legacy
+/// verifier reads the public key, genesis, DevID and root out of the receipt,
+/// and the cheapest tree satisfying its inclusion check has one leaf. The fact
+/// is built instead from THREE independently established facts, each of which
+/// has exactly one constructor:
 ///
-/// A trader settlement receipt cannot establish this. `verify_trader_settlement_receipt`
-/// reads the public key, genesis, DevID and root out of the receipt itself, and
-/// the cheapest tree satisfying its inclusion check has one leaf — so, in that
-/// module's own words, the honest fixture and a forgery are byte-identical
-/// constructions and it must not be read as evidence that value moved.
-/// Establishing this fact means binding `post_root` to an independently
-/// verifiable trader transition, which is amendment 2c-C4's (5c-2's) work.
+/// ```text
+/// MarketCorrespondence      CORR.1-CORR.5          check_market_correspondence
+/// BundleAcceptanceWitness   2c-D §7, and only §7   verify_trader_acceptance
+/// IntentSatisfaction        2c-E §6 SAT.1-SAT.6    check_intent_satisfaction
+/// ```
 ///
-/// Its absence is load-bearing rather than a stub: a market successor cannot
-/// reach [`C3Verdict::Valid`] without one, so the encoder cut alone can never
-/// make a market successor look complete. That inference —
-/// `2c-A lands + 10.a passes = market valid` — is not sound, and this type is
-/// what stops the compiler from letting anyone write it:
+/// The third is C2's (2c-D §14, ruling C2-R2): `may_certify()` must be
+/// unreachable unless Tier-1 intent satisfaction held, and the 5-c-1 gate that
+/// was its only live enforcement point is deleted by the same change. Making it
+/// a required argument is what makes that a type error rather than a review
+/// comment. A struct literal remains impossible:
 ///
 /// ```compile_fail
 /// use dsm::dlv::successor_validity::IndependentRealization;
 /// let _ = IndependentRealization {
 ///     _corr: unreachable!(),
 ///     _acceptance: unreachable!(),
+///     _intent: unreachable!(),
 /// };
 /// ```
-///
-/// **2c-C4 gave it a definition and deliberately not a constructor that can
-/// run.** [`IndependentRealization::from_parts`] takes C4's own half — a
-/// [`MarketCorrespondence`], which the walk can produce — together with a
-/// [`BundleAcceptanceWitness`], which nothing can. The impossibility moved one
-/// level down rather than away: 2c-D defines the bundle-acceptance leaf, binds
-/// the accepted economic result to the exact `b`, and gives that witness its
-/// only constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndependentRealization {
     _corr: MarketCorrespondence,
     _acceptance: BundleAcceptanceWitness,
+    _intent: IntentSatisfaction,
 }
 
 /// **2c-D's conjunct: this acceptance realizes THIS bundle `b`.**
@@ -590,7 +675,13 @@ impl BundleAcceptanceWitness {
 
 /// The accepted `DlvSettle` the ordered walk validated, as `CORR` reads it
 /// (2c-C4 §4). Every field comes from the transition the walk VALIDATED, never
-/// from the bundle's carried bytes.
+/// from the bundle's carried bytes and never from a published receipt.
+///
+/// **The balance effects are typed (2c-D §14, ruling C2-R2).** They used to be
+/// one opaque digest that no production code computed, which made CORR.4 — and
+/// with it every market realization — unreachable. They are now the operation's
+/// own fields, and the only way to obtain them is
+/// [`AcceptedTransition::from_verified_settle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedTransition {
     /// The accepted successor's own parent on the trader's bilateral chain.
@@ -601,19 +692,113 @@ pub struct AcceptedTransition {
     pub external_commitment_x: [u8; 32],
     /// The vault parent the accepted operation consumes.
     pub parent_binding: [u8; 32],
-    /// A digest of the operation's balance effects, for CORR.4.
-    pub effects_digest: [u8; 32],
+    /// The vault generation the accepted operation consumes.
+    pub parent_sequence: u64,
+    /// The asset the trader paid into the vault, and how much.
+    pub input_policy_commit: [u8; 32],
+    pub input_amount: u64,
+    /// The asset the vault paid out, and how much.
+    pub output_policy_commit: [u8; 32],
+    pub output_amount: u64,
+    /// The fee rate the operation states.
+    pub fee_bps: u32,
+}
+
+impl AcceptedTransition {
+    /// The accepted effects of a VERIFIED `DlvSettle`, with the successor pair
+    /// the same walk recomputed. `None` for any other operation: a transition
+    /// that is not a settle has no market effects to correspond.
+    ///
+    /// `operation` must be the lineage walk's verified operation — the same
+    /// bytes `sigma_dsm` authenticated — and never the bundle's
+    /// `recovery_material`, which is what CORR compares AGAINST.
+    pub fn from_verified_settle(
+        embedded_parent: [u8; 32],
+        c_dsm_plus: [u8; 32],
+        operation: &crate::types::operations::Operation,
+    ) -> Option<Self> {
+        let crate::types::operations::Operation::DlvSettle {
+            parent_binding,
+            parent_sequence,
+            external_commitment_x,
+            input_policy_commit,
+            input_amount,
+            output_policy_commit,
+            output_amount,
+            fee_bps,
+            ..
+        } = operation
+        else {
+            return None;
+        };
+        Some(Self {
+            embedded_parent,
+            c_dsm_plus,
+            external_commitment_x: *external_commitment_x,
+            parent_binding: *parent_binding,
+            parent_sequence: *parent_sequence,
+            input_policy_commit: *input_policy_commit,
+            input_amount: *input_amount,
+            output_policy_commit: *output_policy_commit,
+            output_amount: *output_amount,
+            fee_bps: *fee_bps,
+        })
+    }
 }
 
 /// The market coordinates `B` carries, as `CORR` compares them. Read from the
 /// decoded bundle; the two coordinate systems are never mixed (2c-C4 §2).
+///
+/// The route's economics are the ONE beta allocation (2c-A ruling 3), typed.
+/// The only constructor that reads a bundle is
+/// [`BundleCoordinates::from_market_bundle`], which refuses every other shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BundleCoordinates {
     pub trader_parent: [u8; 32],
     pub trader_successor: [u8; 32],
     pub route_set_commitment: [u8; 32],
-    /// A digest of the selected route's `T_v` economics, for CORR.4.
-    pub route_effects_digest: [u8; 32],
+    /// The single allocation's `c_n`, amounts and fee rate.
+    pub leg_parent_binding: [u8; 32],
+    pub leg_delta_in: u64,
+    pub leg_delta_out: u64,
+    pub leg_fee_bps: u32,
+    /// The parent binding the bundle's one `T_v` names.
+    pub transition_parent_binding: [u8; 32],
+}
+
+impl BundleCoordinates {
+    /// The coordinates of a BETA market bundle: exactly one route leg, that leg
+    /// a bare `Allocation`, and exactly one `T_v` (2c-A ruling 3).
+    ///
+    /// Any other shape is `BundleNotCanonical` — "not specified for this
+    /// profile" (2c-D §14, C2-R2), never a shape this function tries to read.
+    pub fn from_market_bundle(
+        terms: &crate::ccb::MarketTerms,
+        transitions: &[crate::ccb::ConsumedDlvTransition],
+    ) -> Result<Self, Reason> {
+        let alloc = beta_allocation(&terms.selected_route)?;
+        let [transition] = transitions else {
+            return Err(Reason::BundleNotCanonical);
+        };
+        Ok(Self {
+            trader_parent: terms.trader_parent,
+            trader_successor: terms.trader_successor,
+            route_set_commitment: terms.route_set_commitment,
+            leg_parent_binding: alloc.parent_binding,
+            leg_delta_in: alloc.delta_in,
+            leg_delta_out: alloc.delta_out,
+            leg_fee_bps: alloc.fee_policy.fee_bps(),
+            transition_parent_binding: transition.parent_binding,
+        })
+    }
+}
+
+/// The one allocation a beta route may carry, or `BundleNotCanonical`.
+fn beta_allocation(route: &crate::ccb::Route) -> Result<&crate::ccb::Allocation, Reason> {
+    match route.legs() {
+        [crate::ccb::RouteLeg::Single(alloc)] => Ok(alloc),
+        _ => Err(Reason::BundleNotCanonical),
+    }
 }
 
 /// C4's own half of realization: `CORR.1`–`CORR.5` all held for one candidate.
@@ -675,8 +860,21 @@ pub fn check_market_correspondence(
     if accepted.parent_binding != cursor_c_n {
         return Err(Reason::StaleParent);
     }
-    // CORR.4 — the effects are the selected route's economics.
-    if accepted.effects_digest != bundle.route_effects_digest {
+    // CORR.4 — the effects are the selected route's economics, TYPED and one
+    // equality at a time (2c-D §14, C2-R2), so a mutation dropping any single
+    // field is caught by a test named for it.
+    if bundle.leg_parent_binding != accepted.parent_binding
+        || bundle.transition_parent_binding != accepted.parent_binding
+    {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    if bundle.leg_delta_in != accepted.input_amount {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    if bundle.leg_delta_out != accepted.output_amount {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    if bundle.leg_fee_bps != accepted.fee_bps {
         return Err(Reason::RealizationEvidenceInvalid);
     }
     // CORR.5 — the byte correspondence held at the cursor. Structural: a
@@ -693,21 +891,138 @@ pub fn check_market_correspondence(
 }
 
 impl IndependentRealization {
-    /// **The realization fact, 2c-C4 §5.** C4's own half plus 2c-D's witness.
-    ///
-    /// Callable the moment `BundleAcceptanceWitness` gains a constructor, and
-    /// not before. Until then a market fold carries
-    /// [`C3Verdict::PartialPendingRealization`] and **must not** be promoted
-    /// to realized from the correspondence alone.
+    /// **The realization fact, 2c-C4 §5, completed by 2c-D.** C4's own half,
+    /// 2c-D's acceptance witness, and the Tier-1 intent fact C2 re-sourced.
+    /// Each argument exists only because its one verifier returned it.
     pub fn from_parts(
         correspondence: MarketCorrespondence,
         acceptance: BundleAcceptanceWitness,
+        intent: IntentSatisfaction,
     ) -> Self {
         Self {
             _corr: correspondence,
             _acceptance: acceptance,
+            _intent: intent,
         }
     }
+}
+
+/// **Tier-1 intent satisfaction held** — 2c-E §6 `SAT.1`–`SAT.6` for the
+/// authenticated `TradeIntent` and the selected route.
+///
+/// Private field and one constructor, [`check_intent_satisfaction`], so
+/// holding one IS the fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentSatisfaction {
+    intent: crate::ccb::TradeIntent,
+}
+
+impl IntentSatisfaction {
+    /// The intent that was shown satisfied.
+    pub fn intent(&self) -> &crate::ccb::TradeIntent {
+        &self.intent
+    }
+}
+
+/// What Tier 1 is checked from. Every operand is authenticated: the intent and
+/// route are `B`'s own decoded fields, and the RouteCommit is the one inside
+/// the lineage-verified operation, which `sigma_dsm` covers — never a
+/// RouteCommit fetched under a storage key (2c-D §14, D-a).
+#[derive(Debug, Clone, Copy)]
+pub struct IntentEvidence<'a> {
+    pub intent: &'a crate::ccb::TradeIntent,
+    pub route: &'a crate::ccb::Route,
+    /// The VERIFIED operation's `route_commit_bytes`.
+    pub route_commit_bytes: &'a [u8],
+    pub vault_id: &'a [u8; 32],
+    /// The trader authority the lineage walk proved.
+    pub proven_ak: &'a [u8],
+}
+
+/// **2c-E §6, `SAT.1`–`SAT.6`** — the exact-output restatement of 2c-A's
+/// Tier 1, which is what C2 re-sources (2c-D §14, D-a). 2c-A's original
+/// `min_out`, `max_fee`, `max_hops`, `max_fanout` and `k` are not evaluated:
+/// 2c-E removed them from `TradeIntent`.
+///
+/// ```text
+/// SAT.1  I is B's decoded field 1; nothing carried stands in for it (structural)
+/// SAT.2  the RouteCommit's signature verifies, and under the PROVEN key
+/// SAT.3  the intent's tokens, amounts and fee equal the signed hop
+/// SAT.4  the selected route's one leg equals the signed hop
+/// SAT.5  re-simulating V_n at Φ(V_n) reproduces exact_out EXACTLY
+/// SAT.6  the intent's fee rate is Φ(V_n)'s
+/// ```
+///
+/// SAT.5 re-simulates from the INTENT against the authenticated `V_n`, not from
+/// the route and not by reusing CORR.5's derivation: 2c-E is explicit that the
+/// value `exact_out` is checked against must come from authenticated state.
+pub fn check_intent_satisfaction(
+    evidence: &IntentEvidence<'_>,
+    parent: &VaultStateV2,
+    c_n: [u8; 32],
+) -> Result<IntentSatisfaction, Reason> {
+    let intent = evidence.intent;
+    let alloc = beta_allocation(evidence.route)?;
+
+    // SAT.2 — pure verification: decode, schema, signature, the hop for THIS
+    // vault, bound to THIS parent. Then the signing key must be the proven one.
+    let hop = crate::dlv::route_commit::verify_route_commit_hop(
+        evidence.route_commit_bytes,
+        evidence.vault_id,
+        &c_n,
+    )
+    .map_err(|e| match e {
+        crate::dlv::route_commit::RouteHopError::ParentBindingMismatch => Reason::StaleParent,
+        _ => Reason::RealizationEvidenceInvalid,
+    })?;
+    if hop.initiator_public_key.as_slice() != evidence.proven_ak {
+        return Err(Reason::SettlerKeyMismatch);
+    }
+
+    // SAT.3 — the intent IS what the trader signed.
+    if intent.token_in != hop.token_in
+        || intent.token_out != hop.token_out
+        || intent.amount_in != hop.input_amount
+        || intent.exact_out != hop.expected_output
+        || intent.fee_bps != hop.fee_bps
+    {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    // SAT.4 — the selected route's one leg IS the signed hop. The hop's
+    // parent binding was verified equal to `c_n` above.
+    if alloc.parent_binding != c_n {
+        return Err(Reason::StaleParent);
+    }
+    if alloc.delta_in != hop.input_amount
+        || alloc.delta_out != hop.expected_output
+        || alloc.fee_policy.fee_bps() != hop.fee_bps
+    {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    // SAT.6 — the vault's fee is the authority.
+    let phi = parent.fee_policy.fee_bps();
+    if intent.fee_bps != phi {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    // SAT.5 — the independent fact, from authenticated state.
+    let direction = check_market_orientation(parent, &intent.token_in, &intent.token_out)?;
+    let (reserve_in, reserve_out) = match direction {
+        Direction::AtoB => (parent.reserve_a, parent.reserve_b),
+        Direction::BtoA => (parent.reserve_b, parent.reserve_a),
+    };
+    let reproduced =
+        constant_product_output_classified(intent.amount_in, reserve_in, reserve_out, phi)
+            .map_err(Reason::from)?;
+    if reproduced != intent.exact_out {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    Ok(IntentSatisfaction {
+        intent: intent.clone(),
+    })
 }
 
 /// `VDS.COMMON.10.a` held for one candidate: `Canon(expected)` is
@@ -789,7 +1104,9 @@ pub enum C3Verdict {
     /// Reachable for an OWNER CLOSE through
     /// [`CompleteValidity::from_close_witness`] — its conjuncts are all
     /// present-tense once `10.a` is. A market successor additionally needs an
-    /// [`IndependentRealization`], which nothing can construct.
+    /// [`IndependentRealization`], which only
+    /// [`IndependentRealization::from_parts`] builds: correspondence, a
+    /// [`BundleAcceptanceWitness`] and [`IntentSatisfaction`], all three.
     Valid(CompleteValidity),
     /// A conjunct decided against the successor.
     Invalid(Reason),
@@ -798,18 +1115,6 @@ pub enum C3Verdict {
     Incomplete(Reason),
     /// A proven contradiction in the storage substrate (Req 6.3).
     SafetyViolation(Reason),
-    /// A MARKET successor: every conjunct held, `10.a` included, and the one
-    /// fact still missing is that the settlement occurred — 2c-C4's
-    /// [`IndependentRealization`].
-    ///
-    /// This is **deployment status, not a protocol outcome** — it deliberately
-    /// sits outside the [`Reason`] namespace so it can never be mistaken for a
-    /// verdict about the successor. A caller may fold forward on it. A caller
-    /// may NOT emit accepted-successor finality, validate `TA_B`, release a
-    /// fence, advance the realized frontier as accepted, or convert it to
-    /// [`C3Verdict::Valid`] downstream. The fold may compute forward; the
-    /// validity claim may not.
-    PartialPendingRealization(CorrespondenceWitness),
 }
 
 /// Evidence that every conjunct held.
@@ -819,10 +1124,11 @@ pub enum C3Verdict {
 /// successor fully valid, and no `assume_valid` shortcut to add later in a
 /// hurry. [`Self::from_close_witness`] is the owner-close path — the witness
 /// is the last conjunct a close has. [`Self::from_market_witness`] also takes
-/// an [`IndependentRealization`], which has no constructor, so
-/// `2c-A + 10.a = market valid` is a compile error rather than a rule — the
-/// impossibility now sitting one level down, in
-/// [`BundleAcceptanceWitness`].
+/// an [`IndependentRealization`], which only
+/// [`IndependentRealization::from_parts`] builds, so
+/// `2c-A + 10.a = market valid` is a compile error rather than a rule: the
+/// realization fact cannot be had without a [`BundleAcceptanceWitness`], and
+/// that has one constructor, behind §7.
 ///
 /// Pinned by the compiler, not by convention — this does not build:
 ///
@@ -856,8 +1162,8 @@ impl CompleteValidity {
     }
 
     /// A market successor whose `10.a` held AND whose settlement is
-    /// independently established. Uncallable until 2c-D gives
-    /// [`BundleAcceptanceWitness`] a constructor — deliberately.
+    /// independently established — the composition walk's certification, and
+    /// the only way a market fold reaches [`C3Verdict::may_certify`].
     pub fn from_market_witness(
         witness: CorrespondenceWitness,
         realization: IndependentRealization,
@@ -874,35 +1180,20 @@ impl CompleteValidity {
 
 impl C3Verdict {
     /// The class, for callers that branch on it.
-    ///
-    /// `PartialPendingRealization` returns `None` rather than a class: it is
-    /// not one of the four protocol outcomes, and returning `Valid` for it
-    /// would be exactly the claim this whole type exists to withhold.
-    pub const fn class(&self) -> Option<OutcomeClass> {
+    pub const fn class(&self) -> OutcomeClass {
         match self {
-            Self::Valid(_) => Some(OutcomeClass::Valid),
-            Self::Invalid(_) => Some(OutcomeClass::Invalid),
-            Self::Incomplete(_) => Some(OutcomeClass::Incomplete),
-            Self::SafetyViolation(_) => Some(OutcomeClass::SafetyViolation),
-            Self::PartialPendingRealization(_) => None,
+            Self::Valid(_) => OutcomeClass::Valid,
+            Self::Invalid(_) => OutcomeClass::Invalid,
+            Self::Incomplete(_) => OutcomeClass::Incomplete,
+            Self::SafetyViolation(_) => OutcomeClass::SafetyViolation,
         }
     }
 
-    /// Whether the caller may fold this successor forward.
-    ///
-    /// True for a complete verdict and for a market fold pending its
-    /// realization fact — the missing fact withholds the validity CLAIM, it
-    /// does not halt composition. Blocking the fold instead would stop every
-    /// market vault until 2c-C4.
-    pub const fn may_fold(&self) -> bool {
-        matches!(self, Self::Valid(_) | Self::PartialPendingRealization(_))
-    }
-
     /// Whether the successor may cross a boundary whose semantics require FULL
-    /// `ValidDlvSuccessorCore` — accepted-successor finality, `TA_B`, fence
-    /// release, accepted-frontier advancement.
-    ///
-    /// Deliberately NOT the same question as [`Self::may_fold`].
+    /// `ValidDlvSuccessorCore` — accepted-successor finality, fence release,
+    /// accepted-frontier advancement. The walk folds nothing that fails this
+    /// (2c-D §14): a market fold without its realization fact is the
+    /// bound-but-unrealized frontier, not a provisional fold.
     pub const fn may_certify(&self) -> bool {
         matches!(self, Self::Valid(_))
     }
@@ -1347,13 +1638,22 @@ mod tests {
             c_dsm_plus: [0x12; 32],
             external_commitment_x: [0x13; 32],
             parent_binding: cursor,
-            effects_digest: [0x14; 32],
+            parent_sequence: 7,
+            input_policy_commit: [0x10; 32],
+            input_amount: 100,
+            output_policy_commit: [0x20; 32],
+            output_amount: 90,
+            fee_bps: 30,
         };
         let bundle = BundleCoordinates {
             trader_parent: [0x11; 32],
             trader_successor: [0x12; 32],
             route_set_commitment: [0x13; 32],
-            route_effects_digest: [0x14; 32],
+            leg_parent_binding: cursor,
+            leg_delta_in: 100,
+            leg_delta_out: 90,
+            leg_fee_bps: 30,
+            transition_parent_binding: cursor,
         };
         (accepted, bundle, cursor, w)
     }
@@ -1415,16 +1715,31 @@ mod tests {
 
     /// CORR.4 — the effects are not the selected route's economics. This is
     /// the conjunct that stops a trader accepting the exactly-right transition
-    /// at the wrong price.
+    /// at the wrong price. TYPED (2c-D §14, C2-R2): every field is its own
+    /// equality, so each one is exercised alone.
     #[test]
     fn effects_that_are_not_the_routes_economics_do_not_correspond() {
-        let (a, b, cursor, w) = corr_fixture();
-        let mut wrong = a;
-        wrong.effects_digest = [0xEE; 32];
-        assert_eq!(
-            check_market_correspondence(&wrong, &b, cursor, w),
-            Err(Reason::RealizationEvidenceInvalid)
-        );
+        type Alteration = (&'static str, fn(&mut BundleCoordinates));
+        let alterations: [Alteration; 5] = [
+            ("the leg's parent binding", |b| {
+                b.leg_parent_binding = [0xEE; 32]
+            }),
+            ("T_v's parent binding", |b| {
+                b.transition_parent_binding = [0xEE; 32]
+            }),
+            ("delta_in", |b| b.leg_delta_in += 1),
+            ("delta_out", |b| b.leg_delta_out -= 1),
+            ("the leg's fee rate", |b| b.leg_fee_bps += 1),
+        ];
+        for (what, alter) in alterations {
+            let (a, mut b, cursor, w) = corr_fixture();
+            alter(&mut b);
+            assert_eq!(
+                check_market_correspondence(&a, &b, cursor, w),
+                Err(Reason::RealizationEvidenceInvalid),
+                "a route whose {what} differs from the accepted operation must not correspond"
+            );
+        }
     }
 
     /// CORR.5 — a witness about a DIFFERENT parent. The two halves would
@@ -1443,29 +1758,18 @@ mod tests {
         );
     }
 
-    /// A market verdict pending its realization fact may fold and may NOT
-    /// certify; a close verdict from the same witness does both. This is the
-    /// whole separation the C4 seam rests on.
+    /// A close's correspondence witness is its last conjunct, so it
+    /// certifies. A market has no such shortcut: the same witness reaches
+    /// `Valid` only through `from_market_witness`, whose realization argument
+    /// the `compile_fail` doctests on `CompleteValidity` pin as unforgeable.
     #[test]
-    fn a_market_witness_folds_but_never_certifies_and_a_close_witness_certifies() {
+    fn a_close_witness_certifies() {
         let v = parent(1_000, 1_000, None);
         let supplied = v.encode().expect("encodes");
         let w = check_correspondence(&v, [7; 32], &supplied).expect("bytes equal");
-        let market = C3Verdict::PartialPendingRealization(w.clone());
-        assert!(market.may_fold(), "composition must continue");
-        assert!(
-            !market.may_certify(),
-            "a missing realization fact must never be certified as valid"
-        );
-        assert_eq!(
-            market.class(),
-            None,
-            "deployment status is not a protocol class"
-        );
         let close = C3Verdict::Valid(CompleteValidity::from_close_witness(w.clone()));
-        assert!(close.may_fold());
         assert!(close.may_certify(), "a close's 10.a is its last conjunct");
-        assert_eq!(close.class(), Some(OutcomeClass::Valid));
+        assert_eq!(close.class(), OutcomeClass::Valid);
         let C3Verdict::Valid(cv) = close else {
             unreachable!()
         };
@@ -1473,13 +1777,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_verdict_neither_folds_nor_certifies() {
+    fn a_refused_verdict_never_certifies() {
         for v in [
             C3Verdict::Invalid(Reason::StaleParent),
             C3Verdict::Incomplete(Reason::BindingEvidenceUnavailable),
             C3Verdict::SafetyViolation(Reason::DuplicateBindingFinality),
         ] {
-            assert!(!v.may_fold(), "{v:?}");
             assert!(!v.may_certify(), "{v:?}");
         }
     }
@@ -1567,6 +1870,403 @@ mod tests {
                 kind: DlvTransitionKind::Settle
             }
         );
+    }
+
+    // ---------- 2c-D §14 (C2): the typed cutover predicates ----------
+
+    use crate::ccb::{
+        Allocation, AllocationBundle, ConsumedDlvTransition, Route, RouteLeg, TradeIntent,
+    };
+    use prost::Message as _;
+
+    const C_N: [u8; 32] = [0x3C; 32];
+    const VAULT: [u8; 32] = [3; 32];
+    const PC_A: [u8; 32] = [0x10; 32];
+    const PC_B: [u8; 32] = [0x20; 32];
+
+    fn curve_out(input: u64, parent: &VaultStateV2) -> u64 {
+        crate::dlv::route_commit::constant_product_output(
+            input,
+            parent.reserve_a,
+            parent.reserve_b,
+            parent.fee_policy.fee_bps(),
+        )
+        .expect("curve")
+    }
+
+    fn accepted(parent: &VaultStateV2, out: u64) -> AcceptedTransition {
+        AcceptedTransition {
+            embedded_parent: [0xC1; 32],
+            c_dsm_plus: [0xC5; 32],
+            external_commitment_x: [0xA0; 32],
+            parent_binding: C_N,
+            parent_sequence: parent.generation,
+            input_policy_commit: PC_A,
+            input_amount: 1_000,
+            output_policy_commit: PC_B,
+            output_amount: out,
+            fee_bps: 30,
+        }
+    }
+
+    /// The orientation predicate is explicit and total over the pair.
+    #[test]
+    fn only_the_vaults_own_pair_in_a_permitted_orientation_is_tradable() {
+        let p = parent(10_000, 5_000, None);
+        assert_eq!(
+            check_market_orientation(&p, &PC_A, &PC_B),
+            Ok(Direction::AtoB)
+        );
+        assert_eq!(
+            check_market_orientation(&p, &PC_B, &PC_A),
+            Ok(Direction::BtoA)
+        );
+        for (i, o, what) in [
+            (PC_A, PC_A, "one asset on both sides"),
+            (PC_A, [0x99; 32], "a foreign output"),
+            ([0x99; 32], PC_B, "a foreign input"),
+        ] {
+            assert_eq!(
+                check_market_orientation(&p, &i, &o),
+                Err(Reason::PairNotVaultPair),
+                "{what} must not reach successor comparison"
+            );
+        }
+    }
+
+    /// CORR.5's accepted derivation: honest input derives exactly the frozen
+    /// successor; each extra conjunct refuses alone.
+    #[test]
+    fn the_accepted_derivation_is_the_frozen_one_and_refuses_each_disagreement() {
+        let p = parent(10_000, 5_000, None);
+        let out = curve_out(1_000, &p);
+        let DeriveExpected::Derived(next) =
+            derive_accepted_market_successor(&p, C_N, &accepted(&p, out))
+        else {
+            panic!("an honest accepted settle derives");
+        };
+        let DeriveExpected::Derived(frozen) = derive_market_successor(
+            &p,
+            C_N,
+            &MarketTerms {
+                input_policy_commit: PC_A,
+                output_policy_commit: PC_B,
+                input_amount: 1_000,
+                fee_bps: 30,
+            },
+        ) else {
+            panic!("frozen derivation");
+        };
+        assert_eq!(next, frozen, "no second derivation beside the frozen one");
+
+        type Alteration = (&'static str, fn(&mut AcceptedTransition), Reason);
+        let alterations: [Alteration; 4] = [
+            (
+                "a foreign input asset",
+                |a| a.input_policy_commit = [0x99; 32],
+                Reason::PairNotVaultPair,
+            ),
+            (
+                "another generation",
+                |a| a.parent_sequence += 1,
+                Reason::GenerationMismatch,
+            ),
+            (
+                "another fee rate",
+                |a| a.fee_bps += 1,
+                Reason::RealizationEvidenceInvalid,
+            ),
+            (
+                "an output the curve does not yield",
+                |a| a.output_amount += 1,
+                Reason::RealizationEvidenceInvalid,
+            ),
+        ];
+        for (what, alter, reason) in alterations {
+            let mut a = accepted(&p, out);
+            alter(&mut a);
+            assert!(
+                matches!(derive_accepted_market_successor(&p, C_N, &a), DeriveExpected::Refused(r) if r == reason),
+                "{what} must be refused as {reason:?}"
+            );
+        }
+    }
+
+    /// The LEFT side of CORR.4 comes from a verified settle and nothing else.
+    #[test]
+    fn accepted_effects_are_read_from_a_settle_and_nothing_else() {
+        let settle = crate::types::operations::Operation::DlvSettle {
+            vault_id: VAULT.to_vec(),
+            owner_public_key: vec![0x01; 64],
+            owner_devid: [0x41; 32],
+            owner_genesis: [0x42; 32],
+            input_policy_commit: PC_A,
+            output_policy_commit: PC_B,
+            parent_sequence: 7,
+            parent_binding: C_N,
+            route_commit_bytes: vec![0x09; 8],
+            external_commitment_x: [0xA0; 32],
+            input_amount: 1_000,
+            output_amount: 900,
+            fee_bps: 30,
+            sigma: [0x66; 32],
+            settler_public_key: vec![0x02; 64],
+            settler_devid: [0x22; 32],
+            settlement_receipt_id: [0x33; 32],
+            signature: vec![0x77; 48],
+            mode: crate::types::operations::TransactionMode::Unilateral,
+        };
+        let a = AcceptedTransition::from_verified_settle([0xC1; 32], [0xC5; 32], &settle)
+            .expect("a settle has effects");
+        assert_eq!(
+            (
+                a.parent_binding,
+                a.parent_sequence,
+                a.input_amount,
+                a.output_amount,
+                a.fee_bps
+            ),
+            (C_N, 7, 1_000, 900, 30)
+        );
+        let not_a_settle = crate::types::operations::Operation::Noop;
+        assert!(
+            AcceptedTransition::from_verified_settle([0; 32], [0; 32], &not_a_settle).is_none()
+        );
+    }
+
+    fn alloc(delta_in: u64, delta_out: u64) -> Allocation {
+        Allocation {
+            parent_binding: C_N,
+            delta_in,
+            delta_out,
+            encumbrance_claim: [0; 32],
+            fee_policy: FeePolicy::new(30).expect("fee"),
+        }
+    }
+
+    /// Beta's shape (2c-A ruling 3) is the ONLY shape the coordinates read.
+    #[test]
+    fn only_a_beta_bundle_has_coordinates() {
+        let mut successor = parent(11_000, 4_000, None);
+        successor.parent_state_commitment = C_N;
+        let t = ConsumedDlvTransition::market(C_N, successor).expect("linked");
+        let terms = crate::ccb::settlement::fixtures::market_terms(C_N, [0xA0; 32]);
+
+        let coords = BundleCoordinates::from_market_bundle(&terms, std::slice::from_ref(&t))
+            .expect("one leg, one allocation, one T_v");
+        assert_eq!(
+            (coords.leg_parent_binding, coords.transition_parent_binding),
+            (C_N, C_N)
+        );
+
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&terms, &[]),
+            Err(Reason::BundleNotCanonical),
+            "no T_v"
+        );
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&terms, &[t.clone(), t.clone()]),
+            Err(Reason::BundleNotCanonical),
+            "two T_v"
+        );
+        let mut two_legs = terms.clone();
+        two_legs.selected_route = Route::new(vec![
+            RouteLeg::Single(alloc(1, 1)),
+            RouteLeg::Single(alloc(2, 2)),
+        ])
+        .expect("route");
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&two_legs, std::slice::from_ref(&t)),
+            Err(Reason::BundleNotCanonical),
+            "two legs"
+        );
+        let mut fanned = terms;
+        fanned.selected_route = Route::new(vec![RouteLeg::Bundle(
+            AllocationBundle::new(vec![alloc(1, 1), alloc(2, 2)]).expect("bundle"),
+        )])
+        .expect("route");
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&fanned, std::slice::from_ref(&t)),
+            Err(Reason::BundleNotCanonical),
+            "a fanned-out leg"
+        );
+    }
+
+    /// A RouteCommit genuinely signed by `sk`, with one hop for `VAULT`.
+    fn signed_rc(sk: &[u8], pk: &[u8], parent_binding: [u8; 32], input: u64, out: u64) -> Vec<u8> {
+        use crate::types::proto as generated;
+        let hop = generated::RouteCommitHopV1 {
+            vault_id: VAULT.to_vec(),
+            token_in: PC_A.to_vec(),
+            token_out: PC_B.to_vec(),
+            input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+            expected_output_amount_u128: (out as u128).to_be_bytes().to_vec(),
+            fee_bps: 30,
+            parent_binding: parent_binding.to_vec(),
+            ..Default::default()
+        };
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::dlv::route_commit::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x5E; 32],
+            input_token: PC_A.to_vec(),
+            output_token: PC_B.to_vec(),
+            input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+            expected_final_output_amount_u128: (out as u128).to_be_bytes().to_vec(),
+            total_fee_bps: 30,
+            hops: vec![hop],
+            initiator_public_key: pk.to_vec(),
+            ..Default::default()
+        };
+        let canonical = crate::dlv::route_commit::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            crate::crypto::sphincs::sphincs_sign(sk, &canonical).expect("sign");
+        rc.encode_to_vec()
+    }
+
+    struct Tier1 {
+        parent: VaultStateV2,
+        intent: TradeIntent,
+        route: Route,
+        rc: Vec<u8>,
+        pk: Vec<u8>,
+        sk: Vec<u8>,
+    }
+
+    fn tier1() -> Tier1 {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let parent = parent(10_000, 5_000, None);
+        let out = curve_out(1_000, &parent);
+        Tier1 {
+            intent: TradeIntent {
+                token_in: PC_A,
+                amount_in: 1_000,
+                token_out: PC_B,
+                exact_out: out,
+                fee_bps: 30,
+                nonce: [0x5A; 32],
+            },
+            route: Route::new(vec![RouteLeg::Single(alloc(1_000, out))]).expect("route"),
+            rc: signed_rc(&sk, &pk, C_N, 1_000, out),
+            parent,
+            pk,
+            sk,
+        }
+    }
+
+    fn sat(t: &Tier1) -> Result<IntentSatisfaction, Reason> {
+        check_intent_satisfaction(
+            &IntentEvidence {
+                intent: &t.intent,
+                route: &t.route,
+                route_commit_bytes: &t.rc,
+                vault_id: &VAULT,
+                proven_ak: &t.pk,
+            },
+            &t.parent,
+            C_N,
+        )
+    }
+
+    /// SAT.1–SAT.6 hold for an honest, genuinely signed trade.
+    #[test]
+    fn an_honest_signed_trade_satisfies_its_intent() {
+        let t = tier1();
+        assert_eq!(sat(&t).expect("Tier 1 holds").intent(), &t.intent);
+    }
+
+    /// SAT.2 — the signing key must be the PROVEN one, and the signature real.
+    #[test]
+    fn a_route_commit_signed_by_anyone_else_is_not_the_traders_intent() {
+        let mut t = tier1();
+        let (other, _) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        t.pk = other;
+        assert_eq!(sat(&t), Err(Reason::SettlerKeyMismatch));
+
+        let mut t = tier1();
+        let mut rc = crate::types::proto::RouteCommitV1::decode(t.rc.as_slice()).expect("rc");
+        rc.initiator_signature[0] ^= 0xFF;
+        t.rc = rc.encode_to_vec();
+        assert_eq!(sat(&t), Err(Reason::RealizationEvidenceInvalid));
+
+        let mut t = tier1();
+        let out = t.intent.exact_out;
+        t.rc = signed_rc(&t.sk, &t.pk, [0x9E; 32], 1_000, out);
+        assert_eq!(
+            sat(&t),
+            Err(Reason::StaleParent),
+            "a hop signed against another parent"
+        );
+    }
+
+    /// SAT.3 — each intent field must equal the signed hop, alone.
+    #[test]
+    fn an_intent_that_is_not_what_the_trader_signed_is_refused() {
+        type Alteration = (&'static str, fn(&mut TradeIntent));
+        let alterations: [Alteration; 4] = [
+            ("token_in", |i| i.token_in = [0x99; 32]),
+            ("amount_in", |i| i.amount_in += 1),
+            ("exact_out", |i| i.exact_out -= 1),
+            ("fee_bps", |i| i.fee_bps += 1),
+        ];
+        for (what, alter) in alterations {
+            let mut t = tier1();
+            alter(&mut t.intent);
+            assert_eq!(
+                sat(&t),
+                Err(Reason::RealizationEvidenceInvalid),
+                "an intent whose {what} differs from the signed hop must be refused"
+            );
+        }
+    }
+
+    /// SAT.4 — the selected route's one leg must equal the signed hop.
+    #[test]
+    fn a_route_that_is_not_the_signed_hop_is_refused() {
+        let mut t = tier1();
+        let out = t.intent.exact_out;
+        t.route = Route::new(vec![RouteLeg::Single(alloc(1_000, out - 1))]).expect("route");
+        assert_eq!(sat(&t), Err(Reason::RealizationEvidenceInvalid));
+
+        let mut t = tier1();
+        let mut leg = alloc(1_000, out);
+        leg.parent_binding = [0x9E; 32];
+        t.route = Route::new(vec![RouteLeg::Single(leg)]).expect("route");
+        assert_eq!(sat(&t), Err(Reason::StaleParent));
+
+        let mut t = tier1();
+        t.route = Route::new(vec![
+            RouteLeg::Single(alloc(1_000, out)),
+            RouteLeg::Single(alloc(1, 1)),
+        ])
+        .expect("route");
+        assert_eq!(
+            sat(&t),
+            Err(Reason::BundleNotCanonical),
+            "beta routes have one leg"
+        );
+    }
+
+    /// SAT.5 — a trade signed, intended and routed CONSISTENTLY at a price the
+    /// authenticated V_n does not produce. Every SAT.3/SAT.4 equality holds, so
+    /// only the independent re-simulation can refuse it — which is 2c-E's
+    /// point: exact_out checked against itself proves nothing.
+    #[test]
+    fn a_self_consistent_trade_at_the_wrong_price_is_refused() {
+        let mut t = tier1();
+        let wrong = t.intent.exact_out + 1;
+        t.intent.exact_out = wrong;
+        t.route = Route::new(vec![RouteLeg::Single(alloc(1_000, wrong))]).expect("route");
+        t.rc = signed_rc(&t.sk, &t.pk, C_N, 1_000, wrong);
+        assert_eq!(sat(&t), Err(Reason::RealizationEvidenceInvalid));
+    }
+
+    /// SAT.6 — the vault's fee is the authority; an intent signed at another
+    /// rate is refused even when the route and the hop agree with it.
+    #[test]
+    fn an_intent_at_a_fee_the_vault_does_not_charge_is_refused() {
+        let mut t = tier1();
+        t.parent.fee_policy = FeePolicy::new(31).expect("fee");
+        assert_eq!(sat(&t), Err(Reason::RealizationEvidenceInvalid));
     }
 }
 

@@ -9,10 +9,11 @@
 //! `b`, bind the economics — are a separate change, and until they exist
 //! holding a well-formed `TA_B` establishes nothing about realization.
 //!
-//! **There is no decoder here, deliberately.** Nothing in this crate consumes
-//! a foreign `TA_B` yet, and a decoder with no verifier behind it is an
-//! invitation to read a decoded acceptance as an accepted one. It lands with
-//! §7, which is the only thing that can say what a decoded `TA_B` means.
+//! **The decoder lands with its consumer.** Until the realization cutover
+//! nothing fetched a foreign `TA_B`, and a decoder with no verifier behind it
+//! was an invitation to read a decoded acceptance as an accepted one. The
+//! composition walk now fetches one by content address and hands it straight
+//! to 2c-D §7 — the only thing that can say what a decoded `TA_B` means.
 //!
 //! Say that precisely, because the shape invites the opposite reading: a
 //! `TA_B` that decodes is a claim someone serialized. It is not evidence that
@@ -195,6 +196,77 @@ impl TraderAcceptance {
     }
 }
 
+/// Why bytes are not a canonical `TA_B` (registry §5.40).
+///
+/// There is no "not canonical" arm: every field is fixed-width and the path
+/// count is pinned, so an exact-length parse of this layout IS the canonical
+/// encoding. `decoded_bytes_re_encode_to_themselves` pins that claim rather
+/// than leaving it to be believed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptanceDecodeError {
+    /// The bytes do not follow the layout: wrong envelope, truncated, or
+    /// trailing input.
+    Layout(crate::ccb::decode::DecodeError),
+    /// Field 3 is not a canonical `0x0032` schema 1 bundle-acceptance leaf.
+    LeafNotBundleAcceptance,
+    /// The layout parsed, but the object violates a frozen rejection.
+    Malformed(AcceptanceMalformed),
+}
+
+impl core::fmt::Display for AcceptanceDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Layout(e) => write!(f, "not a TA_B layout: {e}"),
+            Self::LeafNotBundleAcceptance => write!(
+                f,
+                "field 3 is not a canonical 0x0032 leaf, so there is no acceptance to verify"
+            ),
+            Self::Malformed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The nested `0x0032` schema 1 leaf: its envelope and two `digest32`.
+const NESTED_LEAF_LEN: usize = 4 + 32 + 32;
+
+/// Decode canonical `TA_B` bytes. **A decoded acceptance is still a claim**:
+/// it becomes evidence only when 2c-D §7's verifier returns a witness for it.
+pub fn decode_trader_acceptance(bytes: &[u8]) -> Result<TraderAcceptance, AcceptanceDecodeError> {
+    use crate::ccb::decode::{Cursor, DecodeError};
+    let layout = AcceptanceDecodeError::Layout;
+    let mut c = Cursor { b: bytes, i: 0 };
+    c.envelope(TraderAcceptance::CLASS, TraderAcceptance::SCHEMA)
+        .map_err(layout)?;
+    let trader_genesis = c.digest32().map_err(layout)?;
+    let economic_position = c.u64().map_err(layout)?;
+    let leaf = match crate::economic::decode::decode_leaf_state(
+        c.take(NESTED_LEAF_LEN).map_err(layout)?,
+    ) {
+        Ok(EconomicLeafState::BundleAcceptance(leaf)) => leaf,
+        _ => return Err(AcceptanceDecodeError::LeafNotBundleAcceptance),
+    };
+    let count = c.u32().map_err(layout)? as usize;
+    if count != ECONOMIC_SMT_HEIGHT {
+        return Err(AcceptanceDecodeError::Malformed(
+            AcceptanceMalformed::PathLength {
+                expected: ECONOMIC_SMT_HEIGHT,
+                got: count,
+            },
+        ));
+    }
+    let mut path = Vec::with_capacity(ECONOMIC_SMT_HEIGHT);
+    for _ in 0..ECONOMIC_SMT_HEIGHT {
+        path.push(c.digest32().map_err(layout)?);
+    }
+    if c.i != bytes.len() {
+        return Err(layout(DecodeError::TrailingBytes {
+            extra: bytes.len() - c.i,
+        }));
+    }
+    TraderAcceptance::new(trader_genesis, economic_position, leaf, path)
+        .map_err(AcceptanceDecodeError::Malformed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +353,84 @@ mod tests {
         p[0] = [0x01; 32];
         let other_path = TraderAcceptance::new([0x11; 32], 3, leaf(), p).expect("path");
         assert_ne!(other_path.ta_b().expect("id"), id, "acceptance_path");
+    }
+
+    fn acceptance() -> TraderAcceptance {
+        TraderAcceptance::new([0x11; 32], 3, leaf(), path()).expect("well formed")
+    }
+
+    #[test]
+    fn decoded_bytes_re_encode_to_themselves() {
+        let bytes = acceptance().encode().expect("encodable");
+        let back = decode_trader_acceptance(&bytes).expect("decodes");
+        assert_eq!(back, acceptance());
+        assert_eq!(
+            back.encode().expect("encodable"),
+            bytes,
+            "decode is canonical"
+        );
+    }
+
+    #[test]
+    fn truncated_or_trailing_bytes_are_not_an_acceptance() {
+        let bytes = acceptance().encode().expect("encodable");
+        assert!(matches!(
+            decode_trader_acceptance(&bytes[..bytes.len() - 1]),
+            Err(AcceptanceDecodeError::Layout(_))
+        ));
+        let mut long = bytes;
+        long.push(0);
+        assert!(matches!(
+            decode_trader_acceptance(&long),
+            Err(AcceptanceDecodeError::Layout(
+                crate::ccb::decode::DecodeError::TrailingBytes { extra: 1 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn another_class_is_not_an_acceptance() {
+        let mut bytes = acceptance().encode().expect("encodable");
+        bytes[1] = 0x12;
+        assert!(matches!(
+            decode_trader_acceptance(&bytes),
+            Err(AcceptanceDecodeError::Layout(_))
+        ));
+    }
+
+    /// Field 3 must be a bundle-acceptance leaf, not merely 68 bytes.
+    #[test]
+    fn a_nested_leaf_of_another_class_is_refused() {
+        let mut bytes = acceptance().encode().expect("encodable");
+        bytes[4 + 32 + 8 + 1] = 0x31; // the nested envelope's class, 0x0032 -> 0x0031
+        assert_eq!(
+            decode_trader_acceptance(&bytes),
+            Err(AcceptanceDecodeError::LeafNotBundleAcceptance)
+        );
+    }
+
+    /// The frozen rejections apply to decoded bytes exactly as to built ones.
+    #[test]
+    fn decoded_bytes_meet_the_frozen_rejections() {
+        let mut short_count = acceptance().encode().expect("encodable");
+        let at = 4 + 32 + 8 + NESTED_LEAF_LEN;
+        short_count[at..at + 4].copy_from_slice(&255u32.to_be_bytes());
+        assert_eq!(
+            decode_trader_acceptance(&short_count),
+            Err(AcceptanceDecodeError::Malformed(
+                AcceptanceMalformed::PathLength {
+                    expected: 256,
+                    got: 255
+                }
+            ))
+        );
+        let mut zero_genesis = acceptance().encode().expect("encodable");
+        zero_genesis[4..36].copy_from_slice(&[0u8; 32]);
+        assert_eq!(
+            decode_trader_acceptance(&zero_genesis),
+            Err(AcceptanceDecodeError::Malformed(
+                AcceptanceMalformed::GenesisIsZero
+            ))
+        );
     }
 }

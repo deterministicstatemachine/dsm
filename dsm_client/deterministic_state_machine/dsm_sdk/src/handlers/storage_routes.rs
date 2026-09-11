@@ -2976,6 +2976,16 @@ impl AppRouterImpl {
                             errors.push(format!("close-intent resume failed: {e}"));
                         }
                     }
+                    // A market settlement whose completion was interrupted —
+                    // bound, advanced, its receipt not yet at quorum (2c-D §14,
+                    // D-f). Finishes the SAME settlement; never retries one.
+                    match self.resume_settlement_completions().await {
+                        Ok(n) => pushed += n,
+                        Err(e) => {
+                            log::warn!("[storage.sync] settlement completion resume errored: {e}");
+                            errors.push(format!("settlement completion resume failed: {e}"));
+                        }
+                    }
                 }
 
                 // Record network success for connectivity monitoring

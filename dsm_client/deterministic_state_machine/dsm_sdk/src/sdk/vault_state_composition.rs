@@ -35,24 +35,27 @@
 //! a claim or it does not — so `q` attributed members answering "nothing
 //! here" is a positive fact, and it is the only thing that ends the walk.
 //!
-//! Each generation therefore has exactly three outcomes:
+//! Each generation therefore has four outcomes:
 //!
 //! ```text
-//! empty at quorum   -> the chain ends here; THIS is the frontier
-//! winner at quorum  -> validate the edge and fold, or fail closed
-//! anything else     -> DLV_BINDING_EVIDENCE_UNAVAILABLE
+//! free at quorum        -> the chain ends here; THIS is the frontier
+//! bound + realized      -> fold and continue
+//! bound + not realized  -> the chain ends here, and the frontier is BOUND
+//! anything else         -> DLV_BINDING_EVIDENCE_UNAVAILABLE, or the edge is INVALID
 //! ```
 //!
-//! Validating an edge means: the winner's claim verifies and binds this exact
-//! parent `c_n`; a settlement receipt is PRESENT and internally consistent for
-//! this generation step -- it is the trader's self-attested claim and NOT proof
-//! that value moved, per `settlement_receipt_leaf`'s own header, and 2c-C4 owns
-//! the fact that replaces it; the signed `RouteCommit` recomputes the claimed
-//! `X`; the hop binds the cursor's `c_n`; and the AMM re-simulates to exactly
-//! the claimed output. A close
-//! consumes the same cell — close and settle contend for one slot per
-//! generation — and is recognised by its deterministic `x` claimed under the
-//! owner's proven authority key, folding to the terminal zero-reserve state.
+//! An owner CLOSE realizes on binding finality: its successor is fully
+//! determined and pre-authorized (Req 6.30). A MARKET edge realizes only when
+//! CERTIFIED (amendment 2c-D §14, C2): the trader's `TA_B`, located by `b` and
+//! fetched by content address, passes 2c-D §7 against the trader's own
+//! validated lineage; the accepted operation corresponds to the bundle
+//! (CORR.1–CORR.5, typed); the trade satisfies its signed intent (2c-E §6); and
+//! the published receipt's facts are the settlement receipt the trader's
+//! validated transition committed under `R_T^+` (Req 21.16, D4 as corrected).
+//! The receipt is Req 21.16's EVIDENCE and never authority. Evidence not yet
+//! published leaves the frontier bound-but-unrealized; evidence present and
+//! failing verification is INVALID. A close consumes the same cell — close and
+//! settle contend for one slot per generation.
 //!
 //! Nothing here is a portable proof of maximality, and nothing claims to be:
 //! the statement is "during this read, no successor beyond `c_n` was
@@ -67,19 +70,20 @@
 //! its own: the `c_n` a new trade's hop must bind as its parent.
 
 use dsm::ccb::VaultStateV2;
+use dsm::dlv::published_receipt::{verify_published_receipt, VerifiedReceipt};
+use dsm::dlv::settlement_receipt_leaf::{derive_receipt_id, SignedTraderSettlementReceipt};
 use dsm::dlv::successor_validity::{
-    check_correspondence, derive_close_successor, derive_market_successor, C3Verdict,
-    CompleteValidity, DeriveExpected, MarketTerms, OutcomeClass, Reason,
+    check_correspondence, check_intent_satisfaction, check_market_correspondence,
+    derive_accepted_market_successor, derive_close_successor, AcceptedTransition,
+    BundleCoordinates, C3Verdict, CompleteValidity, DeriveExpected, IndependentRealization,
+    IntentEvidence, IntentSatisfaction, OutcomeClass, Reason,
 };
-use dsm::types::proto as generated;
+use dsm::economic::provenance::{PeerLineageFailure, ProvenanceResolver as _, ValidatedPeerTransition};
+use dsm::types::operations::Operation;
 use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::sdk::identity_presentation::verify_anchor_presentation;
-use crate::sdk::route_commit_sdk::{
-    compute_external_commitment, external_commitment_rc_key, verify_route_commit_unlock_eligibility,
-};
-use crate::sdk::routing_path_sdk::constant_product_output;
 
 /// Maximum pending-chain depth a composer will fold before treating the
 /// vault as saturated and excluding it from path search.  Caps adversarial
@@ -101,14 +105,18 @@ pub(crate) struct FoldedParent {
     /// Which KIND of consumer owned it. A resumed close must be able to tell
     /// its own fold from a market settle that landed at the same generation.
     pub bound_kind: dsm::dlv::settlement_bundle::BundleShape,
-    /// What C3 concluded about the successor this fold produced. An owner
-    /// close folds [`C3Verdict::Valid`]: every conjunct held, `VDS.COMMON.10.a`
-    /// included. A market fold is [`C3Verdict::PartialPendingRealization`]:
-    /// every conjunct held, `10.a` included, and the fact that the settlement
-    /// occurred is 2c-C4's — so the fold may compute forward and the validity
-    /// claim is withheld. Recorded so that the withholding is a value a caller
-    /// must confront, not an absence it can read as consent.
+    /// What C3 concluded about the successor this fold produced — always
+    /// [`C3Verdict::Valid`], because the walk folds nothing that fails
+    /// `may_certify()` (2c-D §14). An owner close reaches it through
+    /// `VDS.COMMON.10.a`; a market fold only through the independent
+    /// realization fact — correspondence, the §7 bundle acceptance and intent
+    /// satisfaction, together.
     pub verdict: C3Verdict,
+    /// For a CERTIFIED market fold, the settlement it realized — Req 21.16's
+    /// typed fact, proven under the trader's validated `R_T^+`. `None` for a
+    /// close. This is what an owner's reconcile acts on (2c-D §14, C2-R1
+    /// point 6): the exact certified fold, never a receipt read on the side.
+    pub realized_trade: Option<VerifiedReceipt>,
 }
 
 /// What the binding register — plus this device's own fence table — says about
@@ -146,6 +154,11 @@ pub(crate) enum FrontierBinding {
     /// the walk cannot see a foreign trader's in-flight bind through this table
     /// — that is exactly what the register's `Undetermined` answer is for.
     LocallyFenced { tx_id: [u8; 32] },
+    /// Composition STOPPED at a requested state and deliberately did not read
+    /// its binding — produced only by [`compose_vault_history_until`] for
+    /// reserve provenance (2c-D §14). It says nothing about availability, and
+    /// no route may act on it.
+    NotObserved,
 }
 
 /// Where the owner's `EconomicProofArtifactV1` lives, as an unsigned
@@ -352,6 +365,58 @@ pub(crate) async fn compose_vault_state(
     token_b: &[u8],
     fee_bps: u32,
 ) -> Result<ComposedVaultState, CompositionError> {
+    compose_vault_state_with(
+        vault_id,
+        presentation,
+        vn_bytes,
+        token_a,
+        token_b,
+        fee_bps,
+        None,
+    )
+    .await
+}
+
+/// [`compose_vault_state`], with the settling trader's own not-yet-published
+/// receipt as Req 21.16's evidence for ITS settlement (2c-D §14, C2-R1 point 1).
+///
+/// The candidate is verified exactly as a fetched receipt is; where it came
+/// from changes nothing about the verdict, and it is never authority.
+pub(crate) async fn compose_vault_state_with(
+    vault_id: &[u8; 32],
+    presentation: &crate::generated::AnchorPresentationV3,
+    vn_bytes: &[u8],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+    receipt_candidate: Option<&SignedTraderSettlementReceipt>,
+) -> Result<ComposedVaultState, CompositionError> {
+    compose_vault_state_inner(
+        vault_id,
+        presentation,
+        vn_bytes,
+        token_a,
+        token_b,
+        fee_bps,
+        receipt_candidate,
+        None,
+    )
+    .await
+}
+
+/// The walk itself. `stop_at` composes only UP TO a requested state and stops
+/// there without reading its binding (reserve provenance, 2c-D §14).
+#[allow(clippy::too_many_arguments)]
+async fn compose_vault_state_inner(
+    vault_id: &[u8; 32],
+    presentation: &crate::generated::AnchorPresentationV3,
+    vn_bytes: &[u8],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+    receipt_candidate: Option<&SignedTraderSettlementReceipt>,
+    stop_at: Option<[u8; 32]>,
+) -> Result<ComposedVaultState, CompositionError> {
     // ── The baseline: one authenticated object. ──────────────────────────
     let verified = verify_anchor_presentation(presentation, vn_bytes)
         .map_err(|e| CompositionError::InvalidBaselinePresentation(e.to_string()))?;
@@ -462,6 +527,13 @@ pub(crate) async fn compose_vault_state(
     let mut folded_parents: Vec<FoldedParent> = Vec::new();
     let frontier_binding: FrontierBinding;
     loop {
+        // COMPOSITION UP TO A TARGET (2c-D §14, reserve provenance): stop AT
+        // the requested state and do not read its binding at all, so the
+        // history of V_n never depends on the settlement that consumes it.
+        if stop_at == Some(cursor_c_n) {
+            frontier_binding = FrontierBinding::NotObserved;
+            break;
+        }
         // Saturation is NOT a frontier. A walk that stops because it ran out
         // of budget has established nothing about maximality, and reporting
         // "frontier at 64" would be the omission defect wearing a local name.
@@ -562,6 +634,7 @@ pub(crate) async fn compose_vault_state(
         // What this walk DERIVES for the bound transition — the frozen
         // predicate's successor, by shape. `VDS.COMMON.10.a` then compares it,
         // byte for byte, against the successor the bundle CARRIES.
+        let mut market_evidence: Option<Box<EstablishedMarketEvidence>> = None;
         let expected = match bound.shape {
             // ── CLOSE: binding-final ⇒ REALIZE IMMEDIATELY (Req 6.30). ─────
             // The successor is fully determined — both reserves to zero at
@@ -610,23 +683,13 @@ pub(crate) async fn compose_vault_state(
                 }
             }
 
-            // ── MARKET: binding-final alone MUST NOT realize. ──────────────
-            // ###################################################################
-            // # TEMPORARY SCAFFOLDING (5c-1). DELETED IN 5c-2.
-            // # Realization keeps the PRE-BUNDLE evidence gate verbatim:
-            // # receipt + published RouteCommit (X recomputed from its own
-            // # bytes) + routed-unlock eligibility + hop parent binding +
-            // # exact constant-product re-simulation.
-            // # 5c-2 REPLACES this whole call with the Rev-15 rule — the exact
-            // # bundled trader successor accepted under ordinary DSM AND `TA_B`
-            // # verified — at which point X, the receipt and the RouteCommit
-            // # stop being the realization source and become bundle-internal
-            // # proof material.
-            // ###################################################################
+            // ── MARKET: realized ONLY when certified (2c-D §14, C2). ──────
+            // Binding finality alone realizes nothing (Req 6.2, Req 21.15).
+            // The successor is DERIVED from the trader's accepted operation
+            // (CORR.5) and compared with `T_v` below (`10.a`); the verdict
+            // after that needs CORR.1–CORR.5, 2c-D §7 and Tier-1 intent
+            // satisfaction, and Req 21.16 has already run here.
             dsm::dlv::settlement_bundle::BundleShape::Market => {
-                // A market bundle carries its terms by construction (field 1
-                // present IS the shape), so this cannot fail on a decoded
-                // bundle; stated as a refusal rather than a panic all the same.
                 let Some(terms) = bound.bundle.market_terms() else {
                     return Err(refused(
                         Reason::BundleNotCanonical,
@@ -634,42 +697,35 @@ pub(crate) async fn compose_vault_state(
                     ));
                 };
                 let x = terms.route_set_commitment;
-                match realize_market_successor_5c1(
+                match certify_market_evidence(
                     vault_id,
-                    &x,
+                    bound.bundle_digest,
+                    terms,
+                    bound.bundle.transitions(),
                     &cursor_state,
-                    &cursor_c_n,
-                    &pc_a,
-                    &pc_b,
-                    fee_bps,
+                    cursor_c_n,
+                    receipt_candidate,
                 )
                 .await
                 {
-                    // The evidence is present and it agrees.
-                    MarketRealization::Realized(next) => *next,
-                    // Evidence ABSENT — the trade has not settled yet. THE NEW
-                    // STATE, and the reason this walk needed a fourth outcome:
-                    // the realized frontier is THIS generation, and it is
-                    // occupied. Strictly more informative than the old
-                    // fail-closed, which could not tell "not yet" from "wrong".
-                    // `dlv_reconcile` legitimately runs from here.
-                    MarketRealization::Absent(_) => {
+                    MarketEvidence::Established(ev) => {
+                        let next = ev.expected.clone();
+                        market_evidence = Some(ev);
+                        next
+                    }
+                    // Not yet published. The frontier is THIS generation and
+                    // it is occupied; a later walk realizes it.
+                    MarketEvidence::Absent(_) => {
                         frontier_binding = FrontierBinding::BoundUnrealized {
                             bundle_digest: bound.bundle_digest,
                             route_set_commitment: x,
                         };
                         break;
                     }
-                    // Evidence UNOBTAINABLE. Nothing was learned, so this is
-                    // Req 6.25's INCOMPLETE and not a bound-unrealized frontier:
-                    // reporting a frontier here would claim the trade is
-                    // unsettled on the strength of a transport fault.
-                    MarketRealization::Unavailable(why) => return Err(unavailable(&why)),
-                    // Evidence PRESENT and it CONTRADICTS the bundle. A
-                    // divergence is never an absence.
-                    MarketRealization::Contradicts(reason, why) => {
-                        return Err(refused(reason, &why))
-                    }
+                    // Unobtainable: Req 6.25's INCOMPLETE, never a frontier.
+                    MarketEvidence::Unavailable(why) => return Err(unavailable(&why)),
+                    // Present and failing verification: INVALID, never absence.
+                    MarketEvidence::Contradicts(reason, why) => return Err(refused(reason, &why)),
                 }
             }
         };
@@ -691,23 +747,64 @@ pub(crate) async fn compose_vault_state(
             })?;
         let next_state = witness.expected().clone();
         let next_c_n = witness.c_next();
-        // THE VERDICT THIS FOLD CARRIES. An owner close has no conjunct left:
-        // Valid. A market fold holds every conjunct INCLUDING 10.a, and the
-        // fact that the settlement occurred is 2c-C4's — the walk folds
-        // forward BECAUSE the verdict permits it (`may_fold`), and nothing
-        // downstream may read a market fold as certification.
-        let verdict = match bound.shape {
-            dsm::dlv::settlement_bundle::BundleShape::OwnerClose => {
-                C3Verdict::Valid(CompleteValidity::from_close_witness(witness))
-            }
+        // THE VERDICT THIS FOLD CARRIES — and every fold must CERTIFY. An owner
+        // close has no conjunct left. A market fold is certified from three
+        // independently established facts, each with one constructor
+        // (2c-D §14, C2-R1 point 3): CORR.1–CORR.5, 2c-D §7's acceptance
+        // witness, and Tier-1 intent satisfaction. Nothing uncertified is ever
+        // installed as the composed state.
+        let (verdict, realized_trade) = match bound.shape {
+            dsm::dlv::settlement_bundle::BundleShape::OwnerClose => (
+                C3Verdict::Valid(CompleteValidity::from_close_witness(witness)),
+                None,
+            ),
             dsm::dlv::settlement_bundle::BundleShape::Market => {
-                C3Verdict::PartialPendingRealization(witness)
+                let (Some(ev), Some(terms)) = (market_evidence.take(), bound.bundle.market_terms())
+                else {
+                    return Err(refused(
+                        Reason::BundleNotCanonical,
+                        "its market evidence was never established",
+                    ));
+                };
+                let ev = *ev;
+                let correspondence = check_market_correspondence(
+                    &ev.accepted,
+                    &ev.coords,
+                    cursor_c_n,
+                    witness.clone(),
+                )
+                .map_err(|reason| {
+                    refused(
+                        reason,
+                        "its accepted settle does not correspond to the bundle (CORR.1-CORR.5)",
+                    )
+                })?;
+                let acceptance = dsm::economic::acceptance_verify::verify_trader_acceptance(
+                    &ev.acceptance,
+                    terms,
+                    bound.bundle_digest,
+                    &correspondence,
+                    &ev.trader.validated_root,
+                    &ev.trader.proven_ak,
+                )
+                .map_err(|e| {
+                    refused(
+                        Reason::RealizationEvidenceInvalid,
+                        &format!("its trader acceptance does not verify (2c-D §7): {e}"),
+                    )
+                })?;
+                let realization =
+                    IndependentRealization::from_parts(correspondence, acceptance, ev.intent);
+                (
+                    C3Verdict::Valid(CompleteValidity::from_market_witness(witness, realization)),
+                    Some(ev.receipt),
+                )
             }
         };
-        if !verdict.may_fold() {
+        if !verdict.may_certify() {
             return Err(refused(
                 Reason::CorrespondenceMismatch,
-                "its verdict does not permit folding",
+                "its verdict does not certify",
             ));
         }
         folded_parents.push(FoldedParent {
@@ -717,6 +814,7 @@ pub(crate) async fn compose_vault_state(
             bound_by: bound.bundle_digest,
             bound_kind: bound.shape,
             verdict,
+            realized_trade,
         });
         let _ = transition;
         cursor_state = next_state;
@@ -771,226 +869,268 @@ fn local_fence_overlay(
     }
 }
 
-/// Whether a bound MARKET bundle's successor has actually become economic
-/// state, and if so what that successor is.
+/// A bound MARKET bundle's realization evidence (2c-D §14, C2).
 ///
-/// Three outcomes, and the split between the last two is the whole point:
-/// under the write-once slot every market failure collapsed into one
-/// fail-closed verdict, because a claimed slot with no receipt was
-/// indistinguishable from a claimed slot with a wrong one. "Bound but not yet
-/// settled" is now a FACT the walk can report.
-///
-/// ###################################################################
-/// # TEMPORARY SCAFFOLDING (5c-1). DELETED IN 5c-2.
-/// # This is the PRE-BUNDLE evidence gate, kept verbatim so successful market
-/// # trades keep advancing reserves while the acceptance seam is unfinished.
-/// # 5c-2 replaces the whole function with the Rev-15 rule: the exact bundled
-/// # trader successor accepted under ordinary DSM advancement AND `TA_B`
-/// # verified. Do not grow new dependencies on it.
-/// ###################################################################
-enum MarketRealization {
-    /// The evidence is present and agrees. Fold this successor.
-    Realized(Box<VaultStateV2>),
-    /// The evidence is ABSENT — the trade has not settled yet. Not an error.
+/// The split between the last three outcomes is the frozen C3 taxonomy: an
+/// absence is not a failure, an unreadable input establishes nothing, and
+/// evidence that is present and fails verification is INVALID — never
+/// absence (`Reason::RealizationEvidenceInvalid`'s own doc).
+enum MarketEvidence {
+    /// Every certification input is present and verified.
+    Established(Box<EstablishedMarketEvidence>),
+    /// Not yet published: bound but unrealized.
     Absent(String),
-    /// The evidence could NOT BE READ. Establishes nothing about whether the
-    /// trade settled, so it is neither a frontier nor a contradiction —
-    /// INCOMPLETE, and the walk fails closed rather than reporting a bound
-    /// frontier on the strength of a transport fault.
+    /// Could not be read: INCOMPLETE.
     Unavailable(String),
-    /// The evidence is PRESENT and CONTRADICTS the bundle. A divergence is
-    /// never an absence, and this must fail closed — with the frozen reason
-    /// for THIS site, not one shared reason for all of them.
+    /// Present and failing verification: INVALID.
     Contradicts(Reason, String),
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn realize_market_successor_5c1(
+/// What the walk needs after `10.a` to construct the certifying verdict.
+struct EstablishedMarketEvidence {
+    /// CORR.5's derivation from the accepted operation.
+    expected: VaultStateV2,
+    accepted: AcceptedTransition,
+    coords: BundleCoordinates,
+    acceptance: dsm::economic::trader_acceptance::TraderAcceptance,
+    /// The trader's lineage at the acceptance's position: `R_T^+`, the proven
+    /// AK, the verified operation and `C_dsm+`.
+    trader: ValidatedPeerTransition,
+    intent: IntentSatisfaction,
+    receipt: VerifiedReceipt,
+}
+
+/// Gather and verify everything a market certification needs, in the order
+/// each step's inputs become available. Every operand is authenticated or
+/// derived; nothing a locator or receipt carries is believed.
+async fn certify_market_evidence(
     vault_id: &[u8; 32],
-    x: &[u8; 32],
+    b: [u8; 32],
+    terms: &dsm::ccb::MarketTerms,
+    transitions: &[dsm::ccb::ConsumedDlvTransition],
     cursor_state: &VaultStateV2,
-    cursor_c_n: &[u8; 32],
-    pc_a: &[u8; 32],
-    pc_b: &[u8; 32],
-    fee_bps: u32,
-) -> MarketRealization {
-    // THE RECEIPT GATE. Everything below this line moves someone's liquidity,
-    // so nothing below it runs until a receipt is present and verifies.
-    //
-    // What the receipt PROVES, stated honestly: internal consistency — the
-    // signature verifies under the key the receipt names, and the recomputed
-    // leaf is included under the root the receipt names. Both are read OUT OF
-    // THE RECEIPT. Per `settlement_receipt_leaf`'s own header, the honest
-    // fixture and a forgery are byte-identical constructions, and a pass is
-    // "not evidence that value moved". An earlier comment here claimed the
-    // receipt "cannot be produced without settling"; the receipt module
-    // retracts that, and 5c-2 / 2c-C4 is where the independent realization
-    // fact gets established. Until then this gate is a consistency check on
-    // trader-supplied evidence, and nothing here may be promoted into that
-    // fact.
-    //
-    // What the gate DOES distinguish, and did not before amendment 2c-C3:
-    // a missing receipt is ABSENCE (the trade has not landed; a later walk
-    // folds it), an unreadable one is INCOMPLETE, and a present receipt that
-    // is malformed or fails verification is INVALID — never absence.
-    use crate::sdk::settlement_receipt_codec::ReceiptFetch;
-    let receipt =
-        match crate::sdk::settlement_receipt_codec::fetch_verified_receipt(vault_id, x).await {
-            ReceiptFetch::Verified(r) => *r,
-            ReceiptFetch::Absent => {
-                return MarketRealization::Absent("its settlement receipt is not available".into())
-            }
-            ReceiptFetch::Unavailable(e) => {
-                return MarketRealization::Unavailable(format!(
-                    "its settlement receipt could not be read: {e}"
-                ))
-            }
-            ReceiptFetch::Malformed(why) => {
-                return MarketRealization::Contradicts(
-                    Reason::RealizationEvidenceInvalid,
-                    format!("its settlement receipt is malformed: {why}"),
-                )
-            }
-            ReceiptFetch::Invalid(e) => {
-                return MarketRealization::Contradicts(
-                    Reason::RealizationEvidenceInvalid,
-                    format!("its settlement receipt fails verification: {e}"),
-                )
-            }
-        };
-    // The receipt must describe the step this bundle claims. It is fetched by
-    // (vault, x) and x came from the bound bundle, so it is already tied to
-    // this trade; this pins the generations it moves between. A receipt for a
-    // DIFFERENT step is a divergence, not an absence.
-    if receipt.trade.parent_sequence != cursor_state.generation
-        || receipt.trade.new_sequence != cursor_state.generation.saturating_add(1)
-    {
-        return MarketRealization::Contradicts(
-            Reason::GenerationMismatch,
-            "its receipt witnesses a different generation step".into(),
-        );
-    }
-    let new_sequence = receipt.trade.new_sequence;
-    // Fetch the full signed RouteCommit paired with X.
-    let rc_key = external_commitment_rc_key(x);
-    let Ok(rc_bytes) = BitcoinTapSdk::storage_get_bytes(&rc_key).await else {
-        return MarketRealization::Absent("its RouteCommit is not published".into());
-    };
-    let Ok(rc) = generated::RouteCommitV1::decode(rc_bytes.as_slice()) else {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its RouteCommit does not decode".into(),
-        );
-    };
-    // Storage keys are untrusted labels, so X is RECOMPUTED from the
-    // RouteCommit bytes and required to equal the one the bundle commits.
-    if compute_external_commitment(&rc) != *x {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its RouteCommit does not recompute the bundle's X".into(),
-        );
-    }
-    // Routed-unlock eligibility: initiator signature over canonical RC bytes,
-    // this vault present in the route, and the anchor for X visible.
-    let Ok(hop) = verify_route_commit_unlock_eligibility(&rc_bytes, vault_id).await else {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its RouteCommit fails routed-unlock eligibility".into(),
-        );
-    };
-    // THE PARENT BINDING. The hop must name the c_n of the exact cursor state
-    // it consumes — one byte-equality that pins the generation, the reserves,
-    // the pair, the fee and the authority position at once, because they are
-    // members of the identified V_n.
-    if hop.parent_binding.len() != 32 || hop.parent_binding.as_slice() != cursor_c_n.as_slice() {
-        return MarketRealization::Contradicts(
-            Reason::StaleParent,
-            "its hop is bound to a different parent state".into(),
-        );
-    }
-    if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its hop amounts are malformed".into(),
-        );
-    }
-    let mut in_buf = [0u8; 16];
-    in_buf.copy_from_slice(&hop.input_amount_u128);
-    let mut out_buf = [0u8; 16];
-    out_buf.copy_from_slice(&hop.expected_output_amount_u128);
-    // The wire carries 16-byte big-endian amounts; base units are u64. The
-    // narrowing happens HERE, once, checked — an amount that does not fit is a
-    // malformed hop, not a value to truncate.
-    let (Ok(input_amount), Ok(expected_output)) = (
-        u64::try_from(u128::from_be_bytes(in_buf)),
-        u64::try_from(u128::from_be_bytes(out_buf)),
-    ) else {
-        return MarketRealization::Contradicts(
-            Reason::ArithmeticOverflow,
-            "its hop amounts do not fit u64".into(),
-        );
-    };
-    // Direction against the state's own canonical pair.
-    let input_is_a = hop.token_in.as_slice() == pc_a && hop.token_out.as_slice() == pc_b;
-    let input_is_b = hop.token_in.as_slice() == pc_b && hop.token_out.as_slice() == pc_a;
-    if !input_is_a && !input_is_b {
-        return MarketRealization::Contradicts(
-            Reason::PairNotVaultPair,
-            "its hop trades a different pair".into(),
-        );
-    }
-    let (cursor_in, cursor_out) = if input_is_a {
-        (cursor_state.reserve_a, cursor_state.reserve_b)
-    } else {
-        (cursor_state.reserve_b, cursor_state.reserve_a)
-    };
-    // Re-simulate against the cursor. The composer demands the simulated output
-    // equals the trader's claimed expected_output — anything else means the
-    // trade settled against a different baseline and folding it is unsafe.
-    let Some(simulated) = constant_product_output(input_amount, cursor_in, cursor_out, fee_bps)
-    else {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its trade does not re-simulate against this state".into(),
-        );
-    };
-    if simulated != expected_output {
-        return MarketRealization::Contradicts(
-            Reason::RealizationEvidenceInvalid,
-            "its claimed output is not what this state's curve yields".into(),
-        );
-    }
-    // Construct the successor: generation advanced, reserves moved, predecessor
-    // edge set to the consumed state's identity, and EVERY other field — pair,
-    // fee, release policy, encumbrances, authority position, storage set,
-    // quorum — copied byte-for-byte. Saturating arithmetic is defense in depth;
-    // the re-simulation above should already exclude these.
-    // THE PREDICATE DERIVES THE SUCCESSOR (erratum D4 picks the leg from the
-    // policy-commit set equality; D3 keeps the fee in the pool; the seven
-    // admissibility conditions each refuse with their own reason; a retired
-    // parent is refused). The receipt's claimed amounts were already checked
-    // against the curve above -- that is VDS.MARKET.1 evidence consistency,
-    // and it stays. What changes is that the SUCCESSOR is no longer this
-    // function's clone()-plus-mutations; it is the frozen derivation.
-    let terms = MarketTerms {
-        input_policy_commit: receipt.trade.input_policy_commit,
-        output_policy_commit: receipt.trade.output_policy_commit,
-        input_amount,
-        fee_bps,
-    };
-    let next = match derive_market_successor(cursor_state, *cursor_c_n, &terms) {
-        DeriveExpected::Derived(next) => next,
-        DeriveExpected::Refused(reason) => {
-            return MarketRealization::Contradicts(
-                reason,
-                "its successor does not derive from this parent under the frozen predicate".into(),
+    cursor_c_n: [u8; 32],
+    receipt_candidate: Option<&SignedTraderSettlementReceipt>,
+) -> MarketEvidence {
+    use crate::sdk::trader_acceptance_locator::{fetch_locator, LocatorFetch};
+    use MarketEvidence::{Absent, Contradicts, Unavailable};
+    let invalid = |what: String| Contradicts(Reason::RealizationEvidenceInvalid, what);
+
+    // Beta's shape, before anything is fetched (2c-A ruling 3).
+    let coords = match BundleCoordinates::from_market_bundle(terms, transitions) {
+        Ok(c) => c,
+        Err(r) => {
+            return Contradicts(
+                r,
+                "its route is not a beta market route (one leg, one allocation, one T_v)".into(),
             )
         }
     };
-    // The receipt names the generation it moved to; the derivation advances
-    // by exactly one from the parent. They were pinned equal above.
-    debug_assert_eq!(next.generation, new_sequence);
-    MarketRealization::Realized(next)
+
+    // ── 1–2. Locate TA_B, and fetch it by CONTENT ADDRESS ─────────────────
+    let (ta_b, proof_addr) = match fetch_locator(&b).await {
+        LocatorFetch::Found {
+            ta_b,
+            economic_proof_addr,
+        } => (ta_b, economic_proof_addr),
+        LocatorFetch::Absent => {
+            return Absent("no trader acceptance is published for its bundle".into())
+        }
+        LocatorFetch::Unavailable(e) => {
+            return Unavailable(format!(
+                "its trader-acceptance locator could not be read: {e}"
+            ))
+        }
+        LocatorFetch::Malformed(w) => {
+            return invalid(format!("its trader-acceptance locator is malformed: {w}"))
+        }
+    };
+    let ta_bytes = match crate::sdk::storage_io::fetch_immutable_payload(
+        dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
+        &ta_b,
+    )
+    .await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Absent("its trader acceptance is not held by any member yet".into()),
+        Err(e) => return Unavailable(format!("its trader acceptance could not be read: {e}")),
+    };
+    let acceptance = match dsm::economic::trader_acceptance::decode_trader_acceptance(&ta_bytes) {
+        Ok(a) => a,
+        Err(e) => return invalid(format!("its trader acceptance is not canonical: {e}")),
+    };
+
+    // ── The trader's DevID: the bundle's own settler, never its counterparty
+    // (2c-D §12). G1–G4 already held for these bytes at `observe_parent_binding`.
+    let settler_devid = match Operation::from_bytes(&terms.recovery_material.operation_bytes) {
+        Ok(Operation::DlvSettle { settler_devid, .. }) => settler_devid,
+        _ => {
+            return Contradicts(
+                Reason::BundleNotCanonical,
+                "its market terms carry no settle".into(),
+            )
+        }
+    };
+
+    // ── 3. The trader's lineage: R_T^+, the proven AK, the verified operation
+    // and C_dsm+ — derived by the walk, never carried (2c-D §7 step 3). A walk
+    // that cannot complete is INCOMPLETE, never invalid.
+    let (network_id, root_set) = match crate::sdk::economic_admission_flow::committed_network_id()
+        .and_then(|n| crate::sdk::economic_admission_flow::canonical_set(&n).map(|s| (n, s)))
+    {
+        Ok(v) => v,
+        Err(e) => return Unavailable(format!("the root-register set is not resolvable: {e}")),
+    };
+    let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+        set: &root_set,
+        runtime: tokio::runtime::Handle::current(),
+        expected_network_id: network_id,
+    };
+    let trader = match resolver.validated_peer_transition(
+        &acceptance.trader_genesis(),
+        &settler_devid,
+        acceptance.economic_position(),
+    ) {
+        Ok(t) => t,
+        Err(PeerLineageFailure::Incomplete(e)) => {
+            return Unavailable(format!("the trader's lineage could not be walked: {e}"))
+        }
+        Err(e) => return invalid(format!("the trader's lineage does not validate: {e}")),
+    };
+
+    // ── The accepted effects, from the VERIFIED operation (C2-R2 LEFT) ─────
+    let Some(accepted) = AcceptedTransition::from_verified_settle(
+        trader.embedded_parent,
+        trader.c_dsm_plus,
+        &trader.verified_operation,
+    ) else {
+        return invalid(
+            "the trader's validated transition at that position is not a settle".into(),
+        );
+    };
+    let Operation::DlvSettle {
+        route_commit_bytes, ..
+    } = &trader.verified_operation
+    else {
+        return invalid(
+            "the trader's validated transition at that position is not a settle".into(),
+        );
+    };
+
+    // ── CORR.5's derivation: orientation, generation, fee, curve, output ───
+    let expected = match derive_accepted_market_successor(cursor_state, cursor_c_n, &accepted) {
+        DeriveExpected::Derived(next) => *next,
+        DeriveExpected::Refused(r) => {
+            return Contradicts(
+                r,
+                "its accepted settle does not derive a successor from this parent".into(),
+            )
+        }
+    };
+
+    // ── Tier 1 (2c-E §6, SAT.1–SAT.6), from the VERIFIED RouteCommit ──────
+    let intent = match check_intent_satisfaction(
+        &IntentEvidence {
+            intent: &terms.intent,
+            route: &terms.selected_route,
+            route_commit_bytes: route_commit_bytes.as_slice(),
+            vault_id,
+            proven_ak: &trader.proven_ak,
+        },
+        cursor_state,
+        cursor_c_n,
+    ) {
+        Ok(i) => i,
+        Err(r) => {
+            return Contradicts(
+                r,
+                "the trade does not satisfy its signed intent (2c-E §6)".into(),
+            )
+        }
+    };
+
+    // ── Req 21.16: the receipt's facts, under the VALIDATED R_T^+ ─────────
+    let x = terms.route_set_commitment;
+    let receipt = match receipt_candidate {
+        // The local candidate is the receipt of the settlement being completed
+        // and of nothing else: every other fold reads its own from storage.
+        Some(r) if r.vault_id == *vault_id && r.trade.x == x => r.clone(),
+        _ => match crate::sdk::settlement_receipt_codec::fetch_receipt(vault_id, &x).await {
+            crate::sdk::settlement_receipt_codec::ReceiptFetch::Decoded(r) => *r,
+            crate::sdk::settlement_receipt_codec::ReceiptFetch::Absent => {
+                return Absent("its settlement receipt is not published yet".into())
+            }
+            crate::sdk::settlement_receipt_codec::ReceiptFetch::Unavailable(e) => {
+                return Unavailable(format!("its settlement receipt could not be read: {e}"))
+            }
+            crate::sdk::settlement_receipt_codec::ReceiptFetch::Malformed(w) => {
+                return invalid(format!("its settlement receipt is malformed: {w}"))
+            }
+        },
+    };
+    let proof_bytes = match crate::sdk::storage_io::fetch_immutable_payload(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+        &proof_addr,
+    )
+    .await
+    {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Absent("its inclusion proof is not held by any member yet".into()),
+        Err(e) => return Unavailable(format!("its inclusion proof could not be read: {e}")),
+    };
+    let root = trader.validated_root.economic_root();
+    let artifact = match dsm::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
+    {
+        Ok(a) => a,
+        Err(e) => return invalid(format!("its inclusion proof is malformed: {e}")),
+    };
+    if let Err(e) = artifact.verify_against(
+        &acceptance.trader_genesis(),
+        &settler_devid,
+        acceptance.economic_position(),
+        &root,
+    ) {
+        return invalid(format!(
+            "its inclusion proof does not verify under the validated root: {e}"
+        ));
+    }
+    let receipt_id = derive_receipt_id(vault_id, &x);
+    let Some(path) = artifact.leaves.iter().find_map(|leaf| match &leaf.state {
+        dsm::economic::state::EconomicLeafState::SettlementReceipt(s)
+            if s.vault_id == *vault_id && s.receipt_id == receipt_id =>
+        {
+            Some(leaf.siblings.clone())
+        }
+        _ => None,
+    }) else {
+        return invalid("its inclusion proof names no settlement receipt for this trade".into());
+    };
+    let receipt = match verify_published_receipt(
+        &receipt,
+        &trader.validated_root,
+        &path[..],
+        acceptance.trader_genesis(),
+        settler_devid,
+        *vault_id,
+        x,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return invalid(format!(
+                "its receipt does not correspond to the committed settlement (Req 21.16): {e}"
+            ))
+        }
+    };
+
+    MarketEvidence::Established(Box::new(EstablishedMarketEvidence {
+        expected,
+        accepted,
+        coords,
+        acceptance,
+        trader,
+        intent,
+        receipt,
+    }))
 }
 
 /// Compose a DISCOVERED vault from its published artifacts alone.
@@ -1008,6 +1148,55 @@ pub(crate) async fn compose_discovered_vault(
     token_a: &[u8],
     token_b: &[u8],
     fee_bps: u32,
+) -> Result<ComposedVaultState, CompositionError> {
+    compose_discovered_vault_with(vault_id, token_a, token_b, fee_bps, None).await
+}
+
+/// [`compose_discovered_vault`], with the settling trader's own receipt
+/// candidate for its settlement — see [`compose_vault_state_with`].
+pub(crate) async fn compose_discovered_vault_with(
+    vault_id: &[u8; 32],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+    receipt_candidate: Option<&SignedTraderSettlementReceipt>,
+) -> Result<ComposedVaultState, CompositionError> {
+    compose_discovered_inner(vault_id, token_a, token_b, fee_bps, receipt_candidate, None).await
+}
+
+/// The vault's COMPOSED history from its owner baseline up to and including
+/// the state committed as `target_c_n` — the same walk, stopped AT the target
+/// so the binding there is never read (2c-D §14, reserve provenance). Baseline
+/// first; every later state is a certified fold. A walk that never reaches the
+/// target ends elsewhere, and the reserve rule refuses that history.
+pub(crate) async fn compose_vault_history_until(
+    vault_id: &[u8; 32],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+    target_c_n: [u8; 32],
+) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, CompositionError> {
+    let composed =
+        compose_discovered_inner(vault_id, token_a, token_b, fee_bps, None, Some(target_c_n))
+            .await?;
+    let mut states: Vec<VaultStateV2> = composed
+        .folded_parents
+        .iter()
+        .map(|f| f.state.clone())
+        .collect();
+    states.push(composed.state);
+    Ok(dsm::dlv::composed_history::ComposedVaultHistory::from_walk(
+        states,
+    ))
+}
+
+async fn compose_discovered_inner(
+    vault_id: &[u8; 32],
+    token_a: &[u8],
+    token_b: &[u8],
+    fee_bps: u32,
+    receipt_candidate: Option<&SignedTraderSettlementReceipt>,
+    stop_at: Option<[u8; 32]>,
 ) -> Result<ComposedVaultState, CompositionError> {
     let ad_key = crate::sdk::routing_sdk::advertisement_key(token_a, token_b, vault_id);
     let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key)
@@ -1046,13 +1235,15 @@ pub(crate) async fn compose_discovered_vault(
         .ok_or_else(|| {
             CompositionError::InvalidBaselinePresentation("V_n not resolvable at its c_n".into())
         })?;
-    let mut composed = compose_vault_state(
+    let mut composed = compose_vault_state_inner(
         vault_id,
         &presentation,
         &vn_bytes,
         token_a,
         token_b,
         fee_bps,
+        receipt_candidate,
+        stop_at,
     )
     .await?;
     // The advertisement's economic-proof locator, carried through for readers
@@ -1075,6 +1266,8 @@ pub(crate) async fn compose_discovered_vault(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dsm::dlv::successor_validity::{derive_market_successor, MarketTerms};
+    use dsm::types::proto as generated;
     use dsm::ccb::{
         genesis_parent_commitment, vault_state_commitment, EncumbranceSet, FeePolicy, MarketPolicy,
         ReleasePolicy, StorageSetMembers,
@@ -1499,41 +1692,6 @@ mod tests {
             .expect("publish receipt");
     }
 
-    /// `publish_receipt`, with one signature byte flipped after signing. The
-    /// receipt is well-formed, correctly keyed, and FAILS SPHINCS+ verification
-    /// — the exact input that used to become `Absent` and compose `Ok`.
-    async fn publish_receipt_with_corrupted_signature(
-        vault_id: &[u8; 32],
-        trade: &SettledTrade,
-        trader_pk: &[u8],
-        trader_sk: &[u8],
-    ) {
-        let (genesis, devid) = ([0xA0u8; 32], [0xB0u8; 32]);
-        let receipt_id = derive_receipt_id(vault_id, &trade.x);
-        let key = settlement_receipt_key(&genesis, &devid, vault_id, &receipt_id);
-        let mut tree = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(64);
-        tree.update_leaf(&key, &settlement_receipt_value(trade))
-            .expect("update_leaf");
-        let root = *tree.root();
-        let sibs = tree.get_inclusion_proof(&key, 256).expect("proof").siblings;
-        let mut receipt = sign_trader_settlement_receipt(
-            vault_id,
-            &receipt_id,
-            *trade,
-            &genesis,
-            &devid,
-            &root,
-            sibs,
-            trader_pk,
-            trader_sk,
-        )
-        .expect("sign receipt");
-        receipt.trader_signature[0] ^= 0xFF;
-        crate::sdk::settlement_receipt_codec::publish_settlement_receipt(&receipt)
-            .await
-            .expect("publish receipt");
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn publish_pointer(
         vault_id: &[u8; 32],
@@ -1626,75 +1784,96 @@ mod tests {
         successor
     }
 
-    /// A receipt that is PRESENT, correctly keyed, well-formed, and FAILS
-    /// SPHINCS+ verification.
+    /// 2c-D §14 (C2) — REQ 21.15's WITHHOLD HALF, and no receipt-as-authority.
     ///
-    /// Before amendment 2c-C3 this exact input became `Absent`: the fetch
-    /// collapsed a failed verification into `None`, the walk read `None` as
-    /// "not settled yet", `break`ed, and returned `Ok(...)` with a
-    /// bound-unrealized frontier. A forged receipt was not an error at all.
-    ///
-    /// It is INVALID, with the frozen reason — not absence, not "evidence
-    /// unavailable", and NOT a safety violation: a bad signature establishes
-    /// invalid evidence, and quarantining on it would let anyone able to
-    /// inject a forged receipt force a denial-of-service quarantine.
+    /// Everything 5-c-1 realized on — a signed RouteCommit recomputing X, its
+    /// published anchor, a verifying legacy receipt, and the slot bound to that
+    /// trade — is present. Without the trader's acceptance none of it realizes
+    /// anything: the parent is bound, the frontier stays there, and the
+    /// reserves do not move. This test used to assert the opposite.
     #[tokio::test]
-    async fn a_present_receipt_with_a_corrupted_signature_is_invalid_not_absent() {
+    async fn a_legacy_receipt_alone_does_not_realize_a_market_bundle() {
+        let _fleet = fleet();
+        let vault_id = vid(0x33);
+        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(&vault_id, &x_seed(0x33), &state, true, 10_000).await;
+        let composed =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("a bound, unrealized parent composes");
+        assert!(
+            matches!(
+                composed.frontier_binding,
+                FrontierBinding::BoundUnrealized { .. }
+            ),
+            "bound, and not realized: {:?}",
+            composed.frontier_binding
+        );
+        assert_eq!(
+            composed.sequence, 0,
+            "the frontier stays at the bound parent"
+        );
+        assert_eq!(composed.c_n, c0);
+        assert!(composed.folded_parents.is_empty(), "nothing folded");
+        assert_eq!(
+            (composed.reserves_a, composed.reserves_b),
+            (1_000_000, 500_000),
+            "reserves move on realization, never on binding or on a receipt"
+        );
+    }
+
+    /// 2c-D §14 (C2) — PRESENT-AND-FAILING EVIDENCE IS INVALID, NOT ABSENT.
+    ///
+    /// The property the corrupted-receipt control used to hold, re-pointed at
+    /// the evidence C2 reads first. A locator that IS present and is not a
+    /// locator is decidably false, not "not published yet" — and it never
+    /// quarantines, because anyone able to write the key could otherwise force
+    /// a denial-of-service quarantine (2c-C3.1 ruling A).
+    #[tokio::test]
+    async fn a_present_but_malformed_acceptance_locator_is_invalid_not_absent() {
         let _fleet = fleet();
         let vault_id = vid(0x0C);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (pk, sk) = trader();
-        let (new_a, new_b, x) = publish_rc_for_swap(
-            &x_seed(0x0C),
-            &vault_id,
-            1_000_000,
-            500_000,
-            &c0,
-            true,
-            10_000,
-            &pk,
-            &sk,
+        let (presentation, ccb, state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
+        publish_settled_trade(&vault_id, &x_seed(0x0C), &state, true, 10_000).await;
+        let bound =
+            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
+                .await
+                .expect("bound, unrealized");
+        let FrontierBinding::BoundUnrealized { bundle_digest, .. } = bound.frontier_binding else {
+            panic!("bound: {:?}", bound.frontier_binding);
+        };
+        BitcoinTapSdk::storage_put_bytes(
+            &crate::sdk::trader_acceptance_locator::locator_key(&bundle_digest),
+            &[0xFF, 0xFF, 0xFF],
         )
-        .await;
-        publish_extcommit(&x, &pk).await;
-        let output = 500_000 - new_b;
-        let _ = new_a;
-        let trade = settled_trade(&x, 0, true, 10_000, output);
-        // Same shape as the honest path in every byte but one.
-        publish_receipt_with_corrupted_signature(&vault_id, &trade, &pk, &sk).await;
-        win_slot(&vault_id, 0, &x, &c0, &pk).await;
+        .await
+        .expect("put");
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
-            .expect_err("a forged receipt must not compose — as a frontier or otherwise");
-
-        // NOT absence. The old behaviour was `Ok(BoundUnrealized)`; the
-        // `expect_err` above already rules that out. Now rule out the other
-        // wrong class: this is decidably false, not unobtainable.
+            .expect_err("a malformed locator must not compose — as a frontier or otherwise");
         let CompositionError::SuccessorInvalid { reason, detail } = err else {
             panic!("expected REALIZATION_EVIDENCE_INVALID, got {err:?}");
         };
         assert_eq!(reason, Reason::RealizationEvidenceInvalid);
         assert_eq!(reason.class(), OutcomeClass::Invalid);
-        // 2c-C3.1 ruling A: INVALID evidence — the input an attacker can
-        // manufacture at will — MUST NOT create a quarantine.
         assert!(
             crate::storage::client_db::dlv_lineage_quarantine::roots_for_vault(&vault_id)
                 .expect("readable")
                 .is_empty(),
-            "a forged receipt never quarantines"
+            "malformed evidence never quarantines"
         );
         assert!(
-            detail.contains("fails verification"),
-            "the refusal names the failed verification: {detail}"
+            detail.contains("locator"),
+            "the refusal names the locator: {detail}"
         );
     }
 
     /// 2c-C3.1 — THE FIVE-EFFECT CONTROL for Req 6.3, on the walk.
     ///
-    /// A trade is bound and realized at generation 0 (value A), so this
-    /// verifier RECORDS A as the finality at `k(c0)` — by its own commit and
-    /// again by observation. Then every member of the committed set serves a
+    /// A trade is bound at generation 0 (value A), so this verifier RECORDS A
+    /// as the finality at `k(c0)` — by its own commit and again by observation.
+    /// (Under C2 it is bound and NOT realized; binding finality is the subject.) Then every member of the committed set serves a
     /// DIFFERENT chosen value B at the same key: a broken write-once register,
     /// the only way duplicate finality can arise, because one read at the
     /// canonical quorum cannot show two values. Each of the five effects is
@@ -1715,11 +1894,19 @@ mod tests {
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
                 .expect("A composes");
-        assert_eq!(composed.sequence, 1);
+        // 2c-D §14 (C2): A is BOUND at generation 0 and, without its
+        // certification evidence, NOT realized — the frontier stays at c0.
+        // Req 6.3 concerns BINDING finality, so none of the five effects below
+        // depends on realization, and none of them changed.
+        let FrontierBinding::BoundUnrealized { bundle_digest, .. } = composed.frontier_binding
+        else {
+            panic!("A binds c0: {:?}", composed.frontier_binding);
+        };
+        assert_eq!(composed.sequence, 0);
         let a = quarantine::observed_finality(&vault_id, &c0)
             .expect("readable")
             .expect("the verifier recorded A at k(c0) the moment it established it");
-        assert_eq!(a.value.tx_id, composed.folded_parents[0].bound_by);
+        assert_eq!(a.value.tx_id, bundle_digest);
         // Re-observing the SAME value is not a contradiction: composing again
         // folds A again and writes no root.
         compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
@@ -1877,116 +2064,6 @@ mod tests {
         assert!(
             probe.tx_id.is_none() && probe.value_digest.is_none() && probe.value_addr.is_none(),
             "E5: no value is resolved on a quarantined key"
-        );
-    }
-
-    /// 2c-C3 Phase E, re-pinned after 2c-A.1 — THE MARKET FOLD'S VERDICT. A
-    /// market fold carries `PartialPendingRealization`: composition CONTINUES
-    /// on it, the witness's `expected` is exactly the successor the walk
-    /// installed, its parent is the `c_n` it was derived from, its `c_{n+1}`
-    /// — taken from the SUPPLIED bytes — is the commitment the walk installed,
-    /// and the verdict permits folding while refusing certification. `Valid`
-    /// is not reachable for a market fold: `CompleteValidity::from_market_witness`
-    /// needs an `IndependentRealization`, which has no constructor — so
-    /// nothing built on a market fold can claim accepted-successor finality,
-    /// `TA_B`, or a fence release.
-    #[tokio::test]
-    async fn a_market_fold_corresponds_and_is_partial_pending_realization() {
-        let _fleet = fleet();
-        let vault_id = vid(0x33);
-        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        publish_settled_trade(&vault_id, &x_seed(0x33), &state, true, 10_000).await;
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composition continues on a partial verdict");
-        assert_eq!(composed.sequence, 1, "the fold happened");
-        assert_eq!(composed.folded_parents.len(), 1);
-        let fold = &composed.folded_parents[0];
-        let C3Verdict::PartialPendingRealization(witness) = &fold.verdict else {
-            panic!(
-                "a market fold is partial pending its realization fact, got {:?}",
-                fold.verdict
-            );
-        };
-        assert_eq!(
-            *witness.expected(),
-            composed.state,
-            "expected IS the installed successor"
-        );
-        assert_eq!(
-            witness.parent_commitment(),
-            fold.c_n,
-            "derived from the folded parent"
-        );
-        assert_eq!(witness.parent_commitment(), c0);
-        assert_eq!(
-            witness.c_next(),
-            composed.c_n,
-            "the installed c_{{n+1}} is the witness's, from the supplied bytes"
-        );
-        assert_eq!(
-            witness.c_next(),
-            vault_state_commitment(&composed.state).expect("encodes"),
-            "and equals the commitment of the derived successor (injectivity)"
-        );
-        assert!(fold.verdict.may_fold(), "the fold may compute forward");
-        assert!(
-            !fold.verdict.may_certify(),
-            "the validity claim is withheld"
-        );
-        assert_eq!(
-            fold.verdict.class(),
-            None,
-            "deployment status is not a protocol class"
-        );
-    }
-
-    /// VDS.COMMON.10.a, MARKET — THE MUTATION BY CONSTRUCTION. The same
-    /// honest evidence (RC bound to c_0, X, a verifying receipt) with a bound
-    /// bundle whose field 2 is NOT the derived successor: one preserved field
-    /// differs. Before the encoder cut the walk derived locally and this
-    /// bundle folded like any other; now the comparison refuses it with C3's
-    /// code, and the vault does not advance.
-    #[tokio::test]
-    async fn a_market_bundle_whose_successor_is_not_the_derived_one_fails_10a() {
-        let _fleet = fleet();
-        let vault_id = vid(0x34);
-        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (pk, sk) = trader();
-        let (new_a, new_b, x) = publish_rc_for_swap(
-            &x_seed(0x34),
-            &vault_id,
-            1_000_000,
-            500_000,
-            &c0,
-            true,
-            10_000,
-            &pk,
-            &sk,
-        )
-        .await;
-        publish_extcommit(&x, &pk).await;
-        let trade = settled_trade(&x, 0, true, 10_000, 500_000 - new_b);
-        publish_receipt(&vault_id, &trade, &pk, &sk).await;
-        // The derived successor with ONE preserved field changed — a field
-        // Ruling B says the operation cannot touch.
-        let mut carried = swapped(&state, c0, true, 10_000);
-        assert_eq!((carried.reserve_a, carried.reserve_b), (new_a, new_b));
-        carried.owner_authority_transition_digest = [0xEE; 32];
-        win_slot_with(&vault_id, &x, &c0, carried, &pk).await;
-
-        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-            .await
-            .expect_err("a bundle carrying a successor other than the derived one must not fold");
-        let CompositionError::SuccessorInvalid { reason, detail } = err else {
-            panic!("expected CORRESPONDENCE_MISMATCH, got {err:?}");
-        };
-        assert_eq!(reason, Reason::CorrespondenceMismatch);
-        assert_eq!(reason.class(), OutcomeClass::Invalid);
-        assert!(
-            detail.contains("VDS.COMMON.10.a"),
-            "the refusal names the conjunct: {detail}"
         );
     }
 
@@ -2213,41 +2290,6 @@ mod tests {
         assert!(matches!(err, CompositionError::BaselineMismatch(_)));
     }
 
-    /// A claimed AND settled generation folds: the generation advances by one,
-    /// the reserves move by exactly the simulated swap, and the successor's
-    /// predecessor edge is the baseline's identity — the c_n chain is real.
-    #[tokio::test]
-    async fn a_claimed_and_settled_generation_folds_and_advances_the_chain() {
-        let _fleet = fleet();
-        let vault_id = vid(0x06);
-        let (presentation, ccb, state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let next = publish_settled_trade(&vault_id, &x_seed(0x06), &state, true, 10_000).await;
-        let (new_a, new_b) = (next.reserve_a, next.reserve_b);
-
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composes");
-        assert_eq!(composed.pending_chain_len, 1);
-        assert_eq!(composed.sequence, 1);
-        assert_eq!(composed.reserves_a, new_a);
-        assert_eq!(composed.reserves_b, new_b);
-        // The successor is a real V_n: parent edge = c_0, identity recomputes.
-        assert_eq!(composed.state.parent_state_commitment, c0);
-        assert_eq!(
-            composed.c_n,
-            vault_state_commitment(&composed.state).expect("c_1")
-        );
-        assert_ne!(composed.c_n, c0);
-        // Everything not moved by the trade is copied byte-for-byte.
-        assert_eq!(
-            composed.state.owner_authority_transition_digest,
-            state.owner_authority_transition_digest
-        );
-        assert_eq!(composed.state.storage_set, state.storage_set);
-        assert_eq!(composed.state.quorum, state.quorum);
-    }
-
     /// A BOUND generation whose trade has not settled is not a failure and not
     /// a frontier that anyone may build on: it is the realized frontier, MARKED
     /// BOUND.
@@ -2422,12 +2464,11 @@ mod tests {
         };
         assert_eq!(validity.witness().c_next(), composed.c_n);
         assert_eq!(validity.witness().parent_commitment(), c0);
-        assert!(fold.verdict.may_fold());
         assert!(
             fold.verdict.may_certify(),
             "the close's 10.a was its last conjunct"
         );
-        assert_eq!(fold.verdict.class(), Some(OutcomeClass::Valid));
+        assert_eq!(fold.verdict.class(), OutcomeClass::Valid);
     }
 
     /// VDS.COMMON.10.a, CLOSE — THE MUTATION BY CONSTRUCTION. The owner's
@@ -2730,129 +2771,6 @@ mod tests {
         assert!(
             detail.contains("different parent state"),
             "the refusal names the binding: {detail}"
-        );
-    }
-
-    /// A hop bound to a parent that is NOT the cursor's `c_n` was signed
-    /// against a different state. The slot binds correctly, so the walk
-    /// reaches the RouteCommit — and refuses there rather than folding.
-    #[tokio::test]
-    async fn a_hop_bound_to_a_stale_parent_fails_closed() {
-        let _fleet = fleet();
-        let vault_id = vid(0x08);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let stale_binding = [0xEEu8; 32];
-        assert_ne!(stale_binding, c0);
-        let (pk, sk) = trader();
-        let (_na, _nb, x) = publish_rc_for_swap(
-            &x_seed(0x08),
-            &vault_id,
-            1_000_000,
-            500_000,
-            &stale_binding,
-            true,
-            10_000,
-            &pk,
-            &sk,
-        )
-        .await;
-        publish_extcommit(&x, &pk).await;
-        let out = crate::sdk::routing_path_sdk::constant_product_output(
-            10_000, 1_000_000, 500_000, FEE_BPS,
-        )
-        .expect("sim");
-        let trade = settled_trade(&x, 0, true, 10_000, out);
-        publish_receipt(&vault_id, &trade, &pk, &sk).await;
-        // The SLOT binds the true parent; only the hop is stale.
-        win_slot(&vault_id, 0, &x, &c0, &pk).await;
-
-        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-            .await
-            .expect_err("a stale hop binding cannot fold");
-        // FLIPPED by amendment 2c-C3. `MarketRealization::Contradicts` — the
-        // module's own comment already said "a divergence is never an absence";
-        // now the type says it too.
-        let CompositionError::SuccessorInvalid { reason, detail } = err else {
-            panic!("expected STALE_PARENT, got {err:?}");
-        };
-        assert_eq!(reason, Reason::StaleParent);
-        assert!(
-            detail.contains("bound to a different parent state"),
-            "the refusal names the hop binding: {detail}"
-        );
-    }
-
-    /// A receipt that witnesses a DIFFERENT trade than the claimed one cannot
-    /// activate the edge.
-    #[tokio::test]
-    async fn a_receipt_for_a_different_generation_fails_closed() {
-        let _fleet = fleet();
-        let vault_id = vid(0x09);
-        let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let (pk, sk) = trader();
-        let (_na, _nb, x) = publish_rc_for_swap(
-            &x_seed(0x09),
-            &vault_id,
-            1_000_000,
-            500_000,
-            &c0,
-            true,
-            10_000,
-            &pk,
-            &sk,
-        )
-        .await;
-        publish_extcommit(&x, &pk).await;
-        // The receipt witnesses a step from generation 5, not from 0.
-        let witnessed = settled_trade(&x, 5, true, 10, 3);
-        publish_receipt(&vault_id, &witnessed, &pk, &sk).await;
-        win_slot(&vault_id, 0, &x, &c0, &pk).await;
-
-        let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-            .await
-            .expect_err("a receipt for another step cannot activate this edge");
-        // FLIPPED by amendment 2c-C3 — a receipt for another generation
-        // contradicts the bundle; it does not fail to exist. And it is a
-        // GENERATION mismatch, its own frozen code — not the shared
-        // StaleParent the previous commit routed every contradiction to.
-        let CompositionError::SuccessorInvalid { reason, detail } = err else {
-            panic!("expected GENERATION_MISMATCH, got {err:?}");
-        };
-        assert_eq!(reason, Reason::GenerationMismatch);
-        assert!(
-            detail.contains("different generation step"),
-            "the refusal names the step: {detail}"
-        );
-    }
-
-    /// Two settled generations chain: c_0 → c_1 → c_2, each successor binding
-    /// the previous identity, the second slot claimed at generation 1 and its
-    /// hop bound to c_1 (not c_0), and the walk terminating on the empty cell
-    /// at generation 2.
-    #[tokio::test]
-    async fn two_settled_generations_chain_by_commitment() {
-        let _fleet = fleet();
-        let vault_id = vid(0x0A);
-        let (presentation, ccb, state0, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        let s1 = publish_settled_trade(&vault_id, &x_seed(0x0A), &state0, true, 10_000).await;
-        // c_1 exactly as the walk will install it: the derived successor's.
-        assert_eq!((s1.generation, s1.parent_state_commitment), (1, c0));
-        let c1 = vault_state_commitment(&s1).expect("c_1");
-        let s2 = publish_settled_trade(&vault_id, &x_seed(0x0B), &s1, false, 7_000).await;
-        let (a2, b2) = (s2.reserve_a, s2.reserve_b);
-
-        let composed =
-            compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
-                .await
-                .expect("composes");
-        assert_eq!(composed.pending_chain_len, 2);
-        assert_eq!(composed.sequence, 2);
-        assert_eq!(composed.reserves_a, a2);
-        assert_eq!(composed.reserves_b, b2);
-        assert_eq!(composed.state.parent_state_commitment, c1);
-        assert_eq!(
-            composed.c_n,
-            vault_state_commitment(&composed.state).expect("c_2")
         );
     }
 }
