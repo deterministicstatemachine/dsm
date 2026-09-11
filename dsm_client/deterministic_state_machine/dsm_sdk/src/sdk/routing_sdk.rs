@@ -112,6 +112,10 @@ pub(crate) struct PublishRoutingAdInput<'a> {
     /// discovery material for the trader's verification chain; the ad itself
     /// authenticates nothing.
     pub anchor_presentation_digest: [u8; 32],
+    /// The vault's IMMUTABLE birth anchor (amendment 2c-G, G3 blocker ruling),
+    /// from the owner's record. `None` publishes the current anchor as the
+    /// birth anchor — right at birth, and for ads whose anchor never moves.
+    pub birth_anchor_presentation_digest: Option<[u8; 32]>,
     /// The owner's reserve-proof locator: the artifact's content address and
     /// the economic position whose registered root it names. `None` for a
     /// vault whose record carries none; the ad then advertises no locator and
@@ -163,6 +167,10 @@ pub(crate) async fn publish_active_advertisement(
         lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
         updated_state_number: 1,
         anchor_presentation_digest: input.anchor_presentation_digest.to_vec(),
+        birth_anchor_presentation_digest: input
+            .birth_anchor_presentation_digest
+            .unwrap_or(input.anchor_presentation_digest)
+            .to_vec(),
         economic_proof_addr: input
             .economic_proof
             .map(|(addr, _)| addr.to_vec())
@@ -243,6 +251,62 @@ pub(crate) async fn republish_active_advertisement_with_reserves(
     ad.updated_state_number = ad.updated_state_number.saturating_add(1);
     BitcoinTapSdk::storage_put_bytes(&ad_key, &ad.encode_to_vec()).await?;
     Ok(())
+}
+
+/// Point an existing, ACTIVE advertisement at the owner's fresh baseline
+/// (amendment 2c-G, G3): the anchor digest and the reserve-proof locator move
+/// TOGETHER, in one write, with the reserves the baseline states. Everything
+/// else the owner published is preserved verbatim, and `updated_state_number`
+/// increments so the dedup rule supersedes the previous form.
+///
+/// The two fields never move apart because a trader's provenance reads the
+/// owner's backing from the proof and requires the composed history — which
+/// starts at the anchor — to pass through the proof's generation. The ad is
+/// discovery, never authority: a trader still authenticates the anchor and
+/// verifies the proof against the owner's registered root before composing.
+///
+/// Returns whether anything was written: an ad that already names this anchor
+/// and proof, or one that is no longer active, is left exactly as it is.
+/// Reserves are in CANONICAL pair order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn republish_advertisement_baseline(
+    token_a: &[u8],
+    token_b: &[u8],
+    vault_id: &[u8; 32],
+    anchor_presentation_digest: &[u8; 32],
+    economic_proof: ([u8; 32], u64),
+    reserve_a: u64,
+    reserve_b: u64,
+) -> Result<bool, dsm::types::error::DsmError> {
+    let ad_key = advertisement_key(token_a, token_b, vault_id);
+    let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key).await?;
+    let mut ad =
+        generated::RoutingVaultAdvertisementV1::decode(ad_bytes.as_slice()).map_err(|e| {
+            dsm::types::error::DsmError::serialization_error(
+                "RoutingVaultAdvertisementV1",
+                "decode",
+                Some(ad_key.clone()),
+                Some(e),
+            )
+        })?;
+    if ad.lifecycle_state != LIFECYCLE_ACTIVE {
+        return Ok(false);
+    }
+    let (proof_addr, proof_position) = economic_proof;
+    if ad.anchor_presentation_digest.as_slice() == anchor_presentation_digest.as_slice()
+        && ad.economic_proof_addr.as_slice() == proof_addr.as_slice()
+        && ad.economic_proof_position == proof_position
+    {
+        return Ok(false);
+    }
+    ad.anchor_presentation_digest = anchor_presentation_digest.to_vec();
+    ad.economic_proof_addr = proof_addr.to_vec();
+    ad.economic_proof_position = proof_position;
+    ad.reserve_a = reserve_a;
+    ad.reserve_b = reserve_b;
+    ad.updated_state_number = ad.updated_state_number.saturating_add(1);
+    BitcoinTapSdk::storage_put_bytes(&ad_key, &ad.encode_to_vec()).await?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone)]
@@ -499,6 +563,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
             anchor_presentation_digest: [0u8; 32],
+            birth_anchor_presentation_digest: None,
             economic_proof: None,
         })
         .await
@@ -556,6 +621,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: b"vault-proto",
             anchor_presentation_digest: [0u8; 32],
+            birth_anchor_presentation_digest: None,
             economic_proof: None,
         })
         .await
@@ -630,6 +696,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &proto,
             anchor_presentation_digest: [0u8; 32],
+            birth_anchor_presentation_digest: None,
             economic_proof: None,
         })
         .await
@@ -697,6 +764,7 @@ mod tests {
             owner_public_key: &[0xABu8; 64],
             vault_proto_bytes: &fake_vault_proto_bytes(0x02),
             anchor_presentation_digest: [0u8; 32],
+            birth_anchor_presentation_digest: None,
             economic_proof: None,
         })
         .await
@@ -843,6 +911,7 @@ mod tests {
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
             updated_state_number: 5,
             anchor_presentation_digest: vec![0u8; 32],
+            birth_anchor_presentation_digest: Vec::new(),
             economic_proof_addr: Vec::new(),
             economic_proof_position: 0,
         };

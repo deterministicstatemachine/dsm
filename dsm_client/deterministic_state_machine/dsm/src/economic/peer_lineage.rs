@@ -117,8 +117,9 @@ pub trait PeerEvidenceFetcher {
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &crate::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        let _ = (vault_id, target_c_n, parent);
+        let _ = (vault_id, target_c_n, parent, from_generation);
         Err(PeerLineageFailure::Incomplete(
             "this fetcher cannot compose vault state".into(),
         ))
@@ -220,9 +221,10 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &crate::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
         self.fetcher
-            .composed_vault_history(vault_id, target_c_n, parent)
+            .composed_vault_history(vault_id, target_c_n, parent, from_generation)
     }
 }
 

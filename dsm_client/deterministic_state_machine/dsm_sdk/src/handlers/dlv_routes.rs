@@ -1132,6 +1132,23 @@ impl AppRouterImpl {
                     rec_with_birth.baseline_state_ccb = artifacts.state_ccb.clone();
                     rec_with_birth.baseline_presentation = artifacts.presentation.clone();
                     write_record(tx, &rec_with_birth)?;
+                    // THE IMMUTABLE BIRTH ANCHOR (amendment 2c-G, G3 blocker
+                    // ruling): derived here from the presentation this birth
+                    // publishes, written once, never moved.
+                    crate::storage::client_db::amm_vault_records::set_birth_presentation_digest_with_conn(
+                        tx,
+                        &vault_id,
+                        &dsm::storage_object::immutable_inner(
+                            dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+                            &artifacts.presentation,
+                        ),
+                    )
+                    .map_err(|e| {
+                        dsm::types::error::DsmError::storage(
+                            format!("dlv.create: record the birth anchor: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
                     for (key, bytes) in &artifacts.objects {
                         crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
                             tx,
@@ -3522,6 +3539,7 @@ async fn preflight_reserve_provenance(
                 settle.parent_state.market_policy.token_b(),
                 settle.parent_state.fee_policy.fee_bps(),
                 settle.parent_binding,
+                baseline,
             )
             .await
             .map_err(|e| format!("the composed history: {e}"))?,
@@ -4070,6 +4088,17 @@ impl AppRouterImpl {
                 ),
                 None => {}
             }
+            match &report.baseline {
+                BaselineOutcome::Anchored { generation } => log::info!(
+                    "[owner catch-up] vault {b32}: fresh owner baseline at generation {generation} \
+                     (advertised: {})",
+                    report.advertised
+                ),
+                BaselineOutcome::Refused(why) => {
+                    log::warn!("[owner catch-up] vault {b32}: baseline not refreshed — {why}")
+                }
+                BaselineOutcome::Deferred(_) | BaselineOutcome::Unchanged => {}
+            }
         }
         Ok(applied)
     }
@@ -4093,20 +4122,40 @@ impl AppRouterImpl {
         target: CatchUpTarget,
     ) -> CatchUpReport {
         let mut report = CatchUpReport::default();
-        if let Err(why) = self.catch_up_into(vault_id, target, &mut report).await {
+        let composed = match self.compose_for_catch_up(vault_id).await {
+            Ok(c) => c,
+            Err(why) => {
+                report.stopped = Some(why);
+                return report;
+            }
+        };
+        if let Err(why) = self
+            .catch_up_into(vault_id, &composed, target, &mut report)
+            .await
+        {
             report.stopped = Some(why);
+        }
+        // G3: after the run — finished or stopped — the last FULLY materialized
+        // generation becomes the owner's baseline. Local bookkeeping only: it
+        // is not discovery material until it is quorum-durable and the
+        // advertisement moves, below.
+        report.baseline = self.refresh_owner_baseline(vault_id, &composed).await;
+        match self.advertise_owner_baseline(vault_id).await {
+            Ok(moved) => report.advertised = moved,
+            Err(e) => log::info!(
+                "[owner catch-up] vault {}: the advertisement stays where it is — {e}",
+                crate::util::text_id::encode_base32_crockford(vault_id)
+            ),
         }
         report
     }
 
-    /// The engine's body. Progress is recorded in `report` as each apply
-    /// lands, so an error returned from here stops the run without erasing it.
-    async fn catch_up_into(
+    /// The composition a catch-up consumes: the owner's own vault, through the
+    /// same walk a stranger runs, refused on a quarantined lineage.
+    async fn compose_for_catch_up(
         &self,
         vault_id: &[u8; 32],
-        target: CatchUpTarget,
-        report: &mut CatchUpReport,
-    ) -> Result<(), String> {
+    ) -> Result<crate::sdk::vault_state_composition::ComposedVaultState, String> {
         if self.core_sdk.device_head().is_none() {
             return Err("no device head".into());
         }
@@ -4115,7 +4164,36 @@ impl AppRouterImpl {
         })?;
         // 2c-C3.1 ruling D, effect 4: independent of the walk.
         refuse_quarantined_lineage("owner catch-up", vault_id, composed.sequence, &composed.c_n)?;
-        for fold in owed_certified_folds(&composed, target)? {
+        Ok(composed)
+    }
+
+    /// The engine's body. Progress is recorded in `report` as each apply
+    /// lands, so an error returned from here stops the run without erasing it.
+    async fn catch_up_into(
+        &self,
+        vault_id: &[u8; 32],
+        composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+        target: CatchUpTarget,
+        report: &mut CatchUpReport,
+    ) -> Result<(), String> {
+        let owed = match owed_certified_folds(composed, target) {
+            Ok(owed) => owed,
+            Err(why) => {
+                // A settlement this owner applied BEFORE its current baseline is
+                // not in the composition — the walk starts at that baseline
+                // (G3). Its durable consume-once claim, written only by a
+                // certified apply, records that it was certified and applied:
+                // the request is already satisfied, and nothing is written.
+                if let CatchUpTarget::Through(x) = target {
+                    if applied_before_the_baseline(vault_id, composed, &x)? {
+                        report.already_applied += 1;
+                        return Ok(());
+                    }
+                }
+                return Err(why);
+            }
+        };
+        for fold in owed {
             let Some(certified) = fold.realized_trade.as_ref() else {
                 continue;
             };
@@ -4147,6 +4225,231 @@ impl AppRouterImpl {
             report.applied += 1;
         }
         Ok(())
+    }
+
+    /// THE FRESH OWNER BASELINE (amendment 2c-G, G3): after a catch-up,
+    /// finished or stopped, the last FULLY materialized generation `V_k`
+    /// becomes the owner's authenticated baseline.
+    ///
+    /// A baseline-collapse artifact only. It authorizes, re-certifies and
+    /// re-realizes nothing, moves no value and changes no order: the state it
+    /// anchors is the walk's own certified `V_k`, never rebuilt and never
+    /// supplied, and every validity condition of the ruling is checked by
+    /// [`plan_owner_baseline`] before anything is signed. The presentation
+    /// comes from the same owner-anchor machinery as the birth baseline, and is
+    /// verified the way a stranger verifies it before it is kept.
+    ///
+    /// One transaction freezes `CCB(V_k)` and its presentation for the vault's
+    /// set, freezes the reserve proof at the admitted head for the root-register
+    /// set, advances the record's baseline and moves its proof locator — so the
+    /// record never names an anchor its proof does not reach. That switch is
+    /// LOCAL BOOKKEEPING: the baseline becomes discovery material only when
+    /// [`Self::advertise_owner_baseline`] finds it quorum-durable.
+    ///
+    /// Idempotent and monotone: a baseline already at the owner's generation is
+    /// left alone, and one is never moved backwards.
+    async fn refresh_owner_baseline(
+        &self,
+        vault_id: &[u8; 32],
+        composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    ) -> BaselineOutcome {
+        match self.try_refresh_owner_baseline(vault_id, composed).await {
+            Ok(outcome) => outcome,
+            Err(why) => BaselineOutcome::Refused(why),
+        }
+    }
+
+    async fn try_refresh_owner_baseline(
+        &self,
+        vault_id: &[u8; 32],
+        composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    ) -> Result<BaselineOutcome, String> {
+        let Some(head) = self.core_sdk.device_head() else {
+            return Ok(BaselineOutcome::Deferred("no device head".into()));
+        };
+        // An admission in flight means `R_econ` is not final yet: the owner's
+        // materialized generation is read from it, so anchor on a later pass.
+        if head.pending_economic_admission().is_some() {
+            return Ok(BaselineOutcome::Deferred(
+                "an economic admission is in flight".into(),
+            ));
+        }
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .map_err(|e| format!("vault record read failed: {e}"))?
+            .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
+        let current = dsm::ccb::decode_vault_state(&record.baseline_state_ccb)
+            .map_err(|e| format!("the stored baseline does not decode: {e}"))?;
+        // The owner's materialized generation, from its ADMITTED state — with
+        // the proof of it, which the advertisement will name.
+        let proof = crate::sdk::economic_admission_flow::vault_reserve_proof_at_admitted_head(
+            &head.genesis_digest(),
+            &head.devid(),
+            vault_id,
+        )
+        .map_err(|e| e.to_string())?;
+        if proof.generation <= current.generation {
+            return Ok(BaselineOutcome::Unchanged);
+        }
+        let plan = plan_owner_baseline(
+            vault_id,
+            composed,
+            &record.storage_set_id,
+            proof.generation,
+            &proof.legs,
+        )?;
+        let presentation = owner_baseline_presentation(&plan)?;
+
+        let network_id = crate::sdk::economic_admission_flow::committed_network_id()
+            .map_err(|e| e.to_string())?;
+        let root_set = crate::sdk::economic_admission_flow::canonical_set(&network_id)
+            .map_err(|e| e.to_string())?;
+        {
+            use crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn;
+            let binding = crate::storage::client_db::get_connection()
+                .map_err(|e| format!("database: {e}"))?;
+            let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("open the baseline transaction: {e}"))?;
+            for (key, bytes) in [
+                (
+                    immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_VAULT_STATE,
+                        &plan.state_ccb,
+                    ),
+                    &plan.state_ccb,
+                ),
+                (
+                    immutable_object_key(
+                        dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1,
+                        &presentation,
+                    ),
+                    &presentation,
+                ),
+            ] {
+                freeze_artifact_with_conn(
+                    &tx,
+                    &record.storage_set_id,
+                    &key,
+                    bytes,
+                    &plan.c_n,
+                    REBASELINE_ARTIFACT_PURPOSE,
+                )
+                .map_err(|e| format!("freeze baseline object {key}: {e}"))?;
+            }
+            freeze_artifact_with_conn(
+                &tx,
+                &root_set.id(),
+                &proof.key,
+                &proof.bytes,
+                &proof.root,
+                "economic-proof-artifact",
+            )
+            .map_err(|e| format!("freeze the reserve proof: {e}"))?;
+            crate::storage::client_db::amm_vault_records::update_baseline_with_conn(
+                &tx,
+                vault_id,
+                &plan.state_ccb,
+                &presentation,
+            )
+            .map_err(|e| format!("advance the record's baseline: {e}"))?;
+            crate::storage::client_db::amm_vault_records::update_economic_proof_locator_with_conn(
+                &tx,
+                vault_id,
+                &crate::storage::client_db::amm_vault_records::EconomicProofLocator {
+                    addr: proof.addr,
+                    position: proof.position,
+                },
+            )
+            .map_err(|e| format!("move the record's proof locator: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("commit the baseline transaction: {e}"))?;
+        }
+        // Best-effort now; the generic sweep replays the frozen bytes to quorum.
+        if let Err(e) = crate::handlers::artifact_republish::republish_unpublished_artifacts().await
+        {
+            log::info!("[owner baseline] publication pass errored (the sweep retries): {e}");
+        }
+        Ok(BaselineOutcome::Anchored {
+            generation: proof.generation,
+        })
+    }
+
+    /// Point the vault's advertisement at the owner's baseline — the anchor and
+    /// the reserve-proof locator TOGETHER — once that baseline is quorum-
+    /// durable (amendment 2c-G, G3). Returns whether the advertisement moved.
+    ///
+    /// Until every condition holds, the advertisement keeps naming the old,
+    /// already-published baseline, which stays valid, so trading never pauses:
+    /// both baseline objects at quorum on the vault's set, the proof fetchable
+    /// by content address exactly as a trader fetches it, and the proof's
+    /// generation not behind the anchor's — the order a trader's provenance
+    /// needs. The ad is discovery only; a trader still authenticates the anchor
+    /// and verifies the proof against the owner's registered root.
+    async fn advertise_owner_baseline(&self, vault_id: &[u8; 32]) -> Result<bool, String> {
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .map_err(|e| format!("vault record read failed: {e}"))?
+            .ok_or_else(|| "no AMM vault record for this vault on this device".to_string())?;
+        let Some(locator) = record.economic_proof else {
+            return Ok(false);
+        };
+        if !baseline_is_published(vault_id) {
+            return Ok(false);
+        }
+        let presentation_inner = verified_baseline(vault_id)?.presentation_inner;
+        let Some(proof_bytes) = crate::sdk::storage_io::fetch_immutable_payload(
+            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &locator.addr,
+        )
+        .await
+        .map_err(|e| format!("the reserve proof could not be read: {e}"))?
+        else {
+            return Ok(false);
+        };
+        let artifact = dsm::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
+            .map_err(|e| format!("the reserve proof does not decode: {e}"))?;
+        let proof_generation = artifact
+            .leaves
+            .iter()
+            .find_map(|leaf| match &leaf.state {
+                dsm::economic::state::EconomicLeafState::VaultReserve(r)
+                    if r.vault_id == *vault_id =>
+                {
+                    Some(r.vault_sequence)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| "the reserve proof names no reserve leaf of this vault".to_string())?;
+        let baseline = dsm::ccb::decode_vault_state(&record.baseline_state_ccb)
+            .map_err(|e| format!("the stored baseline does not decode: {e}"))?;
+        if proof_generation < baseline.generation {
+            return Err(format!(
+                "the reserve proof stands at generation {proof_generation}, behind the baseline at \
+                 {} — an anchor its proof does not reach would refuse every settle",
+                baseline.generation
+            ));
+        }
+        let pair = dsm::types::device_state::VaultStatePair::new(
+            record.policy_commit_a,
+            record.policy_commit_b,
+            record.fee_bps,
+        )
+        .map_err(|e| format!("the vault record's pair is not canonical: {e}"))?;
+        let head = self
+            .core_sdk
+            .device_head()
+            .ok_or_else(|| "no device head".to_string())?;
+        crate::sdk::routing_sdk::republish_advertisement_baseline(
+            &pair.a(),
+            &pair.b(),
+            vault_id,
+            &presentation_inner,
+            (locator.addr, locator.position),
+            head.vault_reserve(vault_id, &pair.a()),
+            head.vault_reserve(vault_id, &pair.b()),
+        )
+        .await
+        .map_err(|e| format!("the advertisement could not be moved: {e}"))
     }
 
     /// Apply ONE certified fold: the owner's `DlvOwnerApplyV2`, admitted with
@@ -4352,6 +4655,186 @@ impl AppRouterImpl {
     }
 }
 
+/// Whether the settlement committed as `x` was applied by this owner at a
+/// generation BELOW the composition's baseline — so it cannot appear among the
+/// walk's folds. Read from the consume-once claims, which only a certified
+/// apply writes.
+fn applied_before_the_baseline(
+    vault_id: &[u8; 32],
+    composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    x: &[u8; 32],
+) -> Result<bool, String> {
+    let baseline = composed
+        .folded_parents
+        .first()
+        .map(|f| f.generation)
+        .unwrap_or(composed.sequence);
+    let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, x);
+    for generation in 0..baseline {
+        let consumer =
+            crate::storage::client_db::load_vault_generation_consumer(vault_id, generation)
+                .map_err(|e| format!("consumption lookup failed: {e}"))?;
+        if consumer.is_some_and(|c| c.source_commitment == receipt_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Purpose label frozen on a fresh owner baseline's objects (amendment 2c-G,
+/// G3). Opaque to the publication layer; for operators and proofs.
+const REBASELINE_ARTIFACT_PURPOSE: &str = "dlv-rebaseline";
+
+/// What a fresh owner baseline commits (amendment 2c-G, G3).
+struct OwnerBaselinePlan {
+    state: dsm::ccb::VaultStateV2,
+    c_n: [u8; 32],
+    state_ccb: Vec<u8>,
+}
+
+/// The state a fresh owner baseline anchors, and every validity condition the
+/// G3 ruling puts on it — checked before anything is signed.
+///
+/// The state is the walk's OWN certified state at the owner's materialized
+/// generation — the frontier, or a folded parent — never rebuilt from local
+/// facts and never supplied. So a generation the walk did not certify has no
+/// state here at all: an uncertified successor can never be absorbed into a
+/// baseline. Around it:
+///
+/// - the vault is this vault and the generation is the materialized one;
+/// - its parent is the certified chain just consumed — it names the `c_n` of
+///   the fold at the previous generation;
+/// - its reserves are exactly the owner's ADMITTED legs at that generation, by
+///   asset identity;
+/// - its storage set is the authenticated one — the record's and the walk's;
+/// - it is canonical: it encodes, decodes to itself, and commits to its `c_n`.
+fn plan_owner_baseline(
+    vault_id: &[u8; 32],
+    composed: &crate::sdk::vault_state_composition::ComposedVaultState,
+    record_storage_set_id: &[u8; 32],
+    generation: u64,
+    admitted_legs: &[dsm::economic::state::EconomicVaultReserveState],
+) -> Result<OwnerBaselinePlan, String> {
+    let (state, c_n) = if composed.sequence == generation {
+        (&composed.state, composed.c_n)
+    } else {
+        match composed
+            .folded_parents
+            .iter()
+            .find(|f| f.generation == generation)
+        {
+            Some(f) => (&f.state, f.c_n),
+            None => {
+                return Err(format!(
+                    "generation {generation} is not in the certified chain this walk composed — an \
+                     uncertified successor is never absorbed into a baseline"
+                ))
+            }
+        }
+    };
+    let parent = composed
+        .folded_parents
+        .iter()
+        .find(|f| f.generation.checked_add(1) == Some(generation))
+        .ok_or_else(|| {
+            format!(
+                "the composition carries no parent for generation {generation} — the baseline \
+                 would not link to the certified chain"
+            )
+        })?;
+    if state.parent_state_commitment != parent.c_n {
+        return Err(format!(
+            "the state at generation {generation} does not name its certified parent"
+        ));
+    }
+    if state.vault_id != *vault_id || state.generation != generation {
+        return Err("the anchored state is not this vault at the materialized generation".into());
+    }
+    let admitted = |pc: &[u8; 32]| {
+        admitted_legs
+            .iter()
+            .find(|l| {
+                l.vault_id == *vault_id && l.policy_commit == *pc && l.vault_sequence == generation
+            })
+            .map(|l| l.amount)
+    };
+    if admitted(state.market_policy.token_a()) != Some(state.reserve_a)
+        || admitted(state.market_policy.token_b()) != Some(state.reserve_b)
+    {
+        return Err(format!(
+            "the state's reserves are not the owner's admitted reserves at generation {generation}"
+        ));
+    }
+    let set_id = dsm::ccb::storage_set_id(&state.storage_set)
+        .map_err(|e| format!("the state's storage set does not derive an id: {e}"))?;
+    if set_id != *record_storage_set_id || set_id != composed.storage_set_id {
+        return Err("the state's storage set is not the vault's authenticated one".into());
+    }
+    let state_ccb = state
+        .encode()
+        .map_err(|e| format!("the state does not encode: {e}"))?;
+    let decoded = dsm::ccb::decode_vault_state(&state_ccb)
+        .map_err(|e| format!("the state's encoding does not decode: {e}"))?;
+    if decoded
+        .encode()
+        .map_err(|e| format!("the decoded state does not re-encode: {e}"))?
+        != state_ccb
+    {
+        return Err("the state's encoding is not canonical".into());
+    }
+    if dsm::ccb::vault_state_commitment(state)
+        .map_err(|e| format!("the state does not commit: {e}"))?
+        != c_n
+    {
+        return Err("the state does not commit to the walk's c_n".into());
+    }
+    Ok(OwnerBaselinePlan {
+        state: state.clone(),
+        c_n,
+        state_ccb,
+    })
+}
+
+/// The owner's `AnchorPresentationV3` over a planned baseline — the SAME
+/// owner-anchor machinery as the birth baseline — verified exactly as a
+/// stranger verifies it before it is kept.
+fn owner_baseline_presentation(plan: &OwnerBaselinePlan) -> Result<Vec<u8>, String> {
+    use prost::Message as _;
+    let (seed, network_id, g) = owner_presentation_inputs().map_err(|e| e.to_string())?;
+    let inputs = crate::sdk::identity_presentation::OwnerIdentityInputs {
+        network_id: network_id.as_bytes(),
+        wallet_index: 0,
+        device_slot: 0,
+        genesis_version: 3,
+    };
+    let auth = crate::sdk::identity_presentation::derive_own_authority_context(&seed, inputs)
+        .map_err(|e| e.to_string())?;
+    if auth.g != g {
+        return Err("the re-derived identity is not the installed one".into());
+    }
+    // The anchored state must be one THIS owner authored: its identity, its
+    // device, and the authority position every generation carries.
+    if plan.state.owner_genesis_id != auth.g
+        || plan.state.owner_device_id != auth.devid
+        || plan.state.owner_authority_transition_digest != auth.position
+    {
+        return Err("the anchored state names an owner authority other than this device's".into());
+    }
+    let presentation = crate::sdk::identity_presentation::build_own_anchor_presentation(
+        &seed, inputs, &auth.g, &plan.c_n,
+    )
+    .map_err(|e| e.to_string())?;
+    let verified = crate::sdk::identity_presentation::verify_anchor_presentation(
+        &presentation,
+        &plan.state_ccb,
+    )
+    .map_err(|e| format!("the fresh presentation does not verify: {e}"))?;
+    if verified.c_n != plan.c_n {
+        return Err("the fresh presentation anchors a different state".into());
+    }
+    Ok(presentation.encode_to_vec())
+}
+
 /// Where an owner catch-up stops (amendment 2c-G, ruling G2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatchUpTarget {
@@ -4371,6 +4854,24 @@ pub(crate) struct CatchUpReport {
     pub already_applied: u32,
     /// Why the run ended before its target, if it did.
     pub stopped: Option<String>,
+    /// What the run did to the owner's baseline (amendment 2c-G, G3).
+    pub baseline: BaselineOutcome,
+    /// Whether the advertisement moved to the owner's baseline this run.
+    pub advertised: bool,
+}
+
+/// What a catch-up did to the owner's baseline (amendment 2c-G, G3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum BaselineOutcome {
+    /// The baseline already stands at the owner's materialized generation.
+    #[default]
+    Unchanged,
+    /// A fresh baseline was frozen and the record advanced to it.
+    Anchored { generation: u64 },
+    /// Not attempted this pass (an admission in flight); a later pass anchors.
+    Deferred(String),
+    /// Attempted and refused; nothing was written.
+    Refused(String),
 }
 
 /// ONE catch-up at a time on this device: an explicit request waits for a
@@ -11326,6 +11827,606 @@ mod funded_creation_tests {
         assert_eq!(leaves(owner, &vault_id, &pc_a, &pc_b).2, 1);
     }
 
+    /// The vault's routing advertisement as a stranger reads it.
+    fn advertisement(
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+    ) -> generated::RoutingVaultAdvertisementV1 {
+        use prost::Message as _;
+        let bytes = crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(
+                    &crate::sdk::routing_sdk::advertisement_key(pc_a, pc_b, vault_id),
+                ),
+            )
+            .expect("the advertisement is readable");
+        generated::RoutingVaultAdvertisementV1::decode(bytes.as_slice()).expect("decode")
+    }
+
+    /// The generation the owner's stored baseline anchors.
+    fn baseline_generation(vault_id: &[u8; 32]) -> u64 {
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(vault_id)
+            .expect("record read")
+            .expect("record");
+        dsm::ccb::decode_vault_state(&record.baseline_state_ccb)
+            .expect("baseline decodes")
+            .generation
+    }
+
+    /// `trader` settles `input` of A against the vault's composed state, which
+    /// must stand at `generation`.
+    fn settle_next(
+        trader: &crate::test_support::two_device::TestDevice,
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        generation: u64,
+        input: u64,
+        nonce: u8,
+    ) -> [u8; 32] {
+        trader.enter();
+        let (gen, ra, rb) = composed(vault_id, pc_a, pc_b);
+        assert_eq!(
+            gen, generation,
+            "the trader settles generation {generation}"
+        );
+        let out = crate::sdk::routing_path_sdk::constant_product_output(input, ra, rb, 30)
+            .expect("curve output");
+        let (res, x) = trader_settles(
+            trader.router(),
+            &trader.ak_pk,
+            &trader.device_id,
+            vault_id,
+            pc_a,
+            pc_b,
+            gen,
+            (ra, rb),
+            input,
+            out,
+            nonce,
+        );
+        assert!(res.success, "the trader settles: {:?}", res.error_message);
+        settle_outcome(&res, "realized");
+        x
+    }
+
+    /// G3 — A CAUGHT-UP OWNER MOVES ITS BASELINE, AND STRANGERS COMPOSE FROM IT.
+    ///
+    /// Two generations realize while the owner is away. Its catch-up freezes a
+    /// fresh baseline for EXACTLY the caught-up `V_2`, publishes it, and moves
+    /// the advertisement to it — the anchor and the reserve-proof locator
+    /// TOGETHER. Afterwards the owner's composition and a stranger's both start
+    /// at `V_2` (no folded history) and reach the identical frontier; a third
+    /// trader settles off the moved advertisement, which is the provenance a
+    /// wrong anchor/proof pair would refuse; the next catch-up re-anchors at
+    /// `V_3`; and a pass with nothing owed writes nothing.
+    ///
+    /// MUTATION CONTROL: drop the "never re-anchor the same generation" guard
+    /// (`<=` → `<`) and the final no-writes assertion goes red.
+    #[test]
+    #[serial]
+    fn a_caught_up_owner_moves_its_baseline_and_strangers_compose_from_it() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline",
+            &[("trader0", 0xE1), ("trader1", 0xE2), ("trader2", 0xE3)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders[..2], &[1_000, 700]);
+        let before = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(before.sequence, 2);
+        assert_eq!(
+            before.folded_parents.len(),
+            2,
+            "a stranger replays from birth"
+        );
+        let birth_ad = advertisement(&vault_id, &pc_a, &pc_b);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let rt = crate::runtime::get_runtime();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 2);
+
+        // The fresh baseline is EXACTLY the caught-up V_2.
+        assert_eq!(baseline_generation(&vault_id), 2);
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("record read")
+            .expect("record");
+        let base = dsm::ccb::decode_vault_state(&record.baseline_state_ccb).expect("decode");
+        assert_eq!(
+            dsm::ccb::vault_state_commitment(&base).expect("c_n"),
+            before.c_n
+        );
+        assert!(
+            super::baseline_is_published(&vault_id),
+            "and quorum-durable"
+        );
+
+        // The advertisement moved: anchor and proof together.
+        let ad = advertisement(&vault_id, &pc_a, &pc_b);
+        let locator = record.economic_proof.expect("the record's proof locator");
+        assert_eq!(
+            ad.anchor_presentation_digest,
+            super::verified_baseline(&vault_id)
+                .expect("verified")
+                .presentation_inner
+                .to_vec()
+        );
+        assert_ne!(
+            ad.anchor_presentation_digest,
+            birth_ad.anchor_presentation_digest
+        );
+        assert_eq!(ad.economic_proof_addr, locator.addr.to_vec());
+        assert_eq!(ad.economic_proof_position, locator.position);
+        assert!(ad.updated_state_number > birth_ad.updated_state_number);
+
+        // Owner and stranger compose FROM V_2 now, to the same frontier.
+        let own = rt
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes");
+        assert_eq!((own.sequence, own.c_n), (2, before.c_n));
+        assert!(own.folded_parents.is_empty());
+        let stranger = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!((stranger.sequence, stranger.c_n), (2, before.c_n));
+        assert!(
+            stranger.folded_parents.is_empty(),
+            "a stranger's composition starts at V_2, not birth"
+        );
+
+        // TRADING CONTINUES off the moved advertisement.
+        settle_next(&traders[2], &vault_id, &pc_a, &pc_b, 2, 400, 0x62);
+
+        owner_dev.enter();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 1);
+        assert_eq!(baseline_generation(&vault_id), 3);
+        assert_eq!(
+            advertisement(&vault_id, &pc_a, &pc_b).anchor_presentation_digest,
+            super::verified_baseline(&vault_id)
+                .expect("verified")
+                .presentation_inner
+                .to_vec()
+        );
+
+        // IDEMPOTENT: nothing owed, nothing written.
+        let record_before =
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .expect("record");
+        let ad_before = advertisement(&vault_id, &pc_a, &pc_b);
+        let puts = crate::sdk::storage_io::fake_fleet::put_log().len();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 0);
+        let record_after =
+            crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+                .expect("record read")
+                .expect("record");
+        assert_eq!(
+            record_after.baseline_state_ccb,
+            record_before.baseline_state_ccb
+        );
+        assert_eq!(
+            record_after.baseline_presentation,
+            record_before.baseline_presentation
+        );
+        assert_eq!(advertisement(&vault_id, &pc_a, &pc_b), ad_before);
+        assert_eq!(crate::sdk::storage_io::fake_fleet::put_log().len(), puts);
+    }
+
+    /// G3 — A PARTIAL CATCH-UP ANCHORS ONLY ITS LAST FULLY APPLIED GENERATION.
+    ///
+    /// Three generations owed; the pass is interrupted after one apply. The
+    /// baseline moves to exactly `V_1` — never a generation the owner has not
+    /// materialized — the advertisement follows, and a stranger composes from
+    /// `V_1` to the SAME frontier the market reached. The next pass anchors
+    /// `V_3`.
+    #[test]
+    #[serial]
+    fn a_partial_catch_up_anchors_only_its_last_fully_applied_generation() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline-partial",
+            &[("trader0", 0xE5), ("trader1", 0xE6), ("trader2", 0xE7)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000, 700, 400]);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let rt = crate::runtime::get_runtime();
+        let _reset = UnlimitedCatchUpOnDrop;
+        super::CATCH_UP_APPLY_BUDGET.store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 1);
+        assert_eq!(
+            baseline_generation(&vault_id),
+            1,
+            "only the fully applied generation is anchored"
+        );
+        let stranger = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            (stranger.sequence, stranger.c_n),
+            (frontier.sequence, frontier.c_n),
+            "the market's frontier is ahead of the owner's baseline, and unchanged by it"
+        );
+        assert_eq!(
+            stranger.folded_parents.len(),
+            2,
+            "a stranger now composes from V_1"
+        );
+
+        super::CATCH_UP_APPLY_BUDGET.store(-1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 2);
+        assert_eq!(baseline_generation(&vault_id), 3);
+    }
+
+    /// G3 — THE BASELINE PLAN REFUSES EVERY ALTERED FACT.
+    ///
+    /// Pure, over one real composition two generations on. The frontier and a
+    /// folded generation each plan to the walk's own state and `c_n`. Refused
+    /// by name: reserves other than the admitted ones, a generation the walk
+    /// did not certify, another storage set, a broken parent link, and a
+    /// generation with no certified parent.
+    ///
+    /// MUTATION CONTROL: drop the parent-link check and the broken-link case
+    /// goes red.
+    #[test]
+    #[serial]
+    fn the_baseline_plan_refuses_every_altered_fact() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline-plan",
+            &[("trader0", 0xE8), ("trader1", 0xE9)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000, 700]);
+        owner_dev.enter();
+        let composed = crate::runtime::get_runtime()
+            .block_on(super::compose_own_vault(&vault_id))
+            .expect("the owner composes");
+        assert_eq!(composed.sequence, 2);
+        let set_id = composed.storage_set_id;
+        let legs_of = |s: &dsm::ccb::VaultStateV2| {
+            vec![
+                dsm::economic::state::EconomicVaultReserveState {
+                    vault_id,
+                    policy_commit: *s.market_policy.token_a(),
+                    amount: s.reserve_a,
+                    vault_sequence: s.generation,
+                },
+                dsm::economic::state::EconomicVaultReserveState {
+                    vault_id,
+                    policy_commit: *s.market_policy.token_b(),
+                    amount: s.reserve_b,
+                    vault_sequence: s.generation,
+                },
+            ]
+        };
+        let v1 = composed
+            .folded_parents
+            .iter()
+            .find(|f| f.generation == 1)
+            .expect("generation 1")
+            .clone();
+
+        let plan =
+            super::plan_owner_baseline(&vault_id, &composed, &set_id, 2, &legs_of(&composed.state))
+                .expect("the frontier plans");
+        assert_eq!(plan.c_n, composed.c_n);
+        let plan =
+            super::plan_owner_baseline(&vault_id, &composed, &set_id, 1, &legs_of(&v1.state))
+                .expect("a folded generation plans");
+        assert_eq!(plan.c_n, v1.c_n);
+
+        let refused = |what: &str,
+                       c: &crate::sdk::vault_state_composition::ComposedVaultState,
+                       set: &[u8; 32],
+                       generation: u64,
+                       legs: Vec<dsm::economic::state::EconomicVaultReserveState>,
+                       needle: &str| {
+            match super::plan_owner_baseline(&vault_id, c, set, generation, &legs) {
+                Ok(_) => panic!("{what} must not plan"),
+                Err(e) => assert!(e.contains(needle), "{what}: {e}"),
+            }
+        };
+        let mut altered = legs_of(&composed.state);
+        altered[0].amount += 1;
+        refused(
+            "altered reserves",
+            &composed,
+            &set_id,
+            2,
+            altered,
+            "admitted reserves",
+        );
+        let mut ahead = legs_of(&composed.state);
+        for l in &mut ahead {
+            l.vault_sequence = 3;
+        }
+        refused(
+            "an uncertified generation",
+            &composed,
+            &set_id,
+            3,
+            ahead,
+            "not in the certified chain",
+        );
+        refused(
+            "another storage set",
+            &composed,
+            &[0x5A; 32],
+            2,
+            legs_of(&composed.state),
+            "authenticated one",
+        );
+        let mut broken = composed.clone();
+        if let Some(f) = broken.folded_parents.iter_mut().find(|f| f.generation == 1) {
+            f.c_n = [0x66; 32];
+        }
+        refused(
+            "a broken parent link",
+            &broken,
+            &set_id,
+            2,
+            legs_of(&composed.state),
+            "does not name its certified parent",
+        );
+        let first = composed
+            .folded_parents
+            .iter()
+            .find(|f| f.generation == 0)
+            .expect("generation 0")
+            .clone();
+        refused(
+            "a generation with no certified parent",
+            &composed,
+            &set_id,
+            0,
+            legs_of(&first.state),
+            "no parent",
+        );
+    }
+
+    /// THE BIRTH FALLBACK MAKES A PROOF THAT PREDATES ITS ANCHOR HARMLESS
+    /// (amendment 2c-G, G3 blocker ruling).
+    ///
+    /// The catch-up moves the advertisement to the fresh anchor `V_2` with its
+    /// reserve proof at generation 2 — together, as the ruling requires. Here the
+    /// advertisement is deliberately re-pointed at `V_2` while keeping the BIRTH
+    /// proof (generation 0). A trader still settles: its provenance takes the
+    /// owner's backing from the proof, and the history walk that must include
+    /// generation 0 composes from the immutable birth anchor rather than the
+    /// newer current one. Before the ruling this pairing refused every settle.
+    /// Restored to the matching proof, the next trader settles too.
+    ///
+    /// MUTATION CONTROL: drop the birth fallback and the first settle goes red.
+    #[test]
+    #[serial]
+    fn a_proof_that_predates_its_anchor_still_settles_through_the_birth_fallback() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline-coupling",
+            &[("trader0", 0xED), ("trader1", 0xEE), ("trader2", 0xEF)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders[..2], &[1_000, 700]);
+        let birth_ad = advertisement(&vault_id, &pc_a, &pc_b);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let rt = crate::runtime::get_runtime();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 2);
+        let moved = advertisement(&vault_id, &pc_a, &pc_b);
+        let anchor: [u8; 32] = moved
+            .anchor_presentation_digest
+            .as_slice()
+            .try_into()
+            .expect("anchor digest");
+        let fresh_proof: [u8; 32] = moved
+            .economic_proof_addr
+            .as_slice()
+            .try_into()
+            .expect("fresh proof");
+        let birth_proof: [u8; 32] = birth_ad
+            .economic_proof_addr
+            .as_slice()
+            .try_into()
+            .expect("birth proof");
+        assert_ne!(fresh_proof, birth_proof, "the catch-up moved the proof");
+
+        // The pairing the design never publishes: the fresh anchor, the birth proof.
+        let wrote = rt
+            .block_on(crate::sdk::routing_sdk::republish_advertisement_baseline(
+                &moved.token_a,
+                &moved.token_b,
+                &vault_id,
+                &anchor,
+                (birth_proof, birth_ad.economic_proof_position),
+                moved.reserve_a,
+                moved.reserve_b,
+            ))
+            .expect("republish");
+        assert!(wrote);
+        let trader = &traders[2];
+        trader.enter();
+        let (gen, ra, rb) = composed(&vault_id, &pc_a, &pc_b);
+        assert_eq!(gen, 2);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(400, ra, rb, 30)
+            .expect("curve output");
+        let (res, _) = trader_settles(
+            trader.router(),
+            &trader.ak_pk,
+            &trader.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            gen,
+            (ra, rb),
+            400,
+            out,
+            0x64,
+        );
+        assert!(
+            res.success,
+            "the history walk falls back to birth, so the settle goes through: {:?}",
+            res.error_message
+        );
+        settle_outcome(&res, "realized");
+
+        // Restored — the anchor with its own proof — the same trader settles.
+        rt.block_on(crate::sdk::routing_sdk::republish_advertisement_baseline(
+            &moved.token_a,
+            &moved.token_b,
+            &vault_id,
+            &anchor,
+            (fresh_proof, moved.economic_proof_position),
+            moved.reserve_a,
+            moved.reserve_b,
+        ))
+        .expect("restore");
+        let fourth = participant("trader3", 0xF0);
+        owner_transfers(&owner_dev, &fourth, &pc_a, 5_000);
+        settle_next(&fourth, &vault_id, &pc_a, &pc_b, 3, 300, 0x65);
+    }
+
+    /// THE HISTORICAL FALLBACK (amendment 2c-G, G3 blocker ruling).
+    ///
+    /// After the advertisement moves to `V_2`, a history walk that must include
+    /// generation 0 composes from the vault's immutable BIRTH anchor, while one
+    /// that needs generation 2 composes from the current anchor. An
+    /// advertisement whose birth field names a state that is not this vault's
+    /// birth — here, the moved anchor itself — is refused rather than composed
+    /// from: a caller cannot substitute a historical anchor.
+    ///
+    /// MUTATION CONTROL: drop the fallback (always compose from the current
+    /// anchor) and the generation-0 walk goes red.
+    #[test]
+    #[serial]
+    fn history_walks_fall_back_to_the_immutable_birth_anchor_and_refuse_a_substituted_one() {
+        use prost::Message as _;
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline-history",
+            &[("trader0", 0xF1), ("trader1", 0xF2)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders, &[1_000, 700]);
+        let frontier = composed_frontier(&vault_id, &pc_a, &pc_b);
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let rt = crate::runtime::get_runtime();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 2);
+        let moved = advertisement(&vault_id, &pc_a, &pc_b);
+        assert_ne!(
+            moved.anchor_presentation_digest, moved.birth_anchor_presentation_digest,
+            "the anchor moved; the birth anchor did not"
+        );
+
+        let walk = |from: u64| {
+            rt.block_on(
+                crate::sdk::vault_state_composition::compose_vault_history_until(
+                    &vault_id,
+                    &pc_a,
+                    &pc_b,
+                    30,
+                    frontier.c_n,
+                    from,
+                ),
+            )
+        };
+        let from_birth = walk(0).expect("a walk that needs generation 0");
+        assert_eq!(from_birth.states()[0].generation, 0, "it starts at birth");
+        let from_anchor = walk(2).expect("a walk that needs generation 2");
+        assert_eq!(
+            from_anchor.states()[0].generation,
+            2,
+            "it starts at the current anchor"
+        );
+
+        // A substituted historical anchor: the birth field re-pointed at V_2.
+        let mut forged = moved.clone();
+        forged.birth_anchor_presentation_digest = moved.anchor_presentation_digest.clone();
+        rt.block_on(
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(
+                &crate::sdk::routing_sdk::advertisement_key(&pc_a, &pc_b, &vault_id),
+                &forged.encode_to_vec(),
+            ),
+        )
+        .expect("write the forged ad");
+        let e = walk(0).expect_err("a substituted birth anchor must be refused");
+        assert!(
+            e.to_string().contains("not this vault's birth state"),
+            "the refusal names the substitution: {e}"
+        );
+    }
+
+    /// G3 — A BASELINE BELOW QUORUM NEVER MOVES THE ADVERTISEMENT.
+    ///
+    /// The owner catches up, but its fresh presentation cannot reach the fleet.
+    /// The record switches (local bookkeeping), yet the advertisement keeps
+    /// naming the old, published baseline, and trading continues off it. Once
+    /// publication heals, the next pass moves the advertisement — anchor and
+    /// proof together.
+    ///
+    /// MUTATION CONTROL: drop the quorum gate in `advertise_owner_baseline` and
+    /// the first advertisement assertion goes red.
+    #[test]
+    #[serial]
+    fn a_baseline_below_quorum_never_moves_the_advertisement() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, traders) = market_with_traders(
+            "sofi/spec/rebaseline-pending",
+            &[("trader0", 0xEA), ("trader1", 0xEB), ("trader2", 0xEC)],
+        );
+        market_moves(&vault_id, &pc_a, &pc_b, &traders[..2], &[1_000, 700]);
+        let birth_ad = advertisement(&vault_id, &pc_a, &pc_b);
+        let prefix = format!(
+            "immutable::{}::",
+            String::from_utf8_lossy(
+                dsm::common::domain_tags::TAG_DSM_ANCHOR_PRESENTATION_V1.source_bytes()
+            )
+        );
+        crate::sdk::storage_io::fake_fleet::fail_keys_with_prefix(&prefix);
+
+        owner_dev.enter();
+        let owner = owner_dev.router();
+        let rt = crate::runtime::get_runtime();
+        assert_eq!(rt.block_on(owner.resume_owner_catch_up()).expect("pass"), 2);
+        assert_eq!(
+            baseline_generation(&vault_id),
+            2,
+            "the record switched locally"
+        );
+        assert!(
+            !super::baseline_is_published(&vault_id),
+            "…but it is pending"
+        );
+        assert_eq!(
+            advertisement(&vault_id, &pc_a, &pc_b),
+            birth_ad,
+            "a pending baseline never becomes the discovery baseline"
+        );
+
+        // Trading continues off the old, published baseline.
+        settle_next(&traders[2], &vault_id, &pc_a, &pc_b, 2, 400, 0x63);
+
+        crate::sdk::storage_io::fake_fleet::heal_keys_with_prefix(&prefix);
+        owner_dev.enter();
+        rt.block_on(owner.resume_owner_catch_up()).expect("pass");
+        assert!(super::baseline_is_published(&vault_id));
+        let ad = advertisement(&vault_id, &pc_a, &pc_b);
+        let record = crate::storage::client_db::amm_vault_records::get_amm_vault_record(&vault_id)
+            .expect("record read")
+            .expect("record");
+        assert_eq!(
+            ad.anchor_presentation_digest,
+            super::verified_baseline(&vault_id)
+                .expect("verified")
+                .presentation_inner
+                .to_vec()
+        );
+        let locator = record.economic_proof.expect("locator");
+        assert_eq!(
+            (ad.economic_proof_addr.clone(), ad.economic_proof_position),
+            (locator.addr.to_vec(), locator.position),
+            "the anchor and its proof moved together"
+        );
+    }
+
     // ── CLOSE / WITHDRAWAL ───────────────────────────────────────────────────
     // Invariant 4 at the ROUTE. The core arm proves the mutation is unforgeable;
     // these prove the route that drives it: what the owner gets back, when the
@@ -11532,12 +12633,13 @@ mod funded_creation_tests {
         // The terminal objects of the CLOSING generation — the terminal
         // `CCB(V_n)` and its presentation — at quorum. Their keys are
         // content-derived, so they are read back from the delivery log: the
-        // birth published two immutable objects, the close two more.
+        // birth published two immutable objects, the catch-up's fresh baseline
+        // (amendment 2c-G, G3) two more, and the close two more.
         let keys = immutable_keys_in_fleet();
         assert_eq!(
             keys.len(),
-            4,
-            "birth + terminal = four immutable objects, got {keys:?}"
+            6,
+            "birth + the caught-up baseline (G3) + terminal = six immutable objects, got {keys:?}"
         );
         for key in &keys {
             assert!(

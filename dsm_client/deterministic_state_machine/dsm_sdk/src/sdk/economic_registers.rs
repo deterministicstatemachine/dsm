@@ -350,6 +350,7 @@ fn composed_history_via_walk(
     vault_id: &[u8; 32],
     target_c_n: &[u8; 32],
     parent: &dsm::ccb::VaultStateV2,
+    from_generation: u64,
 ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
     use crate::sdk::vault_state_composition::{compose_vault_history_until, CompositionError};
     let (token_a, token_b) = (
@@ -364,6 +365,7 @@ fn composed_history_via_walk(
             &token_b,
             fee_bps,
             *target_c_n,
+            from_generation,
         ))
     })
     .map_err(|e| {
@@ -382,8 +384,9 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &dsm::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent)
+        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent, from_generation)
     }
 
     /// The network's root-register set as THIS device's catalog resolves it.
@@ -628,9 +631,14 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &dsm::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
         dsm::economic::peer_lineage::PeerEvidenceFetcher::composed_vault_history(
-            self.inner, vault_id, target_c_n, parent,
+            self.inner,
+            vault_id,
+            target_c_n,
+            parent,
+            from_generation,
         )
     }
 
@@ -714,8 +722,9 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         vault_id: &[u8; 32],
         target_c_n: &[u8; 32],
         parent: &dsm::ccb::VaultStateV2,
+        from_generation: u64,
     ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent)
+        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent, from_generation)
     }
 
     /// The network's root-register set as THIS device's catalog resolves it.
