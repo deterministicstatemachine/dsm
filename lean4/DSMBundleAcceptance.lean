@@ -37,8 +37,10 @@
     * Steps 3, 4 and 7 are PARAMETERS in the Rust (a `ValidatedEconomicRoot`
       and a `MarketCorrespondence`) and are likewise hypotheses here. This file
       does not re-derive the walk or `CORR.1`-`CORR.5`.
-    * Nothing here releases a fence, publishes a receipt, or bears on
-      Req 21.15's realize half or Req 21.16, which are still owed.
+    * Fence release, receipt publication and Req 21.16 are not modelled here.
+      C2 (2c-D §14) implements them; DSMSettlementCompletion models the
+      certify -> publish -> release ordering and DSMComposedReserveProvenance
+      the reserve rule later generations consume.
 
   Mutation controls, executed rather than asserted:
 
