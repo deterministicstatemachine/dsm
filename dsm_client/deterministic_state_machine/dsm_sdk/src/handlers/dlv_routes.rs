@@ -11902,8 +11902,12 @@ mod funded_creation_tests {
     /// wrong anchor/proof pair would refuse; the next catch-up re-anchors at
     /// `V_3`; and a pass with nothing owed writes nothing.
     ///
-    /// MUTATION CONTROL: drop the "never re-anchor the same generation" guard
-    /// (`<=` → `<`) and the final no-writes assertion goes red.
+    /// Re-anchoring an already-anchored generation is byte-idempotent even
+    /// without the `<=` short-circuit in `try_refresh_owner_baseline`: the
+    /// presentation signature is deterministic, a freeze of an identical
+    /// `(key, digest)` is a no-op, and the advertisement reports unchanged. A
+    /// mutation that drops the short-circuit stays green — it saves work; it
+    /// is not a gate.
     #[test]
     #[serial]
     fn a_caught_up_owner_moves_its_baseline_and_strangers_compose_from_it() {
