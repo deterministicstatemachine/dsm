@@ -1244,6 +1244,15 @@ Permanent unresolution remains possible on the market-first path or while a quor
 transaction itself has not reached a recoverable terminal decision. Beta defines no timeout, automatic
 eviction, direct-owner withdrawal bypass, or override that discards a market candidate whose DLV
 parent may already be bound.
+Implementation (amendment 2c-G, G4). The release/close is economically admitted: its write set
+drains exactly the owner's admitted reserve leaves at exactly the parent generation and credits
+ordinary balance from them in the same conservation-preserving update, so the released value exists
+in the owner's economic lineage. The one canonical close commit derives the parent, generation,
+reserves and storage set from the composed vault state — never from its caller — and refuses a
+close whose parent a realized market successor already consumed, a skipped or stale generation,
+amounts other than the parent's, and a parent another candidate holds. Close authority, QuorumBind
+and the accepted-successor rules are unchanged, and a close still requires the owner caught up to
+the composed frontier first.
 Requirement 6.31 (Owner catch-up baseline). When the LP returns to an active DLV and
 catches its bilateral relationship state against the DLV up through all then-known realized market
 successors, the resulting authenticated owner state must commit a fresh DLV baseline/anchor. Later
