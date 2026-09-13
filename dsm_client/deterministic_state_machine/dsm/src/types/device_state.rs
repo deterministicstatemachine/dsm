@@ -1210,6 +1210,27 @@ impl DeviceState {
         self.genesis
     }
 
+    /// Install the canonical genesis authority root `G` on an ALREADY
+    /// CONSTRUCTED head.
+    ///
+    /// Only the constructor used to write `genesis`, which made
+    /// `CoreSDK::write_genesis_device_head` silently unable to honour its own
+    /// contract: it takes the existing head when one is present, so on that
+    /// branch `genesis` kept whatever the head was built with. Genesis install
+    /// always hits that branch — `StateMachine::set_state` materialises a head
+    /// first — so every freshly created wallet ended up with a head whose
+    /// `genesis` was the `[0u8; 32]` that `set_state` invented. Every consumer
+    /// reading `genesis_digest()` as the authority root then compared against
+    /// zeros: the ERA faucet's authority evidence re-derived the real seed-rooted
+    /// `v3.g` and fail-closed on every device, correctly.
+    ///
+    /// This is the narrow repair for that: a head that HAS the canonical root
+    /// can be told it. It does not make the root optional and does not add a
+    /// second notion of `G` — there is one, the seed-derived `v3.g`.
+    pub fn set_genesis_digest(&mut self, genesis: [u8; 32]) {
+        self.genesis = genesis;
+    }
+
     /// Device identifier.
     pub fn devid(&self) -> [u8; 32] {
         self.devid

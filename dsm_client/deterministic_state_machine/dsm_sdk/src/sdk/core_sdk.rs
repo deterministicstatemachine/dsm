@@ -661,6 +661,16 @@ impl CoreSDK {
     /// (§2.2) and is also used as the legacy SMT-root anchor for the
     /// initial head so `verify_state` checks against the genesis hash work
     /// before any relationship advance has fired.
+    ///
+    /// `genesis` is set UNCONDITIONALLY, on both branches. It used to be written
+    /// only by the constructor in the `unwrap_or_else`, so a pre-existing head
+    /// kept whatever root it was built with — and that is the branch genesis
+    /// install always takes, because `StateMachine::set_state` materialises a
+    /// head (with a `[0u8; 32]` genesis) before this runs. The result was a
+    /// persisted head whose authority root was zeros while `AppState` held the
+    /// correct `v3.g`, and every reader of `genesis_digest()` compared against
+    /// zeros. Honouring the contract on both branches is the fix; nothing
+    /// downstream is taught to tolerate a zero root.
     fn write_genesis_device_head(&self, genesis_hash: [u8; 32]) -> Result<(), DsmError> {
         use crate::storage::client_db::update_bcr_device_head;
         let mut head = self.device_head().unwrap_or_else(|| {
@@ -671,6 +681,7 @@ impl CoreSDK {
                 1024,
             )
         });
+        head.set_genesis_digest(genesis_hash);
         if head.legacy_anchor().is_none() {
             head.bootstrap_legacy_root(genesis_hash);
         }
@@ -679,7 +690,14 @@ impl CoreSDK {
                 format!("genesis head-cache write failed: {e}"),
                 None::<std::io::Error>,
             )
-        })
+        })?;
+        // Install it IN MEMORY as well. `StateMachine::set_state` no longer
+        // manufactures a head (it does not know `G` and must not invent one), so
+        // this is now the only thing that gives the state machine a head at
+        // genesis — and callers read `device_head()` straight after install.
+        // Creating it here is the point: this function has the canonical root.
+        self.state_machine.lock().set_device_head(head);
+        Ok(())
     }
 
     /// Initialize CoreSDK with default device identity
@@ -892,7 +910,29 @@ impl CoreSDK {
     }
 
     /// Deterministic in-process genesis (for tests/bootstrap only)
+    ///
+    /// Refuses to run over an identity that already HAS a canonical head.
+    ///
+    /// The genesis this builds is synthetic: a zero-entropy `State` whose
+    /// `compute_hash()` is handed to `write_genesis_device_head` as if it were
+    /// `G`. `AppRouterImpl::new` calls this unconditionally on EVERY router
+    /// build, right after `new_with_device` has restored the real head from
+    /// `bcr_device_heads`. Once `write_genesis_device_head` became authoritative
+    /// on both branches, that meant the synthetic hash overwrote the restored
+    /// seed-derived `v3.g` — in memory AND in the persisted row — on every
+    /// freshly created wallet. The ERA faucet's authority evidence then
+    /// re-derived the true G and fail-closed, correctly, against the fabricated
+    /// one.
+    ///
+    /// A head that is already present carries the only legitimate authority
+    /// root; there is nothing for a synthetic genesis to do, so this returns
+    /// without touching state or the head. It still builds a head where none
+    /// exists (test fixtures, and the headless identity paths whose authority
+    /// is an open protocol question — see TRACE-2026-09-12-006).
     pub fn initialize_with_genesis_state(&self) -> Result<(), DsmError> {
+        if self.device_head().is_some() {
+            return Ok(());
+        }
         let initial_entropy = [0u8; 32];
         let mut genesis_state = State::new_genesis(initial_entropy, self.device_info.clone());
         // Precompute and embed the hash so tests and callers see a non-empty hash field
@@ -4532,6 +4572,191 @@ mod tests {
             Ok(sdk) => sdk,
             Err(e) => panic!("Failed to init SDK: {:?}", e),
         }
+    }
+
+    /// THE PRODUCTION DEFECT, REPRODUCED AT ITS ORDERING.
+    ///
+    /// `install_v2_genesis` calls `set_state` BEFORE `write_genesis_device_head`.
+    /// `set_state` used to materialise a head with a `[0u8; 32]` genesis, and
+    /// `write_genesis_device_head` only wrote `genesis` on its construct-new
+    /// branch — so the existing-head branch (the one genesis install ALWAYS
+    /// takes) left the persisted head claiming a zero authority root while
+    /// `AppState` held the real `v3.g`. Every reader of `genesis_digest()` then
+    /// compared against zeros; the ERA faucet's authority evidence re-derived
+    /// the true seed-rooted G and fail-closed on every freshly created wallet.
+    ///
+    /// This pins the existing-head branch specifically, because that is the one
+    /// that shipped broken.
+    #[test]
+    #[serial]
+    fn genesis_install_writes_the_canonical_root_on_the_existing_head_branch() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let sdk = test_sdk();
+
+        // A distinctive, NON-ZERO canonical root, so a fabricated zero cannot
+        // pass by coincidence.
+        let canonical_g = [0xA7u8; 32];
+        let mut genesis_state =
+            dsm::core::identity::genesis::GenesisState::new().expect("genesis state");
+        genesis_state.hash = canonical_g;
+        genesis_state.device_id = Some(sdk.device_info.device_id);
+        genesis_state.signing_key.public_key = sdk.device_info.public_key.clone();
+
+        // FORCE THE BROKEN BRANCH. Layer 2 stops `set_state` manufacturing a
+        // head, so install would now take the construct-new path — which was
+        // never broken. A head must already be present for this test to pin
+        // what actually shipped: `write_genesis_device_head` adopting an
+        // existing head and leaving its root untouched. This models any head
+        // that exists before the canonical root is known, which is exactly the
+        // state `set_state` used to leave behind.
+        sdk.set_device_head_for_testing(dsm::types::device_state::DeviceState::new(
+            [0u8; 32],
+            sdk.device_info.device_id,
+            sdk.device_info.public_key.clone(),
+            1024,
+        ));
+        assert_eq!(
+            sdk.device_head()
+                .expect("precondition head")
+                .genesis_digest(),
+            [0u8; 32],
+            "precondition: the existing head carries a zero root"
+        );
+
+        let returned = sdk.install_v2_genesis(&genesis_state).expect("install");
+        assert_eq!(returned, canonical_g, "install must return the canonical G");
+
+        let head = sdk
+            .device_head()
+            .expect("a head exists after genesis install");
+        assert_ne!(
+            head.genesis_digest(),
+            [0u8; 32],
+            "the head must not carry a fabricated zero authority root"
+        );
+        assert_eq!(
+            head.genesis_digest(),
+            canonical_g,
+            "the head's genesis root must BE the canonical seed-derived G"
+        );
+
+        // And it must survive the persist/reload the faucet actually reads through.
+        let reloaded = crate::storage::client_db::load_bcr_device_head(&sdk.device_info.device_id)
+            .expect("head reload")
+            .expect("a persisted head");
+        assert_eq!(
+            reloaded.genesis_digest(),
+            canonical_g,
+            "the PERSISTED head must carry the canonical G — this is what readers load"
+        );
+    }
+
+    /// Layer 2: `set_state` must not invent an authority root it does not know.
+    /// With no head installed it leaves `device_state` absent rather than
+    /// manufacturing `DeviceState::new([0u8; 32], ..)`.
+    #[test]
+    #[serial]
+    fn set_state_does_not_fabricate_a_zero_genesis_head() {
+        let dev = DeviceInfo::from_hashed_label("test_device_no_fabricate", vec![2u8; 32]);
+        let mut sm = dsm::core::state_machine::StateMachine::new();
+        let state = dsm::types::state_types::State::new_genesis([9u8; 32], dev);
+        sm.set_state(state);
+        assert!(
+            sm.device_head().is_none(),
+            "set_state does not know G and must not manufacture a head claiming one"
+        );
+    }
+
+    /// THE ROUTER-BUILD CLOBBER, REPRODUCED IN PRODUCTION ORDER.
+    ///
+    /// `system.createGenesisV2` writes the canonical head, then hot-swaps in a
+    /// full `AppRouterImpl`, whose constructor builds a SECOND `CoreSDK`
+    /// (`new_with_device` restores that head from `bcr_device_heads`) and then
+    /// calls `initialize_with_genesis_state()` unconditionally. That call builds
+    /// a synthetic zero-entropy genesis and hands its hash to the now-
+    /// authoritative `write_genesis_device_head`, overwriting the restored
+    /// `v3.g`. On device this was the ERA faucet's
+    /// "re-derived G does not match this device's stored genesis id".
+    ///
+    /// This drives exactly that sequence across two SDK instances sharing one
+    /// DB, and requires the canonical root to survive the router build both in
+    /// memory and in the persisted row.
+    #[test]
+    #[serial]
+    fn router_build_does_not_overwrite_a_restored_canonical_genesis_root() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        // 1. createGenesisV2's own CoreSDK installs the canonical root.
+        let genesis_sdk = test_sdk();
+        let canonical_g = [0x5Cu8; 32];
+        let mut genesis_state =
+            dsm::core::identity::genesis::GenesisState::new().expect("genesis state");
+        genesis_state.hash = canonical_g;
+        genesis_state.device_id = Some(genesis_sdk.device_info.device_id);
+        genesis_state.signing_key.public_key = genesis_sdk.device_info.public_key.clone();
+        genesis_sdk
+            .install_v2_genesis(&genesis_state)
+            .expect("install canonical genesis");
+
+        // 2. The router's CoreSDK: same device, restores the persisted head.
+        let router_sdk = CoreSDK::new_with_device(genesis_sdk.device_info.clone())
+            .expect("router core restores from db");
+        assert_eq!(
+            router_sdk
+                .device_head()
+                .expect("restored head")
+                .genesis_digest(),
+            canonical_g,
+            "precondition: the router's CoreSDK restored the canonical root"
+        );
+
+        // 3. What AppRouterImpl::new does next, unconditionally.
+        router_sdk
+            .initialize_with_genesis_state()
+            .expect("router genesis init");
+
+        assert_eq!(
+            router_sdk
+                .device_head()
+                .expect("head after router build")
+                .genesis_digest(),
+            canonical_g,
+            "the router build must not replace the canonical root with a synthetic genesis"
+        );
+        let persisted =
+            crate::storage::client_db::load_bcr_device_head(&genesis_sdk.device_info.device_id)
+                .expect("reload")
+                .expect("a persisted head");
+        assert_eq!(
+            persisted.genesis_digest(),
+            canonical_g,
+            "the PERSISTED root must survive the router build — this is what the faucet reads"
+        );
+    }
+
+    /// Control for the guard: where NO head exists, `initialize_with_genesis_state`
+    /// must still produce one. Test fixtures and the headless identity paths rely
+    /// on that, and the guard must not silently turn it into a no-op.
+    #[test]
+    #[serial]
+    fn initialize_with_genesis_state_still_builds_a_head_when_none_exists() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let sdk = test_sdk();
+        assert!(
+            sdk.device_head().is_none(),
+            "precondition: fresh SDK has no head"
+        );
+        sdk.initialize_with_genesis_state().expect("genesis init");
+        assert!(
+            sdk.device_head().is_some(),
+            "with no head present the bootstrap path must still create one"
+        );
     }
 
     /// Stage 4 Slice 3 (signal a): the offline-bearer "no appliance" error must speak v2 — name the

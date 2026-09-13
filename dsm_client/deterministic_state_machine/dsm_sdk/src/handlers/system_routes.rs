@@ -424,6 +424,71 @@ pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
         "createGenesisV2",
     );
 
+    // 5d. IDENTITY PUBLICATION — drive it in THIS session.
+    //
+    // This route used to do neither half of what `system.genesis` does: it never
+    // wrote a publication row and never called `publish_identity_now`. On the v2
+    // path publication was therefore driven only by `retry_pending_publications`
+    // at SDK init, so a wallet created in a session stayed in
+    // `publication_pending` until the app was RESTARTED — the user watching
+    // "PUBLISHING IDENTITY…" had no way forward, and a restart is not something
+    // a real user can be asked to do. (5c publishes the device TREE; that is a
+    // different object and does not mark the identity published.)
+    //
+    // Two halves, in order. The row FIRST, so a crash between here and the
+    // publish still leaves something for the startup retry to find — today the
+    // retry only works because `backfill_publication_rows_for_local_identities`
+    // reconstructs the row this route never wrote. Then the publish itself,
+    // SPAWNED: genesis never blocks on the network (same contract as 5c), and a
+    // slow or unreachable fleet must not hold the response. Failure is
+    // non-fatal — local genesis stays durable, the row stays unpublished, and
+    // the startup retry remains the backstop rather than the only driver.
+    {
+        let dev_b32 = device_id_b32.clone();
+        let g_b32 = crate::util::text_id::encode_base32_crockford(&g);
+        let pk_b32 = crate::util::text_id::encode_base32_crockford(&ak_pk);
+        if let Err(e) = crate::storage::client_db::publication::upsert_publication_state(
+            &dev_b32,
+            &g_b32,
+            crate::storage::client_db::publication::PublicationState::LocalGenesisCommitted,
+            0,
+            "",
+        ) {
+            log::warn!(
+                "system.createGenesisV2: failed to record local-genesis publication state: {e}"
+            );
+        }
+        crate::runtime::get_runtime().spawn(async move {
+            match crate::sdk::identity_publication::publish_identity_now(
+                &dev_b32, &pk_b32, &g_b32,
+            )
+            .await
+            {
+                Ok(report) if report.is_published() => log::info!(
+                    "system.createGenesisV2: identity PUBLISHED for device={} ({}/{} verified, quorum {})",
+                    &dev_b32[..8.min(dev_b32.len())],
+                    report.verified,
+                    report.total_nodes,
+                    report.required
+                ),
+                Ok(report) => log::warn!(
+                    "system.createGenesisV2: identity NOT published for device={} ({}/{} verified, \
+                     quorum {}) — local genesis is durable and startup will retry. failures: {:?}",
+                    &dev_b32[..8.min(dev_b32.len())],
+                    report.verified,
+                    report.total_nodes,
+                    report.required,
+                    report.failures
+                ),
+                Err(e) => log::warn!(
+                    "system.createGenesisV2: identity publication failed for device={}: {e} \
+                     — local genesis is durable and startup will retry",
+                    &dev_b32[..8.min(dev_b32.len())]
+                ),
+            }
+        });
+    }
+
     // Success rail (mirrors finalize_bootstrap_core): complete → ok. The wallet_ready screen
     // transition itself rides the fresh session snapshot Kotlin publishes after this response.
     emit(LifecycleKind::GenesisKindSecuringComplete, 0);
