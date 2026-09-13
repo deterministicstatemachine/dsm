@@ -150,21 +150,27 @@ impl StateMachine {
         // Mirror the verbatim State for the validation-tooling compat shims.
         // NOT read by current_state(); see the field doc.
         self.compat_shim_state = Some(state.clone());
-        if self.device_state.is_none() {
-            let mut ds = crate::types::device_state::DeviceState::new(
-                [0u8; 32],
-                state.device_info.device_id,
-                state.device_info.public_key.clone(),
-                1024,
-            );
-            // Seed SMT root with the State's hash for legacy compat.
+        // Re-seed an EXISTING head only. This function does not know the
+        // genesis authority root `G`, so it must not manufacture a head that
+        // claims one.
+        //
+        // It used to build `DeviceState::new([0u8; 32], ...)` whenever no head
+        // existed. That zero is not "unset" to any reader — `genesis_digest()`
+        // returns it as a genesis root like any other. Because genesis install
+        // calls this BEFORE `write_genesis_device_head`, the fabricated
+        // zero-root head is the one that got persisted, and the ERA faucet's
+        // authority evidence — which re-derives the real seed-rooted `v3.g` —
+        // fail-closed against zeros on every freshly created wallet. The check
+        // was right; the state was fabricated.
+        //
+        // Every production caller either holds `G` and writes the head itself
+        // immediately after (`install_v2_genesis`,
+        // `initialize_with_genesis_state`, `create_genesis_with_passive_contributors`
+        // all call `write_genesis_device_head`), or already has a head
+        // (`migrate_token_balance_keys`). None needs a pre-genesis head, so
+        // nothing legitimate is lost by refusing to invent one.
+        if let Some(ds) = self.device_state.as_mut() {
             ds.bootstrap_legacy_root(state_hash);
-            self.device_state = Some(ds);
-        } else {
-            // Re-seed with new state hash for tests that swap state.
-            if let Some(ds) = self.device_state.as_mut() {
-                ds.bootstrap_legacy_root(state_hash);
-            }
         }
     }
 
@@ -562,6 +568,17 @@ mod state_machine_tests {
         };
 
         let mut state_machine = StateMachine::new();
+        // Install the head EXPLICITLY, carrying the real genesis root. This used
+        // to come free from `set_state`, which fabricated a head with a
+        // `[0u8; 32]` genesis whenever none existed — the production defect that
+        // fail-closed the ERA faucet's authority check. A test that needs a head
+        // now says so, and says which root it has.
+        state_machine.set_device_head(crate::types::device_state::DeviceState::new(
+            genesis_state.hash,
+            device_id,
+            genesis_state.device_info.public_key.clone(),
+            1024,
+        ));
         state_machine.set_state(genesis_state);
 
         let dev_id = device_id;
@@ -582,6 +599,14 @@ mod state_machine_tests {
         let mut machine = StateMachine::new();
         let (initial_state, _pk, _sk) = create_test_genesis_state_with_keypair();
         let dev_id = initial_state.device_info.device_id;
+        // Explicit head with the real genesis root — see the note in
+        // `test_first_post_genesis_transition_is_allowed`.
+        machine.set_device_head(crate::types::device_state::DeviceState::new(
+            initial_state.hash,
+            dev_id,
+            initial_state.device_info.public_key.clone(),
+            1024,
+        ));
         machine.set_state(initial_state);
 
         // SMT-advance mechanics test: non-balance op, no deltas (see conservation guard).

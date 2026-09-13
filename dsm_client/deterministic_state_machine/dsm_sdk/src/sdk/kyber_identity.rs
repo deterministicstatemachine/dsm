@@ -18,7 +18,11 @@
 //! persisting the Kyber key, closing any key-substitution path. The ~29 KB
 //! SPHINCS+ signature rides in the registry / device-info record, never the QR.
 //!
-//! The Kyber SECRET key is never read, transmitted, or reconstructed here.
+//! The Kyber SECRET key is never transmitted or persisted here. It is also
+//! never read from storage — the one place a secret exists in this module is
+//! the cold-cache recovery in [`build_local_kyber_identity_binding`], which
+//! re-derives the keypair solely to take its public half and drops the secret
+//! at the end of that expression.
 
 use dsm::crypto::{blake3::domain_hash, kyber, sphincs};
 use dsm::types::error::DsmError;
@@ -52,8 +56,30 @@ fn as_array_32(bytes: &[u8], what: &str) -> Result<[u8; 32], DsmError> {
 
 /// Build this device's Kyber identity binding for registry publication.
 /// Returns `(kyber_public_key, binding_sig)`. Fails closed when the wallet is
-/// locked (no AK secret) or the local Kyber public key is uninitialised or
-/// malformed. The Kyber secret key is never touched.
+/// locked (no AK secret) or the canonical Kyber key material is unavailable.
+///
+/// The process-global `bridge::LOCAL_KYBER_PUBKEY` is a CACHE, never a
+/// precondition. It is installed at router build, which on a first-run device
+/// happens BEFORE genesis exists — so `WalletSDK::new()` has no genesis state,
+/// the install is skipped, and the slot stays cold for the rest of that
+/// session. Genesis then publishes its device tree and immediately tries to
+/// publish the identity, which read the cold slot and failed with "local Kyber
+/// public key not installed". The device parked in `PublicationPending` with
+/// only the STARTUP retry able to clear it: every first-run device required an
+/// app restart to finish publishing, and a real user just watched "PUBLISHING
+/// IDENTITY…" forever.
+///
+/// So a cold slot is recovered here from the canonical source rather than
+/// refused: `current_smaster()` + `DSM/kyber\0`, the SAME derivation
+/// `WalletSDK::init_device_keys` uses to populate `{device_id}_device_kyber_pk`,
+/// so the recovered key is byte-identical to the keystore's. It is NOT the
+/// random pre-genesis shell keypair that path falls back to — if the canonical
+/// material is genuinely unavailable (no seed, no genesis, wallet locked) this
+/// fails closed. Nothing is synthesised or substituted.
+///
+/// The Kyber SECRET key is never transmitted or persisted here; the recovery
+/// path re-derives the keypair only to take its public half, and drops the
+/// secret immediately.
 pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmError> {
     let device_id = as_array_32(
         &AppState::get_device_id()
@@ -65,9 +91,21 @@ pub fn build_local_kyber_identity_binding() -> Result<(Vec<u8>, Vec<u8>), DsmErr
             .ok_or_else(|| DsmError::InvalidState("genesis_hash not initialised".into()))?,
         "genesis_hash",
     )?;
-    let kyber_pk = crate::bridge::local_kyber_pubkey()
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| DsmError::InvalidState("local Kyber public key not installed".into()))?;
+    let kyber_pk = match crate::bridge::local_kyber_pubkey().filter(|k| !k.is_empty()) {
+        Some(pk) => pk,
+        None => {
+            // Cold cache — recover the canonical key, then warm the slot so the
+            // rest of the session takes the fast path.
+            let smaster = crate::init::current_smaster()?;
+            let (pk, _sk) = kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")?;
+            log::info!(
+                "[kyber_identity] local Kyber public key cache was cold; recovered the canonical \
+                 key from Smaster and installed it (no restart required)"
+            );
+            crate::bridge::install_local_kyber_pubkey(pk.clone());
+            pk
+        }
+    };
     if kyber_pk.len() != kyber::public_key_bytes() {
         return Err(DsmError::invalid_parameter(format!(
             "local Kyber public key must be {} bytes (ML-KEM-768), got {}",
@@ -121,6 +159,94 @@ pub fn verify_kyber_identity_binding(
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    /// THE FIRST-RUN CONDITION, REPRODUCED. On a fresh device the router is
+    /// built before genesis exists, so `WalletSDK::new()` cannot hand over a
+    /// Kyber key and `bridge::LOCAL_KYBER_PUBKEY` stays cold for that whole
+    /// session. Genesis then commits and immediately builds the identity
+    /// binding to publish. Before the fix that read the cold slot and failed
+    /// with "local Kyber public key not installed", parking every first-run
+    /// device in `PublicationPending` until the app was RESTARTED.
+    ///
+    /// This test holds the cache cold and asserts the binding still builds, in
+    /// the same process, with no router rebuild and no restart — and that the
+    /// key it recovered is the canonical one, not a fresh random keypair.
+    #[test]
+    #[serial_test::serial]
+    fn binding_builds_with_a_cold_cache_and_recovers_the_canonical_key() {
+        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        let device_id = vec![0x11u8; 32];
+        let genesis = vec![0x22u8; 32];
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id.clone(),
+            vec![0x33u8; 32],
+            genesis.clone(),
+            vec![0x44u8; 32],
+        );
+        crate::sdk::recovery_sdk::RecoverySDK::set_cached_wallet_seed_for_testing(
+            b"DSM/test/cold-kyber-cache-seed".to_vec(),
+        );
+
+        // What the wallet keystore WOULD hold: the same Smaster derivation
+        // `WalletSDK::init_device_keys` uses. This is the canonical answer.
+        let smaster = crate::init::current_smaster().expect("smaster from seed + genesis");
+        let (canonical_pk, _sk) =
+            kyber::generate_kyber_keypair_from_entropy(&smaster, "DSM/kyber\0")
+                .expect("canonical kyber derivation");
+
+        // Cold cache: empty is treated as absent by the getter's filter.
+        crate::bridge::install_local_kyber_pubkey(Vec::new());
+        assert!(
+            crate::bridge::local_kyber_pubkey()
+                .filter(|k| !k.is_empty())
+                .is_none(),
+            "precondition: the cache must be cold"
+        );
+
+        let (pk, sig) = build_local_kyber_identity_binding()
+            .expect("a cold cache must NOT block identity binding");
+
+        assert_eq!(
+            pk, canonical_pk,
+            "the recovered key must be the canonical Smaster-derived one, never a fresh keypair"
+        );
+        assert_eq!(
+            crate::bridge::local_kyber_pubkey().expect("cache warmed"),
+            canonical_pk,
+            "the fallback must install exactly the canonical key as the cache"
+        );
+
+        // The binding actually verifies against the device's own AK — proving
+        // we produced a publishable artifact, not merely a non-error.
+        let ak_pk = crate::sdk::signing_authority::current_public_key().expect("AK public key");
+        let did = as_array_32(&device_id, "device_id").expect("32");
+        let g = as_array_32(&genesis, "genesis").expect("32");
+        verify_kyber_identity_binding(&did, &g, &pk, &sig, &ak_pk)
+            .expect("the binding built from a cold cache must verify");
+    }
+
+    /// The honest residual: recovery is not a licence to invent. With no wallet
+    /// seed cached there is no canonical Kyber material, and the binding must
+    /// fail closed rather than fall back to the random pre-genesis shell
+    /// keypair `init_device_keys` uses for its own unpublished shell.
+    #[test]
+    #[serial_test::serial]
+    fn a_cold_cache_without_canonical_material_fails_closed() {
+        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        crate::sdk::app_state::AppState::set_identity_info(
+            vec![0x55u8; 32],
+            vec![0x66u8; 32],
+            vec![0x77u8; 32],
+            vec![0x88u8; 32],
+        );
+        crate::sdk::recovery_sdk::RecoverySDK::clear_cached_wallet_seed_for_testing();
+        crate::bridge::install_local_kyber_pubkey(Vec::new());
+
+        let err = build_local_kyber_identity_binding()
+            .expect_err("no canonical material must fail closed, not fabricate a key");
+        let msg = format!("{err:?}");
+        assert!(!msg.is_empty(), "the refusal must carry a reason: {msg}");
+    }
 
     /// B4 CACHE TRACE, second half: verification is RECOMPUTED from the binding
     /// every call, never read from a stored verdict.

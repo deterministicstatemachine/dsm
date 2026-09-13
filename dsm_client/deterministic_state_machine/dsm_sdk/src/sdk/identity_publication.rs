@@ -71,14 +71,21 @@ pub async fn publish_identity_now(
     };
 
     if report.is_published() {
-        if let Err(e) = upsert_publication_state(
+        match upsert_publication_state(
             device_id_b32,
             genesis_hash_b32,
             PublicationState::Published,
             report.required,
             "",
         ) {
-            log::warn!("identity_publication: failed to persist Published state: {e}");
+            // The write is what makes the identity ready, so the session
+            // refresh goes out beside it. Publication runs in the background
+            // after genesis; the host computed the session phase while this
+            // was still pending, and nothing else tells it to recompute.
+            Ok(()) => push_session_refresh(),
+            Err(e) => {
+                log::warn!("identity_publication: failed to persist Published state: {e}")
+            }
         }
     } else {
         let summary = report
@@ -104,6 +111,21 @@ fn record_pending(device_id_b32: &str, genesis_hash_b32: &str, required: u32, er
         log::warn!("identity_publication: failed to persist PublicationPending state: {e}");
     }
 }
+
+/// Ask the host to republish the session snapshot.
+///
+/// `dsm-wallet-refresh` is the topic the Android host treats as a session hint:
+/// it re-runs `publishSessionState`, which recomputes the phase from the
+/// persisted publication row this module just wrote.
+#[cfg(all(target_os = "android", feature = "jni"))]
+fn push_session_refresh() {
+    if let Err(e) = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]) {
+        log::warn!("identity_publication: session refresh dispatch failed: {e}");
+    }
+}
+
+#[cfg(not(all(target_os = "android", feature = "jni")))]
+fn push_session_refresh() {}
 
 /// Whether this device's identity is ready to use — i.e. a quorum of nodes has
 /// been read-back verified. A durable local genesis record does NOT satisfy
