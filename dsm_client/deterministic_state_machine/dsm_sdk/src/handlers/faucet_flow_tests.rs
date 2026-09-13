@@ -86,7 +86,7 @@ impl Drop for FleetGuard {
 }
 
 /// Point the loader at a fleet whose member NAMES are the canonical register
-/// members (`dsm-node-1..3`) — the profile resolves its set by re-hashing
+/// members (derived from the pin) — the profile resolves its set by re-hashing
 /// member ids, so the default `test-1..3` fleet can never satisfy it. The
 /// endpoints are irrelevant: all register I/O is faked in `cfg(test)`.
 pub(crate) fn install_canonical_fleet() -> FleetGuard {
@@ -97,10 +97,14 @@ pub(crate) fn install_canonical_fleet() -> FleetGuard {
     let mut cfg = String::from(
         "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\nports = [8080]\n",
     );
-    for i in 1..=3 {
-        let inc = crate::economic_fixtures::fixture_register_incarnation(&format!("dsm-node-{i}"));
+    for (i, id) in crate::economic_fixtures::canonical_member_ids()
+        .iter()
+        .enumerate()
+    {
+        let inc = crate::economic_fixtures::fixture_register_incarnation(id);
+        let port = 8081 + i;
         cfg.push_str(&format!(
-            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n\
+            "\n[[nodes]]\nname = \"{id}\"\nendpoint = \"http://127.0.0.1:{port}\"\n\
              register_incarnation = \"{inc}\"\n"
         ));
     }

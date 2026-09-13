@@ -51,8 +51,43 @@ impl Drop for FleetGuard {
     }
 }
 
-/// Point the loader at a fleet whose member NAMES are the canonical register
-/// members (`dsm-node-1..3`).
+/// The network's PINNED root-register member ids, in pin order.
+///
+/// Every fixture fleet is derived from this rather than restating a member
+/// count, so re-pinning the register cannot leave a fixture resolving to a set
+/// the network no longer commits to.
+pub fn canonical_member_ids() -> Vec<String> {
+    dsm::economic::register::pinned_root_register_members(NETWORK)
+        .expect("the beta network is pinned")
+        .iter()
+        .map(|(id, _)| String::from_utf8(id.to_vec()).expect("pinned member ids are UTF-8"))
+        .collect()
+}
+
+/// The pinned register quorum `q`.
+pub fn canonical_quorum() -> usize {
+    dsm::economic::register::resolve_root_register_profile(NETWORK)
+        .expect("the beta network is pinned")
+        .quorum as usize
+}
+
+/// How many nodes one b0x submit lands on: the submit loop stops at `q`
+/// successes, so a fleet of `n > q` holds a message on `q` nodes, not all `n`.
+/// "Every node" only held while the fleet was exactly `q` wide.
+pub fn delivery_quorum() -> usize {
+    canonical_quorum().min(canonical_member_ids().len())
+}
+
+/// The fewest pinned members whose loss leaves the fleet below quorum: the
+/// LAST `n − q + 1` in pin order, so exactly `q − 1` stay reachable and the
+/// members earlier in pin order are the ones still answering.
+pub fn members_to_break_quorum() -> Vec<String> {
+    let ids = canonical_member_ids();
+    ids[canonical_quorum() - 1..].to_vec()
+}
+
+/// Point the loader at a fleet whose member NAMES are the pinned register
+/// members.
 ///
 /// The profile resolves its set by RE-HASHING member ids, so the default
 /// `test-1..3` fleet can never satisfy it. The endpoints are irrelevant: all
@@ -65,10 +100,11 @@ pub fn install_canonical_fleet() -> FleetGuard {
     let mut cfg = String::from(
         "protocol = \"http\"\nlan_ip = \"127.0.0.1\"\nallow_localhost = true\nports = [8080]\n",
     );
-    for i in 1..=3 {
-        let inc = fixture_register_incarnation(&format!("dsm-node-{i}"));
+    for (i, id) in canonical_member_ids().iter().enumerate() {
+        let inc = fixture_register_incarnation(id);
+        let port = 8081 + i;
         cfg.push_str(&format!(
-            "\n[[nodes]]\nname = \"dsm-node-{i}\"\nendpoint = \"http://127.0.0.1:808{i}\"\n\
+            "\n[[nodes]]\nname = \"{id}\"\nendpoint = \"http://127.0.0.1:{port}\"\n\
              register_incarnation = \"{inc}\"\n"
         ));
     }
@@ -333,15 +369,15 @@ pub fn mint_asset(router: &AppRouterImpl, ticker: &str, decimals: u32, amount: u
 /// must burn nothing and advance nothing") stays reachable without reaching for
 /// an unfunded or fabricated head.
 pub fn take_register_offline() {
-    for i in 1..=3 {
-        crate::sdk::storage_io::fake_registers::fail_member(&format!("dsm-node-{i}"), true);
+    for id in canonical_member_ids() {
+        crate::sdk::storage_io::fake_registers::fail_member(&id, true);
     }
 }
 
 /// Bring the register fleet back up.
 pub fn bring_register_online() {
-    for i in 1..=3 {
-        crate::sdk::storage_io::fake_registers::fail_member(&format!("dsm-node-{i}"), false);
+    for id in canonical_member_ids() {
+        crate::sdk::storage_io::fake_registers::fail_member(&id, false);
     }
 }
 

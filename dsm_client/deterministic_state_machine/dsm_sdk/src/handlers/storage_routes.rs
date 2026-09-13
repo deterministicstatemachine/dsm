@@ -5283,10 +5283,11 @@ mod tests {
 
         trust_root_test_db();
 
-        // Three recorders, because the production submit path is quorum-shaped;
-        // one endpoint could not distinguish "called submit" from "reached K".
+        // One recorder per pinned member, because the production submit path is
+        // quorum-shaped; one endpoint could not distinguish "called submit" from
+        // "reached K".
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..3)
+        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
             .map(|_| spawn_recorder(log.clone()).expect("recorder"))
             .collect();
         point_env_config_at(&endpoints);
@@ -5425,11 +5426,11 @@ mod tests {
                 .filter(|p| p.body == *want)
                 .map(|p| p.endpoint.as_str())
                 .collect();
+            let k = crate::economic_fixtures::delivery_quorum();
             assert_eq!(
                 reached.len(),
-                endpoints.len(),
-                "{label} must reach all {} nodes; reached {:?}",
-                endpoints.len(),
+                k,
+                "{label} must reach the delivery quorum of {k} nodes; reached {:?}",
                 reached
             );
         }
@@ -5502,7 +5503,7 @@ mod tests {
 
         let overrides: StatusOverrides = StatusOverrides::default();
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..3)
+        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
             .map(|_| {
                 spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder")
             })
@@ -5638,7 +5639,8 @@ mod tests {
             .filter(|p| p.body == frozen.evidence_bytes)
             .count();
         assert!(
-            replayed_transfer >= 3 && replayed_evidence >= 3,
+            replayed_transfer >= crate::economic_fixtures::delivery_quorum()
+                && replayed_evidence >= crate::economic_fixtures::delivery_quorum(),
             "the whole frozen set is replayed to full quorum, not just the missing half \
              (transfer x{replayed_transfer}, evidence x{replayed_evidence})"
         );
@@ -5674,7 +5676,7 @@ mod tests {
 
         trust_root_test_db();
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..3)
+        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
             .map(|_| spawn_recorder(log.clone()).expect("recorder"))
             .collect();
         point_env_config_at(&endpoints);
@@ -5896,7 +5898,7 @@ mod tests {
         let identity_bytes = std::sync::Arc::new(identity.encode_to_vec());
 
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let endpoints: Vec<String> = (0..3)
+        let endpoints: Vec<String> = (0..crate::economic_fixtures::canonical_member_ids().len())
             .map(|_| spawn_send_recorder(log.clone(), identity_bytes.clone()).expect("recorder"))
             .collect();
 
@@ -6067,7 +6069,7 @@ mod tests {
             // reached quorum is the defect — whether it was never sent, or
             // sent best-effort without waiting.
             assert!(
-                !(result.success && reached.len() < endpoints.len()),
+                !(result.success && reached.len() < crate::economic_fixtures::delivery_quorum()),
                 "wallet.send reported success=true while the frozen {:?} \
                  artifact ({} bytes, submission_id={}) reached only {}/{} \
                  nodes. A split send whose A-side evidence never reaches \

@@ -2,13 +2,20 @@
 
 //! The beta storage profile — a FIXED PROFILE, not a quorum function.
 //!
-//! OWNER DECISION (2026-08-23): the deployed beta storage set is the
-//! THREE-member Alibaba ECS fleet, and the profile is fixed at `q = 2`. If
-//! one member is unavailable, both remaining members are required; if two or
-//! more are unavailable, a new settlement decision cannot be established
-//! until the fixed threshold is again reachable. Rev 15 Req 6.13 states
-//! this same three-member/q=2 profile (amended 2026-08-24 from the earlier
-//! five-member/q=4 draft).
+//! OWNER DECISION (2026-09-12): the deployed beta storage set is the
+//! FIVE-member GCP fleet, and the profile is fixed at `q = 3`. Up to two
+//! members may be unavailable; with three or more gone, a new settlement
+//! decision cannot be established until the fixed threshold is again
+//! reachable. Req 6.13 is amended to this five-member/q=3 profile.
+//!
+//! On the threshold specifically. Rev 15 Req 6.13 originally fixed `n=5, q=4`
+//! for an intersection margin of `4 + 4 − 5 = 3`, and the 2026-08-21
+//! conformance delta warned that deploying five nodes under a majority rule
+//! collapses that margin to `≥ 1`. The owner chose `q = 3` knowing this: it is
+//! the SAME margin already accepted when Req 6.13 was amended on 2026-08-24 to
+//! the three-member fleet (`2 + 2 − 3 = 1`), and it keeps the profile equal to
+//! the canonical majority a consumer actually calls, which the test below
+//! pins. What changed is the fleet, not the safety argument.
 //!
 //! That is a threshold for ONE cardinality. There is no quorum function
 //! over arbitrary `n`, so this module refuses every other set size rather than
@@ -38,16 +45,16 @@
 //!
 //! The state-identity cut commits `q` inside the signed `V_n` (field 15),
 //! sourced at birth from `quorum_for(|S|)` over the resolved catalog set —
-//! which equals this profile's threshold for the three-member fleet. This
+//! which equals this profile's threshold for the five-member fleet. This
 //! module remains the named, testable statement of the fixed profile a
 //! conformance check reads against, rather than a recomputation.
 
 /// The one storage-set cardinality the beta profile defines a threshold
-/// for: the deployed three-member fleet.
-pub const SOFI_BETA_MEMBERS: usize = 3;
+/// for: the deployed five-member fleet.
+pub const SOFI_BETA_MEMBERS: usize = 5;
 
 /// The fixed threshold for that cardinality.
-pub const SOFI_BETA_QUORUM: u32 = 2;
+pub const SOFI_BETA_QUORUM: u32 = 3;
 
 /// A storage set that is not the Rev 15 beta profile.
 ///
@@ -109,21 +116,21 @@ mod tests {
 
     /// The profile the owner fixed for the deployed fleet.
     #[test]
-    fn the_three_member_beta_set_commits_two() {
-        assert_eq!(sofi_beta_quorum_for(3).expect("the beta profile"), 2);
-        assert_eq!(SOFI_BETA_QUORUM, 2);
-        assert_eq!(SOFI_BETA_MEMBERS, 3);
+    fn the_five_member_beta_set_commits_three() {
+        assert_eq!(sofi_beta_quorum_for(5).expect("the beta profile"), 3);
+        assert_eq!(SOFI_BETA_QUORUM, 3);
+        assert_eq!(SOFI_BETA_MEMBERS, 5);
     }
 
     /// EVERY other cardinality is refused, including the ones that look
-    /// plausible. `5` is the superseded profile, `1` is local dev, and `2`
-    /// and `4` are one step either side — none of them is the beta storage
+    /// plausible. `3` is the superseded Alibaba profile, `1` is local dev, and
+    /// `4` and `6` are one step either side — none of them is the beta storage
     /// set, and none may be silently mapped to a threshold.
     #[test]
     fn every_other_cardinality_is_refused_rather_than_mapped() {
-        for n in [0usize, 1, 2, 4, 5, 6, 7, 9, 100] {
+        for n in [0usize, 1, 2, 3, 4, 6, 7, 9, 100] {
             let err = sofi_beta_quorum_for(n)
-                .expect_err("only the three-member profile has a defined threshold");
+                .expect_err("only the five-member profile has a defined threshold");
             assert_eq!(err.members, n, "the error names the set it was handed");
         }
     }
@@ -134,7 +141,7 @@ mod tests {
     /// helper would have produced are NOT returned.
     #[test]
     fn no_majority_fallback_survives_behind_the_refusal() {
-        for (n, majority) in [(1usize, 1u32), (5, 3), (6, 4), (7, 4)] {
+        for (n, majority) in [(1usize, 1u32), (3, 2), (6, 4), (7, 4)] {
             match sofi_beta_quorum_for(n) {
                 Err(_) => {}
                 Ok(q) => panic!(
@@ -146,7 +153,7 @@ mod tests {
     }
 
     /// The profile's threshold and the canonical rule verification now applies
-    /// agree where both are defined — the three-member fleet — and the
+    /// agree where both are defined — the five-member fleet — and the
     /// canonical rule is what a consumer actually calls.
     #[test]
     fn the_profile_threshold_is_the_canonical_quorum_for_the_deployed_fleet() {
@@ -154,10 +161,10 @@ mod tests {
             sofi_beta_quorum_for(SOFI_BETA_MEMBERS).expect("the deployed cardinality"),
             crate::economic::cell_observation::canonical_quorum(SOFI_BETA_MEMBERS),
         );
-        crate::economic::cell_observation::require_canonical_quorum(3, 2)
+        crate::economic::cell_observation::require_canonical_quorum(5, 3)
             .expect("the profile's own q is canonical");
-        for not_q in [1u32, 3] {
-            crate::economic::cell_observation::require_canonical_quorum(3, not_q)
+        for not_q in [2u32, 4] {
+            crate::economic::cell_observation::require_canonical_quorum(5, not_q)
                 .expect_err("only the canonical value is accepted");
         }
     }

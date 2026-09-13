@@ -348,8 +348,10 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
     assert!(sent.success, "{:?}", sent.error_message);
 
     // Quorum gone: prevalidation cannot establish the q-durable closure.
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::fail_member(id);
+    }
     let held_sync = p.b.sync().await;
     assert!(held_sync.success, "{:?}", held_sync.errors);
     assert_eq!(p.b.era_balance(), 0, "nothing credited under the outage");
@@ -379,8 +381,9 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
     );
 
     // Fleet back: the SAME row proceeds through the full admission.
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::heal_member(id);
+    }
     let recovered = p.b.sync().await;
     assert!(recovered.success, "{:?}", recovered.errors);
     assert_eq!(p.b.era_balance(), 10, "applied once after recovery");
