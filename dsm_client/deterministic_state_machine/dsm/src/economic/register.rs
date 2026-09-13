@@ -299,7 +299,10 @@ const BETA_ROOT_REGISTER_MEMBERS: [PinnedMember; 5] = [
 /// `network_id` default. The real mainnet gets its OWN id (and with it a
 /// fresh, untouched faucet allocation) as a new profile at launch — nothing
 /// claimed under this network can validate there.
-const BETA_NETWORK_ID: &[u8] = b"dsm-testnet";
+/// The network the beta root register is pinned for. One name for the
+/// network, so callers resolve the profile they were built for instead of
+/// each spelling the id themselves.
+pub const BETA_NETWORK_ID: &[u8] = b"dsm-testnet";
 
 /// One pinned entry: a member id and the register incarnation it serves.
 pub type PinnedMember = (&'static [u8], [u8; 32]);

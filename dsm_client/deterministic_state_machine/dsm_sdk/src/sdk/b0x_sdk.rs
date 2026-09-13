@@ -489,6 +489,20 @@ impl B0xSDK {
         Ok((genesis_b32, self.device_id.clone(), cache_key))
     }
 
+    /// Test-only: build the SDK for a register whose quorum differs from the
+    /// pinned one, so a test can watch the fan-out follow K rather than the
+    /// fleet size or a literal. Production has exactly one K: the profile's.
+    #[cfg(test)]
+    pub(crate) fn with_delivery_quorum(mut self, quorum_k: usize) -> Self {
+        self.quorum_k = quorum_k;
+        self
+    }
+
+    /// The delivery quorum this SDK fans out to.
+    pub fn delivery_quorum(&self) -> usize {
+        self.quorum_k
+    }
+
     pub fn new(
         device_id_b32: String,
         core_sdk: Arc<CoreSDK>,
@@ -523,6 +537,23 @@ impl B0xSDK {
         // Cancellation/limits are owned by the caller task lifetime.
         let http_client = crate::sdk::storage_node_sdk::build_ca_aware_client();
 
+        // The delivery fan-out stops at K acknowledging members. K is the
+        // register quorum of the network this device is built for — resolved
+        // from the pinned profile, never a literal beside it. A literal `3`
+        // used to live here; it agreed with the 5/3 pin by coincidence and
+        // silently diverged from the 3/2 one (#867). No profile, no fan-out:
+        // a device that cannot resolve its register has nothing to deliver to.
+        let quorum_k = dsm::economic::register::resolve_root_register_profile(
+            dsm::economic::register::BETA_NETWORK_ID,
+        )
+        .map_err(|e| {
+            DsmError::internal(
+                format!("B0xSDK::new: root register profile unresolved: {e}"),
+                None::<std::io::Error>,
+            )
+        })?
+        .quorum as usize;
+
         let sdk = Self {
             device_id: device_id_b32,
             core_sdk,
@@ -537,7 +568,7 @@ impl B0xSDK {
             salt_genesis: Self::derive_salt(b"DSM/b0x-salt-G", &decoded),
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
             tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
-            quorum_k: 3,
+            quorum_k,
             pending_countersign_deltas: Vec::new(),
             pending_relationship_finalized: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
@@ -4847,6 +4878,161 @@ mod tests {
             submission_id: Some(crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16])),
             sender_economic_position: 0,
             sender_debit_mutation_index: 0,
+        }
+    }
+
+    /// A loopback member that records which endpoint each `POST` hit and
+    /// answers `204 No Content`. Returns its base URL.
+    fn spawn_ack_recorder(
+        hits: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> std::io::Result<String> {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let me = base.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = vec![0u8; 65536];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                if head.starts_with("POST") {
+                    hits.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(me.clone());
+                }
+                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        Ok(base)
+    }
+
+    /// THE FAN-OUT FOLLOWS THE REGISTER QUORUM — not the fleet size and not
+    /// a literal beside it (#867). `new` used to carry `quorum_k: 3`, which
+    /// agreed with the 5/3 pin by coincidence and silently diverged from the
+    /// 3/2 one. Now K is the resolved profile's quorum: with more members than
+    /// K, exactly K distinct members receive a submit, and an SDK built for a
+    /// register with a different K fans out to exactly that K. (While the pin
+    /// is 3, a re-introduced literal 3 is indistinguishable here — deriving it
+    /// is what makes the fan-out move with the pin instead of drifting.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_delivery_fan_out_follows_the_register_quorum_not_the_fleet_size() {
+        ensure_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("db");
+
+        let profile = dsm::economic::register::resolve_root_register_profile(
+            dsm::economic::register::BETA_NETWORK_ID,
+        )
+        .expect("beta profile");
+        let k = profile.quorum as usize;
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        // Strictly more members than K, so "reached K" and "reached all" differ.
+        let endpoints: Vec<String> = (0..k + 2)
+            .map(|_| spawn_ack_recorder(hits.clone()).expect("recorder"))
+            .collect();
+
+        // The submitting identity, its genesis record and a token per member
+        // (the same seeding the storage-route recorder tests use), so the
+        // only thing under test is the fan-out.
+        let device_id = vec![0x0Au8; 32];
+        let genesis_hash = vec![0x31u8; 32];
+        let binding_key = vec![0x41u8; 32];
+        let (public_key, _sk) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            dsm::merkle::sparse_merkle_tree::empty_root(
+                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            )
+            .to_vec(),
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+        let sender_b32 = crate::util::text_id::encode_base32_crockford(&[0x0Au8; 32]);
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32.clone(),
+                device_id: sender_b32.clone(),
+                mpc_proof: "test".to_string(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 3,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: endpoints.clone(),
+                entropy_hash: String::new(),
+                protocol_version: "v1".to_string(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".to_string(),
+                network_id: "dsm-test".into(),
+            },
+        )
+        .expect("seed genesis record");
+        for ep in &endpoints {
+            crate::storage::client_db::store_auth_token(
+                ep,
+                &sender_b32,
+                &genesis_b32,
+                "test-token",
+            )
+            .expect("seed auth token");
+        }
+        let distinct = |hits: &std::sync::Arc<std::sync::Mutex<Vec<String>>>| {
+            hits.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<String>>()
+                .len()
+        };
+
+        // Built for the pinned register: K is the profile's quorum, and a
+        // submit reaches exactly K of the k+2 members.
+        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
+        let mut sdk =
+            B0xSDK::new(sender_b32.clone(), core.clone(), endpoints.clone()).expect("B0xSDK");
+        assert_eq!(
+            sdk.delivery_quorum(),
+            k,
+            "K is the resolved profile's quorum, not a literal"
+        );
+        sdk.submit_to_b0x_with_retry(params_split_shape(), &B0xRetryConfig::default())
+            .await
+            .expect("submit at K");
+        assert_eq!(
+            distinct(&hits),
+            k,
+            "exactly K distinct members receive the submit"
+        );
+
+        // A register with a different quorum: the fan-out follows it.
+        for other_k in [2usize, 1] {
+            hits.lock().unwrap_or_else(|p| p.into_inner()).clear();
+            let mut sdk = B0xSDK::new(sender_b32.clone(), core.clone(), endpoints.clone())
+                .expect("B0xSDK")
+                .with_delivery_quorum(other_k);
+            let mut params = params_split_shape();
+            params.seq = 10 + other_k as u64;
+            sdk.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
+                .await
+                .expect("submit at other K");
+            assert_eq!(
+                distinct(&hits),
+                other_k,
+                "the fan-out follows the register quorum it was built for (K={other_k})"
+            );
         }
     }
 
