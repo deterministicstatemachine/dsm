@@ -2722,7 +2722,7 @@ impl AppRouterImpl {
         if bytes.is_empty() {
             return err("dlv.unlockRouted: empty DlvUnlockRoutedV1 payload".into());
         }
-        let req = match generated::DlvUnlockRoutedV1::decode(&*bytes) {
+        let mut req = match generated::DlvUnlockRoutedV1::decode(&*bytes) {
             Ok(r) => r,
             Err(e) => {
                 return err(format!(
@@ -3012,14 +3012,34 @@ impl AppRouterImpl {
         // fall back to `req.device_id` -- 32 DevID bytes in a 64-byte AK field --
         // which passed the device-head advance (the signature is verified
         // against THIS device's key, not the operation's) and could only fail
-        // later. A DevID is not an authority key, and no key is manufactured:
-        // an absent key is a refusal.
+        // later. A DevID is not an authority key, and no key is manufactured
+        // from one: the length gate below still refuses it.
+        //
+        // An EMPTY key is the canonical request for wallet stamping — the same
+        // accept-or-stamp rule `dlv.create`, `route.signRouteCommit` and
+        // `route.publishExternalCommitment` apply, and the two steps this
+        // route follows in the swap flow. The wallet's signing key is the key
+        // this route signs the operation with below, so the stamped key is
+        // exactly the one the signature proves. Before this, the shipped swap
+        // path sent an empty key and every routed unlock from a handset was
+        // refused here.
         if req.unlocker_public_key.is_empty() {
-            return err(
-                "dlv.unlockRouted: unlocker_public_key is required; a DevID is not an \
-                 authority key and none is manufactured in its place"
-                    .to_string(),
-            );
+            match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) if !pk.is_empty() => req.unlocker_public_key = pk,
+                Ok(_) => {
+                    return err(
+                        "dlv.unlockRouted: empty unlocker_public_key requested wallet \
+                                stamping but the wallet signing pk is empty"
+                            .to_string(),
+                    );
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.unlockRouted: empty unlocker_public_key requested wallet \
+                         stamping but get_current_public_key failed: {e}"
+                    ));
+                }
+            }
         }
         if req.unlocker_public_key.len() != dsm::dlv::successor_validity::AUTHORITY_KEY_LEN {
             return err(format!(
@@ -3037,11 +3057,35 @@ impl AppRouterImpl {
             return err("dlv.unlockRouted: routed settlement requires a verified AMM hop".into());
         };
 
+        // ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13). The trader is
+        // about to be CREDITED the output token; its own pre-settlement state
+        // must already commit that token's adoption, exactly as an offline
+        // receipt would require. This is checked here, before the first-writer
+        // claim and before any binding, so a refusal costs nothing — and it
+        // is checked again by `DeviceState::advance` at the credit, so no
+        // path can route around it. A settlement never roots a token on the
+        // receiver's behalf: the market-evidence check below authenticates
+        // the policy bytes, it does not adopt them.
+        {
+            let Some(head) = self.core_sdk.device_head() else {
+                return err("dlv.unlockRouted: no device head; nothing can be credited".into());
+            };
+            if !head.has_adopted(&settle.output_policy_commit) {
+                return err(format!(
+                    "dlv.unlockRouted: this device has not adopted the output token {} — ADD \
+                     TOKEN first; a settlement cannot credit a token whose policy this device \
+                     has not committed to its own state",
+                    crate::util::text_id::encode_base32_crockford(&settle.output_policy_commit)
+                ));
+            }
+        }
+
         // Both traded assets must satisfy the applicable token policy, and
-        // the TRADER must be rooted in their public anchors — before the
-        // first-writer claim, where a refusal still costs nothing. A trader
-        // may root here for the first time: adoption is open to anyone
-        // holding the commit, and the hop just authenticated both commits.
+        // the market legs' policy bytes must be authenticated against their
+        // public anchors — before the first-writer claim, where a refusal
+        // still costs nothing. Fetching the bytes here is market evidence,
+        // not adoption: the gate above already required the trader's own
+        // committed adoption of what it receives.
         for pc in [&settle.input_policy_commit, &settle.output_policy_commit] {
             if let Err(e) = require_rooted_market_leg("dlv.unlockRouted", pc).await {
                 return err(e);
@@ -5700,6 +5744,55 @@ mod funded_creation_tests {
     /// copied out of the owner's registry — and then receives a canonical,
     /// admitted owner→trader transfer (0x0025) through the real `wallet.send`
     /// and `storage.sync`. No holder is hand-seeded anywhere.
+    /// The trader ADDS the token through the production route: fetches and
+    /// authenticates the public policy from the network and commits the
+    /// adoption leaf to its own head. This is the precondition of holding or
+    /// receiving the token (owner ruling 2026-09-13), so every trader in a
+    /// market adopts BOTH legs before it trades.
+    fn trader_adopts(
+        trader: &crate::test_support::two_device::TestDevice,
+        policy_commit: &[u8; 32],
+    ) {
+        let rt = crate::runtime::get_runtime();
+        trader.enter();
+        // The trader does not know this token yet — that is the point — so
+        // name it by its commit, not by a ticker its registry cannot resolve.
+        let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+        let adopted = rt.block_on(trader.router().query(crate::bridge::AppQuery {
+            path: "tokens.addByAnchor".to_string(),
+            params: anchor_b32.clone().into_bytes(),
+        }));
+        assert!(
+            adopted.success,
+            "the trader adopts {anchor_b32} from the network: {:?}",
+            adopted.error_message
+        );
+        assert!(
+            trader
+                .router()
+                .core_sdk
+                .device_head()
+                .is_some_and(|h| h.has_adopted(policy_commit)),
+            "adoption is committed to the trader's head, not just its registry"
+        );
+    }
+
+    /// A trader JOINS a market: it is funded with the input leg (which
+    /// requires adopting it to receive) and adopts the output leg it will
+    /// swap into. Both through the production routes. This is the shape every
+    /// market trader has by construction; the one test that skips the output
+    /// adoption on purpose calls the two halves separately.
+    fn fund_trader(
+        owner: &crate::test_support::two_device::TestDevice,
+        trader: &crate::test_support::two_device::TestDevice,
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        amount: u64,
+    ) {
+        owner_transfers(owner, trader, pc_a, amount);
+        trader_adopts(trader, pc_b);
+    }
+
     fn owner_transfers(
         owner: &crate::test_support::two_device::TestDevice,
         trader: &crate::test_support::two_device::TestDevice,
@@ -5715,15 +5808,7 @@ mod funded_creation_tests {
         // First sync = registration on every node, which is what lets the
         // owner resolve the trader's identity at quorum before sending.
         rt.block_on(trader.sync());
-        let rooted = rt.block_on(trader.router().query(crate::bridge::AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: crate::util::text_id::encode_base32_crockford(policy_commit).into_bytes(),
-        }));
-        assert!(
-            rooted.success,
-            "the trader roots to {ticker} from the network: {:?}",
-            rooted.error_message
-        );
+        trader_adopts(trader, policy_commit);
         owner.enter();
         rt.block_on(owner.sync());
         let sent = rt.block_on(owner.send_token(trader, &ticker, amount));
@@ -6840,7 +6925,7 @@ mod funded_creation_tests {
             trader_pk, owner_dev.ak_pk,
             "the two devices must be distinct"
         );
-        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        fund_trader(&owner_dev, &trader_dev, &pc_a, &pc_b, 5_000);
         trader_dev.enter();
         let trader = trader_dev.router();
         assert!(
@@ -8479,7 +8564,7 @@ mod funded_creation_tests {
 
         // ── TRADER: own device, own database, no record of this vault ───────
         let trader_dev = participant("trader", 0x5B);
-        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        fund_trader(&owner_dev, &trader_dev, &pc_a, &pc_b, 5_000);
         trader_dev.enter();
         let trader = trader_dev.router();
         assert!(
@@ -8834,6 +8919,41 @@ mod funded_creation_tests {
         expected_out: u64,
         nonce: u8,
     ) -> (AppResult, [u8; 32]) {
+        trader_settles_naming_key(
+            router,
+            trader_pk,
+            trader_pk.to_vec(),
+            trader_did,
+            vault_id,
+            pc_a,
+            pc_b,
+            seq,
+            (ra, rb),
+            input,
+            expected_out,
+            nonce,
+        )
+    }
+
+    /// As [`trader_settles`], but the `unlocker_public_key` the request NAMES
+    /// is chosen separately from the key that signs the route commit — so a
+    /// test can send an empty key (wallet stamping) or a wrong-shaped one
+    /// (a DevID) against the route's key gate.
+    #[allow(clippy::too_many_arguments)]
+    fn trader_settles_naming_key(
+        router: &AppRouterImpl,
+        trader_pk: &[u8],
+        unlocker_public_key: Vec<u8>,
+        trader_did: &[u8; 32],
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        seq: u64,
+        (ra, rb): (u64, u64),
+        input: u64,
+        expected_out: u64,
+        nonce: u8,
+    ) -> (AppResult, [u8; 32]) {
         use prost::Message as _;
 
         let pair = generated::RoutingPairRequest {
@@ -8906,7 +9026,7 @@ mod funded_creation_tests {
             vault_id: vault_id.to_vec(),
             device_id: trader_did.to_vec(),
             route_commit_bytes: rc.encode_to_vec(),
-            unlocker_public_key: trader_pk.to_vec(),
+            unlocker_public_key,
             signature: Vec::new(),
         };
         let res = crate::runtime::get_runtime().block_on(async {
@@ -9252,7 +9372,7 @@ mod funded_creation_tests {
             .iter()
             .map(|(slot, tag)| {
                 let t = participant(slot, *tag);
-                owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+                fund_trader(&owner_dev, &t, &pc_a, &pc_b, 5_000);
                 t
             })
             .collect();
@@ -9461,6 +9581,201 @@ mod funded_creation_tests {
             (frontier_after.c_n, frontier_after.sequence),
             (frontier_before.c_n, frontier_before.sequence),
             "and the frontier did not move"
+        );
+    }
+
+    /// THE HANDSET PATH. The shipped swap flow (`SwapTab` →
+    /// `unlockVaultRouted`) sends `unlocker_public_key` EMPTY: the frontend
+    /// holds no authority key and, by doctrine, never derives one. The route
+    /// must read that as the wallet-stamping request its two predecessors in
+    /// the same flow already honour, and settle with the wallet's own signing
+    /// key — the key it signs the operation with. Observed on a phone
+    /// 2026-09-12: every routed unlock was refused at this gate.
+    #[test]
+    #[serial]
+    fn a_settle_naming_no_unlocker_key_is_stamped_with_the_wallet_key() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/stamp-key", &[("trader0", 0x52)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let before = composed_frontier(&vault_id, &pc_a, &pc_b);
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output");
+
+        let (res, _x) = trader_settles_naming_key(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            Vec::new(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            expected_out,
+            0x32,
+        );
+        assert!(
+            res.success,
+            "an empty unlocker key is the wallet-stamping request, got: {:?}",
+            res.error_message
+        );
+        // NOT VACUOUS: the settlement realised — the frontier moved to the
+        // next generation with the trade's reserves.
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            after.sequence,
+            before.sequence + 1,
+            "one generation settled"
+        );
+        assert_eq!(
+            (after.reserves_a, after.reserves_b),
+            (10_000 + 1_000, 5_000 - expected_out),
+            "reserves reflect the stamped trader's trade"
+        );
+    }
+
+    /// ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13). A trader that holds
+    /// the input leg but never ADDED the output token is refused at the route
+    /// gate — before the first-writer claim, before any binding round, before
+    /// any economic mutation — and the refusal names adoption. Observed on
+    /// hardware the other way round: a device that never added SOFI was
+    /// credited 44.56 SOFI by this route and could neither see nor spend it.
+    /// Positive control: the SAME trader adopts through the production route
+    /// and the SAME trade then settles.
+    #[test]
+    #[serial]
+    fn a_trader_that_has_not_adopted_the_output_token_is_refused_before_binding() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, _traders) =
+            market_with_traders("sofi/spec/unadopted-out", &[]);
+        // A trader funded with the INPUT leg only: it adopted pc_a to receive
+        // it, and never adopted pc_b.
+        let trader_dev = participant("trader-noadopt", 0x54);
+        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        assert!(
+            !trader
+                .core_sdk
+                .device_head()
+                .expect("trader head")
+                .has_adopted(&pc_b),
+            "precondition: the trader has not adopted the output token"
+        );
+        let before = composed_frontier(&vault_id, &pc_a, &pc_b);
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output");
+
+        let (res, _x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            expected_out,
+            0x34,
+        );
+        assert!(
+            !res.success,
+            "a settle into an un-adopted token must refuse"
+        );
+        let why = res.error_message.clone().unwrap_or_default();
+        assert!(
+            why.contains("has not adopted the output token"),
+            "the refusal names adoption, got: {why}"
+        );
+        // NOTHING BEHIND IT: no binding round was driven, no fence written,
+        // no value moved, the frontier did not move.
+        assert!(
+            crate::sdk::binding_fleet_double::cas_log().is_empty(),
+            "a refused-before-binding settle drives no binding round"
+        );
+        assert!(trader_fence_of(&trader_dev).is_none(), "no fence row");
+        let head = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(head.balance(&pc_b), 0, "nothing credited");
+        assert_eq!(head.balance(&pc_a), 5_000, "nothing debited");
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!((after.c_n, after.sequence), (before.c_n, before.sequence));
+
+        // Positive control: adopt through the production route, then the
+        // same trade settles.
+        trader_adopts(&trader_dev, &pc_b);
+        trader_dev.enter();
+        let (res, _x) = trader_settles(
+            trader_dev.router(),
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            expected_out,
+            0x35,
+        );
+        assert!(
+            res.success,
+            "after adoption the same trade settles: {:?}",
+            res.error_message
+        );
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(after.sequence, before.sequence + 1);
+    }
+
+    /// Ruling I's refusal stays: a DevID is 32 bytes, an authority key is 64.
+    /// Stamping applies to an ABSENT key only; a present, wrong-shaped one is
+    /// never repaired into the wallet's key.
+    #[test]
+    #[serial]
+    fn a_settle_naming_a_devid_as_the_unlocker_key_is_refused() {
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/devid-key", &[("trader0", 0x53)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let before = composed_frontier(&vault_id, &pc_a, &pc_b);
+
+        let (res, _x) = trader_settles_naming_key(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            trader_dev.device_id.to_vec(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output"),
+            0x33,
+        );
+        assert!(
+            !res.success,
+            "a DevID in the authority-key field must refuse"
+        );
+        let why = res.error_message.clone().unwrap_or_default();
+        assert!(
+            why.contains("must be 64 bytes (an authority key), got 32"),
+            "the refusal names the shape, got: {why}"
+        );
+        let after = composed_frontier(&vault_id, &pc_a, &pc_b);
+        assert_eq!(
+            (after.c_n, after.sequence),
+            (before.c_n, before.sequence),
+            "nothing settled"
         );
     }
 
@@ -11177,14 +11492,14 @@ mod funded_creation_tests {
             .into_iter()
             .map(|(slot, tag)| {
                 let t = participant(slot, tag);
-                owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+                fund_trader(&owner_dev, &t, &pc_a, &pc_b, 5_000);
                 t
             })
             .collect();
         let probe_behind = participant("probe-behind", 0x61);
-        owner_transfers(&owner_dev, &probe_behind, &pc_a, 5_000);
+        fund_trader(&owner_dev, &probe_behind, &pc_a, &pc_b, 5_000);
         let probe_ahead = participant("probe-ahead", 0x62);
-        owner_transfers(&owner_dev, &probe_ahead, &pc_a, 5_000);
+        fund_trader(&owner_dev, &probe_ahead, &pc_a, &pc_b, 5_000);
         owner_dev.enter();
 
         let create = generated::DlvInstantiateV1 {
@@ -12289,7 +12604,7 @@ mod funded_creation_tests {
         ))
         .expect("restore");
         let fourth = participant("trader3", 0xF0);
-        owner_transfers(&owner_dev, &fourth, &pc_a, 5_000);
+        fund_trader(&owner_dev, &fourth, &pc_a, &pc_b, 5_000);
         settle_next(&fourth, &vault_id, &pc_a, &pc_b, 3, 300, 0x65);
     }
 
@@ -12481,7 +12796,7 @@ mod funded_creation_tests {
         .into_iter()
         .map(|(slot, tag)| {
             let t = participant(slot, tag);
-            owner_transfers(&owner_dev, &t, &pc_a, 5_000);
+            fund_trader(&owner_dev, &t, &pc_a, &pc_b, 5_000);
             t
         })
         .collect();
@@ -12722,6 +13037,53 @@ mod funded_creation_tests {
     /// Fund a vault, let ONE trader move it a generation, and (optionally) fold
     /// that settlement back. Returns `(vault_id, reserves_now, x)` — `x` names
     /// the settlement, so a caller that skipped the fold can perform it later.
+    /// The projection IS the head's cache (`client_db::tokens`): a funded
+    /// creation debits both legs on the owner's head INSIDE the operation —
+    /// no caller-supplied delta names them — so the rows the wallet renders
+    /// from must be re-projected at the commit chokepoint, not at the next
+    /// startup sweep. On hardware (2026-09-13) the owner kept showing its
+    /// pre-vault 1000.00 SOFI / 90 ERA after funding 500.00 / 50 into the
+    /// vault. Mutation control: drop `reproject_committed_head` from
+    /// `execute_on_relationship_inner` and this goes red on the stale rows the
+    /// mint left behind. (Skipping `install_identity` here reddens it for two
+    /// unrelated reasons in a full run — inherited registry rows, then a
+    /// register conflict — which is what every sibling's first line prevents.)
+    #[test]
+    #[serial]
+    fn a_funded_creation_reprojects_the_owner_balances_it_debited() {
+        install_identity();
+        let (_vault_id, (pc_a, pc_b), owner_dev, _traders) =
+            market_with_traders("funded-creation-reprojects", &[]);
+        owner_dev.enter();
+        let head = owner_dev
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("owner head");
+        let devtxt = crate::util::text_id::encode_base32_crockford(&head.devid());
+
+        for (pc, funded) in [(&pc_a, 10_000u64), (&pc_b, 5_000u64)] {
+            let ticker = dsm::core::token::resolve_ticker_for_policy_commit(pc)
+                .expect("a token the owner created resolves to its ticker");
+            let on_head = head.balance(pc);
+            assert!(
+                [75_000u64, 20_000u64].contains(&(on_head + funded)),
+                "{ticker}: the head was debited by exactly the funded leg (head={on_head}, funded={funded})"
+            );
+            let row = crate::storage::client_db::get_balance_projection(&devtxt, &ticker)
+                .expect("projection read")
+                .unwrap_or_else(|| panic!("{ticker}: the owner has a projection row"));
+            assert_eq!(
+                row.available, on_head,
+                "{ticker}: the row the wallet renders equals the committed head, not the pre-vault balance"
+            );
+            assert_eq!(
+                row.locked, 0,
+                "{ticker}: nothing is locked by a funded creation"
+            );
+        }
+    }
+
     fn vault_after_one_trade(
         owner_dev: &crate::test_support::two_device::TestDevice,
         pc_a: &[u8; 32],
@@ -12756,7 +13118,7 @@ mod funded_creation_tests {
         });
         assert!(res.success, "advertise failed: {:?}", res.error_message);
         let trader_dev = participant("trader", 0x51);
-        owner_transfers(owner_dev, &trader_dev, pc_a, 5_000);
+        fund_trader(owner_dev, &trader_dev, pc_a, pc_b, 5_000);
         trader_dev.enter();
         let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
             .expect("curve output");
@@ -13717,7 +14079,7 @@ mod funded_creation_tests {
         // The probe learns the vault while it is still live and funded.
         let probe_dev = participant("probe-dead-market", 0x54);
         let (tpk, tdid) = (probe_dev.ak_pk.clone(), probe_dev.device_id);
-        owner_transfers(&owner_dev, &probe_dev, &pc_a, 5_000);
+        fund_trader(&owner_dev, &probe_dev, &pc_a, &pc_b, 5_000);
         probe_dev.enter();
         let probe = probe_dev.router();
         let res = crate::runtime::get_runtime().block_on(async {

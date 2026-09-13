@@ -873,6 +873,40 @@ mod tests {
             owner_keypair().public_key.clone(),
             1024,
         );
+        // Adoption precedes receipt (owner ruling 2026-09-13): a credit of a
+        // policy the head has not adopted is refused at `advance`, so the
+        // fixture adopts through the real self-loop `AdoptToken` transition
+        // first — the same shape `tokens.addByAnchor` commits on a device.
+        let (self_rel, self_tip) = (
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &device_id),
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &device_id, &device_id,
+            ),
+        );
+        let adopted = device
+            .advance(
+                self_rel,
+                device_id,
+                Operation::AdoptToken {
+                    policy_commit,
+                    signature: vec![0xAD; 64],
+                },
+                vec![0xAE; 32],
+                None,
+                &[],
+                Some(self_tip),
+                None,
+                None,
+                None,
+            )
+            .expect("adoption precedes receipt");
+        let self_loop_tip = RelChainTip {
+            chain_tip: adopted.new_chain_state.compute_chain_tip(),
+            counterparty_devid: device_id,
+            tip_entropy: adopted.new_chain_state.entropy.clone(),
+            value_capability: ValueCapability::Unknown,
+        };
+        let device = adopted.new_device_state;
         // The PR4 credit gate: a credit-direction Transfer advances only
         // with a matching Prepared DsmBacked admission attached — the honest
         // fixture precondition, exactly what production attaches. Stripped
@@ -913,8 +947,28 @@ mod tests {
             .new_device_state
             .clone()
             .with_pending_economic_admission(None);
+        // Two relationships now: the self-loop that carried the adoption and
+        // the bilateral one that carried the credit. Restore lists them in
+        // the head's own order so the rebuilt root equals the live one.
         let tips = new_device_state.relationship_keys();
-        assert_eq!(tips, vec![rel_key]);
+        assert_eq!(tips.len(), 2);
+        assert!(tips.contains(&self_rel) && tips.contains(&rel_key));
+        let rel_tip = RelChainTip {
+            chain_tip: rel.compute_chain_tip(),
+            counterparty_devid: counterparty,
+            tip_entropy: rel.entropy.clone(),
+            value_capability: ValueCapability::Unknown,
+        };
+        let tips_in_order: Vec<([u8; 32], RelChainTip)> = tips
+            .iter()
+            .map(|k| {
+                if *k == self_rel {
+                    (self_rel, self_loop_tip.clone())
+                } else {
+                    (rel_key, rel_tip.clone())
+                }
+            })
+            .collect();
 
         let head = DeviceState::restore(
             new_device_state.genesis_digest(),
@@ -922,15 +976,7 @@ mod tests {
             new_device_state.public_key().to_vec(),
             Some([0x99; 32]),
             outcome.new_device_state.balances_snapshot().clone(),
-            vec![(
-                rel_key,
-                RelChainTip {
-                    chain_tip: rel.compute_chain_tip(),
-                    counterparty_devid: counterparty,
-                    tip_entropy: rel.entropy.clone(),
-                    value_capability: ValueCapability::Unknown,
-                },
-            )],
+            tips_in_order,
             outcome.new_device_state.extra_leaves_snapshot().clone(),
             outcome
                 .new_device_state

@@ -9,17 +9,17 @@
 //! registered anything. A transfer to a second device could never have settled,
 //! and would have failed at the transfer layer with nothing obviously wrong.
 //!
-//! Adoption is NOT a state transition: no advance, no issuance, and no fee.
-//! Only the creator burns the 10 ERA. Charging to *receive* a token would be
-//! wrong, so that is pinned here rather than left to inspection.
+//! Adoption IS an authenticated state transition — the adoption leaf is
+//! committed to the device head, which is what a later receipt is checked
+//! against so the receiver can validate the token from its OWN state, offline
+//! (owner ruling 2026-09-13). It is still fee-free: only the creator burns the
+//! 10 ERA. Charging to *receive* a token would be wrong, so that is pinned here.
 
 #![allow(clippy::disallowed_methods)]
 
-use prost::Message;
 use std::path::PathBuf;
 
 use dsm_sdk::bridge::AppRouter;
-use dsm_sdk::generated;
 use dsm_sdk::handlers::app_router_impl::AppRouterImpl;
 use dsm_sdk::runtime;
 use dsm_sdk::storage::client_db::token_registry;
@@ -67,42 +67,12 @@ fn era(r: &AppRouterImpl) -> u64 {
     r.core_sdk.device_head().map(|h| h.balance(&c)).unwrap_or(0)
 }
 
-/// PUBLISH a real policy to adopt, returning its anchor — the durable shape
-/// `token.create` persists, built directly: under 3.5b the creation fee is an
-/// ADMITTED economic debit integration tests cannot run (no fake register
-/// fleet; the admitted create e2e lives in `handlers::sender_admission_tests`),
-/// and adoption only needs the published policy bytes, which is truer to the
-/// "another device created it" story anyway: no registry row exists locally
-/// until adoption writes one.
-fn create_token(_r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
-    let signer = vec![0xBBu8; 32];
-    let alias = format!("{ticker} Token");
-    let mut pb: Vec<u8> = vec![
-        3,           // TOKEN_POLICY_VERSION
-        0,           // TOKEN_KIND_FUNGIBLE
-        0x01 | 0x02, // mint_burn + transferable
-        1,           // mint_burn_threshold
-        1,           // signer count
-    ];
-    pb.extend_from_slice(&(signer.len() as u16).to_be_bytes());
-    pb.extend_from_slice(&signer);
-    pb.push(ticker.len() as u8);
-    pb.extend_from_slice(ticker.as_bytes());
-    pb.extend_from_slice(&(alias.len() as u16).to_be_bytes());
-    pb.extend_from_slice(alias.as_bytes());
-    pb.push(2); // decimals
-    pb.extend_from_slice(&1_000_000u128.to_be_bytes());
-    pb.extend_from_slice(&1_000u128.to_be_bytes());
-    pb.extend_from_slice(&0u16.to_be_bytes()); // description
-    pb.extend_from_slice(&0u16.to_be_bytes()); // icon
-    pb.push(0); // ALLOWLIST_KIND_NONE
-    pb.extend_from_slice(&0u16.to_be_bytes());
-
-    let proto = generated::TokenPolicyV3 { policy_bytes: pb }.encode_to_vec();
-    let anchor =
-        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &proto);
-    token_registry::upsert_policy(&anchor, &proto).expect("publish policy bytes");
-    anchor
+/// A REAL token: created and issued through `token.create` + `token.mint`
+/// on this router (fee burned, issuance admitted), returning its anchor —
+/// the only way a policy comes to exist. Nothing here builds policy bytes or
+/// writes a registry row by hand.
+fn create_token(r: &AppRouterImpl, ticker: &str) -> [u8; 32] {
+    dsm_sdk::economic_fixtures::mint_asset(r, ticker, 2, 1_000)
 }
 
 /// EVERY token query route must be reachable through the production dispatcher.
@@ -161,13 +131,24 @@ fn the_route_is_reachable_through_the_production_dispatcher() {
     );
 }
 
-/// (4) Adoption charges no fee and advances no device state.
+/// (4) Adoption charges no fee, and it is COMMITTED STATE: the creator's
+/// head already carries the adoption leaf from the creation advance, so
+/// adding its own token is idempotent — no ERA, no second advance — while the
+/// leaf that receipt is checked against is present. (A second device's
+/// adoption, which DOES advance its head, is proven in-crate where two real
+/// devices exist: `recipient_admission_tests` and `dlv_routes`.)
 #[test]
 #[serial_test::serial]
-fn adoption_costs_no_era_and_does_not_advance_device_state() {
+fn adoption_costs_no_era_and_is_committed_on_the_head() {
     runtime::dsm_init_runtime();
     let (r, _fleet) = funded_router(0x83);
     let anchor = create_token(&r, "ADOPT");
+    assert!(
+        r.core_sdk
+            .device_head()
+            .is_some_and(|h| h.has_adopted(&anchor)),
+        "creation commits the creator's adoption of its own token"
+    );
 
     let era_before = era(&r);
     let root_before = r.core_sdk.device_head().map(|h| h.root());
@@ -179,8 +160,12 @@ fn adoption_costs_no_era_and_does_not_advance_device_state() {
     assert_eq!(
         r.core_sdk.device_head().map(|h| h.root()),
         root_before,
-        "adoption must not advance the device state"
+        "an already-adopted token is not re-advanced"
     );
+    assert!(r
+        .core_sdk
+        .device_head()
+        .is_some_and(|h| h.has_adopted(&anchor)));
 }
 
 /// (3) An exact duplicate adoption is idempotent, not an error.

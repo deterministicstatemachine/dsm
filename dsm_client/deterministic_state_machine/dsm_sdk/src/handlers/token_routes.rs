@@ -1044,6 +1044,59 @@ impl AppRouterImpl {
                     Err(e) => return err(format!("tokens.addByAnchor: registry read failed: {e}")),
                 }
 
+                // THE AUTHENTICATED PART OF ADDING A TOKEN (owner ruling
+                // 2026-09-13). The registry rows below are local bookkeeping;
+                // the adoption LEAF is what every later credit of this token is
+                // checked against in `DeviceState::advance`, so the device can
+                // validate what it accepts from its OWN committed state — with
+                // no connectivity at the moment of receipt. No fee, no balance
+                // delta; committed first, so nothing is registered that the
+                // state does not stand behind. Idempotent: an adopted token is
+                // not re-advanced.
+                {
+                    let Some(head) = self.core_sdk.device_head() else {
+                        return err(
+                            "tokens.addByAnchor: no device head; adoption must be committed to \
+                             state before the token can be held"
+                                .into(),
+                        );
+                    };
+                    if !head.has_adopted(&anchor) {
+                        let dev_id = self.device_id_bytes;
+                        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                            &dev_id, &dev_id,
+                        );
+                        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                            &dev_id, &dev_id,
+                        );
+                        let unsigned = dsm::types::operations::Operation::AdoptToken {
+                            policy_commit: anchor,
+                            signature: Vec::new(),
+                        };
+                        let signed = match self.core_sdk.sign_operation_sphincs(unsigned) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return err(format!(
+                                    "tokens.addByAnchor: adoption could not be signed: {e}"
+                                ))
+                            }
+                        };
+                        if let Err(e) = self.core_sdk.execute_on_relationship_guarded(
+                            rel_key,
+                            dev_id,
+                            signed,
+                            &[],
+                            Some(init_tip),
+                            None,
+                            None,
+                        ) {
+                            return err(format!(
+                                "tokens.addByAnchor: adoption could not be committed to state: {e}"
+                            ));
+                        }
+                    }
+                }
+
                 if let Err(e) =
                     crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
                 {

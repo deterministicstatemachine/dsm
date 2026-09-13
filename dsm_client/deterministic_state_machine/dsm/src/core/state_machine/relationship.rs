@@ -282,6 +282,7 @@ impl RelationshipStatePair {
                         Operation::Lock { .. } => b"lock____",
                         Operation::Unlock { .. } => b"unlock__",
                         Operation::CreateToken { .. } => b"crt_tok_",
+                        Operation::AdoptToken { .. } => b"adopt_tk",
                         Operation::Noop => b"noop____",
                         Operation::DlvCreate { .. } => b"dlv_crt_",
                         Operation::DlvUnlock { .. } => b"dlv_ulk_",
