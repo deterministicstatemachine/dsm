@@ -347,7 +347,13 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       boxSizing: 'border-box',
       padding: '0 8px',
       margin: '-20px -20px 0',
-      overflow: 'hidden',
+      // The container is a fixed height, so vertical overflow must scroll: an
+      // expanded token card is taller than the screen and its MINT / BURN /
+      // FORGET row sits below the fold. `hidden` made those controls
+      // unreachable. Horizontal stays hidden — the width deliberately bleeds
+      // 40px past the parent via the negative margins.
+      overflowX: 'hidden',
+      overflowY: 'auto',
       background: 'linear-gradient(0deg, rgba(var(--text-rgb),0.08), rgba(var(--text-rgb),0.02)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.1) 0px, rgba(var(--text-rgb),0.1) 2px, transparent 2px, transparent 4px)',
     }}>
       {/* Header */}
