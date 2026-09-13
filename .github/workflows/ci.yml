@@ -51,10 +51,13 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # Rust: format, clippy, build, test
+  # Rust gates: purity checks, safety lints, fmt/clippy, the --all-features
+  # build, codegen enforcement, audit. Tests run in `rust-test` below, split
+  # per crate so the PR critical path is the slowest crate rather than the
+  # whole workspace in series.
   # --------------------------------------------------------------------------
-  rust:
-    name: Rust
+  rust-gates:
+    name: Rust gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -114,25 +117,6 @@ jobs:
       - name: Build
         run: cargo build --locked --workspace --all-features
 
-      - name: Test
-        run: |
-          # --test-threads=1: the dsm_sdk/storage suites share process-global
-          # singletons (AppState, the in-memory client DB connection, wallet-seed
-          # cache, posted-DLV store). serial_test's #[serial] lock only serializes
-          # #[serial] tests against each OTHER, not against plain #[test] siblings
-          # on other threads, so a non-serial test racing a serial one on that
-          # shared state flakes a random test nondeterministically. Run serial.
-          #
-          # --release: the gate exercises the SHIPPED profile. The suites are
-          # designed for it — the crypto property tests scale their case counts
-          # UP outside debug (`if cfg!(debug_assertions) { 3 } else { 10 }`),
-          # so a debug run was the reduced variant of the properties, and one
-          # adjacency check documented itself as silently skipped under debug
-          # (state_machine/mod.rs). Debug compilation coverage is not lost: the
-          # Build step above still compiles the workspace in the dev profile.
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
-
       - name: Codegen enforcement
         run: |
           bash scripts/codegen_enforce.sh
@@ -142,6 +126,105 @@ jobs:
         run: |
           cargo install cargo-audit --quiet || true
           cargo audit
+
+  # --------------------------------------------------------------------------
+  # Rust tests, one job per crate group, in parallel. The union of the three
+  # groups is exactly `cargo test --workspace --exclude dsm_storage_node`
+  # plus the storage node's local-dev suite — the same board as before, split.
+  # No path-scoping here: every PR runs every group. Scoping comes later and
+  # only once the dependency mapping is shown to be conservative.
+  # --------------------------------------------------------------------------
+  rust-test:
+    name: Rust tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: dsm
+            run: |
+              cargo test --locked -p dsm --release -- --nocapture --test-threads=1
+          - group: dsm_sdk
+            run: |
+              cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1
+          - group: workspace-rest
+            run: |
+              cargo test --locked --workspace --exclude dsm_storage_node --exclude dsm --exclude dsm_sdk --release -- --nocapture --test-threads=1
+              cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.group }}
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler ripgrep
+
+      # --test-threads=1: the dsm_sdk/storage suites share process-global
+      # singletons (AppState, the in-memory client DB connection, wallet-seed
+      # cache, posted-DLV store). serial_test's #[serial] lock only serializes
+      # #[serial] tests against each OTHER, not against plain #[test] siblings
+      # on other threads, so a non-serial test racing a serial one on that
+      # shared state flakes a random test nondeterministically. Run serial.
+      #
+      # --release: the gate exercises the SHIPPED profile. The suites are
+      # designed for it — the crypto property tests scale their case counts
+      # UP outside debug (`if cfg!(debug_assertions) { 3 } else { 10 }`),
+      # so a debug run was the reduced variant of the properties. Debug
+      # compilation coverage is not lost: `rust-gates` still builds the
+      # workspace in the dev profile.
+      - name: Test
+        run: ${{ matrix.run }}
+
+  # --------------------------------------------------------------------------
+  # The exhaustive board, unsplit, on every push to main: the exact command
+  # CLAUDE.md names as "the board". PRs run the same tests through the
+  # per-crate matrix above; this job is the safety net that proves the union
+  # was the whole, on the commit that actually lands.
+  # --------------------------------------------------------------------------
+  rust-board:
+    name: Rust board (main)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+                      /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: board
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler ripgrep
+
+      - name: Test (whole workspace)
+        run: |
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
+          cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
 
   # --------------------------------------------------------------------------
   # Storage node on POSTGRES — the backend the fleet actually deploys.
@@ -243,7 +326,7 @@ jobs:
   formal-validation:
     name: Formal Validation
     runs-on: ubuntu-latest
-    needs: [rust]
+    needs: [rust-gates, rust-test]
     steps:
       - uses: actions/checkout@v7
 
@@ -359,85 +442,6 @@ jobs:
   # --------------------------------------------------------------------------
   # Coverage: Rust + frontend reports, Codecov upload, aggregate summary
   # --------------------------------------------------------------------------
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@1.98.0
-        with:
-          components: llvm-tools-preview
-
-      - uses: taiki-e/install-action@cargo-llvm-cov
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: dsm_client/frontend/package-lock.json
-
-      - name: Install coverage deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler ripgrep
-
-      - name: Install frontend dependencies
-        working-directory: dsm_client/frontend
-        run: npm ci
-
-      - name: Generate Rust coverage artifacts
-        run: |
-          mkdir -p coverage
-          cargo llvm-cov clean --workspace
-          # --test-threads=1: same shared-singleton parallel race as the Test step
-          # (see its comment). Coverage was flaking a random dsm_sdk #[serial] test
-          # per run; serial execution makes it deterministic.
-          cargo llvm-cov --locked --workspace --exclude dsm_storage_node --no-report -- --nocapture --test-threads=1
-          cargo llvm-cov --locked -p dsm_storage_node --no-default-features --features local-dev,strict --no-report -- --nocapture
-          cargo llvm-cov report --json --output-path coverage.json
-          cargo llvm-cov report --lcov --output-path coverage/rust.lcov
-
-      - name: Generate frontend coverage artifacts
-        working-directory: dsm_client/frontend
-        run: npm run test:coverage -- --passWithNoTests --ci
-
-      - name: Build aggregate coverage summary
-        run: |
-          node scripts/aggregate_coverage.mjs
-
-      - name: Upload Rust coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          files: coverage/rust.lcov
-          flags: rust
-          name: rust-coverage
-          fail_ci_if_error: true
-          use_oidc: true
-
-      - name: Upload frontend coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          files: dsm_client/frontend/coverage/lcov.info
-          flags: frontend
-          name: frontend-coverage
-          fail_ci_if_error: true
-          use_oidc: true
-
-      - name: Upload coverage summary artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-summary
-          path: |
-            coverage/aggregate.json
-            coverage/rust.lcov
-            dsm_client/frontend/coverage/lcov.info
-
   # --------------------------------------------------------------------------
   # Embedded: the no_std / bare-metal compile paths that `cargo test` never
   # exercises, plus the two excluded anchor crates that need no external
@@ -614,7 +618,7 @@ jobs:
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
-    needs: [rust]
+    needs: [rust-gates, rust-test]
     steps:
       - uses: actions/checkout@v7
 
@@ -649,7 +653,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [rust]
+    needs: [rust-gates, rust-test]
     steps:
       - uses: actions/checkout@v7
 
