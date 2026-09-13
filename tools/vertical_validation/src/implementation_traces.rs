@@ -223,8 +223,7 @@ fn trace_state_machine_transfer_chain(
         .insert(sender_key, Balance::from_state(100, state.hash));
     refresh_state_hash(&mut state);
 
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
+    let mut machine = machine_with_declared_genesis(&state, seed_bytes);
 
     let steps = [1u64, 2, 3, 4];
     for (idx, amount) in steps.iter().enumerate() {
@@ -279,8 +278,7 @@ fn trace_state_machine_signature_rejection(
     refresh_state_hash(&mut state);
 
     let original_hash = state.hash().expect("original hash");
-    let mut machine = StateMachine::new();
-    machine.set_state(state.clone());
+    let mut machine = machine_with_declared_genesis(&state, seed_bytes);
 
     let mut op = build_signed_transfer(sk, &state, vec![9; 8], 10, b"ERA".to_vec(), vec![0xCD; 32]);
     if let Operation::Transfer { signature, .. } = &mut op {
@@ -330,10 +328,8 @@ fn trace_state_machine_fork_divergence(
     refresh_state_hash(&mut state);
     let prev_hash = state.hash().expect("fork parent hash");
 
-    let mut machine_a = StateMachine::new();
-    machine_a.set_state(state.clone());
-    let mut machine_b = StateMachine::new();
-    machine_b.set_state(state.clone());
+    let mut machine_a = machine_with_declared_genesis(&state, seed_bytes);
+    let mut machine_b = machine_with_declared_genesis(&state, seed_bytes);
 
     let op_a = build_signed_transfer(sk, &state, vec![1; 8], 1, b"ERA".to_vec(), vec![0xD1; 32]);
     let op_b = build_signed_transfer(sk, &state, vec![2; 8], 2, b"ERA".to_vec(), vec![0xD2; 32]);
@@ -2263,6 +2259,27 @@ fn compute_djte_next_tip(
     buf.extend_from_slice(spent_root);
     buf.extend_from_slice(shard_roots_commitment);
     domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_DLV_TIP, &buf)
+}
+
+/// A trace's machine with a device head rooted at the genesis the trace
+/// itself declares.
+///
+/// `StateMachine::set_state` no longer manufactures a head: it does not know
+/// the genesis authority root and must not invent one (a fabricated zero
+/// root is what broke every first-run wallet's authority evidence). These
+/// traces build their state with `State::new_genesis(seed, ..)`, so the seed
+/// IS the root they declare — the head is installed with it explicitly, then
+/// `set_state` re-seeds the legacy root exactly as before.
+fn machine_with_declared_genesis(state: &State, genesis: &[u8; 32]) -> StateMachine {
+    let mut machine = StateMachine::new();
+    machine.set_device_head(dsm::types::device_state::DeviceState::new(
+        *genesis,
+        state.device_info.device_id,
+        state.device_info.public_key.clone(),
+        1024,
+    ));
+    machine.set_state(state.clone());
+    machine
 }
 
 fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
