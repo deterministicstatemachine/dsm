@@ -761,6 +761,7 @@ impl CoreSDK {
         match &mut operation {
             DsmOperation::Transfer { signature, .. }
             | DsmOperation::CreateToken { signature, .. }
+            | DsmOperation::AdoptToken { signature, .. }
             | DsmOperation::Lock { signature, .. }
             | DsmOperation::Unlock { signature, .. }
             | DsmOperation::LockToken { signature, .. }
@@ -1852,6 +1853,30 @@ impl CoreSDK {
         )
     }
 
+    /// Re-project every balance the just-committed `head` carries into
+    /// `balance_projections` — the rows `balance.list` renders from.
+    ///
+    /// The projection IS the head's cache (`client_db::tokens`), so it must be
+    /// brought level with the head at the commit chokepoint, not at the next
+    /// startup sweep. Reserve-mutating operations (funded vault creation,
+    /// close, withdraw) carry their debits inside the operation and never in a
+    /// caller-supplied delta list, which is how a funded creation left the
+    /// owner's wallet showing its pre-vault balances on hardware (2026-09-13).
+    /// Best-effort by design: the head is already durable when this runs, so a
+    /// failure here is a stale cache the startup reconcile repairs, never a
+    /// lost transition.
+    fn reproject_committed_head(head: &dsm::types::device_state::DeviceState) {
+        match client_db::reconcile_projections_with_head(head) {
+            Ok((0, _)) => {}
+            Ok((rebuilt, checked)) => log::info!(
+                "[projection] {rebuilt}/{checked} balance row(s) re-projected from the committed head"
+            ),
+            Err(e) => log::warn!(
+                "[projection] re-projection from the committed head failed (cache stale until the startup sweep): {e}"
+            ),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn execute_on_relationship_inner(
         &self,
@@ -2084,6 +2109,7 @@ impl CoreSDK {
             return Err(e);
         }
         sm.commit_advance(&outcome);
+        Self::reproject_committed_head(&outcome.new_device_state);
 
         // Build a compatibility State view from the outcome for callers that
         // still read State fields. This is a derived view, not the source of
@@ -2149,6 +2175,7 @@ impl CoreSDK {
             },
         )?;
         sm.set_device_head(outcome.new_device_state.clone());
+        Self::reproject_committed_head(&outcome.new_device_state);
         Ok(outcome)
     }
 
@@ -2179,6 +2206,7 @@ impl CoreSDK {
             },
         )?;
         sm.set_device_head(outcome.new_device_state.clone());
+        Self::reproject_committed_head(&outcome.new_device_state);
         Ok(outcome)
     }
 

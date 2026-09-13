@@ -61,6 +61,8 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         Create { .. } | Update { .. } | Delete { .. } => None,
         AddRelationship { .. } | CreateRelationship { .. } | RemoveRelationship { .. } => None,
         Link { .. } | Unlink { .. } | Invalidate { .. } | Generic { .. } => None,
+        // Adoption commits a policy leaf; it moves no value and has no write set.
+        AdoptToken { .. } => None,
         // Recovery re-roots identity material; it does not move value.
         Recovery { .. } => None,
         // Value-egress by the recovery gate's measure, but it executes with

@@ -442,6 +442,11 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                 return Err(DsmError::invalid_operation("CreateToken missing signature"));
             }
         }
+        Operation::AdoptToken { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation("AdoptToken missing signature"));
+            }
+        }
         Operation::Lock { signature, .. } => {
             if signature.is_empty() {
                 return Err(DsmError::invalid_operation("Lock missing signature"));
@@ -966,6 +971,17 @@ pub fn create_next_state(
                 )?;
             } else {
                 return Err(DsmError::invalid_operation("CreateToken missing signature"));
+            }
+        }
+        Operation::AdoptToken { signature, .. } => {
+            if !signature.is_empty() {
+                verify_operation_signature(
+                    &operation,
+                    &current_state.device_info.public_key,
+                    "AdoptToken",
+                )?;
+            } else {
+                return Err(DsmError::invalid_operation("AdoptToken missing signature"));
             }
         }
         Operation::Lock { signature, .. } => {

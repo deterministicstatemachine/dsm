@@ -344,6 +344,22 @@ pub enum Operation {
         /// Human-readable description of the minting event.
         message: String,
     },
+    /// Adopt a token's public policy on THIS device.
+    ///
+    /// The authenticated state transition behind "ADD TOKEN". Applying it
+    /// writes the adoption leaf (`TAG_DSM_TOKEN_ADOPTION`) into the device's
+    /// SMT, and `DeviceState::advance` refuses to CREDIT a non-builtin token
+    /// whose leaf is absent from the pre-state. That is what makes a later
+    /// receipt of the token verifiable offline: the policy the receiver
+    /// validates against is already committed in its own state, not fetched
+    /// at acceptance time. Rooting performed on the receiver's behalf by an
+    /// online settlement path is not adoption and cannot substitute for it.
+    AdoptToken {
+        /// CPTA commit (BLAKE3 `DSM/policy` digest) of the adopted policy.
+        policy_commit: [u8; 32],
+        /// SPHINCS+ signature over the canonical operation bytes.
+        signature: Vec<u8>,
+    },
     /// Burn (destroy) tokens, permanently removing them from circulation.
     Burn {
         /// Quantity of tokens to burn (must be > 0).
@@ -898,6 +914,8 @@ impl Operation {
             // Structurally state-only since the legacy value-bearing fields
             // were deleted; funded creation is DlvCreateFundedV2 (egress).
             | DlvCreate { .. }
+            // Adoption commits a policy leaf; no value moves.
+            | AdoptToken { .. }
             | Noop => false,
         }
     }
@@ -1049,6 +1067,7 @@ impl Operation {
             | Invalidate { .. }
             | Generic { .. }
             | Receive { .. }
+            | AdoptToken { .. }
             | Noop => EgressAsset::NotEgress,
         }
     }
@@ -1472,6 +1491,15 @@ impl Operation {
                     }
                     None => put_u8(&mut out, 0),
                 }
+            }
+            AdoptToken {
+                policy_commit,
+                signature,
+            } => {
+                // 27 is a burned code; 32 is the next free one.
+                put_u8(&mut out, 32);
+                put_bytes(&mut out, policy_commit);
+                put_bytes(&mut out, signature);
             }
             CreateToken {
                 token_id,
@@ -2307,6 +2335,21 @@ impl Operation {
                 }
             }
             21 => Noop,
+            32 => {
+                let policy_commit: [u8; 32] =
+                    get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
+                        DsmError::invalid_operation("adopt_token policy_commit must be 32 bytes")
+                    })?;
+                let signature = if input.is_empty() {
+                    vec![]
+                } else {
+                    get_bytes(&mut input)?
+                };
+                AdoptToken {
+                    policy_commit,
+                    signature,
+                }
+            }
             22 => {
                 let vault_id = get_bytes(&mut input)?;
                 let creator_public_key = get_bytes(&mut input)?;
@@ -2560,6 +2603,7 @@ impl Operation {
                 compromise_proof, ..
             } => Some(compromise_proof.clone()),
             Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2583,6 +2627,7 @@ impl Operation {
         match self {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2629,6 +2674,7 @@ impl Operation {
             Operation::Generic { .. } => "generic",
             Operation::Receive { .. } => "receive",
             Operation::CreateToken { .. } => "create_token",
+            Operation::AdoptToken { .. } => "adopt_token",
             Operation::Noop => "noop",
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
@@ -2649,6 +2695,7 @@ impl Operation {
         match &mut clone {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2678,6 +2725,7 @@ impl Operation {
         match &mut clone {
             Operation::Transfer { signature, .. }
             | Operation::CreateToken { signature, .. }
+            | Operation::AdoptToken { signature, .. }
             | Operation::Lock { signature, .. }
             | Operation::Unlock { signature, .. }
             | Operation::LockToken { signature, .. }
@@ -2789,6 +2837,7 @@ impl Ops for Operation {
             Operation::Unlock { .. } => "unlock",
             Operation::Receive { .. } => "receive",
             Operation::CreateToken { .. } => "create_token",
+            Operation::AdoptToken { .. } => "adopt_token",
             Operation::Noop => "noop",
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
@@ -3531,6 +3580,18 @@ mod tests {
                 nonce: vec![],
                 verification: VerificationType::Standard,
                 sender_state_hash: None,
+            });
+        }
+
+        #[test]
+        fn adopt_token_roundtrip() {
+            roundtrip(&Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![0xCD; 64],
+            });
+            roundtrip(&Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![],
             });
         }
 

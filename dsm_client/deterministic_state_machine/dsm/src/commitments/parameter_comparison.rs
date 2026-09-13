@@ -521,6 +521,12 @@ pub fn extract_operation_parameters(
             params.insert("fee_amount".to_string(), fee_amount.to_le_bytes().to_vec());
             Ok(params)
         }
+        Operation::AdoptToken { policy_commit, .. } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"adopt_token".to_vec());
+            params.insert("policy_commit".to_string(), policy_commit.to_vec());
+            Ok(params)
+        }
         Operation::Noop => {
             let mut params = HashMap::new();
             params.insert("operation_type".to_string(), b"noop".to_vec());

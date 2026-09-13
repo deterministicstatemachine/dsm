@@ -10,6 +10,84 @@ use serial_test::serial;
 use crate::storage::client_db;
 use crate::test_support::two_device::Pair;
 
+/// ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13). A receiver that never
+/// ADDED a token is not credited when that token is sent to it — the policy it
+/// would validate against is not in its own committed state, and nothing may
+/// fetch it on the receiver's behalf at acceptance time. After the receiver
+/// adopts through the production route (the leaf lands on its head), the same
+/// asset credits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts() {
+    use crate::bridge::AppRouter;
+    let p = Pair::boot(100, 0).await;
+    // A REAL creation and issuance on A: fee burned, 0x0029 issuance admitted.
+    p.a.enter();
+    // `mint_asset` drives the routes synchronously (it blocks on the SDK
+    // runtime); inside this tokio test it must run on a blocking slot.
+    let pc = tokio::task::block_in_place(|| {
+        crate::economic_fixtures::mint_asset(p.a.router(), "ADPT", 2, 1_000)
+    });
+    let head_balance = |d: &crate::test_support::two_device::TestDevice| {
+        d.enter();
+        d.router()
+            .core_sdk
+            .device_head()
+            .map(|h| h.balance(&pc))
+            .unwrap_or(0)
+    };
+    assert_eq!(head_balance(&p.a), 1_000, "A holds what it issued");
+    p.b.enter();
+    assert!(
+        !p.b.router()
+            .core_sdk
+            .device_head()
+            .expect("B head")
+            .has_adopted(&pc),
+        "precondition: B never added ADPT"
+    );
+
+    p.a.enter();
+    let sent = p.a.send_token(&p.b, "ADPT", 100).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let _ = p.b.sync().await;
+    assert_eq!(
+        head_balance(&p.b),
+        0,
+        "B is not credited a token it never adopted"
+    );
+
+    // B adopts through the production route: the adoption leaf is committed
+    // to B's head (root moves), no ERA is spent.
+    p.b.enter();
+    let era_before = p.b.era_balance();
+    let root_before = p.b.router().core_sdk.device_head().expect("B head").root();
+    let adopted =
+        p.b.router()
+            .query(crate::bridge::AppQuery {
+                path: "tokens.addByAnchor".to_string(),
+                params: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            })
+            .await;
+    assert!(
+        adopted.success,
+        "B adopts ADPT: {:?}",
+        adopted.error_message
+    );
+    let head = p.b.router().core_sdk.device_head().expect("B head");
+    assert!(head.has_adopted(&pc), "the adoption leaf is on B's head");
+    assert_ne!(head.root(), root_before, "adoption is a committed advance");
+    assert_eq!(p.b.era_balance(), era_before, "adoption costs no ERA");
+
+    // The HELD transfer now applies on B's next sync — a refusal for want of
+    // adoption is an outage shape, not a wedge: nothing is resent, the same
+    // frozen halves credit once the precondition holds.
+    p.b.enter();
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    assert_eq!(head_balance(&p.b), 100, "credited once B adopted");
+}
+
 /// The full transfer with BOTH admissions, asserted at the economic layer:
 /// the sender's debit admitted at its position, the recipient's credit
 /// admitted at ITS position with the consumed-source leaf installed, the

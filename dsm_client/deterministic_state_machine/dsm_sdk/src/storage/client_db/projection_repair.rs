@@ -190,7 +190,20 @@ pub fn reconcile_projections_against_head(device_id_bytes: &[u8; 32]) -> Result<
     let Some(head) = super::load_bcr_device_head(device_id_bytes)? else {
         return Ok((0, 0));
     };
-    let device_txt = crate::util::text_id::encode_base32_crockford(device_id_bytes);
+    reconcile_projections_with_head(&head)
+}
+
+/// The same sweep for a head the caller already holds — the commit chokepoint
+/// calls this with the head it just made durable, so every balance that head
+/// carries is readable from `balance_projections` before the call returns.
+/// A reserve-mutating operation (funded vault creation, close, withdraw) keeps
+/// its debits inside the operation, so no caller-supplied delta list can be
+/// trusted to name the rows that changed; the head itself is the only
+/// complete source. Never touches the head.
+pub fn reconcile_projections_with_head(
+    head: &dsm::types::device_state::DeviceState,
+) -> Result<(usize, usize)> {
+    let device_txt = crate::util::text_id::encode_base32_crockford(&head.devid());
 
     let mut rebuilt = 0usize;
     let mut checked = 0usize;
@@ -223,7 +236,7 @@ pub fn reconcile_projections_against_head(device_id_bytes: &[u8; 32]) -> Result<
             &device_txt,
             token_id,
             policy_commit,
-            &head,
+            head,
             *head_balance,
             locked,
         )

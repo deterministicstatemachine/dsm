@@ -1323,6 +1323,30 @@ impl DeviceState {
         &self.extra_leaves
     }
 
+    /// SMT key of the leaf committing this device's adoption of `policy_commit`.
+    pub fn token_adoption_leaf_key(policy_commit: &[u8; 32]) -> [u8; 32] {
+        crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_TOKEN_ADOPTION,
+            policy_commit,
+        )
+    }
+
+    /// Whether this device's committed state carries the adoption of
+    /// `policy_commit`. Builtin ERA and dBTC are pre-adopted: every device
+    /// holds their policies by construction.
+    pub fn has_adopted(&self, policy_commit: &[u8; 32]) -> bool {
+        if crate::core::token::token_state_manager::builtin_token_id_for_policy_commit(
+            policy_commit,
+        )
+        .is_some()
+        {
+            return true;
+        }
+        self.extra_leaves
+            .get(&Self::token_adoption_leaf_key(policy_commit))
+            .is_some_and(|v| v == policy_commit)
+    }
+
     /// Current chain tip for a relationship, if one exists. Returns
     /// `None` for first-ever transactions on an unseen relationship —
     /// the caller must supply a spec-canonical initial tip.
@@ -1495,6 +1519,30 @@ impl DeviceState {
     /// layer: one admitted `Mint` of `amount` units of `policy_commit` on the
     /// self-loop. A builtin commit is refused exactly as in production — ERA
     /// comes only from [`Self::admitted_faucet_claim`].
+    /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
+    /// transition behind ADD TOKEN, as a no-delta self-loop advance. Idempotent.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn adopt_token(&self, policy_commit: [u8; 32], entropy_seed: u8) -> Result<Self, DsmError> {
+        let (rel_key, initial_tip) = self.self_loop_coordinates();
+        self.clone()
+            .advance(
+                rel_key,
+                self.devid,
+                Operation::AdoptToken {
+                    policy_commit,
+                    signature: vec![0xAD; 64],
+                },
+                vec![entropy_seed; 32],
+                None,
+                &[],
+                Some(initial_tip),
+                None,
+                None,
+                None,
+            )
+            .map(|o| o.new_device_state)
+    }
+
     #[cfg(any(test, feature = "testing"))]
     pub fn admitted_mint(
         &self,
@@ -1502,8 +1550,17 @@ impl DeviceState {
         amount: u64,
         entropy_seed: u8,
     ) -> Result<Self, DsmError> {
-        let (rel_key, initial_tip) = self.self_loop_coordinates();
-        self.advance_admitted(
+        // A minter is the token's issuer, and production issuers adopt in the
+        // creation advance (`CreateToken` writes the leaf). The fixture has no
+        // creation step, so adopt here: an un-adopted device cannot be
+        // credited, by design, and a fixture must not bypass that.
+        let head = if self.has_adopted(&policy_commit) {
+            self.clone()
+        } else {
+            self.adopt_token(policy_commit, entropy_seed ^ 0x80)?
+        };
+        let (rel_key, initial_tip) = head.self_loop_coordinates();
+        head.advance_admitted(
             rel_key,
             self.devid,
             Operation::Mint {
@@ -1956,6 +2013,32 @@ impl DeviceState {
             }
         };
 
+        // ADOPTION GATE. A credit of a non-builtin token is accepted only if
+        // this device's PRE-state already commits the token's adoption leaf —
+        // the authenticated fact that its public policy was installed here
+        // before any value under it arrived. This is what keeps receipt
+        // verifiable offline: nothing about the token is fetched at acceptance
+        // time. The creator adopts in the same advance that creates (the leaf
+        // is written below, from the signed operation); every other device
+        // adopts through `AdoptToken` first. A settlement path that roots the
+        // token on the receiver's behalf does not satisfy this, by design.
+        for d in deltas {
+            if d.direction == BalanceDirection::Credit
+                && !self.has_adopted(&d.policy_commit)
+                && !matches!(
+                    &operation,
+                    Operation::CreateToken { policy_commit, .. } if *policy_commit == d.policy_commit
+                )
+            {
+                return Err(DsmError::invalid_operation(format!(
+                    "advance: refusing to credit token {} — this device has not adopted its \
+                     policy; adoption (ADD TOKEN) must precede receipt so the policy is \
+                     verifiable from local state",
+                    crate::types::identifiers::encode_crockford(&d.policy_commit)
+                )));
+            }
+        }
+
         // Apply deltas to a working copy. Failures leave self untouched. (For an offline-bearer
         // spend, `deltas` is empty — conservation enforced above — so the online balance is
         // untouched here; the value moved via the allocation debit instead.)
@@ -1996,6 +2079,18 @@ impl DeviceState {
         // vault-state leaf. ONE vector, consumed by every batch arm and by the
         // `extra_leaves` replay, so no arm can forget a leaf.
         let mut batch_leaves: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        // ADOPTION LEAF. Written from the signed operation, never from a
+        // caller-supplied leaf: `AdoptToken` adopts the named policy, and
+        // `CreateToken` adopts the token it issues (the creator must be able
+        // to receive its own token back). Idempotent — re-adopting rewrites
+        // the same value.
+        match &operation {
+            Operation::AdoptToken { policy_commit, .. }
+            | Operation::CreateToken { policy_commit, .. } => {
+                batch_leaves.push((Self::token_adoption_leaf_key(policy_commit), *policy_commit));
+            }
+            _ => {}
+        }
         if let Some(VaultReserveMutation::Fund {
             vault_id: funding_vault,
             legs: funding_legs_in,
@@ -4908,6 +5003,10 @@ mod tests {
         let trader = fresh_device(0xB7)
             .admitted_mint(era, 50_000, 0xA0)
             .expect("admitted issuance of era")
+            // A trader receives the OUTPUT token; it must have adopted it
+            // first — the settlement never roots it on the trader's behalf.
+            .adopt_token(rigb, 0xA2)
+            .expect("trader adopts the output token before settling")
             .with_pending_economic_admission(None);
 
         let vault = [0x77u8; 32];
@@ -5584,10 +5683,189 @@ mod tests {
     ///
     /// Without this, DlvClaim on a claimant who has never held the custom
     /// token would silently no-op instead of crediting the locked balance.
+    /// The credit shape the recipient path builds for a custom token: a
+    /// credit-direction Transfer with its DSM-backed admission attached.
+    fn admitted_custom_credit(
+        dev: DeviceState,
+        policy_commit: [u8; 32],
+        amount: u64,
+    ) -> (DeviceState, Operation) {
+        let credit_op = Operation::Transfer {
+            to_device_id: dev.devid.to_vec(),
+            amount: bal(amount),
+            token_id: b"CUSTOM".to_vec(),
+            policy_commit,
+            mode: TransactionMode::Bilateral,
+            nonce: vec![0x5C; 32],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: dev.devid.to_vec(),
+            to: Vec::new(),
+            message: String::new(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let dev = dev.with_pending_economic_admission(Some(
+            crate::economic::admission::PendingEconomicAdmission::prepared(
+                crate::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                crate::economic::faucet::dsm_operation_digest(&credit_op.to_bytes()),
+            ),
+        ));
+        (dev, credit_op)
+    }
+
+    /// THE OFFLINE-RECEIPT INVARIANT (owner ruling 2026-09-13). A receiver
+    /// must already hold the token's public policy in its OWN authenticated
+    /// state before any value under it arrives — it cannot fetch the policy
+    /// later, and no online path may root it on the receiver's behalf. Proven
+    /// on hardware the other way round: a device that never adopted SOFI was
+    /// credited 44.56 SOFI by a routed settlement and could neither see nor
+    /// spend it.
+    #[test]
+    fn a_credit_of_an_unadopted_token_is_refused_at_advance() {
+        let bob = fresh_device(0xBB);
+        let custom_token = pc(0xF1);
+        assert!(!bob.has_adopted(&custom_token));
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &bob.devid, &bob.devid,
+            );
+        let (bob, credit_op) = admitted_custom_credit(bob, custom_token, 50);
+        let err = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                credit_op,
+                entropy(42),
+                None,
+                &[BalanceDelta {
+                    policy_commit: custom_token,
+                    direction: BalanceDirection::Credit,
+                    amount: 50,
+                }],
+                Some(init_tip),
+                None,
+                None,
+                None,
+            )
+            .expect_err("a credit of a token this device never adopted must be refused");
+        assert!(
+            format!("{err}").contains("has not adopted"),
+            "the refusal names adoption, got: {err}"
+        );
+        // Nothing moved: the working copy was discarded with the error.
+        assert!(!bob.balances.contains_key(&custom_token));
+    }
+
+    /// Positive control for the gate above: adoption first, then the SAME
+    /// credit lands. The adoption is a committed leaf, so a reloaded device
+    /// recomputes the same root with it.
+    #[test]
+    fn adoption_precedes_receipt_and_is_committed() {
+        let bob = fresh_device(0xBB);
+        let custom_token = pc(0xF1);
+        let bob = bob.adopt_token(custom_token, 7).expect("adopt");
+        assert!(bob.has_adopted(&custom_token));
+        assert_eq!(
+            bob.extra_leaves
+                .get(&DeviceState::token_adoption_leaf_key(&custom_token)),
+            Some(&custom_token),
+            "adoption is a committed extra leaf, replayed on restore"
+        );
+        // Builtins are pre-adopted; an unrelated commit is not.
+        assert!(
+            bob.has_adopted(&crate::core::token::builtin_policy_commit_for_token("ERA").unwrap())
+        );
+        assert!(!bob.has_adopted(&pc(0xF2)));
+
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let (bob, credit_op) = admitted_custom_credit(bob, custom_token, 50);
+        let outcome = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                credit_op,
+                entropy(43),
+                None,
+                &[BalanceDelta {
+                    policy_commit: custom_token,
+                    direction: BalanceDirection::Credit,
+                    amount: 50,
+                }],
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("after adoption the same credit is accepted");
+        assert_eq!(
+            outcome
+                .new_device_state
+                .balances
+                .get(&custom_token)
+                .copied(),
+            Some(50)
+        );
+        // Re-adopting is idempotent: same leaf, same value, no refusal.
+        let again = outcome
+            .new_device_state
+            .adopt_token(custom_token, 8)
+            .expect("adopt");
+        assert!(again.has_adopted(&custom_token));
+    }
+
+    /// The creator adopts in the creation advance itself: a token's issuer
+    /// must be able to receive its own token back without a second step.
+    #[test]
+    fn create_token_adopts_the_token_it_issues() {
+        let bob = fresh_device(0xBB);
+        let new_token = pc(0xF3);
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &bob.devid, &bob.devid,
+            );
+        let create = Operation::CreateToken {
+            token_id: b"NEWT".to_vec(),
+            initial_supply: bal(0),
+            policy_commit: new_token,
+            fee_amount: 0,
+            name: "New".into(),
+            symbol: "NEWT".into(),
+            decimals: 2,
+            metadata_uri: None,
+            signature: vec![0xC7; 64],
+        };
+        let outcome = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                create,
+                entropy(9),
+                None,
+                &[],
+                Some(init_tip),
+                None,
+                None,
+                None,
+            )
+            .expect("a zero-fee, zero-supply creation advances");
+        assert!(outcome.new_device_state.has_adopted(&new_token));
+    }
+
     #[test]
     fn advance_credit_materialises_new_policy_commit_entry() {
         let bob = fresh_device(0xBB);
         let custom_token = pc(0xF1);
+        // Adoption is the precondition of receipt (see the tests above); this
+        // test is about the balance entry, so adopt first.
+        let bob = bob.adopt_token(custom_token, 1).expect("adopt");
 
         // Bob starts with zero exposure to this policy_commit.
         assert!(
@@ -5598,10 +5876,6 @@ mod tests {
         // Simulate the DlvClaim credit landing on Bob's self-loop.
         let rk_self =
             crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
-        let init_tip =
-            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &bob.devid, &bob.devid,
-            );
 
         // THE CREDIT SHAPE PRODUCTION ACTUALLY USES. A mint is no longer a
         // credit vehicle — issuance is refused at this layer until class
@@ -5643,7 +5917,7 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 50,
                 }],
-                Some(init_tip),
+                None,
                 None,
                 None,
                 None,
@@ -8323,6 +8597,11 @@ mod tests {
         let era = pc(0xE7);
         let devid = [0xB7u8; 32];
         let head = DeviceState::new([0xA7; 32], devid, vec![0xC7; 32], 64);
+        // Receipt presupposes adoption (owner ruling 2026-09-13): the head must
+        // already commit this token's policy before any credit under it.
+        let head = head
+            .adopt_token(era, 0x11)
+            .expect("adopt the incoming token");
         let sender = [0x99u8; 32];
         let rk = [0x33u8; 32];
         let tip = [0x11u8; 32];

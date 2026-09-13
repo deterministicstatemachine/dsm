@@ -948,6 +948,40 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
             dsm::types::policy_types::PolicyAnchor::from_bytes(row.policy_commit),
         ))
     }));
+    // THE CREATION'S COMMITMENT (owner ruling 2026-09-13). A creator adopts
+    // its token in the creation advance; this seam test skips the route, so
+    // it commits the same adoption leaf the same way — a SIGNED `AdoptToken`
+    // self-loop advance on the real head — or the mint's credit is refused,
+    // correctly, for want of it. Nothing about the policy is fabricated: the
+    // bytes are the production packer's, under this wallet's real key.
+    {
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &devid, &devid,
+        );
+        let signed = core
+            .sign_operation_sphincs(dsm::types::operations::Operation::AdoptToken {
+                policy_commit,
+                signature: Vec::new(),
+            })
+            .expect("sign the adoption");
+        core.execute_on_relationship_guarded(
+            rel_key,
+            devid,
+            signed,
+            &[],
+            Some(init_tip),
+            None,
+            None,
+        )
+        .expect("commit the adoption");
+        assert!(
+            core.device_head()
+                .expect("head")
+                .has_adopted(&policy_commit),
+            "the adoption leaf is on the head before any credit of HELD"
+        );
+    }
     let mint = dsm::types::operations::Operation::Mint {
         amount: dsm::types::token_types::Balance::from_state(25, genesis),
         token_id: b"HELD".to_vec(),
