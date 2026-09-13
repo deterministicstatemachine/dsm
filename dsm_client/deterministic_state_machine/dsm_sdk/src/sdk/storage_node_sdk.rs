@@ -366,16 +366,27 @@ pub fn canonical_params_bytes(m: &HashMap<String, String>) -> Vec<u8> {
 
 /// Build a reqwest::Client that loads custom CA certs from the DSM env config TOML.
 /// Reusable by any code path that needs HTTPS to storage nodes with self-signed certs.
-pub fn build_ca_aware_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder().user_agent("DSM-SDK/1.0");
-    let mut certs_loaded: u32 = 0;
+/// The CA material a storage client is built from: the resolved env-config
+/// path and the bytes of every PEM it names, in order. Two calls that resolve
+/// the same material get the same client; a re-pointed config or a replaced
+/// `ca.crt` produces different material and therefore a fresh build.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct CaMaterial {
+    env_path: Option<String>,
+    certs: Vec<(std::path::PathBuf, Vec<u8>)>,
+}
+
+/// Read the env config and the CA PEMs it names. Every failure is logged
+/// exactly as before and yields no certificate for that entry — this is the
+/// same fail-open-to-the-system-store behaviour the per-call builder had.
+fn resolve_ca_material() -> CaMaterial {
     let env_path_opt = std::env::var("DSM_ENV_CONFIG_PATH")
         .ok()
         .or_else(|| crate::network::get_env_config_path().map(|s| s.to_string()))
         .or_else(|| std::env::var("ENV_CONFIG_PATH").ok());
+    let mut certs: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
     match env_path_opt {
         Some(ref env_path) => {
-            log::info!("[build_ca_aware_client] env config path: {}", env_path);
             let config_dir = std::path::Path::new(env_path)
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
@@ -391,45 +402,28 @@ pub fn build_ca_aware_client() -> reqwest::Client {
                                         config_dir.join(p)
                                     };
                                     match std::fs::read(&cert_path) {
-                                        Ok(bytes) => match reqwest::Certificate::from_pem(&bytes) {
-                                            Ok(cert) => {
-                                                builder = builder.add_root_certificate(cert);
-                                                certs_loaded += 1;
-                                                log::info!(
-                                                            "[build_ca_aware_client] Loaded CA cert: {} ({} bytes)",
-                                                            cert_path.display(),
-                                                            bytes.len()
-                                                        );
-                                            }
-                                            Err(e) => {
-                                                log::error!(
-                                                            "[build_ca_aware_client] PEM parse FAILED for {}: {} — HTTPS to self-signed storage nodes will fail",
-                                                            cert_path.display(),
-                                                            e
-                                                        );
-                                            }
-                                        },
+                                        Ok(bytes) => certs.push((cert_path, bytes)),
                                         Err(e) => {
                                             log::error!(
-                                                    "[build_ca_aware_client] Cannot read CA cert at {}: {} — HTTPS to self-signed storage nodes will fail",
-                                                    cert_path.display(),
-                                                    e
-                                                );
+                                                "[build_ca_aware_client] Cannot read CA cert at {}: {} — HTTPS to self-signed storage nodes will fail",
+                                                cert_path.display(),
+                                                e
+                                            );
                                         }
                                     }
                                 }
                             }
                         } else {
                             log::warn!(
-                                    "[build_ca_aware_client] No custom_ca_certs array in env config — using system CA store only"
-                                );
+                                "[build_ca_aware_client] No custom_ca_certs array in env config — using system CA store only"
+                            );
                         }
                     }
                     Err(e) => {
                         log::error!(
-                                "[build_ca_aware_client] Failed to parse env config TOML: {} — no custom CA certs loaded",
-                                e
-                            );
+                            "[build_ca_aware_client] Failed to parse env config TOML: {} — no custom CA certs loaded",
+                            e
+                        );
                     }
                 },
                 Err(e) => {
@@ -447,12 +441,88 @@ pub fn build_ca_aware_client() -> reqwest::Client {
             );
         }
     }
+    CaMaterial {
+        env_path: env_path_opt,
+        certs,
+    }
+}
+
+/// Build a client from resolved material. This is the expensive step (TLS
+/// configuration, connection pool); it runs only on a cache miss.
+fn build_client_from(material: &CaMaterial) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder().user_agent("DSM-SDK/1.0");
+    let mut certs_loaded: u32 = 0;
+    if let Some(env_path) = &material.env_path {
+        log::info!("[build_ca_aware_client] env config path: {}", env_path);
+    }
+    for (cert_path, bytes) in &material.certs {
+        match reqwest::Certificate::from_pem(bytes) {
+            Ok(cert) => {
+                builder = builder.add_root_certificate(cert);
+                certs_loaded += 1;
+                log::info!(
+                    "[build_ca_aware_client] Loaded CA cert: {} ({} bytes)",
+                    cert_path.display(),
+                    bytes.len()
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "[build_ca_aware_client] PEM parse FAILED for {}: {} — HTTPS to self-signed storage nodes will fail",
+                    cert_path.display(),
+                    e
+                );
+            }
+        }
+    }
     CA_CERTS_LOADED.store(certs_loaded, std::sync::atomic::Ordering::SeqCst);
+    CA_AWARE_CLIENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     log::info!(
         "[build_ca_aware_client] Total custom CA certs loaded: {}",
         certs_loaded
     );
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// One shared client per CA material.
+///
+/// Every storage operation used to construct its own `reqwest::Client`: the
+/// env TOML and each CA PEM read from disk, a new TLS configuration and a new
+/// connection pool, three log lines — about a second per operation on a
+/// handset, and a two-minute quote once a vault had a generation or two of
+/// history to compose (749 builds in one quote window on the beta fleet,
+/// 2026-09-13). `reqwest::Client` is an `Arc` designed to be shared, so the
+/// build now happens once per distinct material: the same resolved config
+/// path and the same PEM bytes hand back the same client, and a re-pointed
+/// config or a replaced `ca.crt` (both happen on this fleet) rebuilds it.
+/// Resolving the material still reads the small files — that is what makes
+/// the key honest — but the expensive TLS setup is paid once.
+pub fn build_ca_aware_client() -> reqwest::Client {
+    let material = resolve_ca_material();
+    let mut slot = CA_AWARE_CLIENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((cached_material, client)) = slot.as_ref() {
+        if *cached_material == material {
+            return client.clone();
+        }
+    }
+    let client = build_client_from(&material);
+    *slot = Some((material, client.clone()));
+    client
+}
+
+/// The cached client and the material it was built from.
+static CA_AWARE_CLIENT: std::sync::Mutex<Option<(CaMaterial, reqwest::Client)>> =
+    std::sync::Mutex::new(None);
+
+/// How many times a client was actually BUILT (not handed back from the
+/// cache). Read by tests to prove the cache is load-bearing.
+static CA_AWARE_CLIENT_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of real client builds so far (cache misses).
+pub fn ca_aware_client_builds() -> u64 {
+    CA_AWARE_CLIENT_BUILDS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Number of custom CA certificates loaded by `build_ca_aware_client()`.
@@ -5214,6 +5284,73 @@ fn decode_device_tree_state(bytes: &[u8]) -> Result<PersistedDeviceTreeState, Ds
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// THE CACHE IS LOAD-BEARING. A quote on the beta fleet paid ~1 s per
+    /// storage operation because every operation built its own TLS client
+    /// (749 builds in one quote window). Same material → same client; a
+    /// replaced `ca.crt` at the same path → a fresh build (the key is the
+    /// PEM bytes, not the path). Mutation control: make the lookup never hit
+    /// and the "no second build" line goes red.
+    #[test]
+    #[serial_test::serial]
+    fn a_storage_client_is_built_once_per_ca_material_and_rebuilt_when_it_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ca_path = dir.path().join("ca.crt");
+        let cfg_path = dir.path().join("dsm_env_config.toml");
+        let pem_a = rcgen::generate_simple_self_signed(vec!["dsm-test-a".to_string()])
+            .expect("self-signed a")
+            .cert
+            .pem();
+        let pem_b = rcgen::generate_simple_self_signed(vec!["dsm-test-b".to_string()])
+            .expect("self-signed b")
+            .cert
+            .pem();
+        std::fs::write(&ca_path, &pem_a).expect("write ca");
+        std::fs::write(&cfg_path, "custom_ca_certs = [\"ca.crt\"]\n").expect("write cfg");
+        let previous = std::env::var("DSM_ENV_CONFIG_PATH").ok();
+        unsafe {
+            std::env::set_var("DSM_ENV_CONFIG_PATH", &cfg_path);
+        }
+
+        let before = ca_aware_client_builds();
+        let _first = build_ca_aware_client();
+        assert_eq!(
+            ca_aware_client_builds(),
+            before + 1,
+            "the first call builds"
+        );
+        assert_eq!(
+            ca_certs_loaded_count(),
+            1,
+            "the real PEM was loaded into it"
+        );
+        let _second = build_ca_aware_client();
+        assert_eq!(
+            ca_aware_client_builds(),
+            before + 1,
+            "the same material hands back the cached client — no second build"
+        );
+
+        std::fs::write(&ca_path, &pem_b).expect("replace ca");
+        let _third = build_ca_aware_client();
+        assert_eq!(
+            ca_aware_client_builds(),
+            before + 2,
+            "a replaced ca.crt at the SAME path is different material: rebuilt"
+        );
+        std::fs::write(&ca_path, &pem_a).expect("restore ca");
+        let _fourth = build_ca_aware_client();
+        assert_eq!(
+            ca_aware_client_builds(),
+            before + 3,
+            "the key is the material, not the path: restoring the old bytes rebuilds again"
+        );
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("DSM_ENV_CONFIG_PATH", v) },
+            None => unsafe { std::env::remove_var("DSM_ENV_CONFIG_PATH") },
+        }
+    }
 
     // Helper to build a minimal SDK instance (no network I/O on new())
     async fn make_sdk() -> StorageNodeSDK {
