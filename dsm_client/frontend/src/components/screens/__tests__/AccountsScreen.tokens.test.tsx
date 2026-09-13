@@ -117,6 +117,20 @@ describe('AccountsScreen — the screen TOKENS actually opens', () => {
     expect(screen.getByRole('button', { name: /^BURN$/ })).toBeInTheDocument();
   });
 
+  /// Being in the DOM is not being reachable. The screen is a fixed-height
+  /// container, and an expanded card pushes MINT / BURN / FORGET below the
+  /// fold; with overflow hidden on the vertical axis they rendered (so the test
+  /// above passed) and could never be scrolled to or tapped on a device.
+  it('lets an expanded card scroll its supply actions into reach', async () => {
+    render(<AccountsScreen />);
+    fireEvent.click(await screen.findByText('MYTOK'));
+    const mint = await screen.findByRole('button', { name: /^MINT$/ });
+    const container = mint.closest('.dsm-content') as HTMLElement | null;
+    expect(container).not.toBeNull();
+    expect(container!.style.overflowY).toBe('auto');
+    expect(container!.style.overflowX).toBe('hidden');
+  });
+
   /// THE GAP THIS CLOSES. A device that ADOPTS a token is shown its anchor on
   /// the confirmation card; the device that CREATED it was shown nothing,
   /// anywhere. Handing the token to a peer therefore meant reading the registry
