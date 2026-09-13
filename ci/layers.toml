@@ -1,0 +1,100 @@
+# The dependency map behind the CI layer selector (ci/select_layers.py).
+#
+# A pull request runs the smallest set of validation layers the dependency
+# graph proves is safe; pushes to main, the nightly run and the FULL preset
+# run everything. Precedence, in this order:
+#   1. FULL triggers: event push/schedule, preset FULL, any file under
+#      [full_triggers], or any changed file no surface maps — unknown = FULL.
+#   2. Surface mapping: every surface a file matches (a path may map to more
+#      than one; the SDK's jni/bridge modules are SDK *and* JNI_ANDROID).
+#   3. Escalation: the transitive closure over [escalation], because the
+#      dependency DIRECTION decides what a change can affect.
+#   A manual preset means "pretend this surface changed" and goes through the
+#   same closure — it can never be weaker than the automatic selection.
+#
+# This file lives under ci/**, which is itself a FULL trigger: the mechanism
+# that decides what may be skipped never validates itself on a narrowed board.
+
+[surfaces]
+CORE        = ["dsm_client/deterministic_state_machine/dsm/**", "crates/**"]
+SDK         = ["dsm_client/deterministic_state_machine/dsm_sdk/**"]
+JNI_ANDROID = [
+  "dsm_client/android/**",
+  "crates/dsm-android-anchor/**",
+  "dsm_client/deterministic_state_machine/dsm_sdk/src/jni/**",
+  "dsm_client/deterministic_state_machine/dsm_sdk/src/bridge/**",
+]
+STORAGE     = ["dsm_storage_node/**"]
+FRONTEND    = ["dsm_client/frontend/**"]
+FORMAL      = [
+  "tools/vertical_validation/**",
+  "tools/vector_runner/**",
+  "tools/vector_builder/**",
+  "tla/**",
+  "lean4/**",
+]
+
+# A change in the key implies the values (closure is transitive).
+[escalation]
+CORE              = ["SDK", "JNI_ANDROID", "STORAGE", "FORMAL"]
+SDK               = ["JNI_ANDROID", "FORMAL"]
+JNI_ANDROID       = ["SDK"]
+STORAGE           = ["SDK_NODE_PROTOCOL"]
+FRONTEND          = []
+FORMAL            = []
+SDK_NODE_PROTOCOL = []
+
+# Any of these changing runs FULL, whatever else the diff says.
+[full_triggers]
+paths = [
+  "**/Cargo.toml",
+  "**/Cargo.lock",
+  "rust-toolchain*",
+  ".github/**",
+  "ci/**",
+  "scripts/**",
+  "Makefile",
+  "proto/**",
+  "**/build.rs",
+  "codecov.yml",
+  "dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/**",
+  "dsm_client/deterministic_state_machine/dsm_sdk/src/economic_fixtures.rs",
+  "dsm_client/deterministic_state_machine/dsm/src/crypto/**",
+]
+
+# Never select anything on their own (mirrors the workflows' paths-ignore).
+[ignored]
+paths = ["**/*.md"]
+
+# The SDK suites that exercise the storage-node contract: what a STORAGE
+# change escalates to instead of every SDK unit test.
+[sdk_node_protocol]
+lib_filters = [
+  "handlers::storage_routes",
+  "sdk::storage_node_sdk",
+  "sdk::b0x_sdk",
+  "sdk::storage_io",
+  "sdk::storage_set",
+  "sdk::storage_sync_sdk",
+  "sdk::storage_node_health",
+]
+integration_tests = ["b0x_integration", "storage_full_lifecycle"]
+
+# The Rust test matrix groups the selector emits, and what each runs.
+[groups.dsm]
+when = ["CORE"]
+run = "cargo test --locked -p dsm --release -- --nocapture --test-threads=1"
+
+[groups.dsm_sdk]
+when = ["SDK"]
+run = "cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1"
+
+# Only when STORAGE escalated here without SDK itself being selected.
+[groups.sdk-node-protocol]
+when = ["SDK_NODE_PROTOCOL"]
+unless = ["SDK"]
+run = "cargo test --locked -p dsm_sdk --release --lib -- --nocapture --test-threads=1 {lib_filters}\ncargo test --locked -p dsm_sdk --release {integration_tests} -- --nocapture --test-threads=1"
+
+[groups.workspace-rest]
+when = ["CORE", "STORAGE", "FORMAL"]
+run = "cargo test --locked --workspace --exclude dsm_storage_node --exclude dsm --exclude dsm_sdk --release -- --nocapture --test-threads=1\ncargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture"

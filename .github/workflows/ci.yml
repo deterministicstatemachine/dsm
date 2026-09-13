@@ -23,6 +23,17 @@ on:
   # Run on every PR regardless of base branch, so stacked PRs (whose base is
   # another feature branch, not main) are validated too — not only the one at
   # the bottom of a stack that targets main. Push/schedule stay main-only.
+  # Manual runs pick a validation preset. A preset means "pretend this
+  # surface changed" and goes through the same escalation graph as an
+  # automatic PR selection — it can never be weaker than automatic CI.
+  # FULL runs everything regardless of what git thinks changed.
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: "Validation preset (FULL = everything)"
+        type: choice
+        default: FULL
+        options: [FULL, CORE, SDK, STORAGE, JNI_ANDROID, FRONTEND, FORMAL]
   pull_request:
     paths-ignore:
       # A markdown-only change cannot alter any CI outcome, so running the
@@ -51,6 +62,45 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
+  # Layer selection. ci/layers.toml is the dependency map; ci/select_layers.py
+  # applies it: FULL trigger → multi-surface mapping → escalation closure,
+  # unknown path = FULL. Pushes to main and nightly always run FULL. The
+  # selector's own tests run first — it proves itself before it may narrow
+  # anything — and ci/** is itself a FULL trigger.
+  # --------------------------------------------------------------------------
+  select:
+    name: Select layers
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.sel.outputs.full }}
+      core: ${{ steps.sel.outputs.core }}
+      sdk: ${{ steps.sel.outputs.sdk }}
+      jni_android: ${{ steps.sel.outputs.jni_android }}
+      storage: ${{ steps.sel.outputs.storage }}
+      frontend: ${{ steps.sel.outputs.frontend }}
+      formal: ${{ steps.sel.outputs.formal }}
+      sdk_node_protocol: ${{ steps.sel.outputs.sdk_node_protocol }}
+      rust: ${{ steps.sel.outputs.rust }}
+      rust_matrix: ${{ steps.sel.outputs.rust_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Selector self-test
+        run: python3 ci/test_select_layers.py
+
+      - name: Select
+        id: sel
+        env:
+          EVENT: ${{ github.event_name }}
+          PRESET: ${{ github.event.inputs.preset }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.sha }}
+        run: |
+          python3 ci/select_layers.py --event "$EVENT" --preset "$PRESET" --base "$BASE" --head "$HEAD" | tee -a "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------------------
   # Rust gates: purity checks, safety lints, fmt/clippy, the --all-features
   # build, codegen enforcement, audit. Tests run in `rust-test` below, split
   # per crate so the PR critical path is the slowest crate rather than the
@@ -58,6 +108,8 @@ jobs:
   # --------------------------------------------------------------------------
   rust-gates:
     name: Rust gates
+    needs: [select]
+    if: needs.select.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -136,21 +188,16 @@ jobs:
   # --------------------------------------------------------------------------
   rust-test:
     name: Rust tests (${{ matrix.group }})
+    needs: [select]
+    if: needs.select.outputs.rust_matrix != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # The groups and their commands come from ci/layers.toml via the
+      # selector: dsm, dsm_sdk, sdk-node-protocol (STORAGE's downstream SDK
+      # coverage when SDK itself is not selected), workspace-rest.
       matrix:
-        include:
-          - group: dsm
-            run: |
-              cargo test --locked -p dsm --release -- --nocapture --test-threads=1
-          - group: dsm_sdk
-            run: |
-              cargo test --locked -p dsm_sdk --release -- --nocapture --test-threads=1
-          - group: workspace-rest
-            run: |
-              cargo test --locked --workspace --exclude dsm_storage_node --exclude dsm --exclude dsm_sdk --release -- --nocapture --test-threads=1
-              cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
+        include: ${{ fromJson(needs.select.outputs.rust_matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -248,6 +295,8 @@ jobs:
   # --------------------------------------------------------------------------
   storage-node-postgres:
     name: Storage Node (Postgres)
+    needs: [select]
+    if: needs.select.outputs.storage == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -326,7 +375,8 @@ jobs:
   formal-validation:
     name: Formal Validation
     runs-on: ubuntu-latest
-    needs: [rust-gates, rust-test]
+    needs: [select, rust-gates, rust-test]
+    if: needs.select.outputs.formal == 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -358,6 +408,8 @@ jobs:
   # --------------------------------------------------------------------------
   frontend:
     name: Frontend
+    needs: [select]
+    if: needs.select.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -404,6 +456,8 @@ jobs:
   # --------------------------------------------------------------------------
   android-unit-tests:
     name: Android Unit Tests
+    needs: [select]
+    if: needs.select.outputs.jni_android == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -460,6 +514,8 @@ jobs:
   # --------------------------------------------------------------------------
   embedded:
     name: Embedded (no_std + excluded anchor crates)
+    needs: [select]
+    if: needs.select.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -535,6 +591,8 @@ jobs:
   # --------------------------------------------------------------------------
   lean:
     name: Lean 4 proofs
+    needs: [select]
+    if: needs.select.outputs.formal == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -618,7 +676,8 @@ jobs:
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
-    needs: [rust-gates, rust-test]
+    needs: [select, rust-gates, rust-test]
+    if: needs.select.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -653,7 +712,8 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [rust-gates, rust-test]
+    needs: [select, rust-gates, rust-test]
+    if: needs.select.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@v7
 
