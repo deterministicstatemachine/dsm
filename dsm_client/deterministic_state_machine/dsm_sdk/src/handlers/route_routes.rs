@@ -178,6 +178,42 @@ impl AppRouterImpl {
             }
         };
 
+        // ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13) — and the
+        // transaction dies HERE. `dlv.unlockRouted` refuses an un-adopted
+        // output token too, but by then the trader has already published its
+        // external commitment and a vault-pending pointer to the storage set:
+        // visible material for a swap that can never settle. Signing the
+        // route is the first step of the shipped swap, the final hop's
+        // `token_out` is the asset this device would receive, and
+        // `route.publishExternalCommitment` only ever publishes a route that
+        // was retained here — so refusing before anything is signed or
+        // retained means nothing is committed or published for it.
+        let Some(last_hop) = rc.hops.last() else {
+            return err("route.signRouteCommit: a route has no hops".into());
+        };
+        let output_token: [u8; 32] = match last_hop.token_out.as_slice().try_into() {
+            Ok(a) => a,
+            Err(_) => {
+                return err(format!(
+                    "route.signRouteCommit: the final hop's token_out must be 32 bytes, got {}",
+                    last_hop.token_out.len()
+                ));
+            }
+        };
+        let Some(head) = self.core_sdk.device_head() else {
+            return err(
+                "route.signRouteCommit: no device head; this device cannot receive anything".into(),
+            );
+        };
+        if !head.has_adopted(&output_token) {
+            return err(format!(
+                "route.signRouteCommit: this device has not adopted the output token {} — ADD \
+                 TOKEN first; a route whose output this device cannot receive is not signed, \
+                 so nothing is committed or published for it",
+                crate::util::text_id::encode_base32_crockford(&output_token)
+            ));
+        }
+
         // Wallet pk + sk.  Both must be available — strict-fail
         // otherwise so callers get a precise error rather than a
         // signed-with-empty-key result that the eligibility gate
@@ -1160,7 +1196,13 @@ mod stamping_tests {
             hops: vec![generated::RouteCommitHopV1 {
                 vault_id: vec![0x77; 32],
                 token_in: vec![0x11; 32],
-                token_out: vec![0x22; 32],
+                // The signer must be able to RECEIVE what it signs for: the
+                // route commit refuses an output this device has not adopted
+                // (owner ruling 2026-09-13), so the fixture names the ERA
+                // builtin — adopted by construction — never a made-up commit.
+                token_out: crate::policy::builtin_policy_commit("ERA")
+                    .expect("ERA policy")
+                    .to_vec(),
                 input_amount_u128: 1_000u128.to_be_bytes().to_vec(),
                 expected_output_amount_u128: 970u128.to_be_bytes().to_vec(),
                 ..Default::default()

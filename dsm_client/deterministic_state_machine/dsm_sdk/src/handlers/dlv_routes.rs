@@ -13084,6 +13084,137 @@ mod funded_creation_tests {
         }
     }
 
+    /// THE TRANSACTION DIES BEFORE ANY PUBLISHABLE STATE EXISTS. The shipped
+    /// swap is `route.signRouteCommit` → `route.publishExternalCommitment` →
+    /// `dlv.unlockRouted`. `dlv.unlockRouted` already refuses an un-adopted
+    /// output token, but on hardware (2026-09-13) the stranger's external
+    /// commitment and vault-pending pointer had reached all five members
+    /// before that refusal: visible material for a swap that can never
+    /// settle. The invariant here is stronger than "settlement eventually
+    /// refuses": if the trader cannot validly receive the output asset, the
+    /// route commit fails LOCALLY and produces no external commitment, no
+    /// vault-pending pointer and no storage publication at all.
+    #[test]
+    #[serial]
+    fn a_route_whose_output_the_trader_has_not_adopted_dies_before_any_publication() {
+        use prost::Message as _;
+        install_identity();
+        let (vault_id, (pc_a, pc_b), owner_dev, _traders) =
+            market_with_traders("sofi/spec/unadopted-out-route", &[]);
+        let trader_dev = participant("trader-noadopt-route", 0x56);
+        owner_transfers(&owner_dev, &trader_dev, &pc_a, 5_000);
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        assert!(
+            !trader
+                .core_sdk
+                .device_head()
+                .expect("trader head")
+                .has_adopted(&pc_b),
+            "precondition: the trader has not adopted the output token"
+        );
+        let puts_before = crate::sdk::storage_io::fake_fleet::put_log().len();
+        let expected_out =
+            crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+                .expect("curve output");
+        let unsigned = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x56; 32],
+            total_fee_bps: 30,
+            initiator_public_key: trader_dev.ak_pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![generated::RouteCommitHopV1 {
+                vault_id: vault_id.to_vec(),
+                token_in: pc_a.to_vec(),
+                token_out: pc_b.to_vec(),
+                input_amount_u128: (1_000u128).to_be_bytes().to_vec(),
+                expected_output_amount_u128: (expected_out as u128).to_be_bytes().to_vec(),
+                fee_bps: 30,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&unsigned);
+
+        // Step 1 of the shipped swap refuses, naming adoption.
+        let signed = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "route.signRouteCommit".to_string(),
+                    args: pack(unsigned.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(
+            !signed.success,
+            "signing a route into an un-adopted output must refuse"
+        );
+        let why = signed.error_message.clone().unwrap_or_default();
+        assert!(
+            why.contains("has not adopted the output token"),
+            "the refusal names adoption, got: {why}"
+        );
+
+        // Step 2 has nothing to publish: no route was retained for this X.
+        let published = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "route.publishExternalCommitment".to_string(),
+                    args: pack(
+                        generated::ExternalCommitmentV1 {
+                            version: 1,
+                            x: x.to_vec(),
+                            publisher_public_key: Vec::new(),
+                            label: String::new(),
+                        }
+                        .encode_to_vec(),
+                    ),
+                })
+                .await
+        });
+        assert!(
+            !published.success,
+            "nothing was retained, so nothing can be published"
+        );
+
+        // NOTHING ESCAPED: no external commitment, no vault-pending pointer,
+        // no storage publication of any kind, no binding round, no fence,
+        // no value moved.
+        let puts = crate::sdk::storage_io::fake_fleet::put_log();
+        assert_eq!(puts.len(), puts_before, "no storage publication at all");
+        assert!(
+            !puts.iter().any(|(_, key, _)| {
+                key.starts_with("sofi/extcommit") || key.starts_with("sofi/vault-pending")
+            }),
+            "no external commitment and no vault-pending pointer reached any member"
+        );
+        assert!(
+            crate::sdk::binding_fleet_double::cas_log().is_empty(),
+            "no binding round was driven"
+        );
+        assert!(trader_fence_of(&trader_dev).is_none(), "no fence row");
+        let head = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(head.balance(&pc_b), 0, "nothing credited");
+        assert_eq!(head.balance(&pc_a), 5_000, "nothing debited");
+
+        // Positive control: adopt through the production route; the SAME
+        // unsigned route is then signed by this device.
+        trader_adopts(&trader_dev, &pc_b);
+        let signed = crate::runtime::get_runtime().block_on(async {
+            trader
+                .invoke(AppInvoke {
+                    method: "route.signRouteCommit".to_string(),
+                    args: pack(unsigned.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(
+            signed.success,
+            "after adoption the route is signed: {:?}",
+            signed.error_message
+        );
+    }
+
     fn vault_after_one_trade(
         owner_dev: &crate::test_support::two_device::TestDevice,
         pc_a: &[u8; 32],
