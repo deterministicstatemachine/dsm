@@ -8,6 +8,23 @@ DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes h
 
 This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of five status tags: **proven on hardware** (exercised end to end on phones against the live fleet), **host-tested** (green in the Rust board), **silicon pending** (firmware written and wired, awaiting the named validation row), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
 
+## Contents
+
+1. [Beta testers — start here](#beta-testers--start-here)
+2. [Who this README is for](#who-this-readme-is-for)
+3. [Status board](#status-board)
+4. [Workspace map](#workspace-map)
+5. [Protocol pillars](#protocol-pillars)
+6. [Sovereign Finance (SoFi)](#sovereign-finance-sofi)
+7. [dBTC — the dBTC is the asset; the Bitcoin key is machinery](#dbtc--the-dbtc-is-the-asset-the-bitcoin-key-is-machinery)
+8. [Offline anchor appliance — Software Authority, Hardware Identity](#offline-anchor-appliance--software-authority-hardware-identity)
+9. [Android app and frontend](#android-app-and-frontend)
+10. [Storage nodes and the beta fleet](#storage-nodes-and-the-beta-fleet)
+11. [Formal verification](#formal-verification)
+12. [Development workflow](#development-workflow)
+13. [Documentation index](#documentation-index)
+14. [License](#license)
+
 ## Beta testers — start here
 
 **[⬇ Download the latest DSM Wallet APK](https://github.com/deterministicstatemachine/dsm/releases/latest)**
