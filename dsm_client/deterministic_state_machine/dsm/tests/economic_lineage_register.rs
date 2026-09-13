@@ -54,10 +54,10 @@ fn each_position_of_each_identity_is_its_own_cell() {
 // ── Network-scoped resolution, fail closed ─────────────────────────────────
 
 #[test]
-fn the_beta_register_resolves_to_the_three_member_fleet_at_q_two() {
+fn the_beta_register_resolves_to_the_five_member_fleet_at_q_three() {
     let p = resolve_root_register_profile(b"dsm-testnet").expect("known network");
-    assert_eq!(p.members.len(), 3);
-    assert_eq!(p.quorum, 2);
+    assert_eq!(p.members.len(), 5);
+    assert_eq!(p.quorum, 3);
     // The set id is a re-derivation over `(member, incarnation)` pairs, not a
     // constant somebody typed — so a member list that drifts, or a member
     // that rebuilt its register, changes the id rather than silently
@@ -90,7 +90,7 @@ fn a_candidate_whose_membership_is_not_the_networks_is_refused() {
         other => panic!("a foreign membership must be refused, got {other:?}"),
     }
 
-    // A SHORT set is refused too: a quorum argument over two of the three
+    // A SHORT set is refused too: a quorum argument over a subset of the pinned
     // members is not this network's register.
     let short = dsm::ccb::StorageSetMembers::new(&[
         (&b"dsm-node-1"[..], [0xC1; 32]),

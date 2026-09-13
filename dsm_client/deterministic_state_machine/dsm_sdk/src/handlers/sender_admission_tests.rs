@@ -445,10 +445,12 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     let rel = p.a.rel_key_with(&p.b);
     let submits_before = p.submits().len();
 
-    // Quorum is 2-of-3: two failing members make evidence publication
-    // impossible, so finish_admission dies AFTER the staged commit.
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+    // Losing n − q + 1 members makes evidence publication impossible, so
+    // finish_admission dies AFTER the staged commit.
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::fail_member(id);
+    }
     let refused = p.a.send(&p.b, 10).await;
     assert!(!refused.success, "the send must not report success");
     let msg = refused.error_message.unwrap_or_default();
@@ -506,8 +508,9 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
     );
 
     // Recovery: heal the fleet, finish the SAME admission from frozen state.
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::heal_member(id);
+    }
     crate::sdk::economic_admission_flow::resume_pending_admission(&core, b"dsm-testnet", pending)
         .await
         .expect("resume completes the same admission");
@@ -996,10 +999,12 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
         ))
     };
 
-    // Quorum is 2-of-3: two dead members make evidence publication
-    // impossible, so finish dies AFTER the staged commit.
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+    // Losing n − q + 1 members makes evidence publication impossible, so
+    // finish dies AFTER the staged commit.
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::fail_member(id);
+    }
     let refused = admitted_self_loop_operation(&core, mint, delta.clone(), facts, None).await;
     let seam_err = refused
         .as_ref()
@@ -1026,8 +1031,9 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
         .expect("the exact evidence bytes are frozen for resume");
 
     // Heal the fleet; resume completes the SAME admission from frozen bytes.
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
-    crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+    for id in &down {
+        crate::sdk::storage_io::fake_fleet::heal_member(id);
+    }
     resume_pending_admission(&core, NETWORK, pending)
         .await
         .expect("resume completes the held mint admission");

@@ -525,7 +525,11 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
         .first()
         .map(|s| s.message_id.clone())
         .expect("a submit");
-    assert_eq!(p.acked_count(&transfer_id), 3, "B ACKed on every node");
+    assert_eq!(
+        p.acked_count(&transfer_id),
+        crate::economic_fixtures::delivery_quorum(),
+        "B ACKed on every node that holds the transfer"
+    );
 
     p.a.enter();
     let calibrated =
@@ -569,8 +573,8 @@ async fn r4_a_storage_ack_cannot_release_the_sender_gate() {
         .collect();
     assert_eq!(
         certificates.len(),
-        3,
-        "exactly one certificate per node (deterministic id, quorum 3)"
+        crate::economic_fixtures::delivery_quorum(),
+        "exactly one certificate per delivering node (deterministic id)"
     );
     assert!(
         certificates
@@ -692,7 +696,10 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
         pending_heads, 0,
         "the certificate's signing key was promoted and deleted"
     );
-    let submits_before = p.submits().len();
+    // Per node: `submits()` concatenates node by node, and nodes no longer
+    // receive equal counts once the fleet is wider than the delivery quorum,
+    // so a flat skip would drop the wrong posts.
+    let submits_before: Vec<usize> = p.nodes.iter().map(|n| n.submits().len()).collect();
 
     // The fleet returns; the sweep replays.
     p.override_all_submits(None);
@@ -710,12 +717,17 @@ async fn r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_ret
     assert_eq!(proposal_statuses(&rel).len(), 1, "no second proposal");
     assert_eq!(p.a.era_balance(), 990, "no second debit");
     let replayed: Vec<_> = p
-        .submits()
-        .into_iter()
-        .skip(submits_before)
+        .nodes
+        .iter()
+        .zip(&submits_before)
+        .flat_map(|(n, before)| n.submits().into_iter().skip(*before))
         .filter(|s| s.message_id == frozen_id)
         .collect();
-    assert_eq!(replayed.len(), 3, "one replay per node under the frozen id");
+    assert_eq!(
+        replayed.len(),
+        crate::economic_fixtures::delivery_quorum(),
+        "one replay per delivering node under the frozen id"
+    );
     for r in &replayed {
         assert_eq!(
             r.body, frozen_bytes,
@@ -767,7 +779,9 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     // A's second transfer arrives at B before the certificate.
     let sent2 = p.a.send(&p.b, 7).await;
     assert!(sent2.success, "{:?}", sent2.error_message);
-    let transfer2_id = p
+    // Node 0 is first in the submit loop's order, so it receives every submit;
+    // the flat `p.submits()` ends on whichever wider-fleet node posted last.
+    let transfer2_id = p.nodes[0]
         .submits()
         .last()
         .map(|s| s.message_id.clone())
@@ -803,7 +817,10 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
         staging_states(),
         vec!["accepted".to_string(), "accepted".to_string()]
     );
-    assert_eq!(p.acked_count(&transfer2_id), 3);
+    assert_eq!(
+        p.acked_count(&transfer2_id),
+        crate::economic_fixtures::delivery_quorum()
+    );
     // And generation #2 finalizes normally on both sides.
     let a_sync = p.a.sync().await;
     assert!(a_sync.success, "{:?}", a_sync.errors);

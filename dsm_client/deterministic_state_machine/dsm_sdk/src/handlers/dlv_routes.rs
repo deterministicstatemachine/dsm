@@ -5614,7 +5614,8 @@ mod funded_creation_tests {
 
     /// Replace the fleet. Called by `install_identity`, i.e. once per test.
     fn respawn_fleet() {
-        let nodes: Vec<_> = (0..3)
+        let nodes: Vec<_> = crate::economic_fixtures::canonical_member_ids()
+            .iter()
             .map(|_| crate::test_support::fake_node::FakeB0xNode::spawn())
             .collect();
         *fleet_slot().lock().expect("fleet slot") = nodes;
@@ -9368,9 +9369,9 @@ mod funded_creation_tests {
     /// `bind_settlement`'s own tests already prove the refusal at that layer.
     /// What they cannot show is that the LIVE route reaches it: that the whole
     /// producer path — sign, prepare, produce, resolve the vault's committed
-    /// set — runs and then refuses at publication, leaving nothing behind. Two
-    /// of three members are down, so publication is attributable at 1 of 3
-    /// against a quorum of 2.
+    /// set — runs and then refuses at publication, leaving nothing behind.
+    /// `n − q + 1` members are down, so publication is attributable at `q − 1`
+    /// against a quorum of `q`.
     #[test]
     #[serial]
     fn a_settle_whose_publication_misses_quorum_binds_nothing_and_fences_nothing() {
@@ -9389,10 +9390,13 @@ mod funded_creation_tests {
             "no fence before the attempt"
         );
 
-        // TAKE THE FLEET BELOW QUORUM. n=3, q=2; two down leaves one
-        // attributable acceptance, which `put_bundle` refuses.
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-1");
-        crate::sdk::storage_io::fake_fleet::fail_member("dsm-node-2");
+        // TAKE THE FLEET BELOW QUORUM. `n − q + 1` down leaves `q − 1`
+        // attributable acceptances, which `put_bundle` refuses.
+        let q = crate::economic_fixtures::canonical_quorum();
+        let down = crate::economic_fixtures::members_to_break_quorum();
+        for id in &down {
+            crate::sdk::storage_io::fake_fleet::fail_member(id);
+        }
 
         let (res, _x) = trader_settles(
             trader,
@@ -9416,13 +9420,13 @@ mod funded_creation_tests {
         // settle had died earlier for some unrelated reason — which, with two
         // storage members down, is exactly the plausible false pass. The
         // counts prove the whole producer path ran and stopped at the
-        // publication quorum: one attributable acceptance out of three,
-        // against a required two.
+        // publication quorum: `q − 1` attributable acceptances against a
+        // required `q`.
         let why = res.error_message.clone().unwrap_or_default();
         assert!(
             why.contains("PublicationNotDurable")
-                && why.contains("accepted: 1")
-                && why.contains("required: 2"),
+                && why.contains(&format!("accepted: {}", q - 1))
+                && why.contains(&format!("required: {q}")),
             "the refusal must be the publication quorum itself, got: {why}"
         );
 
@@ -9444,8 +9448,9 @@ mod funded_creation_tests {
             "the trader's head did not advance"
         );
 
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-1");
-        crate::sdk::storage_io::fake_fleet::heal_member("dsm-node-2");
+        for id in &down {
+            crate::sdk::storage_io::fake_fleet::heal_member(id);
+        }
         let frontier_after = composed_frontier(&vault_id, &pc_a, &pc_b);
         assert_eq!(
             frontier_after.frontier_binding,

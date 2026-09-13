@@ -253,7 +253,7 @@ mod tests {
     /// so the pin cannot silently drift from what the fleet actually holds.
     /// THE FLEET'S OWN DERIVATION, PINNED. Every provisioned member computed
     /// this set id from its configured `[[storage_set.members]]` at restart and
-    /// logged `storage set configured: 3 members, id=<this>`. Core must
+    /// logged `storage set configured: 5 members, id=<this>`. Core must
     /// re-derive the same digest from the same pairs, or the pin and the fleet
     /// name different registers.
     #[test]
@@ -262,8 +262,8 @@ mod tests {
             .expect("the beta network is provisioned");
         assert_eq!(
             crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
-            "E05YS8101EJH33KY2CG625JJE8A0Z4GJNSEM335TX1XVTWM9RR8G",
-            "core's derivation must equal what dsm-node-1, -2 and -3 each logged"
+            "DN61X37SS8ZVV96E98Q4MSFGG8JGR7438ADNY38C7X8WNBZR5S90",
+            "core's derivation must equal what all five provisioned members logged"
         );
     }
 
@@ -272,15 +272,23 @@ mod tests {
         let logged = [
             (
                 "dsm-node-1",
-                "DXWR7W9J2E5ASQ5BJBYF13ZZEK1VFTZFYNWAYPF1KNT8C33YPVM0",
+                "5VVWG3GB04F8NG43VVKA9E8CRPZXHBCG04GSWSRC5ZR3ZH28T3M0",
             ),
             (
                 "dsm-node-2",
-                "H4ZSDG34M1BSQQH8T9WWWZ65Y90YW9QY2CYRR2EG3H621VDGJ3W0",
+                "M0WKNKC31F50D0GZW6JYM9YZTDS38W3AD7GYZNN40NQV8KPQ3F50",
             ),
             (
                 "dsm-node-3",
-                "VW3REAWA7PR608Y4AY3VX18M8BE4828PFPNVTG380XV18HKF8SSG",
+                "KCAGAY7R518SNJ0EN9C290FBWF592VB77MWKAH8STMGVBCFTBW2G",
+            ),
+            (
+                "dsm-node-4",
+                "A4MGZZ51J20NKYNC5F260GYPPSHH4VV8EWH8Y355FS8DFG8TEW80",
+            ),
+            (
+                "dsm-node-5",
+                "QNRVKTMK8HPY9DYNS6NFZR7QHC93Y8FSBG1105R8ND5P7B379RH0",
             ),
         ];
         let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")

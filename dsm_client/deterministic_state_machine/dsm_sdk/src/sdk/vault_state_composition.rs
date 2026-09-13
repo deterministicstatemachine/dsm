@@ -1622,22 +1622,14 @@ mod tests {
             // through the local catalog and counts cells at THIS q — so the
             // fixture must commit the fleet these tests actually run against,
             // exactly as a real vault commits the fleet it was born under.
-            storage_set: StorageSetMembers::new(&[
-                (
-                    &b"dsm-node-1"[..],
-                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-1"),
-                ),
-                (
-                    &b"dsm-node-2"[..],
-                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-2"),
-                ),
-                (
-                    &b"dsm-node-3"[..],
-                    crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-3"),
-                ),
-            ])
+            storage_set: StorageSetMembers::new(
+                dsm::economic::register::pinned_root_register_members(
+                    crate::economic_fixtures::NETWORK,
+                )
+                .expect("pinned"),
+            )
             .expect("set"),
-            quorum: 2,
+            quorum: crate::economic_fixtures::canonical_quorum() as u32,
         };
         let ccb = state.encode().expect("encode");
         let c0 = vault_state_commitment(&state).expect("c_0");
@@ -2024,7 +2016,8 @@ mod tests {
             .is_empty());
 
         // A member breaks its register: every member now serves B at k(c0).
-        let all = ["dsm-node-1", "dsm-node-2", "dsm-node-3"];
+        let ids = crate::economic_fixtures::canonical_member_ids();
+        let all: Vec<&str> = ids.iter().map(String::as_str).collect();
         let k = dsm::dlv::settlement_bundle::resource_key(&c0);
         let b_digest = [0xB1u8; 32];
         let b_addr = dsm::storage_object::immutable_addr_from_inner(
@@ -2204,17 +2197,19 @@ mod tests {
     ///
     /// Under the old prefix-listing fold, a member that simply did not return
     /// a key produced a SHORT CHAIN that was reported as the composed state,
-    /// indistinguishable from a genuinely shorter one. Here two of three
-    /// members go silent, so fewer than the committed `q = 2` give an
-    /// attributed answer, and the walk refuses instead of reporting the
-    /// baseline as a frontier.
+    /// indistinguishable from a genuinely shorter one. Here `n − q + 1`
+    /// members go silent, so fewer than the committed `q` give an attributed
+    /// answer, and the walk refuses instead of reporting the baseline as a
+    /// frontier.
     #[tokio::test]
     async fn a_short_quorum_on_the_cell_is_not_a_frontier() {
         let _fleet = fleet();
         let vault_id = vid(0x0D);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-2");
-        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
+        let down = crate::economic_fixtures::members_to_break_quorum();
+        for id in &down {
+            crate::sdk::binding_fleet_double::fail_member_id(id);
+        }
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -2237,8 +2232,9 @@ mod tests {
         // Positive control: heal the members and the SAME vault composes to a
         // frontier, so the refusal above is the quorum rule and not a broken
         // fixture.
-        crate::sdk::binding_fleet_double::heal_member_id("dsm-node-2");
-        crate::sdk::binding_fleet_double::heal_member_id("dsm-node-3");
+        for id in &down {
+            crate::sdk::binding_fleet_double::heal_member_id(id);
+        }
         let composed =
             compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
                 .await
@@ -2247,20 +2243,24 @@ mod tests {
     }
 
     /// Req 15.8 counting: a member whose response echoes SOMEONE ELSE'S id is
-    /// uncountable. Two members answering, one of them impersonating the
-    /// other, is one attributed answer — below `q`.
+    /// uncountable. Exactly `q` members answering, one of them impersonating
+    /// another, is `q − 1` attributed answers — below `q`.
     #[tokio::test]
     async fn a_member_echoing_another_id_is_uncountable() {
         let _fleet = fleet();
         let vault_id = vid(0x0E);
         let (presentation, ccb, _state, _c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
-        // node-2 answers naming node-1. That defeats BOTH halves of the
-        // attribution rule — the id and the register incarnation — so it is
-        // uncountable, and two honest answers cannot be reached.
-        let impostor = crate::sdk::binding_fleet_double::endpoint_for_member("dsm-node-2")
-            .expect("node-2 is registered");
-        crate::sdk::binding_fleet_double::set_echo(&impostor, b"dsm-node-1".to_vec(), [1; 32]);
+        let ids = crate::economic_fixtures::canonical_member_ids();
+        let q = crate::economic_fixtures::canonical_quorum();
+        for id in &ids[q..] {
+            crate::sdk::binding_fleet_double::fail_member_id(id);
+        }
+        // The second member answers naming the first. That defeats BOTH halves
+        // of the attribution rule — the id and the register incarnation — so it
+        // is uncountable, and `q` honest answers cannot be reached.
+        let impostor = crate::sdk::binding_fleet_double::endpoint_for_member(&ids[1])
+            .expect("the second member is registered");
+        crate::sdk::binding_fleet_double::set_echo(&impostor, ids[0].as_bytes().to_vec(), [1; 32]);
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -2270,11 +2270,11 @@ mod tests {
             CompositionError::BindingEvidenceUnavailable(_)
         ));
 
-        // Positive control: the SAME two members, honestly attributed, reach q.
+        // Positive control: the SAME `q` members, honestly attributed, reach q.
         crate::sdk::binding_fleet_double::restore_echo(
             &impostor,
-            "dsm-node-2",
-            crate::economic_fixtures::fixture_register_incarnation_bytes("dsm-node-2"),
+            &ids[1],
+            crate::economic_fixtures::fixture_register_incarnation_bytes(&ids[1]),
         );
         compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -2285,8 +2285,8 @@ mod tests {
     ///
     /// The old test forced two claimants onto one write-once cell. That state
     /// is unreachable through the driver here, and saying otherwise would be a
-    /// test pretending the driver did something it structurally cannot: with
-    /// n=3 and q=2, failing two members means no quorum forms AT ALL, so no
+    /// test pretending the driver did something it structurally cannot:
+    /// failing `n − q + 1` members means no quorum forms AT ALL, so no
     /// single-member accept can be left behind.
     ///
     /// The reachable — and more accurate — hostile state is UNDETERMINED: an
@@ -2299,11 +2299,13 @@ mod tests {
         let _fleet = fleet();
         let vault_id = vid(0x0F);
         let (presentation, ccb, _state, c0) = baseline_fixture(vault_id, 1_000_000, 500_000);
-        // ONE member holds an accepted record; ONE is unreachable; the third
-        // holds nothing. Attributed = 2 = q, but neither a chosen value nor a
-        // quorum of explicit absences exists.
+        // ONE member holds an accepted record; every member past the first `q`
+        // is unreachable; the rest hold nothing. Attributed = q, but neither a
+        // chosen value nor a quorum of explicit absences exists.
+        let ids = crate::economic_fixtures::canonical_member_ids();
+        let q = crate::economic_fixtures::canonical_quorum();
         crate::sdk::binding_fleet_double::plant_committed(
-            &["dsm-node-1"],
+            &[ids[0].as_str()],
             &[dsm::dlv::settlement_bundle::resource_key(&c0)],
             [0xAB; 32],
             [0xAB; 32],
@@ -2313,7 +2315,9 @@ mod tests {
                 proposer_id: [0x7B; 32],
             },
         );
-        crate::sdk::binding_fleet_double::fail_member_id("dsm-node-3");
+        for id in &ids[q..] {
+            crate::sdk::binding_fleet_double::fail_member_id(id);
+        }
 
         let err = compose_vault_state(&vault_id, &presentation, &ccb, &TOKEN_A, &TOKEN_B, FEE_BPS)
             .await
@@ -2853,8 +2857,14 @@ mod tests {
         let bundle =
             market_bundle_for_tests(&stale, any_successor(&vault_id, 0, &stale), &x_seed(0x10));
         let canon = dsm::dlv::settlement_bundle::canon(&bundle).expect("canon");
+        // A quorum of members holds it, so the bind is chosen, not undecided.
+        let ids = crate::economic_fixtures::canonical_member_ids();
+        let chosen: Vec<&str> = ids[..crate::economic_fixtures::canonical_quorum()]
+            .iter()
+            .map(String::as_str)
+            .collect();
         crate::sdk::binding_fleet_double::plant_committed(
-            &["dsm-node-1", "dsm-node-2"],
+            &chosen,
             &[dsm::dlv::settlement_bundle::resource_key(&c0)],
             dsm::dlv::settlement_bundle::bundle_digest(&canon),
             dsm::dlv::settlement_bundle::bundle_digest(&canon),

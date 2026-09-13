@@ -336,9 +336,9 @@ impl TestDevice {
     }
 }
 
-/// A booted A/B pair sharing a three-node fleet (identity quorum and delivery
-/// quorum are both K=3, as in production), mutually added as contacts and
-/// funded. The starting point of every protocol test.
+/// A booted A/B pair sharing a fleet of the network's pinned register members
+/// (one fake node per member, as in production), mutually added as contacts
+/// and funded. The starting point of every protocol test.
 pub struct Pair {
     pub nodes: Vec<FakeB0xNode>,
     pub a: TestDevice,
@@ -410,7 +410,10 @@ impl Pair {
         // stale member echoes would make a later vault's key answer for the
         // wrong fleet.
         crate::sdk::binding_fleet_double::reset_all();
-        let nodes: Vec<FakeB0xNode> = (0..3).map(|_| FakeB0xNode::spawn()).collect();
+        let nodes: Vec<FakeB0xNode> = crate::economic_fixtures::canonical_member_ids()
+            .iter()
+            .map(|_| FakeB0xNode::spawn())
+            .collect();
         let endpoints: Vec<String> = nodes.iter().map(|n| n.endpoint.clone()).collect();
         crate::test_support::fake_node::point_env_config_at(&endpoints);
         let mut a = TestDevice::create("A", 0x0A);
