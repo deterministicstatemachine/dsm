@@ -8,7 +8,6 @@ Thank you for taking part in the beta. This document covers how to report issues
 
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Use [SUPPORT.md](SUPPORT.md) for general help and [SECURITY.md](SECURITY.md) for private vulnerability reports.
-- If your change touches DLV specs, policy specs, or generated clients, read [dsm-gen/README.md](dsm-gen/README.md) first.
 
 ---
 
@@ -72,13 +71,6 @@ Targeted validation examples:
 - Rust / SDK / storage work: `make test-rust` or focused `cargo test --package ...`
 - Frontend work: `make test-frontend`
 - Android / JNI work: `make android`
-
-If you are changing vault or policy specifications, validate and regenerate through `dsm-gen` instead of hand-editing generated clients:
-
-```bash
-cargo run -p dsm-gen -- validate path/to/spec.yaml
-cargo run -p dsm-gen -- client path/to/spec.yaml --lang ts
-```
 
 ### Primitive Changes
 

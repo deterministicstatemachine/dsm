@@ -93,7 +93,7 @@ export default function DevSoFiLaunchScreen(): JSX.Element {
 
       <div className="settings-shell__panel">
         <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Paste a compiled SoFi spec (Base32 blob from dsm-gen compile).
+          Paste a SoFi launch blob (Base32; 3-byte header: version, mode, type — see sofi_routes.rs).
           The app will decode the header, fill in your device identity,
           create the vault or publish the policy, and return the result.
         </div>

@@ -157,18 +157,6 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
 
 The Makefile then mirrors the built `.so` files into `dsm_client/deterministic_state_machine/jniLibs/` as well.
 
-## `dsm-gen`
-
-If you are working on DLVs, policies, or generated integration clients:
-
-```bash
-cargo run -p dsm-gen -- --help
-cargo run -p dsm-gen -- validate dsm-gen/test-vault.yaml
-cargo run -p dsm-gen -- validate dsm-gen/test-policy.yaml
-```
-
-Then read [dsm-gen/README.md](dsm-gen/README.md).
-
 ## Bitcoin / dBTC
 
 Bitcoin testing is signet-backed. There is no local Bitcoin node workflow in this repository.
