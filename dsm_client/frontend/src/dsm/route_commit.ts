@@ -182,22 +182,23 @@ export async function isExternalCommitmentVisible(
 }
 
 /**
- * Invoke the routed-unlock path on the local device.  Handler runs
- * the chunks #4 + #5 eligibility gate (SPHINCS+ verify the
- * RouteCommit, locate the hop, confirm anchor visibility) and only
- * then emits `Operation::DlvUnlock` on the local actor's self-loop.
+ * Invoke the routed-unlock path on the local device. Rust verifies the signed
+ * RouteCommitV1 (SPHINCS+ over the whole route, the hop chain, X visible),
+ * gates every hop's vault, and settles the route as ONE settlement: one
+ * operation, one bundle over every hop's vault, one binding, one advance of
+ * this device's chain.
  *
- * WHICH VAULTS SETTLE IS THE SIGNED ROUTE'S DECISION. Omit `vaultId`
- * (the wallet's trade path) and Rust settles every hop of the
- * RouteCommitV1, in hop order, using each hop's committed vault id.
- * Pass a 32-byte `vaultId` only to settle exactly that one hop (the
- * owner-side callers).  The frontend never picks a vault.
+ * WHICH VAULTS SETTLE IS THE SIGNED ROUTE'S DECISION. Omit `vaultId` (the
+ * wallet's trade path) and Rust settles the whole route. A 32-byte `vaultId`
+ * is accepted only for a one-hop route, where it must name that hop's vault;
+ * a route of two or more hops refuses any `vaultId`. The frontend never picks
+ * a vault.
  *
- * Returns the settle status and the last settled hop's `b` as Base32
- * on success.  On any eligibility failure the SDK error variant is
- * surfaced verbatim (e.g. `InvalidInitiatorSignature`,
- * `VaultNotInRoute`, `ExternalCommitmentNotVisible`) so the UI can
- * render a precise rejection reason.
+ * Returns `<status>:<b>` on success: the settlement status and the one
+ * bundle's `b` as Base32. On any eligibility failure the SDK error variant is
+ * surfaced verbatim (e.g. `InvalidInitiatorSignature`, `VaultNotInRoute`,
+ * `ExternalCommitmentNotVisible`) so the UI can render a precise rejection
+ * reason.
  */
 export async function unlockVaultRouted(input: {
   vaultId?: Uint8Array;
@@ -211,7 +212,7 @@ export async function unlockVaultRouted(input: {
     if (vaultId.length !== 0 && vaultId.length !== 32) {
       return {
         success: false,
-        error: 'vaultId must be 32 bytes, or omitted to settle every hop of the route',
+        error: 'vaultId must be 32 bytes, or omitted to settle the whole route',
       };
     }
     if (!input.deviceId || input.deviceId.length !== 32) {

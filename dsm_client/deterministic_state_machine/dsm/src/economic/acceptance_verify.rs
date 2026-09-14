@@ -152,7 +152,12 @@ pub fn verify_trader_acceptance(
     if operation.to_bytes() != evidence.operation_bytes {
         return Err(AcceptanceInvalid::OperationNotCanonical);
     }
-    let Operation::DlvSettle { settler_devid, .. } = operation else {
+    // A route-wide settle (amendment 2c-H) names its settler exactly as a
+    // single-vault settle does: one trader, one credited DevID, however many
+    // vaults the route consumes.
+    let (Operation::DlvSettle { settler_devid, .. }
+    | Operation::DlvRouteSettle { settler_devid, .. }) = operation
+    else {
         return Err(AcceptanceInvalid::OperationNotCanonical);
     };
 
@@ -422,6 +427,59 @@ mod tests {
             witness,
         )
         .expect("CORR.1-5")
+    }
+
+    /// Amendment 2c-H: the acceptance of a ROUTE settle verifies exactly as a
+    /// single-vault settle's does — the settler the route-wide operation names
+    /// is the DevID the digest is built over and the leaf is keyed under.
+    #[test]
+    fn a_route_settle_acceptance_yields_the_witness() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let leg = |vault: u8, parent: u8, input: [u8; 32], output: [u8; 32], a: u64, b: u64| {
+            crate::types::operations::DlvRouteLeg {
+                vault_id: [vault; 32],
+                owner_public_key: vec![0x01; 64],
+                owner_devid: [0x41; 32],
+                owner_genesis: [0x42; 32],
+                input_policy_commit: input,
+                output_policy_commit: output,
+                parent_sequence: 7,
+                parent_binding: [parent; 32],
+                input_amount: a,
+                output_amount: b,
+                fee_bps: 30,
+                settlement_receipt_id: crate::dlv::settlement_receipt_leaf::derive_receipt_id(
+                    &[vault; 32],
+                    &X,
+                ),
+            }
+        };
+        let route = Operation::DlvRouteSettle {
+            legs: vec![
+                leg(0x03, 0xC0, [0x10; 32], [0x30; 32], 1_000, 900),
+                leg(0x04, 0xC2, [0x30; 32], [0x20; 32], 900, 800),
+            ],
+            route_commit_bytes: vec![0x09; 8],
+            external_commitment_x: X,
+            settler_public_key: vec![0x02; 64],
+            settler_devid: DEV,
+            signature: vec![0x77; 48],
+            mode: TransactionMode::Unilateral,
+        };
+        let (mut terms, c_dsm_plus) = terms_signed_by(&sk, DEV, DEV);
+        let op_bytes = route.to_bytes();
+        let digest =
+            substrate_signing_digest(&G, &DEV, &c_dsm_plus, &dsm_operation_digest(&op_bytes));
+        let sigma = crate::crypto::sphincs::sphincs_sign(&sk, &digest).expect("sign");
+        terms.recovery_material =
+            DsmSuccessorEvidence::new([0x77; 32], [0xC1; 32], DEV, op_bytes, [0xE0; 32], sigma)
+                .expect("evidence");
+        let eoid = dsm_economic_operation_id(&G, &DEV, &c_dsm_plus);
+        let (leaf, path, root) = leaf_and_root(eoid, B);
+        let acceptance = TraderAcceptance::new(G, 3, leaf, path).expect("well formed");
+        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(3, root);
+        verify_trader_acceptance(&acceptance, &terms, B, &correspondence(), &validated, &pk)
+            .expect("a route settle's acceptance verifies under its settler");
     }
 
     #[test]

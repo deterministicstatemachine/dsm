@@ -989,7 +989,7 @@ async fn admit_reserve_mutation<A>(
 /// is composed around. Required, never optional: without it the write set
 /// cannot emit the acceptance leaf realization needs (2c-D producer adoption),
 /// and a settle that silently omitted it would stay bound-unrealized forever.
-pub(crate) async fn admitted_dlv_settle<A>(
+pub(crate) async fn admitted_market_settle<A>(
     core: &CoreSDK,
     operation: Operation,
     bundle_id: [u8; 32],
@@ -997,8 +997,7 @@ pub(crate) async fn admitted_dlv_settle<A>(
     counterparty_devid: [u8; 32],
     initial_chain_tip: [u8; 32],
     deltas: &[dsm::types::device_state::BalanceDelta],
-    reserve_consumption_evidence_bytes: Vec<u8>,
-    owner_economic_position: u64,
+    reserve_consumption_evidence: Vec<(Vec<u8>, u64)>,
     expected_successor: [u8; 32],
     build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
     write_extra: impl Fn(
@@ -1007,19 +1006,56 @@ pub(crate) async fn admitted_dlv_settle<A>(
         &A,
     ) -> Result<(), DsmError>,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    if !matches!(operation, Operation::DlvSettle { .. }) {
-        return Err(DsmError::invalid_operation(
-            "admitted_dlv_settle takes a DlvSettle",
+    // ONE RESERVE-CONSUMPTION EVIDENCE PER CONSUMED VAULT, each with the owner
+    // locator it cites, in the operation's own order: a DlvSettle consumes one
+    // vault (0x0026); a DlvRouteSettle consumes every leg's, and `E_R` is in
+    // route-leg order (0x0035, amendment 2c-H H9).
+    let route_wide = match &operation {
+        Operation::DlvSettle { .. } if reserve_consumption_evidence.len() == 1 => false,
+        Operation::DlvRouteSettle { legs, .. }
+            if legs.len() == reserve_consumption_evidence.len() =>
+        {
+            true
+        }
+        _ => return Err(DsmError::invalid_operation(
+            "admitted_market_settle takes a DlvSettle with one reserve-consumption evidence, or \
+                 a DlvRouteSettle with one per leg",
+        )),
+    };
+    let mut fact_legs = Vec::with_capacity(reserve_consumption_evidence.len());
+    let mut evidence_artifacts = Vec::with_capacity(reserve_consumption_evidence.len());
+    for (evidence_bytes, owner_economic_position) in reserve_consumption_evidence {
+        let reserve_consumption_evidence_addr = dsm::storage_object::immutable_inner(
+            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+            &evidence_bytes,
+        );
+        let evidence_key = crate::sdk::economic_registers::immutable_object_key(
+            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+            &evidence_bytes,
+        );
+        fact_legs.push(dsm::economic::write_set::RouteLegConsumptionFacts {
+            owner_economic_position,
+            reserve_consumption_evidence_addr,
+        });
+        evidence_artifacts.push((
+            evidence_key,
+            evidence_bytes,
+            "dlv-reserve-consumption-evidence",
         ));
     }
-    let evidence_addr = dsm::storage_object::immutable_inner(
-        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-        &reserve_consumption_evidence_bytes,
-    );
-    let evidence_key = crate::sdk::economic_registers::immutable_object_key(
-        dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-        &reserve_consumption_evidence_bytes,
-    );
+    let settle_facts = if route_wide {
+        CreditSourceFacts::DlvRouteReserveConsumption { legs: fact_legs }
+    } else {
+        let Some(leg) = fact_legs.first() else {
+            return Err(DsmError::invalid_operation(
+                "a single-vault settle names one reserve-consumption evidence",
+            ));
+        };
+        CreditSourceFacts::DlvReserveConsumption {
+            owner_economic_position: leg.owner_economic_position,
+            reserve_consumption_evidence_addr: leg.reserve_consumption_evidence_addr,
+        }
+    };
 
     let StagedAdmission {
         network_id,
@@ -1035,17 +1071,7 @@ pub(crate) async fn admitted_dlv_settle<A>(
         prepared,
         ..
     } = stage_admission(core, &operation, |_position| {
-        Ok((
-            CreditSourceFacts::DlvReserveConsumption {
-                owner_economic_position,
-                reserve_consumption_evidence_addr: evidence_addr,
-            },
-            vec![(
-                evidence_key,
-                reserve_consumption_evidence_bytes,
-                "dlv-reserve-consumption-evidence",
-            )],
-        ))
+        Ok((settle_facts, evidence_artifacts))
     })
     .await?;
 

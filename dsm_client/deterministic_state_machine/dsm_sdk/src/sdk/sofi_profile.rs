@@ -6,11 +6,11 @@
 //! SoFi V2 §9.1 keeps sequential depth (`max_hops`) and same-pair horizontal
 //! fanout (`max_fanout`) as independent, finite, committed bounds; the bundle
 //! cardinality (`|{T_v}|`) is a third. They are spelled out separately because
-//! they move separately: amendment 2c-H lifts the bundle cardinality to two
-//! (one route-wide bundle over two vaults) while the SDK still executes one
-//! hop until the route-wide unlock lands, and raising the transition count to
-//! admit split liquidity on one leg must never, by aliasing, also admit deeper
-//! sequential routes, or the reverse. A one-hop route across three LPs is `(1 hop, 3 transitions, fanout
+//! they move separately. Amendment 2c-H H12 sets both the depth and the bundle
+//! cardinality to two BY DECISION — with fanout 1, one route-wide bundle over
+//! two vaults is exactly two hops — and pins them equal by test; raising the
+//! transition count to admit split liquidity on one leg must never, by
+//! aliasing, also admit deeper sequential routes, or the reverse. A one-hop route across three LPs is `(1 hop, 3 transitions, fanout
 //! 3)`; a two-hop route across two LPs each is `(2 hops, 4 transitions,
 //! fanout 2)`.
 //!
@@ -18,13 +18,15 @@
 //! than [`BETA_MAX_HOPS`] before any composition, publication, fence or bind;
 //! the binder (`route.findAndBindBestPath`) searches no deeper, so the wallet
 //! never signs, and never publishes `X` for, a route the profile cannot settle.
-//! Multi-vault atomic settlement — one bundle carrying every `T_v`, one
-//! `QuorumBind` over the complete sorted `K(B)`, one trader advance (§6.5,
-//! §6.6, §7.2, §9.7, §16.2) — is the general profile; beta does not emulate
-//! it hop by hop, because §16.2 forbids exactly that emulation.
+//! A route of two hops settles as ONE route-wide settlement — one bundle
+//! carrying every `T_v`, one `QuorumBind` over the complete sorted `K(B)`, one
+//! trader advance (§6.5, §6.6, §7.2, §9.7, §16.2) — never hop by hop, because
+//! §16.2 forbids exactly that emulation.
 
-/// Sequential route depth the SDK will bind and execute in beta.
-pub(crate) const BETA_MAX_HOPS: usize = 1;
+/// Sequential route depth the SDK will bind and execute in beta: two, by the
+/// owner's 2c-H ruling (H12). Equal to [`BETA_MAX_TRANSITIONS`] by decision and
+/// pinned so by a test, never defined as it.
+pub(crate) const BETA_MAX_HOPS: usize = 2;
 
 /// Vault transitions one settlement bundle may carry in beta: two, by the
 /// owner's 2c-H ruling (H12). This equals `dsm::ccb::MAX_TRANSITIONS` — the
@@ -69,19 +71,28 @@ mod tests {
     fn the_search_depth_is_clamped_to_the_profile() {
         assert_eq!(bounded_search_depth(0), BETA_MAX_HOPS);
         assert_eq!(bounded_search_depth(1), 1);
-        assert_eq!(bounded_search_depth(2), BETA_MAX_HOPS);
+        assert_eq!(bounded_search_depth(2), 2);
+        assert_eq!(bounded_search_depth(3), BETA_MAX_HOPS);
         assert_eq!(bounded_search_depth(99), BETA_MAX_HOPS);
         assert_eq!(bounded_search_depth(u32::MAX), BETA_MAX_HOPS);
     }
 
-    /// Beta executes one hop, a bundle may carry two transitions (2c-H), and
-    /// a leg draws from one DLV. The three are stated separately; this pins the
-    /// profile so a change to any one is a visible decision.
+    /// Beta executes two hops, a bundle carries two transitions, and a leg
+    /// draws from one DLV (2c-H H12). The three are stated separately; this
+    /// pins the profile so a change to any one is a visible decision.
     #[test]
-    fn the_beta_profile_is_one_hop_two_transitions_fanout_one() {
+    fn the_beta_profile_is_two_hops_two_transitions_fanout_one() {
         assert_eq!(
             (BETA_MAX_HOPS, BETA_MAX_TRANSITIONS, BETA_MAX_FANOUT),
-            (1, 2, 1)
+            (2, 2, 1)
         );
+    }
+
+    /// With fanout 1 a route's transitions ARE its hops, so the two limits
+    /// agree — by this test, never by one being defined as the other (H12).
+    #[test]
+    fn the_depth_and_the_bundle_cardinality_agree_by_decision() {
+        assert_eq!(BETA_MAX_FANOUT, 1);
+        assert_eq!(BETA_MAX_HOPS, BETA_MAX_TRANSITIONS);
     }
 }

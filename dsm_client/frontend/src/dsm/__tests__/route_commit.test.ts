@@ -275,7 +275,7 @@ describe('route_commit.ts', () => {
       expect(result.error).toMatch(/vaultId.*32 bytes/);
     });
 
-    test('omitting vaultId sends an empty vault_id: Rust settles every hop of the route', async () => {
+    test('omitting vaultId sends an empty vault_id: Rust settles the whole route as one', async () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(appStateEnvelope('realized:B_B32'));
       const result = await unlockVaultRouted({
         deviceId,

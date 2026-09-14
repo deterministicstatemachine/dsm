@@ -46,6 +46,10 @@ pub enum BindError {
     Profile,
     /// The fence could not be persisted, so the transaction did not begin.
     FenceNotPersisted,
+    /// A consumed parent's successor commits a storage set or quorum other
+    /// than the one this binding runs under (amendment 2c-H H15, Req 6.16):
+    /// the bundle would be bound where that vault does not look for it.
+    SettlementDomain,
 }
 
 /// This Class K instance's proposer id — the low tiebreak of every round and
@@ -152,6 +156,14 @@ pub async fn bind_settlement(
     let b = settlement_bundle::bundle_digest(&canon);
     let addr = settlement_bundle::bundle_addr(&canon);
     let keys = settlement_bundle::key_set(bundle).map_err(|_| BindError::Bundle)?;
+    // ONE SETTLEMENT DOMAIN, checked before anything is published: every
+    // successor commits exactly the set and quorum this binding runs under.
+    if bundle.transitions().iter().any(|t| {
+        dsm::ccb::storage_set_id(&t.successor.storage_set).ok() != Some(set.id())
+            || t.successor.quorum != set.quorum()
+    }) {
+        return Err(BindError::SettlementDomain);
+    }
     // The continuation the fence fixes on COMMITTED: the market's exact
     // prepared trader successor, or the close's c_{n+1} (2c-A.1 ruling 3).
     let trader_successor =
@@ -318,6 +330,24 @@ pub(crate) fn record_own_commit(
     }
 }
 
+/// A successor re-committed to `set`'s settlement domain: its members and
+/// quorum become exactly the ones a binding under `set` runs with. The core
+/// bundle fixtures commit a fixed three-node set, and `bind_settlement` refuses
+/// a successor committing any set or quorum other than the one it binds under.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test fixture; a failure here is the signal
+pub(crate) fn in_settlement_domain(mut successor: VaultStateV2, set: &StorageSet) -> VaultStateV2 {
+    let entries: Vec<(&[u8], [u8; 32])> = set
+        .members()
+        .iter()
+        .map(|m| (m.member_id.as_bytes(), m.register_incarnation_id))
+        .collect();
+    successor.storage_set =
+        dsm::ccb::StorageSetMembers::new(&entries).expect("the set's members commit");
+    successor.quorum = set.quorum();
+    successor
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
@@ -352,12 +382,15 @@ mod tests {
     }
 
     /// A canonical market bundle over vault `[value; 32]`, consuming parent
-    /// `[value ^ 0x40; 32]`.
-    fn a_bundle(_set: &StorageSet, value: u8) -> SettlementBundle {
+    /// `[value ^ 0x40; 32]`, in `set`'s settlement domain.
+    fn a_bundle(set: &StorageSet, value: u8) -> SettlementBundle {
         let parent = [value ^ 0x40; 32];
         dsm::ccb::settlement::fixtures::market_bundle(
             parent,
-            dsm::ccb::settlement::fixtures::successor_of(parent, [value; 32], 4, 1, 1),
+            in_settlement_domain(
+                dsm::ccb::settlement::fixtures::successor_of(parent, [value; 32], 4, 1, 1),
+                set,
+            ),
             [0x0C; 32],
         )
     }
@@ -523,6 +556,105 @@ mod tests {
         );
     }
 
+    /// ONE SETTLEMENT DOMAIN (amendment 2c-H H15). A bundle whose successor
+    /// commits another storage set, or this set at another quorum, is refused
+    /// before the bundle is published, a fence is placed or a round is driven:
+    /// a vault looks for its binding only in the domain it committed.
+    #[tokio::test]
+    #[serial]
+    async fn a_bundle_outside_the_binding_domain_is_refused_before_publication() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let parent = [0x0A; 32];
+        let successor =
+            || dsm::ccb::settlement::fixtures::successor_of(parent, [0xAA; 32], 4, 1, 1);
+        let another_set =
+            dsm::ccb::settlement::fixtures::market_bundle(parent, successor(), [0x0C; 32]);
+        let mut at_another_quorum = in_settlement_domain(successor(), &set);
+        at_another_quorum.quorum = set.quorum() + 1;
+        let another_quorum =
+            dsm::ccb::settlement::fixtures::market_bundle(parent, at_another_quorum, [0x0C; 32]);
+        for (how, bundle) in [
+            ("another set", &another_set),
+            ("another quorum", &another_quorum),
+        ] {
+            assert_eq!(
+                bind_settlement(&set, [7; 32], bundle, [0x11; 32], [0xA1; 32]).await,
+                Err(BindError::SettlementDomain),
+                "a successor committing {how} is refused"
+            );
+        }
+        assert!(
+            crate::sdk::storage_io::fake_fleet::put_log().is_empty(),
+            "the refused bundle was not published"
+        );
+        assert_nothing_mutated(&[0x11; 32], &[0xA1; 32]);
+    }
+
+    /// ONE TRANSACTION, EVERY KEY (amendment 2c-H H5). A route bundle over two
+    /// vault parents, where another bundle already holds the second: the route
+    /// is CONFLICT_FINAL, and it took NOTHING at the first — a bundle over the
+    /// first parent alone still commits there.
+    #[tokio::test]
+    #[serial]
+    async fn a_route_conflicting_at_one_parent_takes_neither() {
+        init_db();
+        let set = test_set(3);
+        reset_fleets(&set);
+        let (p1, p2) = ([0xD1; 32], [0xD2; 32]);
+        let successor = |parent: [u8; 32], vault: u8| {
+            in_settlement_domain(
+                dsm::ccb::settlement::fixtures::successor_of(parent, [vault; 32], 8, 1_000, 1_000),
+                &set,
+            )
+        };
+        let alone = |parent: [u8; 32], vault: u8, x: u8| {
+            dsm::ccb::settlement::fixtures::market_bundle(parent, successor(parent, vault), [x; 32])
+        };
+        assert_eq!(
+            bind_settlement(
+                &set,
+                [1; 32],
+                &alone(p2, 0x04, 0x0E),
+                [0x11; 32],
+                [0xA1; 32]
+            )
+            .await
+            .unwrap(),
+            Ok(Outcome::Committed),
+            "a rival holds the second parent"
+        );
+        let route = SettlementBundle::market(
+            dsm::ccb::settlement::fixtures::route_market_terms([p1, p2], [0x58; 32]),
+            vec![
+                ConsumedDlvTransition::market(p1, successor(p1, 0x03)).unwrap(),
+                ConsumedDlvTransition::market(p2, successor(p2, 0x04)).unwrap(),
+            ],
+        )
+        .expect("a two-leg route bundle");
+        let out = bind_settlement(&set, [2; 32], &route, [0x22; 32], [0xB2; 32])
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, Ok(Outcome::ConflictFinal { .. })),
+            "the route conflicts at the held parent, got {out:?}"
+        );
+        assert_eq!(
+            bind_settlement(
+                &set,
+                [3; 32],
+                &alone(p1, 0x03, 0x0F),
+                [0x33; 32],
+                [0xC3; 32]
+            )
+            .await
+            .unwrap(),
+            Ok(Outcome::Committed),
+            "the first parent was never taken by the route"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn a_second_bundle_over_the_same_vault_parent_conflicts() {
@@ -542,7 +674,10 @@ mod tests {
         let same_parent = first.transitions()[0].parent_binding;
         let second = dsm::ccb::settlement::fixtures::market_bundle(
             same_parent,
-            dsm::ccb::settlement::fixtures::successor_of(same_parent, [0xBB; 32], 4, 1, 1),
+            in_settlement_domain(
+                dsm::ccb::settlement::fixtures::successor_of(same_parent, [0xBB; 32], 4, 1, 1),
+                &set,
+            ),
             [0x0D; 32],
         );
         let out = bind_settlement(&set, [2; 32], &second, [0x22; 32], [0xB2; 32])

@@ -776,11 +776,14 @@ mod tests {
     }
 
     /// A canonical market bundle consuming `vault` at `c_n` into its next
-    /// generation.
+    /// generation, in the settlement domain of the set `init` binds under.
     fn market_bundle(vault: [u8; 32], c_n: [u8; 32]) -> SettlementBundle {
         dsm::ccb::settlement::fixtures::market_bundle(
             c_n,
-            dsm::ccb::settlement::fixtures::successor_of(c_n, vault, GEN + 1, 1, 1),
+            crate::sdk::settlement_bind::in_settlement_domain(
+                dsm::ccb::settlement::fixtures::successor_of(c_n, vault, GEN + 1, 1, 1),
+                &test_set(3),
+            ),
             [0x0C; 32],
         )
     }
