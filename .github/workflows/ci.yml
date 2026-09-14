@@ -176,10 +176,10 @@ jobs:
           bash scripts/codegen_enforce.sh
           bash scripts/guard_protos.sh
 
-      - name: Security audit
+      - name: Security audit (every tracked Cargo.lock)
         run: |
           cargo install cargo-audit --quiet || true
-          cargo audit
+          bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
   # Rust tests, one job per crate group, in parallel. The union of the three
