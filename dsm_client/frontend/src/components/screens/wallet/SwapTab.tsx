@@ -27,7 +27,7 @@ import {
   unlockVaultRouted,
   type RoutingAdvertisementSummary,
 } from '../../../dsm/route_commit';
-import { decodeBase32Crockford } from '../../../utils/textId';
+import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
 import type { Balance } from './helpers';
 
@@ -48,7 +48,10 @@ type QuotedRoute = {
   inputAmountBytes: Uint8Array;
   inputToken: Uint8Array;
   outputToken: Uint8Array;
-  primaryVaultId: Uint8Array;
+  /** The hops the Rust binder committed into the RouteCommitV1, in
+   *  order — display only.  The vault(s) that settle are read from the
+   *  signed route by Rust at unlock time; the frontend never picks one. */
+  hops: Array<{ vaultIdBase32: string }>;
   /** Rust-computed expected final output (decoded from RouteCommitV1
    *  proto returned by `route.findAndBindBestPath`). This is the exact
    *  output the trade produces against the anchored state; the frontend
@@ -219,17 +222,19 @@ function SwapTabInner({
         throw new Error(bindRes.error || 'findAndBindBestPath failed');
       }
 
-      // expectedOut comes straight from the Rust-stamped RouteCommitV1
-      // proto — the exact output bound to the anchored state. No JS AMM
-      // math; the wallet is a thin viewer over the binder's output.
-      const primaryVaultBytes = decodeBase32Crockford(vaults[0].vaultIdBase32);
+      // expectedOut and the hops come straight from the Rust-stamped
+      // RouteCommitV1 proto — the exact output bound to the anchored
+      // state and the vault(s) it binds. No JS AMM math and no vault
+      // choice; the wallet is a thin viewer over the binder's output.
       setQuoted({
         unsignedBytes: bindRes.unsignedRouteCommitBytes,
         vaults,
         inputAmountBytes: u128BigEndian(amountBig),
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
-        primaryVaultId: primaryVaultBytes,
+        hops: bindRes.quote.hops.map((h) => ({
+          vaultIdBase32: encodeBase32Crockford(h.vaultId),
+        })),
         expectedOut: bindRes.quote.expectedFinalOutput,
       });
       setPhase('quoted');
@@ -303,8 +308,9 @@ function SwapTabInner({
         throw new Error('wallet device id unavailable');
       }
       const deviceBytes = decodeBase32Crockford(deviceB32);
+      // No vaultId: Rust settles every hop the signed route names, in
+      // order. The wallet submits the route and renders the outcome.
       const unlock = await unlockVaultRouted({
-        vaultId: quoted.primaryVaultId,
         deviceId: deviceBytes,
         routeCommitBytes: signedBytes,
       });
@@ -392,7 +398,8 @@ function SwapTabInner({
               exact output — bound to current vault state
             </div>
             <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
-              fee {quoted.vaults[0]?.feeBps} bps · vault {quoted.vaults[0]?.vaultIdBase32.slice(0, 12)}…
+              {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} ·{' '}
+              {quoted.hops.map((h) => `vault ${h.vaultIdBase32.slice(0, 12)}…`).join(' → ')}
             </div>
           </div>
         </div>

@@ -265,7 +265,7 @@ describe('route_commit.ts', () => {
       expect(Array.from(req.routeCommitBytes)).toEqual(Array.from(rcBytes));
     });
 
-    test('rejects missing vaultId', async () => {
+    test('rejects a malformed vaultId', async () => {
       const result = await unlockVaultRouted({
         vaultId: new Uint8Array(16),
         deviceId,
@@ -273,6 +273,21 @@ describe('route_commit.ts', () => {
       });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/vaultId.*32 bytes/);
+    });
+
+    test('omitting vaultId sends an empty vault_id: Rust settles every hop of the route', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(appStateEnvelope('realized:B_B32'));
+      const result = await unlockVaultRouted({
+        deviceId,
+        routeCommitBytes: rcBytes,
+      });
+      expect(result.success).toBe(true);
+      expect(result.vaultIdBase32).toBe('realized:B_B32');
+      const [route, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      expect(route).toBe('dlv.unlockRouted');
+      const req = pb.DlvUnlockRoutedV1.fromBinary(pb.ArgPack.fromBinary(body).body);
+      expect(req.vaultId.length).toBe(0);
+      expect(Array.from(req.routeCommitBytes)).toEqual(Array.from(rcBytes));
     });
 
     test('rejects missing deviceId', async () => {

@@ -2722,7 +2722,7 @@ impl AppRouterImpl {
         if bytes.is_empty() {
             return err("dlv.unlockRouted: empty DlvUnlockRoutedV1 payload".into());
         }
-        let mut req = match generated::DlvUnlockRoutedV1::decode(&*bytes) {
+        let req = match generated::DlvUnlockRoutedV1::decode(&*bytes) {
             Ok(r) => r,
             Err(e) => {
                 return err(format!(
@@ -2730,18 +2730,77 @@ impl AppRouterImpl {
                 ));
             }
         };
-        if req.vault_id.len() != 32 {
-            return err("dlv.unlockRouted: vault_id must be 32 bytes".into());
-        }
         if req.device_id.len() != 32 {
             return err("dlv.unlockRouted: device_id must be 32 bytes".into());
         }
         if req.route_commit_bytes.is_empty() {
             return err("dlv.unlockRouted: route_commit_bytes is required".into());
         }
+
+        // WHICH VAULTS SETTLE IS DECIDED BY THE SIGNED ROUTE, never by the
+        // caller. A 32-byte `vault_id` names exactly one hop of that route
+        // (the owner-side and single-hop callers keep that contract). An
+        // EMPTY `vault_id` means every hop of the route, in hop order,
+        // settled here: the UI submits the signed RouteCommitV1 and renders
+        // the result; it never chooses a vault, and a pair with more than one
+        // advertisement or a route with more than one hop needs nothing from
+        // it. The first hop that refuses stops the walk — the hops before it
+        // stand as the exact bilateral settlements they are, the ones after
+        // it are never attempted, and the refusal names the hop.
+        if req.vault_id.is_empty() {
+            let rc = match generated::RouteCommitV1::decode(&*req.route_commit_bytes) {
+                Ok(rc) => rc,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.unlockRouted: route_commit_bytes did not decode: {e}"
+                    ));
+                }
+            };
+            if rc.hops.is_empty() {
+                return err("dlv.unlockRouted: the route names no hops".into());
+            }
+            let total = rc.hops.len();
+            let mut last: Option<AppResult> = None;
+            for (idx, hop) in rc.hops.iter().enumerate() {
+                let Ok(vault_id) = <[u8; 32]>::try_from(hop.vault_id.as_slice()) else {
+                    return err(format!(
+                        "dlv.unlockRouted: hop {idx} of {total} names a vault id of {} bytes",
+                        hop.vault_id.len()
+                    ));
+                };
+                let res = self.unlock_routed_hop(req.clone(), vault_id).await;
+                if !res.success {
+                    return err(format!(
+                        "dlv.unlockRouted: hop {idx} of {total} (vault {}) refused: {}",
+                        crate::util::text_id::encode_base32_crockford(&vault_id),
+                        res.error_message.clone().unwrap_or_default()
+                    ));
+                }
+                last = Some(res);
+            }
+            return last.expect("a non-empty route settled at least one hop");
+        }
+        if req.vault_id.len() != 32 {
+            return err(
+                "dlv.unlockRouted: vault_id must be 32 bytes, or empty to settle every hop of \
+                 the route"
+                    .into(),
+            );
+        }
         let mut vault_id = [0u8; 32];
         vault_id.copy_from_slice(&req.vault_id);
+        self.unlock_routed_hop(req, vault_id).await
+    }
 
+    /// ONE hop of a signed route, settled against `vault_id`: the eligibility
+    /// gate, the composition of the vault's proven state, the parent-binding
+    /// guard, the AMM re-simulation, the bind and the completion. The
+    /// dispatcher above calls this once per hop the route names.
+    async fn unlock_routed_hop(
+        &self,
+        mut req: generated::DlvUnlockRoutedV1,
+        vault_id: [u8; 32],
+    ) -> AppResult {
         // SDK eligibility gate.  Fails closed on every typed variant.
         let hop = match crate::sdk::route_commit_sdk::verify_route_commit_unlock_eligibility(
             &req.route_commit_bytes,
@@ -8954,6 +9013,72 @@ mod funded_creation_tests {
         expected_out: u64,
         nonce: u8,
     ) -> (AppResult, [u8; 32]) {
+        trader_settles_with(
+            router,
+            trader_pk,
+            unlocker_public_key,
+            trader_did,
+            vault_id,
+            pc_a,
+            pc_b,
+            seq,
+            (ra, rb),
+            input,
+            expected_out,
+            nonce,
+            true,
+        )
+    }
+
+    /// The same trade, but the settle request names NO vault: the hop to
+    /// settle comes from the signed route alone.
+    #[allow(clippy::too_many_arguments)]
+    fn trader_settles_by_route(
+        router: &AppRouterImpl,
+        trader_pk: &[u8],
+        trader_did: &[u8; 32],
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        seq: u64,
+        (ra, rb): (u64, u64),
+        input: u64,
+        expected_out: u64,
+        nonce: u8,
+    ) -> (AppResult, [u8; 32]) {
+        trader_settles_with(
+            router,
+            trader_pk,
+            trader_pk.to_vec(),
+            trader_did,
+            vault_id,
+            pc_a,
+            pc_b,
+            seq,
+            (ra, rb),
+            input,
+            expected_out,
+            nonce,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trader_settles_with(
+        router: &AppRouterImpl,
+        trader_pk: &[u8],
+        unlocker_public_key: Vec<u8>,
+        trader_did: &[u8; 32],
+        vault_id: &[u8; 32],
+        pc_a: &[u8; 32],
+        pc_b: &[u8; 32],
+        seq: u64,
+        (ra, rb): (u64, u64),
+        input: u64,
+        expected_out: u64,
+        nonce: u8,
+        name_vault: bool,
+    ) -> (AppResult, [u8; 32]) {
         use prost::Message as _;
 
         let pair = generated::RoutingPairRequest {
@@ -9023,7 +9148,11 @@ mod funded_creation_tests {
             .expect("publish anchor + pointers");
 
         let settle = generated::DlvUnlockRoutedV1 {
-            vault_id: vault_id.to_vec(),
+            vault_id: if name_vault {
+                vault_id.to_vec()
+            } else {
+                Vec::new()
+            },
             device_id: trader_did.to_vec(),
             route_commit_bytes: rc.encode_to_vec(),
             unlocker_public_key,
@@ -13212,6 +13341,85 @@ mod funded_creation_tests {
             signed.success,
             "after adoption the route is signed: {:?}",
             signed.error_message
+        );
+    }
+
+    /// The settle request names no vault; the hop comes from the signed
+    /// route. This is the contract the wallet relies on: a pair with two
+    /// advertisements (a closed vault and a live one) must settle against the
+    /// vault the binder committed, not the first one a list happens to hold.
+    #[test]
+    #[serial]
+    fn an_empty_vault_id_settles_the_hop_the_signed_route_names() {
+        use prost::Message as _;
+        install_identity();
+        let owner_dev = participant("owner", 0x41);
+        let owner = owner_dev.router();
+        let (pc_a, pc_b) =
+            crate::sdk::funded_vault_fixture::admitted_device_holding(owner, 55_000, 20_000);
+        owner_dev.enter();
+        let vault_id = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner, &pc_a, &pc_b, 10_000, 5_000,
+        );
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: pc_a.to_vec(),
+            token_b: pc_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: "sofi/spec/by-route".to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "advertise failed: {:?}", res.error_message);
+
+        let trader_dev = participant("trader-by-route", 0x53);
+        fund_trader(&owner_dev, &trader_dev, &pc_a, &pc_b, 5_000);
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let before = {
+            let head = trader.core_sdk.device_head().expect("trader head");
+            (head.balance(&pc_a), head.balance(&pc_b))
+        };
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+        let (res, _x) = trader_settles_by_route(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0x21,
+        );
+        assert!(
+            res.success,
+            "the route's own hop settles with no caller-named vault: {:?}",
+            res.error_message
+        );
+        settle_outcome(&res, "realized");
+        let head = trader.core_sdk.device_head().expect("trader head");
+        assert_eq!(
+            (head.balance(&pc_a), head.balance(&pc_b)),
+            (before.0 - 1_000, before.1 + out),
+            "exactly the hop's input left and exactly its output arrived"
+        );
+        assert_eq!(
+            composed(&vault_id, &pc_a, &pc_b),
+            (1, 11_000, 5_000 - out),
+            "the vault the route named is the one that moved"
         );
     }
 
