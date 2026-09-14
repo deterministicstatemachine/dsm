@@ -50,8 +50,20 @@ pub const SPX256F_SIGNATURE_LEN: usize = 49_856;
 /// `0x0031` field 5 — a BLAKE3 output, exactly this long.
 pub const ENTROPY_LEN: usize = 32;
 
-/// The beta transition cardinality of a bundle (2c-A ruling 3).
-pub const BETA_TRANSITIONS: usize = 1;
+/// The first byte of a grammar-26 `DlvSettleOperationPreimageV1` (2c-B): the
+/// single-vault settle carried in `0x0031` field 4. Defined here, once, beside
+/// the bundle rule that reads it; `dlv::market_evidence` (G3) imports it.
+pub const DLV_SETTLE_DISCRIMINATOR: u8 = 26;
+
+/// The first byte of a grammar-33 `DlvRouteSettleOperationPreimageV1` (2c-H
+/// H7): the route-wide settle. Same single definition rule as grammar 26.
+pub const DLV_ROUTE_SETTLE_DISCRIMINATOR: u8 = 33;
+
+/// The largest transition set one settlement bundle may carry: the profile's
+/// `h` (amendment 2c-H, H12, lifting 2c-A ruling 3 for the route-wide
+/// operation). A grammar-26 market bundle and an owner close still carry
+/// exactly one.
+pub const MAX_TRANSITIONS: usize = 2;
 
 fn require_len(field: &'static str, v: &[u8], expected: usize) -> Result<(), CcbError> {
     if v.len() == expected {
@@ -538,13 +550,22 @@ impl CcbObject for SettlementBundle {
 }
 
 impl SettlementBundle {
-    /// A market bundle: terms present, exactly one transition (beta), and that
-    /// transition carries no close authorization.
+    /// A market bundle: terms present, a transition set whose cardinality the
+    /// settlement operation fixes, and no transition carrying a close
+    /// authorization.
+    ///
+    /// The operation is read from the recovery material's first byte (2c-H
+    /// H6). Grammar 26 (`DlvSettle`) settles one vault: exactly one transition.
+    /// Grammar 33 (`DlvRouteSettle`) settles a route: two up to
+    /// [`MAX_TRANSITIONS`] transitions, one per route leg, every leg a bare
+    /// allocation (H2), legs and transitions in a parent-binding bijection
+    /// (never matched by position), and every successor in one settlement
+    /// domain (H15, Req 6.16).
     pub fn market(
         terms: MarketTerms,
         transitions: Vec<ConsumedDlvTransition>,
     ) -> Result<Self, CcbError> {
-        Self::beta_cardinality(&transitions)?;
+        Self::market_cardinality_and_correspondence(&terms, &transitions)?;
         if transitions
             .iter()
             .any(ConsumedDlvTransition::is_owner_close)
@@ -573,13 +594,63 @@ impl SettlementBundle {
         })
     }
 
-    fn beta_cardinality(transitions: &[ConsumedDlvTransition]) -> Result<(), CcbError> {
-        if transitions.len() != BETA_TRANSITIONS {
-            return Err(CcbError::TransitionCount {
-                got: transitions.len(),
-            });
+    fn market_cardinality_and_correspondence(
+        terms: &MarketTerms,
+        transitions: &[ConsumedDlvTransition],
+    ) -> Result<(), CcbError> {
+        let n = transitions.len();
+        if !(1..=MAX_TRANSITIONS).contains(&n) {
+            return Err(CcbError::TransitionCount { got: n });
         }
-        Ok(())
+        match terms.recovery_material.operation_bytes.first() {
+            Some(&DLV_SETTLE_DISCRIMINATOR) => {
+                if n != 1 {
+                    return Err(CcbError::TransitionCount { got: n });
+                }
+                Ok(())
+            }
+            Some(&DLV_ROUTE_SETTLE_DISCRIMINATOR) => {
+                if n < 2 {
+                    return Err(CcbError::TransitionCount { got: n });
+                }
+                let legs = terms.selected_route.legs();
+                if legs.len() != n {
+                    return Err(CcbError::BundleShape(
+                        "a route bundle carries one transition per route leg",
+                    ));
+                }
+                for leg in legs {
+                    let RouteLeg::Single(allocation) = leg else {
+                        return Err(CcbError::BundleShape(
+                            "a route bundle's legs are bare allocations (fanout 1)",
+                        ));
+                    };
+                    let matching = transitions
+                        .iter()
+                        .filter(|t| t.parent_binding == allocation.parent_binding)
+                        .count();
+                    if matching != 1 {
+                        return Err(CcbError::BundleShape(
+                            "a route bundle's legs and transitions do not correspond one to \
+                             one by parent binding",
+                        ));
+                    }
+                }
+                let first = &transitions[0].successor;
+                if transitions[1..].iter().any(|t| {
+                    t.successor.storage_set != first.storage_set
+                        || t.successor.quorum != first.quorum
+                }) {
+                    return Err(CcbError::BundleShape(
+                        "a route bundle's transitions name more than one settlement domain",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(CcbError::BundleShape(
+                "a market bundle's operation preimage is neither grammar 26 nor grammar 33",
+            )),
+        }
     }
 
     pub fn shape(&self) -> BundleShape {
@@ -594,8 +665,9 @@ impl SettlementBundle {
         self.market_terms.as_ref()
     }
 
-    /// The transitions in canonical (§2.4) order. With beta's cardinality of
-    /// one, ordering is trivial; it is still the set's order.
+    /// The transitions in canonical (§2.4) order — element CCB, never route
+    /// order. A verifier finds a vault's own transition with
+    /// [`Self::transition_for_parent`], not by position.
     pub fn transitions(&self) -> &[ConsumedDlvTransition] {
         &self.transitions
     }
@@ -847,6 +919,124 @@ pub mod fixtures {
         .expect("fixture market terms")
     }
 
+    /// Two chained legs consuming `parents`: `0x10 → 0x30 → 0x20`, 10,000 in,
+    /// 4,935 between, 2,000 out, 30 bps each (2c-H route fixtures).
+    pub fn two_hop_route_legs(
+        parents: [[u8; 32]; 2],
+    ) -> Vec<crate::types::operations::DlvRouteLeg> {
+        use crate::types::operations::DlvRouteLeg;
+        let leg = |vault: u8,
+                   parent: [u8; 32],
+                   input: [u8; 32],
+                   output: [u8; 32],
+                   input_amount: u64,
+                   output_amount: u64,
+                   receipt: u8| DlvRouteLeg {
+            vault_id: [vault; 32],
+            owner_public_key: vec![0x02; 64],
+            owner_devid: [0x02; 32],
+            owner_genesis: [0x01; 32],
+            input_policy_commit: input,
+            output_policy_commit: output,
+            parent_sequence: 7,
+            parent_binding: parent,
+            input_amount,
+            output_amount,
+            fee_bps: 30,
+            settlement_receipt_id: [receipt; 32],
+        };
+        vec![
+            leg(
+                0x03, parents[0], [0x10; 32], [0x30; 32], 10_000, 4_935, 0x11,
+            ),
+            leg(0x04, parents[1], [0x30; 32], [0x20; 32], 4_935, 2_000, 0x12),
+        ]
+    }
+
+    /// The route settle over `legs`, signed by the fixture trader over the
+    /// canonical bytes with the signature cleared, then written back.
+    pub fn signed_route_settle(
+        legs: Vec<crate::types::operations::DlvRouteLeg>,
+        x: [u8; 32],
+    ) -> crate::types::operations::Operation {
+        use crate::types::operations::{Operation, TransactionMode};
+        let kp = fixture_keypair();
+        let mut op = Operation::DlvRouteSettle {
+            legs,
+            route_commit_bytes: vec![0x09; 5],
+            external_commitment_x: x,
+            settler_public_key: kp.public_key.clone(),
+            settler_devid: FIXTURE_TRADER_DEVID,
+            signature: Vec::new(),
+            mode: TransactionMode::Unilateral,
+        };
+        let sig = crate::crypto::sphincs::sphincs_sign(&kp.secret_key, &op.to_bytes())
+            .expect("fixture route settle signature");
+        if let Operation::DlvRouteSettle { signature, .. } = &mut op {
+            *signature = sig;
+        }
+        op
+    }
+
+    /// The selected route `legs` name, in route order: one bare allocation
+    /// per leg, stating that leg's parent, amounts and fee.
+    pub fn route_of(legs: &[crate::types::operations::DlvRouteLeg]) -> Route {
+        Route::new(
+            legs.iter()
+                .map(|l| {
+                    RouteLeg::Single(Allocation {
+                        parent_binding: l.parent_binding,
+                        delta_in: l.input_amount,
+                        delta_out: l.output_amount,
+                        encumbrance_claim: [0x00; 32],
+                        fee_policy: FeePolicy::new(l.fee_bps).unwrap(),
+                    })
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// The fixture trader's prepared successor for a signed settle or route
+    /// settle, from the genuine producer.
+    pub fn prepared_for(
+        signed: &crate::types::operations::Operation,
+    ) -> crate::dlv::market_producer::PreparedSuccessor {
+        crate::dlv::market_producer::prepare_market_successor(
+            FIXTURE_REL_KEY,
+            FIXTURE_TRADER_PARENT,
+            FIXTURE_TRADER_DEVID,
+            signed,
+            FIXTURE_ENTROPY,
+            &crate::dlv::market_producer::TraderIdentity {
+                genesis: FIXTURE_TRADER_GENESIS,
+                device_id: FIXTURE_TRADER_DEVID,
+            },
+            &fixture_keypair().secret_key,
+        )
+        .expect("fixture prepared successor")
+    }
+
+    /// GENUINE grammar-33 market terms: a signed route settle over two chained
+    /// legs consuming `parents`, prepared and assembled by the real producer,
+    /// which runs `G1`-`G5` over its own output. The intent is the route's
+    /// end to end: hop 0's input, the last hop's output, the summed fee (H11).
+    pub fn route_market_terms(parents: [[u8; 32]; 2], x: [u8; 32]) -> MarketTerms {
+        let legs = two_hop_route_legs(parents);
+        let intent = TradeIntent {
+            token_in: legs[0].input_policy_commit,
+            amount_in: legs[0].input_amount,
+            token_out: legs[1].output_policy_commit,
+            exact_out: legs[1].output_amount,
+            fee_bps: legs.iter().map(|l| l.fee_bps).sum(),
+            nonce: [0x5E; 32],
+        };
+        let route = route_of(&legs);
+        let signed = signed_route_settle(legs, x);
+        crate::dlv::market_producer::market_terms(intent, x, route, &prepared_for(&signed))
+            .expect("fixture route market terms")
+    }
+
     /// A canonical market bundle consuming `parent` into `successor` under
     /// route-set commitment `x`.
     pub fn market_bundle(
@@ -1028,6 +1218,137 @@ mod tests {
         assert_eq!(
             SettlementBundle::market(terms(parent), vec![]),
             Err(CcbError::TransitionCount { got: 0 })
+        );
+    }
+
+    // ── 2c-H: the route-wide shape ──────────────────────────────────────────
+    //
+    // Route terms here are GENUINE grammar-33 producer output
+    // (`fixtures::route_market_terms`). Tests that need a malformed route
+    // mutate `selected_route` after production, which the constructor judges
+    // structurally (H2, H6, H15) without re-running the evidence conjuncts.
+
+    fn route_terms(parents: [[u8; 32]; 2]) -> MarketTerms {
+        super::fixtures::route_market_terms(parents, [0x58; 32])
+    }
+
+    fn transition_over(parent: [u8; 32], vault: u8) -> ConsumedDlvTransition {
+        ConsumedDlvTransition::market(
+            parent,
+            super::fixtures::successor_of(parent, [vault; 32], 8, 1_000, 1_000),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_route_bundle_carries_one_transition_per_leg_matched_by_parent() {
+        let (p1, p2) = ([0xD1; 32], [0xD2; 32]);
+        let b = SettlementBundle::market(
+            route_terms([p1, p2]),
+            // Deliberately NOT in route order: correspondence is by parent.
+            vec![transition_over(p2, 0x04), transition_over(p1, 0x03)],
+        )
+        .expect("a two-leg route bundle over two parents");
+        assert_eq!(b.transitions().len(), 2);
+        assert!(b.transition_for_parent(&p1).is_some());
+        assert!(b.transition_for_parent(&p2).is_some());
+    }
+
+    #[test]
+    fn a_route_bundle_with_one_transition_is_refused() {
+        let (p1, p2) = ([0xD1; 32], [0xD2; 32]);
+        assert_eq!(
+            SettlementBundle::market(route_terms([p1, p2]), vec![transition_over(p1, 0x03)]),
+            Err(CcbError::TransitionCount { got: 1 })
+        );
+    }
+
+    #[test]
+    fn a_route_bundle_above_the_profile_cardinality_is_refused() {
+        let (p1, p2, p3) = ([0xD1; 32], [0xD2; 32], [0xD3; 32]);
+        let too_many = vec![
+            transition_over(p1, 0x03),
+            transition_over(p2, 0x04),
+            transition_over(p3, 0x05),
+        ];
+        assert_eq!(
+            SettlementBundle::market(route_terms([p1, p2]), too_many),
+            Err(CcbError::TransitionCount {
+                got: MAX_TRANSITIONS + 1
+            })
+        );
+    }
+
+    #[test]
+    fn a_route_bundle_whose_legs_and_transitions_do_not_correspond_is_refused() {
+        let (p1, p2, stranger) = ([0xD1; 32], [0xD2; 32], [0xDF; 32]);
+        assert_eq!(
+            SettlementBundle::market(
+                route_terms([p1, p2]),
+                vec![transition_over(p1, 0x03), transition_over(stranger, 0x04)],
+            ),
+            Err(CcbError::BundleShape(
+                "a route bundle's legs and transitions do not correspond one to one by parent binding"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_route_bundle_with_a_fanned_out_leg_is_refused() {
+        let (p1, p2) = ([0xD1; 32], [0xD2; 32]);
+        let mut t = route_terms([p1, p2]);
+        let allocation = |parent: [u8; 32], d: u64| Allocation {
+            parent_binding: parent,
+            delta_in: d,
+            delta_out: d,
+            encumbrance_claim: [0x00; 32],
+            fee_policy: FeePolicy::new(30).unwrap(),
+        };
+        t.selected_route = Route::new(vec![
+            RouteLeg::Bundle(
+                AllocationBundle::new(vec![allocation(p1, 10), allocation(p2, 11)]).unwrap(),
+            ),
+            RouteLeg::Single(allocation(p2, 12)),
+        ])
+        .unwrap();
+        assert_eq!(
+            SettlementBundle::market(
+                t,
+                vec![transition_over(p1, 0x03), transition_over(p2, 0x04)]
+            ),
+            Err(CcbError::BundleShape(
+                "a route bundle's legs are bare allocations (fanout 1)"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_route_bundle_across_two_settlement_domains_is_refused() {
+        let (p1, p2) = ([0xD1; 32], [0xD2; 32]);
+        let mut other_domain = super::fixtures::successor_of(p2, [0x04; 32], 8, 1_000, 1_000);
+        other_domain.quorum = 3;
+        let foreign = ConsumedDlvTransition::market(p2, other_domain).unwrap();
+        assert_eq!(
+            SettlementBundle::market(
+                route_terms([p1, p2]),
+                vec![transition_over(p1, 0x03), foreign]
+            ),
+            Err(CcbError::BundleShape(
+                "a route bundle's transitions name more than one settlement domain"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_market_bundle_whose_preimage_is_neither_grammar_is_refused() {
+        let parent = [0xD4; 32];
+        let mut t = terms(parent);
+        t.recovery_material.operation_bytes[0] = 28;
+        assert_eq!(
+            SettlementBundle::market(t, vec![transition_over(parent, 0x03)]),
+            Err(CcbError::BundleShape(
+                "a market bundle's operation preimage is neither grammar 26 nor grammar 33"
+            ))
         );
     }
 

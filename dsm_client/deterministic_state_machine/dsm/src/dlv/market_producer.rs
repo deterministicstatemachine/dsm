@@ -7,7 +7,8 @@
 //! caller could invent one:
 //!
 //! ```text
-//! operation_bytes   = the caller's SIGNED Operation::DlvSettle, canonically
+//! operation_bytes   = the caller's SIGNED Operation::DlvSettle or
+//!                     Operation::DlvRouteSettle (2c-H), canonically
 //!                     encoded. Refused unless it is a settle carrying a
 //!                     signature — an unsigned operation cannot be signed
 //!                     afterwards, because the signature is inside the bytes
@@ -48,8 +49,9 @@ use crate::types::operations::{Operation, TransactionMode};
 /// caller's inputs, never a repair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProducerError {
-    /// The operation is not a `DlvSettle`. Discriminator 26 is what 2c-B's
-    /// `G3` requires, and it is a property of the operation, not of the bytes.
+    /// The operation is neither a `DlvSettle` nor a `DlvRouteSettle`.
+    /// Discriminators 26 and 33 are what `G3` admits, and they are a property
+    /// of the operation, not of the bytes.
     NotASettle,
     /// The settle carries no signature. The settler signs with field 18
     /// cleared and writes the signature back, so an operation committed
@@ -74,7 +76,8 @@ impl core::fmt::Display for ProducerError {
         match self {
             Self::NotASettle => write!(
                 f,
-                "market production needs an Operation::DlvSettle; discriminator 26 is 2c-B's G3"
+                "market production needs an Operation::DlvSettle or Operation::DlvRouteSettle; \
+                 discriminators 26 and 33 are G3's"
             ),
             Self::Unsigned => write!(
                 f,
@@ -142,6 +145,9 @@ pub fn prepare_market_successor(
 ) -> Result<PreparedSuccessor, ProducerError> {
     match signed_settle {
         Operation::DlvSettle {
+            signature, mode, ..
+        }
+        | Operation::DlvRouteSettle {
             signature, mode, ..
         } => {
             if signature.is_empty() {
@@ -334,6 +340,19 @@ mod tests {
             &[0u8; 128],
         );
         assert_eq!(e, Err(ProducerError::NotUnilateral));
+    }
+
+    /// 2c-H: the producer accepts a signed route settle, and its own verifier
+    /// (`G1`-`G5`) passes on what it emits.
+    #[test]
+    fn a_route_settle_is_produced_and_passes_its_own_verifier() {
+        let t = fixtures::route_market_terms([[0xE3; 32], [0xE4; 32]], [0x58; 32]);
+        assert_eq!(t.recovery_material.operation_bytes[0], 33, "grammar 33");
+        assert_eq!(
+            crate::dlv::market_evidence::check_market_evidence(&t),
+            Ok(())
+        );
+        assert_eq!(t.recovery_material.embedded_parent, t.trader_parent);
     }
 
     #[test]

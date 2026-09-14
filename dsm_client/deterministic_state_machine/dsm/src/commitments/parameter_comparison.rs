@@ -556,6 +556,48 @@ pub fn extract_operation_parameters(
             params.insert("vault_id".to_string(), vault_id.clone());
             Ok(params)
         }
+        // A route settle's fixed parameters name the exact route: its
+        // commitment, the ordered vaults and receipts, and the route's net
+        // input and output. Two routes over the same first vault differ here.
+        Operation::DlvRouteSettle {
+            legs,
+            external_commitment_x,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"dlv_route_settle".to_vec());
+            params.insert(
+                "external_commitment_x".to_string(),
+                external_commitment_x.to_vec(),
+            );
+            params.insert(
+                "vault_ids".to_string(),
+                legs.iter().flat_map(|l| l.vault_id).collect(),
+            );
+            params.insert(
+                "settlement_receipt_ids".to_string(),
+                legs.iter().flat_map(|l| l.settlement_receipt_id).collect(),
+            );
+            if let (Some(first), Some(last)) = (legs.first(), legs.last()) {
+                params.insert(
+                    "input_policy_commit".to_string(),
+                    first.input_policy_commit.to_vec(),
+                );
+                params.insert(
+                    "input_amount".to_string(),
+                    first.input_amount.to_be_bytes().to_vec(),
+                );
+                params.insert(
+                    "output_policy_commit".to_string(),
+                    last.output_policy_commit.to_vec(),
+                );
+                params.insert(
+                    "output_amount".to_string(),
+                    last.output_amount.to_be_bytes().to_vec(),
+                );
+            }
+            Ok(params)
+        }
         // Settlement's fixed parameters name the exact trade, not just the
         // vault: a comparison that saw only the vault id could not tell two
         // different settlements against it apart.

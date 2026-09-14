@@ -62,7 +62,8 @@ pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
 pub use settlement::{
     Allocation, AllocationBundle, BundleShape, ConsumedDlvTransition, DlvProofMaterial,
     DsmSuccessorEvidence, MarketTerms, Route, RouteLeg, SettlementBundle, TradeIntent,
-    BETA_TRANSITIONS, ENTROPY_LEN, SPX256F_SIGNATURE_LEN,
+    DLV_ROUTE_SETTLE_DISCRIMINATOR, DLV_SETTLE_DISCRIMINATOR, ENTROPY_LEN, MAX_TRANSITIONS,
+    SPX256F_SIGNATURE_LEN,
 };
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetEntry,
@@ -620,7 +621,9 @@ impl core::fmt::Display for CcbError {
             CcbError::BundleShape(why) => write!(f, "settlement bundle shape: {why}"),
             CcbError::TransitionCount { got } => write!(
                 f,
-                "a beta settlement bundle carries exactly one transition, not {got}"
+                "{got} transitions is not a cardinality this bundle shape may carry: a \
+                 market bundle carries 1..={MAX_TRANSITIONS}, and an owner close carries \
+                 exactly one transition"
             ),
             CcbError::ParentLinkage => write!(
                 f,

@@ -5,11 +5,12 @@
 //!
 //! SoFi V2 §9.1 keeps sequential depth (`max_hops`) and same-pair horizontal
 //! fanout (`max_fanout`) as independent, finite, committed bounds; the bundle
-//! cardinality (`|{T_v}|`, amendment 2c-A ruling 3) is a third. All three are
-//! `1` in beta, and that coincidence is exactly why they are spelled out
-//! separately: raising the transition count to admit split liquidity on one
-//! leg must not, by aliasing, also admit deeper sequential routes, and vice
-//! versa. A one-hop route across three LPs is `(1 hop, 3 transitions, fanout
+//! cardinality (`|{T_v}|`) is a third. They are spelled out separately because
+//! they move separately: amendment 2c-H lifts the bundle cardinality to two
+//! (one route-wide bundle over two vaults) while the SDK still executes one
+//! hop until the route-wide unlock lands, and raising the transition count to
+//! admit split liquidity on one leg must never, by aliasing, also admit deeper
+//! sequential routes, or the reverse. A one-hop route across three LPs is `(1 hop, 3 transitions, fanout
 //! 3)`; a two-hop route across two LPs each is `(2 hops, 4 transitions,
 //! fanout 2)`.
 //!
@@ -25,11 +26,12 @@
 /// Sequential route depth the SDK will bind and execute in beta.
 pub(crate) const BETA_MAX_HOPS: usize = 1;
 
-/// Vault transitions one settlement bundle may carry in beta. This equals
-/// `dsm::ccb::BETA_TRANSITIONS` — the core's cardinality fence — and a test
-/// pins that equality, so the two cannot drift apart silently; it is not
-/// defined AS that constant, so raising one never raises the other.
-pub(crate) const BETA_MAX_TRANSITIONS: usize = 1;
+/// Vault transitions one settlement bundle may carry in beta: two, by the
+/// owner's 2c-H ruling (H12). This equals `dsm::ccb::MAX_TRANSITIONS` — the
+/// core's cardinality fence — and a test pins that equality, so the two cannot
+/// drift apart silently; it is not defined AS that constant, so raising one
+/// never raises the other.
+pub(crate) const BETA_MAX_TRANSITIONS: usize = 2;
 
 /// Independent DLVs one same-pair allocation leg may draw from in beta.
 pub(crate) const BETA_MAX_FANOUT: usize = 1;
@@ -57,7 +59,7 @@ mod tests {
     /// other, this is the test that says so.
     #[test]
     fn the_sdk_transition_limit_agrees_with_the_core_bundle_cardinality() {
-        assert_eq!(BETA_MAX_TRANSITIONS, dsm::ccb::BETA_TRANSITIONS);
+        assert_eq!(BETA_MAX_TRANSITIONS, dsm::ccb::MAX_TRANSITIONS);
     }
 
     /// The binder never searches deeper than the profile: `0` is the profile's
@@ -72,14 +74,14 @@ mod tests {
         assert_eq!(bounded_search_depth(u32::MAX), BETA_MAX_HOPS);
     }
 
-    /// Beta is one hop, one transition, one DLV per leg. The three are stated
-    /// separately; this pins the profile so a change to any one is a visible
-    /// decision.
+    /// Beta executes one hop, a bundle may carry two transitions (2c-H), and
+    /// a leg draws from one DLV. The three are stated separately; this pins the
+    /// profile so a change to any one is a visible decision.
     #[test]
-    fn the_beta_profile_is_one_hop_one_transition_fanout_one() {
+    fn the_beta_profile_is_one_hop_two_transitions_fanout_one() {
         assert_eq!(
             (BETA_MAX_HOPS, BETA_MAX_TRANSITIONS, BETA_MAX_FANOUT),
-            (1, 1, 1)
+            (1, 2, 1)
         );
     }
 }

@@ -1762,6 +1762,7 @@ impl DeviceState {
         if matches!(
             operation,
             Operation::DlvSettle { .. }
+                | Operation::DlvRouteSettle { .. }
                 | Operation::DlvClose { .. }
                 | Operation::DlvCreateFundedV2 { .. }
                 | Operation::DlvOwnerApplyV2 { .. }

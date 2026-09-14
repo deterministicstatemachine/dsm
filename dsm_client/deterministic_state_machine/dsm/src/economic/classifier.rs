@@ -116,6 +116,11 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // changed, `None` is impossible.
         DlvCreate { .. } => None,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
+        // Amendment 2c-H: a route settle's closed write set (net debit, net
+        // credit funded by 0x0035, one receipt leaf per vault, one acceptance
+        // leaf) is stated by the write-set arm of this same change. Until that
+        // arm exists it is refused, never admitted on a partial write set.
+        DlvRouteSettle { .. } => UnsupportedValueTransition,
     }
 }
 
