@@ -119,6 +119,7 @@ pub(crate) mod settlement_payment_producer;
 pub mod settlement_receipt_codec;
 pub mod settlement_slot;
 pub mod smart_commitment_sdk;
+pub mod sofi_profile; // the beta routing profile: hops, transitions, fanout — three limits, never aliased
 pub(crate) mod sofi_receipt_publication;
 pub mod trader_acceptance_locator;
 pub mod transfer_hooks;

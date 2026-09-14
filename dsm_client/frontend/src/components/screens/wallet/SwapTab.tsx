@@ -17,15 +17,12 @@
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
-  listAdvertisementsForPair,
-  syncVaultsForPair,
   findAndBindBestPath,
   signRouteCommit,
   computeExternalCommitment,
   publishExternalCommitment,
   isExternalCommitmentVisible,
   unlockVaultRouted,
-  type RoutingAdvertisementSummary,
 } from '../../../dsm/route_commit';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
@@ -44,7 +41,6 @@ type Phase =
 
 type QuotedRoute = {
   unsignedBytes: Uint8Array;
-  vaults: RoutingAdvertisementSummary[];
   inputAmountBytes: Uint8Array;
   inputToken: Uint8Array;
   outputToken: Uint8Array;
@@ -187,27 +183,10 @@ function SwapTabInner({
       const outputTokenBytes = decodePolicyCommit(outputToken, 'To');
       const amountBig = bigIntFromString(amount);
 
-      // Sync first so the path search runs against fresh vault state.
-      const syncRes = await syncVaultsForPair({
-        tokenA: inputTokenBytes,
-        tokenB: outputTokenBytes,
-      });
-      if (!syncRes.success) {
-        throw new Error(syncRes.error || 'syncVaultsForPair failed');
-      }
-
-      const listRes = await listAdvertisementsForPair({
-        tokenA: inputTokenBytes,
-        tokenB: outputTokenBytes,
-      });
-      if (!listRes.success) {
-        throw new Error(listRes.error || 'listAdvertisementsForPair failed');
-      }
-      const vaults = listRes.advertisements ?? [];
-      if (vaults.length === 0) {
-        throw new Error(`No liquidity advertised for ${inputToken.trim()} ↔ ${outputToken.trim()}`);
-      }
-
+      // Discovery is the binder's: it searches the advertised pair no
+      // deeper than the beta profile can settle (one hop), mirrors the
+      // hop's vault for the unlock, and says NoPath itself. Nothing here
+      // lists or syncs a pair on its behalf.
       const bindRes = await findAndBindBestPath({
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
@@ -228,7 +207,6 @@ function SwapTabInner({
       // choice; the wallet is a thin viewer over the binder's output.
       setQuoted({
         unsignedBytes: bindRes.unsignedRouteCommitBytes,
-        vaults,
         inputAmountBytes: u128BigEndian(amountBig),
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
@@ -308,8 +286,9 @@ function SwapTabInner({
         throw new Error('wallet device id unavailable');
       }
       const deviceBytes = decodeBase32Crockford(deviceB32);
-      // No vaultId: Rust settles every hop the signed route names, in
-      // order. The wallet submits the route and renders the outcome.
+      // No vaultId: Rust settles the hop the signed route names, and
+      // refuses a route deeper than the beta profile before any binding.
+      // The wallet submits the route and renders the outcome.
       const unlock = await unlockVaultRouted({
         deviceId: deviceBytes,
         routeCommitBytes: signedBytes,
@@ -388,7 +367,7 @@ function SwapTabInner({
           <div className="balance-card" style={{ padding: '8px 12px' }}>
             <div className="balance-info">
               <span className="token-symbol">
-                {quoted.vaults.length} vault{quoted.vaults.length === 1 ? '' : 's'} discovered
+                {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} bound
               </span>
               <span className="balance-amount">
                 {quoted.expectedOut.toString()} {outputToken.trim()}
@@ -453,7 +432,7 @@ function SwapTabInner({
       <ConfirmModal
         visible={showConfirm}
         title="Confirm swap"
-        message={`Swap ${amount} ${inputToken.trim()} for exactly ${quoted?.expectedOut.toString() ?? 0} ${outputToken.trim()} via ${quoted?.vaults.length ?? 0} vault${(quoted?.vaults.length ?? 0) === 1 ? '' : 's'}?`}
+        message={`Swap ${amount} ${inputToken.trim()} for exactly ${quoted?.expectedOut.toString() ?? 0} ${outputToken.trim()} via ${quoted?.hops.length ?? 0} hop${(quoted?.hops.length ?? 0) === 1 ? '' : 's'}?`}
         onConfirm={() => { setShowConfirm(false); void handleExecute(); }}
         onCancel={() => setShowConfirm(false)}
       />
