@@ -690,6 +690,47 @@ fn validate_conservation(
             Ok(())
         }
 
+        // A ROUTE settle (amendment 2c-H H3, H4): the same two positional deltas
+        // as a single-vault settle, taken end to end — the first leg's input
+        // debited, the last leg's output credited. The intermediate assets never
+        // touch the trader, so a delta naming one is refused like any third
+        // delta. Route conservation (RC.1-RC.5) holds first, from the legs alone.
+        Operation::DlvRouteSettle { legs, .. } => {
+            crate::types::operations::DlvRouteLeg::check_route_conservation(legs).map_err(|e| {
+                DsmError::invalid_operation(format!("conservation: DlvRouteSettle {e}"))
+            })?;
+            let (Some(first), Some(last)) = (legs.first(), legs.last()) else {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvRouteSettle names no legs",
+                ));
+            };
+            if deltas.len() != 2 {
+                return Err(DsmError::invalid_operation(format!(
+                    "conservation: DlvRouteSettle must carry exactly 2 deltas, got {}",
+                    deltas.len()
+                )));
+            }
+            let d_in = &deltas[0];
+            let d_out = &deltas[1];
+            if d_in.policy_commit != first.input_policy_commit
+                || d_in.direction != BalanceDirection::Debit
+                || d_in.amount != first.input_amount
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvRouteSettle delta[0] must debit the first leg's input exactly",
+                ));
+            }
+            if d_out.policy_commit != last.output_policy_commit
+                || d_out.direction != BalanceDirection::Credit
+                || d_out.amount != last.output_amount
+            {
+                return Err(DsmError::invalid_operation(
+                    "conservation: DlvRouteSettle delta[1] must credit the last leg's output exactly",
+                ));
+            }
+            Ok(())
+        }
+
         // The owner RECORDS a settlement it has already verified. It authorizes
         // no value movement of its own: the trader's credit was final at the
         // trader's advance, and the fee accrues inside the reserves as LP yield,
@@ -2716,7 +2757,7 @@ impl DeviceState {
         // a receipt can only come into existence through an advance that already
         // satisfied the positional conservation arm, so the leaf cannot describe
         // a different trade than the deltas that moved.
-        let settlement_leaf: Option<([u8; 32], [u8; 32])> = match &operation {
+        let settlement_leaves: Vec<([u8; 32], [u8; 32])> = match &operation {
             Operation::DlvSettle {
                 vault_id,
                 settlement_receipt_id,
@@ -2743,7 +2784,7 @@ impl DeviceState {
                     output_policy_commit: *output_policy_commit,
                     output_amount: *output_amount,
                 };
-                Some((
+                vec![(
                     crate::dlv::settlement_receipt_leaf::settlement_receipt_key(
                         &self.genesis,
                         &self.devid,
@@ -2751,9 +2792,44 @@ impl DeviceState {
                         settlement_receipt_id,
                     ),
                     crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade),
-                ))
+                )]
             }
-            _ => None,
+            // A route settle writes ONE receipt leaf per vault it crosses
+            // (amendment 2c-H H10), each derived from its own leg, so each LP's
+            // apply is funded by its own leaf and no LP needs another's.
+            Operation::DlvRouteSettle {
+                legs,
+                external_commitment_x,
+                ..
+            } => legs
+                .iter()
+                .map(|leg| {
+                    let new_sequence = leg.parent_sequence.checked_add(1).ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "DlvRouteSettle: a leg's parent sequence cannot advance",
+                        )
+                    })?;
+                    let trade = crate::dlv::settlement_receipt_leaf::SettledTrade {
+                        x: *external_commitment_x,
+                        parent_sequence: leg.parent_sequence,
+                        new_sequence,
+                        input_policy_commit: leg.input_policy_commit,
+                        input_amount: leg.input_amount,
+                        output_policy_commit: leg.output_policy_commit,
+                        output_amount: leg.output_amount,
+                    };
+                    Ok((
+                        crate::dlv::settlement_receipt_leaf::settlement_receipt_key(
+                            &self.genesis,
+                            &self.devid,
+                            &leg.vault_id,
+                            &leg.settlement_receipt_id,
+                        ),
+                        crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade),
+                    ))
+                })
+                .collect::<Result<Vec<_>, DsmError>>()?,
+            _ => Vec::new(),
         };
 
         // Build the successor chain state with the updated witness.
@@ -2796,11 +2872,11 @@ impl DeviceState {
         // per-device anchor-state leaf as ONE atomic root update — all four inclusion proofs are
         // taken against the true pre/post roots (never an intermediate root), so both the
         // relationship and anchor-state proofs bind the same `child_r_a` the transfer commits.
-        let (smt_proofs, anchor_proofs) = match (&anchor_leaf, &settlement_leaf) {
+        let (smt_proofs, anchor_proofs) = match (&anchor_leaf, settlement_leaves.is_empty()) {
             // The ordinary path, and the only one that keeps `smt_replace`: no
             // anchor leaf, no receipt leaf, no reserve/vault-state leaves. Every
             // transfer.
-            (None, None) if batch_leaves.is_empty() => {
+            (None, true) if batch_leaves.is_empty() => {
                 let p = new_smt
                     .smt_replace(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
@@ -2814,7 +2890,7 @@ impl DeviceState {
             // leaves land — and two roots would put the reserve proof and the
             // vault-state proof out of agreement, which `compose_vault_state`
             // requires to be equal.
-            (None, None) => {
+            (None, true) => {
                 let pre_root = *new_smt.root();
                 let rel_parent = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -2841,13 +2917,14 @@ impl DeviceState {
                     None,
                 )
             }
-            // A settling advance with no anchor leaf: the receipt leaf rides the
+            // A settling advance with no anchor leaf: the receipt leaves (one per
+            // vault a route crosses) ride the
             // SAME batch as the relationship leaf, so the settlement and its
             // witness share one device root. `smt_replace` cannot express this —
             // its child proof binds a root taken before the receipt leaf lands —
             // so the pre/post roots and both proofs are taken by hand, exactly as
             // the anchor-leaf branch below does.
-            (None, Some((rk, rv))) => {
+            (None, false) => {
                 let pre_root = *new_smt.root();
                 let rel_parent = new_smt
                     .get_inclusion_proof(&rel_key, 256)
@@ -2855,9 +2932,11 @@ impl DeviceState {
                 new_smt
                     .update_leaf(&rel_key, &child_chain_tip)
                     .map_err(|e| DsmError::invalid_operation(format!("rel leaf replace: {e}")))?;
-                new_smt.update_leaf(rk, rv).map_err(|e| {
-                    DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
-                })?;
+                for (rk, rv) in &settlement_leaves {
+                    new_smt.update_leaf(rk, rv).map_err(|e| {
+                        DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
+                    })?;
+                }
                 for (k, v) in &batch_leaves {
                     new_smt.update_leaf(k, v).map_err(|e| {
                         DsmError::invalid_operation(format!("vault reserve/state leaf: {e}"))
@@ -2901,7 +2980,7 @@ impl DeviceState {
                         DsmError::invalid_operation(format!("offline-allocation leaf replace: {e}"))
                     })?;
                 }
-                if let Some((rk, rv)) = &settlement_leaf {
+                for (rk, rv) in &settlement_leaves {
                     new_smt.update_leaf(rk, rv).map_err(|e| {
                         DsmError::invalid_operation(format!("settlement receipt leaf: {e}"))
                     })?;
@@ -2990,7 +3069,7 @@ impl DeviceState {
         if let Some(al) = &anchor_leaf {
             new_extra_leaves.insert(al.key, al.new_value);
         }
-        if let Some((rk, rv)) = settlement_leaf {
+        for (rk, rv) in settlement_leaves {
             new_extra_leaves.insert(rk, rv);
         }
         // Reserve and vault-state leaves replay through `extra_leaves` too, or a
@@ -5088,6 +5167,228 @@ mod tests {
             Some(crate::dlv::settlement_receipt_leaf::settlement_receipt_value(&trade)),
             "the receipt leaf must replay through extra_leaves"
         );
+    }
+
+    // ── amendment 2c-H: a route settle's movement and its receipt leaves ────
+
+    /// A two-leg route `input → mid → output` over vaults `0x77` and `0x78`:
+    /// 1,000 in, 453 between, 560 out.
+    fn route_settle_op(input_pc: [u8; 32], mid_pc: [u8; 32], output_pc: [u8; 32]) -> Operation {
+        let leg = |vault: u8,
+                   parent: u8,
+                   input: [u8; 32],
+                   output: [u8; 32],
+                   input_amount: u64,
+                   output_amount: u64| crate::types::operations::DlvRouteLeg {
+            vault_id: [vault; 32],
+            owner_public_key: vec![0xAA; 64],
+            owner_devid: devid(0xA1),
+            owner_genesis: [0u8; 32],
+            input_policy_commit: input,
+            output_policy_commit: output,
+            parent_sequence: 0,
+            parent_binding: [parent; 32],
+            input_amount,
+            output_amount,
+            fee_bps: 30,
+            settlement_receipt_id: [vault ^ 0x0F; 32],
+        };
+        sign_op(Operation::DlvRouteSettle {
+            legs: vec![
+                leg(0x77, 0x11, input_pc, mid_pc, 1_000, 453),
+                leg(0x78, 0x12, mid_pc, output_pc, 453, 560),
+            ],
+            route_commit_bytes: vec![0x44; 8],
+            external_commitment_x: [0x55; 32],
+            settler_public_key: vec![0xBB; 64],
+            settler_devid: devid(0xB1),
+            signature: Vec::new(),
+            mode: TransactionMode::Bilateral,
+        })
+    }
+
+    /// H3, H4: a route's deltas are its ENDS, positionally. Nothing may touch
+    /// the intermediate asset, and a route that does not conserve is refused
+    /// whatever its deltas.
+    #[test]
+    fn route_settle_deltas_are_the_routes_ends_positionally() {
+        let (era, mid, rigb) = (pc(0xE0), pc(0xE8), pc(0xF0));
+        let op = route_settle_op(era, mid, rigb);
+        let ok = [
+            delta(era, BalanceDirection::Debit, 1_000),
+            delta(rigb, BalanceDirection::Credit, 560),
+        ];
+        validate_conservation(&devid(0xB1), &op, &ok, None).expect("the route's ends must pass");
+
+        for (why, deltas) in [
+            ("no deltas at all", vec![]),
+            (
+                "the intermediate asset credited",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(mid, BalanceDirection::Credit, 453),
+                ],
+            ),
+            (
+                "the intermediate asset debited",
+                vec![
+                    delta(mid, BalanceDirection::Debit, 453),
+                    delta(rigb, BalanceDirection::Credit, 560),
+                ],
+            ),
+            (
+                "an intermediate delta riding along",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(mid, BalanceDirection::Credit, 453),
+                    delta(rigb, BalanceDirection::Credit, 560),
+                ],
+            ),
+            (
+                "REORDERED",
+                vec![
+                    delta(rigb, BalanceDirection::Credit, 560),
+                    delta(era, BalanceDirection::Debit, 1_000),
+                ],
+            ),
+            (
+                "taking more than the last leg's output",
+                vec![
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 561),
+                ],
+            ),
+        ] {
+            assert!(
+                validate_conservation(&devid(0xB1), &op, &deltas, None).is_err(),
+                "must reject: {why}"
+            );
+        }
+
+        let Operation::DlvRouteSettle {
+            mut legs,
+            route_commit_bytes,
+            external_commitment_x,
+            settler_public_key,
+            settler_devid,
+            signature,
+            mode,
+        } = op
+        else {
+            unreachable!("constructed as a route settle")
+        };
+        legs[1].input_amount = 454;
+        let broken = Operation::DlvRouteSettle {
+            legs,
+            route_commit_bytes,
+            external_commitment_x,
+            settler_public_key,
+            settler_devid,
+            signature,
+            mode,
+        };
+        assert!(
+            validate_conservation(&devid(0xB1), &broken, &ok, None).is_err(),
+            "RC.2: leg 0's output is not leg 1's input"
+        );
+    }
+
+    /// H10: a route settling advance commits ONE receipt leaf per vault under
+    /// its post-advance root, and each replays through `extra_leaves`. The
+    /// trader adopts only the FINAL output token: the intermediate asset is
+    /// never credited, so it needs no adoption (H4).
+    #[test]
+    fn a_route_settling_advance_commits_a_receipt_leaf_per_vault() {
+        use crate::dlv::settlement_receipt_leaf::{
+            settlement_receipt_key, settlement_receipt_value, SettledTrade,
+        };
+
+        let (era, mid, rigb) = (pc(0xE0), pc(0xE8), pc(0xF0));
+        let trader = fresh_device(0xB8)
+            .admitted_mint(era, 50_000, 0xA0)
+            .expect("admitted issuance of era")
+            .adopt_token(rigb, 0xA2)
+            .expect("trader adopts the final output token")
+            .with_pending_economic_admission(None);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &trader.devid,
+            &trader.devid,
+        );
+        let tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &trader.devid,
+            &trader.devid,
+        );
+        let op = route_settle_op(era, mid, rigb);
+        let (legs, x) = match &op {
+            Operation::DlvRouteSettle {
+                legs,
+                external_commitment_x,
+                ..
+            } => (legs.clone(), *external_commitment_x),
+            _ => unreachable!(),
+        };
+
+        let out = trader
+            .advance(
+                rk,
+                trader.devid,
+                op,
+                entropy(22),
+                None,
+                &[
+                    delta(era, BalanceDirection::Debit, 1_000),
+                    delta(rigb, BalanceDirection::Credit, 560),
+                ],
+                Some(tip),
+                None,
+                None,
+                None,
+            )
+            .expect("a route settlement advances");
+        let after = &out.new_device_state;
+        let post_root = *after.smt.root();
+
+        assert_eq!(legs.len(), 2);
+        for leg in &legs {
+            let trade = SettledTrade {
+                x,
+                parent_sequence: leg.parent_sequence,
+                new_sequence: leg.parent_sequence + 1,
+                input_policy_commit: leg.input_policy_commit,
+                input_amount: leg.input_amount,
+                output_policy_commit: leg.output_policy_commit,
+                output_amount: leg.output_amount,
+            };
+            let key = settlement_receipt_key(
+                &after.genesis,
+                &after.devid,
+                &leg.vault_id,
+                &leg.settlement_receipt_id,
+            );
+            let value = settlement_receipt_value(&trade);
+            let proof = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
+                key,
+                value: Some(value),
+                siblings: after
+                    .smt
+                    .get_inclusion_proof(&key, 256)
+                    .expect("receipt proof")
+                    .siblings,
+            };
+            assert!(
+                crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
+                    &proof, &post_root
+                ),
+                "the post-advance root commits vault {:#04x}'s receipt leaf",
+                leg.vault_id[0]
+            );
+            assert_eq!(
+                after.extra_leaves_snapshot().get(&key).copied(),
+                Some(value),
+                "vault {:#04x}'s receipt leaf must replay through extra_leaves",
+                leg.vault_id[0]
+            );
+        }
     }
 
     /// A settlement the trader never made has no leaf, so no receipt over it can

@@ -122,6 +122,13 @@ pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
 /// is the non-reuse marker, so no consumed-source leaf exists for this arm.
 pub const TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/dlv-reserve-consumption/v1");
+/// SourceId for a DLV route reserve consumption (0x0035, amendment 2c-H H9):
+/// `H(tag ‖ 0x00 ‖ x ‖ u32_be(N) ‖ for each leg in route order: vault_id ‖
+/// parent_sequence_be)` — one route consuming one generation of each vault it
+/// crosses; the N write-once settlement-receipt leaves are the non-reuse
+/// markers, so no consumed-source leaf exists for this arm.
+pub const TAG_DSM_ECON_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/dlv-route-reserve-consumption/v1");
 /// Immutable namespace for the 0x0026 evidence bundle
 /// (`ReserveConsumptionEvidenceV1`: exact CCB(V_n) + the owner's vault-bound
 /// authority evidence + both reserve pre-leaves with their 256-sibling

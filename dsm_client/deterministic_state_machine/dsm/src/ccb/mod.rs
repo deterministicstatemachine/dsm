@@ -155,7 +155,7 @@ pub mod class {
     /// mutations and its inline credit sources.
     pub const ECONOMIC_TRANSITION_WITNESS: u16 = 0x001D;
 
-    // Credit-provenance classes. Seven arms, closed: a credit that names none
+    // Credit-provenance classes. Eight arms, closed: a credit that names none
     // of them is unfunded, and there is deliberately no `Custom`. All are
     // schema 1 EXCEPT `0x0026`/`0x0027`, whose schema 1 is BURNED (3.6, owner
     // ruling 2026-08-28) — schema 2 adds the peer economic-position locator
@@ -186,6 +186,11 @@ pub mod class {
     /// The recipient credit of a consumed ERA faucet ticket — the seventh
     /// provenance arm. Scoped to one network through its `faucet_id`.
     pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
+
+    /// The route-wide settle's one output credit, funded by a reserve
+    /// consumption in every vault the route crosses — the eighth provenance
+    /// arm (amendment 2c-H, H9). Schema 1.
+    pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
@@ -339,6 +344,14 @@ pub mod schema {
         (super::class::TRADE_INTENT, 1),
         (super::class::MARKET_TERMS, 1),
         (super::class::SETTLEMENT_BUNDLE, 1),
+        // Amendment 2c-H H17: `0x0031` field 4 now admits grammar 33 beside 26,
+        // which widens a frozen member's meaning, so `0x0031` schema 1 burns;
+        // by §2.7 nesting `0x0033` schema 2 and `0x000E` schema 2 burn with it.
+        // A 2c-B-conformant schema-1 verifier would otherwise refuse a valid
+        // route-wide bundle while claiming the same schema.
+        (super::class::DSM_SUCCESSOR_EVIDENCE, 1),
+        (super::class::MARKET_TERMS, 2),
+        (super::class::SETTLEMENT_BUNDLE, 2),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live

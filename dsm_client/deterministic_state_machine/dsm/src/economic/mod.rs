@@ -46,7 +46,7 @@
 //! write set proves *what changed*, never *why a credit may appear*, and a
 //! verifier that checked only the mutations would accept a trader crediting
 //! itself from nothing. The `CreditSource` algebra (classes
-//! `0x0023`–`0x0028`, plus `0x0030`) lives in [`provenance`], and class
+//! `0x0023`–`0x0028`, plus `0x0030` and `0x0035`) lives in [`provenance`], and class
 //! `0x0029` (`IssuanceAuthorizationBody`, [`issuance`]) is the policy-signed
 //! predicate the `0x0023` arm resolves — the producer is `token.mint`'s
 //! economic admission.

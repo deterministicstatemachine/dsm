@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The six credit-source descriptors — CCB classes `0x0023`–`0x0028`.
+//! The credit-source descriptors — CCB classes `0x0023`–`0x0028`, `0x0030` and
+//! `0x0035`.
 //!
 //! ## Why these are inline, not addressed
 //!
@@ -33,7 +34,7 @@
 //!
 //! ## No `Custom` arm
 //!
-//! The algebra is closed. A credit that names none of these seven is unfunded,
+//! The algebra is closed. A credit that names none of these eight is unfunded,
 //! and there is deliberately no escape hatch — an open arm would be where
 //! every future "just this once" credit went.
 //!
@@ -191,13 +192,77 @@ impl CcbObject for CreditSourceValidatedFaucetDistribution {
     const SCHEMA: u16 = 1;
 }
 
-/// One funding statement for one credit. Closed: seven arms, no `Custom`.
+/// One entry of `E_R`: one route leg's reserve-consumption locator (amendment
+/// 2c-H, H9). Exactly `0x0026`'s per-vault fields; the route's `x` is stated
+/// once, on the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteLegReserveConsumption {
+    pub vault_id: [u8; 32],
+    pub parent_sequence: u64,
+    /// UNTRUSTED locator of this leg's owner economic ancestry — the `0x0026`
+    /// discipline.
+    pub owner_economic_position: u64,
+    pub reserve_consumption_evidence_addr: [u8; 32],
+}
+
+/// `0x0035` schema 1 — the trader's ONE output credit of a route-wide settle,
+/// funded by consuming a reserve in every vault the route crosses (amendment
+/// 2c-H, H9).
+///
+/// `legs` is `E_R`, a §2.5 sequence in ROUTE-LEG ORDER — never sorted, never
+/// discovery order: entry `k` is the operation's `legs[k]`. The encoder and the
+/// strict decoder refuse, from these bytes alone, an empty list, more than `h`
+/// entries, and two entries naming one vault or one evidence address
+/// ([`Self::entries_refusal`]). Nothing here shows that an entry corresponds to
+/// its leg: that needs the operation and the dereferenced evidence, and it is
+/// the credit-source verifier's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreditSourceDlvRouteReserveConsumption {
+    pub credit_mutation_index: u32,
+    pub x: [u8; 32],
+    pub legs: Vec<RouteLegReserveConsumption>,
+}
+
+impl CcbObject for CreditSourceDlvRouteReserveConsumption {
+    const CLASS: u16 = class::CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION;
+    const SCHEMA: u16 = 1;
+}
+
+impl CreditSourceDlvRouteReserveConsumption {
+    /// The syntactic rules on `E_R` (2c-H H9), shared by the encoder and the
+    /// strict decoder so the two cannot disagree. `None` when the entries are
+    /// well formed.
+    pub fn entries_refusal(&self) -> Option<CcbError> {
+        let class = Self::CLASS;
+        if self.legs.is_empty() {
+            return Some(CcbError::EmptySequence { class });
+        }
+        if self.legs.len() > crate::ccb::MAX_TRANSITIONS {
+            return Some(CcbError::TransitionCount {
+                got: self.legs.len(),
+            });
+        }
+        for (i, entry) in self.legs.iter().enumerate() {
+            if self.legs.iter().skip(i + 1).any(|later| {
+                later.vault_id == entry.vault_id
+                    || later.reserve_consumption_evidence_addr
+                        == entry.reserve_consumption_evidence_addr
+            }) {
+                return Some(CcbError::DuplicateSetElement { class });
+            }
+        }
+        None
+    }
+}
+
+/// One funding statement for one credit. Closed: eight arms, no `Custom`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreditSource {
     AuthorizedIssuance(CreditSourceAuthorizedIssuance),
     SameTransitionMove(CreditSourceSameTransitionMove),
     ValidatedPeerDebit(CreditSourceValidatedPeerDebit),
     DlvReserveConsumption(CreditSourceDlvReserveConsumption),
+    DlvRouteReserveConsumption(CreditSourceDlvRouteReserveConsumption),
     ValidatedDlvSettlementPayment(CreditSourceValidatedDlvSettlementPayment),
     VerifiedOfflineReentry(CreditSourceVerifiedOfflineReentry),
     ValidatedFaucetDistribution(CreditSourceValidatedFaucetDistribution),
@@ -213,6 +278,7 @@ impl CreditSource {
             Self::SameTransitionMove(_) => CreditSourceSameTransitionMove::CLASS,
             Self::ValidatedPeerDebit(_) => CreditSourceValidatedPeerDebit::CLASS,
             Self::DlvReserveConsumption(_) => CreditSourceDlvReserveConsumption::CLASS,
+            Self::DlvRouteReserveConsumption(_) => CreditSourceDlvRouteReserveConsumption::CLASS,
             Self::ValidatedDlvSettlementPayment(_) => {
                 CreditSourceValidatedDlvSettlementPayment::CLASS
             }
@@ -229,27 +295,35 @@ impl CreditSource {
             Self::SameTransitionMove(s) => s.credit_mutation_index,
             Self::ValidatedPeerDebit(s) => s.credit_mutation_index,
             Self::DlvReserveConsumption(s) => s.credit_mutation_index,
+            Self::DlvRouteReserveConsumption(s) => s.credit_mutation_index,
             Self::ValidatedDlvSettlementPayment(s) => s.credit_mutation_index,
             Self::VerifiedOfflineReentry(s) => s.credit_mutation_index,
             Self::ValidatedFaucetDistribution(s) => s.credit_mutation_index,
         }
     }
 
-    /// The direct external evidence address this source references, if any.
+    /// Every direct external evidence address this source references, in field
+    /// order.
     ///
-    /// `SameTransitionMove` returns `None` — it is intra-transition and has no
-    /// external evidence at all. The manifest's `provenance_evidence_addrs` is
-    /// derived from exactly these, which is why it is a publication index
-    /// rather than a second description of provenance.
-    pub fn external_evidence_addr(&self) -> Option<[u8; 32]> {
+    /// `SameTransitionMove` references none — it is intra-transition and has no
+    /// external evidence at all — and a route reserve consumption references one
+    /// per route leg (2c-H H9). The manifest's `provenance_evidence_addrs` is
+    /// derived from exactly these, which is why it is a publication index rather
+    /// than a second description of provenance.
+    pub fn external_evidence_addrs(&self) -> Vec<[u8; 32]> {
         match self {
-            Self::AuthorizedIssuance(s) => Some(s.issuance_authorization_addr),
-            Self::SameTransitionMove(_) => None,
-            Self::ValidatedPeerDebit(s) => Some(s.acceptance_evidence_addr),
-            Self::DlvReserveConsumption(s) => Some(s.reserve_consumption_evidence_addr),
-            Self::ValidatedDlvSettlementPayment(s) => Some(s.payment_evidence_addr),
-            Self::VerifiedOfflineReentry(s) => Some(s.branch_evidence_addr),
-            Self::ValidatedFaucetDistribution(s) => Some(s.faucet_claim_evidence_addr),
+            Self::AuthorizedIssuance(s) => vec![s.issuance_authorization_addr],
+            Self::SameTransitionMove(_) => Vec::new(),
+            Self::ValidatedPeerDebit(s) => vec![s.acceptance_evidence_addr],
+            Self::DlvReserveConsumption(s) => vec![s.reserve_consumption_evidence_addr],
+            Self::DlvRouteReserveConsumption(s) => s
+                .legs
+                .iter()
+                .map(|entry| entry.reserve_consumption_evidence_addr)
+                .collect(),
+            Self::ValidatedDlvSettlementPayment(s) => vec![s.payment_evidence_addr],
+            Self::VerifiedOfflineReentry(s) => vec![s.branch_evidence_addr],
+            Self::ValidatedFaucetDistribution(s) => vec![s.faucet_claim_evidence_addr],
         }
     }
 
@@ -289,6 +363,22 @@ impl CreditSource {
                 push_digest32(&mut out, &s.x); // 4
                 push_u64(&mut out, s.owner_economic_position); // 5
                 push_digest32(&mut out, &s.reserve_consumption_evidence_addr); // 6
+            }
+            Self::DlvRouteReserveConsumption(s) => {
+                if let Some(refusal) = s.entries_refusal() {
+                    return Err(refusal);
+                }
+                push_envelope::<CreditSourceDlvRouteReserveConsumption>(&mut out);
+                push_u32(&mut out, s.credit_mutation_index); // 1
+                push_digest32(&mut out, &s.x); // 2
+                let count = u32::try_from(s.legs.len()).map_err(|_| CcbError::LengthOverflow)?;
+                push_u32(&mut out, count); // 3, E_R in route-leg order
+                for entry in &s.legs {
+                    push_digest32(&mut out, &entry.vault_id);
+                    push_u64(&mut out, entry.parent_sequence);
+                    push_u64(&mut out, entry.owner_economic_position);
+                    push_digest32(&mut out, &entry.reserve_consumption_evidence_addr);
+                }
             }
             Self::ValidatedDlvSettlementPayment(s) => {
                 push_envelope::<CreditSourceValidatedDlvSettlementPayment>(&mut out);

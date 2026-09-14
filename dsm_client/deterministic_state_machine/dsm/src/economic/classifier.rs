@@ -78,7 +78,10 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // allocation, and the accepting transition refuses the operation
         // without a matching pending admission.
         FaucetClaim { .. } => ClosedWriteSet,
-        DlvSettle { .. } | DlvClose { .. } => ClosedWriteSet,
+        // A route settle (amendment 2c-H H10) states its complete effect too:
+        // one net debit, one net credit funded by 0x0035, one receipt leaf per
+        // vault and one acceptance leaf.
+        DlvSettle { .. } | DlvRouteSettle { .. } | DlvClose { .. } => ClosedWriteSet,
         // The 3.6 v2 vault operations state their complete economic effect
         // in the signed operation: both funding legs (create), or the exact
         // reserve movement with the parent vault-state binding (owner apply).
@@ -116,11 +119,6 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // changed, `None` is impossible.
         DlvCreate { .. } => None,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
-        // Amendment 2c-H: a route settle's closed write set (net debit, net
-        // credit funded by 0x0035, one receipt leaf per vault, one acceptance
-        // leaf) is stated by the write-set arm of this same change. Until that
-        // arm exists it is refused, never admitted on a partial write set.
-        DlvRouteSettle { .. } => UnsupportedValueTransition,
     }
 }
 

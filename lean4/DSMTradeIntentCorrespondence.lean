@@ -248,4 +248,90 @@ theorem a_disagreeing_output_never_satisfies
     simp [beq_eq_false_iff_ne, h]
   simp [this]
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Amendment 2c-H H11, SAT-R: a route of N legs, each certified at its OWN vault
+--
+-- SAT.5-R: at vault k, the leg's input re-simulated against vault k's
+-- AUTHENTICATED state reproduces the leg's output exactly. SAT.6-R: each leg is
+-- priced at its vault's rate, and the intent's rate is the sum of the legs'.
+-- The intent's exact output is the LAST leg's; RC.2 carries every intermediate
+-- output into the next leg (DSMRouteConservation).
+--
+-- Mutation control, executed rather than asserted: the per-vault conjunct
+-- (`legs.all legSatisfies`) dropped from `routeSatisfies`
+--   -> `a_leg_its_own_vault_does_not_reproduce_is_refused` is proved FALSE by
+--      the kernel ("Tactic `decide` proved that the proposition ... is false"),
+--      and `every_vault_reproduces_its_own_leg` loses its proof (the
+--      conjunction it projects no longer exists). Reverted; this is the
+--      unmutated module.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+/-- One route leg as SAT-R reads it at its vault. -/
+structure RouteLeg where
+  amountIn  : Nat
+  amountOut : Nat
+  feeBps    : Nat
+deriving DecidableEq, Repr
+
+/-- SAT.5-R and the per-vault half of SAT.6-R, at ONE vault. -/
+def legSatisfies (policy : VaultState → Nat → Nat) (leg : RouteLeg) (v : VaultState) : Bool :=
+  (leg.amountOut == policy v leg.amountIn) && (leg.feeBps == v.feeBps)
+
+/-- SAT-R route-wide: every vault certifies its own leg (2c-H H13), the
+    intent's exact output is the last leg's, and its rate is the legs' sum. -/
+def routeSatisfies (policy : VaultState → Nat → Nat) (i : Intent)
+    (legs : List (RouteLeg × VaultState)) : Bool :=
+  legs.all (fun p => legSatisfies policy p.1 p.2)
+    && (match legs.getLast? with
+        | some p => i.exactOut == p.1.amountOut
+        | none => false)
+    && (i.feeBps == (legs.map (fun p => p.1.feeBps)).foldl (· + ·) 0)
+
+/-- For ANY route: a satisfied intent has every vault reproducing its own leg
+    from its own authenticated state. No vault's certification stands in for
+    another's. -/
+theorem every_vault_reproduces_its_own_leg
+    (policy : VaultState → Nat → Nat) (i : Intent) (legs : List (RouteLeg × VaultState))
+    (h : routeSatisfies policy i legs = true) :
+    ∀ p ∈ legs, legSatisfies policy p.1 p.2 = true := by
+  unfold routeSatisfies at h
+  simp only [Bool.and_eq_true, List.all_eq_true] at h
+  exact h.1.1
+
+/-- Vault B: 30 bps, reserves 900 / 800. `samplePolicy vb 45 = 800 * 45 / 945 = 38`. -/
+def vb : VaultState := { feeBps := 30, reserveIn := 900, reserveOut := 800 }
+
+theorem the_second_vault_output_is_thirtyeight : samplePolicy vb 45 = 38 := by decide
+
+def legA : RouteLeg := { amountIn := 100, amountOut := 45, feeBps := 30 }
+def legB : RouteLeg := { amountIn := 45, amountOut := 38, feeBps := 30 }
+def routeIntent : Intent :=
+  { tokenIn := 1, amountIn := 100, tokenOut := 3, exactOut := 38, feeBps := 60, nonce := 7 }
+
+theorem the_honest_route_satisfies :
+    routeSatisfies samplePolicy routeIntent [(legA, vn), (legB, vb)] = true := by decide
+
+/-- SAT.5-R at vault B alone. The intent and the forged leg agree with each
+    other and vault A certifies — refused, because vault B's own state does not
+    reproduce its leg. -/
+theorem a_leg_its_own_vault_does_not_reproduce_is_refused :
+    routeSatisfies samplePolicy { routeIntent with exactOut := 40 }
+      [(legA, vn), ({ legB with amountOut := 40 }, vb)] = false := by decide
+
+/-- SAT.6-R: the signed rate is the SUM of the legs' rates. -/
+theorem a_rate_that_is_not_the_legs_sum_is_refused :
+    routeSatisfies samplePolicy { routeIntent with feeBps := 30 }
+      [(legA, vn), (legB, vb)] = false := by decide
+
+/-- The exact output is the last leg's, never an intermediate one. -/
+theorem an_intermediate_output_as_the_exact_output_is_refused :
+    routeSatisfies samplePolicy { routeIntent with exactOut := 45 }
+      [(legA, vn), (legB, vb)] = false := by decide
+
+#print axioms every_vault_reproduces_its_own_leg
+#print axioms the_honest_route_satisfies
+#print axioms a_leg_its_own_vault_does_not_reproduce_is_refused
+#print axioms a_rate_that_is_not_the_legs_sum_is_refused
+#print axioms an_intermediate_output_as_the_exact_output_is_refused
+
 end DSMTradeIntent

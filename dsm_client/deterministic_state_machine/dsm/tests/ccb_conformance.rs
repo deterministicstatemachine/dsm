@@ -563,15 +563,18 @@ fn live_schemas_match_the_registry_and_none_is_burned() {
         // Amendment 2c-D defined 0x0011; it was "blocked" until then.
         (0x0011, 1),
         (0x000D, 2),
-        (0x000E, 2),
+        // Amendment 2c-H H17: `0x0031` field 4 admits grammar 33 beside 26, so
+        // `0x0031` moved to schema 2, and §2.7 nesting carried the bump into
+        // `0x0033` and `0x000E`.
+        (0x000E, 3),
         (0x000F, 1),
         (0x0010, 1),
         (0x0015, 2),
         (0x0016, 2),
-        (0x0031, 1),
+        (0x0031, 2),
         // Amendment 2c-D allocated 0x0032 as the bundle-acceptance leaf state.
         (0x0032, 1),
-        (0x0033, 2),
+        (0x0033, 3),
     ];
 
     for (name, class, sch) in live {

@@ -17,8 +17,9 @@ use dsm::economic::claim::{
 };
 use dsm::economic::credit::{
     CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
-    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
+    CreditSourceDlvRouteReserveConsumption, CreditSourceSameTransitionMove,
+    CreditSourceValidatedDlvSettlementPayment, CreditSourceValidatedPeerDebit,
+    CreditSourceVerifiedOfflineReentry, RouteLegReserveConsumption,
 };
 use dsm::economic::decode::{decode_credit_source, decode_leaf_state, decode_transition_witness};
 use dsm::economic::mutation::EconomicLeafMutation;
@@ -563,6 +564,101 @@ fn the_burned_dlv_source_schemas_are_refused() {
         assert!(
             decode_credit_source(&burned).is_err(),
             "burned schema-1 bytes must be refused"
+        );
+    }
+}
+
+// ── 2c-H H9: 0x0035, the route reserve consumption ─────────────────────────
+
+/// `E_R` over `(vault, evidence address)` entries, in the order given.
+fn route_consumption(entries: &[([u8; 32], [u8; 32])]) -> CreditSource {
+    CreditSource::DlvRouteReserveConsumption(CreditSourceDlvRouteReserveConsumption {
+        credit_mutation_index: 1,
+        x: [0x55; 32],
+        legs: entries
+            .iter()
+            .enumerate()
+            .map(|(k, (vault, addr))| RouteLegReserveConsumption {
+                vault_id: *vault,
+                parent_sequence: 12 + k as u64,
+                owner_economic_position: 6 + k as u64,
+                reserve_consumption_evidence_addr: *addr,
+            })
+            .collect(),
+    })
+}
+
+/// E_R is route-leg order, never sorted: the codec keeps an unsorted list as
+/// it is, and the provenance index names every leg's evidence.
+#[test]
+fn a_route_reserve_consumption_round_trips_in_route_order() {
+    let source = route_consumption(&[([0xC9; 32], [0x61; 32]), ([0xC1; 32], [0x62; 32])]);
+    let bytes = source.encode().expect("encodable");
+    assert_eq!(&bytes[..4], &[0x00, 0x35, 0x00, 0x01], "0x0035 schema 1");
+    // envelope 4, index 4, x 32, count 4, then 2 × (32 + 8 + 8 + 32)
+    assert_eq!(bytes.len(), 4 + 4 + 32 + 4 + 2 * 80);
+    assert_eq!(decode_credit_source(&bytes).expect("decodable"), source);
+    assert_eq!(
+        source.external_evidence_addrs(),
+        vec![[0x61; 32], [0x62; 32]],
+        "one evidence address per leg, in route order"
+    );
+}
+
+/// The decoder refuses what its OWN bytes show — an empty or over-`h` count, a
+/// trailing byte, one vault or one evidence address twice — and nothing that
+/// would need the operation.
+#[test]
+fn the_route_reserve_consumption_decoder_refuses_what_its_own_bytes_show() {
+    let good = route_consumption(&[([0xC1; 32], [0x61; 32]), ([0xC2; 32], [0x62; 32])]);
+    let bytes = good.encode().expect("encodable");
+    let count_at = 4 + 4 + 32;
+
+    let mut empty = bytes[..count_at].to_vec();
+    empty.extend_from_slice(&0u32.to_be_bytes());
+    assert!(decode_credit_source(&empty).is_err(), "an empty E_R");
+
+    // Refused on the count alone: no entry follows it.
+    let mut over = bytes[..count_at].to_vec();
+    over.extend_from_slice(
+        &u32::try_from(dsm::ccb::MAX_TRANSITIONS + 1)
+            .unwrap()
+            .to_be_bytes(),
+    );
+    assert!(decode_credit_source(&over).is_err(), "more entries than h");
+
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(decode_credit_source(&trailing).is_err(), "a trailing byte");
+
+    for (what, entries) in [
+        (
+            "one vault twice",
+            [([0xC1; 32], [0x61; 32]), ([0xC1; 32], [0x62; 32])],
+        ),
+        (
+            "one evidence address twice",
+            [([0xC1; 32], [0x61; 32]), ([0xC2; 32], [0x61; 32])],
+        ),
+    ] {
+        assert!(
+            matches!(
+                route_consumption(&entries).encode(),
+                Err(CcbError::DuplicateSetElement { class: 0x0035 })
+            ),
+            "the encoder refuses {what}"
+        );
+        let mut hand = bytes[..count_at].to_vec();
+        hand.extend_from_slice(&2u32.to_be_bytes());
+        for (k, (vault, addr)) in entries.iter().enumerate() {
+            hand.extend_from_slice(vault);
+            hand.extend_from_slice(&(12 + k as u64).to_be_bytes());
+            hand.extend_from_slice(&(6 + k as u64).to_be_bytes());
+            hand.extend_from_slice(addr);
+        }
+        assert!(
+            decode_credit_source(&hand).is_err(),
+            "the decoder refuses {what}"
         );
     }
 }

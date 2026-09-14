@@ -297,7 +297,11 @@ pub struct DsmSuccessorEvidence {
 
 impl CcbObject for DsmSuccessorEvidence {
     const CLASS: u16 = class::DSM_SUCCESSOR_EVIDENCE;
-    const SCHEMA: u16 = 1;
+    /// Schema 2 (amendment 2c-H, H17). Field 4 is one settlement-operation
+    /// preimage of a frozen grammar, self-discriminated by its first byte: 26
+    /// (`DlvSettle`) or 33 (`DlvRouteSettle`). Schema 1 admitted grammar 26
+    /// alone; widening a frozen member's meaning burns it (§2.8).
+    const SCHEMA: u16 = 2;
 }
 
 impl DsmSuccessorEvidence {
@@ -368,10 +372,10 @@ pub struct MarketTerms {
 
 impl CcbObject for MarketTerms {
     const CLASS: u16 = class::MARKET_TERMS;
-    /// Schema 2, transitively: field 1 nests `0x000B`, and §2.7 nests by
-    /// complete CCB including the nested schema, so 2c-E's cut changes these
-    /// bytes. Schema 1 is BURNED.
-    const SCHEMA: u16 = 2;
+    /// Schema 3, transitively through field 6 (`0x0031` schema 2, amendment
+    /// 2c-H H17): §2.7 nests by complete CCB including the nested schema.
+    /// Schemas 1 (2c-E) and 2 are BURNED.
+    const SCHEMA: u16 = 3;
 }
 
 impl MarketTerms {
@@ -534,7 +538,8 @@ pub enum BundleShape {
 
 /// §5.19 — `B`. Constructed only through [`SettlementBundle::market`] and
 /// [`SettlementBundle::owner_close`], so an object that exists satisfies the
-/// shape rule and the beta cardinality.
+/// shape rule and its cardinality: one `T_v` for grammar 26 and an owner
+/// close, one per leg (at most `MAX_TRANSITIONS`) for grammar 33.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettlementBundle {
     market_terms: Option<MarketTerms>,
@@ -543,10 +548,11 @@ pub struct SettlementBundle {
 
 impl CcbObject for SettlementBundle {
     const CLASS: u16 = class::SETTLEMENT_BUNDLE;
-    /// Schema 2, transitively through `0x0033` (2c-E §7). The owner-close arm
-    /// changes no substance but shares the enclosing class, so a close bundle's
-    /// bytes move with this bump. Schema 1 is BURNED.
-    const SCHEMA: u16 = 2;
+    /// Schema 3, transitively through `0x0033` (amendment 2c-H H17, the 2c-E §7
+    /// precedent). The owner-close arm changes no substance but shares the
+    /// enclosing class, so a close bundle's bytes move with this bump. Schemas
+    /// 1 and 2 are BURNED.
+    const SCHEMA: u16 = 3;
 }
 
 impl SettlementBundle {
@@ -1161,7 +1167,7 @@ mod tests {
         // length is unchanged at 50,330.
         assert_eq!(
             &bytes[..9],
-            &[0x00, 0x0E, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x01]
+            &[0x00, 0x0E, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]
         );
         assert_eq!(&bytes[9..13], &[0x00, 0x0F, 0x00, 0x01]);
         assert_eq!(&bytes[13..45], &parent, "parent_binding is a bare digest32");
@@ -1180,11 +1186,11 @@ mod tests {
             ConsumedDlvTransition::market(parent, successor(parent, 1_010_000, 495_065)).unwrap();
         let b = SettlementBundle::market(terms(parent), vec![t]).unwrap();
         let bytes = b.encode().unwrap();
-        assert_eq!(&bytes[..5], &[0x00, 0x0E, 0x00, 0x02, 0x01]);
+        assert_eq!(&bytes[..5], &[0x00, 0x0E, 0x00, 0x03, 0x01]);
         assert_eq!(
             &bytes[5..9],
-            &[0x00, 0x33, 0x00, 0x02],
-            "MarketTerms follows the marker, at SCHEMA 2 (2c-E)"
+            &[0x00, 0x33, 0x00, 0x03],
+            "MarketTerms follows the marker, at SCHEMA 3 (2c-H)"
         );
         assert_eq!(b.shape(), BundleShape::Market);
         // The transition's last two bytes: proof_material absent, field 4 absent.

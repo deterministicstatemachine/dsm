@@ -177,7 +177,7 @@ impl EconomicTransitionWitness {
         let mut addrs: Vec<[u8; 32]> = self
             .credit_sources
             .iter()
-            .filter_map(CreditSource::external_evidence_addr)
+            .flat_map(CreditSource::external_evidence_addrs)
             .collect();
         addrs.sort_unstable();
         addrs.dedup();

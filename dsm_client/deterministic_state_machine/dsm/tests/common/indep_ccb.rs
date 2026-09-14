@@ -209,8 +209,9 @@ pub fn route(legs: Vec<Vec<u8>>) -> Vec<u8> {
     out
 }
 
-/// `0x0031` schema 1: three digests, `operation_bytes`, `entropy` as `bytes`
-/// of 32, field 6 absent, `sigma_dsm` as `bytes`.
+/// `0x0031` schema 2 (2c-H H17): three digests, `operation_bytes` (grammar 26
+/// or 33, opaque here), `entropy` as `bytes` of 32, field 6 absent,
+/// `sigma_dsm` as `bytes`.
 pub fn dsm_successor_evidence(
     rel_key: [u8; 32],
     embedded_parent: [u8; 32],
@@ -220,7 +221,7 @@ pub fn dsm_successor_evidence(
     sigma_dsm: &[u8],
 ) -> Vec<u8> {
     [
-        envelope(0x0031, 1),
+        envelope(0x0031, 2),
         rel_key.to_vec(),
         embedded_parent.to_vec(),
         counterparty_devid.to_vec(),
@@ -241,7 +242,7 @@ pub fn market_terms(
     recovery_material: Vec<u8>,
 ) -> Vec<u8> {
     [
-        envelope(0x0033, 2),
+        envelope(0x0033, 3),
         intent,
         route_set_commitment.to_vec(),
         selected_route,
@@ -273,7 +274,7 @@ pub fn consumed_dlv_transition(
     .concat()
 }
 
-/// `0x000E` schema 2 (2c-E, transitive): field 1 with its marker always emitted, then the
+/// `0x000E` schema 3 (2c-H H17, transitive): field 1 with its marker always emitted, then the
 /// transition SET ordered by complete element encoding.
 pub fn settlement_bundle(market_terms: Option<Vec<u8>>, mut transitions: Vec<Vec<u8>>) -> Vec<u8> {
     let field1 = match market_terms {
@@ -281,7 +282,7 @@ pub fn settlement_bundle(market_terms: Option<Vec<u8>>, mut transitions: Vec<Vec
         Some(t) => [vec![0x01], t].concat(),
     };
     transitions.sort();
-    let mut out = [envelope(0x000E, 2), field1, u32be(transitions.len() as u32)].concat();
+    let mut out = [envelope(0x000E, 3), field1, u32be(transitions.len() as u32)].concat();
     for t in transitions {
         out.extend(t);
     }
