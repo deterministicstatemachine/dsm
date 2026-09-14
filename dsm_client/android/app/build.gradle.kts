@@ -176,6 +176,17 @@ android {
     }
 
     testOptions {
+        // Gradle managed device for the instrumented suite in CI (device-local
+        // tests only; `@RealHardware` classes are excluded by runner argument).
+        managedDevices {
+            localDevices {
+                create("pixel6Api34") {
+                    device = "Pixel 6"
+                    apiLevel = 34
+                    systemImageSource = "aosp-atd"
+                }
+            }
+        }
         unitTests {
             isIncludeAndroidResources = true
             // Many Android platform APIs in unit tests don't have real implementations; returning defaults makes tests less flaky
