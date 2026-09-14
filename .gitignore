@@ -247,7 +247,12 @@ Agent-Refinement-System-Final.md
 # ---------------------------------------------------------------------------
 .agents/
 .claude/
-docs/plans/
+/docs/*
+!/docs/book/
+!/docs/audits/
+!/docs/bench-proofs/
+/PAPER_ALIGNMENT.md
+/hooks/
 .claude-plugin/
 .clinerules/
 .cursor/
@@ -256,7 +261,6 @@ AGENTS.md
 CLAUDE.md
 caveman-compress/
 commands/caveman*.toml
-hooks/caveman-*
 plugins/caveman/
 rules/caveman-*.md
 skills/
