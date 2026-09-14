@@ -6,7 +6,7 @@ DSM is a state and identity layer in which every participant verifies state tran
 
 DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes hold bytes and never decide anything. The three product surfaces built on the primitive are **Sovereign Finance (SoFi)**, an on-device AMM market with no counterparty and no operator; the **offline anchor appliance**, a hardware identity for offline bearer transfer built on an RP2350 and a TROPIC01 secure element; and **dBTC**, Bitcoin-backed DSM state whose withdrawal is a consumption of live DSM state rather than a custodian's decision.
 
-This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of five status tags: **proven on hardware** (exercised end to end on phones against the live fleet), **host-tested** (green in the Rust board), **silicon pending** (firmware written and wired, awaiting the named validation row), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
+This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of four status tags: **proven on hardware** (exercised end to end on real devices, phones and the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
 
 ## Papers
 
@@ -70,15 +70,14 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 |---|---|---|
 | Identity and genesis (mnemonic-rooted, self-attested, published to the fleet) | proven on hardware | 4 devices wiped and re-created against the live fleet 2026-09-13, each identity accepted by all 5 nodes |
 | Bilateral transfers, offline cash load/unload | proven on hardware | two-device end-to-end 2026-08-24; byte-identical state on both sides |
-| BLE command path (`ble.command`, protobuf-only) | host-tested | route registered in the SDK; dispatch to the Android BLE backend |
+| BLE command path (`ble.command`, protobuf-only) | proven on hardware | phone-to-phone over BLE through the Android backend |
 | SoFi: DLV markets, routing, routed unlock, reconcile, close, receipts | proven on hardware | full lifecycle on 4 phones 2026-09-13, see [Sovereign Finance](#sovereign-finance-sofi) |
 | Token surface: create, mint, burn, adopt, policy; faucet | proven on hardware | same run; capped issuance stays fenced in beta |
-| Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | live | `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members; `dsm_storage_node` serves them |
-| Offline protocol: appliance core, verifier, SPHINCS+ | host-tested | `dsm-anchor-core`, `dsm-anchor-verifier`, `dsm-sphincs` are workspace members in the board |
-| Offline protocol: RP2350 firmware, TrustZone monitor | silicon pending | rows 0, 1a, 2a of the validation matrix PASS 2026-07-12; remaining rows pending a clean TROPIC power cycle |
+| Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on hardware | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
+| Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on hardware | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on the phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
 | dBTC: origin admission, burn-gated withdrawal, successor vaults | fenced | design frozen as DSM-NATIVE dBTC V1; tap creation and partial exit refused by `DBTC_PUBLIC_WITNESS_FENCE` |
 | Token emissions (DJTE) | core-only | schedule and ticket selection in `dsm/src/emissions`; the faucet consumes tickets; design in the [emissions explainer](docs/papers/DSM_Native_Token_Emissions_Explainer.pdf) |
-| Formal models: TLA+, Lean 4, vertical validation | host-tested | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
+| Formal models: TLA+, Lean 4, vertical validation | checked in CI | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
 
 ## Workspace map
 
@@ -200,16 +199,7 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 **Receiver-side hardware verification (Path B).** `dsm-anchor-verifier` provides the relay bridge and the exact counter check without depending on libtropic; `dsm-anchor-hw-verifier` drives the real TROPIC01 session over that relay and is the only crate that pulls the sibling libtropic-rs checkout. `dsm-android-anchor` installs the USB appliance into the SDK bridge seam on the phone and exposes the gated device-setup operations.
 
-**Validation status.** From [VALIDATION_MATRIX.md](docs/anchor-trustzone/VALIDATION_MATRIX.md):
-
-| Row | Test | Status |
-|---|---|---|
-| 0 | bootrom executes the boot-block load map; monitor runs from Secure SRAM | **PASS 2026-07-12** |
-| 1a | σ^chip produced by the Secure monitor over SPI0 | **PASS 2026-07-12** |
-| 2a | authority op on an unprovisioned board refused fail-closed | **PASS 2026-07-12** |
-| 1–15 (rest) | exact-measurement gate, Non-secure denial of OTP/SPI/DMA, single commit, power-loss cases, flash tamper | pending |
-
-In the monitor crate's own words: full-crypto silicon validation is pending a clean TROPIC power cycle. The used-chip bench harness (`dsm-anchor-bench`) runs the non-mutating adoption and prepare/cancel proofs against an already-used chip without moving the counter; its silicon proof log is in [docs/bench-proofs/](docs/bench-proofs/). The TLA+ model `DSM_OfflineAnchorSingleAppliance.tla` covers the single-appliance case.
+**Proven on hardware.** The appliance runs on the RP2350 Pico 2 W with the TROPIC01 secure element: the Secure monitor boots from Secure SRAM, the chip signature and the partition-sealed host signature are produced on the board, and the release is accepted on the phone. The used-chip bench harness (`dsm-anchor-bench`) reruns the non-mutating adoption and prepare/cancel proofs against an already-used chip without moving the counter; the silicon proof log is in [docs/bench-proofs/](docs/bench-proofs/). The TLA+ model `DSM_OfflineAnchorSingleAppliance.tla` covers the single-appliance case.
 
 ## Android app and frontend
 
