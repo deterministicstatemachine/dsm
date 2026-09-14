@@ -8,25 +8,8 @@ DSM is not a blockchain, a rollup, or a payment-channel network. Storage nodes h
 
 This README is the map for release `v0.1.0-beta.4`. Every claim below carries one of four status tags: **proven on hardware** (exercised end to end on real devices, phones and the anchor appliance, against the live fleet), **checked in CI** (models and proofs that run in the pipeline), **fenced** (code present, refused by a named guard), or **core-only** (implemented in the core crate, not wired to a route).
 
-## Papers
-
-Not an engineer? Start with the **[plain-language guide](docs/papers/DSM_Plain_Language_Explainer.pdf)**: DSM, token emissions, offline payments, Sovereign Finance, and dBTC, with pictures and no formulas.
-
-One explainer per surface:
-
-| Paper | What it covers |
-|---|---|
-| [DSM](docs/papers/DSM_High_Level_Explainer.pdf) | the primitive: bilateral state, sparse Merkle trees, determinism, precommitment, linear resources, conflict-local finality |
-| [Sovereign Finance](docs/papers/SoFi_High_Level_Explainer.pdf) | DLVs, exact-output routing, client-computed quorum binding, non-authoritative storage |
-| [dBTC](docs/papers/dBTC_Native_Explainer.pdf) | consumption-gated release, successor vaults, no second double-spend system |
-| [Offline protocol](docs/papers/DSM_Offline_Explainer.pdf) | whole-state consumption, the three-factor witness, no chip as judge |
-| [Token emissions](docs/papers/DSM_Native_Token_Emissions_Explainer.pdf) | DJTE: a locked source vault, a proof-carrying lottery over sharded identities, no miner, clock, or coordinator |
-
-The normative text behind them is the [DSM Primitive](docs/papers/dsm_primitive.pdf) paper; the authority is the code, and each section below names where its code lives. See the [documentation index](#documentation-index).
-
 ## Contents
 
-0. [Papers](#papers)
 1. [Beta testers](#beta-testers)
 2. [Who this README is for](#who-this-readme-is-for)
 3. [Status board](#status-board)
@@ -76,7 +59,7 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 | Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on hardware | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
 | Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on hardware | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on the phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
 | dBTC: origin admission, burn-gated withdrawal, successor vaults | fenced | proven on hardware on signet earlier; fenced in this release while it is upgraded to align with Sovereign Finance (DSM-NATIVE dBTC V1), a small upgrade and the next thing being done; ships in v5 shortly after v4 |
-| Token emissions (DJTE) | core-only | schedule and ticket selection in `dsm/src/emissions`; the faucet consumes tickets; design in the [emissions explainer](docs/papers/DSM_Native_Token_Emissions_Explainer.pdf) |
+| Token emissions (DJTE) | core-only | schedule and ticket selection in `dsm/src/emissions`; the faucet consumes tickets |
 | Formal models: TLA+, Lean 4, vertical validation | checked in CI | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
 
 ## Workspace map
@@ -113,8 +96,8 @@ Membership is declared in the root [Cargo.toml](Cargo.toml). The default workspa
 
 - **Hash-adjacent bilateral state.** Each relationship is its own chain; a transition consumes its identified parent, and conflicting successors to one consumed state are excluded by the Tripwire. There is no global ordering to wait for. Handbook: [Protocol Reference](docs/book/05-protocol-reference.md).
 - **Device state and the SMT.** A device's head commits every relationship tip, its balance projections, and adoption leaves into one sparse Merkle tree. The per-device leaf cache is bounded (1024 leaves, FIFO eviction), which is a stated property, not a hidden one.
-- **Canonical commit bytes (CCB).** Everything that is hashed or signed is a domain-separated canonical encoding produced by the core; protobuf bytes are transport and are never signed. Registry: [ccb-object-registry.md](docs/papers/ccb-object-registry.md).
-- **Economic root register.** Admitted economic state is rooted in a register kept on the storage fleet as write-once slots, pinned to a member set and a quorum. Storage nodes accept or refuse a write; they never interpret it ([ADR 0002](docs/adr/0002-storage-acceptance-is-not-cryptographic-endorsement.md)).
+- **Canonical commit bytes (CCB).** Everything that is hashed or signed is a domain-separated canonical encoding produced by the core; protobuf bytes are transport and are never signed. Code: [dsm/src/ccb/](dsm_client/deterministic_state_machine/dsm/src/ccb/).
+- **Economic root register.** Admitted economic state is rooted in a register kept on the storage fleet as write-once slots, pinned to a member set and a quorum. Storage nodes accept or refuse a write; they never interpret it.
 - **Genesis v3, mnemonic-rooted.** Genesis is derived from the BIP39 mnemonic and self-attested on the device (`createGenesisV2`), then the identity record is published to the fleet and accepted at quorum. There is no MPC service and no genesis server.
 - **Determinism bans.** No wall-clock markers in protocol or core logic. No JSON in protocol paths; Envelope v3 protobuf only, strict-fail on any other version. Hex is banned; Base32 Crockford is the only string form and only at UI, QR, and log boundaries. No `unsafe` in core protocol paths without review. Full list: [Hard Invariants](docs/book/appendix-b-hard-invariants.md).
 - **Post-quantum by default.** BLAKE3 everywhere, always with a domain tag; SPHINCS+ (BLAKE3-keyed, byte-compatible with `dsm-sphincs`) for every signature. Handbook: [Cryptographic Architecture](docs/book/06-cryptographic-architecture.md).
@@ -140,11 +123,11 @@ SoFi is an AMM market that runs on the participants' own devices. A liquidity pr
 
 **Proven on hardware, 2026-09-13.** On a wiped five-node fleet with four phones: each device created its identity (accepted 5 of 5) and claimed the faucet; the owner created a token, minted supply, and funded a vault at 30 bps; two traders adopted the token and swapped, each landing the expected output; a third device that had never adopted the token was refused at `dlv.unlockRouted`; the owner reconciled through three vault generations; a second swap by the first trader settled against the reconciled reserves; the owner's wallet showed the vault's reserves debited from the start.
 
-Read next: the [SoFi high-level explainer](docs/papers/SoFi_High_Level_Explainer.pdf), [SoFi LP walkthrough](docs/sofi-lp-walkthrough.md), [two-device playbook](docs/sofi-two-device-playbook.md), [cross-device test](docs/cross-device-sofi-test.md), and the frozen amendments in [docs/papers/](docs/papers/) (`amendment-2c-*.md`). Code: the vault, routing, settlement, and receipt objects live in [dsm/src/dlv/](dsm_client/deterministic_state_machine/dsm/src/dlv/) and [dsm/src/economic/](dsm_client/deterministic_state_machine/dsm/src/economic/); the routes in [dlv_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/dlv_routes.rs), [route_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/route_routes.rs), [token_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/token_routes.rs), and [faucet_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/faucet_routes.rs).
+Code: the vault, routing, settlement, and receipt objects live in [dsm/src/dlv/](dsm_client/deterministic_state_machine/dsm/src/dlv/) and [dsm/src/economic/](dsm_client/deterministic_state_machine/dsm/src/economic/); the routes in [dlv_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/dlv_routes.rs), [route_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/route_routes.rs), [token_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/token_routes.rs), and [faucet_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/faucet_routes.rs).
 
 ## dBTC
 
-dBTC is Bitcoin-backed economic state native to DSM (paper: [dBTC explainer](docs/papers/dBTC_Native_Explainer.pdf); specification: DSM-NATIVE dBTC V1). A real Bitcoin output is funded under a vault profile and verified at the required depth; exactly that quantity is admitted as dBTC into DSM state. From then on dBTC moves the way every other DSM asset moves: as ordinary bilateral transitions, online or offline, with no Bitcoin transaction, no confirmation, no depositor, no custodian, and no ledger.
+dBTC is Bitcoin-backed economic state native to DSM. A real Bitcoin output is funded under a vault profile and verified at the required depth; exactly that quantity is admitted as dBTC into DSM state. From then on dBTC moves the way every other DSM asset moves: as ordinary bilateral transitions, online or offline, with no Bitcoin transaction, no confirmation, no depositor, no custodian, and no ledger.
 
 **The one rule everything follows from:** holding Bitcoin-related bytes is not holding dBTC. A party may hold the vault identifier, the lineage, every public receipt, the encrypted execution capsule, the fulfillment hash, and a copy of every storage replica, and still have no withdrawal authority. Release requires, conjunctively: live dBTC state, valid authority over it, a valid consumption of it, and DLV fulfillment derived from that consumption.
 
@@ -183,7 +166,7 @@ dBTC is Bitcoin-backed economic state native to DSM (paper: [dBTC explainer](doc
 
 ## Offline protocol
 
-Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Paper: [offline protocol explainer](docs/papers/DSM_Offline_Explainer.pdf); boot design: [boot_fenced_fused_anchor.tex](docs/papers/boot_fenced_fused_anchor.tex). Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-pico/](crates/dsm-anchor-pico/), [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the receiver side is [crates/dsm-anchor-verifier/](crates/dsm-anchor-verifier/) and [crates/dsm-anchor-hw-verifier/](crates/dsm-anchor-hw-verifier/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
+Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-pico/](crates/dsm-anchor-pico/), [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the receiver side is [crates/dsm-anchor-verifier/](crates/dsm-anchor-verifier/) and [crates/dsm-anchor-hw-verifier/](crates/dsm-anchor-hw-verifier/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
 
 **Two identity domains on one phone.** The online domain is the BIP39 seed alone: no hardware, all online DSM operation. The offline domain is a fusion of three factors, and every offline release must be witnessed by all three over the same root-advance message:
 
@@ -195,7 +178,7 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 **The appliance.** `dsm-anchor-core` implements the compact three-state machine (prepare, commit, emit, finalize), power-loss recovery, the software-only receiver acceptance predicate, and the protobuf wire protocol. The chip and host witnesses are minted at commit, after a one-way physical counter decrement that is kept 1:1 with the SMT counter, so no valid release witness exists for an origin while that origin is still spendable. A birth fuse and a slot-0 birth cage make first provisioning one-way. The receiver reads no live chip state, no relay session, and no raw counter: it checks signatures over the message.
 
-**TrustZone-M split on the RP2350.** The Secure monitor (`dsm-anchor-secure-monitor`) owns OTP, the host key, the TROPIC01 SPI bus, the physical counter, the prepare/commit/recovery state, and the exact-measurement seal, and exposes exactly one Non-secure-callable gateway with a fixed-slot mailbox. The Non-secure application (`dsm-anchor-nonsecure-app`) owns USB-CDC, protobuf, and host transport, and has no path to any Secure resource. The monitor runs from Secure SRAM after a bootrom load map and locks SAU and ACCESSCTRL before launching the app. Boundary: [SECURITY_BOUNDARY.md](docs/anchor-trustzone/SECURITY_BOUNDARY.md); memory: [MEMORY_MAP.md](docs/anchor-trustzone/MEMORY_MAP.md).
+**TrustZone-M split on the RP2350.** The Secure monitor (`dsm-anchor-secure-monitor`) owns OTP, the host key, the TROPIC01 SPI bus, the physical counter, the prepare/commit/recovery state, and the exact-measurement seal, and exposes exactly one Non-secure-callable gateway with a fixed-slot mailbox. The Non-secure application (`dsm-anchor-nonsecure-app`) owns USB-CDC, protobuf, and host transport, and has no path to any Secure resource. The monitor runs from Secure SRAM after a bootrom load map and locks SAU and ACCESSCTRL before launching the app.
 
 **Receiver-side hardware verification (Path B).** `dsm-anchor-verifier` provides the relay bridge and the exact counter check without depending on libtropic; `dsm-anchor-hw-verifier` drives the real TROPIC01 session over that relay and is the only crate that pulls the sibling libtropic-rs checkout. `dsm-android-anchor` installs the USB appliance into the SDK bridge seam on the phone and exposes the gated device-setup operations.
 
@@ -215,7 +198,7 @@ Release APKs are signed by the maintainer; CI does not sign or upload them. Hand
 
 ## Storage nodes and the beta fleet
 
-A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules ([ADR 0002](docs/adr/0002-storage-acceptance-is-not-cryptographic-endorsement.md), [ADR 0003](docs/adr/0003-transport-may-be-multi-message-acceptance-remains-atomic.md)). The beta fleet is five nodes in GCP `us-central1` with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
+A storage node is index-only persistence: it stores and serves bytes, keeps write-once registers, and never signs, validates, or interprets protocol rules. The beta fleet is five nodes in GCP `us-central1` with a quorum of three. The client pins the five members and the quorum in `dsm/src/economic/register.rs` under the `dsm-testnet` network id; the same register profile drives the delivery fan-out, so a message is delivered to exactly the quorum's worth of members. The app ships configured for this fleet.
 
 - Local development nodes: `make nodes-up`, `make nodes-down`, `make nodes-status`, `make nodes-reset` (PostgreSQL required). Handbook: [Storage Nodes](docs/book/07-storage-nodes.md).
 - Operators: Terraform and deployment scripts under `dsm_storage_node/`; the release workflow ships a Linux x86_64 binary with its SHA-256.
@@ -228,7 +211,7 @@ A storage node is index-only persistence: it stores and serves bytes, keeps writ
 - **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
-Reports: [docs/reports/](docs/reports/); audits: [docs/audits/](docs/audits/); paper-to-code alignment: [PAPER_ALIGNMENT.md](PAPER_ALIGNMENT.md).
+Audits: [docs/audits/](docs/audits/).
 
 ## Development workflow
 
@@ -267,12 +250,8 @@ It runs in `--release` because the shipped profile is what is gated and the cryp
 ## Documentation index
 
 - [Developer Handbook](docs/book/README.md) — architecture, setup, protocol reference, storage nodes, testing, command reference, glossary, hard invariants, spec index
-- [Papers](#papers) — plain-language guide, DSM, Sovereign Finance, dBTC, offline protocol, token emissions (all under [docs/papers/](docs/papers/))
-- [DSM Primitive](docs/papers/dsm_primitive.pdf) — boundary, definition, and composition of the primitive; [Initial bootstrap](docs/papers/Initial_bootstrap.pdf)
-- [Papers and frozen amendments](docs/papers/) — settlement and evidence profile, accepted successor, verification closure, lineage quarantine, exact-output trade intent, receipts, owner catch-up, CCB object registry
 - Where the code lives — core [dsm/src/](dsm_client/deterministic_state_machine/dsm/src/) (`core`, `bilateral`, `dlv`, `economic`, `ccb`, `vault`, `bitcoin`, `emissions`, `crypto`), SDK routes [dsm_sdk/src/handlers/](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/), storage node [dsm_storage_node/](dsm_storage_node/), appliance [crates/](crates/), Android [dsm_client/android/](dsm_client/android/), frontend [dsm_client/frontend/](dsm_client/frontend/)
-- [ADRs](docs/adr/) — domain separation constructions, storage acceptance, multi-message transport
-- [Audits](docs/audits/), [reports](docs/reports/), [bench proofs](docs/bench-proofs/), [anchor TrustZone](docs/anchor-trustzone/)
+- [Audits](docs/audits/) and [bench proofs](docs/bench-proofs/) — hardware and design audits, the silicon proof log
 - [Quickstart](QUICKSTART.md), [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md), [Support](SUPPORT.md), [Changelog](CHANGELOG.md)
 - [Proto schema](proto/dsm_app.proto) — the wire format
 
