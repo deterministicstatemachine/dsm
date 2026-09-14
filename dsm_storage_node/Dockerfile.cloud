@@ -40,13 +40,11 @@ COPY crates/dsm-anchor-verifier/Cargo.toml crates/dsm-anchor-verifier/Cargo.toml
 COPY crates/dsm-sphincs/Cargo.toml crates/dsm-sphincs/Cargo.toml
 
 # Stub crates for remaining workspace members so resolver doesn't fail
-RUN mkdir -p dsm-gen/src && echo 'fn main(){}' > dsm-gen/src/main.rs
 RUN mkdir -p tools/vector_runner/src && echo 'fn main(){}' > tools/vector_runner/src/main.rs
 RUN mkdir -p tools/vector_builder/src && echo 'fn main(){}' > tools/vector_builder/src/main.rs
 RUN mkdir -p tools/vertical_validation/src && echo 'fn main(){}' > tools/vertical_validation/src/main.rs
 
 # Check if these Cargo.tomls exist, else stub them
-RUN test -f dsm-gen/Cargo.toml || (echo '[package]\nname="dsm-gen"\nversion="0.1.0"\nedition="2021"\n[[bin]]\nname="dsm-gen"\npath="src/main.rs"' > dsm-gen/Cargo.toml)
 RUN test -f tools/vector_runner/Cargo.toml || (echo '[package]\nname="vector_runner"\nversion="0.1.0"\nedition="2021"\n[[bin]]\nname="vector_runner"\npath="src/main.rs"' > tools/vector_runner/Cargo.toml)
 RUN test -f tools/vector_builder/Cargo.toml || (echo '[package]\nname="vector_builder"\nversion="0.1.0"\nedition="2021"\n[[bin]]\nname="vector_builder"\npath="src/main.rs"' > tools/vector_builder/Cargo.toml)
 RUN test -f tools/vertical_validation/Cargo.toml || (echo '[package]\nname="vertical_validation"\nversion="0.1.0"\nedition="2021"\n[[bin]]\nname="vertical_validation"\npath="src/main.rs"' > tools/vertical_validation/Cargo.toml)
