@@ -537,12 +537,26 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      - name: Accept SDK licenses (NDK and system image downloads)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Install the NDK version Gradle pins
+        # app/build.gradle.kts pins ndkVersion, and its CMake build uses that NDK,
+        # so the Rust libraries are built with the same one. The path is resolved
+        # in the shell: a `${{ env.* }}` expression reads only workflow-defined
+        # variables, never the runner image's, and evaluated to an empty
+        # ANDROID_NDK_HOME that cargo-ndk refused.
+        run: |
+          NDK_VERSION="$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)"
+          test -n "$NDK_VERSION"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
       - name: Build the SDK library for every packaged ABI
         # refreshDsmJniLibs (app/build.gradle.kts) refuses to package unless all
         # three abiFilters ABIs have a library, so building only the emulator's
         # x86_64 would fail before any test ran. This is the repo's own target.
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: make android-libs
 
       - name: Cache Gradle caches
@@ -554,9 +568,6 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('dsm_client/android/**/*.gradle*', 'dsm_client/android/**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
-
-      - name: Accept SDK licenses (system image download)
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Run the instrumented suite on the managed device
         working-directory: dsm_client/android
