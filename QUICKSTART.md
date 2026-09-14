@@ -45,7 +45,7 @@ The default app config (`dsm_env_config.toml`) ships pre-configured to connect t
 
 No local PostgreSQL or local node setup is needed for normal development and testing. With outbound internet access, the app connects to these nodes over HTTPS.
 
-For optional local development nodes (offline dev without internet), see [docs/book/07-storage-nodes.md](docs/book/07-storage-nodes.md#local-multi-node-development).
+For optional local development nodes (offline dev without internet), see `dsm_storage_node/` and the `make nodes-*` targets.
 
 ## Prerequisites
 
@@ -74,7 +74,7 @@ Windows:
 
 - Use PowerShell
 - Run `.\scripts\dev.ps1 setup`
-- Android builds require WSL2; see [docs/book/03-development-setup.md](docs/book/03-development-setup.md)
+- Android builds require WSL2
 
 ## Clone
 
@@ -167,13 +167,13 @@ cargo run -p dsm-gen -- validate dsm-gen/test-vault.yaml
 cargo run -p dsm-gen -- validate dsm-gen/test-policy.yaml
 ```
 
-Then read [dsm-gen/README.md](dsm-gen/README.md) and [docs/book/16-code-generation.md](docs/book/16-code-generation.md).
+Then read [dsm-gen/README.md](dsm-gen/README.md).
 
 ## Bitcoin / dBTC
 
 Bitcoin testing is signet-backed. There is no local Bitcoin node workflow in this repository.
 
-See [docs/book/08-bitcoin-dbtc.md](docs/book/08-bitcoin-dbtc.md).
+Code: `dsm_client/deterministic_state_machine/dsm/src/bitcoin/`, `dsm/src/vault/`, and `dsm_sdk/src/handlers/bitcoin_invoke_routes.rs`.
 
 ## Optional: Local Storage Nodes
 
@@ -203,6 +203,4 @@ scripts/push_env_override.sh --local
 For deeper setup and platform-specific guidance:
 
 - [README.md](README.md)
-- [docs/book/02-quickstart.md](docs/book/02-quickstart.md)
-- [docs/book/03-development-setup.md](docs/book/03-development-setup.md)
-- [docs/book/12-command-reference.md](docs/book/12-command-reference.md)
+- `make help`

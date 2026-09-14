@@ -8,13 +8,13 @@ This repository is open to public feedback, but it is still an early beta.
 - Feature ideas: open a GitHub issue using the feature request template
 - Security issues: email `team@irrefutablelabs.org` and do not post publicly
 - Usage questions: open a GitHub issue or start from the documentation in
-  [README.md](README.md) and [docs/book/README.md](docs/book/README.md)
+  [README.md](README.md)
 
 ## Before You Open an Issue
 
 - Read [README.md](README.md)
 - Check [QUICKSTART.md](QUICKSTART.md)
-- Check [docs/book/13-troubleshooting.md](docs/book/13-troubleshooting.md)
+- Run `make doctor`
 - Search existing issues first
 
 ## Beta Expectations

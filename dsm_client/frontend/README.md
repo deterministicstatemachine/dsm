@@ -8,7 +8,5 @@ This frontend is wired for deterministic, protobuf-only integration with the DSM
 
 ## Start here
 
-Read the canonical guide for patterns, examples, and invariants:
-
-- ../../docs/book/11-integration-guide.md
+The bridge contract is `../android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt`; the wire format is `../../proto/dsm_app.proto`.
 

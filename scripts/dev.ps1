@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     All common developer tasks: build, test, storage-node management, frontend.
-    Android APK builds require WSL2 — see docs/book/03-development-setup.md#windows-setup.
+    Android APK builds require WSL2 — see QUICKSTART.md.
 
 .EXAMPLE
     .\scripts\dev.ps1 help
@@ -67,7 +67,7 @@ function Show-Help {
     Write-Host "    clean         Remove all build artifacts" -ForegroundColor Gray
     Write-Host ""
     Write-Host "  Android builds require WSL2 — run 'make android' inside WSL2." -ForegroundColor Yellow
-    Write-Host "  See docs/book/03-development-setup.md for Windows setup instructions." -ForegroundColor Yellow
+    Write-Host "  See QUICKSTART.md for Windows setup instructions." -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -135,7 +135,7 @@ function Invoke-Setup {
 
     Write-Host ""
     Write-Host "  Android builds: WSL2 required (NDK toolchain not supported on Windows native)" -ForegroundColor Yellow
-    Write-Host "  Install WSL2 + Ubuntu, then follow docs/book/03-development-setup.md inside WSL2." -ForegroundColor Yellow
+    Write-Host "  Install WSL2 + Ubuntu, then follow QUICKSTART.md inside WSL2." -ForegroundColor Yellow
     Write-Host ""
     Ok "Setup check complete."
 }
