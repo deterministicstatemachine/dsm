@@ -24,7 +24,8 @@ class BleEventRelayPersistenceTest {
     @Before
     fun setUp() {
         ctx = ApplicationProvider.getApplicationContext()
-        // Clear any prior test data
+        // Clear any prior test data and any bridge-ready state a prior test set
+        BleEventRelay.testResetBridgeReady()
         BleEventRelay.clearAll(ctx)
     }
 
@@ -55,11 +56,30 @@ class BleEventRelayPersistenceTest {
         }
         assertEquals(3, BleEventRelay.getPendingCount(ctx))
 
-        // When: flush
+        // When: the bridge is ready and we flush. There is no WebView in an
+        // instrumented process, so delivery throws and the relay DROPS the
+        // replayed event (persistIfUnavailable = false) instead of re-inserting
+        // it — which is exactly what lets the row count reach zero.
+        BleEventRelay.markBridgeReady(ctx)
         BleEventRelay.flushPersisted(ctx)
 
         // Then: all events flushed and pruned
         assertEquals(0, BleEventRelay.getPendingCount(ctx))
+    }
+
+    @Test
+    fun flushLeavesEventsWhenBridgeNotReady() {
+        // Given: 2 persisted events and a bridge that is NOT ready
+        for (i in 1..2) {
+            BleEventRelay.testPersistDirect(ctx, "event$i".toByteArray(Charsets.ISO_8859_1))
+        }
+        assertEquals(2, BleEventRelay.getPendingCount(ctx))
+
+        // When: flush before the bridge is ready
+        BleEventRelay.flushPersisted(ctx)
+
+        // Then: nothing is dropped — the events wait for the bridge
+        assertEquals(2, BleEventRelay.getPendingCount(ctx))
     }
 
     @Test
@@ -84,8 +104,10 @@ class BleEventRelayPersistenceTest {
         }
         assertEquals(2, BleEventRelay.getPendingCount(ctx))
 
-        // When: flush (normally succeeds; testing rollback would require mocking DB failure)
-        // For now, verify flush completes without exception
+        // When: flush with the bridge ready (testing a mid-transaction DB
+        // failure would need a fault-injecting database; here the flush must
+        // complete and commit as one transaction)
+        BleEventRelay.markBridgeReady(ctx)
         BleEventRelay.flushPersisted(ctx)
 
         // Then: events cleared

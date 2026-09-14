@@ -13,6 +13,7 @@ import dsm.types.proto.ArgPack
 import dsm.types.proto.BalanceGetResponse
 import dsm.types.proto.Codec
 import dsm.types.proto.DlvInstantiateV1
+import dsm.types.proto.DlvFundingLegV1
 import dsm.types.proto.DlvSpecV1
 import dsm.types.proto.DlvUnlockRoutedV1
 import dsm.types.proto.Envelope
@@ -324,8 +325,9 @@ internal class SoFiTestContext(
         val amm = AmmConstantProduct.newBuilder()
             .setTokenA(ByteString.copyFrom(lexLower))
             .setTokenB(ByteString.copyFrom(lexHigher))
-            .setReserveAU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_A)))
-            .setReserveBU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_B)))
+            // The predicate carries no reserves: the vault's liquidity is
+            // encumbered from the creator's balance through funding legs
+            // (DlvInstantiateV1.funding_legs) and proved from reserve leaves.
             .setFeeBps(feeBps)
             .build()
         val fm = FulfillmentMechanism.newBuilder()
@@ -358,8 +360,20 @@ internal class SoFiTestContext(
             // Empty pk + signature → Rust accept-or-stamp uses the
             // wallet's pk + signs Track C.4 style.
             .setCreatorPublicKey(ByteString.EMPTY)
-            .setTokenId(ByteString.EMPTY)
-            .setLockedAmountU128(ByteString.copyFrom(ByteArray(16)))
+            // An AMM vault carries exactly two funding legs, the spec's pair
+            // in lex order, both non-zero (proto DlvInstantiateV1.funding_legs).
+            .addFundingLegs(
+                DlvFundingLegV1.newBuilder()
+                    .setPolicyCommit(ByteString.copyFrom(lexLower))
+                    .setAmount(INITIAL_RESERVE_A)
+                    .build(),
+            )
+            .addFundingLegs(
+                DlvFundingLegV1.newBuilder()
+                    .setPolicyCommit(ByteString.copyFrom(lexHigher))
+                    .setAmount(INITIAL_RESERVE_B)
+                    .build(),
+            )
             .setSignature(ByteString.EMPTY)
             .build()
 
@@ -386,8 +400,8 @@ internal class SoFiTestContext(
             .setVaultId(ByteString.copyFrom(vaultId))
             .setTokenA(ByteString.copyFrom(lexLower))
             .setTokenB(ByteString.copyFrom(lexHigher))
-            .setReserveAU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_A)))
-            .setReserveBU128(ByteString.copyFrom(u128be(INITIAL_RESERVE_B)))
+            // Reserves are not accepted from the caller: the handler reads
+            // them from the owner's encumbered reserve leaves.
             .setFeeBps(feeBps)
             .setUnlockSpecDigest(ByteString.copyFrom(unlockSpecDigest))
             .setUnlockSpecKey("defi/spec/sofi-test/$label")

@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
+import com.dsm.wallet.RealHardware
 import com.dsm.wallet.bridge.BridgeEncoding
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.RouteCommitV1
@@ -63,6 +64,7 @@ import org.junit.runners.MethodSorters
  * Watch logs:
  *     adb logcat -s SOFI_TRADE SOFI_XDEV
  */
+@RealHardware
 @RunWith(AndroidJUnit4::class)
 @LargeTest
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
@@ -211,8 +213,8 @@ class SoFiCrossDeviceTraderTest {
         val expectedOut = u128beToLong(rc.expectedFinalOutputAmountU128.toByteArray())
         assertTrue("expected output must be > 0 (got $expectedOut)", expectedOut > 0L)
         assertTrue(
-            "hop must carry a stamped anchor-state binding (reserves digest)",
-            rc.hopsList[0].vaultStateReservesDigest.size() == 32,
+            "hop must carry a stamped parent binding (the parent state's c_n)",
+            rc.hopsList[0].parentBinding.size() == 32,
         )
         Log.i(TAG, "trader quote: exact expected=$expectedOut (single route, anchor-bound)")
 

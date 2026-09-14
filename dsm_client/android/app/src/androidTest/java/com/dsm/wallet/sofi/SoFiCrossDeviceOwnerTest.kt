@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
+import com.dsm.wallet.RealHardware
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.AmmVaultSummaryV1
 import org.junit.Assert.assertEquals
@@ -59,6 +60,7 @@ import java.security.SecureRandom
  * Watch logs:
  *     adb logcat -s SOFI_TRADE SOFI_XDEV
  */
+@RealHardware
 @RunWith(AndroidJUnit4::class)
 @LargeTest
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
@@ -177,8 +179,8 @@ class SoFiCrossDeviceOwnerTest {
                 val vid = summary.vaultId.toByteArray()
                 val matchesOurs = vid.contentEquals(vault1Id) || vid.contentEquals(vault2Id)
                 if (!matchesOurs) return@firstOrNull false
-                val ra = u128beToLong(summary.reserveAU128.toByteArray())
-                val rb = u128beToLong(summary.reserveBU128.toByteArray())
+                val ra = summary.reserveA
+                val rb = summary.reserveB
                 ra != INITIAL_RESERVE_A || rb != INITIAL_RESERVE_B
             }
             if (settled != null) {
@@ -202,8 +204,8 @@ class SoFiCrossDeviceOwnerTest {
                     vid.contentEquals(vault1Id) || vid.contentEquals(vault2Id)
                 }
                 .map { s ->
-                    val ra = u128beToLong(s.reserveAU128.toByteArray())
-                    val rb = u128beToLong(s.reserveBU128.toByteArray())
+                    val ra = s.reserveA
+                    val rb = s.reserveB
                     "${b32(s.vaultId.toByteArray())}: ra=$ra rb=$rb"
                 }
             Log.e(TAG, "owner poll: trader settlement never reached us. snapshot=$finalSnapshot")
@@ -216,8 +218,8 @@ class SoFiCrossDeviceOwnerTest {
         //            Trader spent ERA (lex-higher = reserveB) and
         //            received output_token (lex-lower = reserveA), so
         //            reserveB grew and reserveA shrunk. ──
-        val raAfter = u128beToLong(updated.reserveAU128.toByteArray())
-        val rbAfter = u128beToLong(updated.reserveBU128.toByteArray())
+        val raAfter = updated.reserveA
+        val rbAfter = updated.reserveB
         assertTrue(
             "reserveB (ERA) must grow after trader settle ($rbAfter <= $INITIAL_RESERVE_B)",
             rbAfter > INITIAL_RESERVE_B,

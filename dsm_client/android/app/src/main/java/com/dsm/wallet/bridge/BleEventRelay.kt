@@ -219,6 +219,14 @@ object BleEventRelay {
         }
     }
 
+    /** Test-only: forget a previous `markBridgeReady`, so a test can prove the
+     *  not-ready path after another test proved the ready path. */
+    @androidx.annotation.VisibleForTesting
+    @JvmStatic
+    fun testResetBridgeReady() {
+        bridgeReady = false
+    }
+
     @androidx.annotation.VisibleForTesting
     @JvmStatic
     fun testPersistDirect(ctx: Context, envelopeBytes: ByteArray) {

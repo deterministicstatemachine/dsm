@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
+import com.dsm.wallet.RealHardware
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.AmmVaultSummaryV1
 import dsm.types.proto.RouteCommitV1
@@ -82,6 +83,7 @@ import java.security.SecureRandom
  *  - The post-trade reserve update (chunks #7 republish-on-settled)
  *    completes within the bounded poll window after `dlv.unlockRouted`.
  */
+@RealHardware
 @RunWith(AndroidJUnit4::class)
 @LargeTest
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
@@ -182,8 +184,8 @@ class SoFiTradeRealHwTest {
         val expectedOut = u128beToLong(rc.expectedFinalOutputAmountU128.toByteArray())
         assertTrue("expected output must be > 0 (got $expectedOut)", expectedOut > 0L)
         assertTrue(
-            "hop must carry a stamped anchor-state binding (reserves digest)",
-            rc.hopsList[0].vaultStateReservesDigest.size() == 32,
+            "hop must carry a stamped parent binding (the parent state's c_n)",
+            rc.hopsList[0].parentBinding.size() == 32,
         )
         Log.i(TAG, "quote: exact expected=$expectedOut (single route, anchor-bound)")
 
@@ -212,8 +214,8 @@ class SoFiTradeRealHwTest {
             val owned = sofi.listOwnedAmmVaults()
             primaryAfter = owned.firstOrNull { it.vaultId.toByteArray().contentEquals(primaryVaultId) }
             if (primaryAfter != null) {
-                val ra = u128beToLong(primaryAfter.reserveAU128.toByteArray())
-                val rb = u128beToLong(primaryAfter.reserveBU128.toByteArray())
+                val ra = primaryAfter.reserveA
+                val rb = primaryAfter.reserveB
                 if (ra != INITIAL_RESERVE_A || rb != INITIAL_RESERVE_B) {
                     reservesMoved = true
                     break
@@ -237,8 +239,8 @@ class SoFiTradeRealHwTest {
         // Trader spends ERA (tokenB) in, gets DEMO_BBB (tokenA) out.
         // So reserveB INCREASES (trader put ERA into the reserve) and
         // reserveA DECREASES (reserve paid out DEMO_BBB).
-        val raAfter = u128beToLong(updated.reserveAU128.toByteArray())
-        val rbAfter = u128beToLong(updated.reserveBU128.toByteArray())
+        val raAfter = updated.reserveA
+        val rbAfter = updated.reserveB
         assertTrue(
             "reserveB (ERA) must grow ($rbAfter <= $INITIAL_RESERVE_B)",
             rbAfter > INITIAL_RESERVE_B,

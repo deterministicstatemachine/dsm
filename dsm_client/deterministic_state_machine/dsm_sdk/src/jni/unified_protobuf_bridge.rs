@@ -1202,14 +1202,11 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_getTransportHeadersV3Pack(
     )
 }
 
+/// The error code of a framed or bare Error envelope, or `None` — see
+/// `crate::envelope::transport::error_code_of_transport_bytes` for why the
+/// frame byte must be stripped here.
 fn is_error_envelope_bytes(bytes: &[u8]) -> Option<u32> {
-    match crate::envelope::from_canonical_bytes(bytes) {
-        Ok(env) => match env.payload {
-            Some(pb::envelope::Payload::Error(e)) => Some(e.code),
-            _ => None,
-        },
-        Err(_) => None,
-    }
+    crate::envelope::transport::error_code_of_transport_bytes(bytes)
 }
 
 /// JNI helper: return error code (>0) if envelope is an Error envelope, otherwise 0.

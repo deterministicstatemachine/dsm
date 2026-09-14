@@ -4,6 +4,8 @@ package com.dsm.wallet.bridge
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.dsm.wallet.RealHardware
 import com.dsm.wallet.ui.MainActivity
 import com.google.protobuf.ByteString
 import java.io.File
@@ -248,7 +250,7 @@ class AndroidLayerProofTest {
         ensureGenesis()
 
         val messageId = 0x0102030405060708L
-        val requestBytes = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
         val framedReq = prependMessageId(messageId, requestBytes)
 
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, framedReq)
@@ -263,7 +265,7 @@ class AndroidLayerProofTest {
 
         val id1 = 1L
         val id2 = 2L
-        val requestBytes = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
 
         val resp1 = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(id1, requestBytes))
         val resp2 = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(id2, requestBytes))
@@ -277,7 +279,7 @@ class AndroidLayerProofTest {
         ensureGenesis()
 
         val messageId = Long.MAX_VALUE
-        val requestBytes = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
+        val requestBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(messageId, requestBytes))
 
         assertEquals("Max message ID must survive", messageId, readMessageId(framedResp))
@@ -291,30 +293,6 @@ class AndroidLayerProofTest {
     // =========================================================================
 
     @Test
-    fun t20_method_hasIdentityDirect_beforeGenesis() {
-        // Fresh context may or may not have identity — just verify no crash
-        val requestBytes = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
-        val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(1L, requestBytes))
-
-        assertTrue("Must get response", framedResp.size > 8)
-        val respBody = framedResp.copyOfRange(8, framedResp.size)
-        val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(respBody)
-        assertTrue("hasIdentityDirect must return success (even if false)", isSuccess)
-        assertEquals("Must return 1-byte boolean", 1, data.size)
-        assertTrue("Value must be 0 or 1", data[0] == 0.toByte() || data[0] == 1.toByte())
-    }
-
-    @Test
-    fun t21_method_hasIdentityDirect_afterGenesis() {
-        ensureGenesis()
-
-        val resp = callBridgeMethod("hasIdentityDirect", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertEquals("Must return 1 byte", 1, resp.second.size)
-        assertEquals("Identity must exist after genesis", 1.toByte(), resp.second[0])
-    }
-
-    @Test
     fun t22_method_getDeviceIdBin() {
         ensureGenesis()
 
@@ -325,10 +303,10 @@ class AndroidLayerProofTest {
     }
 
     @Test
-    fun t23_method_getPersistedGenesisHash() {
+    fun t23_method_getGenesisHashBin() {
         ensureGenesis()
 
-        val resp = callBridgeMethod("getPersistedGenesisHash", ByteArray(0))
+        val resp = callBridgeMethod("getGenesisHashBin", ByteArray(0))
         assertTrue("Must be success", resp.first)
         assertEquals("Genesis hash must be 32 bytes", 32, resp.second.size)
         assertFalse("Genesis hash must not be all zeros", resp.second.all { it == 0.toByte() })
@@ -488,14 +466,6 @@ class AndroidLayerProofTest {
     }
 
     @Test
-    fun t33_method_getBluetoothStatus() {
-        // No BLE needed — just proves the method doesn't crash
-        val resp = callBridgeMethod("getBluetoothStatus", ByteArray(0))
-        assertTrue("Must be success", resp.first)
-        assertEquals("Must return 1-byte boolean", 1, resp.second.size)
-    }
-
-    @Test
     fun t34_method_getPersistedGenesisEnvelope() {
         ensureGenesis()
 
@@ -511,13 +481,15 @@ class AndroidLayerProofTest {
     //         MessagePort protocol works end-to-end through the Kotlin layer.
     // =========================================================================
 
+    // Claims the faucet from the live storage fleet, so it runs only on real hardware.
+    @RealHardware
     @Test
     fun t40_fullFrame_identityCheckAndBalanceFetch() {
         ensureGenesis()
         claimFaucet()
 
         // Step 1: Identity check (same bytes JS would send)
-        val identityReq = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
+        val identityReq = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
         val identityFramed = prependMessageId(1001L, identityReq)
         val identityResp = MainActivity.processBridgeRequestForTest(ctx, identityFramed)
 
@@ -526,7 +498,7 @@ class AndroidLayerProofTest {
             identityResp.copyOfRange(8, identityResp.size)
         )
         assertTrue("Identity must succeed", idOk)
-        assertEquals("Identity = true", 1.toByte(), idData[0])
+        assertEquals("An identity has a 32-byte device id", 32, idData.size)
 
         // Step 2: Fetch balances (same bytes JS would send)
         val balReq = encodeBridgeRpcRequest("getAllBalancesStrict", ByteArray(0))
@@ -561,23 +533,6 @@ class AndroidLayerProofTest {
         }
         assertTrue("ERA balance must exist after faucet", foundEra)
         assertTrue("ERA balance must be positive after faucet", eraBalance > 0L)
-    }
-
-    @Test
-    fun t41_fullFrame_deviceId_matchesBetweenMethods() {
-        ensureGenesis()
-
-        // Get device ID via getDeviceIdBin
-        val resp1 = callBridgeMethod("getDeviceIdBin", ByteArray(0))
-        val deviceId1 = resp1.second
-
-        // Get device ID via getPersistedDeviceId (alias)
-        val resp2 = callBridgeMethod("getPersistedDeviceId", ByteArray(0))
-        val deviceId2 = resp2.second
-
-        assertEquals("Both must be 32 bytes", 32, deviceId1.size)
-        assertEquals("Both must be 32 bytes", 32, deviceId2.size)
-        assertTrue("Device IDs from both methods must match", deviceId1.contentEquals(deviceId2))
     }
 
     @Test
@@ -617,8 +572,8 @@ class AndroidLayerProofTest {
             Thread {
                 try {
                     barrier.await() // All threads start simultaneously
-                    val resp = callBridgeMethod("hasIdentityDirect", ByteArray(0))
-                    if (resp.first && resp.second.size == 1 && resp.second[0] == 1.toByte()) {
+                    val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
+                    if (resp.first && resp.second.size == 32 && resp.second.any { it != 0.toByte() }) {
                         successes.incrementAndGet()
                     } else {
                         errors.incrementAndGet()
@@ -675,11 +630,11 @@ class AndroidLayerProofTest {
         ensureGenesis()
 
         val methods = listOf(
-            "hasIdentityDirect" to ByteArray(0),
             "getDeviceIdBin" to ByteArray(0),
-            "getPersistedGenesisHash" to ByteArray(0),
-            "getBluetoothStatus" to ByteArray(0),
+            "getGenesisHashBin" to ByteArray(0),
+            "getSigningPublicKeyBin" to ByteArray(0),
             "getTransportHeadersV3Bin" to ByteArray(0),
+            "getAllBalancesStrict" to ByteArray(0),
         )
 
         val threadCount = methods.size * 2
@@ -720,7 +675,7 @@ class AndroidLayerProofTest {
                 try {
                     barrier.await()
                     val msgId = (1000L + i)
-                    val reqBytes = encodeBridgeRpcRequest("hasIdentityDirect", ByteArray(0))
+                    val reqBytes = encodeBridgeRpcRequest("getDeviceIdBin", ByteArray(0))
                     val framedReq = prependMessageId(msgId, reqBytes)
                     val framedResp = MainActivity.processBridgeRequestForTest(ctx, framedReq)
 
@@ -822,9 +777,9 @@ class AndroidLayerProofTest {
         MainActivity.processBridgeRequestForTest(ctx, prependMessageId(1L, garbage))
 
         // Then: send valid request — bridge must still work
-        val resp = callBridgeMethod("hasIdentityDirect", ByteArray(0))
+        val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
         assertTrue("Bridge must work after error", resp.first)
-        assertEquals("Identity must still exist", 1.toByte(), resp.second[0])
+        assertEquals("Identity must still exist", 32, resp.second.size)
     }
 
     @Test
@@ -835,8 +790,8 @@ class AndroidLayerProofTest {
         var successCount = 0
         for (i in 0 until 100) {
             try {
-                val resp = callBridgeMethod("hasIdentityDirect", ByteArray(0))
-                if (resp.first) successCount++
+                val resp = callBridgeMethod("getDeviceIdBin", ByteArray(0))
+                if (resp.first && resp.second.size == 32) successCount++
             } catch (_: Throwable) {
                 // count as failure
             }
@@ -855,13 +810,21 @@ class AndroidLayerProofTest {
         // Replicate the SDK init that MainActivity does at startup:
         // 1. Set storage base dir (required before AppState can persist)
         Unified.initStorageBaseDir(ctx.filesDir.absolutePath.toByteArray(Charsets.UTF_8))
-        // 2. Copy dsm_env_config.toml from APK assets to app files dir
+        // 2. Install a TEST-ONLY env config (androidTest/assets) into the app
+        //    files dir. The app's bundled dsm_env_config.toml is a deployment
+        //    file this suite must not depend on; it is read here from the
+        //    instrumentation APK's assets, not the app's.
         val cfgFile = File(ctx.filesDir, "dsm_env_config.toml")
-        ctx.assets.open("dsm_env_config.toml").use { input ->
+        InstrumentationRegistry.getInstrumentation().context.assets
+            .open("dsm_env_config.instrumented.toml").use { input ->
             FileOutputStream(cfgFile, false).use { out -> input.copyTo(out) }
         }
         // 3. Tell Rust where the config is (sets ENV_CONFIG_PATH + DSM_ALLOW_LOCALHOST)
         Unified.initDsmSdk(cfgFile.absolutePath)
+        // 4. Initialize the SDK the way MainActivity.initDsmAndSignalReady does:
+        //    this is the step that installs the app router behind the ingress;
+        //    without it every routed method answers "app router not installed".
+        assertTrue("initSdk must install the app router", Unified.initSdk(ctx.filesDir.absolutePath))
 
         // Canonical mnemonic-rooted Genesis v2: generate a mnemonic, then create the wallet from
         // it. No storage nodes, no silicon — the BIP39 mnemonic is the sole root.
