@@ -380,9 +380,9 @@ fmt: ## Auto-format Rust code
 	cargo fmt --all
 
 .PHONY: audit
-audit: ## Security audit (cargo-audit + cargo-deny)
+audit: ## Security audit (cargo-audit on every tracked Cargo.lock + cargo-deny)
 	cargo install cargo-audit --quiet || true
-	cargo audit
+	bash ci/audit_every_lockfile.sh
 	cargo install cargo-deny --quiet || true
 	cargo deny check
 
@@ -456,7 +456,7 @@ release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI s
 	@echo ""
 	@echo "── [3/8] Security audit ────────────────────────────────────"
 	cargo deny check
-	cargo audit
+	bash ci/audit_every_lockfile.sh
 	@echo ""
 	@echo "── [4/8] Protocol purity (CI scan) ─────────────────────────"
 	bash scripts/ci_scan.sh

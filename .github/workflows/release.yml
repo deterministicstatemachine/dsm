@@ -98,10 +98,10 @@ jobs:
           cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
           cargo test --locked -p dsm_storage_node --release --no-default-features --features local-dev,strict -- --nocapture
 
-      - name: Security audit
+      - name: Security audit (every tracked Cargo.lock)
         run: |
           cargo install cargo-audit --quiet --locked || true
-          cargo audit
+          bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
   # Build the storage node binary for Linux x86_64 — the primary deployment
