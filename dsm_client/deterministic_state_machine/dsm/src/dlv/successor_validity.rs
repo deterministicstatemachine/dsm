@@ -681,7 +681,7 @@ impl BundleAcceptanceWitness {
 /// one opaque digest that no production code computed, which made CORR.4 — and
 /// with it every market realization — unreachable. They are now the operation's
 /// own fields, and the only way to obtain them is
-/// [`AcceptedTransition::from_verified_settle`].
+/// [`AcceptedTransition::from_verified_operation_for_parent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedTransition {
     /// The accepted successor's own parent on the trader's bilateral chain.
@@ -705,81 +705,137 @@ pub struct AcceptedTransition {
 }
 
 impl AcceptedTransition {
-    /// The accepted effects of a VERIFIED `DlvSettle`, with the successor pair
-    /// the same walk recomputed. `None` for any other operation: a transition
-    /// that is not a settle has no market effects to correspond.
+    /// The accepted effects AT VAULT CURSOR `cursor_c_n` of a VERIFIED
+    /// `DlvSettle` or `DlvRouteSettle`, with the successor pair the same walk
+    /// recomputed.
+    ///
+    /// A `DlvSettle` names one vault parent and its fields are the effects;
+    /// CORR.3 then judges whether that parent is this cursor. A
+    /// `DlvRouteSettle` names one leg per consumed vault, and the effects at
+    /// this vault are the leg whose `parent_binding` is `cursor_c_n` — by
+    /// parent, never by position (2c-H H11, CORR-R); RC.5 makes that leg
+    /// unique. **CORR.6 is established here**: the route's legs conserve
+    /// (RC.1–RC.5). This is the last place the whole leg list is in hand, so a
+    /// route's effects exist only if it conserved.
+    ///
+    /// Refuses with [`Reason::StaleParent`] when no leg consumes the cursor —
+    /// the route consumed some other parent, which is CORR.3's sense — and with
+    /// [`Reason::RealizationEvidenceInvalid`] for a route that does not
+    /// conserve or an operation that is neither settle.
     ///
     /// `operation` must be the lineage walk's verified operation — the same
     /// bytes `sigma_dsm` authenticated — and never the bundle's
     /// `recovery_material`, which is what CORR compares AGAINST.
-    pub fn from_verified_settle(
+    pub fn from_verified_operation_for_parent(
         embedded_parent: [u8; 32],
         c_dsm_plus: [u8; 32],
         operation: &crate::types::operations::Operation,
-    ) -> Option<Self> {
-        let crate::types::operations::Operation::DlvSettle {
-            parent_binding,
-            parent_sequence,
-            external_commitment_x,
-            input_policy_commit,
-            input_amount,
-            output_policy_commit,
-            output_amount,
-            fee_bps,
-            ..
-        } = operation
-        else {
-            return None;
-        };
-        Some(Self {
-            embedded_parent,
-            c_dsm_plus,
-            external_commitment_x: *external_commitment_x,
-            parent_binding: *parent_binding,
-            parent_sequence: *parent_sequence,
-            input_policy_commit: *input_policy_commit,
-            input_amount: *input_amount,
-            output_policy_commit: *output_policy_commit,
-            output_amount: *output_amount,
-            fee_bps: *fee_bps,
-        })
+        cursor_c_n: [u8; 32],
+    ) -> Result<Self, Reason> {
+        use crate::types::operations::{DlvRouteLeg, Operation};
+        match operation {
+            Operation::DlvSettle {
+                parent_binding,
+                parent_sequence,
+                external_commitment_x,
+                input_policy_commit,
+                input_amount,
+                output_policy_commit,
+                output_amount,
+                fee_bps,
+                ..
+            } => Ok(Self {
+                embedded_parent,
+                c_dsm_plus,
+                external_commitment_x: *external_commitment_x,
+                parent_binding: *parent_binding,
+                parent_sequence: *parent_sequence,
+                input_policy_commit: *input_policy_commit,
+                input_amount: *input_amount,
+                output_policy_commit: *output_policy_commit,
+                output_amount: *output_amount,
+                fee_bps: *fee_bps,
+            }),
+            Operation::DlvRouteSettle {
+                legs,
+                external_commitment_x,
+                ..
+            } => {
+                // CORR.6.
+                DlvRouteLeg::check_route_conservation(legs)
+                    .map_err(|_| Reason::RealizationEvidenceInvalid)?;
+                let leg = legs
+                    .iter()
+                    .find(|leg| leg.parent_binding == cursor_c_n)
+                    .ok_or(Reason::StaleParent)?;
+                Ok(Self {
+                    embedded_parent,
+                    c_dsm_plus,
+                    external_commitment_x: *external_commitment_x,
+                    parent_binding: leg.parent_binding,
+                    parent_sequence: leg.parent_sequence,
+                    input_policy_commit: leg.input_policy_commit,
+                    input_amount: leg.input_amount,
+                    output_policy_commit: leg.output_policy_commit,
+                    output_amount: leg.output_amount,
+                    fee_bps: leg.fee_bps,
+                })
+            }
+            _ => Err(Reason::RealizationEvidenceInvalid),
+        }
     }
 }
 
-/// The market coordinates `B` carries, as `CORR` compares them. Read from the
-/// decoded bundle; the two coordinate systems are never mixed (2c-C4 §2).
+/// The market coordinates `B` carries at ONE vault cursor, as `CORR` compares
+/// them. Read from the decoded bundle; the two coordinate systems are never
+/// mixed (2c-C4 §2).
 ///
-/// The route's economics are the ONE beta allocation (2c-A ruling 3), typed.
-/// The only constructor that reads a bundle is
+/// The route's economics at this vault are the one bare allocation whose parent
+/// binding is the cursor (2c-H H2, H11; a single-vault bundle is `N = 1`),
+/// typed. The only constructor that reads a bundle is
 /// [`BundleCoordinates::from_market_bundle`], which refuses every other shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BundleCoordinates {
     pub trader_parent: [u8; 32],
     pub trader_successor: [u8; 32],
     pub route_set_commitment: [u8; 32],
-    /// The single allocation's `c_n`, amounts and fee rate.
+    /// This vault's allocation: its `c_n`, amounts and fee rate.
     pub leg_parent_binding: [u8; 32],
     pub leg_delta_in: u64,
     pub leg_delta_out: u64,
     pub leg_fee_bps: u32,
-    /// The parent binding the bundle's one `T_v` names.
+    /// The parent binding of the bundle's `T_v` for this vault.
     pub transition_parent_binding: [u8; 32],
 }
 
 impl BundleCoordinates {
-    /// The coordinates of a BETA market bundle: exactly one route leg, that leg
-    /// a bare `Allocation`, and exactly one `T_v` (2c-A ruling 3).
+    /// The coordinates of a market bundle at vault cursor `cursor_c_n`: every
+    /// route leg a bare `Allocation` (fanout 1), exactly one `T_v` per leg, and
+    /// the leg and the `T_v` read here are the ones whose parent binding is the
+    /// cursor — by parent, never by index (2c-H H2).
     ///
-    /// Any other shape is `BundleNotCanonical` — "not specified for this
-    /// profile" (2c-D §14, C2-R2), never a shape this function tries to read.
+    /// Any other shape — a fanned-out leg, a leg count that is not the `T_v`
+    /// count, or no leg or no `T_v` at this cursor — is `BundleNotCanonical`:
+    /// "not specified for this profile" (2c-D §14, C2-R2), never a shape this
+    /// function tries to read.
     pub fn from_market_bundle(
         terms: &crate::ccb::MarketTerms,
         transitions: &[crate::ccb::ConsumedDlvTransition],
+        cursor_c_n: [u8; 32],
     ) -> Result<Self, Reason> {
-        let alloc = beta_allocation(&terms.selected_route)?;
-        let [transition] = transitions else {
+        let legs = bare_allocations(&terms.selected_route)?;
+        if legs.len() != transitions.len() {
             return Err(Reason::BundleNotCanonical);
-        };
+        }
+        let alloc = legs
+            .iter()
+            .copied()
+            .find(|alloc| alloc.parent_binding == cursor_c_n)
+            .ok_or(Reason::BundleNotCanonical)?;
+        let transition = transitions
+            .iter()
+            .find(|t| t.parent_binding == cursor_c_n)
+            .ok_or(Reason::BundleNotCanonical)?;
         Ok(Self {
             trader_parent: terms.trader_parent,
             trader_successor: terms.trader_successor,
@@ -793,12 +849,21 @@ impl BundleCoordinates {
     }
 }
 
-/// The one allocation a beta route may carry, or `BundleNotCanonical`.
-fn beta_allocation(route: &crate::ccb::Route) -> Result<&crate::ccb::Allocation, Reason> {
-    match route.legs() {
-        [crate::ccb::RouteLeg::Single(alloc)] => Ok(alloc),
-        _ => Err(Reason::BundleNotCanonical),
+/// Every leg of a route, each a bare `Allocation` (fanout 1), in route order;
+/// `BundleNotCanonical` for an empty route or a fanned-out leg.
+fn bare_allocations(route: &crate::ccb::Route) -> Result<Vec<&crate::ccb::Allocation>, Reason> {
+    let legs = route.legs();
+    if legs.is_empty() {
+        return Err(Reason::BundleNotCanonical);
     }
+    let mut allocations = Vec::with_capacity(legs.len());
+    for leg in legs {
+        let crate::ccb::RouteLeg::Single(alloc) = leg else {
+            return Err(Reason::BundleNotCanonical);
+        };
+        allocations.push(alloc);
+    }
+    Ok(allocations)
 }
 
 /// C4's own half of realization: `CORR.1`–`CORR.5` all held for one candidate.
@@ -839,6 +904,13 @@ impl MarketCorrespondence {
 /// chain-tip conjunct: this compares the pair the WALK VALIDATED against `B`'s
 /// coordinates, where 2c-B's compares a recomputed tip against `B`'s own
 /// carried bytes. The two can hold or fail independently.
+///
+/// **Route-wide (2c-H H11, CORR-R).** The predicate is the same at every vault
+/// a route consumes: `accepted` is the route's leg at this cursor and `bundle`
+/// the coordinates at this cursor, so CORR.4 compares the leg whose
+/// `parent_binding == c_n`. **CORR.6** — the route's legs conserve — is
+/// established where the whole leg list is still in hand,
+/// [`AcceptedTransition::from_verified_operation_for_parent`].
 pub fn check_market_correspondence(
     accepted: &AcceptedTransition,
     bundle: &BundleCoordinates,
@@ -939,6 +1011,26 @@ pub struct IntentEvidence<'a> {
     pub proven_ak: &'a [u8],
 }
 
+/// **Tier 1** at vault cursor `c_n`: 2c-E §6 `SAT.1`–`SAT.6` for a
+/// single-vault route, and 2c-H H11 `SAT-R` for a route of two or more legs.
+///
+/// The two forms are the two frozen predicates, selected by the route's shape
+/// and never by a caller. A grammar-26 bundle carries one leg, and its `SAT` is
+/// untouched (H18). A grammar-33 bundle carries at least two: `G5` holds its
+/// legs equal to the signed operation's, which decodes only at `N ≥ 2`. Every
+/// leg is a bare allocation either way.
+pub fn check_intent_satisfaction(
+    evidence: &IntentEvidence<'_>,
+    parent: &VaultStateV2,
+    c_n: [u8; 32],
+) -> Result<IntentSatisfaction, Reason> {
+    let legs = bare_allocations(evidence.route)?;
+    match legs.as_slice() {
+        [alloc] => check_single_vault_intent(evidence, alloc, parent, c_n),
+        _ => check_route_intent(evidence, &legs, parent, c_n),
+    }
+}
+
 /// **2c-E §6, `SAT.1`–`SAT.6`** — the exact-output restatement of 2c-A's
 /// Tier 1, which is what C2 re-sources (2c-D §14, D-a). 2c-A's original
 /// `min_out`, `max_fee`, `max_hops`, `max_fanout` and `k` are not evaluated:
@@ -956,13 +1048,13 @@ pub struct IntentEvidence<'a> {
 /// SAT.5 re-simulates from the INTENT against the authenticated `V_n`, not from
 /// the route and not by reusing CORR.5's derivation: 2c-E is explicit that the
 /// value `exact_out` is checked against must come from authenticated state.
-pub fn check_intent_satisfaction(
+fn check_single_vault_intent(
     evidence: &IntentEvidence<'_>,
+    alloc: &crate::ccb::Allocation,
     parent: &VaultStateV2,
     c_n: [u8; 32],
 ) -> Result<IntentSatisfaction, Reason> {
     let intent = evidence.intent;
-    let alloc = beta_allocation(evidence.route)?;
 
     // SAT.2 — pure verification: decode, schema, signature, the hop for THIS
     // vault, bound to THIS parent. Then the signing key must be the proven one.
@@ -1002,27 +1094,149 @@ pub fn check_intent_satisfaction(
     }
 
     // SAT.6 — the vault's fee is the authority.
-    let phi = parent.fee_policy.fee_bps();
-    if intent.fee_bps != phi {
+    if intent.fee_bps != parent.fee_policy.fee_bps() {
         return Err(Reason::RealizationEvidenceInvalid);
     }
 
     // SAT.5 — the independent fact, from authenticated state.
-    let direction = check_market_orientation(parent, &intent.token_in, &intent.token_out)?;
-    let (reserve_in, reserve_out) = match direction {
-        Direction::AtoB => (parent.reserve_a, parent.reserve_b),
-        Direction::BtoA => (parent.reserve_b, parent.reserve_a),
-    };
-    let reproduced =
-        constant_product_output_classified(intent.amount_in, reserve_in, reserve_out, phi)
-            .map_err(Reason::from)?;
-    if reproduced != intent.exact_out {
-        return Err(Reason::RealizationEvidenceInvalid);
-    }
+    resimulate_exactly(
+        parent,
+        &intent.token_in,
+        &intent.token_out,
+        intent.amount_in,
+        intent.exact_out,
+    )?;
 
     Ok(IntentSatisfaction {
         intent: intent.clone(),
     })
+}
+
+/// **2c-H H11, `SAT-R`** — a route's Tier 1 at ONE of its vaults, cursor `c_n`.
+///
+/// ```text
+/// SAT.1    I is B's decoded field 1 (structural)
+/// SAT.2    the RouteCommit is signed once over the whole route under the PROVEN
+///          key, and its hops chain (H16 on the signed route)
+/// SAT.3-R  I is the signed route end to end: input and output token, input
+///          amount, final output, total fee rate, nonce
+/// SAT.4-R  the selected route's legs are the signed hops, one to one and in
+///          order: parent binding, input, output, fee rate
+/// SAT.5-R  re-simulating this vault's leg against V_n at Φ(V_n) reproduces
+///          the leg's output EXACTLY
+/// SAT.6-R  this vault's leg is priced at Φ(V_n), and I's fee rate is the sum
+///          of the legs' rates under checked u32 arithmetic
+/// ```
+///
+/// SAT.5-R and SAT.6-R hold route-wide because realization requires every
+/// vault to certify (H13): each vault proves its own leg's output and rate, and
+/// RC.2 carries the last leg's output to `exact_out`.
+fn check_route_intent(
+    evidence: &IntentEvidence<'_>,
+    legs: &[&crate::ccb::Allocation],
+    parent: &VaultStateV2,
+    c_n: [u8; 32],
+) -> Result<IntentSatisfaction, Reason> {
+    let intent = evidence.intent;
+
+    // SAT.2 — the whole signed route, once; then the key must be the proven one.
+    let rc = crate::dlv::route_commit::verify_route_commit_chain(evidence.route_commit_bytes)
+        .map_err(|_| Reason::RealizationEvidenceInvalid)?;
+    if rc.initiator_public_key.as_slice() != evidence.proven_ak {
+        return Err(Reason::SettlerKeyMismatch);
+    }
+    // This vault's hop, bound to THIS parent.
+    let Some((k, hop)) = rc
+        .hops
+        .iter()
+        .enumerate()
+        .find(|(_, hop)| hop.vault_id == *evidence.vault_id)
+    else {
+        return Err(Reason::RealizationEvidenceInvalid);
+    };
+    if hop.parent_binding != c_n {
+        return Err(Reason::StaleParent);
+    }
+
+    // SAT.3-R — the intent IS the route the trader signed, end to end.
+    if intent.token_in != rc.input_token
+        || intent.token_out != rc.output_token
+        || intent.amount_in != rc.input_amount
+        || intent.exact_out != rc.expected_final_output
+        || intent.fee_bps != rc.total_fee_bps
+        || intent.nonce != rc.nonce
+    {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    // SAT.4-R — the selected route's legs ARE the signed hops, in order.
+    if legs.len() != rc.hops.len() {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    for (leg, signed) in legs.iter().zip(&rc.hops) {
+        if leg.parent_binding != signed.parent_binding
+            || leg.delta_in != signed.input_amount
+            || leg.delta_out != signed.expected_output
+            || leg.fee_policy.fee_bps() != signed.fee_bps
+        {
+            return Err(Reason::RealizationEvidenceInvalid);
+        }
+    }
+    let Some(leg) = legs.get(k) else {
+        return Err(Reason::RealizationEvidenceInvalid);
+    };
+
+    // SAT.6-R — this vault's rate is its own, and the signed total is the sum.
+    if leg.fee_policy.fee_bps() != parent.fee_policy.fee_bps() {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    let total = legs
+        .iter()
+        .try_fold(0u32, |sum, l| sum.checked_add(l.fee_policy.fee_bps()))
+        .ok_or(Reason::RealizationEvidenceInvalid)?;
+    if intent.fee_bps != total {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+
+    // SAT.5-R — this vault's leg, from authenticated state.
+    resimulate_exactly(
+        parent,
+        &hop.token_in,
+        &hop.token_out,
+        leg.delta_in,
+        leg.delta_out,
+    )?;
+
+    Ok(IntentSatisfaction {
+        intent: intent.clone(),
+    })
+}
+
+/// SAT.5's independent fact, from authenticated state: `amount_in` of
+/// `token_in` against `V_n` at `Φ(V_n)` yields exactly `amount_out`.
+fn resimulate_exactly(
+    parent: &VaultStateV2,
+    token_in: &[u8; 32],
+    token_out: &[u8; 32],
+    amount_in: u64,
+    amount_out: u64,
+) -> Result<(), Reason> {
+    let direction = check_market_orientation(parent, token_in, token_out)?;
+    let (reserve_in, reserve_out) = match direction {
+        Direction::AtoB => (parent.reserve_a, parent.reserve_b),
+        Direction::BtoA => (parent.reserve_b, parent.reserve_a),
+    };
+    let reproduced = constant_product_output_classified(
+        amount_in,
+        reserve_in,
+        reserve_out,
+        parent.fee_policy.fee_bps(),
+    )
+    .map_err(Reason::from)?;
+    if reproduced != amount_out {
+        return Err(Reason::RealizationEvidenceInvalid);
+    }
+    Ok(())
 }
 
 /// `VDS.COMMON.10.a` held for one candidate: `Canon(expected)` is
@@ -2016,8 +2230,10 @@ mod tests {
             signature: vec![0x77; 48],
             mode: crate::types::operations::TransactionMode::Unilateral,
         };
-        let a = AcceptedTransition::from_verified_settle([0xC1; 32], [0xC5; 32], &settle)
-            .expect("a settle has effects");
+        let a = AcceptedTransition::from_verified_operation_for_parent(
+            [0xC1; 32], [0xC5; 32], &settle, C_N,
+        )
+        .expect("a settle has effects");
         assert_eq!(
             (
                 a.parent_binding,
@@ -2029,8 +2245,14 @@ mod tests {
             (C_N, 7, 1_000, 900, 30)
         );
         let not_a_settle = crate::types::operations::Operation::Noop;
-        assert!(
-            AcceptedTransition::from_verified_settle([0; 32], [0; 32], &not_a_settle).is_none()
+        assert_eq!(
+            AcceptedTransition::from_verified_operation_for_parent(
+                [0; 32],
+                [0; 32],
+                &not_a_settle,
+                C_N
+            ),
+            Err(Reason::RealizationEvidenceInvalid)
         );
     }
 
@@ -2044,30 +2266,31 @@ mod tests {
         }
     }
 
-    /// Beta's shape (2c-A ruling 3) is the ONLY shape the coordinates read.
+    /// Bare allocations and one `T_v` per leg (2c-H H2) are the ONLY shape the
+    /// coordinates read.
     #[test]
-    fn only_a_beta_bundle_has_coordinates() {
+    fn only_a_canonical_bundle_shape_has_coordinates() {
         let mut successor = parent(11_000, 4_000, None);
         successor.parent_state_commitment = C_N;
         let t = ConsumedDlvTransition::market(C_N, successor).expect("linked");
         let terms = crate::ccb::settlement::fixtures::market_terms(C_N, [0xA0; 32]);
 
-        let coords = BundleCoordinates::from_market_bundle(&terms, std::slice::from_ref(&t))
-            .expect("one leg, one allocation, one T_v");
+        let coords = BundleCoordinates::from_market_bundle(&terms, std::slice::from_ref(&t), C_N)
+            .expect("one bare allocation and one T_v at the cursor");
         assert_eq!(
             (coords.leg_parent_binding, coords.transition_parent_binding),
             (C_N, C_N)
         );
 
         assert_eq!(
-            BundleCoordinates::from_market_bundle(&terms, &[]),
+            BundleCoordinates::from_market_bundle(&terms, &[], C_N),
             Err(Reason::BundleNotCanonical),
             "no T_v"
         );
         assert_eq!(
-            BundleCoordinates::from_market_bundle(&terms, &[t.clone(), t.clone()]),
+            BundleCoordinates::from_market_bundle(&terms, &[t.clone(), t.clone()], C_N),
             Err(Reason::BundleNotCanonical),
-            "two T_v"
+            "two T_v for one leg"
         );
         let mut two_legs = terms.clone();
         two_legs.selected_route = Route::new(vec![
@@ -2076,9 +2299,9 @@ mod tests {
         ])
         .expect("route");
         assert_eq!(
-            BundleCoordinates::from_market_bundle(&two_legs, std::slice::from_ref(&t)),
+            BundleCoordinates::from_market_bundle(&two_legs, std::slice::from_ref(&t), C_N),
             Err(Reason::BundleNotCanonical),
-            "two legs"
+            "two legs for one T_v"
         );
         let mut fanned = terms;
         fanned.selected_route = Route::new(vec![RouteLeg::Bundle(
@@ -2086,7 +2309,7 @@ mod tests {
         )])
         .expect("route");
         assert_eq!(
-            BundleCoordinates::from_market_bundle(&fanned, std::slice::from_ref(&t)),
+            BundleCoordinates::from_market_bundle(&fanned, std::slice::from_ref(&t), C_N),
             Err(Reason::BundleNotCanonical),
             "a fanned-out leg"
         );
@@ -2143,7 +2366,7 @@ mod tests {
                 token_out: PC_B,
                 exact_out: out,
                 fee_bps: 30,
-                nonce: [0x5A; 32],
+                nonce: [0x5E; 32],
             },
             route: Route::new(vec![RouteLeg::Single(alloc(1_000, out))]).expect("route"),
             rc: signed_rc(&sk, &pk, C_N, 1_000, out),
@@ -2241,8 +2464,8 @@ mod tests {
         .expect("route");
         assert_eq!(
             sat(&t),
-            Err(Reason::BundleNotCanonical),
-            "beta routes have one leg"
+            Err(Reason::RealizationEvidenceInvalid),
+            "a route with more legs than the signed route has hops (SAT.4-R)"
         );
     }
 
@@ -2267,6 +2490,417 @@ mod tests {
         let mut t = tier1();
         t.parent.fee_policy = FeePolicy::new(31).expect("fee");
         assert_eq!(sat(&t), Err(Reason::RealizationEvidenceInvalid));
+    }
+
+    // ---------- 2c-H H11: CORR-R and SAT-R ----------
+
+    const PC_MID: [u8; 32] = [0x30; 32];
+    const ROUTE_P: [[u8; 32]; 2] = [[0xE1; 32], [0xE2; 32]];
+
+    fn route_settle(
+        legs: Vec<crate::types::operations::DlvRouteLeg>,
+    ) -> crate::types::operations::Operation {
+        crate::types::operations::Operation::DlvRouteSettle {
+            legs,
+            route_commit_bytes: vec![0x09; 8],
+            external_commitment_x: [0xA0; 32],
+            settler_public_key: vec![0x02; 64],
+            settler_devid: [0x22; 32],
+            signature: vec![0x77; 48],
+            mode: crate::types::operations::TransactionMode::Unilateral,
+        }
+    }
+
+    /// CORR-R — a route's accepted effects at a vault are the leg on THAT
+    /// vault's cursor, chosen by parent, never by position.
+    #[test]
+    fn a_route_settle_yields_the_leg_on_each_cursor_and_nothing_elsewhere() {
+        let legs = crate::ccb::settlement::fixtures::two_hop_route_legs(ROUTE_P);
+        let op = route_settle(legs.clone());
+        for (k, leg) in legs.iter().enumerate() {
+            let a = AcceptedTransition::from_verified_operation_for_parent(
+                [0xC1; 32], [0xC5; 32], &op, ROUTE_P[k],
+            )
+            .expect("a leg on this cursor");
+            assert_eq!(
+                (
+                    a.parent_binding,
+                    a.input_policy_commit,
+                    a.input_amount,
+                    a.output_policy_commit,
+                    a.output_amount,
+                    a.fee_bps,
+                    a.external_commitment_x
+                ),
+                (
+                    leg.parent_binding,
+                    leg.input_policy_commit,
+                    leg.input_amount,
+                    leg.output_policy_commit,
+                    leg.output_amount,
+                    leg.fee_bps,
+                    [0xA0; 32]
+                )
+            );
+        }
+        assert_eq!(
+            AcceptedTransition::from_verified_operation_for_parent(
+                [0xC1; 32], [0xC5; 32], &op, [0x9E; 32]
+            ),
+            Err(Reason::StaleParent),
+            "a route that consumes no leg on this cursor"
+        );
+    }
+
+    /// CORR.6 — a route whose legs do not conserve has no accepted effects at
+    /// any of its vaults.
+    #[test]
+    fn corr6_a_route_that_does_not_conserve_has_no_accepted_effects() {
+        let mut legs = crate::ccb::settlement::fixtures::two_hop_route_legs(ROUTE_P);
+        legs[1].input_amount += 1;
+        let op = route_settle(legs);
+        for parent in ROUTE_P {
+            assert_eq!(
+                AcceptedTransition::from_verified_operation_for_parent(
+                    [0xC1; 32], [0xC5; 32], &op, parent
+                ),
+                Err(Reason::RealizationEvidenceInvalid)
+            );
+        }
+    }
+
+    /// H2 — a route bundle's coordinates at each vault are that vault's leg and
+    /// `T_v`, matched by parent, whatever order the transitions are carried in.
+    #[test]
+    fn route_coordinates_are_read_at_the_cursor() {
+        let terms = crate::ccb::settlement::fixtures::route_market_terms(ROUTE_P, [0xA0; 32]);
+        let over = |p: [u8; 32]| {
+            let mut successor = parent(11_000, 4_000, None);
+            successor.parent_state_commitment = p;
+            ConsumedDlvTransition::market(p, successor).expect("linked")
+        };
+        let transitions = [over(ROUTE_P[1]), over(ROUTE_P[0])];
+        let legs = crate::ccb::settlement::fixtures::two_hop_route_legs(ROUTE_P);
+        for (k, leg) in legs.iter().enumerate() {
+            let c = BundleCoordinates::from_market_bundle(&terms, &transitions, ROUTE_P[k])
+                .expect("coordinates at this cursor");
+            assert_eq!(
+                (
+                    c.leg_parent_binding,
+                    c.transition_parent_binding,
+                    c.leg_delta_in,
+                    c.leg_delta_out,
+                    c.leg_fee_bps
+                ),
+                (
+                    leg.parent_binding,
+                    leg.parent_binding,
+                    leg.input_amount,
+                    leg.output_amount,
+                    leg.fee_bps
+                )
+            );
+        }
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&terms, &transitions, [0x9E; 32]),
+            Err(Reason::BundleNotCanonical),
+            "no leg on this cursor"
+        );
+        assert_eq!(
+            BundleCoordinates::from_market_bundle(&terms, &transitions[..1], ROUTE_P[1]),
+            Err(Reason::BundleNotCanonical),
+            "one T_v for two legs"
+        );
+    }
+
+    fn route_vault(
+        vault: u8,
+        pair: ([u8; 32], [u8; 32]),
+        reserve_a: u64,
+        reserve_b: u64,
+    ) -> VaultStateV2 {
+        let mut v = parent(reserve_a, reserve_b, None);
+        v.vault_id = [vault; 32];
+        v.market_policy =
+            MarketPolicy::beta_constant_product(pair.0, pair.1).expect("ordered pair");
+        v
+    }
+
+    fn route_hop(
+        vault: u8,
+        parent: [u8; 32],
+        token_in: [u8; 32],
+        token_out: [u8; 32],
+        input: u64,
+        out: u64,
+    ) -> crate::types::proto::RouteCommitHopV1 {
+        crate::types::proto::RouteCommitHopV1 {
+            vault_id: vec![vault; 32],
+            token_in: token_in.to_vec(),
+            token_out: token_out.to_vec(),
+            input_amount_u128: u128::from(input).to_be_bytes().to_vec(),
+            expected_output_amount_u128: u128::from(out).to_be_bytes().to_vec(),
+            fee_bps: 30,
+            parent_binding: parent.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// A two-hop RouteCommit `PC_A → PC_MID → PC_B` over `[input, mid, out]`,
+    /// altered by `alter` BEFORE it is signed.
+    fn signed_route_rc(
+        sk: &[u8],
+        pk: &[u8],
+        amounts: [u64; 3],
+        alter: impl FnOnce(&mut crate::types::proto::RouteCommitV1),
+    ) -> Vec<u8> {
+        let [input, mid, out] = amounts;
+        let mut rc = crate::types::proto::RouteCommitV1 {
+            version: crate::dlv::route_commit::ROUTE_COMMIT_VERSION,
+            nonce: vec![0x5E; 32],
+            input_token: PC_A.to_vec(),
+            output_token: PC_B.to_vec(),
+            input_amount_u128: u128::from(input).to_be_bytes().to_vec(),
+            expected_final_output_amount_u128: u128::from(out).to_be_bytes().to_vec(),
+            total_fee_bps: 60,
+            hops: vec![
+                route_hop(0x03, ROUTE_P[0], PC_A, PC_MID, input, mid),
+                route_hop(0x04, ROUTE_P[1], PC_MID, PC_B, mid, out),
+            ],
+            initiator_public_key: pk.to_vec(),
+            ..Default::default()
+        };
+        alter(&mut rc);
+        let canonical = crate::dlv::route_commit::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            crate::crypto::sphincs::sphincs_sign(sk, &canonical).expect("sign");
+        rc.encode_to_vec()
+    }
+
+    #[derive(Clone)]
+    struct RouteTier1 {
+        vaults: [VaultStateV2; 2],
+        intent: TradeIntent,
+        route: Route,
+        rc: Vec<u8>,
+        pk: Vec<u8>,
+        sk: Vec<u8>,
+        amounts: [u64; 3],
+    }
+
+    fn route_leg(parent: [u8; 32], delta_in: u64, delta_out: u64, fee_bps: u32) -> RouteLeg {
+        RouteLeg::Single(Allocation {
+            parent_binding: parent,
+            delta_in,
+            delta_out,
+            encumbrance_claim: [0; 32],
+            fee_policy: FeePolicy::new(fee_bps).expect("fee"),
+        })
+    }
+
+    /// An honest two-hop trade over two vaults, genuinely signed: vault 0 holds
+    /// `PC_A/PC_MID` and trades A→B; vault 1 holds `PC_B/PC_MID` and trades B→A.
+    fn route_tier1() -> RouteTier1 {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let vaults = [
+            route_vault(0x03, (PC_A, PC_MID), 10_000, 5_000),
+            route_vault(0x04, (PC_B, PC_MID), 8_000, 6_000),
+        ];
+        let mid = crate::dlv::route_commit::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("hop 0");
+        let out = crate::dlv::route_commit::constant_product_output(mid, 6_000, 8_000, 30)
+            .expect("hop 1");
+        let amounts = [1_000, mid, out];
+        RouteTier1 {
+            intent: TradeIntent {
+                token_in: PC_A,
+                amount_in: 1_000,
+                token_out: PC_B,
+                exact_out: out,
+                fee_bps: 60,
+                nonce: [0x5E; 32],
+            },
+            route: Route::new(vec![
+                route_leg(ROUTE_P[0], 1_000, mid, 30),
+                route_leg(ROUTE_P[1], mid, out, 30),
+            ])
+            .expect("route"),
+            rc: signed_route_rc(&sk, &pk, amounts, |_| {}),
+            vaults,
+            pk,
+            sk,
+            amounts,
+        }
+    }
+
+    /// SAT-R at vault `k`, on that vault's own cursor.
+    fn sat_at(t: &RouteTier1, k: usize) -> Result<IntentSatisfaction, Reason> {
+        sat_at_cursor(t, k, ROUTE_P[k])
+    }
+
+    fn sat_at_cursor(
+        t: &RouteTier1,
+        k: usize,
+        c_n: [u8; 32],
+    ) -> Result<IntentSatisfaction, Reason> {
+        let vault_id = t.vaults[k].vault_id;
+        check_intent_satisfaction(
+            &IntentEvidence {
+                intent: &t.intent,
+                route: &t.route,
+                route_commit_bytes: &t.rc,
+                vault_id: &vault_id,
+                proven_ak: &t.pk,
+            },
+            &t.vaults[k],
+            c_n,
+        )
+    }
+
+    /// SAT-R holds at EACH vault of an honest, genuinely signed two-hop route.
+    #[test]
+    fn an_honest_signed_route_satisfies_its_intent_at_every_vault() {
+        let t = route_tier1();
+        for k in 0..2 {
+            assert_eq!(sat_at(&t, k).expect("SAT-R holds").intent(), &t.intent);
+        }
+    }
+
+    /// SAT.2 — the proven key, a chained route, and this vault's hop on THIS
+    /// parent.
+    #[test]
+    fn a_route_not_signed_by_the_proven_key_or_not_chained_is_refused() {
+        let base = route_tier1();
+
+        let mut t = base.clone();
+        let (other, _) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        t.pk = other;
+        assert_eq!(sat_at(&t, 0), Err(Reason::SettlerKeyMismatch));
+
+        let mut t = base.clone();
+        let mid = t.amounts[1];
+        t.rc = signed_route_rc(&t.sk, &t.pk, t.amounts, |rc| {
+            rc.hops[1].input_amount_u128 = u128::from(mid + 1).to_be_bytes().to_vec();
+        });
+        assert_eq!(
+            sat_at(&t, 1),
+            Err(Reason::RealizationEvidenceInvalid),
+            "hop 0 does not hand its output to hop 1"
+        );
+
+        assert_eq!(
+            sat_at_cursor(&base, 1, [0x9E; 32]),
+            Err(Reason::StaleParent),
+            "vault 1's hop is bound to another parent"
+        );
+    }
+
+    /// SAT.3-R — each end-to-end field of the intent must be the signed
+    /// route's, alone.
+    #[test]
+    fn a_route_intent_that_is_not_the_signed_route_end_to_end_is_refused() {
+        type Alteration = (&'static str, fn(&mut TradeIntent));
+        let alterations: [Alteration; 6] = [
+            ("token_in", |i| i.token_in = PC_MID),
+            ("token_out", |i| i.token_out = PC_MID),
+            ("amount_in", |i| i.amount_in += 1),
+            ("exact_out", |i| i.exact_out -= 1),
+            ("fee_bps", |i| i.fee_bps = 30),
+            ("nonce", |i| i.nonce = [0x5A; 32]),
+        ];
+        let base = route_tier1();
+        for (what, alter) in alterations {
+            let mut t = base.clone();
+            alter(&mut t.intent);
+            assert_eq!(
+                sat_at(&t, 0),
+                Err(Reason::RealizationEvidenceInvalid),
+                "an intent whose {what} differs from the signed route must be refused"
+            );
+        }
+    }
+
+    /// SAT.4-R — the selected route's legs are the signed hops, one to one and
+    /// in order.
+    #[test]
+    fn a_selected_route_that_is_not_the_signed_hops_in_order_is_refused() {
+        let base = route_tier1();
+        let [_, mid, out] = base.amounts;
+        let cases: [(&str, Vec<RouteLeg>); 4] = [
+            (
+                "a leg output that is not the signed output",
+                vec![
+                    route_leg(ROUTE_P[0], 1_000, mid, 30),
+                    route_leg(ROUTE_P[1], mid, out - 1, 30),
+                ],
+            ),
+            (
+                "a leg rate that is not the signed rate",
+                vec![
+                    route_leg(ROUTE_P[0], 1_000, mid, 31),
+                    route_leg(ROUTE_P[1], mid, out, 30),
+                ],
+            ),
+            (
+                "the legs in reverse order",
+                vec![
+                    route_leg(ROUTE_P[1], mid, out, 30),
+                    route_leg(ROUTE_P[0], 1_000, mid, 30),
+                ],
+            ),
+            (
+                "a third leg the signed route does not have",
+                vec![
+                    route_leg(ROUTE_P[0], 1_000, mid, 30),
+                    route_leg(ROUTE_P[1], mid, out, 30),
+                    route_leg([0xE3; 32], out, 1, 30),
+                ],
+            ),
+        ];
+        for (what, legs) in cases {
+            let mut t = base.clone();
+            t.route = Route::new(legs).expect("route");
+            assert_eq!(
+                sat_at(&t, 0),
+                Err(Reason::RealizationEvidenceInvalid),
+                "{what} must be refused"
+            );
+        }
+    }
+
+    /// SAT.5-R — each vault proves its OWN leg: a route priced against reserves
+    /// vault 1 does not hold passes at vault 0 and is refused at vault 1.
+    #[test]
+    fn a_route_leg_at_a_price_its_vault_does_not_produce_is_refused_at_that_vault() {
+        let mut t = route_tier1();
+        t.vaults[1].reserve_a += 1_000;
+        assert!(sat_at(&t, 0).is_ok(), "vault 0's own leg still reproduces");
+        assert_eq!(sat_at(&t, 1), Err(Reason::RealizationEvidenceInvalid));
+    }
+
+    /// SAT.6-R — a leg's rate is its vault's, and the signed total is the sum of
+    /// the legs' rates.
+    #[test]
+    fn a_route_whose_rates_are_not_its_vaults_or_do_not_sum_is_refused() {
+        let base = route_tier1();
+
+        let mut t = base.clone();
+        t.vaults[1].fee_policy = FeePolicy::new(31).expect("fee");
+        assert!(sat_at(&t, 0).is_ok(), "vault 0 charges its leg's rate");
+        assert_eq!(
+            sat_at(&t, 1),
+            Err(Reason::RealizationEvidenceInvalid),
+            "vault 1 does not charge its leg's rate"
+        );
+
+        let mut t = base;
+        t.intent.fee_bps = 61;
+        t.rc = signed_route_rc(&t.sk, &t.pk, t.amounts, |rc| rc.total_fee_bps = 61);
+        assert_eq!(
+            sat_at(&t, 0),
+            Err(Reason::RealizationEvidenceInvalid),
+            "a signed total that is not the sum of the legs' rates"
+        );
     }
 }
 

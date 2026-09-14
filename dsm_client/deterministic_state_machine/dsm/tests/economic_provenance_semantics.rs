@@ -397,3 +397,146 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
         .expect("the beta network is known");
     dsm::ccb::StorageSetMembers::new(pinned).expect("pinned beta set")
 }
+
+// ── 2c-H H9: the 0x0035 arm, before it fetches anything ────────────────────
+
+const ROUTE_MID: [u8; 32] = [0x3C; 32];
+const ROUTE_X: [u8; 32] = [0x58; 32];
+
+fn route_leg(
+    vault: u8,
+    parent: u8,
+    input: [u8; 32],
+    output: [u8; 32],
+    input_amount: u64,
+    output_amount: u64,
+) -> dsm::types::operations::DlvRouteLeg {
+    dsm::types::operations::DlvRouteLeg {
+        vault_id: [vault; 32],
+        owner_public_key: vec![0x01; 64],
+        owner_devid: [0x41; 32],
+        owner_genesis: [0x42; 32],
+        input_policy_commit: input,
+        output_policy_commit: output,
+        parent_sequence: 7,
+        parent_binding: [parent; 32],
+        input_amount,
+        output_amount,
+        fee_bps: 30,
+        settlement_receipt_id: dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
+            &[vault; 32],
+            &ROUTE_X,
+        ),
+    }
+}
+
+/// `ERA → ROUTE_MID → SOFI`, settled by this suite's identity under `ak`.
+fn route_settle(ak: &[u8]) -> dsm::types::operations::Operation {
+    dsm::types::operations::Operation::DlvRouteSettle {
+        legs: vec![
+            route_leg(0x03, 0xE1, ERA, ROUTE_MID, 1_000, 453),
+            route_leg(0x04, 0xE2, ROUTE_MID, SOFI, 453, 560),
+        ],
+        route_commit_bytes: vec![0x09; 8],
+        external_commitment_x: ROUTE_X,
+        settler_public_key: ak.to_vec(),
+        settler_devid: DEV,
+        signature: vec![0x77; 48],
+        mode: dsm::types::operations::TransactionMode::Unilateral,
+    }
+}
+
+/// `E_R` naming `(vault, parent_sequence)` per entry, in the order given.
+fn route_source(entries: &[(u8, u64)], x: [u8; 32]) -> CreditSource {
+    CreditSource::DlvRouteReserveConsumption(
+        dsm::economic::credit::CreditSourceDlvRouteReserveConsumption {
+            credit_mutation_index: 0,
+            x,
+            legs: entries
+                .iter()
+                .map(
+                    |(vault, seq)| dsm::economic::credit::RouteLegReserveConsumption {
+                        vault_id: [*vault; 32],
+                        parent_sequence: *seq,
+                        owner_economic_position: 3,
+                        reserve_consumption_evidence_addr: [*vault ^ 0xF0; 32],
+                    },
+                )
+                .collect(),
+        },
+    )
+}
+
+fn route_verdict<'a>(
+    source: CreditSource,
+    op: Option<&'a dsm::types::operations::Operation>,
+    ak: &'a [u8],
+) -> Result<(), ProvenanceError> {
+    let w = witness(vec![mutation(None, Some(bal(SOFI, 560)))], vec![source]);
+    let mut c = ctx(1, ak);
+    c.verified_operation = op;
+    verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &c).map(|_| ())
+}
+
+/// Every coordinate the arm can check before fetching is checked, each alone;
+/// with every coordinate right it reaches the per-vault derivation, whose
+/// evidence fetch this fixture cannot serve — INCOMPLETE, never invalid.
+#[test]
+fn a_route_reserve_consumption_refuses_every_coordinate_it_can_see_before_fetching() {
+    let ak = [0xAB; 64];
+    let op = route_settle(&ak);
+    let good = [(0x03, 7), (0x04, 7)];
+    let refused = |r: Result<(), ProvenanceError>, what: &str| {
+        assert!(
+            matches!(
+                r,
+                Err(ProvenanceError::DlvRouteReserveConsumptionInvalid(_))
+            ),
+            "{what}: {r:?}"
+        );
+    };
+    refused(
+        route_verdict(route_source(&good, ROUTE_X), None, &ak),
+        "no verified operation",
+    );
+    let noop = dsm::types::operations::Operation::Noop;
+    refused(
+        route_verdict(route_source(&good, ROUTE_X), Some(&noop), &ak),
+        "an operation that is not a route settle",
+    );
+    refused(
+        route_verdict(route_source(&good[..1], ROUTE_X), Some(&op), &ak),
+        "one evidence entry for two legs",
+    );
+    refused(
+        route_verdict(route_source(&good, [0x59; 32]), Some(&op), &ak),
+        "another x",
+    );
+    refused(
+        route_verdict(
+            route_source(&[(0x04, 7), (0x03, 7)], ROUTE_X),
+            Some(&op),
+            &ak,
+        ),
+        "E_R not in route-leg order",
+    );
+    refused(
+        route_verdict(
+            route_source(&[(0x03, 7), (0x04, 8)], ROUTE_X),
+            Some(&op),
+            &ak,
+        ),
+        "another generation for leg 1",
+    );
+
+    let reached = route_verdict(route_source(&good, ROUTE_X), Some(&op), &ak);
+    assert!(
+        matches!(
+            reached,
+            Err(ProvenanceError::OwnerLineage(
+                PeerLineageFailure::Incomplete(_)
+            ))
+        ),
+        "{reached:?}"
+    );
+}

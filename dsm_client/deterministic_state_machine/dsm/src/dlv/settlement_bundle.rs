@@ -123,10 +123,11 @@ pub fn key_set(b: &SettlementBundle) -> Result<Vec<[u8; 32]>, BundleError> {
     Ok(keys)
 }
 
-/// The permitted continuation a binding-final bundle fixes for its ONE vault
-/// transition (2c-A.1 ruling 3): the market's exact prepared trader
-/// successor, or the close's `c_{n+1}` — the commitment of the exact drained
-/// successor the owner authorized, derived from the carried state.
+/// The permitted continuation a binding-final bundle fixes: the market's exact
+/// prepared trader successor — ONE for the whole route, however many vaults it
+/// consumes (amendment 2c-H, H3) — or the close's `c_{n+1}`, the commitment of
+/// the exact drained successor the owner authorized, derived from the carried
+/// state of its one transition.
 pub fn permitted_continuation(b: &SettlementBundle) -> Result<[u8; 32], CcbError> {
     match (b.market_terms(), b.transitions().first()) {
         (Some(terms), _) => Ok(terms.trader_successor),

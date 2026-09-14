@@ -322,6 +322,9 @@ pub enum ProvenanceError {
     /// A 0x0026 reserve-consumption clause failed — the message names the
     /// exact clause.
     DlvReserveConsumptionInvalid(String),
+    /// A 0x0035 route reserve-consumption clause failed (amendment 2c-H, H9) —
+    /// the message names the clause and, for a per-vault clause, the route leg.
+    DlvRouteReserveConsumptionInvalid(String),
     /// A 0x0027 settlement-payment clause failed — the message names the
     /// exact clause.
     DlvSettlementPaymentInvalid(String),
@@ -496,6 +499,12 @@ impl core::fmt::Display for ProvenanceError {
             Self::DlvReserveConsumptionInvalid(m) => {
                 write!(f, "credit provenance: reserve consumption refused: {m}")
             }
+            Self::DlvRouteReserveConsumptionInvalid(m) => {
+                write!(
+                    f,
+                    "credit provenance: route reserve consumption refused: {m}"
+                )
+            }
             Self::DlvSettlementPaymentInvalid(m) => {
                 write!(f, "credit provenance: settlement payment refused: {m}")
             }
@@ -538,6 +547,27 @@ pub fn dlv_reserve_consumption_source_id(
     h.update(vault_id);
     h.update(&parent_sequence.to_be_bytes());
     h.update(x);
+    *h.finalize().as_bytes()
+}
+
+/// SourceId for a DLV route reserve consumption (0x0035, amendment 2c-H H9):
+/// `H(tag ‖ 0x00 ‖ x ‖ u32_be(N) ‖ for each leg in route order: vault_id ‖
+/// parent_sequence_be)`. Derived from authenticated coordinates; the N
+/// write-once settlement-receipt leaves are the non-reuse markers, so
+/// `requires_consumed_source_record` stays false.
+pub fn dlv_route_reserve_consumption_source_id(
+    x: &[u8; 32],
+    legs: &[crate::types::operations::DlvRouteLeg],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(
+        crate::common::domain_tags::TAG_DSM_ECON_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION,
+    );
+    h.update(x);
+    h.update(&u32::try_from(legs.len()).unwrap_or(u32::MAX).to_be_bytes());
+    for leg in legs {
+        h.update(&leg.vault_id);
+        h.update(&leg.parent_sequence.to_be_bytes());
+    }
     *h.finalize().as_bytes()
 }
 
@@ -1026,419 +1056,134 @@ pub fn verify_credit_source(
                     "a reserve consumption funds only a DlvSettle output".into(),
                 ));
             };
-            let vault: [u8; 32] = op_vault
-                .as_slice()
-                .try_into()
-                .map_err(|_| invalid("vault id is not 32 bytes".into()))?;
-            // ── 1. Descriptor ↔ operation coordinate equality ─────────────
-            if d.vault_id != vault
-                || d.parent_sequence != *parent_sequence
-                || d.x != *external_commitment_x
-            {
-                return Err(invalid(
-                    "descriptor coordinates do not equal the operation's".into(),
-                ));
-            }
-            // The transition under validation IS the trader's: the settler
-            // named by the signed operation must be the authenticated
-            // identity whose lineage this is.
-            // VDS.COMMON.12 through the ONE typed check. A wrong-width key is
-            // refused at construction: DevID bytes can never be an AK here.
-            {
-                use crate::dlv::successor_validity::{
-                    check_settler_correspondence, AuthorityPublicKey, DevId,
-                };
-                let embedded = AuthorityPublicKey::try_new(settler_public_key);
-                let proven = AuthorityPublicKey::try_new(ctx.proven_ak);
-                let ok = match (embedded, proven) {
-                    (Ok(e), Ok(p)) => check_settler_correspondence(
-                        &e,
-                        &DevId(*settler_devid),
-                        &p,
-                        &DevId(*ctx.device_id),
-                    )
-                    .is_ok(),
-                    _ => false,
-                };
-                if !ok {
-                    return Err(invalid(
-                        "the settle's settler is not the identity under validation".into(),
-                    ));
-                }
-            }
-            // ── 2. The evidence bundle, by exact content address ──────────
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-                    &d.reserve_consumption_evidence_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // INNER content identity — `H_dom(namespace, payload)` — the form
-            // every object in the evidence DAG is addressed by, and the form
-            // the resolver's fetch derives its store key from. The outer
-            // storage-object addr exists too, but an arm committing to it
-            // names an address no resolver can dereference, which made this
-            // arm unsatisfiable by any producer emission. Matches the 0x0023
-            // arm above.
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-                &bundle_bytes,
-            ) != d.reserve_consumption_evidence_addr
-            {
-                return Err(invalid(
-                    "evidence bytes do not hash to the descriptor's address".into(),
-                ));
-            }
-            let ev =
-                crate::economic::reserve_consumption_evidence::decode_reserve_consumption_evidence(
-                    &bundle_bytes,
-                )
-                .map_err(invalid)?;
-            // ── 3. The exact parent vault state: hash-to-c_n, then decode ──
-            {
-                let mut h = crate::crypto::blake3::dsm_domain_hasher(
-                    crate::common::domain_tags::TAG_DSM_VAULT_STATE,
-                );
-                h.update(&ev.exact_vault_state_ccb);
-                if *h.finalize().as_bytes() != *parent_binding {
-                    return Err(invalid(
-                        "the carried CCB(V_n) does not hash to the settle's parent binding".into(),
-                    ));
-                }
-            }
-            let vn = crate::ccb::decode::decode_vault_state(&ev.exact_vault_state_ccb)
-                .map_err(|e| invalid(format!("V_n does not decode: {e}")))?;
-            if vn.vault_id != vault || vn.generation != *parent_sequence {
-                return Err(invalid(
-                    "V_n names a different vault or generation than the settle".into(),
-                ));
-            }
-            // Pair identity: {input, output} must BE V_n's market pair.
-            let (lo, hi) = if input_policy_commit < output_policy_commit {
-                (input_policy_commit, output_policy_commit)
-            } else {
-                (output_policy_commit, input_policy_commit)
-            };
-            if vn.market_policy.token_a() != lo || vn.market_policy.token_b() != hi {
-                return Err(invalid(
-                    "the settle's assets are not V_n's market pair".into(),
-                ));
-            }
-            if vn.fee_policy.fee_bps() != *fee_bps {
-                return Err(invalid("the settle's fee is not V_n's fee".into()));
-            }
-            // THE VAULT'S EXCLUSIVITY RULE, checked as soon as `V_n` is
-            // decoded and before anything downstream relies on it. The
-            // committed quorum must BE the canonical strict majority of the
-            // committed set: a smaller one lets two disjoint claims each reach
-            // quorum, which is two winners for one generation.
-            crate::economic::cell_observation::require_canonical_quorum(
-                vn.storage_set.len(),
-                vn.quorum,
-            )
-            .map_err(|e| invalid(format!("the vault's committed quorum: {e}")))?;
-            // ── 4. THE TWO-AXIS OWNER JOIN ────────────────────────────────
-            // Axis A: V_n itself names the owner identity.
-            if vn.owner_genesis_id != *owner_genesis || vn.owner_device_id != *owner_devid {
-                return Err(invalid(
-                    "V_n names a different owner than the settle".into(),
-                ));
-            }
-            // Axis B: the VAULT-BOUND authority (invariant across market
-            // successors) must independently resolve under the same
-            // (G, DevID) at V_n's own bound position. This is a DIFFERENT
-            // coordinate from the owner's economic-manifest authority
-            // position — the owner's device-authority lineage may advance
-            // after vault creation, and collapsing the axes would make a
-            // long-lived vault unspendable.
-            let vault_authority = crate::economic::authority_evidence::verify_authority_evidence(
-                &ev.owner_authority_evidence,
-                owner_genesis,
-                owner_devid,
-                &vn.owner_authority_transition_digest,
-            )
-            .map_err(|e| invalid(format!("vault-bound owner authority: {e}")))?;
-            if vault_authority.proven_ak.as_slice() != owner_public_key.as_slice() {
-                return Err(invalid(
-                    "the settle's owner key is not the vault-bound proven authority".into(),
-                ));
-            }
-            // ── 5. The owner's VALIDATED economic root at the locator ─────
-            // The locator is untrusted; the walk independently derives
-            // ValidatedEconomicRoot(position), and the reserve facts are
-            // proven against exactly that root.
-            let owner = resolver
-                .validated_peer_transition(owner_genesis, owner_devid, d.owner_economic_position)
-                .map_err(ProvenanceError::OwnerLineage)?;
-            let owner_root = owner.validated_root.economic_root();
-            // THE PROOF SOURCE IS THE GENERIC ARTIFACT — one object, shared
-            // by both directions of a settlement, rather than a second copy
-            // of the same leaves inside this bundle. Fetched by the INNER
-            // content identity like every object in this DAG, re-hashed to
-            // the address the bundle names, and then verified against the
-            // owner, position and root THIS ARM derived. Nothing a locator
-            // said is an input to that check.
-            let proof_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                    &ev.economic_proof_addr,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            if crate::storage_object::immutable_inner(
-                crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                &proof_bytes,
-            ) != ev.economic_proof_addr
-            {
-                return Err(invalid(
-                    "economic proof bytes do not hash to the bundle's address".into(),
-                ));
-            }
-            let artifact =
-                crate::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
-                    .map_err(invalid)?;
-            artifact
-                .verify_against(
-                    owner_genesis,
+            check_reserve_consumption_leg(
+                d,
+                ReserveConsumptionLeg {
+                    vault_id: op_vault,
+                    owner_public_key,
                     owner_devid,
-                    d.owner_economic_position,
-                    &owner_root,
-                )
-                .map_err(invalid)?;
-            // THE COMPOSED-STATE RULE (SoFi; 2c-D §14, conformance repair).
-            // The owner's proof backs the vault's reserves at ONE baseline
-            // generation. At the baseline V_n states exactly those reserves;
-            // past it, V_n must be exactly the state the composition walk
-            // reaches at c_n from that baseline, every step certified. The
-            // owner does not act between generations.
-            let owner_leaves: Vec<crate::economic::state::EconomicVaultReserveState> = artifact
-                .states()
-                .filter_map(|s| match s {
-                    crate::economic::state::EconomicLeafState::VaultReserve(v)
-                        if v.vault_id == vault =>
-                    {
-                        Some(v.clone())
-                    }
-                    _ => None,
-                })
-                .collect();
-            let history = match owner_leaves.first().map(|l| l.vault_sequence) {
-                Some(baseline) if baseline < *parent_sequence => Some(
-                    resolver
-                        .composed_vault_history(&vault, parent_binding, &vn, baseline)
-                        .map_err(ProvenanceError::OwnerLineage)?,
-                ),
-                _ => None,
-            };
-            crate::dlv::composed_history::check_composed_reserve_provenance(
-                &owner_leaves,
-                &vn,
-                history.as_ref(),
-            )
-            .map_err(|r| invalid(r.to_string()))?;
-            // V_n's reserves are now provenanced — by the owner at the
-            // baseline, by composition past it — and are what this trade meets.
-            let (reserve_in, reserve_out) = if input_policy_commit == vn.market_policy.token_a() {
-                (vn.reserve_a, vn.reserve_b)
-            } else {
-                (vn.reserve_b, vn.reserve_a)
-            };
-            // ── 6. Sufficiency ────────────────────────────────────────────
-            if reserve_out < *output_amount {
-                return Err(invalid(
-                    "the vault cannot pay that settlement output".into(),
-                ));
-            }
-            // ── 7. The RouteCommit: pure verification + exact re-simulation
-            let hop = crate::dlv::route_commit::verify_route_commit_hop(
-                route_commit_bytes,
-                &vault,
-                parent_binding,
-            )
-            .map_err(|e| invalid(format!("route commit: {e}")))?;
-            let rc = <crate::types::proto::RouteCommitV1 as prost::Message>::decode(
-                route_commit_bytes.as_slice(),
-            )
-            .map_err(|_| invalid("route commit does not decode".into()))?;
-            if crate::dlv::route_commit::compute_external_commitment(&rc) != *external_commitment_x
-            {
-                return Err(invalid(
-                    "the route commit does not derive the settle's X".into(),
-                ));
-            }
-            if hop.token_in != *input_policy_commit
-                || hop.token_out != *output_policy_commit
-                || hop.input_amount != *input_amount
-                || hop.expected_output != *output_amount
-                || hop.fee_bps != *fee_bps
-            {
-                return Err(invalid(
-                    "the bound hop does not state the settle's exact trade".into(),
-                ));
-            }
-            match crate::dlv::route_commit::constant_product_output(
-                *input_amount,
-                reserve_in,
-                reserve_out,
-                *fee_bps,
-            ) {
-                Some(out) if out == *output_amount => {}
-                _ => {
-                    return Err(invalid(
-                        "re-simulation does not yield the settle's exact output".into(),
-                    ))
-                }
-            }
-            // ── 8. THE BINDING: exclusivity's liveness anchor ────────────
-            // EVERY ANSWER MEANS SOMETHING DIFFERENT, and the verdicts differ.
-            // The taxonomy this file states — an outage retries, a forgery does
-            // not — is only true if it is preserved here: a divergence is a
-            // QUARANTINE, an unreadable or undecided key is RETRYABLE, and
-            // neither is evidence that this credit was forged. Collapsing them
-            // into "no winner" reports a network fault as a forgery and a
-            // forgery as a network fault.
-            //
-            // The key is derived HERE, from the parent state this settle names,
-            // so the resolver cannot answer about a different key than the one
-            // under validation.
-            let k_v = crate::dlv::settlement_bundle::resource_key(parent_binding);
-            let chosen = match resolver.parent_binding_observation(&k_v, &vn.storage_set, vn.quorum)
-            {
-                crate::dlv::binding_observation::BindingObservation::BoundFinal(c) => c,
-                crate::dlv::binding_observation::BindingObservation::Conflict {
-                    chosen, ..
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Quarantined(format!(
-                            "the binding key for this parent holds {} chosen values",
-                            chosen.len()
-                        )),
-                    ))
-                }
-                crate::dlv::binding_observation::BindingObservation::Unavailable {
-                    attributed,
-                    required,
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Incomplete(format!(
-                            "only {attributed} of the vault's members answered the \
-                             binding key ({required} required)"
-                        )),
-                    ))
-                }
-                // THE ARM THAT IS EASY TO GET BACKWARDS. A promise in flight, or
-                // an accepted record held by fewer members than THIS reader's
-                // quorum, is not a forgery: two quorums intersect, but one READ
-                // need not see the intersection, so a value already chosen
-                // behind a down member lands here. Mapping it to Invalid would
-                // make every concurrent settle permanently invalid.
-                crate::dlv::binding_observation::BindingObservation::Undetermined {
-                    attributed,
-                    ..
-                } => {
-                    return Err(ProvenanceError::OwnerLineage(
-                        PeerLineageFailure::Incomplete(format!(
-                            "the binding for this parent is not yet decided \
-                             ({attributed} members answered)"
-                        )),
-                    ))
-                }
-                // A quorum of members each explicitly hold NOTHING at this key.
-                // That IS evidence, and it says this settle never won
-                // exclusivity over the parent it names.
-                crate::dlv::binding_observation::BindingObservation::Free => {
-                    return Err(invalid("no binding was established for this parent".into()))
-                }
-            };
-            // The record's two identity fields must agree with each other
-            // before either is used to fetch anything.
-            if crate::storage_object::immutable_addr_from_inner(
-                crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
-                &chosen.value_digest,
-            ) != chosen.value_addr
-            {
-                return Err(invalid(
-                    "the bound record's digest and address disagree".into(),
-                ));
-            }
-            // The bundle, by the record's own value identity — BYTES, re-hashed
-            // here. The resolver never gets to assert what the bundle says.
-            //
-            // Evidence locality: the resolver fetches through its own configured
-            // fleet, while the bundle was written to the VAULT's committed set.
-            // In the beta deployment those are the same members. If they can
-            // diverge, this fetch is looking at the wrong fleet — which is why a
-            // miss is Incomplete (retryable), never Invalid.
-            let bundle_bytes = resolver
-                .immutable_evidence(
-                    crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
-                    &chosen.value_digest,
-                )
-                .map_err(ProvenanceError::OwnerLineage)?;
-            // Strict decode and the whole-bundle round trip under the frozen
-            // encoder (2c-A.1 ruling 8); the identity is over exactly these
-            // bytes, which are the bytes that were fetched.
-            let decoded = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
-                .map_err(|e| invalid(format!("bound bundle: {e}")))?;
-            let bundle = decoded.bundle;
-            if crate::dlv::settlement_bundle::bundle_digest(&bundle_bytes) != chosen.value_digest
-                || crate::dlv::settlement_bundle::bundle_addr(&bundle_bytes) != chosen.value_addr
-            {
-                return Err(invalid(
-                    "the bound bundle does not hash to the record's identity".into(),
-                ));
-            }
-            // The bundle carries no storage set and no quorum (registry §5.19):
-            // binding authority is `V_n`'s own fields 14 and 15, which is the
-            // set this key was read at.
-            //
-            // AND IT NAMES THIS SETTLE'S PARENT. The register is
-            // application-blind (§22 #12) and never inspects the value it
-            // holds, so a proposer can bind a bundle at k(c_n) whose
-            // transition names some other parent. The transition is located by
-            // `parent_binding == c_n` (2c-A.1 ruling 7); the successor's own
-            // `vault_id` and generation must be this vault's next.
-            let transition = bundle
-                .transition_for_parent(parent_binding)
-                .ok_or_else(|| {
-                    invalid("the bound bundle does not name this settle's parent state".into())
-                })?;
-            if transition.successor.vault_id != vault {
-                return Err(invalid(
-                    "the bound bundle consumes no leg of this vault".into(),
-                ));
-            }
-            if transition.successor.generation != parent_sequence.saturating_add(1) {
-                return Err(invalid(
-                    "the bound bundle's successor is not this parent's next generation".into(),
-                ));
-            }
-            // THE TRADE IDENTITY. A close bundle has no market terms and is
-            // not a settle at all.
-            let terms = bundle.market_terms().ok_or_else(|| {
-                invalid("the bound bundle is an owner close, not a settle".into())
-            })?;
-            if terms.route_set_commitment != d.x {
-                return Err(invalid(
-                    "the bound bundle commits a different route set than this settle".into(),
-                ));
-            }
-            // AUTHORSHIP, without a claimant field to read. A SettlementBundle
-            // has none, and it does not need one: the bundle commits X, section
-            // 7 recomputed X from the RouteCommit's own bytes, that RouteCommit
-            // carries the initiator's signature, and section 1 established the
-            // settler IS `ctx.proven_ak`. So WHO pushed the bytes into the
-            // register is irrelevant — a third party binding this bundle binds
-            // THIS trade, to this trader. That content chain is strictly
-            // stronger than a self-asserted claimant field.
-            if hop.initiator_public_key.as_slice() != ctx.proven_ak {
-                return Err(invalid(
-                    "the bound route was not signed by the settling trader".into(),
-                ));
-            }
+                    owner_genesis,
+                    input_policy_commit,
+                    output_policy_commit,
+                    parent_sequence,
+                    parent_binding,
+                    route_commit_bytes,
+                    external_commitment_x,
+                    input_amount,
+                    output_amount,
+                    fee_bps,
+                    settler_public_key,
+                    settler_devid,
+                },
+                resolver,
+                ctx,
+            )?;
             FundedCredit {
-                source_id: dlv_reserve_consumption_source_id(&vault, *parent_sequence, &d.x),
+                source_id: dlv_reserve_consumption_source_id(&d.vault_id, *parent_sequence, &d.x),
                 policy_commit: *output_policy_commit,
                 amount: *output_amount,
+            }
+        }
+        // ── 0x0035: ROUTE RESERVE CONSUMPTION (amendment 2c-H, H9) ─────────
+        //
+        // The trader's ONE output credit of a route-wide settle. Every leg's
+        // consumption must be provenanced — the intermediate asset paid into
+        // vault k+1 exists only because vault k's reserve released it — so the
+        // per-vault derivation runs once per leg, against the evidence the
+        // descriptor names in route-leg order.
+        CreditSource::DlvRouteReserveConsumption(r) => {
+            let invalid = |m: String| ProvenanceError::DlvRouteReserveConsumptionInvalid(m);
+            let op = ctx.verified_operation.ok_or_else(|| {
+                invalid("a route reserve consumption requires the verified route settle".into())
+            })?;
+            let crate::types::operations::Operation::DlvRouteSettle {
+                legs,
+                route_commit_bytes,
+                external_commitment_x,
+                settler_public_key,
+                settler_devid,
+                ..
+            } = op
+            else {
+                return Err(invalid(
+                    "a route reserve consumption funds only a DlvRouteSettle output".into(),
+                ));
+            };
+            // |E_R| == N, and one trade identity.
+            if r.legs.len() != legs.len() {
+                return Err(invalid(format!(
+                    "the descriptor names {} evidence entries for a route of {} legs",
+                    r.legs.len(),
+                    legs.len()
+                )));
+            }
+            if r.x != *external_commitment_x {
+                return Err(invalid(
+                    "the descriptor's x is not the route settle's".into(),
+                ));
+            }
+            // Every entry's coordinates FIRST, from the descriptor and the
+            // operation alone (H9): nothing is fetched for a descriptor that
+            // names the wrong vault or generation for any leg of the route.
+            for (k, (entry, leg)) in r.legs.iter().zip(legs).enumerate() {
+                if entry.vault_id != leg.vault_id || entry.parent_sequence != leg.parent_sequence {
+                    return Err(invalid(format!(
+                        "evidence entry {k} does not name route leg {k}'s vault and generation"
+                    )));
+                }
+            }
+            for (k, (entry, leg)) in r.legs.iter().zip(legs).enumerate() {
+                // That the evidence entry k addresses is leg k's parent state is
+                // PROVEN by `parent_binding` inside the per-vault derivation
+                // (step 3), never assumed from position.
+                let per_vault = crate::economic::credit::CreditSourceDlvReserveConsumption {
+                    credit_mutation_index: r.credit_mutation_index,
+                    vault_id: entry.vault_id,
+                    parent_sequence: entry.parent_sequence,
+                    x: r.x,
+                    owner_economic_position: entry.owner_economic_position,
+                    reserve_consumption_evidence_addr: entry.reserve_consumption_evidence_addr,
+                };
+                let vault_id = leg.vault_id.to_vec();
+                check_reserve_consumption_leg(
+                    &per_vault,
+                    ReserveConsumptionLeg {
+                        vault_id: &vault_id,
+                        owner_public_key: &leg.owner_public_key,
+                        owner_devid: &leg.owner_devid,
+                        owner_genesis: &leg.owner_genesis,
+                        input_policy_commit: &leg.input_policy_commit,
+                        output_policy_commit: &leg.output_policy_commit,
+                        parent_sequence: &leg.parent_sequence,
+                        parent_binding: &leg.parent_binding,
+                        route_commit_bytes,
+                        external_commitment_x,
+                        input_amount: &leg.input_amount,
+                        output_amount: &leg.output_amount,
+                        fee_bps: &leg.fee_bps,
+                        settler_public_key,
+                        settler_devid,
+                    },
+                    resolver,
+                    ctx,
+                )
+                .map_err(|e| match e {
+                    ProvenanceError::DlvReserveConsumptionInvalid(m) => {
+                        invalid(format!("leg {k}: {m}"))
+                    }
+                    other => other,
+                })?;
+            }
+            // RC.1–RC.5 across the legs.
+            crate::types::operations::DlvRouteLeg::check_route_conservation(legs)
+                .map_err(|e| invalid(e.to_string()))?;
+            let Some(last) = legs.last() else {
+                return Err(invalid("a route settle names no legs".into()));
+            };
+            FundedCredit {
+                source_id: dlv_route_reserve_consumption_source_id(external_commitment_x, legs),
+                policy_commit: last.output_policy_commit,
+                amount: last.output_amount,
             }
         }
         CreditSource::ValidatedDlvSettlementPayment(d) => {
@@ -1658,6 +1403,452 @@ pub fn verify_credit_source(
     Ok(funded)
 }
 
+/// The fields of ONE vault's reserve consumption as the verified operation
+/// states them: a `DlvSettle`'s own fields, or one `DlvRouteSettle` leg with the
+/// route-level fields beside it (amendment 2c-H, H9).
+struct ReserveConsumptionLeg<'a> {
+    vault_id: &'a Vec<u8>,
+    owner_public_key: &'a Vec<u8>,
+    owner_devid: &'a [u8; 32],
+    owner_genesis: &'a [u8; 32],
+    input_policy_commit: &'a [u8; 32],
+    output_policy_commit: &'a [u8; 32],
+    parent_sequence: &'a u64,
+    parent_binding: &'a [u8; 32],
+    route_commit_bytes: &'a Vec<u8>,
+    external_commitment_x: &'a [u8; 32],
+    input_amount: &'a u64,
+    output_amount: &'a u64,
+    fee_bps: &'a u32,
+    settler_public_key: &'a Vec<u8>,
+    settler_devid: &'a [u8; 32],
+}
+
+/// **The per-vault reserve-consumption derivation** (2c-A.1 ruling 14): ONE
+/// function, run by `0x0026` for its one vault and by `0x0035` for every leg of
+/// a route (2c-H H9). Descriptor ↔ operation coordinates and settler
+/// correspondence; the evidence by content address; `V_n` hashing to this
+/// leg's `parent_binding`; pair, fee and canonical quorum; the two-axis owner
+/// join; the owner's validated root, proof artifact and the composed-state
+/// rule; sufficiency; the RouteCommit with exact re-simulation; the binding
+/// observation and authorship.
+fn check_reserve_consumption_leg(
+    d: &crate::economic::credit::CreditSourceDlvReserveConsumption,
+    leg: ReserveConsumptionLeg<'_>,
+    resolver: &dyn ProvenanceResolver,
+    ctx: &ProvenanceContext<'_>,
+) -> Result<(), ProvenanceError> {
+    let invalid = |m: String| ProvenanceError::DlvReserveConsumptionInvalid(m);
+    let ReserveConsumptionLeg {
+        vault_id: op_vault,
+        owner_public_key,
+        owner_devid,
+        owner_genesis,
+        input_policy_commit,
+        output_policy_commit,
+        parent_sequence,
+        parent_binding,
+        route_commit_bytes,
+        external_commitment_x,
+        input_amount,
+        output_amount,
+        fee_bps,
+        settler_public_key,
+        settler_devid,
+    } = leg;
+    let vault: [u8; 32] = op_vault
+        .as_slice()
+        .try_into()
+        .map_err(|_| invalid("vault id is not 32 bytes".into()))?;
+    // ── 1. Descriptor ↔ operation coordinate equality ─────────────
+    if d.vault_id != vault || d.parent_sequence != *parent_sequence || d.x != *external_commitment_x
+    {
+        return Err(invalid(
+            "descriptor coordinates do not equal the operation's".into(),
+        ));
+    }
+    // The transition under validation IS the trader's: the settler
+    // named by the signed operation must be the authenticated
+    // identity whose lineage this is.
+    // VDS.COMMON.12 through the ONE typed check. A wrong-width key is
+    // refused at construction: DevID bytes can never be an AK here.
+    {
+        use crate::dlv::successor_validity::{check_settler_correspondence, AuthorityPublicKey, DevId};
+        let embedded = AuthorityPublicKey::try_new(settler_public_key);
+        let proven = AuthorityPublicKey::try_new(ctx.proven_ak);
+        let ok = match (embedded, proven) {
+            (Ok(e), Ok(p)) => {
+                check_settler_correspondence(&e, &DevId(*settler_devid), &p, &DevId(*ctx.device_id))
+                    .is_ok()
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(invalid(
+                "the settle's settler is not the identity under validation".into(),
+            ));
+        }
+    }
+    // ── 2. The evidence bundle, by exact content address ──────────
+    let bundle_bytes = resolver
+        .immutable_evidence(
+            crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+            &d.reserve_consumption_evidence_addr,
+        )
+        .map_err(ProvenanceError::OwnerLineage)?;
+    // INNER content identity — `H_dom(namespace, payload)` — the form
+    // every object in the evidence DAG is addressed by, and the form
+    // the resolver's fetch derives its store key from. The outer
+    // storage-object addr exists too, but an arm committing to it
+    // names an address no resolver can dereference, which made this
+    // arm unsatisfiable by any producer emission. Matches the 0x0023
+    // arm above.
+    if crate::storage_object::immutable_inner(
+        crate::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+        &bundle_bytes,
+    ) != d.reserve_consumption_evidence_addr
+    {
+        return Err(invalid(
+            "evidence bytes do not hash to the descriptor's address".into(),
+        ));
+    }
+    let ev = crate::economic::reserve_consumption_evidence::decode_reserve_consumption_evidence(
+        &bundle_bytes,
+    )
+    .map_err(invalid)?;
+    // ── 3. The exact parent vault state: hash-to-c_n, then decode ──
+    {
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_VAULT_STATE,
+        );
+        h.update(&ev.exact_vault_state_ccb);
+        if *h.finalize().as_bytes() != *parent_binding {
+            return Err(invalid(
+                "the carried CCB(V_n) does not hash to the settle's parent binding".into(),
+            ));
+        }
+    }
+    let vn = crate::ccb::decode::decode_vault_state(&ev.exact_vault_state_ccb)
+        .map_err(|e| invalid(format!("V_n does not decode: {e}")))?;
+    if vn.vault_id != vault || vn.generation != *parent_sequence {
+        return Err(invalid(
+            "V_n names a different vault or generation than the settle".into(),
+        ));
+    }
+    // Pair identity: {input, output} must BE V_n's market pair.
+    let (lo, hi) = if input_policy_commit < output_policy_commit {
+        (input_policy_commit, output_policy_commit)
+    } else {
+        (output_policy_commit, input_policy_commit)
+    };
+    if vn.market_policy.token_a() != lo || vn.market_policy.token_b() != hi {
+        return Err(invalid(
+            "the settle's assets are not V_n's market pair".into(),
+        ));
+    }
+    if vn.fee_policy.fee_bps() != *fee_bps {
+        return Err(invalid("the settle's fee is not V_n's fee".into()));
+    }
+    // THE VAULT'S EXCLUSIVITY RULE, checked as soon as `V_n` is
+    // decoded and before anything downstream relies on it. The
+    // committed quorum must BE the canonical strict majority of the
+    // committed set: a smaller one lets two disjoint claims each reach
+    // quorum, which is two winners for one generation.
+    crate::economic::cell_observation::require_canonical_quorum(vn.storage_set.len(), vn.quorum)
+        .map_err(|e| invalid(format!("the vault's committed quorum: {e}")))?;
+    // ── 4. THE TWO-AXIS OWNER JOIN ────────────────────────────────
+    // Axis A: V_n itself names the owner identity.
+    if vn.owner_genesis_id != *owner_genesis || vn.owner_device_id != *owner_devid {
+        return Err(invalid(
+            "V_n names a different owner than the settle".into(),
+        ));
+    }
+    // Axis B: the VAULT-BOUND authority (invariant across market
+    // successors) must independently resolve under the same
+    // (G, DevID) at V_n's own bound position. This is a DIFFERENT
+    // coordinate from the owner's economic-manifest authority
+    // position — the owner's device-authority lineage may advance
+    // after vault creation, and collapsing the axes would make a
+    // long-lived vault unspendable.
+    let vault_authority = crate::economic::authority_evidence::verify_authority_evidence(
+        &ev.owner_authority_evidence,
+        owner_genesis,
+        owner_devid,
+        &vn.owner_authority_transition_digest,
+    )
+    .map_err(|e| invalid(format!("vault-bound owner authority: {e}")))?;
+    if vault_authority.proven_ak.as_slice() != owner_public_key.as_slice() {
+        return Err(invalid(
+            "the settle's owner key is not the vault-bound proven authority".into(),
+        ));
+    }
+    // ── 5. The owner's VALIDATED economic root at the locator ─────
+    // The locator is untrusted; the walk independently derives
+    // ValidatedEconomicRoot(position), and the reserve facts are
+    // proven against exactly that root.
+    let owner = resolver
+        .validated_peer_transition(owner_genesis, owner_devid, d.owner_economic_position)
+        .map_err(ProvenanceError::OwnerLineage)?;
+    let owner_root = owner.validated_root.economic_root();
+    // THE PROOF SOURCE IS THE GENERIC ARTIFACT — one object, shared
+    // by both directions of a settlement, rather than a second copy
+    // of the same leaves inside this bundle. Fetched by the INNER
+    // content identity like every object in this DAG, re-hashed to
+    // the address the bundle names, and then verified against the
+    // owner, position and root THIS ARM derived. Nothing a locator
+    // said is an input to that check.
+    let proof_bytes = resolver
+        .immutable_evidence(
+            crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+            &ev.economic_proof_addr,
+        )
+        .map_err(ProvenanceError::OwnerLineage)?;
+    if crate::storage_object::immutable_inner(
+        crate::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+        &proof_bytes,
+    ) != ev.economic_proof_addr
+    {
+        return Err(invalid(
+            "economic proof bytes do not hash to the bundle's address".into(),
+        ));
+    }
+    let artifact = crate::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
+        .map_err(invalid)?;
+    artifact
+        .verify_against(
+            owner_genesis,
+            owner_devid,
+            d.owner_economic_position,
+            &owner_root,
+        )
+        .map_err(invalid)?;
+    // THE COMPOSED-STATE RULE (SoFi; 2c-D §14, conformance repair).
+    // The owner's proof backs the vault's reserves at ONE baseline
+    // generation. At the baseline V_n states exactly those reserves;
+    // past it, V_n must be exactly the state the composition walk
+    // reaches at c_n from that baseline, every step certified. The
+    // owner does not act between generations.
+    let owner_leaves: Vec<crate::economic::state::EconomicVaultReserveState> = artifact
+        .states()
+        .filter_map(|s| match s {
+            crate::economic::state::EconomicLeafState::VaultReserve(v) if v.vault_id == vault => {
+                Some(v.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let history = match owner_leaves.first().map(|l| l.vault_sequence) {
+        Some(baseline) if baseline < *parent_sequence => Some(
+            resolver
+                .composed_vault_history(&vault, parent_binding, &vn, baseline)
+                .map_err(ProvenanceError::OwnerLineage)?,
+        ),
+        _ => None,
+    };
+    crate::dlv::composed_history::check_composed_reserve_provenance(
+        &owner_leaves,
+        &vn,
+        history.as_ref(),
+    )
+    .map_err(|r| invalid(r.to_string()))?;
+    // V_n's reserves are now provenanced — by the owner at the
+    // baseline, by composition past it — and are what this trade meets.
+    let (reserve_in, reserve_out) = if input_policy_commit == vn.market_policy.token_a() {
+        (vn.reserve_a, vn.reserve_b)
+    } else {
+        (vn.reserve_b, vn.reserve_a)
+    };
+    // ── 6. Sufficiency ────────────────────────────────────────────
+    if reserve_out < *output_amount {
+        return Err(invalid(
+            "the vault cannot pay that settlement output".into(),
+        ));
+    }
+    // ── 7. The RouteCommit: pure verification + exact re-simulation
+    let hop = crate::dlv::route_commit::verify_route_commit_hop(
+        route_commit_bytes,
+        &vault,
+        parent_binding,
+    )
+    .map_err(|e| invalid(format!("route commit: {e}")))?;
+    let rc = <crate::types::proto::RouteCommitV1 as prost::Message>::decode(
+        route_commit_bytes.as_slice(),
+    )
+    .map_err(|_| invalid("route commit does not decode".into()))?;
+    if crate::dlv::route_commit::compute_external_commitment(&rc) != *external_commitment_x {
+        return Err(invalid(
+            "the route commit does not derive the settle's X".into(),
+        ));
+    }
+    if hop.token_in != *input_policy_commit
+        || hop.token_out != *output_policy_commit
+        || hop.input_amount != *input_amount
+        || hop.expected_output != *output_amount
+        || hop.fee_bps != *fee_bps
+    {
+        return Err(invalid(
+            "the bound hop does not state the settle's exact trade".into(),
+        ));
+    }
+    match crate::dlv::route_commit::constant_product_output(
+        *input_amount,
+        reserve_in,
+        reserve_out,
+        *fee_bps,
+    ) {
+        Some(out) if out == *output_amount => {}
+        _ => {
+            return Err(invalid(
+                "re-simulation does not yield the settle's exact output".into(),
+            ))
+        }
+    }
+    // ── 8. THE BINDING: exclusivity's liveness anchor ────────────
+    // EVERY ANSWER MEANS SOMETHING DIFFERENT, and the verdicts differ.
+    // The taxonomy this file states — an outage retries, a forgery does
+    // not — is only true if it is preserved here: a divergence is a
+    // QUARANTINE, an unreadable or undecided key is RETRYABLE, and
+    // neither is evidence that this credit was forged. Collapsing them
+    // into "no winner" reports a network fault as a forgery and a
+    // forgery as a network fault.
+    //
+    // The key is derived HERE, from the parent state this settle names,
+    // so the resolver cannot answer about a different key than the one
+    // under validation.
+    let k_v = crate::dlv::settlement_bundle::resource_key(parent_binding);
+    let chosen = match resolver.parent_binding_observation(&k_v, &vn.storage_set, vn.quorum) {
+        crate::dlv::binding_observation::BindingObservation::BoundFinal(c) => c,
+        crate::dlv::binding_observation::BindingObservation::Conflict { chosen, .. } => {
+            return Err(ProvenanceError::OwnerLineage(
+                PeerLineageFailure::Quarantined(format!(
+                    "the binding key for this parent holds {} chosen values",
+                    chosen.len()
+                )),
+            ))
+        }
+        crate::dlv::binding_observation::BindingObservation::Unavailable {
+            attributed,
+            required,
+        } => {
+            return Err(ProvenanceError::OwnerLineage(
+                PeerLineageFailure::Incomplete(format!(
+                    "only {attributed} of the vault's members answered the \
+                     binding key ({required} required)"
+                )),
+            ))
+        }
+        // THE ARM THAT IS EASY TO GET BACKWARDS. A promise in flight, or
+        // an accepted record held by fewer members than THIS reader's
+        // quorum, is not a forgery: two quorums intersect, but one READ
+        // need not see the intersection, so a value already chosen
+        // behind a down member lands here. Mapping it to Invalid would
+        // make every concurrent settle permanently invalid.
+        crate::dlv::binding_observation::BindingObservation::Undetermined {
+            attributed, ..
+        } => {
+            return Err(ProvenanceError::OwnerLineage(
+                PeerLineageFailure::Incomplete(format!(
+                    "the binding for this parent is not yet decided \
+                     ({attributed} members answered)"
+                )),
+            ))
+        }
+        // A quorum of members each explicitly hold NOTHING at this key.
+        // That IS evidence, and it says this settle never won
+        // exclusivity over the parent it names.
+        crate::dlv::binding_observation::BindingObservation::Free => {
+            return Err(invalid("no binding was established for this parent".into()))
+        }
+    };
+    // The record's two identity fields must agree with each other
+    // before either is used to fetch anything.
+    if crate::storage_object::immutable_addr_from_inner(
+        crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+        &chosen.value_digest,
+    ) != chosen.value_addr
+    {
+        return Err(invalid(
+            "the bound record's digest and address disagree".into(),
+        ));
+    }
+    // The bundle, by the record's own value identity — BYTES, re-hashed
+    // here. The resolver never gets to assert what the bundle says.
+    //
+    // Evidence locality: the resolver fetches through its own configured
+    // fleet, while the bundle was written to the VAULT's committed set.
+    // In the beta deployment those are the same members. If they can
+    // diverge, this fetch is looking at the wrong fleet — which is why a
+    // miss is Incomplete (retryable), never Invalid.
+    let bundle_bytes = resolver
+        .immutable_evidence(
+            crate::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+            &chosen.value_digest,
+        )
+        .map_err(ProvenanceError::OwnerLineage)?;
+    // Strict decode and the whole-bundle round trip under the frozen
+    // encoder (2c-A.1 ruling 8); the identity is over exactly these
+    // bytes, which are the bytes that were fetched.
+    let decoded = crate::dlv::settlement_bundle::decode_canonical(&bundle_bytes)
+        .map_err(|e| invalid(format!("bound bundle: {e}")))?;
+    let bundle = decoded.bundle;
+    if crate::dlv::settlement_bundle::bundle_digest(&bundle_bytes) != chosen.value_digest
+        || crate::dlv::settlement_bundle::bundle_addr(&bundle_bytes) != chosen.value_addr
+    {
+        return Err(invalid(
+            "the bound bundle does not hash to the record's identity".into(),
+        ));
+    }
+    // The bundle carries no storage set and no quorum (registry §5.19):
+    // binding authority is `V_n`'s own fields 14 and 15, which is the
+    // set this key was read at.
+    //
+    // AND IT NAMES THIS SETTLE'S PARENT. The register is
+    // application-blind (§22 #12) and never inspects the value it
+    // holds, so a proposer can bind a bundle at k(c_n) whose
+    // transition names some other parent. The transition is located by
+    // `parent_binding == c_n` (2c-A.1 ruling 7); the successor's own
+    // `vault_id` and generation must be this vault's next.
+    let transition = bundle
+        .transition_for_parent(parent_binding)
+        .ok_or_else(|| {
+            invalid("the bound bundle does not name this settle's parent state".into())
+        })?;
+    if transition.successor.vault_id != vault {
+        return Err(invalid(
+            "the bound bundle consumes no leg of this vault".into(),
+        ));
+    }
+    if transition.successor.generation != parent_sequence.saturating_add(1) {
+        return Err(invalid(
+            "the bound bundle's successor is not this parent's next generation".into(),
+        ));
+    }
+    // THE TRADE IDENTITY. A close bundle has no market terms and is
+    // not a settle at all.
+    let terms = bundle
+        .market_terms()
+        .ok_or_else(|| invalid("the bound bundle is an owner close, not a settle".into()))?;
+    if terms.route_set_commitment != d.x {
+        return Err(invalid(
+            "the bound bundle commits a different route set than this settle".into(),
+        ));
+    }
+    // AUTHORSHIP, without a claimant field to read. A SettlementBundle
+    // has none, and it does not need one: the bundle commits X, section
+    // 7 recomputed X from the RouteCommit's own bytes, that RouteCommit
+    // carries the initiator's signature, and section 1 established the
+    // settler IS `ctx.proven_ak`. So WHO pushed the bytes into the
+    // register is irrelevant — a third party binding this bundle binds
+    // THIS trade, to this trader. That content chain is strictly
+    // stronger than a self-asserted claimant field.
+    if hop.initiator_public_key.as_slice() != ctx.proven_ak {
+        return Err(invalid(
+            "the bound route was not signed by the settling trader".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Which arms must leave a persistent consumed-source record.
 ///
 /// `SameTransitionMove` does not: its debit is inside the same write set, so
@@ -1718,6 +1909,20 @@ pub fn market_leg_commits(operation: &crate::types::operations::Operation) -> Ve
             output_policy_commit,
             ..
         } => vec![*input_policy_commit, *output_policy_commit],
+        // Every asset a route moves, intermediates included: they never become
+        // trader balances (2c-H H4), but each is still a market leg and its
+        // policy still applies.
+        Operation::DlvRouteSettle { legs, .. } => {
+            let mut commits: Vec<[u8; 32]> = Vec::with_capacity(legs.len() + 1);
+            for leg in legs {
+                for pc in [leg.input_policy_commit, leg.output_policy_commit] {
+                    if !commits.contains(&pc) {
+                        commits.push(pc);
+                    }
+                }
+            }
+            commits
+        }
         _ => Vec::new(),
     }
 }

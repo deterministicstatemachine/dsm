@@ -772,6 +772,7 @@ impl CoreSDK {
             | DsmOperation::DlvClaim { signature, .. }
             | DsmOperation::DlvInvalidate { signature, .. }
             | DsmOperation::DlvSettle { signature, .. }
+            | DsmOperation::DlvRouteSettle { signature, .. }
             | DsmOperation::DlvClose { signature, .. }
             | DsmOperation::DlvCreateFundedV2 { signature, .. }
             | DsmOperation::DlvOwnerApplyV2 { signature, .. } => {

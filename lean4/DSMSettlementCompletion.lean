@@ -183,4 +183,91 @@ theorem an_uncertifiable_sample_never_releases :
 #print axioms the_resume_finishes_what_the_first_pass_could_not
 #print axioms an_uncertifiable_sample_never_releases
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Amendment 2c-H H13: a route settlement — ONE fence over N vault receipts
+--
+-- Each consumed vault certifies its own fold for the same bundle, and each
+-- vault's receipt must be durable at quorum. The fence releases only after
+-- every vault certified AND every receipt is at quorum; one receipt below
+-- quorum leaves the whole settlement bound-unrealized (C2-R1 point 4, N-wise).
+--
+-- Mutation control, executed rather than asserted: the release condition
+-- weakened from "every receipt" to "any receipt" (`all id` -> `any id`)
+--   -> `one_receipt_below_quorum_holds_the_whole_route` is proved FALSE by the
+--      kernel ("Tactic `decide` proved that the proposition ... is false"), and
+--      `every_route_pass_keeps_every_receipt_before_release` loses its proof
+--      (unsolved goals: a release with a receipt still below quorum). Reverted;
+--      this is the unmutated module.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+/-- A route settlement's completion state: one fence, one receipt per vault. -/
+structure RouteSettlement where
+  published : List Bool
+  fence : Fence
+  deriving DecidableEq, Repr
+
+/-- What one pass meets, per vault: its fold certifies on this device, and its
+receipt reaches quorum now. -/
+structure RouteWorld where
+  certifiable : List Bool
+  quorumReachable : List Bool
+  deriving DecidableEq, Repr
+
+/-- **One route completion pass.** -/
+def routePass (w : RouteWorld) (s : RouteSettlement) : RouteSettlement :=
+  match s.fence with
+  | .released => s
+  | .held =>
+    if w.certifiable.all id then
+      if (List.zipWith (· || ·) s.published w.quorumReachable).all id then
+        { published := List.zipWith (· || ·) s.published w.quorumReachable, fence := .released }
+      else
+        { s with published := List.zipWith (· || ·) s.published w.quorumReachable }
+    else s
+
+/-- A released route has every receipt at quorum. -/
+def routeOrdered (s : RouteSettlement) : Prop :=
+  s.fence = .released → s.published.all id = true
+
+/-- **ORDERING, N-wise, preserved by every pass.** -/
+theorem every_route_pass_keeps_every_receipt_before_release
+    (w : RouteWorld) (s : RouteSettlement) (h : routeOrdered s) :
+    routeOrdered (routePass w s) := by
+  obtain ⟨pub, fence⟩ := s
+  cases fence with
+  | released => simpa [routePass, routeOrdered] using h
+  | held =>
+    unfold routeOrdered routePass
+    by_cases hc : w.certifiable.all id = true
+    · by_cases hp : (List.zipWith (· || ·) pub w.quorumReachable).all id = true
+      · simp [hc, hp]
+      · simp [hc, hp]
+    · simp [hc]
+
+def twoHeld : RouteSettlement := { published := [false, false], fence := .held }
+def secondBelowQuorum : RouteWorld := { certifiable := [true, true], quorumReachable := [true, false] }
+def bothReachable : RouteWorld := { certifiable := [true, true], quorumReachable := [true, true] }
+def secondUncertified : RouteWorld := { certifiable := [true, false], quorumReachable := [true, true] }
+
+/-- One receipt below quorum: the first receipt is published, the fence holds. -/
+theorem one_receipt_below_quorum_holds_the_whole_route :
+    routePass secondBelowQuorum twoHeld = { published := [true, false], fence := .held } := by
+  decide
+
+/-- D-f, N-wise: the SAME settlement, resumed once the second receipt reaches
+quorum, releases. -/
+theorem the_resume_releases_once_every_receipt_is_at_quorum :
+    (routePass bothReachable (routePass secondBelowQuorum twoHeld)).fence = .released := by
+  decide
+
+/-- One vault whose fold does not certify holds the whole route, whatever
+quorum offers. -/
+theorem one_uncertified_vault_holds_the_whole_route :
+    (routePass secondUncertified twoHeld).fence = .held := by decide
+
+#print axioms every_route_pass_keeps_every_receipt_before_release
+#print axioms one_receipt_below_quorum_holds_the_whole_route
+#print axioms the_resume_releases_once_every_receipt_is_at_quorum
+#print axioms one_uncertified_vault_holds_the_whole_route
+
 end DSMSettlementCompletion

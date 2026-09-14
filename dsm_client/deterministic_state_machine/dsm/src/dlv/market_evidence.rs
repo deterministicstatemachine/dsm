@@ -10,12 +10,16 @@
 //! its output, and the half a FOREIGN verifier runs.
 //!
 //! ```text
-//! G1  operation_bytes decodes under DlvSettleOperationPreimageV1, consuming
+//! G1  operation_bytes decodes under DlvSettleOperationPreimageV1 (26) or
+//!     DlvRouteSettleOperationPreimageV1 (33, amendment 2c-H), consuming
 //!     ALL bytes, with every fixed-length semantic field at its required
 //!     length and the signature at the SPX256f length
 //! G2  re-encode(decode(operation_bytes)) == operation_bytes
-//! G3  discriminator == 26 and mode == Unilateral
+//! G3  discriminator ∈ {26, 33} and mode == Unilateral
 //! G4  relationship_chain_tip_v2(<its six inputs>) == trader_successor
+//! G5  for 33 only (2c-H H11): the signed legs equal the selected route's
+//!     legs, in route order — parent binding, amounts, fee — and they
+//!     conserve (RC.1–RC.5). Grammar 26 is untouched (H18).
 //! ```
 //!
 //! WHY NOT IN THE DECODER. Owner ruling: the chain-tip recomputation is
@@ -38,10 +42,12 @@
 use crate::ccb::settlement::{MarketTerms, SPX256F_SIGNATURE_LEN};
 use crate::dlv::successor_validity::AUTHORITY_KEY_LEN;
 use crate::types::device_state::relationship_chain_tip_v2;
-use crate::types::operations::{Operation, TransactionMode};
+use crate::ccb::settlement::RouteLeg;
+use crate::types::operations::{DlvRouteLeg, Operation, RouteConservationError, TransactionMode};
 
-/// The discriminator 2c-B froze for `DlvSettleOperationPreimageV1`.
-pub const DLV_SETTLE_DISCRIMINATOR: u8 = 26;
+/// The operation discriminators G3 reads — defined once, in `ccb`, beside the
+/// bundle rule that ties each grammar to its transition cardinality.
+pub use crate::ccb::{DLV_ROUTE_SETTLE_DISCRIMINATOR, DLV_SETTLE_DISCRIMINATOR};
 
 /// Which conjunct refused, and what it saw. Structured, never a string: the
 /// arm IS the finding.
@@ -66,7 +72,7 @@ pub enum EvidenceInvalid {
     /// two encodings of one operation exist and a verifier could disagree with
     /// the signer about which was signed.
     NotCanonical,
-    /// `G3`. Not discriminator 26.
+    /// `G3`. Neither discriminator 26 nor 33.
     WrongDiscriminator { got: u8 },
     /// `G3`. The decoded operation is not a settle.
     NotASettle,
@@ -86,6 +92,13 @@ pub enum EvidenceInvalid {
         expected: usize,
         got: usize,
     },
+    /// `G5` (2c-H H11). The route settle's legs and the selected route's legs
+    /// differ: another count, a leg that is not a bare allocation, or a leg
+    /// whose parent binding, amounts or fee differ. `leg` is the first index
+    /// that differs, or the shorter length when the counts differ.
+    RouteLegMismatch { leg: usize },
+    /// `G5` (2c-H H8). The route settle's legs do not conserve.
+    RouteNotConserved(RouteConservationError),
     /// `G4`. The carried successor is not the tip of the carried inputs. This
     /// is the conjunct that makes the evidence self-consistent rather than
     /// merely well-formed.
@@ -100,7 +113,8 @@ impl core::fmt::Display for EvidenceInvalid {
         match self {
             Self::Undecodable => write!(
                 f,
-                "G1: operation_bytes do not decode under DlvSettleOperationPreimageV1"
+                "G1: operation_bytes do not decode under DlvSettleOperationPreimageV1 or \
+                 DlvRouteSettleOperationPreimageV1"
             ),
             Self::TrailingBytes { decoded, carried } => write!(
                 f,
@@ -113,9 +127,12 @@ impl core::fmt::Display for EvidenceInvalid {
                  operation exist"
             ),
             Self::WrongDiscriminator { got } => {
-                write!(f, "G3: discriminator {got}, expected 26")
+                write!(f, "G3: discriminator {got}, expected 26 or 33")
             }
-            Self::NotASettle => write!(f, "G3: the decoded operation is not a DlvSettle"),
+            Self::NotASettle => write!(
+                f,
+                "G3: the decoded operation is not a DlvSettle or a DlvRouteSettle"
+            ),
             Self::NotUnilateral => write!(f, "G3: a settle in this profile is Unilateral"),
             Self::FieldWidth {
                 field,
@@ -126,6 +143,11 @@ impl core::fmt::Display for EvidenceInvalid {
                 "G1: {field} is {got} bytes, expected {expected}; a short field re-encodes to \
                  itself, so G2 and G4 cannot catch it"
             ),
+            Self::RouteLegMismatch { leg } => write!(
+                f,
+                "G5: the selected route's leg {leg} is not the signed route settle's leg {leg}"
+            ),
+            Self::RouteNotConserved(e) => write!(f, "G5: {e}"),
             Self::SuccessorIsNotTheChainTip { .. } => write!(
                 f,
                 "G4: trader_successor is not relationship_chain_tip_v2 of the carried inputs"
@@ -147,7 +169,7 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
     // G3's discriminator, read before decoding so a wrong tag reports as a
     // wrong tag rather than as an undecodable blob.
     match bytes.first() {
-        Some(&DLV_SETTLE_DISCRIMINATOR) => {}
+        Some(&DLV_SETTLE_DISCRIMINATOR) | Some(&DLV_ROUTE_SETTLE_DISCRIMINATOR) => {}
         Some(&got) => return Err(EvidenceInvalid::WrongDiscriminator { got }),
         None => return Err(EvidenceInvalid::Undecodable),
     }
@@ -159,7 +181,7 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
 
     // G3, on the decoded operation rather than on its first byte.
     match &op {
-        Operation::DlvSettle { mode, .. } => {
+        Operation::DlvSettle { mode, .. } | Operation::DlvRouteSettle { mode, .. } => {
             if *mode != TransactionMode::Unilateral {
                 return Err(EvidenceInvalid::NotUnilateral);
             }
@@ -186,6 +208,43 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
                 AUTHORITY_KEY_LEN,
                 owner_public_key.len(),
             ),
+            (
+                "settler_public_key",
+                AUTHORITY_KEY_LEN,
+                settler_public_key.len(),
+            ),
+            ("signature", SPX256F_SIGNATURE_LEN, signature.len()),
+        ] {
+            if got != expected {
+                return Err(EvidenceInvalid::FieldWidth {
+                    field,
+                    expected,
+                    got,
+                });
+            }
+        }
+    }
+
+    // G1's width rule for grammar 33. Every leg digest is a 32-byte array the
+    // decoder enforces; each leg's owner key, the settler key and the signature
+    // are length-prefixed and checked here or nowhere.
+    if let Operation::DlvRouteSettle {
+        legs,
+        settler_public_key,
+        signature,
+        ..
+    } = &op
+    {
+        for leg in legs {
+            if leg.owner_public_key.len() != AUTHORITY_KEY_LEN {
+                return Err(EvidenceInvalid::FieldWidth {
+                    field: "legs[].owner_public_key",
+                    expected: AUTHORITY_KEY_LEN,
+                    got: leg.owner_public_key.len(),
+                });
+            }
+        }
+        for (field, expected, got) in [
             (
                 "settler_public_key",
                 AUTHORITY_KEY_LEN,
@@ -230,6 +289,40 @@ pub fn check_market_evidence(terms: &MarketTerms) -> Result<(), EvidenceInvalid>
             carried: terms.trader_successor,
             recomputed,
         });
+    }
+
+    // G5 (2c-H H11), grammar 33 only. Both collections are route-order
+    // sequences, so leg k is compared with leg k; the parent binding must match
+    // as well as the amounts and fee, so a reordered route cannot pass.
+    if let Operation::DlvRouteSettle { legs, .. } = &op {
+        check_route_legs_match_selected_route(legs, terms)?;
+        DlvRouteLeg::check_route_conservation(legs).map_err(EvidenceInvalid::RouteNotConserved)?;
+    }
+    Ok(())
+}
+
+/// `G5`'s correspondence half: the signed legs are the selected route's legs.
+fn check_route_legs_match_selected_route(
+    legs: &[DlvRouteLeg],
+    terms: &MarketTerms,
+) -> Result<(), EvidenceInvalid> {
+    let route_legs = terms.selected_route.legs();
+    if route_legs.len() != legs.len() {
+        return Err(EvidenceInvalid::RouteLegMismatch {
+            leg: route_legs.len().min(legs.len()),
+        });
+    }
+    for (k, (signed, selected)) in legs.iter().zip(route_legs).enumerate() {
+        let RouteLeg::Single(allocation) = selected else {
+            return Err(EvidenceInvalid::RouteLegMismatch { leg: k });
+        };
+        if allocation.parent_binding != signed.parent_binding
+            || allocation.delta_in != signed.input_amount
+            || allocation.delta_out != signed.output_amount
+            || allocation.fee_policy.fee_bps() != signed.fee_bps
+        {
+            return Err(EvidenceInvalid::RouteLegMismatch { leg: k });
+        }
     }
     Ok(())
 }
@@ -406,6 +499,96 @@ mod tests {
         assert_eq!(
             check_market_evidence(&t),
             Err(EvidenceInvalid::NotUnilateral)
+        );
+    }
+
+    // ── 2c-H: grammar 33 ────────────────────────────────────────────────────
+
+    /// Market terms around a signed route settle over `legs`, assembled
+    /// directly (not through `market_terms`, whose self-check would refuse a
+    /// deliberately broken route before this verifier could be asked).
+    fn route_terms_over(legs: Vec<DlvRouteLeg>) -> MarketTerms {
+        let x = [0x58; 32];
+        let route = fixtures::route_of(&legs);
+        let last = legs.len() - 1;
+        let intent = crate::ccb::TradeIntent {
+            token_in: legs[0].input_policy_commit,
+            amount_in: legs[0].input_amount,
+            token_out: legs[last].output_policy_commit,
+            exact_out: legs[last].output_amount,
+            fee_bps: 60,
+            nonce: [0x5E; 32],
+        };
+        let prepared = fixtures::prepared_for(&fixtures::signed_route_settle(legs, x));
+        MarketTerms {
+            intent,
+            route_set_commitment: x,
+            selected_route: route,
+            trader_parent: prepared.trader_parent(),
+            trader_successor: prepared.trader_successor(),
+            recovery_material: prepared.evidence().clone(),
+        }
+    }
+
+    #[test]
+    fn a_genuine_route_settle_satisfies_all_five() {
+        let t = fixtures::route_market_terms([[0xE1; 32], [0xE2; 32]], [0x58; 32]);
+        assert_eq!(
+            t.recovery_material.operation_bytes[0],
+            DLV_ROUTE_SETTLE_DISCRIMINATOR
+        );
+        assert_eq!(check_market_evidence(&t), Ok(()));
+    }
+
+    #[test]
+    fn g5_a_selected_route_that_disagrees_with_the_signed_legs_is_refused() {
+        let parents = [[0xE1; 32], [0xE2; 32]];
+        let mut t = fixtures::route_market_terms(parents, [0x58; 32]);
+        let mut shifted = fixtures::two_hop_route_legs(parents);
+        shifted[1].output_amount += 1;
+        t.selected_route = fixtures::route_of(&shifted);
+        assert_eq!(
+            check_market_evidence(&t),
+            Err(EvidenceInvalid::RouteLegMismatch { leg: 1 })
+        );
+    }
+
+    #[test]
+    fn g5_a_reordered_selected_route_is_refused() {
+        let parents = [[0xE1; 32], [0xE2; 32]];
+        let mut t = fixtures::route_market_terms(parents, [0x58; 32]);
+        let mut reversed = fixtures::two_hop_route_legs(parents);
+        reversed.reverse();
+        t.selected_route = fixtures::route_of(&reversed);
+        assert_eq!(
+            check_market_evidence(&t),
+            Err(EvidenceInvalid::RouteLegMismatch { leg: 0 })
+        );
+    }
+
+    #[test]
+    fn g5_a_route_settle_that_does_not_conserve_is_refused() {
+        let mut legs = fixtures::two_hop_route_legs([[0xE1; 32], [0xE2; 32]]);
+        legs[1].input_amount = 4_936;
+        assert_eq!(
+            check_market_evidence(&route_terms_over(legs)),
+            Err(EvidenceInvalid::RouteNotConserved(
+                RouteConservationError::AmountChainBroken { leg: 0 }
+            ))
+        );
+    }
+
+    #[test]
+    fn g1_a_route_leg_with_a_short_owner_key_is_refused() {
+        let mut legs = fixtures::two_hop_route_legs([[0xE1; 32], [0xE2; 32]]);
+        legs[1].owner_public_key.pop();
+        assert_eq!(
+            check_market_evidence(&route_terms_over(legs)),
+            Err(EvidenceInvalid::FieldWidth {
+                field: "legs[].owner_public_key",
+                expected: AUTHORITY_KEY_LEN,
+                got: AUTHORITY_KEY_LEN - 1,
+            })
         );
     }
 }

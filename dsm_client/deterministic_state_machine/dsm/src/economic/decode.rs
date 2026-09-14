@@ -13,7 +13,7 @@
 //! is not a witness with a suffix; it is not a witness.
 //!
 //! Scope is the witness closure: `0x001D`, `0x001E`, the leaf states
-//! `0x001F`–`0x0022`, and the credit sources `0x0023`–`0x0028`. The claim and
+//! `0x001F`–`0x0022`, and the credit sources `0x0023`–`0x0028`, `0x0030` and `0x0035`. The claim and
 //! manifest (`0x001B` / `0x001C`) are the register and admission layer and
 //! decode with that work, not here.
 
@@ -22,6 +22,7 @@ use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
     CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
+    CreditSourceDlvRouteReserveConsumption, RouteLegReserveConsumption,
     CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
     CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
     CreditSourceVerifiedOfflineReentry,
@@ -59,7 +60,8 @@ pub fn decode_leaf_mutation(bytes: &[u8]) -> Result<EconomicLeafMutation, Decode
     Ok(m)
 }
 
-/// Decode a standalone `CreditSource` — one of classes `0x0023`–`0x0028`.
+/// Decode a standalone `CreditSource` — one of classes `0x0023`–`0x0028`,
+/// `0x0030` and `0x0035`.
 pub fn decode_credit_source(bytes: &[u8]) -> Result<CreditSource, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     let s = read_credit_source(&mut c)?;
@@ -422,6 +424,43 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     reserve_consumption_evidence_addr: c.digest32()?,
                 },
             ))
+        }
+        class::CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION => {
+            c.envelope(
+                CreditSourceDlvRouteReserveConsumption::CLASS,
+                CreditSourceDlvRouteReserveConsumption::SCHEMA,
+            )?;
+            let credit_mutation_index = c.u32()?;
+            let x = c.digest32()?;
+            // The count is bounded BEFORE any entry is read, so a hostile count
+            // sizes neither an allocation nor a loop.
+            let count = c.u32()? as usize;
+            if count == 0 || count > crate::ccb::MAX_TRANSITIONS {
+                return Err(DecodeError::Invalid(format!(
+                    "route reserve consumption: {count} evidence entries is not 1..={}",
+                    crate::ccb::MAX_TRANSITIONS
+                )));
+            }
+            let mut legs = Vec::with_capacity(count);
+            for _ in 0..count {
+                legs.push(RouteLegReserveConsumption {
+                    vault_id: c.digest32()?,
+                    parent_sequence: c.u64()?,
+                    owner_economic_position: c.u64()?,
+                    reserve_consumption_evidence_addr: c.digest32()?,
+                });
+            }
+            let source = CreditSourceDlvRouteReserveConsumption {
+                credit_mutation_index,
+                x,
+                legs,
+            };
+            // The same rules the encoder applies, from these bytes alone. No
+            // correspondence to the operation is established here (H9).
+            if let Some(refusal) = source.entries_refusal() {
+                return Err(invalid(refusal));
+            }
+            Ok(CreditSource::DlvRouteReserveConsumption(source))
         }
         class::CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT => {
             c.envelope(

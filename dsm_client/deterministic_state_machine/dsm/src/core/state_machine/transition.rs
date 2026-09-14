@@ -500,6 +500,13 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
                 return Err(DsmError::invalid_operation("DlvSettle missing signature"));
             }
         }
+        Operation::DlvRouteSettle { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(
+                    "DlvRouteSettle missing signature",
+                ));
+            }
+        }
         Operation::DlvClose { signature, .. } => {
             if signature.is_empty() {
                 return Err(DsmError::invalid_operation("DlvClose missing signature"));

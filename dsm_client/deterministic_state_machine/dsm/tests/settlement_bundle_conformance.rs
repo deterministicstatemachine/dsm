@@ -111,24 +111,24 @@ fn prod_successor(reserve_a: u64, reserve_b: u64) -> VaultStateV2 {
 // ── pinned identities (captured once from the independent encoder) ───────────
 
 const CLOSE_B: [u8; 32] = [
-    19, 14, 237, 145, 26, 180, 133, 226, 121, 53, 213, 205, 56, 229, 207, 161, 0, 225, 242, 44,
-    228, 40, 86, 121, 181, 10, 25, 116, 218, 66, 113, 248,
+    68, 52, 120, 79, 84, 123, 35, 29, 175, 100, 237, 100, 252, 89, 186, 147, 163, 132, 87, 245,
+    129, 2, 27, 37, 41, 197, 72, 233, 140, 212, 7, 0,
 ];
 const CLOSE_ADDR: [u8; 32] = [
-    124, 202, 174, 159, 47, 228, 36, 49, 3, 140, 43, 39, 191, 199, 222, 150, 9, 155, 89, 142, 206,
-    54, 134, 166, 123, 246, 141, 41, 235, 249, 213, 218,
+    175, 230, 194, 114, 117, 120, 147, 124, 66, 209, 204, 213, 251, 0, 209, 50, 157, 141, 190, 103,
+    120, 66, 195, 147, 145, 76, 15, 213, 193, 37, 216, 115,
 ];
 const CLOSE_C_NEXT: [u8; 32] = [
     201, 10, 173, 167, 78, 52, 108, 26, 142, 80, 242, 142, 130, 112, 165, 122, 199, 234, 187, 148,
     211, 33, 203, 193, 77, 214, 102, 100, 101, 238, 21, 202,
 ];
 const MARKET_B: [u8; 32] = [
-    170, 0, 170, 66, 150, 170, 70, 17, 60, 254, 4, 18, 131, 150, 221, 191, 29, 53, 181, 74, 160,
-    215, 208, 27, 227, 165, 77, 145, 15, 58, 77, 45,
+    66, 119, 134, 40, 227, 147, 188, 196, 176, 185, 244, 239, 189, 113, 74, 92, 29, 62, 248, 100,
+    123, 88, 79, 79, 193, 87, 144, 214, 150, 148, 4, 75,
 ];
 const MARKET_ADDR: [u8; 32] = [
-    31, 13, 77, 255, 209, 9, 59, 201, 198, 241, 55, 1, 55, 92, 191, 215, 219, 178, 200, 214, 30,
-    155, 133, 133, 234, 165, 56, 171, 191, 51, 35, 209,
+    52, 39, 123, 214, 8, 40, 189, 35, 55, 197, 250, 84, 207, 160, 84, 92, 86, 24, 106, 52, 104,
+    146, 159, 139, 52, 3, 106, 129, 122, 176, 198, 151,
 ];
 const MARKET_C_NEXT: [u8; 32] = [
     88, 81, 131, 194, 192, 135, 159, 196, 243, 15, 252, 230, 230, 74, 138, 88, 40, 172, 114, 12,
@@ -170,8 +170,8 @@ fn owner_close_reproduces_the_worked_layout_byte_for_byte() {
     // The framing 2c-A prints.
     assert_eq!(
         &bytes[..4],
-        &[0x00, 0x0E, 0x00, 0x02],
-        "0x000E SCHEMA 2 (2c-E)"
+        &[0x00, 0x0E, 0x00, 0x03],
+        "0x000E SCHEMA 3 (2c-H)"
     );
     assert_eq!(
         bytes[4], 0x00,
@@ -310,10 +310,10 @@ fn the_market_vector_is_the_a_plus_b_closure_test() {
     // `max_fanout`, `k` (4 each) left, and `fee_bps` (4) arrived.
     assert_eq!(
         &bytes[..5],
-        &[0x00, 0x0E, 0x00, 0x02, 0x01],
-        "field 1 PRESENT -> Market; 0x000E SCHEMA 2 (2c-E)"
+        &[0x00, 0x0E, 0x00, 0x03, 0x01],
+        "field 1 PRESENT -> Market; 0x000E SCHEMA 3 (2c-H)"
     );
-    assert_eq!(&bytes[5..9], &[0x00, 0x33, 0x00, 0x02], "0x0033 SCHEMA 2");
+    assert_eq!(&bytes[5..9], &[0x00, 0x33, 0x00, 0x03], "0x0033 SCHEMA 3");
     assert_eq!(
         &bytes[9..13],
         &[0x00, 0x0B, 0x00, 0x02],
@@ -354,6 +354,204 @@ fn market_identities_are_pinned_and_the_decoder_records_the_span() {
     assert_eq!(d.bundle, prod_market_bundle());
     assert_eq!(&bytes[d.successor_spans[0].clone()], successor.as_slice());
     assert_eq!(dsm::dlv::settlement_bundle::bundle_digest(&bytes), b);
+}
+
+// ── the route vector: amendment 2c-H, grammar 33 at N = 2 (H17) ─────────────
+
+// Pinned from the independent encoder; the producer supplies the operands.
+const ROUTE_B: [u8; 32] = [
+    230, 102, 3, 151, 72, 94, 75, 158, 177, 32, 23, 158, 145, 30, 194, 170, 175, 240, 12, 27, 137,
+    62, 126, 45, 146, 9, 36, 191, 235, 82, 136, 39,
+];
+const ROUTE_ADDR: [u8; 32] = [
+    136, 85, 97, 43, 252, 245, 67, 138, 69, 68, 174, 91, 181, 173, 138, 185, 75, 119, 176, 173,
+    159, 121, 134, 30, 102, 234, 178, 17, 86, 241, 54, 164,
+];
+const ROUTE_LEN: usize = 102_055;
+
+const ROUTE_PARENTS: [[u8; 32]; 2] = [[0xE1; 32], [0xE2; 32]];
+const TOKEN_MID: [u8; 32] = [0x30; 32];
+
+/// Vault `k` of the route: vault 0 holds `TOKEN_A/TOKEN_MID`, vault 1 holds
+/// `TOKEN_B/TOKEN_MID`; both under the one settlement domain (same set, same
+/// quorum), each linked to its own route parent.
+struct RouteVault {
+    id: [u8; 32],
+    pair: ([u8; 32], [u8; 32]),
+    reserves: (u64, u64),
+}
+
+fn route_vault(k: usize) -> RouteVault {
+    match k {
+        0 => RouteVault {
+            id: [0x03; 32],
+            pair: (TOKEN_A, TOKEN_MID),
+            reserves: (1_010_000, 495_065),
+        },
+        _ => RouteVault {
+            id: [0x04; 32],
+            pair: (TOKEN_B, TOKEN_MID),
+            reserves: (500_000, 250_000),
+        },
+    }
+}
+
+fn indep_route_successor(k: usize) -> Vec<u8> {
+    let RouteVault {
+        id: vault,
+        pair: (a, b),
+        reserves: (ra, rb),
+    } = route_vault(k);
+    indep::vault_state(
+        G_O,
+        D_O,
+        vault,
+        GENERATION,
+        ra,
+        rb,
+        indep::market_policy(0x0001, 1, a, b),
+        indep::release_policy(0x0001, 1),
+        indep::fee_policy(FEE_BPS),
+        indep::encumbrance_set(vec![]),
+        None,
+        ROUTE_PARENTS[k],
+        R_O,
+        indep::storage_set(members()),
+        QUORUM,
+    )
+}
+
+fn prod_route_successor(k: usize) -> VaultStateV2 {
+    let RouteVault {
+        id: vault,
+        pair: (a, b),
+        reserves: (ra, rb),
+    } = route_vault(k);
+    let mut v = prod_successor(ra, rb);
+    v.vault_id = vault;
+    v.market_policy = MarketPolicy::beta_constant_product(a, b).unwrap();
+    v.parent_state_commitment = ROUTE_PARENTS[k];
+    v
+}
+
+/// GENUINE grammar-33 terms: a signed route settle prepared and assembled by
+/// the real producer, which runs G1-G5 over its own output.
+fn produced_route_terms() -> MarketTerms {
+    dsm::ccb::settlement::fixtures::route_market_terms(ROUTE_PARENTS, X)
+}
+
+fn indep_route_bundle() -> Vec<u8> {
+    let produced = produced_route_terms();
+    let ev = &produced.recovery_material;
+    let intent = indep::trade_intent(TOKEN_A, 10_000, TOKEN_B, 2_000, 2 * FEE_BPS, NONCE);
+    let legs = vec![
+        indep::allocation(
+            ROUTE_PARENTS[0],
+            10_000,
+            4_935,
+            CLAIM,
+            indep::fee_policy(FEE_BPS),
+        ),
+        indep::allocation(
+            ROUTE_PARENTS[1],
+            4_935,
+            2_000,
+            CLAIM,
+            indep::fee_policy(FEE_BPS),
+        ),
+    ];
+    let terms = indep::market_terms(
+        intent,
+        X,
+        indep::route(legs),
+        produced.trader_parent,
+        produced.trader_successor,
+        indep::dsm_successor_evidence(
+            ev.rel_key,
+            ev.embedded_parent,
+            ev.counterparty_devid,
+            &ev.operation_bytes,
+            ev.entropy,
+            ev.sigma_dsm(),
+        ),
+    );
+    indep::settlement_bundle(
+        Some(terms),
+        (0..2)
+            .map(|k| {
+                indep::consumed_dlv_transition(ROUTE_PARENTS[k], indep_route_successor(k), None)
+            })
+            .collect(),
+    )
+}
+
+fn prod_route_bundle() -> SettlementBundle {
+    SettlementBundle::market(
+        produced_route_terms(),
+        (0..2)
+            .map(|k| {
+                ConsumedDlvTransition::market(ROUTE_PARENTS[k], prod_route_successor(k)).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// The amendment's `MARKET_ROUTE` vector, cut once from the genuine producer at
+/// `N = 2`: one bundle over both vaults, grammar 33 inside field 6, and H7's
+/// length re-measured from real bytes.
+#[test]
+fn the_route_vector_is_one_bundle_over_both_vaults() {
+    let bytes = indep_route_bundle();
+    assert_eq!(
+        bytes.len(),
+        ROUTE_LEN,
+        "the complete route byte vector's length"
+    );
+    assert!(
+        bytes.len() < 512 * 1024,
+        "under the storage node's ingress cap"
+    );
+    assert_eq!(
+        &bytes[..5],
+        &[0x00, 0x0E, 0x00, 0x03, 0x01],
+        "Market, 0x000E SCHEMA 3"
+    );
+    assert_eq!(&bytes[5..9], &[0x00, 0x33, 0x00, 0x03], "0x0033 SCHEMA 3");
+
+    let ev = produced_route_terms().recovery_material;
+    assert_eq!(ev.operation_bytes[0], 33, "grammar 33");
+    assert_eq!(
+        ev.operation_bytes.len(),
+        50_010 + 348 * 2 + 5,
+        "H7: 50,010 + 348·N + |RC| at N = 2 with a 5-byte RouteCommit"
+    );
+
+    // 1. the production encoder agrees.
+    assert_eq!(prod_route_bundle().encode().unwrap(), bytes);
+    // 2. the decoder rebuilds the object and records both spans.
+    let d = decode_settlement_bundle_canonical(&bytes).unwrap();
+    assert_eq!(d.bundle, prod_route_bundle());
+    assert_eq!(d.successor_spans.len(), 2);
+    // 3. the identities are the pinned literals.
+    let b = indep::h_dom(NS, &bytes);
+    assert_eq!(b, ROUTE_B);
+    assert_eq!(indep::storage_addr(NS, &b), ROUTE_ADDR);
+    assert_eq!(dsm::dlv::settlement_bundle::bundle_digest(&bytes), b);
+    // K(B) names both parents; the receipt carries both successors (§5.42, N-wise).
+    assert_eq!(
+        dsm::dlv::settlement_bundle::key_set(&prod_route_bundle())
+            .unwrap()
+            .len(),
+        2
+    );
+    let receipt = dsm::dlv::sofi_receipt::SofiReceipt::project(&prod_route_bundle(), A_B)
+        .expect("a route bundle has a receipt");
+    assert_eq!(
+        receipt.encode().len(),
+        4 + 96 + 4 + 33 * 2,
+        "170 bytes at N = 2"
+    );
 }
 
 // ── the Def 14.2 receipt of the market vector (amendment 2c-F, §5.42) ─────────
@@ -587,8 +785,11 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
         // 0x0034 is the Def 14.2 SofiReceipt (amendment 2c-F R4), allocated
         // with its encoder.
         0x0034,
+        // 0x0035 is the route reserve-consumption credit source (amendment
+        // 2c-H H9), allocated with its encoder.
+        0x0035,
     ];
-    for n in 0x0001u16..=0x0034 {
+    for n in 0x0001u16..=0x0035 {
         let sets = [
             encodable.contains(&n),
             reserved::is_reserved(n),
@@ -624,18 +825,39 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
         );
         assert!(!declared_unencoded::is_declared_unencoded(n));
     }
-    // 2c-E's burns: the intent cut, and the two classes it propagates through.
-    // Recorded in the machine-readable table, not only in a comment, so a
-    // schema-1 envelope classifies as BURNED rather than as an unknown schema —
-    // the distinction registry §2.8 rests its never-re-assign guarantee on.
-    for n in [0x000B, 0x0033, 0x000E] {
+    // The machine-readable burn table, so a retired envelope classifies as
+    // BURNED rather than as an unknown schema — the distinction registry §2.8
+    // rests its never-re-assign guarantee on. 2c-E burned schema 1 of the
+    // intent and of the two classes it propagates through. Amendment 2c-H H17
+    // widened `0x0031` field 4 to grammar 33, burning `0x0031` schema 1 and, by
+    // §2.7 nesting, `0x0033` and `0x000E` schema 2. The live schema is read
+    // from each class's own constant, and a live schema is never burned.
+    use dsm::ccb::{CcbObject, DsmSuccessorEvidence, TradeIntent};
+    for (n, burned, live) in [
+        (0x000B, &[1u16][..], TradeIntent::SCHEMA),
+        (0x0031, &[1][..], DsmSuccessorEvidence::SCHEMA),
+        (0x0033, &[1, 2][..], MarketTerms::SCHEMA),
+        (0x000E, &[1, 2][..], SettlementBundle::SCHEMA),
+    ] {
+        for s in burned {
+            assert!(
+                dsm::ccb::schema::is_burned(n, *s),
+                "{n:#06x} schema {s} is burned"
+            );
+        }
         assert!(
-            dsm::ccb::schema::is_burned(n, 1),
-            "{n:#06x} schema 1 is burned by 2c-E"
-        );
-        assert!(
-            !dsm::ccb::schema::is_burned(n, 2),
-            "{n:#06x} schema 2 is the LIVE form and must never be burned"
+            !dsm::ccb::schema::is_burned(n, live),
+            "{n:#06x} schema {live} is the LIVE form and must never be burned"
         );
     }
+    assert_eq!(
+        (
+            TradeIntent::SCHEMA,
+            DsmSuccessorEvidence::SCHEMA,
+            MarketTerms::SCHEMA,
+            SettlementBundle::SCHEMA
+        ),
+        (2, 2, 3, 3),
+        "the live schemas after amendment 2c-H H17"
+    );
 }

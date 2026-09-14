@@ -719,6 +719,7 @@ fn reserved_classes_have_no_encoder() {
         dsm::economic::credit::CreditSourceValidatedDlvSettlementPayment::CLASS,
         dsm::economic::credit::CreditSourceVerifiedOfflineReentry::CLASS,
         dsm::economic::credit::CreditSourceValidatedFaucetDistribution::CLASS,
+        dsm::economic::credit::CreditSourceDlvRouteReserveConsumption::CLASS,
     ];
     for class in encodable {
         assert!(
@@ -732,7 +733,7 @@ fn reserved_classes_have_no_encoder() {
         encodable,
         [
             0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025,
-            0x0026, 0x0027, 0x0028, 0x0030
+            0x0026, 0x0027, 0x0028, 0x0030, 0x0035
         ]
     );
 }

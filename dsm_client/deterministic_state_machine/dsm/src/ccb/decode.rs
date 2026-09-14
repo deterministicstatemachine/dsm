@@ -444,7 +444,7 @@ pub(crate) fn route_at(c: &mut Cursor<'_>) -> Result<Route, DecodeError> {
     Route::new(legs).map_err(invalid)
 }
 
-/// `0x0031` schema 1. `entropy` is exactly 32 bytes; `encapsulated_entropy`
+/// `0x0031` schema 2. `entropy` is exactly 32 bytes; `encapsulated_entropy`
 /// present is refused; `sigma_dsm` is exactly 49,856 (2c-B).
 pub(crate) fn dsm_successor_evidence_at(
     c: &mut Cursor<'_>,
@@ -478,7 +478,7 @@ pub(crate) fn dsm_successor_evidence_at(
     .map_err(invalid)
 }
 
-/// `0x0033` schema 1.
+/// `0x0033` schema 3.
 pub(crate) fn market_terms_at(c: &mut Cursor<'_>) -> Result<MarketTerms, DecodeError> {
     c.envelope(class::MARKET_TERMS, MarketTerms::SCHEMA)?;
     let terms = MarketTerms {
@@ -543,8 +543,9 @@ pub struct DecodedSettlementBundle {
     pub successor_spans: Vec<core::ops::Range<usize>>,
 }
 
-/// Decode `CCB(B)` — class `0x000E`, schema 1, strict, no trailing bytes. The
-/// shape rule and beta cardinality are enforced by the constructors.
+/// Decode `CCB(B)` — class `0x000E`, schema 3, strict, no trailing bytes. The
+/// shape rule and the cardinality (one `T_v` for grammar 26 and an owner close,
+/// one per leg for grammar 33) are enforced by the constructors.
 pub fn decode_settlement_bundle(bytes: &[u8]) -> Result<DecodedSettlementBundle, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
     c.envelope(class::SETTLEMENT_BUNDLE, SettlementBundle::SCHEMA)?;

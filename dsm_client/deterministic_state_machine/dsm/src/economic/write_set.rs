@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 
 use crate::economic::credit::{
     CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
+    CreditSourceDlvRouteReserveConsumption, RouteLegReserveConsumption,
     CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
     CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
 };
@@ -215,6 +216,19 @@ pub enum CreditSourceFacts {
         owner_economic_position: u64,
         reserve_consumption_evidence_addr: [u8; 32],
     },
+    /// A route-wide settle's one output credit, funded by consuming a reserve in
+    /// every vault the route crosses (0x0035, amendment 2c-H H9). One entry per
+    /// route leg IN ROUTE ORDER. Every coordinate the descriptor states beside
+    /// them (vault, parent, x) is read from the OPERATION.
+    DlvRouteReserveConsumption { legs: Vec<RouteLegConsumptionFacts> },
+}
+
+/// One route leg's external consumption facts (0x0035): the untrusted owner
+/// locator and the evidence address, for the leg at the same route position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteLegConsumptionFacts {
+    pub owner_economic_position: u64,
+    pub reserve_consumption_evidence_addr: [u8; 32],
 }
 
 /// The producer's authenticated pre-state, decoded. `balances` is keyed by
@@ -296,6 +310,16 @@ enum SemanticWriteSet {
         input: DlvLeg,
         output: DlvLeg,
         receipt: EconomicSettlementReceiptState,
+    },
+    /// `DlvRouteSettle` (amendment 2c-H H3, H4, H10): ONE net input debit
+    /// (`legs[0]`'s input), ONE net output credit (`legs[N-1]`'s output) funded
+    /// by `DlvRouteReserveConsumption` (0x0035), and one settlement-receipt leaf
+    /// per vault inserted FROM ZERO. Intermediate assets never touch the
+    /// trader's balances.
+    DlvRouteSettle {
+        input: DlvLeg,
+        output: DlvLeg,
+        receipts: Vec<EconomicSettlementReceiptState>,
     },
     /// `DlvOwnerApplyV2`: reserve[input] gains `input.1`, reserve[output]
     /// loses `output.1`, both advancing `parent_sequence -> new_sequence`
@@ -538,6 +562,55 @@ fn semantic_write_set(
                 receipt,
             })
         }
+        Operation::DlvRouteSettle {
+            legs,
+            external_commitment_x,
+            ..
+        } => {
+            // RC.1–RC.5, judged from the legs alone.
+            crate::types::operations::DlvRouteLeg::check_route_conservation(legs).map_err(
+                |_| WriteSetError::MalformedVaultOperation {
+                    detail: "a route settle's legs do not conserve (RC.1-RC.5)",
+                },
+            )?;
+            let mut receipts = Vec::with_capacity(legs.len());
+            for leg in legs {
+                let new_sequence = leg.parent_sequence.checked_add(1).ok_or(
+                    WriteSetError::MalformedVaultOperation {
+                        detail: "settlement sequence overflow",
+                    },
+                )?;
+                // One receipt per vault, each through the validating
+                // constructor and each named by its own leg's receipt id.
+                let receipt = EconomicSettlementReceiptState::new(
+                    leg.vault_id,
+                    *external_commitment_x,
+                    leg.parent_sequence,
+                    new_sequence,
+                    leg.input_policy_commit,
+                    leg.input_amount,
+                    leg.output_policy_commit,
+                    leg.output_amount,
+                )
+                .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
+                if receipt.receipt_id != leg.settlement_receipt_id {
+                    return Err(WriteSetError::MalformedVaultOperation {
+                        detail: "a route leg's settlement_receipt_id does not derive from its vault and x",
+                    });
+                }
+                receipts.push(receipt);
+            }
+            let (Some(first), Some(last)) = (legs.first(), legs.last()) else {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "a route settle names no legs",
+                });
+            };
+            Ok(SemanticWriteSet::DlvRouteSettle {
+                input: (first.input_policy_commit, first.input_amount),
+                output: (last.output_policy_commit, last.output_amount),
+                receipts,
+            })
+        }
         Operation::DlvOwnerApplyV2 {
             vault_id,
             parent_sequence,
@@ -661,10 +734,14 @@ pub fn build_write_set(
     // realization needs; a non-settlement carrying one would be composing a
     // bundle around an operation that is not part of any.
     let bundle_id = match (&semantic, context) {
-        (SemanticWriteSet::DlvSettle { .. }, EconomicWriteContext::DlvSettle { bundle_id }) => {
-            Some(*bundle_id)
-        }
-        (SemanticWriteSet::DlvSettle { .. }, EconomicWriteContext::NonSettlement) => {
+        (
+            SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. },
+            EconomicWriteContext::DlvSettle { bundle_id },
+        ) => Some(*bundle_id),
+        (
+            SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. },
+            EconomicWriteContext::NonSettlement,
+        ) => {
             return Err(WriteSetError::WrongWriteSet {
                 detail: "a market settle needs its settlement-bundle context; without `b` it \
                          cannot emit the acceptance leaf its realization requires",
@@ -678,6 +755,98 @@ pub fn build_write_set(
         }
         (_, EconomicWriteContext::NonSettlement) => None,
     };
+
+    /// A market settle's planned leaves, single-vault or route-wide (2c-H H3,
+    /// H10): the net input debit, the net output credit funded by the external
+    /// source, one settlement-receipt leaf per consumed vault inserted FROM
+    /// ZERO, and the one bundle-acceptance leaf.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_market_settle(
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        economic_operation_id: &[u8; 32],
+        pre_balances: &BTreeMap<[u8; 32], u64>,
+        tree: &EconomicSmt,
+        facts: &CreditSourceFacts,
+        bundle_id: Option<[u8; 32]>,
+        input: DlvLeg,
+        output: DlvLeg,
+        receipts: Vec<EconomicSettlementReceiptState>,
+    ) -> Result<Vec<PlannedLeaf>, WriteSetError> {
+        let mut planned = Vec::with_capacity(receipts.len() + 3);
+        // Input balance debit.
+        planned.push(plan_balance_debit(
+            genesis,
+            device_id,
+            pre_balances,
+            input.0,
+            input.1,
+        )?);
+        // Output balance credit, funded by the reserve consumption.
+        let (policy_commit, amount) = output;
+        let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
+        let next = have
+            .checked_add(amount)
+            .ok_or(WriteSetError::BalanceOverflow)?;
+        let pre = balance_state(policy_commit, have)?;
+        let post = balance_state(policy_commit, next)?;
+        let key = post
+            .as_ref()
+            .map(|s| s.leaf_key(genesis, device_id))
+            .ok_or(WriteSetError::WrongWriteSet {
+                detail: "settle credit produced no post state",
+            })?;
+        planned.push(PlannedLeaf {
+            key,
+            pre,
+            post,
+            source: Some(PlannedSource::External(facts.clone())),
+        });
+        // The settlement-receipt leaves, each inserted FROM ZERO — write-once:
+        // an existing leaf means that (vault, x) already settled.
+        for receipt in receipts {
+            let receipt_state = EconomicLeafState::SettlementReceipt(receipt);
+            let key = receipt_state.leaf_key(genesis, device_id);
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a settlement receipt for this (vault, x) already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post: Some(receipt_state),
+                source: None,
+            });
+        }
+        // THE BUNDLE-ACCEPTANCE LEAF (amendment 2c-D, producer adoption). `b`
+        // comes from the context — established upstream from the canonical `B`
+        // — while the operation identity comes from the authenticated
+        // transition. The two facts have DIFFERENT ORIGINS on purpose: ruling
+        // D3's three-way binding depends on it.
+        let bundle = bundle_id.ok_or(WriteSetError::WrongWriteSet {
+            detail: "a market settle reached the acceptance leaf without bundle context",
+        })?;
+        let acceptance = EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
+            bundle,
+            economic_operation_id: *economic_operation_id,
+        });
+        let key = acceptance.leaf_key(genesis, device_id);
+        // Write-once: an existing leaf means this transition already committed
+        // a bundle, and a second would be a different claim at one position.
+        if tree.get(&key).is_some() {
+            return Err(WriteSetError::WrongWriteSet {
+                detail: "a bundle-acceptance leaf for this economic operation already exists",
+            });
+        }
+        planned.push(PlannedLeaf {
+            key,
+            pre: None,
+            post: Some(acceptance),
+            source: None,
+        });
+        Ok(planned)
+    }
 
     let mut planned: Vec<PlannedLeaf> = Vec::new();
 
@@ -805,80 +974,39 @@ pub fn build_write_set(
             if !matches!(facts, CreditSourceFacts::DlvReserveConsumption { .. }) {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
             }
-            // Input balance debit.
-            planned.push(plan_balance_debit(
+            planned.extend(plan_market_settle(
                 genesis,
                 device_id,
+                economic_operation_id,
                 pre_balances,
-                input.0,
-                input.1,
+                tree,
+                facts,
+                bundle_id,
+                input,
+                output,
+                vec![receipt],
             )?);
-            // Output balance credit, funded by the reserve consumption.
-            let (policy_commit, amount) = output;
-            let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
-            let next = have
-                .checked_add(amount)
-                .ok_or(WriteSetError::BalanceOverflow)?;
-            let pre = balance_state(policy_commit, have)?;
-            let post = balance_state(policy_commit, next)?;
-            let key = post
-                .as_ref()
-                .map(|s| s.leaf_key(genesis, device_id))
-                .ok_or(WriteSetError::WrongWriteSet {
-                    detail: "settle credit produced no post state",
-                })?;
-            planned.push(PlannedLeaf {
-                key,
-                pre,
-                post,
-                source: Some(PlannedSource::External(facts.clone())),
-            });
-            // The settlement-receipt leaf, inserted FROM ZERO — write-once:
-            // an existing leaf means this (vault, x) already settled.
-            let receipt_state = EconomicLeafState::SettlementReceipt(receipt);
-            let key = receipt_state.leaf_key(genesis, device_id);
-            if tree.get(&key).is_some() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settlement receipt for this (vault, x) already exists",
-                });
+        }
+        SemanticWriteSet::DlvRouteSettle {
+            input,
+            output,
+            receipts,
+        } => {
+            if !matches!(facts, CreditSourceFacts::DlvRouteReserveConsumption { .. }) {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
             }
-            planned.push(PlannedLeaf {
-                key,
-                pre: None,
-                post: Some(receipt_state),
-                source: None,
-            });
-
-            // THE BUNDLE-ACCEPTANCE LEAF (amendment 2c-D, producer adoption).
-            //
-            // `b` comes from the context — established upstream from the
-            // canonical `B` — while the operation identity comes from the
-            // authenticated transition. The two facts have DIFFERENT ORIGINS
-            // on purpose: ruling D3's three-way binding depends on it, and
-            // deriving either from the other here would collapse the very
-            // relation §7 checks.
-            let bundle = bundle_id.ok_or(WriteSetError::WrongWriteSet {
-                detail: "a market settle reached the acceptance leaf without bundle context",
-            })?;
-            let acceptance = EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
-                bundle,
-                economic_operation_id: *economic_operation_id,
-            });
-            let key = acceptance.leaf_key(genesis, device_id);
-            // Write-once: an existing leaf means this transition already
-            // committed a bundle, and a second would be a different claim at
-            // one position rather than a new leaf.
-            if tree.get(&key).is_some() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a bundle-acceptance leaf for this economic operation already exists",
-                });
-            }
-            planned.push(PlannedLeaf {
-                key,
-                pre: None,
-                post: Some(acceptance),
-                source: None,
-            });
+            planned.extend(plan_market_settle(
+                genesis,
+                device_id,
+                economic_operation_id,
+                pre_balances,
+                tree,
+                facts,
+                bundle_id,
+                input,
+                output,
+                receipts,
+            )?);
         }
         SemanticWriteSet::DlvOwnerApply {
             vault_id,
@@ -1214,6 +1342,36 @@ pub fn build_write_set(
                         reserve_consumption_evidence_addr,
                     })
                 }
+                (
+                    CreditSourceFacts::DlvRouteReserveConsumption { legs: facts_legs },
+                    Operation::DlvRouteSettle {
+                        legs,
+                        external_commitment_x,
+                        ..
+                    },
+                ) => {
+                    if facts_legs.len() != legs.len() {
+                        return Err(WriteSetError::FactsDoNotMatchOperation);
+                    }
+                    CreditSource::DlvRouteReserveConsumption(
+                        CreditSourceDlvRouteReserveConsumption {
+                            credit_mutation_index,
+                            x: *external_commitment_x,
+                            // E_R in ROUTE-LEG ORDER: entry k is legs[k].
+                            legs: legs
+                                .iter()
+                                .zip(facts_legs)
+                                .map(|(leg, f)| RouteLegReserveConsumption {
+                                    vault_id: leg.vault_id,
+                                    parent_sequence: leg.parent_sequence,
+                                    owner_economic_position: f.owner_economic_position,
+                                    reserve_consumption_evidence_addr: f
+                                        .reserve_consumption_evidence_addr,
+                                })
+                                .collect(),
+                        },
+                    )
+                }
                 _ => return Err(WriteSetError::FactsDoNotMatchOperation),
             };
             credit_sources.push(source);
@@ -1270,12 +1428,18 @@ pub fn verify_operation_write_set(
             | SemanticWriteSet::DlvWithdraw { .. }
             | SemanticWriteSet::DlvOwnerApply { .. }
     );
-    let receipts_legal = matches!(semantic, SemanticWriteSet::DlvSettle { .. });
+    let receipts_legal = matches!(
+        semantic,
+        SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. }
+    );
     // Amendment 2c-D. A bundle-acceptance leaf is legal in exactly the write
     // set that produces the successor it is keyed to — every other operation
     // refuses the class outright through `classify`, which is how receipts are
     // already kept out and why no arm needs its own emptiness check.
-    let acceptances_legal = matches!(semantic, SemanticWriteSet::DlvSettle { .. });
+    let acceptances_legal = matches!(
+        semantic,
+        SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. }
+    );
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
     let mut reserves: Vec<ObservedReserve> = Vec::new();
@@ -1593,6 +1757,91 @@ pub fn verify_operation_write_set(
                         return Err(WriteSetError::WrongWriteSet {
                             detail: "reserve-consumption source names different coordinates \
                                      than the operation",
+                        });
+                    }
+                    Ok(())
+                }
+                _ => Err(WriteSetError::WrongWriteSet {
+                    detail: "credit source kind does not match the operation",
+                }),
+            }
+        }
+        SemanticWriteSet::DlvRouteSettle {
+            input,
+            output,
+            receipts: expected_receipts,
+        } => {
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a route settle's non-reuse is its write-once receipt leaves, not a \
+                             consumed source",
+                });
+            }
+            expect_exactly_one_acceptance(&acceptances, witness.economic_operation_id)?;
+            let n = expected_receipts.len();
+            if witness.mutations.len() != n + 3 || balances.len() != 2 || receipts.len() != n {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a route settle is exactly one input debit, one output credit, one \
+                             receipt insertion per vault and one bundle-acceptance leaf",
+                });
+            }
+            let debit = expect_one_balance(&balances, input.0)?;
+            if debit.pre_amount.checked_sub(debit.post_amount) != Some(input.1) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "route settle input debit is not exactly the authorized input",
+                });
+            }
+            let credit = expect_one_balance(&balances, output.0)?;
+            if credit.post_amount.checked_sub(credit.pre_amount) != Some(output.1) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "route settle output credit is not exactly the authorized output",
+                });
+            }
+            // The receipt leaves are exactly the operation's, one per vault.
+            // Compared keyed by (vault, receipt id): witness order is key order,
+            // the operation's is route order.
+            let mut observed: Vec<&EconomicSettlementReceiptState> =
+                receipts.iter().map(|(_, r)| r).collect();
+            let mut wanted: Vec<&EconomicSettlementReceiptState> =
+                expected_receipts.iter().collect();
+            observed.sort_by_key(|r| (r.vault_id, r.receipt_id));
+            wanted.sort_by_key(|r| (r.vault_id, r.receipt_id));
+            if observed != wanted {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the receipt leaves are not the route settle's own settlement facts, \
+                             one per vault",
+                });
+            }
+            if witness.credit_sources.len() != 1 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a route settle has exactly one credit source",
+                });
+            }
+            match (&witness.credit_sources[0], operation) {
+                (
+                    CreditSource::DlvRouteReserveConsumption(d),
+                    Operation::DlvRouteSettle {
+                        legs,
+                        external_commitment_x,
+                        ..
+                    },
+                ) => {
+                    if d.credit_mutation_index != credit.mutation_index {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "route reserve-consumption source does not fund the output \
+                                     credit",
+                        });
+                    }
+                    if d.x != *external_commitment_x
+                        || d.legs.len() != legs.len()
+                        || d.legs.iter().zip(legs).any(|(entry, leg)| {
+                            entry.vault_id != leg.vault_id
+                                || entry.parent_sequence != leg.parent_sequence
+                        })
+                    {
+                        return Err(WriteSetError::WrongWriteSet {
+                            detail: "route reserve-consumption source names other coordinates \
+                                     than the operation, or not in route order",
                         });
                     }
                     Ok(())

@@ -955,13 +955,13 @@ async fn certify_market_evidence(
     use MarketEvidence::{Absent, Contradicts, Unavailable};
     let invalid = |what: String| Contradicts(Reason::RealizationEvidenceInvalid, what);
 
-    // Beta's shape, before anything is fetched (2c-A ruling 3).
-    let coords = match BundleCoordinates::from_market_bundle(terms, transitions) {
+    // The bundle's shape at this parent, before anything is fetched (2c-H H2).
+    let coords = match BundleCoordinates::from_market_bundle(terms, transitions, cursor_c_n) {
         Ok(c) => c,
         Err(r) => {
             return Contradicts(
                 r,
-                "its route is not a beta market route (one leg, one allocation, one T_v)".into(),
+                "its route has no bare allocation and T_v at this parent".into(),
             )
         }
     };
@@ -1038,14 +1038,21 @@ async fn certify_market_evidence(
     };
 
     // ── The accepted effects, from the VERIFIED operation (C2-R2 LEFT) ─────
-    let Some(accepted) = AcceptedTransition::from_verified_settle(
+    let accepted = match AcceptedTransition::from_verified_operation_for_parent(
         trader.embedded_parent,
         trader.c_dsm_plus,
         &trader.verified_operation,
-    ) else {
-        return invalid(
-            "the trader's validated transition at that position is not a settle".into(),
-        );
+        cursor_c_n,
+    ) {
+        Ok(a) => a,
+        Err(r) => {
+            return Contradicts(
+                r,
+                "the trader's validated transition at that position has no accepted effects \
+                 at this parent"
+                    .into(),
+            )
+        }
     };
     let Operation::DlvSettle {
         route_commit_bytes, ..

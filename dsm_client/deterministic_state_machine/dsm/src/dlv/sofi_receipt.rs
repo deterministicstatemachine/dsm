@@ -45,8 +45,9 @@ use crate::storage_object::{immutable_addr, immutable_inner};
 /// One field-4 entry: the successor commitment and the absent witness marker.
 const ENTRY_LEN: usize = 32 + 1;
 
-/// The canonical length at beta cardinality (one `T_v`): 4 envelope, three
-/// `digest32`, a 4-byte count and one entry.
+/// The canonical length for ONE `T_v` (a single-vault bundle): 4 envelope,
+/// three `digest32`, a 4-byte count and one entry. A route bundle of `N`
+/// transitions projects `4 + 96 + 4 + 33·N` bytes (amendment 2c-H, §2).
 pub const SOFI_RECEIPT_BETA_LEN: usize = 4 + 3 * 32 + 4 + ENTRY_LEN;
 
 /// `0x0034` schema 1 (registry §5.42).
