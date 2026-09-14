@@ -619,11 +619,12 @@ pub fn advance_validated(
     // constructor of a market verdict. A verdict produced here would be
     // self-attestation to any foreign verifier.
     let validity = match accepted.dsm_verified_operation() {
-        Some(crate::types::operations::Operation::DlvSettle { .. }) => {
-            SuccessorValidity::DlvTransition {
-                kind: DlvTransitionKind::Settle,
-            }
-        }
+        Some(
+            crate::types::operations::Operation::DlvSettle { .. }
+            | crate::types::operations::Operation::DlvRouteSettle { .. },
+        ) => SuccessorValidity::DlvTransition {
+            kind: DlvTransitionKind::Settle,
+        },
         Some(crate::types::operations::Operation::DlvClose { .. }) => {
             SuccessorValidity::DlvTransition {
                 kind: DlvTransitionKind::Close,

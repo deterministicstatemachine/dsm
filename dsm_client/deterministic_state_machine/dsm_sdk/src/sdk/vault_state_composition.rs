@@ -1002,7 +1002,10 @@ async fn certify_market_evidence(
     // ── The trader's DevID: the bundle's own settler, never its counterparty
     // (2c-D §12). G1–G4 already held for these bytes at `observe_parent_binding`.
     let settler_devid = match Operation::from_bytes(&terms.recovery_material.operation_bytes) {
-        Ok(Operation::DlvSettle { settler_devid, .. }) => settler_devid,
+        Ok(
+            Operation::DlvSettle { settler_devid, .. }
+            | Operation::DlvRouteSettle { settler_devid, .. },
+        ) => settler_devid,
         _ => {
             return Contradicts(
                 Reason::BundleNotCanonical,
@@ -1054,9 +1057,12 @@ async fn certify_market_evidence(
             )
         }
     };
-    let Operation::DlvSettle {
+    let (Operation::DlvSettle {
         route_commit_bytes, ..
-    } = &trader.verified_operation
+    }
+    | Operation::DlvRouteSettle {
+        route_commit_bytes, ..
+    }) = &trader.verified_operation
     else {
         return invalid(
             "the trader's validated transition at that position is not a settle".into(),
@@ -1543,18 +1549,22 @@ mod tests {
     }
 
     /// A successor of `vault_id` at `parent_sequence + 1` for a bind whose
-    /// realization evidence never arrives — the walk stops before `10.a`.
+    /// realization evidence never arrives — the walk stops before `10.a`. It
+    /// commits the fleet's own settlement domain, the one the bind runs under.
     fn any_successor(
         vault_id: &[u8; 32],
         parent_sequence: u64,
         parent_c_n: &[u8; 32],
     ) -> VaultStateV2 {
-        dsm::ccb::settlement::fixtures::successor_of(
-            *parent_c_n,
-            *vault_id,
-            parent_sequence.saturating_add(1),
-            0,
-            0,
+        crate::sdk::settlement_bind::in_settlement_domain(
+            dsm::ccb::settlement::fixtures::successor_of(
+                *parent_c_n,
+                *vault_id,
+                parent_sequence.saturating_add(1),
+                0,
+                0,
+            ),
+            &fleet_set(),
         )
     }
 

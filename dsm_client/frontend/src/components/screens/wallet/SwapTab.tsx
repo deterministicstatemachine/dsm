@@ -183,9 +183,9 @@ function SwapTabInner({
       const outputTokenBytes = decodePolicyCommit(outputToken, 'To');
       const amountBig = bigIntFromString(amount);
 
-      // Discovery is the binder's: it searches the advertised pair no
-      // deeper than the beta profile can settle (one hop), mirrors the
-      // hop's vault for the unlock, and says NoPath itself. Nothing here
+      // Discovery is the binder's: it searches no deeper than the beta
+      // profile can settle, mirrors each hop's vault for the unlock, and
+      // says NoPath itself. Nothing here
       // lists or syncs a pair on its behalf.
       const bindRes = await findAndBindBestPath({
         inputToken: inputTokenBytes,

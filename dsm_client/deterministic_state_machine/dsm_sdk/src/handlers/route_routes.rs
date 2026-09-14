@@ -843,7 +843,8 @@ impl AppRouterImpl {
         };
         // THE SEARCH GOES NO DEEPER THAN BETA CAN SETTLE. A route is bound and
         // signed only if `dlv.unlockRouted` can execute it, and beta executes
-        // one hop (`sofi_profile::BETA_MAX_HOPS`): the wallet must never sign,
+        // at most `sofi_profile::BETA_MAX_HOPS` hops as one route-wide
+        // settlement (amendment 2c-H H12): the wallet must never sign,
         // and never publish `X` for, a route the profile refuses. A caller
         // asking for more is clamped, not refused — the depth is the profile's,
         // not the caller's. `0` means "the profile's depth".

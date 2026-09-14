@@ -118,13 +118,12 @@ async fn require_rooted_market_leg(route: &str, pc: &[u8; 32]) -> Result<(), Str
     Ok(())
 }
 
-// `dlv.unlockRouted` with no vault named settles the ONE hop a beta route may
-// carry. Raising `BETA_MAX_HOPS` is not a number change: it is the route-wide
-// bundle of SoFi §9.7 (every `T_v` in one bundle, one bind over `K(B)`, one
-// trader advance), and this assertion is where that work starts.
+// `dlv.unlockRouted` settles a route of up to `BETA_MAX_HOPS` hops as ONE
+// bundle, and with fanout 1 every hop is one `T_v`: the profile can never name
+// a route deeper than the core bundle can carry (amendment 2c-H H12).
 const _: () = assert!(
-    crate::sdk::sofi_profile::BETA_MAX_HOPS == 1,
-    "dlv.unlockRouted settles one hop; a deeper profile needs the route-wide bundle"
+    crate::sdk::sofi_profile::BETA_MAX_HOPS <= dsm::ccb::MAX_TRANSITIONS,
+    "dlv.unlockRouted settles every hop in one bundle; the profile cannot exceed its cardinality"
 );
 
 impl AppRouterImpl {
@@ -2708,21 +2707,15 @@ impl AppRouterImpl {
         ))
     }
 
-    /// dlv.unlockRouted — atomic-route unlock path for SoFi (chunk #4).
+    /// dlv.unlockRouted — execute a signed route (SoFi §7.2, §9.7, §16.2).
     ///
-    /// Decodes a `DlvUnlockRoutedV1` carrying a typed `RouteCommitV1`,
-    /// runs the SDK eligibility check (vault_id ∈ RouteCommit AND
-    /// `is_external_commitment_visible(X)` returns Ok(true)) before
-    /// emitting the standard `Operation::DlvUnlock` on the unlocker's
-    /// self-loop.  No new on-chain operation type — atomicity is
-    /// achieved off-chain via the visibility of X (SoFi spec §3.2,
-    /// §5.1; the state machine does not know about routing).
-    ///
-    /// Failure modes are typed via `RouteCommitVerifyError` so a
-    /// failed verification returns a precise error (rather than a
-    /// generic `dlv.unlock failed`) — this is what unlocks
-    /// fail-closed semantics for vault owners that haven't yet seen
-    /// the trader's anchor publish.
+    /// A route of ONE hop settles that vault's transition under grammar 26. A
+    /// route of two or more hops, up to `sofi_profile::BETA_MAX_HOPS`, settles
+    /// as ONE route-wide settlement under grammar 33 (amendment 2c-H): one
+    /// bundle carrying every hop's `T_v`, one `QuorumBind` over the complete
+    /// `K(B)`, one trader advance whose deltas are the route's two ends, and a
+    /// receipt per vault. Every hop passes its vault's gates before anything is
+    /// signed, published, fenced or bound; a refusal names its rule.
     async fn dlv_unlock_routed(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -2745,25 +2738,6 @@ impl AppRouterImpl {
         if req.route_commit_bytes.is_empty() {
             return err("dlv.unlockRouted: route_commit_bytes is required".into());
         }
-
-        // WHICH VAULT SETTLES IS DECIDED BY THE SIGNED ROUTE, never by the
-        // caller. An EMPTY `vault_id` means the hop the route names: the UI
-        // submits the signed RouteCommitV1 and renders the result; it never
-        // chooses a vault, and a pair with more than one advertisement needs
-        // nothing from it. A 32-byte `vault_id` names that same hop explicitly
-        // (the owner-side and single-hop callers keep that contract); the
-        // eligibility gate below refuses a vault the route does not name.
-        //
-        // BETA SETTLES ONE VAULT TRANSITION PER ROUTE (amendment 2c-A ruling
-        // 3; `sofi_profile::BETA_MAX_HOPS`). A route naming more hops is
-        // refused HERE — whichever way the caller addresses it — before any
-        // composition, publication, trader fence, quorum binding, reserve
-        // movement or receipt. SoFi §7.2, §9.7 and §16.2 make a multi-vault
-        // route ONE bundle carrying every `T_v`, ONE `QuorumBind` over the
-        // complete `K(B)` and ONE trader advance; §16.2 forbids emulating that
-        // by settling the hops one after another, and §7.2 forbids settling
-        // one vault of such a route on its own. Until the core carries a
-        // route-wide bundle, the answer is a refusal that names the rule.
         let rc = match generated::RouteCommitV1::decode(&*req.route_commit_bytes) {
             Ok(rc) => rc,
             Err(e) => {
@@ -2776,14 +2750,33 @@ impl AppRouterImpl {
         if hops == 0 {
             return err("dlv.unlockRouted: the route names no hops".into());
         }
+        // THE PROFILE BOUNDS THE ROUTE (amendment 2c-H H12). A deeper route is
+        // refused HERE — whichever way the caller addresses it — before any
+        // composition, publication, trader fence, quorum binding, reserve
+        // movement or receipt.
         if hops > crate::sdk::sofi_profile::BETA_MAX_HOPS {
             return err(format!(
-                "dlv.unlockRouted: beta settles exactly one vault transition per route \
-                 (2c-A ruling 3); this route names {hops} hops, and multi-vault atomic \
-                 settlement — one bundle over every hop's vault, one binding over the \
-                 complete key set — is not in the beta profile. Nothing was bound."
+                "dlv.unlockRouted: this route names {hops} hops and the beta profile settles at \
+                 most {} per route (amendment 2c-H H12). Nothing was bound.",
+                crate::sdk::sofi_profile::BETA_MAX_HOPS
             ));
         }
+        // A MULTI-HOP ROUTE SETTLES AS ONE. SoFi §7.2, §9.7 and §16.2 make it
+        // ONE bundle carrying every `T_v`, ONE `QuorumBind` over the complete
+        // `K(B)` and ONE trader advance; §16.2 forbids emulating that by
+        // settling the hops one after another, and §7.2 forbids settling one
+        // vault of such a route on its own.
+        if hops > 1 {
+            return self.unlock_routed_route(req, rc).await;
+        }
+
+        // WHICH VAULT SETTLES IS DECIDED BY THE SIGNED ROUTE, never by the
+        // caller. An EMPTY `vault_id` means the hop the route names: the UI
+        // submits the signed RouteCommitV1 and renders the result; it never
+        // chooses a vault, and a pair with more than one advertisement needs
+        // nothing from it. A 32-byte `vault_id` names that same hop explicitly
+        // (the owner-side and single-hop callers keep that contract); the
+        // eligibility gate refuses a vault the route does not name.
         let vault_id = if req.vault_id.is_empty() {
             let Ok(v) = <[u8; 32]>::try_from(rc.hops[0].vault_id.as_slice()) else {
                 return err(format!(
@@ -2806,12 +2799,11 @@ impl AppRouterImpl {
     }
 
     /// ONE hop of a signed route, settled against `vault_id`: the eligibility
-    /// gate, the composition of the vault's proven state, the parent-binding
-    /// guard, the AMM re-simulation, the bind and the completion. The
-    /// dispatcher above calls this once per hop the route names.
+    /// gate (signature, the hop for this vault, the external commitment
+    /// visible), that vault's gates, then the settlement tail with one leg.
     async fn unlock_routed_hop(
         &self,
-        mut req: generated::DlvUnlockRoutedV1,
+        req: generated::DlvUnlockRoutedV1,
         vault_id: [u8; 32],
     ) -> AppResult {
         // SDK eligibility gate.  Fails closed on every typed variant.
@@ -2828,23 +2820,102 @@ impl AppRouterImpl {
                 ));
             }
         };
+        let settle = match self.gate_route_hop(&hop, vault_id).await {
+            Ok(settle) => settle,
+            Err(e) => return err(e),
+        };
+        self.settle_gated_legs(req, vec![(vault_id, settle)]).await
+    }
 
-        // Chunk #7 — AMM re-simulation gate.  For vaults whose
-        // fulfillment condition is `AmmConstantProduct`, re-run the
-        // constant-product math against THE VAULT'S CURRENT
-        // RESERVES (not the advertisement's, which may be stale)
-        // and reject if the trader's claimed `expected_output` does
-        // not match.  This is the difference between
-        // "signed-route execution" and
-        // "independently re-simulated reserve-math execution".
-        //
-        // Reserves are read inside the vault mutex but the actual
-        // post-trade update happens AFTER `execute_on_relationship`
-        // succeeds — see the post-advance block below.  A concurrent
-        // unlock between read and update is serialised by
-        // `Mutex<LimboVault>`, so the lock-free window only matters
-        // if the on-chain advance fails (in which case reserves were
-        // never advanced — correct fail-closed).
+    /// A signed route of two or more hops, settled as ONE route-wide settlement
+    /// (amendment 2c-H). The signed route's own chain is verified once — the
+    /// signature over the whole route, each hop handing its asset and exact
+    /// output to the next, the route's ends, no vault and no parent named twice
+    /// (H16 on the signed route) — its external commitment must be visible, and
+    /// then EVERY hop passes its vault's gates before anything is signed,
+    /// published, fenced or bound.
+    async fn unlock_routed_route(
+        &self,
+        req: generated::DlvUnlockRoutedV1,
+        rc: generated::RouteCommitV1,
+    ) -> AppResult {
+        // ONE ROUTE, SETTLED AS A WHOLE (amendment 2c-H H1). No caller addresses
+        // one vault of a multi-hop route: `vault_id` MUST be empty, and naming
+        // any vault — even one the route crosses — is refused before anything.
+        if !req.vault_id.is_empty() {
+            return err(format!(
+                "dlv.unlockRouted: a route of {} hops settles as a whole, so vault_id must be \
+                 empty (amendment 2c-H H1). Nothing was bound.",
+                rc.hops.len()
+            ));
+        }
+        let verified =
+            match dsm::dlv::route_commit::verify_route_commit_chain(&req.route_commit_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.unlockRouted: the signed route does not verify ({e}); nothing was \
+                         bound"
+                    ))
+                }
+            };
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        match crate::sdk::route_commit_sdk::is_external_commitment_visible(&x).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return err("dlv.unlockRouted: route-commit eligibility rejected: \
+                     ExternalCommitmentNotVisible"
+                    .into())
+            }
+            Err(e) => {
+                return err(format!(
+                    "dlv.unlockRouted: route-commit eligibility rejected: AnchorFetchFailed({e})"
+                ))
+            }
+        }
+        let mut legs = Vec::with_capacity(rc.hops.len());
+        for (hop, signed) in rc.hops.iter().zip(&verified.hops) {
+            let vault_id = signed.vault_id;
+            let settle = match self.gate_route_hop(hop, vault_id).await {
+                Ok(settle) => settle,
+                Err(e) => return err(e),
+            };
+            // THE SIGNED HOP IS THE GATED TRADE. SAT.4-R holds every allocation
+            // to its signed hop, and the curve gate prices a hop at its VAULT's
+            // own rate, so a hop signed at any other fee — or naming any other
+            // parent, asset or amount — would pass every gate here and fail only
+            // after the bind. Refused before anything is signed.
+            if signed.parent_binding != settle.parent_binding
+                || signed.token_in != settle.input_policy_commit
+                || signed.token_out != settle.output_policy_commit
+                || signed.input_amount != settle.input_amount
+                || signed.expected_output != settle.output_amount
+                || signed.fee_bps != settle.fee_bps
+            {
+                return err(format!(
+                    "dlv.unlockRouted: the signed hop for vault {} is not the trade its vault's \
+                     gates verified (SAT.4-R); nothing was bound",
+                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                ));
+            }
+            legs.push((vault_id, settle));
+        }
+        self.settle_gated_legs(req, legs).await
+    }
+
+    /// **One hop's vault gates.** The vault is mirrored locally and is an AMM
+    /// vault; its state is COMPOSED from the owner's published baseline and
+    /// every verified fold; the hop names exactly the composed parent; the
+    /// lineage is not quarantined; and the constant-product re-simulation
+    /// against the proven reserves reproduces the hop's expected output
+    /// exactly. Returns the terms that hop settles on. A single-hop route runs
+    /// it once and a route-wide one runs it per hop, so both apply the same
+    /// gates, and every refusal lands before anything is signed or bound.
+    async fn gate_route_hop(
+        &self,
+        hop: &generated::RouteCommitHopV1,
+        vault_id: [u8; 32],
+    ) -> Result<SettleTerms, String> {
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         // There is no anchor-enforcement bypass left to track. The per-vault
         // selector is retired: binding is unconditional, so no vault can be in
@@ -2865,7 +2936,7 @@ impl AppRouterImpl {
             let vault_lock = match dlv_manager.get_vault(&vault_id).await {
                 Ok(v) => v,
                 Err(e) => {
-                    return err(format!(
+                    return Err(format!(
                         "dlv.unlockRouted: vault {} not in local DLVManager: {e}",
                         crate::util::text_id::encode_base32_crockford(&vault_id)
                     ));
@@ -2925,7 +2996,7 @@ impl AppRouterImpl {
                     fee_bps: vault_fee_bps,
                 } = vault.fulfillment_condition
                 else {
-                    return err("dlv.unlockRouted: routed settlement requires an AMM vault".into());
+                    return Err("dlv.unlockRouted: routed settlement requires an AMM vault".into());
                 };
 
                 // DELEGATED LIQUIDITY. The vault's state at the hop's parent is
@@ -2965,7 +3036,7 @@ impl AppRouterImpl {
                     // Every composition failure is "the liquidity is unproven".
                     // Fail closed — nothing here may be guessed at.
                     Err(e) => {
-                        return err(format!(
+                        return Err(format!(
                             "dlv.unlockRouted: vault {} cannot be composed from its published \
                              baseline ({e}); its liquidity is unproven and cannot be settled \
                              against",
@@ -2984,16 +3055,16 @@ impl AppRouterImpl {
                 // read as a binding mismatch and both are refusals.
                 {
                     use crate::sdk::route_commit_sdk::{enforce_parent_binding, ParentBindingReject};
-                    match enforce_parent_binding(&hop, &composed.c_n) {
+                    match enforce_parent_binding(hop, &composed.c_n) {
                         Ok(()) => {}
                         Err(ParentBindingReject::MissingBinding) => {
-                            return err("dlv.unlockRouted: the RouteCommit hop carries no parent \
+                            return Err("dlv.unlockRouted: the RouteCommit hop carries no parent \
                                  binding — an unbound hop names no state and cannot be \
                                  settled"
                                 .to_string());
                         }
                         Err(ParentBindingReject::StaleParent) => {
-                            return err(format!(
+                            return Err(format!(
                                 "dlv.unlockRouted: vault {} is at generation {} but the route \
                                  binds a different parent state — that parent is stale, \
                                  already consumed, or was never this vault's state",
@@ -3005,14 +3076,12 @@ impl AppRouterImpl {
                 }
 
                 // 2c-C3.1 ruling D, effect 4: independent of the walk.
-                if let Err(e) = refuse_quarantined_lineage(
+                refuse_quarantined_lineage(
                     "dlv.unlockRouted",
                     &vault_id,
                     composed.sequence,
                     &composed.c_n,
-                ) {
-                    return err(e);
-                }
+                )?;
 
                 // The parent identity this settlement would consume, and
                 // whether it was still available when composed. Carried on
@@ -3032,7 +3101,7 @@ impl AppRouterImpl {
                 (composed.reserves_a, composed.reserves_b)
             };
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
-                &hop,
+                hop,
                 &vault.fulfillment_condition,
                 proven_a,
                 proven_b,
@@ -3045,7 +3114,7 @@ impl AppRouterImpl {
                         <[u8; 32]>::try_from(hop.token_in.as_slice()).ok(),
                         <[u8; 32]>::try_from(hop.token_out.as_slice()).ok(),
                     ) else {
-                        return err(
+                        return Err(
                             "dlv.unlockRouted: hop assets are not 32-byte policy commits".into(),
                         );
                     };
@@ -3072,29 +3141,46 @@ impl AppRouterImpl {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    return err(format!(
+                    return Err(format!(
                         "dlv.unlockRouted: AMM re-simulation rejected: {e:?}"
                     ));
                 }
             }
         };
-        // Past the gates. This is a SETTLEMENT: value moves.
+        settle_terms
+            .ok_or_else(|| "dlv.unlockRouted: routed settlement requires a verified AMM hop".into())
+    }
+
+    /// **The settlement of a signed route whose every hop passed its vault's
+    /// gates** — the ONE settlement tail, for a route of one hop or of many.
+    ///
+    /// ONE operation (grammar 26 for one leg, exactly what a single-hop route
+    /// has always settled; grammar 33 for two or more), ONE bundle carrying
+    /// every consumed vault's `T_v`, ONE `QuorumBind` over the complete
+    /// `K(B)`, ONE trader advance whose deltas are the route's two ends, then
+    /// ONE completion over every leg (SoFi §7.2, §9.7, §16.2; amendment 2c-H
+    /// H1-H5, H13). Nothing before the bind writes to the trader's chain, the
+    /// fleet, a fence or a register, so a refusal up to the bind costs nothing;
+    /// the trader's one canonical advance happens only after the binding
+    /// COMMITTED, and the intermediate assets never touch the trader.
+    async fn settle_gated_legs(
+        &self,
+        mut req: generated::DlvUnlockRoutedV1,
+        legs: Vec<([u8; 32], SettleTerms)>,
+    ) -> AppResult {
+        let (Some((first_vault, first)), Some((_, last))) = (legs.first(), legs.last()) else {
+            return err("dlv.unlockRouted: routed settlement requires a verified AMM hop".into());
+        };
+        let route_wide = legs.len() > 1;
+
         // Ruling I. The settler key is a correspondence claim checked against
-        // the proven authority at economic admission (provenance.rs). It used to
-        // fall back to `req.device_id` -- 32 DevID bytes in a 64-byte AK field --
-        // which passed the device-head advance (the signature is verified
-        // against THIS device's key, not the operation's) and could only fail
-        // later. A DevID is not an authority key, and no key is manufactured
-        // from one: the length gate below still refuses it.
-        //
-        // An EMPTY key is the canonical request for wallet stamping — the same
-        // accept-or-stamp rule `dlv.create`, `route.signRouteCommit` and
-        // `route.publishExternalCommitment` apply, and the two steps this
-        // route follows in the swap flow. The wallet's signing key is the key
-        // this route signs the operation with below, so the stamped key is
-        // exactly the one the signature proves. Before this, the shipped swap
-        // path sent an empty key and every routed unlock from a handset was
-        // refused here.
+        // the proven authority at economic admission (provenance.rs). A DevID is
+        // not an authority key, and no key is manufactured from one: the length
+        // gate below refuses it. An EMPTY key is the canonical request for
+        // wallet stamping — the same accept-or-stamp rule `dlv.create`,
+        // `route.signRouteCommit` and `route.publishExternalCommitment` apply;
+        // the wallet's signing key is the key this route signs the operation
+        // with below, so the stamped key is exactly the one the signature proves.
         if req.unlocker_public_key.is_empty() {
             match crate::sdk::signing_authority::current_public_key() {
                 Ok(pk) if !pk.is_empty() => req.unlocker_public_key = pk,
@@ -3121,44 +3207,39 @@ impl AppRouterImpl {
             ));
         }
 
-        // The trade, in the terms the conservation chokepoint checks. Taken from
-        // the hop that was just verified against the owner's proven reserves, so
-        // the deltas below cannot describe a different trade than the one the
-        // AMM re-simulation accepted.
-        let Some(settle) = settle_terms.as_ref() else {
-            return err("dlv.unlockRouted: routed settlement requires a verified AMM hop".into());
-        };
-
         // ADOPTION PRECEDES RECEIPT (owner ruling 2026-09-13). The trader is
-        // about to be CREDITED the output token; its own pre-settlement state
-        // must already commit that token's adoption, exactly as an offline
-        // receipt would require. This is checked here, before the first-writer
-        // claim and before any binding, so a refusal costs nothing — and it
-        // is checked again by `DeviceState::advance` at the credit, so no
-        // path can route around it. A settlement never roots a token on the
-        // receiver's behalf: the market-evidence check below authenticates
-        // the policy bytes, it does not adopt them.
+        // credited the route's FINAL output token and nothing else — an
+        // intermediate asset never becomes a trader balance (2c-H H4) — so that
+        // token's adoption must already be committed to the trader's own state.
+        // Checked here, before any binding, and again by `DeviceState::advance`
+        // at the credit, so no path can route around it.
         {
             let Some(head) = self.core_sdk.device_head() else {
                 return err("dlv.unlockRouted: no device head; nothing can be credited".into());
             };
-            if !head.has_adopted(&settle.output_policy_commit) {
+            if !head.has_adopted(&last.output_policy_commit) {
                 return err(format!(
                     "dlv.unlockRouted: this device has not adopted the output token {} — ADD \
                      TOKEN first; a settlement cannot credit a token whose policy this device \
                      has not committed to its own state",
-                    crate::util::text_id::encode_base32_crockford(&settle.output_policy_commit)
+                    crate::util::text_id::encode_base32_crockford(&last.output_policy_commit)
                 ));
             }
         }
 
-        // Both traded assets must satisfy the applicable token policy, and
-        // the market legs' policy bytes must be authenticated against their
-        // public anchors — before the first-writer claim, where a refusal
-        // still costs nothing. Fetching the bytes here is market evidence,
-        // not adoption: the gate above already required the trader's own
-        // committed adoption of what it receives.
-        for pc in [&settle.input_policy_commit, &settle.output_policy_commit] {
+        // EVERY asset the route moves must satisfy the applicable token policy,
+        // intermediates included (they are market legs even though no trader
+        // holds them), with the policy bytes authenticated against their public
+        // anchors — before the first-writer claim, where a refusal costs nothing.
+        let mut market_legs: Vec<[u8; 32]> = Vec::with_capacity(legs.len() + 1);
+        for (_, settle) in &legs {
+            for pc in [settle.input_policy_commit, settle.output_policy_commit] {
+                if !market_legs.contains(&pc) {
+                    market_legs.push(pc);
+                }
+            }
+        }
+        for pc in &market_legs {
             if let Err(e) = require_rooted_market_leg("dlv.unlockRouted", pc).await {
                 return err(e);
             }
@@ -3170,70 +3251,77 @@ impl AppRouterImpl {
             return err("dlv.unlockRouted: route_commit_bytes did not decode".into());
         };
         let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc_for_x);
-        // ── OCCUPANCY, FOR THIS TRADE ────────────────────────────────────────
-        // Naming the right parent is not enough: it must still be ours to take.
-        // Three cases, and only the middle one is subtle.
-        //
+
+        // ── OCCUPANCY, FOR THIS TRADE, AT EVERY VAULT ────────────────────────
         //   Free            -> nobody holds it; this settle may bind.
-        //   BoundUnrealized -> SOMETHING holds it. If that something is THIS
-        //                      trade's own bundle (same X), this is a retry of
-        //                      a bind we already won, and refusing would strand
-        //                      our own trade. Any other X is a rival, and
-        //                      binding would lose ConflictFinal after we had
-        //                      already priced and authorized the trade.
-        //   LocallyFenced   -> this device has an unresolved transaction over
-        //                      the parent; recovery owns it, and starting a
-        //                      second one would reuse ballots recovery spent.
-        //
-        // The BoundUnrealized arm is also the seam 5c-2 grows into: once
-        // realization is gated on the accepted trader successor plus `TA_B`,
-        // "our own bundle is bound but not yet realized" stops being a retry
-        // case and becomes the normal mid-flight state.
-        match settle.frontier_binding {
-            crate::sdk::vault_state_composition::FrontierBinding::Free => {}
-            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
-                route_set_commitment,
-                ..
-            } if route_set_commitment == x => {}
-            crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized { .. } => {
-                return err(format!(
-                    "dlv.unlockRouted: vault {} has this generation bound by another trade — \
-                     re-quote against the composed frontier",
-                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                ));
+        //   BoundUnrealized -> held. By THIS trade's own bundle (same X) it is a
+        //                      retry of a bind we already won; any other X is a
+        //                      rival, and binding would lose ConflictFinal after
+        //                      the trade was priced and authorized.
+        //   LocallyFenced   -> this device has an unresolved transaction over the
+        //                      parent; recovery owns it.
+        for (vault_id, settle) in &legs {
+            match settle.frontier_binding {
+                crate::sdk::vault_state_composition::FrontierBinding::Free => {}
+                crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                    route_set_commitment,
+                    ..
+                } if route_set_commitment == x => {}
+                crate::sdk::vault_state_composition::FrontierBinding::BoundUnrealized {
+                    ..
+                } => {
+                    return err(format!(
+                        "dlv.unlockRouted: vault {} has this generation bound by another trade — \
+                         re-quote against the composed frontier",
+                        crate::util::text_id::encode_base32_crockford(vault_id),
+                    ));
+                }
+                crate::sdk::vault_state_composition::FrontierBinding::LocallyFenced { .. } => {
+                    return err(format!(
+                        "dlv.unlockRouted: this device holds an unresolved transaction over vault \
+                         {}'s current generation; it stays fenced until recovery resolves it",
+                        crate::util::text_id::encode_base32_crockford(vault_id),
+                    ));
+                }
+                crate::sdk::vault_state_composition::FrontierBinding::NotObserved => {
+                    return err(format!(
+                        "dlv.unlockRouted: the composition did not observe vault {}'s frontier; \
+                         refusing",
+                        crate::util::text_id::encode_base32_crockford(vault_id),
+                    ));
+                }
             }
-            crate::sdk::vault_state_composition::FrontierBinding::LocallyFenced { .. } => {
-                return err(format!(
-                    "dlv.unlockRouted: this device holds an unresolved transaction over vault \
-                     {}'s current generation; it stays fenced until recovery resolves it",
-                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                ));
-            }
-            crate::sdk::vault_state_composition::FrontierBinding::NotObserved => {
-                return err(format!(
-                    "dlv.unlockRouted: the composition did not observe vault {}'s frontier; \
-                     refusing",
-                    crate::util::text_id::encode_base32_crockford(&vault_id),
-                ));
-            }
+        }
+
+        // ONE SETTLEMENT DOMAIN (amendment 2c-H H15, Req 6.16, Req 9.4). Every
+        // consumed parent commits the same storage set and quorum, or the route
+        // cannot be one binding: refused before anything is signed.
+        if legs.iter().any(|(_, settle)| {
+            settle.storage_set_id != first.storage_set_id
+                || settle.parent_state.quorum != first.parent_state.quorum
+        }) {
+            return err(
+                "dlv.unlockRouted: the route's vaults commit different storage sets or quorums, \
+                 and one route binds in ONE settlement domain (amendment 2c-H H15). Nothing was \
+                 bound."
+                    .into(),
+            );
         }
 
         // ── MARKET EMISSION: BIND, ADVANCE, THEN COMPLETE ───────────────────
         //
-        // 5c-2 Step 4 made emission live; 2c-D §14 (C2) made completion live.
         // Binding a trade is not settling it: the settlement is realized only
-        // when the composition walk certifies it, its receipt reaches quorum,
-        // and only then is the trader's fence released. Anything short of that
-        // leaves it bound and unrealized, and D-f's resume finishes it.
+        // when the composition walk certifies it at EVERY vault, every receipt
+        // reaches quorum, and only then is the trader's fence released. Anything
+        // short of that leaves it bound and unrealized, and D-f's resume
+        // finishes it.
         //
         // ORDER MATTERS AND IS NOT INCIDENTAL. Sign, then prepare, then
         // produce, then publish, then fence, then bind. The settle's signature
         // is INSIDE the bytes the chain tip hashes, so a settle cannot be
         // signed after the advance; and `bind_settlement` publishes the
-        // canonical bundle to a quorum of the vault's committed set and
-        // refuses BEFORE any fence or binding round if that publication is not
-        // durable, so a failed publication leaves no bind, no fence and no
-        // rival excluded.
+        // canonical bundle to a quorum of the committed set and refuses BEFORE
+        // any fence or binding round if that publication is not durable.
         let actor = match self.core_sdk.get_current_state() {
             Ok(st) => st.device_info.device_id,
             Err(e) => return err(format!("dlv.unlockRouted: no local device identity: {e}")),
@@ -3246,9 +3334,9 @@ impl AppRouterImpl {
             Ok(kp) => kp,
             Err(e) => return err(format!("dlv.unlockRouted: no signing authority: {e}")),
         };
-        // A market settle advances the trader's SELF-LOOP. The owner neither
-        // signs nor advances at settle time; their side is a later, separate
-        // owner-apply on the owner's own loop.
+        // A market settle advances the trader's SELF-LOOP. No owner signs or
+        // advances at settle time; each owner's side is a later, separate
+        // owner-apply on that owner's own loop.
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &actor, &actor,
@@ -3257,33 +3345,98 @@ impl AppRouterImpl {
         let Ok(nonce) = <[u8; 32]>::try_from(rc_for_x.nonce.as_slice()) else {
             return err("dlv.unlockRouted: the RouteCommit nonce is not 32 bytes".into());
         };
-        let receipt_id = dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, &x);
+        let receipt_ids: Vec<[u8; 32]> = legs
+            .iter()
+            .map(|(vault_id, _)| dsm::dlv::settlement_receipt_leaf::derive_receipt_id(vault_id, &x))
+            .collect();
+
+        // THE INTENT'S FEE RATE. One leg: the vault's own rate. A route: the
+        // trader signs one total, which must be the sum of the rates every
+        // vault charges (SAT.6-R) — refused here rather than bound and never
+        // certifiable.
+        let intent_fee_bps = if route_wide {
+            let Ok(total) = u32::try_from(rc_for_x.total_fee_bps) else {
+                return err("dlv.unlockRouted: the route's total fee does not fit u32".into());
+            };
+            let sum = legs
+                .iter()
+                .try_fold(0u32, |acc, (_, settle)| acc.checked_add(settle.fee_bps));
+            if sum != Some(total) {
+                return err(
+                    "dlv.unlockRouted: the route's signed total fee is not the sum of its vaults' \
+                     fees (SAT.6-R); refusing before signing"
+                        .into(),
+                );
+            }
+            total
+        } else {
+            first.fee_bps
+        };
 
         // THE SETTLE. Every field is a composed or verified fact: the owner
-        // identity and the fee come from the authenticated `V_n`, the amounts
-        // from the re-simulation that proved them against the owner's reserves,
-        // and `provenance` re-checks each against `V_n` later. Nothing here is
-        // caller-supplied except the route bytes the trader signed.
-        let unsigned = dsm::types::operations::Operation::DlvSettle {
-            vault_id: vault_id.to_vec(),
-            owner_public_key: settle.owner_public_key.clone(),
-            owner_devid: settle.owner_devid,
-            owner_genesis: settle.owner_genesis,
-            input_policy_commit: settle.input_policy_commit,
-            output_policy_commit: settle.output_policy_commit,
-            parent_sequence: settle.parent_sequence,
-            parent_binding: settle.parent_binding,
-            route_commit_bytes: req.route_commit_bytes.clone(),
-            external_commitment_x: x,
-            input_amount: settle.input_amount,
-            output_amount: settle.output_amount,
-            fee_bps: settle.fee_bps,
-            sigma: [0u8; 32],
-            settler_public_key: req.unlocker_public_key.clone(),
-            settler_devid: actor,
-            settlement_receipt_id: receipt_id,
-            signature: Vec::new(),
-            mode: dsm::types::operations::TransactionMode::Unilateral,
+        // identities and fees come from each authenticated `V_n`, the amounts
+        // from the re-simulations that proved them against the owners'
+        // reserves, and `provenance` re-checks each against its `V_n` later.
+        let unsigned = if route_wide {
+            let route_legs: Vec<dsm::types::operations::DlvRouteLeg> = legs
+                .iter()
+                .zip(&receipt_ids)
+                .map(
+                    |((vault_id, settle), receipt_id)| dsm::types::operations::DlvRouteLeg {
+                        vault_id: *vault_id,
+                        owner_public_key: settle.owner_public_key.clone(),
+                        owner_devid: settle.owner_devid,
+                        owner_genesis: settle.owner_genesis,
+                        input_policy_commit: settle.input_policy_commit,
+                        output_policy_commit: settle.output_policy_commit,
+                        parent_sequence: settle.parent_sequence,
+                        parent_binding: settle.parent_binding,
+                        input_amount: settle.input_amount,
+                        output_amount: settle.output_amount,
+                        fee_bps: settle.fee_bps,
+                        settlement_receipt_id: *receipt_id,
+                    },
+                )
+                .collect();
+            if let Err(e) =
+                dsm::types::operations::DlvRouteLeg::check_route_conservation(&route_legs)
+            {
+                return err(format!(
+                    "dlv.unlockRouted: the route does not conserve ({e}); nothing was signed or \
+                     bound"
+                ));
+            }
+            dsm::types::operations::Operation::DlvRouteSettle {
+                legs: route_legs,
+                route_commit_bytes: req.route_commit_bytes.clone(),
+                external_commitment_x: x,
+                settler_public_key: req.unlocker_public_key.clone(),
+                settler_devid: actor,
+                signature: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            }
+        } else {
+            dsm::types::operations::Operation::DlvSettle {
+                vault_id: first_vault.to_vec(),
+                owner_public_key: first.owner_public_key.clone(),
+                owner_devid: first.owner_devid,
+                owner_genesis: first.owner_genesis,
+                input_policy_commit: first.input_policy_commit,
+                output_policy_commit: first.output_policy_commit,
+                parent_sequence: first.parent_sequence,
+                parent_binding: first.parent_binding,
+                route_commit_bytes: req.route_commit_bytes.clone(),
+                external_commitment_x: x,
+                input_amount: first.input_amount,
+                output_amount: first.output_amount,
+                fee_bps: first.fee_bps,
+                sigma: [0u8; 32],
+                settler_public_key: req.unlocker_public_key.clone(),
+                settler_devid: actor,
+                settlement_receipt_id: receipt_ids[0],
+                signature: Vec::new(),
+                mode: dsm::types::operations::TransactionMode::Unilateral,
+            }
         };
         let signed = match self.core_sdk.sign_operation_sphincs(unsigned) {
             Ok(op) => op,
@@ -3295,18 +3448,19 @@ impl AppRouterImpl {
         };
 
         // THE PURE PREPARE. No writes, no head install: it exists to learn the
-        // embedded parent and the entropy the chain tip is computed over, both
-        // of which are the device's own and neither of which a caller may pick.
+        // embedded parent and the entropy the chain tip is computed over. The
+        // deltas are the route's ENDS: the first leg's input debited, the last
+        // leg's output credited (2c-H H3).
         let deltas = vec![
             dsm::types::device_state::BalanceDelta {
-                policy_commit: settle.input_policy_commit,
+                policy_commit: first.input_policy_commit,
                 direction: dsm::types::device_state::BalanceDirection::Debit,
-                amount: settle.input_amount,
+                amount: first.input_amount,
             },
             dsm::types::device_state::BalanceDelta {
-                policy_commit: settle.output_policy_commit,
+                policy_commit: last.output_policy_commit,
                 direction: dsm::types::device_state::BalanceDirection::Credit,
-                amount: settle.output_amount,
+                amount: last.output_amount,
             },
         ];
         let outcome = match self.core_sdk.simulate_advance_for_confirm(
@@ -3331,8 +3485,7 @@ impl AppRouterImpl {
         };
 
         // PRODUCE. `prepare_market_successor` RECOMPUTES the successor from the
-        // signed bytes; there is no parameter through which one could be
-        // supplied, and `market_terms` runs `G1`-`G4` over its own output.
+        // signed bytes; `market_terms` runs `G1`-`G5` over its own output.
         let prepared = match dsm::dlv::market_producer::prepare_market_successor(
             rel_key,
             embedded_parent,
@@ -3348,11 +3501,6 @@ impl AppRouterImpl {
             Ok(p) => p,
             Err(e) => return err(format!("dlv.unlockRouted: {e}")),
         };
-        // The producer and the prepare must agree about the successor. They
-        // compute it by the same rule from the same inputs, so a disagreement
-        // means one of them is not doing what it says, and binding a successor
-        // this device would not actually advance to is the one outcome worth
-        // refusing hardest.
         if prepared.trader_successor() != outcome.new_chain_state.compute_chain_tip() {
             return err(
                 "dlv.unlockRouted: the produced successor is not the one this device would \
@@ -3361,92 +3509,99 @@ impl AppRouterImpl {
             );
         }
 
-        // THE BUNDLE. The vault successor is DERIVED from the authenticated
-        // parent by the same constant-product rule every verifier applies, so
-        // it is a function of `V_n` rather than of anything the trader supplies.
-        let successor = match dsm::dlv::successor_validity::derive_market_successor(
-            &settle.parent_state,
-            settle.parent_binding,
-            &dsm::dlv::successor_validity::MarketTerms {
-                input_policy_commit: settle.input_policy_commit,
-                output_policy_commit: settle.output_policy_commit,
-                input_amount: settle.input_amount,
-                fee_bps: settle.fee_bps,
-            },
-        ) {
-            dsm::dlv::successor_validity::DeriveExpected::Derived(v) => *v,
-            dsm::dlv::successor_validity::DeriveExpected::Refused(r) => {
-                return err(format!(
-                    "dlv.unlockRouted: the market successor does not derive from the \
-                     authenticated parent: {r:?}"
-                ))
-            }
-        };
-        let market_terms = match dsm::dlv::market_producer::market_terms(
-            dsm::ccb::TradeIntent {
-                token_in: settle.input_policy_commit,
-                amount_in: settle.input_amount,
-                token_out: settle.output_policy_commit,
-                exact_out: settle.output_amount,
-                fee_bps: settle.fee_bps,
-                nonce,
-            },
-            x,
-            match dsm::ccb::Route::new(vec![dsm::ccb::RouteLeg::Single(dsm::ccb::Allocation {
+        // THE BUNDLE. Each vault's successor is DERIVED from its authenticated
+        // parent by the constant-product rule every verifier applies; the route
+        // carries one bare allocation per leg, in route order.
+        let mut transitions = Vec::with_capacity(legs.len());
+        let mut allocations = Vec::with_capacity(legs.len());
+        for (_, settle) in &legs {
+            let successor = match dsm::dlv::successor_validity::derive_market_successor(
+                &settle.parent_state,
+                settle.parent_binding,
+                &dsm::dlv::successor_validity::MarketTerms {
+                    input_policy_commit: settle.input_policy_commit,
+                    output_policy_commit: settle.output_policy_commit,
+                    input_amount: settle.input_amount,
+                    fee_bps: settle.fee_bps,
+                },
+            ) {
+                dsm::dlv::successor_validity::DeriveExpected::Derived(v) => *v,
+                dsm::dlv::successor_validity::DeriveExpected::Refused(r) => {
+                    return err(format!(
+                        "dlv.unlockRouted: the market successor does not derive from the \
+                         authenticated parent: {r:?}"
+                    ))
+                }
+            };
+            let transition =
+                match dsm::ccb::ConsumedDlvTransition::market(settle.parent_binding, successor) {
+                    Ok(t) => t,
+                    Err(e) => return err(format!("dlv.unlockRouted: transition: {e:?}")),
+                };
+            transitions.push(transition);
+            let fee_policy = match dsm::ccb::FeePolicy::new(settle.fee_bps) {
+                Ok(f) => f,
+                Err(e) => return err(format!("dlv.unlockRouted: fee policy: {e:?}")),
+            };
+            allocations.push(dsm::ccb::RouteLeg::Single(dsm::ccb::Allocation {
                 parent_binding: settle.parent_binding,
                 delta_in: settle.input_amount,
                 delta_out: settle.output_amount,
                 encumbrance_claim: [0u8; 32],
-                fee_policy: match dsm::ccb::FeePolicy::new(settle.fee_bps) {
-                    Ok(f) => f,
-                    Err(e) => return err(format!("dlv.unlockRouted: fee policy: {e:?}")),
-                },
-            })]) {
-                Ok(r) => r,
-                Err(e) => return err(format!("dlv.unlockRouted: route: {e:?}")),
+                fee_policy,
+            }));
+        }
+        let route = match dsm::ccb::Route::new(allocations) {
+            Ok(r) => r,
+            Err(e) => return err(format!("dlv.unlockRouted: route: {e:?}")),
+        };
+        let market_terms = match dsm::dlv::market_producer::market_terms(
+            dsm::ccb::TradeIntent {
+                token_in: first.input_policy_commit,
+                amount_in: first.input_amount,
+                token_out: last.output_policy_commit,
+                exact_out: last.output_amount,
+                fee_bps: intent_fee_bps,
+                nonce,
             },
+            x,
+            route,
             &prepared,
         ) {
             Ok(t) => t,
             Err(e) => return err(format!("dlv.unlockRouted: {e}")),
         };
-        let transition =
-            match dsm::ccb::ConsumedDlvTransition::market(settle.parent_binding, successor) {
-                Ok(t) => t,
-                Err(e) => return err(format!("dlv.unlockRouted: transition: {e:?}")),
-            };
-        let bundle = match dsm::ccb::SettlementBundle::market(market_terms, vec![transition]) {
+        let bundle = match dsm::ccb::SettlementBundle::market(market_terms, transitions) {
             Ok(b) => b,
             Err(e) => return err(format!("dlv.unlockRouted: bundle: {e:?}")),
         };
 
-        // PREFLIGHT THE RESERVE PROVENANCE (2c-D §14). Every admission
-        // condition whose inputs exist before the first mutating bind is
-        // checked HERE: a trade admission would refuse must never commit a
-        // binding and strand this vault generation. It is the SAME rule the
-        // `DlvReserveConsumption` provenance arm applies, over the same owner
-        // proof and — past the owner's baseline — the same composed history,
-        // so it can be neither weaker nor stronger than the verdict it
-        // anticipates. An actual COMMIT, once reached, stays authoritative.
-        let Some(locator) = settle.owner_economic_proof else {
-            return err(
-                "dlv.unlockRouted: the vault's advertisement carries no economic-proof locator, so \
-                 this trade could never be admitted; refusing before binding"
-                    .into(),
-            );
-        };
-        if let Err(why) = preflight_reserve_provenance(&vault_id, settle, &locator).await {
-            return err(format!(
-                "dlv.unlockRouted: the parent's reserves are not provenanced ({why}); refusing \
-                 before binding"
-            ));
+        // PREFLIGHT THE RESERVE PROVENANCE AT EVERY VAULT (2c-D §14). A trade
+        // admission would refuse must never commit a binding and strand a vault
+        // generation; it is the SAME rule the reserve-consumption arm applies
+        // per leg, so it can be neither weaker nor stronger than that verdict.
+        let mut locators = Vec::with_capacity(legs.len());
+        for (vault_id, settle) in &legs {
+            let Some(locator) = settle.owner_economic_proof else {
+                return err(
+                    "dlv.unlockRouted: the vault's advertisement carries no economic-proof \
+                     locator, so this trade could never be admitted; refusing before binding"
+                        .into(),
+                );
+            };
+            if let Err(why) = preflight_reserve_provenance(vault_id, settle, &locator).await {
+                return err(format!(
+                    "dlv.unlockRouted: the parent's reserves are not provenanced ({why}); \
+                     refusing before binding"
+                ));
+            }
+            locators.push(locator);
         }
 
         // PUBLISH, FENCE, BIND — in that order, and all inside
         // `bind_settlement`. The fence is keyed on the TRADER's own chain and
-        // parent, NOT on the vault: a market settle consumes the trader's
-        // sovereign chain position, and reusing the close path's vault-keyed
-        // identity would fence the wrong thing.
+        // parent, NOT on a vault: a market settle consumes the trader's
+        // sovereign chain position once, however many vaults the route crosses.
         let Some(proposer_id) = crate::sdk::settlement_bind::local_proposer_id() else {
             return err("dlv.unlockRouted: no local proposer identity".into());
         };
@@ -3456,7 +3611,7 @@ impl AppRouterImpl {
                     Ok(c) => c,
                     Err(e) => return err(format!("dlv.unlockRouted: storage-set catalog: {e}")),
                 };
-                match catalog.resolve(&settle.storage_set_id) {
+                match catalog.resolve(&first.storage_set_id) {
                     Some(sset) => sset.clone(),
                     None => return err(
                         "dlv.unlockRouted: the vault's committed storage set is not resolvable \
@@ -3476,41 +3631,34 @@ impl AppRouterImpl {
         {
             Ok(Ok(dsm::dlv::quorum_bind::Outcome::Committed)) => {
                 // THE BINDING IS AUTHORITATIVE. Now, and only now, the trader
-                // advances its OWN chain to the successor the bundle names,
-                // with the economic admission attached (Step 4 requirement 6).
-                //
-                // The credit arm is `0x0026 DlvReserveConsumption`: a trader's
-                // settle output is funded by consuming an owner vault reserve.
-                // The evidence names the exact `V_n`, the owner's authority
-                // evidence and the owner's economic proof, so a verifier
-                // REPLAYS the owner's ancestry instead of trusting this device.
-                let evidence_bytes = {
+                // advances its OWN chain to the successor the bundle names, with
+                // the economic admission attached. One reserve-consumption
+                // evidence per vault: the exact `V_n`, the owner's authority
+                // evidence and the owner's economic proof, so a verifier REPLAYS
+                // each owner's ancestry instead of trusting this device.
+                let mut evidence = Vec::with_capacity(legs.len());
+                for ((_, settle), locator) in legs.iter().zip(&locators) {
                     let vn = match settle.parent_state.encode() {
                         Ok(v) => v,
                         Err(e) => return err(format!("dlv.unlockRouted: V_n encode: {e:?}")),
                     };
-                    generated::ReserveConsumptionEvidenceV1 {
-                        exact_vault_state_ccb: vn,
-                        owner_authority_evidence: settle.owner_authority_evidence.clone(),
-                        economic_proof_addr: locator.addr.to_vec(),
-                    }
-                    .encode_to_vec()
-                };
-                // `b`, DERIVED ONCE. The write set needs it to emit the
-                // bundle-acceptance leaf (2c-D producer adoption) and the
-                // response reports it; deriving it twice would be two chances
-                // to derive it differently.
+                    evidence.push((
+                        generated::ReserveConsumptionEvidenceV1 {
+                            exact_vault_state_ccb: vn,
+                            owner_authority_evidence: settle.owner_authority_evidence.clone(),
+                            economic_proof_addr: locator.addr.to_vec(),
+                        }
+                        .encode_to_vec(),
+                        locator.position,
+                    ));
+                }
+                // `b`, DERIVED ONCE.
                 let bundle_canon = match dsm::dlv::settlement_bundle::canon(&bundle) {
                     Ok(c) => c,
                     Err(e) => return err(format!("dlv.unlockRouted: canon: {e:?}")),
                 };
                 let b = dsm::dlv::settlement_bundle::bundle_digest(&bundle_canon);
-                // `expected_successor` is the exact successor the bundle was
-                // BOUND to. The advance refuses if it would commit any other,
-                // checked after the pure prepare and before anything is
-                // written — so a device that would diverge leaves nothing
-                // persisted and nothing credited.
-                if let Err(e) = crate::sdk::economic_admission_flow::admitted_dlv_settle(
+                if let Err(e) = crate::sdk::economic_admission_flow::admitted_market_settle(
                     &self.core_sdk,
                     signed.clone(),
                     b,
@@ -3518,52 +3666,47 @@ impl AppRouterImpl {
                     actor,
                     init_tip,
                     &deltas,
-                    evidence_bytes,
-                    locator.position,
+                    evidence,
                     prepared.trader_successor(),
                     |_o| Ok(()),
                     |_tx, _o, _a| Ok(()),
                 )
                 .await
                 {
-                    // The bundle is bound and stays bound; what failed is this
-                    // device's own admission. Reported as a refusal so no
-                    // caller reads it as a completed trade.
                     return err(format!(
                         "dlv.unlockRouted: the trade is BOUND but this device could not admit its \
                          own advance ({e}); nothing was credited and the parent stays fenced"
                     ));
                 }
 
-                // ── THE CUTOVER (2c-D §14, C2): certify, publish, THEN release.
-                // The walk is the only certifier, the receipt this device
-                // builds is Req 21.16's evidence and never authority, and the
-                // fence releases only after that receipt is durably published.
-                // A crash or a receipt below quorum leaves the settlement bound
-                // and unrealized with the fence held (C2-R1 point 4; D-f).
-                let Some(new_sequence) = settle.parent_sequence.checked_add(1) else {
-                    return err("dlv.unlockRouted: the settled generation cannot advance".into());
-                };
-                // The pair and fee of the AUTHENTICATED `V_n` this settle was
-                // priced against (`settle.parent_state`, the state the reserve
-                // evidence above encodes). The advertisement key and the pair
-                // parser are both order-insensitive, so this composes exactly
-                // the vault the settle priced.
+                // ── THE CUTOVER (2c-D §14, C2; 2c-H H13): certify every leg,
+                // publish every receipt, THEN release the one fence.
+                let mut completion_legs = Vec::with_capacity(legs.len());
+                for ((vault_id, settle), receipt_id) in legs.iter().zip(&receipt_ids) {
+                    let Some(new_sequence) = settle.parent_sequence.checked_add(1) else {
+                        return err(
+                            "dlv.unlockRouted: the settled generation cannot advance".into()
+                        );
+                    };
+                    completion_legs.push(CompletionLeg {
+                        vault_id: *vault_id,
+                        token_a: *settle.parent_state.market_policy.token_a(),
+                        token_b: *settle.parent_state.market_policy.token_b(),
+                        fee_bps: settle.fee_bps,
+                        trade: dsm::dlv::settlement_receipt_leaf::SettledTrade {
+                            x,
+                            parent_sequence: settle.parent_sequence,
+                            new_sequence,
+                            input_policy_commit: settle.input_policy_commit,
+                            input_amount: settle.input_amount,
+                            output_policy_commit: settle.output_policy_commit,
+                            output_amount: settle.output_amount,
+                        },
+                        receipt_id: *receipt_id,
+                    });
+                }
                 let completion = MarketCompletion {
-                    vault_id,
-                    token_a: *settle.parent_state.market_policy.token_a(),
-                    token_b: *settle.parent_state.market_policy.token_b(),
-                    fee_bps: settle.fee_bps,
-                    trade: dsm::dlv::settlement_receipt_leaf::SettledTrade {
-                        x,
-                        parent_sequence: settle.parent_sequence,
-                        new_sequence,
-                        input_policy_commit: settle.input_policy_commit,
-                        input_amount: settle.input_amount,
-                        output_policy_commit: settle.output_policy_commit,
-                        output_amount: settle.output_amount,
-                    },
-                    receipt_id,
+                    legs: completion_legs,
                     b,
                     bundle: bundle_canon,
                     rel_key,
@@ -3670,11 +3813,10 @@ async fn preflight_reserve_provenance(
     .map_err(|r| r.to_string())
 }
 
-/// The exact settlement a completion finishes (2c-D §14): built by the settle
-/// route from its own advance, or by D-f from the fence row and the bound
-/// bundle. Every field is fixed before completion starts, and nothing in
-/// completion changes one.
-struct MarketCompletion {
+/// One vault's leg of the settlement a completion finishes: the vault, the pair
+/// and fee its walk composes under, the trade exactly as the advance recorded
+/// it, and the receipt id `(vault_id, x)` names.
+struct CompletionLeg {
     vault_id: [u8; 32],
     token_a: [u8; 32],
     token_b: [u8; 32],
@@ -3682,6 +3824,15 @@ struct MarketCompletion {
     /// The trade exactly as the advance recorded it in the device SMT.
     trade: dsm::dlv::settlement_receipt_leaf::SettledTrade,
     receipt_id: [u8; 32],
+}
+
+/// The exact settlement a completion finishes (2c-D §14; amendment 2c-H H13):
+/// built by the settle route from its own advance, or by D-f from the fence row
+/// and the bound bundle. ONE bundle, fence and permitted successor; one leg per
+/// vault the settlement consumed. Every field is fixed before completion
+/// starts, and nothing in completion changes one.
+struct MarketCompletion {
+    legs: Vec<CompletionLeg>,
     b: [u8; 32],
     /// `CCB(B)`, the exact bound bundle `b` names: what the Def 14.2 receipt
     /// projects and publishes (2c-F).
@@ -3690,6 +3841,45 @@ struct MarketCompletion {
     rel_key: [u8; 32],
     fenced_parent: [u8; 32],
     permitted_successor: [u8; 32],
+}
+
+/// One completion leg from a bound operation's own fields, refusing a leg whose
+/// generation cannot advance or whose receipt id is not `(vault_id, x)`'s.
+#[allow(clippy::too_many_arguments)]
+fn completion_leg(
+    vault_id: [u8; 32],
+    input_policy_commit: [u8; 32],
+    output_policy_commit: [u8; 32],
+    parent_sequence: u64,
+    x: [u8; 32],
+    input_amount: u64,
+    output_amount: u64,
+    fee_bps: u32,
+    settlement_receipt_id: [u8; 32],
+) -> Result<CompletionLeg, String> {
+    let Some(new_sequence) = parent_sequence.checked_add(1) else {
+        return Err("the settled generation cannot advance".into());
+    };
+    if settlement_receipt_id != dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&vault_id, &x)
+    {
+        return Err("the bound operation does not name this settlement's receipt".into());
+    }
+    Ok(CompletionLeg {
+        vault_id,
+        token_a: input_policy_commit,
+        token_b: output_policy_commit,
+        fee_bps,
+        trade: dsm::dlv::settlement_receipt_leaf::SettledTrade {
+            x,
+            parent_sequence,
+            new_sequence,
+            input_policy_commit,
+            input_amount,
+            output_policy_commit,
+            output_amount,
+        },
+        receipt_id: settlement_receipt_id,
+    })
 }
 
 /// What one completion attempt established (2c-D §14, C2-R1 point 4).
@@ -3707,21 +3897,24 @@ enum CompletionOutcome {
     Refused(String),
 }
 
-/// **The completion of a bound market settlement** (2c-D §14, C2-R1) — the
-/// ONE path, run by the settle route after its advance and by D-f's resume.
+/// **The completion of a bound market settlement** (2c-D §14, C2-R1; amendment
+/// 2c-H H13) — the ONE path, run by the settle route after its advance and by
+/// D-f's resume, for a settlement of one vault or of a route.
 ///
 /// ```text
-/// recover the exact frozen V1, or build it once   evidence, never authority
-/// compose with that V1 as the candidate           the walk is the only certifier
-/// require a CERTIFIED fold for exactly b          may_certify(), or nothing
-/// freeze V1, sweep, require quorum                durable BEFORE release (point 4)
-/// freeze the Def 14.2 receipt closure for S_v     an obligation, NEVER a gate (2c-F R6)
-/// SuccessorAccepted at the exact placed fence     only now; twice is not an error
+/// per leg: recover the exact frozen V1, or build it once   evidence, never authority
+/// per leg: compose the vault with that V1 as the candidate the walk is the only certifier
+/// per leg: require a CERTIFIED fold for exactly b          may_certify(), or nothing
+/// freeze EVERY V1, sweep, require EVERY one at quorum     durable BEFORE release (point 4)
+/// freeze the Def 14.2 receipt closure for S_v              an obligation, NEVER a gate (2c-F R6)
+/// SuccessorAccepted at the exact placed fence              only now; twice is not an error
 /// ```
 ///
-/// Idempotent: a V1 already frozen is recovered and never regenerated; an
-/// exact V1 already at quorum is not re-sent; a fence already released for
-/// this bundle is this settlement finished.
+/// The one fence releases only when EVERY vault certified and EVERY receipt is
+/// at quorum; one leg short leaves the whole settlement bound and unrealized.
+/// Idempotent per leg: a V1 already frozen is recovered and never regenerated,
+/// an exact V1 already at quorum is not re-sent, and a fence already released
+/// for this bundle is this settlement finished.
 async fn complete_settlement(
     head: &dsm::types::device_state::DeviceState,
     keypair: &dsm::crypto::signatures::SignatureKeyPair,
@@ -3731,137 +3924,166 @@ async fn complete_settlement(
     use crate::storage::client_db::trader_parent_fence as fdb;
     use CompletionOutcome::{Pending, Realized, Refused};
 
-    let receipt_key =
-        crate::sdk::settlement_receipt_codec::vault_receipt_key(&c.vault_id, &c.trade.x);
+    if c.legs.is_empty() {
+        return Refused("a settlement completes at least one leg".into());
+    }
+    // Per leg: (receipt key, receipt bytes, certified economic root, S_v).
+    let mut certified_legs: Vec<(String, Vec<u8>, [u8; 32], [u8; 32])> =
+        Vec::with_capacity(c.legs.len());
+    let mut sofi_closure = None;
+    for leg in &c.legs {
+        let receipt_key =
+            crate::sdk::settlement_receipt_codec::vault_receipt_key(&leg.vault_id, &leg.trade.x);
 
-    // THE EXACT RECEIPT. Bytes already frozen for this settlement are its
-    // receipt — recovered, never regenerated — and must name exactly this
-    // trade. Only when none exist is V1 built, once, over this device's
-    // post-advance state; its legacy device fields carry no weight (#854).
-    let frozen = match fpa::get_current_artifact_payload(&receipt_key) {
-        Ok(frozen) => frozen,
-        Err(e) => return Pending(format!("the receipt's publication row is unreadable: {e}")),
-    };
-    let receipt = match frozen {
-        Some(bytes) => {
-            let Some(receipt) = generated::TraderSettlementReceiptV1::decode(bytes.as_slice())
-                .ok()
-                .and_then(|p| crate::sdk::settlement_receipt_codec::receipt_from_proto(&p))
-            else {
-                return Refused("the frozen settlement receipt does not decode".into());
-            };
-            if receipt.vault_id != c.vault_id
-                || receipt.receipt_id != c.receipt_id
-                || receipt.trade != c.trade
-            {
-                return Refused("the frozen settlement receipt is not this settlement's".into());
+        // THE EXACT RECEIPT. Bytes already frozen for this leg are its receipt
+        // — recovered, never regenerated — and must name exactly this trade.
+        // Only when none exist is V1 built, once, over this device's
+        // post-advance state; every leg's receipt is over the same root.
+        let frozen = match fpa::get_current_artifact_payload(&receipt_key) {
+            Ok(frozen) => frozen,
+            Err(e) => return Pending(format!("the receipt's publication row is unreadable: {e}")),
+        };
+        let receipt = match frozen {
+            Some(bytes) => {
+                let Some(receipt) = generated::TraderSettlementReceiptV1::decode(bytes.as_slice())
+                    .ok()
+                    .and_then(|p| crate::sdk::settlement_receipt_codec::receipt_from_proto(&p))
+                else {
+                    return Refused("the frozen settlement receipt does not decode".into());
+                };
+                if receipt.vault_id != leg.vault_id
+                    || receipt.receipt_id != leg.receipt_id
+                    || receipt.trade != leg.trade
+                {
+                    return Refused(
+                        "the frozen settlement receipt is not this settlement's".into(),
+                    );
+                }
+                receipt
             }
-            receipt
-        }
-        None => {
-            let key = dsm::dlv::settlement_receipt_leaf::settlement_receipt_key(
-                &head.genesis(),
-                &head.devid(),
-                &c.vault_id,
-                &c.receipt_id,
-            );
-            let siblings = match head.inclusion_siblings(&key) {
-                Ok(siblings) => siblings,
-                Err(e) => return Pending(format!("the receipt leaf has no device path: {e}")),
-            };
-            match dsm::dlv::settlement_receipt_leaf::sign_trader_settlement_receipt(
-                &c.vault_id,
-                &c.receipt_id,
-                c.trade,
-                &head.genesis(),
-                &head.devid(),
-                &head.root(),
-                siblings,
-                &keypair.public_key,
-                &keypair.secret_key,
-            ) {
-                Ok(receipt) => receipt,
-                Err(e) => {
-                    return Pending(format!("the settlement receipt could not be signed: {e}"))
+            None => {
+                let key = dsm::dlv::settlement_receipt_leaf::settlement_receipt_key(
+                    &head.genesis(),
+                    &head.devid(),
+                    &leg.vault_id,
+                    &leg.receipt_id,
+                );
+                let siblings = match head.inclusion_siblings(&key) {
+                    Ok(siblings) => siblings,
+                    Err(e) => return Pending(format!("the receipt leaf has no device path: {e}")),
+                };
+                match dsm::dlv::settlement_receipt_leaf::sign_trader_settlement_receipt(
+                    &leg.vault_id,
+                    &leg.receipt_id,
+                    leg.trade,
+                    &head.genesis(),
+                    &head.devid(),
+                    &head.root(),
+                    siblings,
+                    &keypair.public_key,
+                    &keypair.secret_key,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(e) => {
+                        return Pending(format!("the settlement receipt could not be signed: {e}"))
+                    }
                 }
             }
+        };
+
+        // CERTIFY — through this vault's walk, with this exact receipt as Req
+        // 21.16's evidence. Nothing cached stands in for this.
+        let composed = match crate::sdk::vault_state_composition::compose_discovered_vault_with(
+            &leg.vault_id,
+            &leg.token_a,
+            &leg.token_b,
+            leg.fee_bps,
+            Some(&receipt),
+        )
+        .await
+        {
+            Ok(composed) => composed,
+            Err(e) => return Pending(format!("the settlement is not certifiable yet: {e}")),
+        };
+        let Some(fold) = composed
+            .folded_parents
+            .iter()
+            .find(|f| f.bound_by == c.b && f.verdict.may_certify())
+        else {
+            return Pending("no certified fold for this bundle yet".into());
+        };
+        let Some(certified) = fold.realized_trade.as_ref() else {
+            return Pending("no certified fold for this bundle yet".into());
+        };
+        if certified.vault_id() != leg.vault_id
+            || certified.receipt_id() != leg.receipt_id
+            || certified.trade() != leg.trade
+        {
+            return Refused("the certified settlement is not this receipt's".into());
         }
-    };
-
-    // CERTIFY — through the walk, with this exact receipt as Req 21.16's
-    // evidence. Nothing cached stands in for this.
-    let composed = match crate::sdk::vault_state_composition::compose_discovered_vault_with(
-        &c.vault_id,
-        &c.token_a,
-        &c.token_b,
-        c.fee_bps,
-        Some(&receipt),
-    )
-    .await
-    {
-        Ok(composed) => composed,
-        Err(e) => return Pending(format!("the settlement is not certifiable yet: {e}")),
-    };
-    let Some(fold) = composed
-        .folded_parents
-        .iter()
-        .find(|f| f.bound_by == c.b && f.verdict.may_certify())
-    else {
-        return Pending("no certified fold for this bundle yet".into());
-    };
-    let Some(certified) = fold.realized_trade.as_ref() else {
-        return Pending("no certified fold for this bundle yet".into());
-    };
-    if certified.vault_id() != c.vault_id
-        || certified.receipt_id() != c.receipt_id
-        || certified.trade() != c.trade
-    {
-        return Refused("the certified settlement is not this receipt's".into());
+        if certified_legs
+            .first()
+            .is_some_and(|(_, _, _, set)| *set != composed.storage_set_id)
+        {
+            return Refused("the settlement's vaults compose under different storage sets".into());
+        }
+        // THE DEF 14.2 RECEIPT (2c-F) — one for the bundle, projected once from
+        // a certified fold's own acceptance; an obligation, never a condition
+        // of the release below (R6).
+        if sofi_closure.is_none() {
+            sofi_closure = Some(
+                fold.certified_acceptance
+                    .as_ref()
+                    .ok_or_else(|| "the certified fold carries no acceptance".to_string())
+                    .and_then(|acceptance| {
+                        crate::sdk::sofi_receipt_publication::closure(
+                            &c.bundle,
+                            acceptance,
+                            composed.storage_set_id,
+                        )
+                    })
+                    .and_then(|closure| {
+                        if closure.receipt.bundle() == c.b {
+                            Ok(closure)
+                        } else {
+                            Err("the carried bundle is not the one this settlement bound"
+                                .to_string())
+                        }
+                    }),
+            );
+        }
+        let bytes =
+            crate::sdk::settlement_receipt_codec::receipt_to_proto(&receipt).encode_to_vec();
+        certified_legs.push((
+            receipt_key,
+            bytes,
+            certified.economic_root(),
+            composed.storage_set_id,
+        ));
     }
+    let sofi_closure =
+        sofi_closure.unwrap_or_else(|| Err("no leg certified an acceptance".to_string()));
 
-    // PUBLISH DURABLY, BEFORE RELEASE (C2-R1 point 4; D-b). `storage_put_bytes`
-    // returns Ok on ONE node, so the receipt is frozen for the vault's set and
-    // released only once a quorum of that set holds the exact bytes. Freezing
-    // the same bytes again is a no-op.
-    let bytes = crate::sdk::settlement_receipt_codec::receipt_to_proto(&receipt).encode_to_vec();
-    // THE DEF 14.2 RECEIPT (2c-F) — an obligation this certification creates,
-    // never a condition of the release below (R6). Projected here and only
-    // here, from the certified fold's own acceptance; frozen for the vault's
-    // authenticated committed set; published by the same sweep. Any failure is
-    // reported and never holds the fence.
-    let sofi_closure = fold
-        .certified_acceptance
-        .as_ref()
-        .ok_or_else(|| "the certified fold carries no acceptance".to_string())
-        .and_then(|acceptance| {
-            crate::sdk::sofi_receipt_publication::closure(
-                &c.bundle,
-                acceptance,
-                composed.storage_set_id,
-            )
-        })
-        .and_then(|closure| {
-            if closure.receipt.bundle() == c.b {
-                Ok(closure)
-            } else {
-                Err("the carried bundle is not the one this settlement bound".to_string())
-            }
-        });
+    // PUBLISH DURABLY, BEFORE RELEASE (C2-R1 point 4; D-b). Every receipt is
+    // frozen for the vault's set and the release waits until a quorum of that
+    // set holds EVERY exact receipt. Freezing the same bytes again is a no-op.
     {
         let binding = match crate::storage::client_db::get_connection() {
             Ok(binding) => binding,
             Err(e) => return Pending(format!("database: {e}")),
         };
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-        if let Err(e) = fpa::freeze_artifact_with_conn(
-            &conn,
-            &composed.storage_set_id,
-            &receipt_key,
-            &bytes,
-            &certified.economic_root(),
-            "trader-settlement-receipt",
-        ) {
-            return Pending(format!("the settlement receipt could not be frozen: {e}"));
+        for (receipt_key, bytes, economic_root, storage_set_id) in &certified_legs {
+            if let Err(e) = fpa::freeze_artifact_with_conn(
+                &conn,
+                storage_set_id,
+                receipt_key,
+                bytes,
+                economic_root,
+                "trader-settlement-receipt",
+            ) {
+                return Pending(format!("the settlement receipt could not be frozen: {e}"));
+            }
         }
         match &sofi_closure {
             Ok(closure) => {
@@ -3881,12 +4103,17 @@ async fn complete_settlement(
         }
     }
     let receipt_published = |key: &str| fpa::is_artifact_published(key).unwrap_or(false);
-    if !receipt_published(&receipt_key) {
+    let every_receipt_published = || {
+        certified_legs
+            .iter()
+            .all(|(receipt_key, ..)| receipt_published(receipt_key))
+    };
+    if !every_receipt_published() {
         if let Err(e) = crate::handlers::artifact_republish::republish_unpublished_artifacts().await
         {
             log::warn!("[settlement completion] receipt publication pass failed (retried): {e}");
         }
-        if !receipt_published(&receipt_key) {
+        if !every_receipt_published() {
             return Pending("the settlement receipt is below its publication quorum".into());
         }
     }
@@ -4033,57 +4260,83 @@ pub(crate) async fn resume_settlement_completion(
         return Refused("the bound bundle's parent or successor is not the fence's".into());
     }
 
-    // THE EXACT TRADE, from the bound operation — never from a receipt.
+    // THE EXACT TRADE, from the bound operation — never from a receipt. One leg
+    // per vault the settlement consumed: a DlvSettle names one, a DlvRouteSettle
+    // names every leg of the route (amendment 2c-H H13).
     let Ok(operation) =
         dsm::types::operations::Operation::from_bytes(&terms.recovery_material.operation_bytes)
     else {
         return Refused("the bound operation does not decode".into());
     };
-    let dsm::types::operations::Operation::DlvSettle {
-        vault_id,
-        input_policy_commit,
-        output_policy_commit,
-        parent_sequence,
-        external_commitment_x,
-        input_amount,
-        output_amount,
-        fee_bps,
-        settlement_receipt_id,
-        ..
-    } = operation
-    else {
-        return Refused("the bound operation is not a DlvSettle".into());
-    };
-    let Ok(vault_id) = <[u8; 32]>::try_from(vault_id.as_slice()) else {
-        return Refused("the bound operation's vault id is not 32 bytes".into());
-    };
-    let Some(new_sequence) = parent_sequence.checked_add(1) else {
-        return Refused("the settled generation cannot advance".into());
-    };
-    if external_commitment_x != terms.route_set_commitment
-        || settlement_receipt_id
-            != dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
-                &vault_id,
-                &external_commitment_x,
-            )
-    {
-        return Refused("the bound operation does not name this settlement's receipt".into());
-    }
-    let completion = MarketCompletion {
-        vault_id,
-        token_a: input_policy_commit,
-        token_b: output_policy_commit,
-        fee_bps,
-        trade: dsm::dlv::settlement_receipt_leaf::SettledTrade {
-            x: external_commitment_x,
-            parent_sequence,
-            new_sequence,
+    let legs = match operation {
+        dsm::types::operations::Operation::DlvSettle {
+            vault_id,
             input_policy_commit,
-            input_amount,
             output_policy_commit,
+            parent_sequence,
+            external_commitment_x,
+            input_amount,
             output_amount,
-        },
-        receipt_id: settlement_receipt_id,
+            fee_bps,
+            settlement_receipt_id,
+            ..
+        } => {
+            let Ok(vault_id) = <[u8; 32]>::try_from(vault_id.as_slice()) else {
+                return Refused("the bound operation's vault id is not 32 bytes".into());
+            };
+            if external_commitment_x != terms.route_set_commitment {
+                return Refused(
+                    "the bound operation does not name this settlement's receipt".into(),
+                );
+            }
+            match completion_leg(
+                vault_id,
+                input_policy_commit,
+                output_policy_commit,
+                parent_sequence,
+                external_commitment_x,
+                input_amount,
+                output_amount,
+                fee_bps,
+                settlement_receipt_id,
+            ) {
+                Ok(leg) => vec![leg],
+                Err(why) => return Refused(why),
+            }
+        }
+        dsm::types::operations::Operation::DlvRouteSettle {
+            legs,
+            external_commitment_x,
+            ..
+        } => {
+            if external_commitment_x != terms.route_set_commitment {
+                return Refused(
+                    "the bound operation does not name this settlement's receipt".into(),
+                );
+            }
+            let mut completion_legs = Vec::with_capacity(legs.len());
+            for leg in legs {
+                match completion_leg(
+                    leg.vault_id,
+                    leg.input_policy_commit,
+                    leg.output_policy_commit,
+                    leg.parent_sequence,
+                    external_commitment_x,
+                    leg.input_amount,
+                    leg.output_amount,
+                    leg.fee_bps,
+                    leg.settlement_receipt_id,
+                ) {
+                    Ok(built) => completion_legs.push(built),
+                    Err(why) => return Refused(why),
+                }
+            }
+            completion_legs
+        }
+        _ => return Refused("the bound operation is not a DlvSettle or a DlvRouteSettle".into()),
+    };
+    let completion = MarketCompletion {
+        legs,
         b,
         bundle: bytes,
         rel_key: stored.trader_chain_id,
@@ -13438,8 +13691,7 @@ mod funded_creation_tests {
 
     /// Two advertised vaults over two pairs sharing one asset — `a/b` owned
     /// and `b/c` owned — and a trader holding `a`, `b` and adopting `c`. The
-    /// market a two-hop route would cross, for the tests that prove beta
-    /// neither binds nor executes one.
+    /// market a two-hop route crosses.
     struct TwoPairMarket {
         owner_dev: crate::test_support::two_device::TestDevice,
         trader_dev: crate::test_support::two_device::TestDevice,
@@ -13455,6 +13707,16 @@ mod funded_creation_tests {
     }
 
     fn two_pair_market(trader_slot: &'static str, trader_tag: u8) -> TwoPairMarket {
+        two_pair_market_adopting(trader_slot, trader_tag, true)
+    }
+
+    /// [`two_pair_market`], with the trader's adoption of `c` — the final
+    /// output of the route `a → b → c` — made or withheld.
+    fn two_pair_market_adopting(
+        trader_slot: &'static str,
+        trader_tag: u8,
+        adopts_c: bool,
+    ) -> TwoPairMarket {
         use prost::Message as _;
         install_identity();
         let owner_dev = participant("owner", 0x41);
@@ -13501,7 +13763,9 @@ mod funded_creation_tests {
 
         let trader_dev = participant(trader_slot, trader_tag);
         fund_trader(&owner_dev, &trader_dev, &pc_a, &pc_b, 5_000);
-        trader_adopts(&trader_dev, &pc_c);
+        if adopts_c {
+            trader_adopts(&trader_dev, &pc_c);
+        }
         TwoPairMarket {
             owner_dev,
             trader_dev,
@@ -13515,22 +13779,17 @@ mod funded_creation_tests {
         }
     }
 
-    /// A HOSTILE CALLER bypasses the binder: it hand-builds and signs a
-    /// two-hop route the beta binder would never produce, publishes its
-    /// external commitment, and asks the SDK to execute it — with no vault
+    /// A HOSTILE CALLER bypasses the binder: it hand-builds and signs a route
+    /// one hop deeper than the profile settles (amendment 2c-H H12), publishes
+    /// its external commitment, and asks the SDK to execute it — with no vault
     /// named, and then naming the first hop's vault. Both are refused before
-    /// any economic side effect: no fleet write, no CAS round, no trader
-    /// fence, no reserve movement, no generation advance.
-    ///
-    /// SoFi §7.2 / §9.7 / §16.2 make a multi-vault route one bundle and one
-    /// binding; amendment 2c-A ruling 3 fences beta to one vault transition
-    /// per bundle. The execution boundary is where that is enforced, whatever
-    /// the caller signed.
+    /// any economic side effect: no fleet write, no CAS round, no trader fence,
+    /// no reserve movement, no generation advance.
     #[test]
     #[serial]
-    fn a_route_naming_more_than_one_hop_is_refused_before_any_bind() {
+    fn a_route_deeper_than_the_profile_is_refused_before_any_bind() {
         use prost::Message as _;
-        let m = two_pair_market("trader-hostile-two-hop", 0x58);
+        let m = two_pair_market("trader-hostile-deep", 0x58);
         m.trader_dev.enter();
         let trader = m.trader_dev.router();
         let _ = &m.owner_dev;
@@ -13549,12 +13808,6 @@ mod funded_creation_tests {
             });
             assert!(res.success, "sync failed: {:?}", res.error_message);
         }
-        // The route a two-hop binder WOULD have produced: real parents, real
-        // curve outputs, hop 0's output feeding hop 1.
-        let out0 = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
-            .expect("hop 0 output");
-        let out1 = crate::sdk::routing_path_sdk::constant_product_output(out0, 4_000, 20_000, 30)
-            .expect("hop 1 output");
         let parent_ab = composed_frontier(&m.vault_ab, &m.pc_a, &m.pc_b).c_n;
         let parent_bc = composed_frontier(&m.vault_bc, &m.bc_lo, &m.bc_hi).c_n;
         let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
@@ -13575,16 +13828,23 @@ mod funded_creation_tests {
                 ..Default::default()
             }
         };
+        let depth = crate::sdk::sofi_profile::BETA_MAX_HOPS + 1;
+        let hops: Vec<generated::RouteCommitHopV1> = (0..depth)
+            .map(|k| {
+                if k % 2 == 0 {
+                    hop(&m.vault_ab, &m.pc_a, &m.pc_b, 1_000, 400, parent_ab)
+                } else {
+                    hop(&m.vault_bc, &m.pc_b, &m.pc_c, 400, 1_000, parent_bc)
+                }
+            })
+            .collect();
         let mut rc = generated::RouteCommitV1 {
             version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
             nonce: vec![0x58; 32],
-            total_fee_bps: 60,
+            total_fee_bps: 30 * depth as u64,
             initiator_public_key: m.trader_dev.ak_pk.clone(),
             initiator_signature: Vec::new(),
-            hops: vec![
-                hop(&m.vault_ab, &m.pc_a, &m.pc_b, 1_000, out0, parent_ab),
-                hop(&m.vault_bc, &m.pc_b, &m.pc_c, out0, out1, parent_bc),
-            ],
+            hops,
             ..Default::default()
         };
         let canonical =
@@ -13624,11 +13884,14 @@ mod funded_creation_tests {
                 head.balance(&m.pc_c),
             )
         };
-        let gens_before = (
-            composed(&m.vault_ab, &m.pc_a, &m.pc_b).0,
-            composed(&m.vault_bc, &m.bc_lo, &m.bc_hi).0,
+        assert_eq!(
+            (
+                composed(&m.vault_ab, &m.pc_a, &m.pc_b).0,
+                composed(&m.vault_bc, &m.bc_lo, &m.bc_hi).0,
+            ),
+            (0, 0),
+            "both vaults start unmoved"
         );
-        assert_eq!(gens_before, (0, 0), "both vaults start unmoved");
 
         for (how, named) in [
             ("no vault named", Vec::new()),
@@ -13651,11 +13914,11 @@ mod funded_creation_tests {
             });
             assert!(
                 !res.success,
-                "{how}: a two-hop route must be refused in beta"
+                "{how}: a route deeper than the profile is refused"
             );
             let msg = res.error_message.clone().unwrap_or_default();
             assert!(
-                msg.contains("one vault transition per route") && msg.contains("names 2 hops"),
+                msg.contains(&format!("names {depth} hops")) && msg.contains("settles at most"),
                 "{how}: the refusal names the rule and the route's depth: {msg}"
             );
         }
@@ -13710,6 +13973,545 @@ mod funded_creation_tests {
         );
     }
 
+    /// The route `a → b → c` over the two-pair market at both vaults' composed
+    /// frontiers, signed by the trader, with its external commitment published:
+    /// `(route, X, hop 0's output, the final output)`. Both outputs are the
+    /// curve's at each vault's own 30 bps; `fees` are the rates the trader SIGNS
+    /// per hop and `total_fee_bps` the total it signs, so a test can sign a
+    /// route its vaults do not charge.
+    fn signed_two_hop_route(
+        m: &TwoPairMarket,
+        input: u64,
+        fees: (u32, u32),
+        total_fee_bps: u64,
+        nonce: u8,
+    ) -> (generated::RouteCommitV1, [u8; 32], u64, u64) {
+        use prost::Message as _;
+        m.trader_dev.enter();
+        let trader = m.trader_dev.router();
+        for (t_a, t_b) in [(m.pc_a, m.pc_b), (m.bc_lo, m.bc_hi)] {
+            let pair = generated::RoutingPairRequest {
+                token_a: t_a.to_vec(),
+                token_b: t_b.to_vec(),
+            };
+            let res = crate::runtime::get_runtime().block_on(async {
+                trader
+                    .invoke(AppInvoke {
+                        method: "route.syncVaultsForPair".to_string(),
+                        args: pack(pair.encode_to_vec()),
+                    })
+                    .await
+            });
+            assert!(res.success, "sync failed: {:?}", res.error_message);
+        }
+        let ab = composed_frontier(&m.vault_ab, &m.pc_a, &m.pc_b);
+        let bc = composed_frontier(&m.vault_bc, &m.bc_lo, &m.bc_hi);
+        let reserve = |v: &crate::sdk::vault_state_composition::ComposedVaultState,
+                       pc: &[u8; 32]| {
+            if v.state.market_policy.token_a() == pc {
+                v.reserves_a
+            } else {
+                v.reserves_b
+            }
+        };
+        let out0 = crate::sdk::routing_path_sdk::constant_product_output(
+            input,
+            reserve(&ab, &m.pc_a),
+            reserve(&ab, &m.pc_b),
+            30,
+        )
+        .expect("hop 0 output");
+        let out1 = crate::sdk::routing_path_sdk::constant_product_output(
+            out0,
+            reserve(&bc, &m.pc_b),
+            reserve(&bc, &m.pc_c),
+            30,
+        )
+        .expect("hop 1 output");
+        let hop = |vault: &[u8; 32],
+                   t_in: &[u8; 32],
+                   t_out: &[u8; 32],
+                   amount: u64,
+                   out: u64,
+                   fee_bps: u32,
+                   parent: [u8; 32]| generated::RouteCommitHopV1 {
+            vault_id: vault.to_vec(),
+            token_in: t_in.to_vec(),
+            token_out: t_out.to_vec(),
+            input_amount_u128: (amount as u128).to_be_bytes().to_vec(),
+            expected_output_amount_u128: (out as u128).to_be_bytes().to_vec(),
+            fee_bps,
+            parent_binding: parent.to_vec(),
+            ..Default::default()
+        };
+        let trader_sk = crate::sdk::signing_authority::current_secret_key().expect("trader sk");
+        let mut rc = generated::RouteCommitV1 {
+            version: crate::sdk::route_commit_sdk::ROUTE_COMMIT_VERSION,
+            nonce: vec![nonce; 32],
+            input_token: m.pc_a.to_vec(),
+            output_token: m.pc_c.to_vec(),
+            input_amount_u128: (input as u128).to_be_bytes().to_vec(),
+            expected_final_output_amount_u128: (out1 as u128).to_be_bytes().to_vec(),
+            total_fee_bps,
+            initiator_public_key: m.trader_dev.ak_pk.clone(),
+            initiator_signature: Vec::new(),
+            hops: vec![
+                hop(&m.vault_ab, &m.pc_a, &m.pc_b, input, out0, fees.0, ab.c_n),
+                hop(&m.vault_bc, &m.pc_b, &m.pc_c, out0, out1, fees.1, bc.c_n),
+            ],
+        };
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc).encode_to_vec();
+        rc.initiator_signature =
+            dsm::crypto::sphincs::sphincs_sign(&trader_sk, &canonical).expect("trader signs");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        crate::runtime::get_runtime()
+            .block_on(
+                crate::sdk::route_commit_sdk::publish_route_anchor_with_pointers(
+                    &x,
+                    &rc,
+                    &m.trader_dev.ak_pk,
+                    &trader_sk,
+                    "lp-offline",
+                ),
+            )
+            .expect("publish anchor + pointers");
+        (rc, x, out0, out1)
+    }
+
+    /// Submit `rc` to `dlv.unlockRouted` as the trader, naming no vault.
+    fn unlock_route(m: &TwoPairMarket, rc: &generated::RouteCommitV1) -> AppResult {
+        unlock_route_naming(m, rc, Vec::new())
+    }
+
+    /// Submit `rc` to `dlv.unlockRouted` as the trader, with `vault_id` as given.
+    fn unlock_route_naming(
+        m: &TwoPairMarket,
+        rc: &generated::RouteCommitV1,
+        vault_id: Vec<u8>,
+    ) -> AppResult {
+        use prost::Message as _;
+        m.trader_dev.enter();
+        let settle = generated::DlvUnlockRoutedV1 {
+            vault_id,
+            device_id: m.trader_dev.device_id.to_vec(),
+            route_commit_bytes: rc.encode_to_vec(),
+            unlocker_public_key: m.trader_dev.ak_pk.clone(),
+            signature: Vec::new(),
+        };
+        crate::runtime::get_runtime().block_on(async {
+            m.trader_dev
+                .router()
+                .invoke(AppInvoke {
+                    method: "dlv.unlockRouted".to_string(),
+                    args: pack(settle.encode_to_vec()),
+                })
+                .await
+        })
+    }
+
+    /// The trader's `(a, b, c)` balances.
+    fn route_balances(m: &TwoPairMarket) -> (u64, u64, u64) {
+        let head = m
+            .trader_dev
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("trader head");
+        (
+            head.balance(&m.pc_a),
+            head.balance(&m.pc_b),
+            head.balance(&m.pc_c),
+        )
+    }
+
+    /// The b/c vault's composed `(sequence, reserve_lo, reserve_hi)` after `b`
+    /// rose by `b_in` and `c` fell by `c_out`, in the pair's canonical order.
+    fn bc_reserves(m: &TwoPairMarket, sequence: u64, b_in: u64, c_out: u64) -> (u64, u64, u64) {
+        if m.bc_lo == m.pc_b {
+            (sequence, 4_000 + b_in, 20_000 - c_out)
+        } else {
+            (sequence, 20_000 - c_out, 4_000 + b_in)
+        }
+    }
+
+    /// The canonical bundle `b` names, fetched from the fleet and re-hashed.
+    fn bound_bundle(b: &[u8; 32]) -> dsm::ccb::SettlementBundle {
+        let bytes = crate::runtime::get_runtime()
+            .block_on(crate::sdk::storage_io::fetch_immutable_payload(
+                dsm::common::domain_tags::TAG_DSM_SETTLEMENT_BUNDLE,
+                b,
+            ))
+            .expect("bundle read")
+            .expect("the bound bundle is published");
+        assert_eq!(dsm::dlv::settlement_bundle::bundle_digest(&bytes), *b);
+        dsm::dlv::settlement_bundle::decode_canonical(&bytes)
+            .expect("canonical")
+            .bundle
+    }
+
+    /// Whether the vault receipt `(vault, x)` is at its publication quorum.
+    fn receipt_durable(vault: &[u8; 32], x: &[u8; 32]) -> bool {
+        crate::storage::client_db::frozen_publication_artifact::is_artifact_published(
+            &crate::sdk::settlement_receipt_codec::vault_receipt_key(vault, x),
+        )
+        .expect("publication state")
+    }
+
+    /// **ONE ROUTE, ONE SETTLEMENT** (amendment 2c-H H1-H5, H10, H13, H14).
+    ///
+    /// A trader signs `a → b → c` across two vaults and submits it once. What
+    /// settles is ONE grammar-33 operation in ONE bundle carrying both vaults'
+    /// transitions, bound by ONE binding transaction over both vault keys, and
+    /// ONE advance of the trader's chain — from exactly the parent the bundle
+    /// names to exactly the successor it binds. The trader's balances move by
+    /// the route's ends only (`a` down by the input, `c` up by the final output,
+    /// `b` untouched), each vault advances one generation by its own leg, both
+    /// receipts reach quorum before the one fence releases, and each LP catches
+    /// up from its own leg alone.
+    #[test]
+    #[serial]
+    fn a_two_hop_route_settles_as_one_bundle_one_binding_and_one_trader_advance() {
+        let m = two_pair_market("trader-two-hop", 0x5A);
+        let (rc, x, out0, out1) = signed_two_hop_route(&m, 1_000, (30, 30), 60, 0x5A);
+        let parent_ab = composed_frontier(&m.vault_ab, &m.pc_a, &m.pc_b).c_n;
+        let parent_bc = composed_frontier(&m.vault_bc, &m.bc_lo, &m.bc_hi).c_n;
+        let (rel_key, trader_parent) = trader_position_of(&m.trader_dev);
+        let cas_before = crate::sdk::binding_fleet_double::cas_log().len();
+        let before = route_balances(&m);
+
+        let res = unlock_route(&m, &rc);
+        assert!(res.success, "the route settles: {:?}", res.error_message);
+        let b = settle_outcome(&res, "realized");
+
+        // ONE BUNDLE: one transition per consumed vault, one route operation.
+        let bundle = bound_bundle(&b);
+        let mut consumed: Vec<[u8; 32]> = bundle
+            .transitions()
+            .iter()
+            .map(|t| t.parent_binding)
+            .collect();
+        consumed.sort();
+        let mut both = vec![parent_ab, parent_bc];
+        both.sort();
+        assert_eq!(
+            consumed, both,
+            "the bundle consumes exactly both vaults' parents"
+        );
+        let terms = bundle.market_terms().expect("a market bundle");
+        let head = m
+            .trader_dev
+            .router()
+            .core_sdk
+            .device_head()
+            .expect("trader head");
+        assert_eq!(
+            (terms.trader_parent, Some(terms.trader_successor)),
+            (trader_parent, head.chain_tip(&rel_key)),
+            "ONE trader advance: from the parent the bundle names to the successor it binds"
+        );
+        match dsm::types::operations::Operation::from_bytes(
+            &terms.recovery_material.operation_bytes,
+        ) {
+            Ok(dsm::types::operations::Operation::DlvRouteSettle {
+                legs,
+                external_commitment_x,
+                ..
+            }) => {
+                assert_eq!(legs.len(), 2, "one leg per hop");
+                assert_eq!(external_commitment_x, x, "under the route's own X");
+            }
+            _ => panic!("the bound operation is a route settle"),
+        }
+
+        // ONE BINDING TRANSACTION over the complete K(B).
+        let keys = dsm::dlv::settlement_bundle::key_set(&bundle).expect("K(B)");
+        assert_eq!(keys.len(), 2, "K(B) holds both vault keys");
+        let rounds = crate::sdk::binding_fleet_double::cas_log();
+        let touching: Vec<_> = rounds
+            .iter()
+            .skip(cas_before)
+            .filter(|(_, round_keys, _)| round_keys.iter().any(|k| keys.contains(k)))
+            .collect();
+        assert!(!touching.is_empty(), "the settlement drove a binding round");
+        assert!(
+            touching
+                .iter()
+                .all(|(_, round_keys, record)| *round_keys == keys && record.tx_id == b),
+            "every round over either vault key is the one transaction over both"
+        );
+
+        // THE ROUTE'S ENDS, and nothing else, on the trader's chain (H3, H4).
+        assert_eq!(
+            route_balances(&m),
+            (before.0 - 1_000, before.1, before.2 + out1),
+            "a down by the input, c up by the final output, b untouched"
+        );
+
+        // EACH VAULT, ONE GENERATION, BY ITS OWN LEG.
+        assert_eq!(
+            composed(&m.vault_ab, &m.pc_a, &m.pc_b),
+            (1, 11_000, 5_000 - out0),
+            "vault a/b moved by hop 0"
+        );
+        let bc_after = bc_reserves(&m, 1, out0, out1);
+        assert_eq!(
+            composed(&m.vault_bc, &m.bc_lo, &m.bc_hi),
+            bc_after,
+            "vault b/c moved by hop 1"
+        );
+
+        // EVERY RECEIPT AT QUORUM, THEN THE ONE FENCE RELEASED (H13).
+        assert!(
+            receipt_durable(&m.vault_ab, &x) && receipt_durable(&m.vault_bc, &x),
+            "each vault's receipt reached quorum"
+        );
+        assert_eq!(
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &trader_parent, &b)
+                .expect("fence read")
+                .expect("the fence row")
+                .state,
+            dsm::dlv::trader_fence::FenceState::Released,
+            "the one fence is released"
+        );
+
+        // EACH LP CATCHES UP FROM ITS OWN LEG (H14): b/c first, then a/b.
+        m.owner_dev.enter();
+        let owner = m.owner_dev.router();
+        let res = reconcile(owner, &m.vault_bc, &x);
+        assert!(
+            res.success,
+            "the b/c LP applies its leg: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(owner, &m.vault_bc, &m.bc_lo, &m.bc_hi),
+            (bc_after.1, bc_after.2, 1),
+            "the b/c LP's reserves are its vault's composed generation"
+        );
+        let res = reconcile(owner, &m.vault_ab, &x);
+        assert!(
+            res.success,
+            "the a/b LP applies its leg: {:?}",
+            res.error_message
+        );
+        assert_eq!(
+            leaves(owner, &m.vault_ab, &m.pc_a, &m.pc_b),
+            (11_000, 5_000 - out0, 1),
+            "the a/b LP's reserves are its vault's composed generation"
+        );
+    }
+
+    /// Every refusal a route owes BEFORE its bind (amendment 2c-H H1, H4, H11,
+    /// H16): a caller naming one vault of the route; the trader has not adopted
+    /// the route's FINAL output; a hop signed at a fee its vault does not charge
+    /// (SAT.4-R); a signed total that is not the sum of the vaults' fees
+    /// (SAT.6-R). Each is refused naming its rule, and none publishes, fences,
+    /// binds or moves anything.
+    #[test]
+    #[serial]
+    fn a_route_is_refused_before_any_bind_for_its_addressing_adoption_and_signed_fees() {
+        let m = two_pair_market_adopting("trader-route-refusals", 0x5C, false);
+        let (unadopted, ..) = signed_two_hop_route(&m, 1_000, (30, 30), 60, 0x61);
+        let (hop_fee_unlike_vault, ..) = signed_two_hop_route(&m, 1_000, (30, 31), 61, 0x62);
+        let (total_unlike_sum, ..) = signed_two_hop_route(&m, 1_000, (30, 30), 59, 0x63);
+        let (rel_key, _) = trader_position_of(&m.trader_dev);
+        let before = route_balances(&m);
+        let refused = |rc: &generated::RouteCommitV1, named: Vec<u8>, rule: &str| {
+            let puts = crate::sdk::storage_io::fake_fleet::put_log().len();
+            let cas = crate::sdk::binding_fleet_double::cas_log().len();
+            let res = unlock_route_naming(&m, rc, named);
+            assert!(!res.success, "{rule}: the route is refused");
+            let msg = res.error_message.clone().unwrap_or_default();
+            assert!(msg.contains(rule), "the refusal names {rule}: {msg}");
+            assert_eq!(
+                crate::sdk::storage_io::fake_fleet::put_log().len(),
+                puts,
+                "{rule}: nothing was published"
+            );
+            assert_eq!(
+                crate::sdk::binding_fleet_double::cas_log().len(),
+                cas,
+                "{rule}: no binding round"
+            );
+            assert!(
+                trader_fence_of(&m.trader_dev).is_none()
+                    && crate::storage::client_db::trader_parent_fence::list_acceptance_pending_fences(
+                        &rel_key
+                    )
+                    .expect("pending")
+                    .is_empty(),
+                "{rule}: no fence on the trader's chain"
+            );
+            assert_eq!(route_balances(&m), before, "{rule}: no balance moved");
+        };
+        refused(&unadopted, m.vault_ab.to_vec(), "vault_id must be empty");
+        refused(&unadopted, m.vault_bc.to_vec(), "vault_id must be empty");
+        refused(&unadopted, Vec::new(), "has not adopted the output token");
+        refused(&hop_fee_unlike_vault, Vec::new(), "SAT.4-R");
+        trader_adopts(&m.trader_dev, &m.pc_c);
+        refused(&total_unlike_sum, Vec::new(), "SAT.6-R");
+        assert_eq!(
+            (
+                composed(&m.vault_ab, &m.pc_a, &m.pc_b).0,
+                composed(&m.vault_bc, &m.bc_lo, &m.bc_hi).0,
+            ),
+            (0, 0),
+            "neither vault advanced"
+        );
+    }
+
+    /// A RIVAL HOLDS ONE VAULT OF THE ROUTE (amendment 2c-H H5, H15). Another
+    /// trade is bound, unrealized, at the b/c vault's parent. The route over
+    /// a/b and b/c is refused as a whole at that vault's occupancy — before it
+    /// signs or binds anything — and the vault it could have taken, a/b, is
+    /// left exactly as it was: unmoved, and its parent still free.
+    #[test]
+    #[serial]
+    fn a_route_with_one_vault_bound_by_a_rival_takes_neither_vault() {
+        let m = two_pair_market("trader-route-rival", 0x5D);
+        let (rc, ..) = signed_two_hop_route(&m, 1_000, (30, 30), 60, 0x64);
+
+        // THE RIVAL, through the production driver, in the vault's own set.
+        let bc = composed_frontier(&m.vault_bc, &m.bc_lo, &m.bc_hi);
+        let set = crate::sdk::storage_set::StorageSetCatalog::from_env_config()
+            .expect("catalog")
+            .resolve(&bc.storage_set_id)
+            .expect("the vault's birth set resolves through this device's catalog")
+            .clone();
+        crate::sdk::binding_fleet_double::register_set(&set);
+        let rival = market_bundle_at(&bc, &m.pc_b, &m.pc_c, 400, [0x99; 32]);
+        assert_eq!(
+            crate::runtime::get_runtime()
+                .block_on(crate::sdk::settlement_bind::bind_settlement(
+                    &set,
+                    proposer_for(b"rival"),
+                    &rival,
+                    m.vault_bc,
+                    bc.c_n,
+                ))
+                .expect("drive the rival bind"),
+            Ok(dsm::dlv::quorum_bind::Outcome::Committed),
+            "the rival holds the b/c parent"
+        );
+
+        let (rel_key, _) = trader_position_of(&m.trader_dev);
+        let cas = crate::sdk::binding_fleet_double::cas_log().len();
+        let before = route_balances(&m);
+        let res = unlock_route(&m, &rc);
+        assert!(!res.success, "the route is refused");
+        let msg = res.error_message.clone().unwrap_or_default();
+        assert!(
+            msg.contains("bound by another trade"),
+            "refused at the held vault's occupancy: {msg}"
+        );
+        assert_eq!(
+            crate::sdk::binding_fleet_double::cas_log().len(),
+            cas,
+            "the route ran no binding round"
+        );
+        assert!(
+            trader_fence_of(&m.trader_dev).is_none()
+                && crate::storage::client_db::trader_parent_fence::list_acceptance_pending_fences(
+                    &rel_key
+                )
+                .expect("pending")
+                .is_empty(),
+            "no fence on the trader's chain"
+        );
+        assert_eq!(route_balances(&m), before, "no balance moved");
+        let ab = composed_frontier(&m.vault_ab, &m.pc_a, &m.pc_b);
+        assert_eq!(
+            (ab.sequence, ab.reserves_a, ab.reserves_b),
+            (0, 10_000, 5_000),
+            "a/b is unmoved"
+        );
+        assert!(
+            matches!(
+                ab.frontier_binding,
+                crate::sdk::vault_state_composition::FrontierBinding::Free
+            ),
+            "and its parent is still free: the route bound nothing there"
+        );
+    }
+
+    /// ROUTE-WIDE COMPLETION (amendment 2c-H H13; 2c-D §14 D-f). Only the
+    /// SECOND vault's receipt is refused by every member. The route binds and
+    /// the trader advances; the first vault's receipt reaches quorum and the
+    /// second's does not, so the one fence stays HELD — one leg short of
+    /// durable is not realized. A resume releases nothing while that receipt
+    /// is below quorum; once the fleet heals it finishes the SAME settlement,
+    /// every leg, with no binding round and no further advance.
+    #[test]
+    #[serial]
+    fn a_route_one_receipt_short_of_quorum_stays_held_until_resume_finishes_every_leg() {
+        let m = two_pair_market("trader-route-resume", 0x5E);
+        let (rc, x, out0, out1) = signed_two_hop_route(&m, 1_000, (30, 30), 60, 0x65);
+        let (rel_key, trader_parent) = trader_position_of(&m.trader_dev);
+        let before = route_balances(&m);
+        let bc_receipts = format!(
+            "{}{}/",
+            crate::sdk::settlement_receipt_codec::VAULT_RECEIPT_ROOT,
+            crate::util::text_id::encode_base32_crockford(&m.vault_bc)
+        );
+        crate::sdk::storage_io::fake_fleet::fail_keys_with_prefix(&bc_receipts);
+
+        let res = unlock_route(&m, &rc);
+        assert!(res.success, "the route binds: {:?}", res.error_message);
+        let b = settle_outcome(&res, "bound-unrealized");
+        held_fence(&rel_key, &trader_parent, &b);
+        assert!(
+            receipt_durable(&m.vault_ab, &x) && !receipt_durable(&m.vault_bc, &x),
+            "the first leg's receipt is durable and the second's is not"
+        );
+        let settled = (before.0 - 1_000, before.1, before.2 + out1);
+        assert_eq!(
+            route_balances(&m),
+            settled,
+            "the trader advanced once, at the bind"
+        );
+        let trader = m.trader_dev.router();
+        let n = crate::runtime::get_runtime()
+            .block_on(trader.resume_settlement_completions())
+            .expect("resume pass");
+        assert_eq!(n, 0, "nothing realizes while one receipt is below quorum");
+        held_fence(&rel_key, &trader_parent, &b);
+
+        crate::sdk::storage_io::fake_fleet::heal_keys_with_prefix(&bc_receipts);
+        m.trader_dev.enter();
+        let cas = crate::sdk::binding_fleet_double::cas_log().len();
+        let n = crate::runtime::get_runtime()
+            .block_on(trader.resume_settlement_completions())
+            .expect("resume pass");
+        assert_eq!(n, 1, "the one route-wide settlement realized");
+        assert!(
+            receipt_durable(&m.vault_ab, &x) && receipt_durable(&m.vault_bc, &x),
+            "every receipt reached quorum"
+        );
+        assert_eq!(
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &trader_parent, &b)
+                .expect("fence read")
+                .expect("the fence row")
+                .state,
+            dsm::dlv::trader_fence::FenceState::Released,
+            "the one fence is released"
+        );
+        assert_eq!(
+            crate::sdk::binding_fleet_double::cas_log().len(),
+            cas,
+            "the resume drove no binding round"
+        );
+        assert_eq!(route_balances(&m), settled, "and advanced nothing further");
+        assert_eq!(
+            (
+                composed(&m.vault_ab, &m.pc_a, &m.pc_b),
+                composed(&m.vault_bc, &m.bc_lo, &m.bc_hi),
+            ),
+            ((1, 11_000, 5_000 - out0), bc_reserves(&m, 1, out0, out1)),
+            "each vault realized its own leg"
+        );
+    }
+
     /// The binder binds no route deeper than beta can settle, whatever depth
     /// the caller asks for: `a → c` is refused at `max_hops = 0` (the
     /// profile's depth) and at `max_hops = 99` (clamped to it), while `a → b`
@@ -13749,7 +14551,7 @@ mod funded_creation_tests {
             let res = bind(&m.pc_c, max_hops, 0x60);
             assert!(
                 !res.success,
-                "max_hops {max_hops}: a → c needs two hops and beta binds one"
+                "max_hops {max_hops}: a → c crosses two pairs, and discovery is scoped to the named pair"
             );
             let msg = res.error_message.clone().unwrap_or_default();
             assert!(

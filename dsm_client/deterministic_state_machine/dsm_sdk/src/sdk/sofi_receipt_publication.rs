@@ -281,12 +281,18 @@ pub(crate) async fn recover_owed_receipt(fence: &TraderFence) -> ReceiptRecovery
 
     // S_v — the set the fence was bound under, and the set the bundle's own
     // successor commits (equal to the parent's by bundle validity).
-    let [transition] = decoded.bundle.transitions() else {
-        return Refused("the bound bundle is not a beta bundle".into());
-    };
-    match dsm::ccb::storage_set_id(&transition.successor.storage_set) {
-        Ok(id) if id == fence.storage_set_id => {}
-        _ => return Refused("the fence's storage set is not the one the bundle commits".into()),
+    // Every transition commits the one settlement domain (amendment 2c-H H15;
+    // the bundle constructor refuses a route across two), and it is the fence's.
+    let transitions = decoded.bundle.transitions();
+    if transitions.is_empty()
+        || !transitions.iter().all(|t| {
+            matches!(
+                dsm::ccb::storage_set_id(&t.successor.storage_set),
+                Ok(id) if id == fence.storage_set_id
+            )
+        })
+    {
+        return Refused("the fence's storage set is not the one the bundle commits".into());
     }
 
     // TA_B — this device's own admission artifacts for exactly b.
