@@ -42,7 +42,6 @@ import dsm.types.proto.WalletCreateGenesisV2Request
 //   3. Add the external fun declaration in UnifiedNativeApi.kt.
 //   4. Add the frontend wrapper in WebViewBridge.ts.
 //
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
 // ============================================================================
 
 /**
