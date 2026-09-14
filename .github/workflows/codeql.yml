@@ -56,9 +56,10 @@ on:
       #     non-fast-forward, a reviewed PR and signed commits, and NO status
       #     checks — so a skipped workflow cannot leave a PR unmergeable,
       #     which is the usual trap with `paths-ignore`.
-      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
-      # two PDFs; those still run the pipeline, because "it lives under docs/"
-      # is not evidence that nothing consumes it.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
       - '**/*.md'
   # Run on every PR regardless of base branch (see ci.yml) so stacked PRs get
   # scanned. The markdown skip below is consistent with the note that follows:
@@ -80,9 +81,10 @@ on:
       #     non-fast-forward, a reviewed PR and signed commits, and NO status
       #     checks — so a skipped workflow cannot leave a PR unmergeable,
       #     which is the usual trap with `paths-ignore`.
-      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
-      # two PDFs; those still run the pipeline, because "it lives under docs/"
-      # is not evidence that nothing consumes it.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
       - '**/*.md'
   # Lets a full-tree scan be forced without waiting for a push or the cron.
   # Worth knowing when reading a PR check: codeql-action restricts alerts to
