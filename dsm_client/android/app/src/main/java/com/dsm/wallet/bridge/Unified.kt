@@ -35,7 +35,6 @@ import androidx.annotation.Keep
 //   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
 //
 // Full method list: See UnifiedNativeApi.kt for all 87+ external declarations.
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
 // ============================================================================
 
 /**

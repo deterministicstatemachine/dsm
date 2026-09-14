@@ -30,7 +30,6 @@ import androidx.annotation.Keep
 //   - @Keep @JvmStatic external -- survived R8/Proguard minification.
 //
 // See Unified.kt for the public-facing facade that wraps these declarations.
-// See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
 // ============================================================================
 
 /**

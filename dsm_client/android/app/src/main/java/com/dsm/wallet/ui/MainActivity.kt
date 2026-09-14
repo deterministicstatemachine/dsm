@@ -1191,9 +1191,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     .setCancelable(false)
                     .setPositiveButton("Exit") { _, _ -> finishAffinity() }
                     .setNegativeButton("Learn More") { _, _ ->
-                        // Open architecture guide
-                        val intent = Intent(Intent.ACTION_VIEW, 
-                            Uri.parse("https://github.com/deterministicstatemachine/dsm/blob/main/docs/book/04-architecture.md"))
+                        // Open the support page: how to report an incompatible device
+                        val intent = Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/deterministicstatemachine/dsm/blob/main/SUPPORT.md"))
                         startActivity(intent)
                         finishAffinity()
                     }
