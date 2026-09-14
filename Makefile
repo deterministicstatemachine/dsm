@@ -18,7 +18,7 @@
 #
 # Windows developers: use scripts/dev.ps1 instead of this Makefile.
 #   .\scripts\dev.ps1 help
-# Android builds on Windows require WSL2 — see docs/book/03-development-setup.md#windows-setup.
+# Android builds on Windows require WSL2 — see QUICKSTART.md.
 # ---------------------------------------------------------------------------
 
 # Prefer homebrew bash (4+) for associative arrays used by SBOM scripts.

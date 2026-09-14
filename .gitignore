@@ -248,7 +248,6 @@ Agent-Refinement-System-Final.md
 .agents/
 .claude/
 /docs/*
-!/docs/book/
 !/docs/audits/
 !/docs/bench-proofs/
 /PAPER_ALIGNMENT.md

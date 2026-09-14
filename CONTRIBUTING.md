@@ -8,7 +8,7 @@ Thank you for taking part in the beta. This document covers how to report issues
 
 - Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Use [SUPPORT.md](SUPPORT.md) for general help and [SECURITY.md](SECURITY.md) for private vulnerability reports.
-- If your change touches DLV specs, policy specs, or generated clients, read [dsm-gen/README.md](dsm-gen/README.md) and [Chapter 16 of the developer handbook](docs/book/16-code-generation.md) first.
+- If your change touches DLV specs, policy specs, or generated clients, read [dsm-gen/README.md](dsm-gen/README.md) first.
 
 ---
 
@@ -39,7 +39,7 @@ Open an issue with the **Enhancement** label. Describe the use case, not just th
 
 ### Prerequisites
 
-See [Chapter 3 — Development Setup](docs/book/03-development-setup.md) for the full environment setup guide.
+See [QUICKSTART.md](QUICKSTART.md) for environment setup.
 
 ```
 Base development: Rust 1.91.0 pinned by rust-toolchain.toml (via rustup), Node.js 20+ (via nvm recommended), protoc
@@ -90,7 +90,7 @@ Treat the DSM primitive as closed by default.
   expanding acceptance, or replacement of a broken assumption.
 
 If your change touches acceptance, ordering, proof verification, identity binding, or fork
-exclusion, read [Chapter 17 — DSM Primitive](docs/book/17-dsm-primitive.md) first.
+exclusion, read `dsm_client/deterministic_state_machine/dsm/src/core/` and `dsm/src/bilateral/` first.
 
 ### PR Checklist
 
