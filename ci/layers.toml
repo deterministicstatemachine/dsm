@@ -73,7 +73,6 @@ lib_filters = [
   "handlers::storage_routes",
   "sdk::storage_node_sdk",
   "sdk::b0x_sdk",
-  "sdk::storage_io",
   "sdk::storage_set",
   "sdk::storage_sync_sdk",
   "sdk::storage_node_health",

@@ -16,9 +16,10 @@ on:
       #     non-fast-forward, a reviewed PR and signed commits, and NO status
       #     checks — so a skipped workflow cannot leave a PR unmergeable,
       #     which is the usual trap with `paths-ignore`.
-      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
-      # two PDFs; those still run the pipeline, because "it lives under docs/"
-      # is not evidence that nothing consumes it.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
       - '**/*.md'
   # Run on every PR regardless of base branch, so stacked PRs (whose base is
   # another feature branch, not main) are validated too — not only the one at
@@ -48,9 +49,10 @@ on:
       #     non-fast-forward, a reviewed PR and signed commits, and NO status
       #     checks — so a skipped workflow cannot leave a PR unmergeable,
       #     which is the usual trap with `paths-ignore`.
-      # Only `**/*.md` is listed. `docs/` also holds a JSON, a TeX source and
-      # two PDFs; those still run the pipeline, because "it lives under docs/"
-      # is not evidence that nothing consumes it.
+      # Only `**/*.md` is listed. A non-markdown file under `docs/` (none
+      # today: docs/ holds only audits and bench proofs) still runs the
+      # pipeline, because "it lives under docs/" is not evidence that nothing
+      # consumes it.
       - '**/*.md'
 
 permissions:
