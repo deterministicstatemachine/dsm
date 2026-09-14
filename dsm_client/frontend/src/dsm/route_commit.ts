@@ -184,26 +184,35 @@ export async function isExternalCommitmentVisible(
 /**
  * Invoke the routed-unlock path on the local device.  Handler runs
  * the chunks #4 + #5 eligibility gate (SPHINCS+ verify the
- * RouteCommit, locate this vault's hop, confirm anchor visibility)
- * and only then emits `Operation::DlvUnlock` on the local actor's
- * self-loop.
+ * RouteCommit, locate the hop, confirm anchor visibility) and only
+ * then emits `Operation::DlvUnlock` on the local actor's self-loop.
  *
- * Returns the unlocked vault id as Base32 on success.  On any
- * eligibility failure the SDK error variant is surfaced verbatim
- * (e.g. `InvalidInitiatorSignature`, `VaultNotInRoute`,
- * `ExternalCommitmentNotVisible`) so the UI can render a precise
- * rejection reason.
+ * WHICH VAULTS SETTLE IS THE SIGNED ROUTE'S DECISION. Omit `vaultId`
+ * (the wallet's trade path) and Rust settles every hop of the
+ * RouteCommitV1, in hop order, using each hop's committed vault id.
+ * Pass a 32-byte `vaultId` only to settle exactly that one hop (the
+ * owner-side callers).  The frontend never picks a vault.
+ *
+ * Returns the settle status and the last settled hop's `b` as Base32
+ * on success.  On any eligibility failure the SDK error variant is
+ * surfaced verbatim (e.g. `InvalidInitiatorSignature`,
+ * `VaultNotInRoute`, `ExternalCommitmentNotVisible`) so the UI can
+ * render a precise rejection reason.
  */
 export async function unlockVaultRouted(input: {
-  vaultId: Uint8Array;
+  vaultId?: Uint8Array;
   deviceId: Uint8Array;
   routeCommitBytes: Uint8Array;
   unlockerPublicKey?: Uint8Array;
   signature?: Uint8Array;
 }): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
   try {
-    if (!input?.vaultId || input.vaultId.length !== 32) {
-      return { success: false, error: 'vaultId must be 32 bytes' };
+    const vaultId = input?.vaultId ?? new Uint8Array(0);
+    if (vaultId.length !== 0 && vaultId.length !== 32) {
+      return {
+        success: false,
+        error: 'vaultId must be 32 bytes, or omitted to settle every hop of the route',
+      };
     }
     if (!input.deviceId || input.deviceId.length !== 32) {
       return { success: false, error: 'deviceId must be 32 bytes' };
@@ -212,7 +221,7 @@ export async function unlockVaultRouted(input: {
       return { success: false, error: 'routeCommitBytes is required' };
     }
     const req = new pb.DlvUnlockRoutedV1({
-      vaultId: input.vaultId as any,
+      vaultId: vaultId as any,
       deviceId: input.deviceId as any,
       routeCommitBytes: input.routeCommitBytes as any,
       unlockerPublicKey: (input.unlockerPublicKey ?? new Uint8Array()) as any,
