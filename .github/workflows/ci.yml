@@ -534,6 +534,13 @@ jobs:
           workspaces: dsm_client/deterministic_state_machine
           key: android-all-abis
 
+      - name: Install CI system deps
+        # The dsm build script compiles the protocol with prost, which needs
+        # protoc; every other Rust job installs it the same way.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
