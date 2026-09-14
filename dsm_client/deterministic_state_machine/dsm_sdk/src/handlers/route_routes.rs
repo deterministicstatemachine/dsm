@@ -715,6 +715,46 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
+    /// Mirror the vault an advertisement names into the local DLVManager, if it
+    /// is not there yet: fetch the full vault proto, verify it against the
+    /// advertisement's digest, and add it. `Ok(Some(vid))` when newly
+    /// mirrored, `Ok(None)` when already present, `Err(why)` when refused.
+    ///
+    /// An already-mirrored vault is left alone, and its reserves are NOT
+    /// refreshed from the advertisement: an advertisement is a discovery hint,
+    /// and the owner's reserves are its own encumbered leaves, advanced only
+    /// by reconciling settlements it has verified. This once copied reserves
+    /// in, which let anyone who could publish an ad restate what an owner held.
+    async fn mirror_advertised_vault(
+        &self,
+        ad: &generated::RoutingVaultAdvertisementV1,
+    ) -> Result<Option<[u8; 32]>, String> {
+        let Ok(vid) = <[u8; 32]>::try_from(ad.vault_id.as_slice()) else {
+            return Err(format!(
+                "advertisement names a {}-byte vault id",
+                ad.vault_id.len()
+            ));
+        };
+        let dlv_manager = self.bitcoin_tap.dlv_manager();
+        if dlv_manager.get_vault(&vid).await.is_ok() {
+            return Ok(None);
+        }
+        let proto_bytes = crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad)
+            .await
+            .map_err(|e| format!("digest verify failed: {e}"))?;
+        let post_proto = generated::VaultPostProto::decode(proto_bytes.as_slice())
+            .map_err(|e| format!("decode VaultPostProto failed: {e}"))?;
+        let post = dsm::vault::limbo_vault::VaultPost::try_from(&post_proto)
+            .map_err(|e| format!("VaultPost conversion failed: {e}"))?;
+        let vault = dsm::vault::limbo_vault::LimboVault::from_vault_post(&post)
+            .map_err(|e| format!("from_vault_post failed: {e}"))?;
+        dlv_manager
+            .add_vault(vault)
+            .await
+            .map_err(|e| format!("add_vault failed: {e}"))?;
+        Ok(Some(vid))
+    }
+
     /// `route.syncVaultsForPair` — fetch + verify + mirror every
     /// active routing-vault for a token pair into the local
     /// `DLVManager` so subsequent `dlv.unlockRouted` calls have the
@@ -742,76 +782,20 @@ impl AppRouterImpl {
                 return err(format!("route.syncVaultsForPair: SDK load failed: {e}"));
             }
         };
-        let dlv_manager = self.bitcoin_tap.dlv_manager();
         let mut newly_mirrored: Vec<[u8; 32]> = Vec::new();
         for published in ads {
             let ad = &published.advertisement;
             if ad.vault_id.len() != 32 {
                 continue;
             }
-            let mut vid = [0u8; 32];
-            vid.copy_from_slice(&ad.vault_id);
-            // Already-mirrored vaults are skipped, and their reserves are NOT
-            // refreshed from the advertisement.
-            //
-            // This block used to copy an ad's reserves into the local vault so
-            // the owner could "observe" a trader's settle. That made a
-            // discovery hint the authority for the owner's own liquidity —
-            // anyone who could publish an ad could restate what the owner held.
-            // The owner's reserves are its own encumbered leaves, advanced only
-            // by reconciling settlements it has verified.
-            if dlv_manager.get_vault(&vid).await.is_ok() {
-                continue;
+            match self.mirror_advertised_vault(ad).await {
+                Ok(Some(vid)) => newly_mirrored.push(vid),
+                Ok(None) => {}
+                Err(why) => log::warn!(
+                    "[route.syncVaultsForPair] skipping {}: {why}",
+                    crate::util::text_id::encode_base32_crockford(&ad.vault_id)
+                ),
             }
-            let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!(
-                        "[route.syncVaultsForPair] skipping {}: digest verify failed: {e}",
-                        crate::util::text_id::encode_base32_crockford(&vid)
-                    );
-                    continue;
-                }
-            };
-            let post_proto = match generated::VaultPostProto::decode(proto_bytes.as_slice()) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!(
-                        "[route.syncVaultsForPair] decode VaultPostProto for {} failed: {e}",
-                        crate::util::text_id::encode_base32_crockford(&vid)
-                    );
-                    continue;
-                }
-            };
-            let post = match dsm::vault::limbo_vault::VaultPost::try_from(&post_proto) {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!(
-                        "[route.syncVaultsForPair] VaultPost conversion for {} failed: {e}",
-                        crate::util::text_id::encode_base32_crockford(&vid)
-                    );
-                    continue;
-                }
-            };
-            let vault = match dsm::vault::limbo_vault::LimboVault::from_vault_post(&post) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!(
-                        "[route.syncVaultsForPair] from_vault_post for {} failed: {e}",
-                        crate::util::text_id::encode_base32_crockford(&vid)
-                    );
-                    continue;
-                }
-            };
-            if let Err(e) = dlv_manager.add_vault(vault).await {
-                log::warn!(
-                    "[route.syncVaultsForPair] add_vault for {} failed: {e}",
-                    crate::util::text_id::encode_base32_crockford(&vid)
-                );
-                continue;
-            }
-            newly_mirrored.push(vid);
         }
         let value = newly_mirrored
             .iter()
@@ -857,11 +841,19 @@ impl AppRouterImpl {
         let Ok(input_amount) = u64::try_from(u128::from_be_bytes(amount_buf)) else {
             return err("route.findAndBindBestPath: input_amount exceeds u64 base units".into());
         };
-        let max_hops = if req.max_hops == 0 {
-            crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS
-        } else {
-            req.max_hops as usize
-        };
+        // THE SEARCH GOES NO DEEPER THAN BETA CAN SETTLE. A route is bound and
+        // signed only if `dlv.unlockRouted` can execute it, and beta executes
+        // one hop (`sofi_profile::BETA_MAX_HOPS`): the wallet must never sign,
+        // and never publish `X` for, a route the profile refuses. A caller
+        // asking for more is clamped, not refused — the depth is the profile's,
+        // not the caller's. `0` means "the profile's depth".
+        let max_hops = crate::sdk::sofi_profile::bounded_search_depth(req.max_hops);
+        if req.max_hops as usize > max_hops {
+            log::info!(
+                "[route.findAndBindBestPath] max_hops {} clamped to the beta profile's {max_hops}",
+                req.max_hops
+            );
+        }
         let mut nonce = [0u8; 32];
         nonce.copy_from_slice(&req.nonce);
 
@@ -1094,6 +1086,27 @@ impl AppRouterImpl {
                 ));
             }
         };
+        // THE VAULT THIS ROUTE SETTLES AGAINST IS MIRRORED NOW, so
+        // `dlv.unlockRouted` finds it locally whichever pair the route crosses.
+        // The UI never syncs a pair on the route's behalf.
+        for hop in &path.hops {
+            let Some(ad) = ads
+                .iter()
+                .find(|a| a.vault_id.as_slice() == hop.vault_id.as_slice())
+            else {
+                return err(format!(
+                    "route.findAndBindBestPath: hop vault {} has no advertisement in the \
+                     searched set",
+                    crate::util::text_id::encode_base32_crockford(&hop.vault_id)
+                ));
+            };
+            if let Err(why) = self.mirror_advertised_vault(ad).await {
+                return err(format!(
+                    "route.findAndBindBestPath: hop vault {} could not be mirrored: {why}",
+                    crate::util::text_id::encode_base32_crockford(&hop.vault_id)
+                ));
+            }
+        }
         let mut unsigned = match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
             crate::sdk::route_commit_sdk::BindRouteCommitInput {
                 path: &path,

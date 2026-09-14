@@ -7,9 +7,8 @@ import * as routeCommit from '../../../../dsm/route_commit';
 
 jest.mock('../../../../dsm/route_commit');
 
-const mockedSync = jest.mocked(routeCommit.syncVaultsForPair);
-const mockedList = jest.mocked(routeCommit.listAdvertisementsForPair);
 const mockedFindBind = jest.mocked(routeCommit.findAndBindBestPath);
+const HOP_VAULT = new Uint8Array(32).fill(0x11);
 
 function makeProps(overrides: Partial<React.ComponentProps<typeof SwapTab>> = {}) {
   return {
@@ -59,33 +58,25 @@ describe('SwapTab', () => {
     expect(screen.getByRole('button', { name: /Quote/ })).toBeDisabled();
   });
 
-  it('discovers a route and shows the exact expected output', async () => {
-    mockedSync.mockResolvedValue({ success: true, newlyMirroredBase32: [] });
-    mockedList.mockResolvedValue({
-      success: true,
-      advertisements: [
-        {
-          vaultIdBase32: '0123456789ABCDEFGHJKMNPQRSTVWXYZ',
-          tokenA: new TextEncoder().encode('DEMO_AAA'),
-          tokenB: new TextEncoder().encode('DEMO_BBB'),
-          reserveA: 1_000_000n,
-          reserveB: 1_000_000n,
-          feeBps: 30,
-          stateNumber: 1n,
-          ownerPublicKey: new Uint8Array([0x01]),
-        },
-      ],
-    });
-    // expectedFinalOutput is the exact output the Rust binder bound to
-    // the anchored vault state; the frontend just displays it. The AMM
+  it('binds a route and shows the exact expected output and the bound hop', async () => {
+    // expectedFinalOutput and the hops are what the Rust binder bound to
+    // the anchored vault state; the frontend just displays them. The AMM
     // math (x=10000, y=1M, fee=30 → 9871) is exercised by
-    // `route_commit_sdk::tests` in Rust.
+    // `route_commit_sdk::tests` in Rust. No pair is listed or synced
+    // here: discovery is the binder's.
     mockedFindBind.mockResolvedValue({
       success: true,
       unsignedRouteCommitBytes: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
       quote: {
         expectedFinalOutput: 9871n,
-        hops: [],
+        hops: [
+          {
+            vaultId: HOP_VAULT,
+            tokenIn: new Uint8Array(32).fill(0xaa),
+            tokenOut: new Uint8Array(32).fill(0xbb),
+            expectedOutput: 9871n,
+          },
+        ],
       },
     });
 
@@ -93,7 +84,9 @@ describe('SwapTab', () => {
     fillForm({ from: ANCHOR_A, to: ANCHOR_B, amount: '10000' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
-    await waitFor(() => expect(screen.getByText(/1 vault discovered/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/1 hop bound/)).toBeInTheDocument());
+    expect(routeCommit.syncVaultsForPair).not.toHaveBeenCalled();
+    expect(routeCommit.listAdvertisementsForPair).not.toHaveBeenCalled();
     // The exact output Rust computed, against the asset named by its
     // anchor. The frontend never recomputes this number.
     expect(screen.getByText(new RegExp(`9871 ${ANCHOR_B}`))).toBeInTheDocument();
@@ -101,21 +94,23 @@ describe('SwapTab', () => {
     expect(screen.getByRole('button', { name: /^Swap$/ })).toBeInTheDocument();
   });
 
-  it('surfaces an error if no vault is advertised for the pair', async () => {
-    mockedSync.mockResolvedValue({ success: true, newlyMirroredBase32: [] });
-    mockedList.mockResolvedValue({ success: true, advertisements: [] });
+  it("surfaces the binder's NoPath refusal verbatim and offers no Swap", async () => {
+    mockedFindBind.mockResolvedValue({
+      success: false,
+      error: 'route.findAndBindBestPath: path search rejected: NoPath',
+    });
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
     fillForm({ from: ANCHOR_A, to: ANCHOR_C, amount: '1' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
-    await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/No liquidity advertised/)));
+    await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/NoPath/)));
     expect(screen.queryByRole('button', { name: /^Swap$/ })).not.toBeInTheDocument();
   });
 
-  it('surfaces a sync error verbatim', async () => {
-    mockedSync.mockResolvedValue({ success: false, error: 'storage node unreachable' });
+  it('surfaces a bind transport error verbatim', async () => {
+    mockedFindBind.mockResolvedValue({ success: false, error: 'storage node unreachable' });
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
