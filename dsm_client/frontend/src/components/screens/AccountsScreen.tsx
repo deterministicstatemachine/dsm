@@ -11,6 +11,7 @@ import { useWalletRefreshListener } from '../../hooks/useWalletRefreshListener';
 import { TokenCreationDialog } from '../TokenCreationDialog';
 import TokenIdentityPanel from '../TokenIdentityPanel';
 import { mintToken, burnToken, addTokenByAnchor, forgetToken } from '../../dsm/policies';
+import { TokenCoin } from '../TokenCoin';
 
 type TokenSymbol = 'ERA' | string;
 type Tab = 'tokens' | 'faucet';
@@ -26,6 +27,8 @@ export interface TokenBalance {
   policyAnchorB32?: string;
   /** Short head of the anchor, for reading against a peer's screen. */
   anchorFingerprint?: string;
+  /** The token policy's icon field, carried from Rust; the row draws the token's coin from it. */
+  iconUrl?: string;
 }
 
 
@@ -133,6 +136,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
         canonicalTokenId: String(b.canonicalTokenId ?? ''),
         policyAnchorB32: String(b.policyAnchorB32 ?? ''),
         anchorFingerprint: String(b.anchorFingerprint ?? ''),
+        iconUrl: String(b.iconUrl ?? ''),
       }));
       setBalances(list);
       return list;
@@ -638,12 +642,21 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
                           textTransform: 'uppercase',
                           letterSpacing: 0.2,
                         }}>
-                          <img
-                            src={logoSrc}
-                            alt={logoAlt}
-                            className={isBtc ? 'btc-gif small' : 'era-gif small'}
-                            style={{ flexShrink: 0, imageRendering: 'pixelated' }}
-                          />
+                          {isBtc || sym === 'era' ? (
+                            <img
+                              src={logoSrc}
+                              alt={logoAlt}
+                              className={isBtc ? 'btc-gif small' : 'era-gif small'}
+                              style={{ flexShrink: 0, imageRendering: 'pixelated' }}
+                            />
+                          ) : (
+                            <TokenCoin
+                              iconUrl={balance.iconUrl}
+                              ticker={balance.symbol || balance.tokenId}
+                              className="era-gif small"
+                              fallbackSrc={eraTokenSrc}
+                            />
+                          )}
                           {balance.symbol || balance.tokenId}
                         </span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

@@ -623,6 +623,7 @@ impl AppRouterImpl {
                         // which would look for a registry row that cannot exist
                         // and reset its decimals to zero.
                         policy_anchor_b32: String::new(),
+                        icon_url: String::new(),
                         anchor_fingerprint: String::new(),
                         // Native BTC has no CPTA identity either.
                         canonical_token_id: String::new(),

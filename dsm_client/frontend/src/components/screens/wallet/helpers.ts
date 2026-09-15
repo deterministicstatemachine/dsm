@@ -11,6 +11,8 @@ export type Balance = {
   balance: string | number;
   decimals?: number;
   usdValue?: string;
+  /** The token policy's icon field, carried from Rust. */
+  iconUrl?: string;
 };
 
 // Transaction type enum helpers (matches proto TransactionType)

@@ -209,6 +209,10 @@ fn builtin_tokens_keep_their_metadata() {
     assert_eq!(dbtc.decimals, 8, "dBTC is satoshis");
     assert_eq!(dbtc.symbol, "dBTC");
 
+    // Protocol assets have no policy icon; the wallet keeps their built-in coins.
+    assert_eq!(era.icon_url, "", "ERA carries no policy icon");
+    assert_eq!(dbtc.icon_url, "", "dBTC carries no policy icon");
+
     // Protocol assets carry their builtin commit, so every token on the screen
     // can show where its rules come from — not just the user-created ones.
     for (ticker, r) in [("ERA", era), ("dBTC", dbtc)] {
@@ -237,4 +241,31 @@ fn a_zero_decimal_custom_token_is_unchanged() {
     assert_eq!(w.available, 750);
     assert_eq!(w.decimals, 0);
     assert_eq!(w.display_amount, "750", "no spurious decimal point");
+    assert_eq!(w.icon_url, "", "a policy that names no icon carries none");
+}
+
+/// A token's coin artwork is its policy's icon field, and it reaches the wire record exactly as
+/// the policy states it, so every wallet holding the token draws the same coin.
+#[test]
+#[serial_test::serial]
+fn a_created_token_carries_its_policy_icon_on_the_wire() {
+    runtime::dsm_init_runtime();
+    let (r, _fleet) = funded_router(0x90);
+
+    let artwork = format!(
+        "dsm:coin:v1:{}",
+        dsm_sdk::util::text_id::encode_base32_crockford(&[0xA5u8; 2048])
+    );
+    dsm_sdk::economic_fixtures::mint_asset_with_icon(&r, "COIN", 2, 1_000, &artwork);
+
+    let rows = wire_rows(&r);
+    let coin = row(&rows, "COIN");
+    assert_eq!(
+        coin.icon_url, artwork,
+        "the policy's icon field must reach the wallet unchanged"
+    );
+    assert!(
+        !coin.policy_anchor_b32.is_empty(),
+        "the icon travels with the anchor it was read from"
+    );
 }

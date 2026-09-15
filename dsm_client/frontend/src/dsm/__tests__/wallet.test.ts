@@ -65,6 +65,7 @@ describe('wallet.ts', () => {
         canonicalTokenId: '',
         policyAnchorB32: '',
         anchorFingerprint: '',
+        iconUrl: '',
         tokenId: 'ERA',
         ticker: 'ERA',
         balance: '1000',

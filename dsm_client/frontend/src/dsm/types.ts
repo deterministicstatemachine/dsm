@@ -312,6 +312,8 @@ export interface TokenBalanceView {
   policyAnchorB32?: string;
   /** Short head of the anchor, for visual comparison before adopting. */
   anchorFingerprint?: string;
+  /** The token policy's icon field, carried from Rust; the wallet draws the token's coin from it. */
+  iconUrl?: string;
 }
 
 /**

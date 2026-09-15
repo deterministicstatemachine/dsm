@@ -4046,6 +4046,14 @@ message BalanceGetResponse {
   // screen that labels the ticker "token id" is telling the user something
   // false, so carry the real value.
   string canonical_token_id = 10;
+  // The icon field of the token's anchored policy, as Rust read it.
+  //
+  // Presentation only. A token created with coin artwork carries its canonical
+  // silhouette here ("dsm:coin:v1:" + Base32 Crockford) and the wallet draws the
+  // coin from it in its own theme; without artwork the wallet cuts the ticker
+  // through the coin. Empty for protocol assets and for policies that name no
+  // icon. Rust never interprets it and nothing resolves a token by it.
+  string icon_url = 11;
 }
 // Multi-token enumeration (ordered lexicographically by token_id on server side)
 message BalancesListResponse { repeated BalanceGetResponse balances = 1; }
