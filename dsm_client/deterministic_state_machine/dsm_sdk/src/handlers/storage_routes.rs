@@ -2964,6 +2964,53 @@ impl AppRouterImpl {
                             errors.push(format!("binding recovery failed: {e}"));
                         }
                     }
+                    // A PENDING ECONOMIC ADMISSION STRANDED BY A CRASH (3.5b PR4;
+                    // ownership ruled 2026-09-15). An advance whose admission never
+                    // finished has not produced its post-admission artifacts. For a
+                    // market settle those are the trader acceptance and its locator
+                    // (2c-D §14, D-c), so no vault walk can certify the settlement
+                    // and the completion resume below stays pending. Finished here
+                    // from frozen state, but ONLY when the head already carried it
+                    // when this process restored it: an admission created after
+                    // startup belongs to the handler that created it. An
+                    // unfinished one (fleet or register unreachable) stays pending
+                    // and retries on a later sync.
+                    if let Some(pending) = self
+                        .core_sdk
+                        .device_head()
+                        .and_then(|h| h.pending_economic_admission().cloned())
+                        .filter(|p| self.core_sdk.admission_predates_startup(p))
+                    {
+                        let position = pending.economic_position;
+                        let resumed =
+                            match crate::sdk::economic_admission_flow::committed_network_id() {
+                                Ok(net) => {
+                                    crate::sdk::economic_admission_flow::resume_pending_admission(
+                                        &self.core_sdk,
+                                        &net,
+                                        pending,
+                                    )
+                                    .await
+                                }
+                                Err(e) => Err(e),
+                            };
+                        match resumed {
+                            Ok(_) => {
+                                log::info!(
+                                    "[storage.sync] stranded economic admission at position \
+                                     {position} finished"
+                                );
+                                pushed += 1;
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[storage.sync] stranded economic admission at position \
+                                     {position} not finished this pass: {e}"
+                                );
+                                errors.push(format!("stranded admission resume failed: {e}"));
+                            }
+                        }
+                    }
                     // A vault close that was interrupted between its binding and
                     // its canonical commit. It no longer re-drives the binding —
                     // recovery above owns that — and only finalizes the local

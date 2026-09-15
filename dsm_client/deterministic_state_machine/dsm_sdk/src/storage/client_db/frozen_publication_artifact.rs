@@ -392,6 +392,29 @@ pub fn find_current_payload_with_prefix_and_purpose(
     Ok(row)
 }
 
+/// [`find_current_payload_with_prefix_and_purpose`], restricted to artifacts
+/// frozen against `bound_root`, so a lookup for one admission cannot return
+/// an older admission's artifact.
+pub fn find_current_payload_with_prefix_purpose_and_root(
+    prefix: &str,
+    purpose: &str,
+    bound_root: &[u8; 32],
+) -> Result<Option<Vec<u8>>> {
+    let binding = crate::storage::client_db::get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            "SELECT payload FROM frozen_publication_artifact
+              WHERE object_key LIKE ?1 || '%' AND purpose = ?2 AND bound_root = ?3
+                AND state != 'superseded'
+              ORDER BY insertion_ordinal DESC LIMIT 1",
+            rusqlite::params![prefix, purpose, bound_root.as_slice()],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    Ok(row)
+}
+
 pub fn list_unpublished_artifacts(limit: u32) -> Result<Vec<FrozenArtifact>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());

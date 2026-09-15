@@ -73,6 +73,18 @@ pub struct CoreSDK {
     anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
 }
 
+/// The pending economic admission each device's head carried when THIS PROCESS
+/// built its first `CoreSDK` for that device, as `(economic_position,
+/// operation_digest)`, or `None` if there was no head or nothing pending.
+/// Recorded once per device per process and never replaced. The SDK can be initialized more than once in a process (a bridge
+/// re-init, an Android activity recreated while the process lives); a router
+/// built then must not adopt an admission a live handler of this process
+/// created. Ownership ruled 2026-09-15: recovery owns only what predates
+/// process startup.
+static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<[u8; 32], Option<(u64, [u8; 32])>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /* ------------------------------- Helpers -------------------------------- */
 
 fn blake3_cat(parts: &[&[u8]]) -> [u8; 32] {
@@ -386,6 +398,7 @@ impl CoreSDK {
     pub(crate) fn admit_economic_position(
         &self,
         economic_position: u64,
+        operation_digest: &[u8; 32],
         economic_root: &[u8; 32],
         leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
         storage_set_id: &[u8; 32],
@@ -399,6 +412,22 @@ impl CoreSDK {
             .device_head()
             .cloned()
             .ok_or_else(|| DsmError::storage("no head".to_string(), None::<std::io::Error>))?;
+        // COMPARE-AND-ADMIT, under the state-machine lock: the head must still
+        // carry exactly this admission. A stale admit writes nothing, so it can
+        // neither clear a newer pending admission nor regress the admitted
+        // coordinate.
+        match head.pending_economic_admission() {
+            Some(p)
+                if p.economic_position == economic_position
+                    && &p.operation_digest == operation_digest => {}
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "admit: the head no longer carries the admission at position \
+                     {economic_position} (it carries {}); refusing a stale admit",
+                    other.map_or_else(|| "none".to_string(), |p| p.economic_position.to_string())
+                )))
+            }
+        }
         let unfenced = head.with_pending_economic_admission(None);
         {
             let binding = get_connection()
@@ -722,6 +751,7 @@ impl CoreSDK {
         let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
+        Self::record_process_startup_admission(&state_machine, &device_info.device_id);
 
         Ok(Self {
             state_machine,
@@ -730,6 +760,50 @@ impl CoreSDK {
             audit_ctr: AtomicU64::new(0),
             anchor_appliance: Mutex::new(None),
         })
+    }
+
+    /// Record, at the FIRST `CoreSDK` built for this device in this process, the
+    /// pending admission its restored head carries (`None` when there is no head
+    /// or nothing is pending). Never replaced: a later construction in the same
+    /// process (a bridge re-init, an activity recreated while the process lives)
+    /// records nothing, so no head created or loaded later in this process can
+    /// have its admission adopted.
+    fn record_process_startup_admission(state_machine: &Mutex<StateMachine>, device_id: &[u8; 32]) {
+        let coords = state_machine.lock().device_head().and_then(|h| {
+            h.pending_economic_admission()
+                .map(|p| (p.economic_position, p.operation_digest))
+        });
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(*device_id)
+            .or_insert(coords);
+    }
+
+    /// Whether `pending` is the admission this device's head already carried when
+    /// THIS PROCESS built its first `CoreSDK` for the device: an admission the
+    /// running process did not create.
+    pub(crate) fn admission_predates_startup(
+        &self,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> bool {
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&self.device_info.device_id)
+            .copied()
+            .flatten()
+            == Some((pending.economic_position, pending.operation_digest))
+    }
+
+    /// Forget every process-startup record. TEST ONLY: it models a process
+    /// restart for tests that build a fresh router over the same database.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn forget_process_startup_admissions_for_testing() {
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {
@@ -5719,6 +5793,45 @@ mod tests {
     // staged seam makes the only legal ordering explicit:
     //     prepare (pure) -> build (DB reads OK) -> ONE tx.
     // ---------------------------------------------------------------------
+
+    /// COMPARE-AND-ADMIT: an admit naming an admission the head no longer
+    /// carries writes nothing. The newer pending admission and the admitted
+    /// coordinate stay exactly as they were.
+    #[test]
+    #[serial]
+    fn a_stale_admit_leaves_a_newer_pending_admission_untouched() {
+        let sdk = full_state_apply_harness();
+        let newer = dsm::economic::admission::PendingEconomicAdmission::prepared(
+            dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+            2,
+            [0x21; 32],
+            [0x22; 32],
+        );
+        let head = sdk.device_head().expect("head");
+        sdk.set_device_head_for_testing(head.with_pending_economic_admission(Some(newer)));
+        let admitted_before =
+            crate::storage::client_db::economic_lineage::get_admitted().expect("admitted read");
+
+        let stale = sdk.admit_economic_position(1, &[0x12; 32], &[0x11; 32], &[], &[0x13; 32], &[]);
+        assert!(stale.is_err(), "a stale admit must refuse");
+
+        let kept = sdk
+            .device_head()
+            .expect("head")
+            .pending_economic_admission()
+            .cloned()
+            .expect("the newer admission is still pending");
+        assert_eq!(
+            (kept.economic_position, kept.operation_digest),
+            (2, [0x22; 32]),
+            "the newer pending admission is untouched"
+        );
+        assert_eq!(
+            crate::storage::client_db::economic_lineage::get_admitted().expect("admitted read"),
+            admitted_before,
+            "the admitted coordinate did not move"
+        );
+    }
 
     /// The builder must run BEFORE the write transaction opens, and a DB read
     /// inside it must not deadlock. If this test hangs, the seam is wrong.

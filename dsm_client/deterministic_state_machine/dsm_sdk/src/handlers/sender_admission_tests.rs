@@ -432,6 +432,112 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
     );
 }
 
+/// COMPARE-AND-FINISH (ownership ruled 2026-09-15). A resume of an admission
+/// that is already admitted returns that admission's outcome and writes
+/// nothing. A stale resume held across a NEWER pending admission leaves that
+/// admission, and the admitted coordinate, exactly as they were.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admission_alone() {
+    use crate::sdk::economic_admission_flow::resume_pending_admission;
+    use crate::sdk::storage_io::fake_fleet;
+    let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    let admitted = || {
+        client_db::economic_lineage::get_admitted()
+            .unwrap()
+            .unwrap()
+            .0
+    };
+
+    // An admission held at position 2, then finished by a resume.
+    for id in &down {
+        fake_fleet::fail_member(id);
+    }
+    assert!(!p.a.send(&p.b, 10).await.success, "the first send is held");
+    p.a.enter();
+    let core = p.a.router().core_sdk.clone();
+    let stale = core
+        .device_head()
+        .unwrap()
+        .pending_economic_admission()
+        .cloned()
+        .expect("the first admission rides the head");
+    for id in &down {
+        fake_fleet::heal_member(id);
+    }
+    let first = resume_pending_admission(&core, b"dsm-testnet", stale.clone())
+        .await
+        .expect("the resume finishes the held admission");
+    p.a.enter();
+    assert_eq!(first.economic_position, 2);
+    assert_eq!(admitted(), 2);
+
+    // A DUPLICATE resume of the same admission: its outcome, nothing written.
+    let again = resume_pending_admission(&core, b"dsm-testnet", stale.clone())
+        .await
+        .expect("a duplicate resume returns the admitted outcome");
+    p.a.enter();
+    assert_eq!(again.economic_position, first.economic_position);
+    assert_eq!(
+        again.economic_proof_addr, first.economic_proof_addr,
+        "the same admission's proof, found by its admitted root"
+    );
+    assert_eq!(admitted(), 2, "the duplicate moved nothing");
+
+    // Deliver the first transfer, so the relationship is clear for the next send.
+    let resent = p.a.sync().await;
+    assert!(resent.success, "{:?}", resent.errors);
+    let applied = p.b.sync().await;
+    assert!(applied.success, "{:?}", applied.errors);
+    assert_eq!(p.b.era_balance(), 10, "B received the first transfer");
+
+    // A NEWER admission held at position 3.
+    for id in &down {
+        fake_fleet::fail_member(id);
+    }
+    let held_again = p.a.send(&p.b, 5).await;
+    assert!(
+        !held_again.success,
+        "the second send must not report success"
+    );
+    let msg = held_again.error_message.unwrap_or_default();
+    assert!(
+        msg.contains("HELD for resume"),
+        "the second send is held for resume, got: {msg}"
+    );
+    p.a.enter();
+    let newer = core
+        .device_head()
+        .unwrap()
+        .pending_economic_admission()
+        .cloned()
+        .expect("the newer admission rides the head");
+    assert_eq!(newer.economic_position, 3);
+
+    // The STALE resume, held across it: the old outcome, the newer untouched.
+    let stale_again = resume_pending_admission(&core, b"dsm-testnet", stale)
+        .await
+        .expect("a stale resume of an admitted admission returns its outcome");
+    p.a.enter();
+    assert_eq!(stale_again.economic_position, 2);
+    let kept = core
+        .device_head()
+        .unwrap()
+        .pending_economic_admission()
+        .cloned()
+        .expect("the newer admission is still pending");
+    assert_eq!(
+        (kept.economic_position, kept.operation_digest),
+        (newer.economic_position, newer.operation_digest),
+        "the newer pending admission is untouched"
+    );
+    assert_eq!(admitted(), 2, "the admitted coordinate did not move");
+    for id in &down {
+        fake_fleet::heal_member(id);
+    }
+}
+
 /// Correction A end to end: a send whose admission CANNOT finish (the
 /// register fleet is down past quorum) commits the debit forward-only,
 /// HOLDS the outbox row, and emits ZERO transfer bytes — even when the
