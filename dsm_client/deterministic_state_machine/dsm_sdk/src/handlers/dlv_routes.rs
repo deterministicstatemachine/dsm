@@ -11659,8 +11659,7 @@ mod funded_creation_tests {
                 .expect("fence row");
         assert!(
             matches!(fence.state, dsm::dlv::trader_fence::FenceState::Released),
-            "completion released the fence, got {:?}",
-            fence.state
+            "completion released the fence"
         );
         let receipt_key = crate::sdk::settlement_receipt_codec::vault_receipt_key(&vault_id, &x);
         assert!(
