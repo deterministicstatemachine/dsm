@@ -71,13 +71,19 @@ pub struct CoreSDK {
     /// DeviceState anchor-state leaf on birth; each bearer transfer drives PREPARE→COMMIT→EMIT→
     /// FINALIZE and advances the leaf in the same `DeviceState::advance`.
     anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
-    /// The pending economic admission the head carried when it was restored
-    /// from disk, as `(economic_position, operation_digest)`. An admission that
-    /// predates this process was stranded by a crash, so the sync may finish it;
-    /// one created after startup belongs to the handler that created it, which
-    /// finishes, retries or fails it (ownership ruled 2026-09-15).
-    pending_admission_at_startup: Mutex<Option<(u64, [u8; 32])>>,
 }
+
+/// The pending economic admission each device's head carried when THIS PROCESS
+/// built its first `CoreSDK` for that device, as `(economic_position,
+/// operation_digest)`, or `None` if there was no head or nothing pending.
+/// Recorded once per device per process and never replaced. The SDK can be initialized more than once in a process (a bridge
+/// re-init, an Android activity recreated while the process lives); a router
+/// built then must not adopt an admission a live handler of this process
+/// created. Ownership ruled 2026-09-15: recovery owns only what predates
+/// process startup.
+static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<[u8; 32], Option<(u64, [u8; 32])>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /* ------------------------------- Helpers -------------------------------- */
 
@@ -745,8 +751,7 @@ impl CoreSDK {
         let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
-        let pending_admission_at_startup =
-            Mutex::new(Self::pending_admission_coords(&state_machine));
+        Self::record_process_startup_admission(&state_machine, &device_info.device_id);
 
         Ok(Self {
             state_machine,
@@ -754,27 +759,51 @@ impl CoreSDK {
             policy_system,
             audit_ctr: AtomicU64::new(0),
             anchor_appliance: Mutex::new(None),
-            pending_admission_at_startup,
         })
     }
 
-    /// The head's pending admission, as `(economic_position, operation_digest)`.
-    fn pending_admission_coords(state_machine: &Mutex<StateMachine>) -> Option<(u64, [u8; 32])> {
-        state_machine
+    /// Record, at the FIRST `CoreSDK` built for this device in this process, the
+    /// pending admission its restored head carries (`None` when there is no head
+    /// or nothing is pending). Never replaced: a later construction in the same
+    /// process (a bridge re-init, an activity recreated while the process lives)
+    /// records nothing, so no head created or loaded later in this process can
+    /// have its admission adopted.
+    fn record_process_startup_admission(state_machine: &Mutex<StateMachine>, device_id: &[u8; 32]) {
+        let coords = state_machine.lock().device_head().and_then(|h| {
+            h.pending_economic_admission()
+                .map(|p| (p.economic_position, p.operation_digest))
+        });
+        PROCESS_STARTUP_ADMISSIONS
             .lock()
-            .device_head()
-            .and_then(|h| h.pending_economic_admission())
-            .map(|p| (p.economic_position, p.operation_digest))
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(*device_id)
+            .or_insert(coords);
     }
 
-    /// Whether `pending` is the admission the head already carried when it was
-    /// restored from disk — an admission this process did not create.
+    /// Whether `pending` is the admission this device's head already carried when
+    /// THIS PROCESS built its first `CoreSDK` for the device: an admission the
+    /// running process did not create.
     pub(crate) fn admission_predates_startup(
         &self,
         pending: &dsm::economic::admission::PendingEconomicAdmission,
     ) -> bool {
-        *self.pending_admission_at_startup.lock()
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&self.device_info.device_id)
+            .copied()
+            .flatten()
             == Some((pending.economic_position, pending.operation_digest))
+    }
+
+    /// Forget every process-startup record. TEST ONLY: it models a process
+    /// restart for tests that build a fresh router over the same database.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn forget_process_startup_admissions_for_testing() {
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {
@@ -872,15 +901,7 @@ impl CoreSDK {
     /// Refresh the in-memory canonical tip from the latest archived sparse-replay
     /// snapshot for this device.
     pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
-        let cold = self.state_machine.lock().device_head().is_none();
-        Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)?;
-        // A head restored with none in memory carries only what predates this
-        // process; a refresh over a live head records nothing.
-        if cold {
-            *self.pending_admission_at_startup.lock() =
-                Self::pending_admission_coords(&self.state_machine);
-        }
-        Ok(())
+        Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
     }
 
     /// Normalize stale balance key formats in the current state.

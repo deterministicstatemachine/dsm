@@ -11531,14 +11531,15 @@ mod funded_creation_tests {
     }
 
     /// A SETTLEMENT STRANDED BETWEEN ITS BIND AND ITS ADMISSION IS FINISHED BY
-    /// THE SYNC AFTER A RESTART, AND NOT BEFORE (hardware 2026-09-15; ownership
-    /// ruled the same day). The settle binds and advances, then its admission
-    /// cannot publish its evidence and stays pending: no trader acceptance, no
-    /// locator, nothing to certify, the fence held. In the same process the
-    /// sync leaves the admission to the handler that created it. After a
-    /// restart the head carried it from disk, so the sync finishes it from
-    /// frozen state; the acceptance's locator appears and completion releases
-    /// the fence.
+    /// THE SYNC AFTER A PROCESS RESTART, AND NOT BEFORE (hardware 2026-09-15;
+    /// ownership ruled the same day). The settle binds and advances, then its
+    /// admission cannot publish its evidence and stays pending: no trader
+    /// acceptance, no locator, nothing to certify, the fence held. In the same
+    /// process the sync leaves the admission to the handler that created it,
+    /// and so does a router rebuilt in that process: "startup" is process
+    /// startup, not a re-init. After a restart the head carried it from disk,
+    /// so the sync finishes it from frozen state; the acceptance's locator
+    /// appears and completion releases the fence.
     #[test]
     #[serial]
     fn a_settlement_stranded_before_its_admission_is_finished_by_the_sync_after_a_restart() {
@@ -11613,6 +11614,26 @@ mod funded_creation_tests {
             pending_position(&trader.core_sdk),
             Some(stranded),
             "the sync does not finish an admission this process created"
+        );
+        held_fence(&rel_key, &fenced_parent, &b);
+
+        // RE-INITIALIZED IN THE SAME PROCESS (a bridge re-init, an Android
+        // activity recreated while the process lives): a router rebuilt over
+        // the same database is not a process start, so it adopts nothing.
+        let reinitialized =
+            crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+                node_id: "same-process-reinit".to_string(),
+                storage_endpoints: Vec::new(),
+                enable_offline: false,
+            })
+            .expect("router");
+        trader_dev.enter();
+        let _ = sync(&reinitialized);
+        trader_dev.enter();
+        assert_eq!(
+            pending_position(&reinitialized.core_sdk),
+            Some(stranded),
+            "a router rebuilt in the same process does not finish an admission this process created"
         );
         held_fence(&rel_key, &fenced_parent, &b);
 
