@@ -270,6 +270,18 @@ impl BindingProbe {
     }
 }
 
+/// What the probe reports about one vault.
+pub struct VaultBindingRows {
+    /// Every parent the composition folded since its anchor.
+    pub consumed: Vec<(u64, [u8; 32], BindingProbe)>,
+    /// Parents the caller named by generation and `c_n`. An LP's reconcile
+    /// re-anchors the vault past a consumed parent, so a proof that must
+    /// observe that parent's binding afterwards pins it from its own baseline.
+    pub pinned: Vec<(u64, [u8; 32], BindingProbe)>,
+    /// The frontier, normally free.
+    pub frontier: (u64, [u8; 32], BindingProbe),
+}
+
 /// Probe EVERY parent this vault's composition consumed, plus its frontier.
 ///
 /// One call, because the c_n values a rig would otherwise have to supply are
@@ -286,7 +298,8 @@ pub async fn probe_vault_bindings(
     token_a: &[u8; 32],
     token_b: &[u8; 32],
     fee_bps: u32,
-) -> Result<Vec<(u64, [u8; 32], BindingProbe)>, String> {
+    pinned: &[(u64, [u8; 32])],
+) -> Result<VaultBindingRows, String> {
     let composed = crate::sdk::vault_state_composition::compose_discovered_vault(
         vault_id, token_a, token_b, fee_bps,
     )
@@ -299,8 +312,8 @@ pub async fn probe_vault_bindings(
         .cloned()
         .ok_or_else(|| "the vault's committed storage set does not resolve here".to_string())?;
     let quorum = set.quorum();
-    let mut out = Vec::new();
     // Every CONSUMED parent: each must be bound, by a bundle that names it.
+    let mut consumed = Vec::new();
     for folded in &composed.folded_parents {
         let probe = probe_parent_binding(
             &set,
@@ -311,12 +324,27 @@ pub async fn probe_vault_bindings(
             quorum,
         )
         .await;
-        out.push((folded.generation, folded.c_n, probe));
+        consumed.push((folded.generation, folded.c_n, probe));
+    }
+    // Every PINNED parent, read at the vault's committed storage set whether or
+    // not the current anchor still folds it.
+    let mut pinned_rows = Vec::new();
+    for (generation, c_n) in pinned {
+        let probe = probe_parent_binding(
+            &set,
+            vault_id,
+            *generation,
+            c_n,
+            &composed.storage_set_id,
+            quorum,
+        )
+        .await;
+        pinned_rows.push((*generation, *c_n, probe));
     }
     // And the FRONTIER, which is normally free — the proof that exclusivity
     // stopped where the composition says it stopped, rather than the walk
     // simply having run out of evidence.
-    let probe = probe_parent_binding(
+    let frontier = probe_parent_binding(
         &set,
         vault_id,
         composed.sequence,
@@ -325,8 +353,11 @@ pub async fn probe_vault_bindings(
         quorum,
     )
     .await;
-    out.push((composed.sequence, composed.c_n, probe));
-    Ok(out)
+    Ok(VaultBindingRows {
+        consumed,
+        pinned: pinned_rows,
+        frontier: (composed.sequence, composed.c_n, frontier),
+    })
 }
 
 /// Read an already-derived resource key at every committed member and classify
