@@ -1140,6 +1140,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         @Suppress("DEPRECATION")
         overridePendingTransition(com.dsm.wallet.R.anim.splash_fade_in, com.dsm.wallet.R.anim.splash_fade_out)
         NativeFirstCutoverReset.resetIfNeeded(this)
+        // The storage base dir is set BEFORE anything on this thread can ask Rust for identity:
+        // onStart/onResume and the WebView bridge do, and AppState cannot be read until it is
+        // set. It is a path and a mkdir; the rest of native init stays on its own thread.
+        try {
+            Unified.initStorageBaseDir(filesDir.path.toByteArray(Charsets.UTF_8))
+        } catch (t: Throwable) {
+            Log.e(tag, "onCreate: initStorageBaseDir failed", t)
+        }
 
         // Force system bars to near-black (95% solid) permanently across all themes.
         // Grain texture and overlay effects can't extend to native bars, so keep them
@@ -1691,7 +1699,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 
                 val baseDir = filesDir.path
                 Log.i(tag, "initDsmAndSignalReady: Base dir = $baseDir")
-                Unified.initStorageBaseDir(baseDir.toByteArray(Charsets.UTF_8))
                 
                 val cfg = materializeEnvConfig()
                 if (cfg != null) {
