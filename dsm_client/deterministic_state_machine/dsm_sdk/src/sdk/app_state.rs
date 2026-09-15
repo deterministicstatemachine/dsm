@@ -164,6 +164,16 @@ impl AppState {
         }
     }
 
+    /// Whether AppState can be read without reaching the loader's missing-base-dir
+    /// panic: in test mode, or once startup has set the storage base dir. Platform
+    /// entry points that can run before startup finishes (an Android lifecycle
+    /// callback, a background service Android restarts on its own) check this and
+    /// answer "not available" instead.
+    pub fn readable() -> bool {
+        std::env::var("DSM_SDK_TEST_MODE").is_ok()
+            || storage_utils::get_storage_base_dir().is_some()
+    }
+
     /// Atomically write current in-memory storage to disk as protobuf.
     fn save_storage() {
         if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
@@ -564,6 +574,71 @@ mod tests {
         // Prime in-memory storage so global is Some (no file I/O in test mode)
         *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(AppStateStorage::default());
         STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
+    }
+
+    // ── identity reads before storage init ──
+
+    /// Run in its own process by
+    /// `identity_reads_before_storage_init_answer_not_available`: no storage base dir
+    /// has been set and test mode is off, as when an Android lifecycle callback or a
+    /// restarted background service asks for identity before startup.
+    #[test]
+    fn identity_reads_before_storage_init_child() {
+        if std::env::var("DSM_APP_STATE_BEFORE_STORAGE_INIT_CHILD").is_err() {
+            return;
+        }
+        assert!(
+            storage_utils::get_storage_base_dir().is_none(),
+            "the child runs before any storage init"
+        );
+        assert!(
+            !AppState::readable(),
+            "AppState is not readable before storage init"
+        );
+        assert_eq!(
+            AppState::readable().then(AppState::get_device_id).flatten(),
+            None
+        );
+        assert_eq!(
+            AppState::readable()
+                .then(AppState::get_genesis_hash)
+                .flatten(),
+            None
+        );
+        assert_eq!(
+            AppState::readable()
+                .then(AppState::get_public_key)
+                .flatten(),
+            None
+        );
+        // The check is load-bearing: the same read without it panics here.
+        assert!(
+            std::panic::catch_unwind(AppState::get_device_id).is_err(),
+            "an unguarded read before storage init panics"
+        );
+    }
+
+    /// Identity reads that can arrive before startup has set the storage base dir
+    /// answer "not available" instead of panicking. The check runs in a child process
+    /// because the storage base dir is set once per process and other tests set it.
+    #[test]
+    fn identity_reads_before_storage_init_answer_not_available() {
+        let test_module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, rest)| rest);
+        let child = format!("{test_module}::identity_reads_before_storage_init_child");
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([child.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env("DSM_APP_STATE_BEFORE_STORAGE_INIT_CHILD", "1")
+            .env_remove("DSM_SDK_TEST_MODE")
+            .output()
+            .expect("spawn the child test");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "the child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     // ── purge_keys_with_prefixes ──

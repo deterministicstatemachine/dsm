@@ -897,9 +897,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
             // 0 = NO_IDENTITY (no persisted device_id/genesis)
             // 1 = RUNTIME_NOT_READY (identity present, but runtime not fully ready yet)
             // 3 = READY (DBRW + SDK fully ready)
-            let has_identity = crate::sdk::app_state::AppState::get_device_id()
-                .map(|v| v.len() == 32)
-                .unwrap_or(false)
+            // Before storage init nothing is readable: NO_IDENTITY, the fail-closed answer.
+            let has_identity = crate::sdk::app_state::AppState::readable()
+                && crate::sdk::app_state::AppState::get_device_id()
+                    .map(|v| v.len() == 32)
+                    .unwrap_or(false)
                 && crate::sdk::app_state::AppState::get_genesis_hash()
                     .map(|v| v.len() == 32)
                     .unwrap_or(false);
@@ -1049,7 +1051,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getDeviceIdBi
             };
             ensure_bootstrap();
 
-            match crate::sdk::app_state::AppState::get_device_id() {
+            // Identity can be asked for before startup has set the storage base dir (an
+            // Android lifecycle callback, a restarted background service): answer "not
+            // available" instead of reaching AppState's missing-base-dir panic.
+            match crate::sdk::app_state::AppState::readable()
+                .then(crate::sdk::app_state::AppState::get_device_id)
+                .flatten()
+            {
                 Some(id) => {
                     // Expect 32 bytes; if not, fail-closed returning empty.
                     if id.len() != 32 {
@@ -1100,7 +1108,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getGenesisHas
             };
             ensure_bootstrap();
 
-            match crate::sdk::app_state::AppState::get_genesis_hash() {
+            // Identity can be asked for before startup has set the storage base dir (an
+            // Android lifecycle callback, a restarted background service): answer "not
+            // available" instead of reaching AppState's missing-base-dir panic.
+            match crate::sdk::app_state::AppState::readable()
+                .then(crate::sdk::app_state::AppState::get_genesis_hash)
+                .flatten()
+            {
                 Some(hash) => {
                     if hash.len() != 32 {
                         log::warn!(
@@ -1150,7 +1164,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSigningPub
             };
             ensure_bootstrap();
 
-            match crate::sdk::app_state::AppState::get_public_key() {
+            // Identity can be asked for before startup has set the storage base dir (an
+            // Android lifecycle callback, a restarted background service): answer "not
+            // available" instead of reaching AppState's missing-base-dir panic.
+            match crate::sdk::app_state::AppState::readable()
+                .then(crate::sdk::app_state::AppState::get_public_key)
+                .flatten()
+            {
                 Some(pk) => {
                     log::info!("getSigningPublicKeyBin: returning {} bytes", pk.len());
                     env.byte_array_from_slice(&pk)
@@ -4557,6 +4577,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
             if crate::bridge::full_app_router_installed() {
                 log::info!("getAppRouterStatus: INSTALLED");
                 return 2;
+            }
+
+            // Before storage init AppState is not readable: startup is incomplete, which is
+            // ROUTER_NOT_READY (not NO_GENESIS: nothing is known about genesis yet).
+            if !crate::sdk::app_state::AppState::readable() {
+                log::info!("getAppRouterStatus: ROUTER_NOT_READY - storage not initialized");
+                return 1;
             }
 
             // Not installed -> check genesis presence
