@@ -20,6 +20,7 @@
 //! | `GET  /api/v2/b0x/status/{id}` | 204 acked · 409 spooled · 404 unknown |
 //! | `POST /api/v2/policy` | index the canonical policy bytes; answer their content anchor |
 //! | `POST /api/v2/policy/get` | serve the bytes under a 32-byte anchor, or 404 |
+//! | `GET  /api/v2/object/list` | keys under `prefix` after `cursor`, `limit` per page, as `ObjectListResponseV1` |
 //!
 //! Per-message-id status overrides let a test make ONE submission fail
 //! (`503`) or answer a status probe differently, then lift the override — the
@@ -69,6 +70,12 @@ struct NodeState {
     /// content-addressed policy index, which is how a peer roots to an asset
     /// it did not create.
     policies: HashMap<[u8; 32], Vec<u8>>,
+    /// Object keys this member lists (bodies are not served).
+    objects: std::collections::BTreeSet<String>,
+    /// Object-listing calls answered so far.
+    list_calls: usize,
+    /// Answer `503` to every listing call from this call on (1-based).
+    fail_listing_from_call: Option<usize>,
 }
 
 /// Handle to one running fake node.
@@ -281,8 +288,73 @@ impl FakeB0xNode {
                 },
                 Err(_) => (404, Vec::new()),
             },
+            ("GET", p) if p.starts_with("/api/v2/object/list") => {
+                st.list_calls += 1;
+                if st
+                    .fail_listing_from_call
+                    .is_some_and(|n| st.list_calls >= n)
+                {
+                    return (503, Vec::new());
+                }
+                let query = p.split_once('?').map(|(_, q)| q).unwrap_or("");
+                let (mut prefix, mut limit, mut cursor) = (String::new(), 100usize, None);
+                for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+                    match k.as_ref() {
+                        "prefix" => prefix = v.into_owned(),
+                        "limit" => limit = v.parse().unwrap_or(100),
+                        "cursor" => cursor = Some(v.into_owned()),
+                        _ => {}
+                    }
+                }
+                let page: Vec<String> = st
+                    .objects
+                    .iter()
+                    .filter(|k| k.starts_with(&prefix))
+                    .filter(|k| cursor.as_deref().is_none_or(|c| k.as_str() > c))
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                let response = dsm::types::proto::ObjectListResponseV1 {
+                    next_cursor: page.last().cloned(),
+                    items: page
+                        .into_iter()
+                        .map(|key| dsm::types::proto::ObjectListItemV1 {
+                            key,
+                            dlv_id_b32: String::new(),
+                            size_bytes: 0,
+                        })
+                        .collect(),
+                };
+                (200, response.encode_to_vec())
+            }
             _ => (204, Vec::new()),
         }
+    }
+
+    /// Make this member list `key`.
+    pub fn seed_object(&self, key: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .objects
+            .insert(key.to_string());
+    }
+
+    /// Object-listing calls this member has answered.
+    pub fn list_calls(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .list_calls
+    }
+
+    /// Answer `503` to every listing call from call `n` on (1-based, counting
+    /// every call so far); `None` restores normal listing.
+    pub fn fail_listing_from_call(&self, n: Option<usize>) {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .fail_listing_from_call = n;
     }
 
     /// Every `POST` this node has received, in order.

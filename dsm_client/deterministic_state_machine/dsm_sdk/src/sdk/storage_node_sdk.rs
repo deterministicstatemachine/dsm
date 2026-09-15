@@ -2119,6 +2119,102 @@ impl StorageNodeSDK {
         })
     }
 
+    /// Every key under `prefix` as ONE member lists it.
+    ///
+    /// [`list_objects`](Self::list_objects) answers each call through
+    /// `execute_with_retry`, which may serve successive pages of one listing
+    /// from different mirrors, and a cursor one node minted need not mean the
+    /// same thing to another. Here members are tried in configured order and
+    /// EVERY page of a walk comes from that one member's client; a walk that
+    /// fails at any page is discarded whole and restarted on the next member.
+    /// The result is therefore one member's view, deterministic for a run.
+    ///
+    /// The walk stops as soon as more than `max_keys` distinct keys are seen
+    /// (or more pages than such a listing could need), and says so in
+    /// `exceeded`: the caller refuses rather than work from a truncated view.
+    pub async fn list_all_keys_pinned(
+        &self,
+        prefix: &str,
+        page_limit: u32,
+        max_keys: usize,
+    ) -> Result<PinnedKeyListing, DsmError> {
+        let page_limit = page_limit.clamp(1, 1000);
+        let mut refusals: Vec<String> = Vec::new();
+        for (member, client) in self.clients.iter().enumerate() {
+            match Self::walk_keys_on(client, prefix, page_limit, max_keys).await {
+                Ok((keys, exceeded)) => {
+                    log::info!(
+                        "list_all_keys_pinned: member {member} ({}) listed {} key(s) under {prefix}{}",
+                        client.node_info.url,
+                        keys.len(),
+                        if exceeded { " before exceeding the bound" } else { "" }
+                    );
+                    return Ok(PinnedKeyListing {
+                        member,
+                        endpoint: client.node_info.url.clone(),
+                        keys,
+                        exceeded,
+                    });
+                }
+                Err(e) => {
+                    log::warn!(
+                        "list_all_keys_pinned: member {member} ({}) could not list {prefix} in \
+                         full ({e}); discarding its partial walk",
+                        client.node_info.url
+                    );
+                    refusals.push(format!("{}: {e}", client.node_info.url));
+                }
+            }
+        }
+        Err(DsmError::storage(
+            format!(
+                "no storage member could list {prefix} in full: {}",
+                refusals.join("; ")
+            ),
+            None::<std::io::Error>,
+        ))
+    }
+
+    /// One member's complete walk of `prefix`: `(keys, exceeded)`.
+    async fn walk_keys_on(
+        client: &StorageNodeClient,
+        prefix: &str,
+        page_limit: u32,
+        max_keys: usize,
+    ) -> Result<(std::collections::BTreeSet<String>, bool), StorageNodeError> {
+        let mut keys = std::collections::BTreeSet::new();
+        let mut cursor: Option<String> = None;
+        // A member that keeps minting cursors over keys already seen must not
+        // keep the walk alive: no honest listing of at most `max_keys` keys
+        // needs more pages than this.
+        let max_pages = max_keys / page_limit as usize + 2;
+        for _ in 0..max_pages {
+            let page = client
+                .list_objects(prefix, cursor.as_deref(), page_limit)
+                .await?;
+            let page_len = page.items.len();
+            for item in page.items {
+                if !item.key.starts_with(prefix) {
+                    continue;
+                }
+                keys.insert(item.key);
+                if keys.len() > max_keys {
+                    return Ok((keys, true));
+                }
+            }
+            if page_len < page_limit as usize {
+                return Ok((keys, false));
+            }
+            match page.next_cursor {
+                Some(next) if !next.is_empty() && cursor.as_deref() != Some(next.as_str()) => {
+                    cursor = Some(next)
+                }
+                _ => return Ok((keys, false)),
+            }
+        }
+        Ok((keys, true))
+    }
+
     pub async fn list_objects(
         &self,
         prefix: &str,
@@ -5810,4 +5906,18 @@ mod member_echo_tests {
         );
         assert!(!answer_counts_for(&echo(None, None), &m), "no echo at all");
     }
+}
+
+/// One storage member's complete listing of a prefix
+/// ([`StorageNodeSDK::list_all_keys_pinned`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedKeyListing {
+    /// Which configured member answered, in configured order.
+    pub member: usize,
+    pub endpoint: String,
+    /// The keys it listed, at most one past the bound when `exceeded`.
+    pub keys: std::collections::BTreeSet<String>,
+    /// The listing is larger than the caller's bound; `keys` is NOT the
+    /// member's full listing.
+    pub exceeded: bool,
 }

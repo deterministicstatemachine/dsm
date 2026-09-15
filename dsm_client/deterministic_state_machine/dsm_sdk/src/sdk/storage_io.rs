@@ -1216,6 +1216,29 @@ pub(crate) async fn list_objects(
     })
 }
 
+/// Every key under `prefix` as ONE storage member lists it
+/// ([`StorageNodeSDK::list_all_keys_pinned`]): pages from one member only, a
+/// failed walk discarded whole, the walk stopped once past `max_keys`.
+pub(crate) async fn list_all_keys_pinned(
+    prefix: &str,
+    page_limit: u32,
+    max_keys: usize,
+) -> Result<crate::sdk::storage_node_sdk::PinnedKeyListing, DsmError> {
+    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
+        DsmError::storage(
+            format!("load storage node config: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let sdk = StorageNodeSDK::new(config).await.map_err(|e| {
+        DsmError::storage(
+            format!("construct storage node sdk: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    sdk.list_all_keys_pinned(prefix, page_limit, max_keys).await
+}
+
 /// Outcome of a fan-out PUT to a custom (non-object-store) endpoint path across
 /// every configured node. DSM storage nodes are independent mirrors, so a write
 /// must reach each one; `conflict` counts HTTP 409 (single-assignment rejection)
@@ -1315,4 +1338,84 @@ pub(crate) async fn get_from_any_node_path(path: &str) -> Result<Vec<u8>, DsmErr
         format!("get_from_any_node_path({path}) failed on all nodes: {last_err}"),
         None::<std::io::Error>,
     ))
+}
+
+#[cfg(test)]
+mod pinned_listing_tests {
+    //! The pinned listing, over real HTTP against loopback storage members.
+
+    use crate::test_support::fake_node::{point_env_config_at, FakeB0xNode};
+    use serial_test::serial;
+
+    fn keys(listing: &crate::sdk::storage_node_sdk::PinnedKeyListing) -> Vec<String> {
+        listing.keys.iter().cloned().collect()
+    }
+
+    /// ONE MEMBER'S VIEW, WHOLE (amendment 2c-H B3). A healthy first member
+    /// answers every page of the walk and the second is never asked. When the
+    /// first fails on its SECOND page, its first page is discarded — none of
+    /// its keys appear — and the whole walk is redone on the second member.
+    /// Past the bound the walk stops and says so; with every member failing
+    /// the listing is refused.
+    #[tokio::test]
+    #[serial]
+    async fn a_key_listing_is_walked_on_one_member_and_restarted_whole_on_failure() {
+        let first = FakeB0xNode::spawn();
+        let second = FakeB0xNode::spawn();
+        for k in 1..=5 {
+            first.seed_object(&format!("sofi/vault/A/B/{k}"));
+        }
+        first.seed_object("sofi/vault-proto/A/B/1");
+        second.seed_object("sofi/vault/A/B/1");
+        second.seed_object("sofi/vault/C/D/9");
+        point_env_config_at(&[first.endpoint.clone(), second.endpoint.clone()]);
+
+        let listing = super::list_all_keys_pinned("sofi/vault/", 2, 100)
+            .await
+            .expect("the first member lists");
+        assert_eq!(listing.member, 0);
+        assert!(!listing.exceeded);
+        assert_eq!(
+            keys(&listing),
+            (1..=5)
+                .map(|k| format!("sofi/vault/A/B/{k}"))
+                .collect::<Vec<_>>(),
+            "every key under the prefix, and nothing outside it"
+        );
+        assert_eq!(first.list_calls(), 3, "three pages of two from ONE member");
+        assert_eq!(second.list_calls(), 0, "the second member was never asked");
+
+        first.fail_listing_from_call(Some(first.list_calls() + 2));
+        let listing = super::list_all_keys_pinned("sofi/vault/", 2, 100)
+            .await
+            .expect("the second member lists");
+        assert_eq!(listing.member, 1, "the walk restarted on the next member");
+        assert_eq!(
+            keys(&listing),
+            vec![
+                "sofi/vault/A/B/1".to_string(),
+                "sofi/vault/C/D/9".to_string()
+            ],
+            "the failed member's first page was discarded, not merged"
+        );
+
+        first.fail_listing_from_call(None);
+        let listing = super::list_all_keys_pinned("sofi/vault/", 2, 3)
+            .await
+            .expect("listing");
+        assert!(
+            listing.exceeded,
+            "past the bound the walk stops and says so"
+        );
+        assert_eq!(listing.keys.len(), 4, "one key past the bound, no more");
+
+        first.fail_listing_from_call(Some(1));
+        second.fail_listing_from_call(Some(1));
+        assert!(
+            super::list_all_keys_pinned("sofi/vault/", 2, 100)
+                .await
+                .is_err(),
+            "with no member able to list in full, the listing is refused"
+        );
+    }
 }

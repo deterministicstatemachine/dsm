@@ -23,6 +23,12 @@
 //! `multi_hop_beats_direct_when_output_better`).  Pure fee-weighted
 //! Dijkstra would silently mis-route in that scenario.
 //!
+//! Bounded: the enumeration explores at most
+//! [`MAX_ENUMERATED_PATHS_PER_SEARCH`] path prefixes and then REFUSES
+//! (`SearchBudgetExceeded`) rather than answer from part of the graph; and a
+//! route never mixes settlement domains (amendment 2c-H H15), so the search
+//! runs within each domain and takes the best.
+//!
 //! Determinism:
 //!   * Input ads are pre-deduplicated by (vault_id, highest
 //!     state_number, lex-smallest key) — same rule as the storage
@@ -44,6 +50,20 @@ use crate::sdk::routing_sdk::{canonical_token_pair, fetch_and_verify_vault_proto
 /// enumeration cost bounded by O(|V|^MAX_HOPS) which is small for
 /// realistic vault counts.  Caller can override via `find_best_path`.
 pub(crate) const DEFAULT_MAX_HOPS: usize = 4;
+
+/// Most path prefixes one search explores before it refuses. With the depth
+/// clamped to the profile and the graph pruned to the pairs a route can cross,
+/// this is a guard against a dense advertised graph, not a limiter an honest
+/// market meets; hitting it is a typed, deterministic refusal.
+pub(crate) const MAX_ENUMERATED_PATHS_PER_SEARCH: usize = 4_096;
+
+/// The settlement domain a vault's composed state commits: its storage set and
+/// quorum (Req 6.16, Req 9.4). A route binds in ONE domain or not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SettlementDomain {
+    pub storage_set_id: [u8; 32],
+    pub quorum: u32,
+}
 
 /// One hop along a discovered route.  Carries everything chunk #3
 /// needs to build the external commitment without re-fetching the
@@ -106,6 +126,9 @@ pub(crate) enum RoutingError {
     EmptyAdvertisementSet,
     /// Caller supplied `input_amount == 0`.
     ZeroInput,
+    /// The search explored more than `budget` path prefixes and refused
+    /// rather than answer from part of the graph.
+    SearchBudgetExceeded { budget: usize },
 }
 
 /// Constant-product output: `(reserve_out * input_after_fee) /
@@ -289,12 +312,33 @@ fn build_adjacency(
 /// state_number wins, lex-smaller token pair tiebreaker) and filtered
 /// to `lifecycle_state == "active"` before search begins, so the
 /// caller may pass raw output from `routing_sdk::load_*`.
+#[cfg(test)]
 pub(crate) fn find_best_path(
     advertisements: &[generated::RoutingVaultAdvertisementV1],
     input_token: &[u8],
     output_token: &[u8],
     input_amount: u64,
     max_hops: usize,
+) -> Result<Path, RoutingError> {
+    search_best_path(
+        advertisements,
+        input_token,
+        output_token,
+        input_amount,
+        max_hops,
+        &mut 0,
+    )
+}
+
+/// [`find_best_path`], counting every explored path prefix into `explored`
+/// against [`MAX_ENUMERATED_PATHS_PER_SEARCH`].
+fn search_best_path(
+    advertisements: &[generated::RoutingVaultAdvertisementV1],
+    input_token: &[u8],
+    output_token: &[u8],
+    input_amount: u64,
+    max_hops: usize,
+    explored: &mut usize,
 ) -> Result<Path, RoutingError> {
     if input_token == output_token {
         return Err(RoutingError::SameToken);
@@ -323,7 +367,8 @@ pub(crate) fn find_best_path(
         &mut visited_tokens,
         &mut current_hops,
         &mut best,
-    );
+        explored,
+    )?;
 
     best.ok_or_else(|| RoutingError::NoPath {
         input_token: input_token.to_vec(),
@@ -342,13 +387,14 @@ fn enumerate(
     visited_tokens: &mut Vec<Vec<u8>>,
     current_hops: &mut Vec<VaultHop>,
     best: &mut Option<Path>,
-) {
+    explored: &mut usize,
+) -> Result<(), RoutingError> {
     if remaining_hops == 0 {
-        return;
+        return Ok(());
     }
     let edges = match adjacency.get(current_token) {
         Some(v) => v,
-        None => return,
+        None => return Ok(()),
     };
     for edge in edges {
         if visited_tokens.iter().any(|t| t == &edge.token_out) {
@@ -376,6 +422,12 @@ fn enumerate(
             owner_public_key: edge.owner_public_key.clone(),
         };
 
+        *explored += 1;
+        if *explored > MAX_ENUMERATED_PATHS_PER_SEARCH {
+            return Err(RoutingError::SearchBudgetExceeded {
+                budget: MAX_ENUMERATED_PATHS_PER_SEARCH,
+            });
+        }
         current_hops.push(hop);
         visited_tokens.push(edge.token_out.clone());
 
@@ -401,12 +453,14 @@ fn enumerate(
                 visited_tokens,
                 current_hops,
                 best,
-            );
+                explored,
+            )?;
         }
 
         current_hops.pop();
         visited_tokens.pop();
     }
+    Ok(())
 }
 
 fn replace_if_better(best: &mut Option<Path>, candidate: Path) {
@@ -436,16 +490,66 @@ fn replace_if_better(best: &mut Option<Path>, candidate: Path) {
     }
 }
 
-/// Storage-verified wrapper.  Fetches each advertisement's full vault
-/// proto, runs the digest binding check, and only feeds surviving ads
-/// into the path search.  An ad whose proto fails verification is
-/// silently dropped (with a log warning) — the search proceeds with
-/// what's left.
-///
-/// Use this from production callers; tests that need to assert on the
-/// pure search semantics call `find_best_path` directly.
-pub(crate) async fn find_and_verify_best_path(
+/// The best path whose every hop lies in ONE settlement domain (amendment 2c-H
+/// H15): the search runs within each domain `domain_of` assigns and the best
+/// of those wins, by the same rule as a single search. A vault with no domain
+/// is not a candidate. The explored-prefix budget is shared across domains.
+pub(crate) fn find_best_path_within_one_domain(
     advertisements: &[generated::RoutingVaultAdvertisementV1],
+    domain_of: &HashMap<[u8; 32], SettlementDomain>,
+    input_token: &[u8],
+    output_token: &[u8],
+    input_amount: u64,
+    max_hops: usize,
+) -> Result<Path, RoutingError> {
+    if input_token == output_token {
+        return Err(RoutingError::SameToken);
+    }
+    if input_amount == 0 {
+        return Err(RoutingError::ZeroInput);
+    }
+    if advertisements.is_empty() {
+        return Err(RoutingError::EmptyAdvertisementSet);
+    }
+    let mut by_domain: std::collections::BTreeMap<
+        SettlementDomain,
+        Vec<generated::RoutingVaultAdvertisementV1>,
+    > = std::collections::BTreeMap::new();
+    for ad in advertisements {
+        if let Some(domain) = vid32(&ad.vault_id).and_then(|v| domain_of.get(&v)) {
+            by_domain.entry(*domain).or_default().push(ad.clone());
+        }
+    }
+    let mut explored = 0usize;
+    let mut best: Option<Path> = None;
+    for group in by_domain.values() {
+        match search_best_path(
+            group,
+            input_token,
+            output_token,
+            input_amount,
+            max_hops,
+            &mut explored,
+        ) {
+            Ok(path) => replace_if_better(&mut best, path),
+            Err(RoutingError::NoPath { .. }) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    best.ok_or_else(|| RoutingError::NoPath {
+        input_token: input_token.to_vec(),
+        output_token: output_token.to_vec(),
+        requested_input: input_amount,
+    })
+}
+
+/// Storage-verified wrapper. Fetches each advertisement's full vault proto,
+/// runs the digest binding check, and feeds only surviving ads into
+/// [`find_best_path_within_one_domain`]. An ad whose proto fails verification
+/// is dropped (with a log warning) and the search proceeds with what is left.
+pub(crate) async fn find_and_verify_best_path_within_one_domain(
+    advertisements: &[generated::RoutingVaultAdvertisementV1],
+    domain_of: &HashMap<[u8; 32], SettlementDomain>,
     input_token: &[u8],
     output_token: &[u8],
     input_amount: u64,
@@ -465,7 +569,14 @@ pub(crate) async fn find_and_verify_best_path(
             }
         }
     }
-    find_best_path(&verified, input_token, output_token, input_amount, max_hops)
+    find_best_path_within_one_domain(
+        &verified,
+        domain_of,
+        input_token,
+        output_token,
+        input_amount,
+        max_hops,
+    )
 }
 
 #[cfg(test)]
@@ -610,6 +721,20 @@ mod tests {
             economic_proof_addr: Vec::new(),
             economic_proof_position: 0,
         }
+    }
+
+    /// Every vault in `ads` in one settlement domain.
+    fn one_domain(
+        ads: &[generated::RoutingVaultAdvertisementV1],
+    ) -> HashMap<[u8; 32], SettlementDomain> {
+        let domain = SettlementDomain {
+            storage_set_id: [0x0A; 32],
+            quorum: 3,
+        };
+        ads.iter()
+            .filter_map(|ad| vid32(&ad.vault_id))
+            .map(|v| (v, domain))
+            .collect()
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -782,9 +907,16 @@ mod tests {
             .await
             .expect("list ads");
         let just_ads: Vec<_> = ads.into_iter().map(|p| p.advertisement).collect();
-        let path = find_and_verify_best_path(&just_ads, &a, &b, 10_000, DEFAULT_MAX_HOPS)
-            .await
-            .expect("path");
+        let path = find_and_verify_best_path_within_one_domain(
+            &just_ads,
+            &one_domain(&just_ads),
+            &a,
+            &b,
+            10_000,
+            DEFAULT_MAX_HOPS,
+        )
+        .await
+        .expect("path");
         assert_eq!(
             path.hops[0].vault_id, good_vid,
             "tampered ad must be excluded; the surviving ad is the only choice"
@@ -899,6 +1031,94 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
     // Test 8: Deterministic tie-break on equal-cost routes
     // ─────────────────────────────────────────────────────────────────
+
+    /// THE BUDGET REFUSES, DETERMINISTICALLY. Seventy vaults on a/b and
+    /// seventy on b/c make 70 + 70·70 = 4,970 prefixes for `a → c` in two
+    /// hops: past the budget, refused the same way twice. Forty of each
+    /// (1,640 prefixes) search normally.
+    #[test]
+    fn a_dense_graph_exhausts_the_search_budget_deterministically() {
+        let (a, b, c) = (token("AAAbud"), token("BBBbud"), token("CCCbud"));
+        let dense = |per_pair: u8| -> Vec<generated::RoutingVaultAdvertisementV1> {
+            (0..per_pair)
+                .flat_map(|i| {
+                    [
+                        ad(vid(i), &a, &b, 1_000_000, 1_000_000, 30, 1),
+                        ad(vid(100 + i), &b, &c, 1_000_000, 1_000_000, 30, 1),
+                    ]
+                })
+                .collect()
+        };
+        let over = dense(70);
+        for _ in 0..2 {
+            assert_eq!(
+                find_best_path(&over, &a, &c, 10_000, 2).err(),
+                Some(RoutingError::SearchBudgetExceeded {
+                    budget: MAX_ENUMERATED_PATHS_PER_SEARCH
+                })
+            );
+        }
+        let under = dense(40);
+        assert_eq!(
+            find_best_path(&under, &a, &c, 10_000, 2)
+                .expect("within budget")
+                .hops
+                .len(),
+            2
+        );
+    }
+
+    /// A ROUTE NEVER CROSSES TWO SETTLEMENT DOMAINS (amendment 2c-H H15).
+    /// Deep a/b and b/c liquidity beats a shallow direct a/c vault when all
+    /// three share a domain. Put b/c in another storage set — or the same set
+    /// at another quorum — and that two-hop route does not exist: the direct
+    /// vault is chosen. Without the direct vault there is no path at all.
+    #[test]
+    fn a_route_never_crosses_two_settlement_domains() {
+        let (a, b, c) = (token("AAAdom"), token("BBBdom"), token("CCCdom"));
+        let ads = vec![
+            ad(vid(90), &a, &b, 1_000_000, 1_000_000, 30, 1),
+            ad(vid(91), &b, &c, 1_000_000, 1_000_000, 30, 1),
+            ad(vid(92), &a, &c, 1_000, 1_000, 30, 1),
+        ];
+        let x = SettlementDomain {
+            storage_set_id: [0x0A; 32],
+            quorum: 3,
+        };
+        let other_set = SettlementDomain {
+            storage_set_id: [0x0B; 32],
+            quorum: 3,
+        };
+        let other_quorum = SettlementDomain {
+            storage_set_id: [0x0A; 32],
+            quorum: 2,
+        };
+        let domains = |bc: SettlementDomain| -> HashMap<[u8; 32], SettlementDomain> {
+            [(vid(90), x), (vid(91), bc), (vid(92), x)]
+                .into_iter()
+                .collect()
+        };
+        let one =
+            find_best_path_within_one_domain(&ads, &domains(x), &a, &c, 10_000, 2).expect("path");
+        assert_eq!(
+            one.hops.iter().map(|h| h.vault_id).collect::<Vec<_>>(),
+            vec![vid(90), vid(91)],
+            "in one domain the deep two-hop route wins"
+        );
+        for split in [other_set, other_quorum] {
+            let direct = find_best_path_within_one_domain(&ads, &domains(split), &a, &c, 10_000, 2)
+                .expect("path");
+            assert_eq!(
+                direct.hops.iter().map(|h| h.vault_id).collect::<Vec<_>>(),
+                vec![vid(92)],
+                "with its legs in two domains the two-hop route does not exist"
+            );
+        }
+        assert!(matches!(
+            find_best_path_within_one_domain(&ads[..2], &domains(other_set), &a, &c, 10_000, 2),
+            Err(RoutingError::NoPath { .. })
+        ));
+    }
 
     #[test]
     fn equal_output_paths_lex_smallest_vault_sequence_wins() {

@@ -580,6 +580,9 @@ struct DbtcStorageTestState {
     /// "never published the stale bytes" from "published them and fixed it".
     /// A test that must prove what went over the wire reads this log.
     op_log: Vec<(String, DbtcStorageOp)>,
+    /// Every key a GET asked for, in order — what a test reads to prove a
+    /// body was never fetched.
+    get_log: Vec<String>,
     /// Fires once, just after a PUT on that key lands. The interleaving seam:
     /// it lets a test perform the database write production would perform
     /// concurrently, at an exact point inside a sweep, without threads.
@@ -2908,6 +2911,12 @@ impl BitcoinTapSdk {
         dbtc_storage_test_state().op_log.clone()
     }
 
+    /// Every key a GET asked the object store for, in order.
+    #[cfg(test)]
+    pub(crate) fn dbtc_storage_get_log() -> Vec<String> {
+        dbtc_storage_test_state().get_log.clone()
+    }
+
     /// Run `hook` once, immediately after the next PUT on `key` lands.
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_put_hook(key: impl Into<String>, hook: fn()) {
@@ -2979,6 +2988,7 @@ impl BitcoinTapSdk {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
+            state.get_log.push(key.to_string());
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
@@ -3017,6 +3027,7 @@ impl BitcoinTapSdk {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
+            state.get_log.push(key.to_string());
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
@@ -3080,6 +3091,46 @@ impl BitcoinTapSdk {
             }
             let sdk = sdk.with_per_node_auth(&auths);
             sdk.delete_at_all_replicas(key).await
+        }
+    }
+
+    /// Every key under `prefix` as ONE storage member lists it, the walk
+    /// stopped once more than `max_keys` are seen
+    /// (`storage_io::list_all_keys_pinned`). The in-process store is one member.
+    pub(crate) async fn storage_list_all_keys_pinned(
+        prefix: &str,
+        max_keys: usize,
+    ) -> Result<crate::sdk::storage_node_sdk::PinnedKeyListing, DsmError> {
+        #[cfg(any(test, feature = "demos"))]
+        {
+            let state = dbtc_storage_test_state();
+            let mut listed: Vec<&String> = state
+                .object_store
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .collect();
+            listed.sort();
+            let mut keys = std::collections::BTreeSet::new();
+            let mut exceeded = false;
+            for key in listed {
+                keys.insert(key.clone());
+                if keys.len() > max_keys {
+                    exceeded = true;
+                    break;
+                }
+            }
+            Ok(crate::sdk::storage_node_sdk::PinnedKeyListing {
+                member: 0,
+                endpoint: "in-process-store".to_string(),
+                keys,
+                exceeded,
+            })
+        }
+
+        #[cfg(not(any(test, feature = "demos")))]
+        {
+            const PAGE: u32 = 200;
+            crate::sdk::storage_io::list_all_keys_pinned(prefix, PAGE, max_keys).await
         }
     }
 
