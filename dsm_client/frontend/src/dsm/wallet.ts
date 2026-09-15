@@ -36,6 +36,8 @@ export async function getAllBalances(): Promise<TokenBalanceView[]> {
       canonicalTokenId: String(b.canonicalTokenId ?? ''),
       policyAnchorB32: String(b.policyAnchorB32 ?? ''),
       anchorFingerprint: String(b.anchorFingerprint ?? ''),
+      // The token policy's icon field, carried from Rust. The wallet draws the coin from it.
+      iconUrl: String(b.iconUrl ?? ''),
       balance: (b.available ?? 0).toString(),
       baseUnits: typeof b.available === 'bigint' ? b.available : BigInt(b.available || 0),
       decimals: typeof b.decimals === 'number' ? b.decimals : 0,

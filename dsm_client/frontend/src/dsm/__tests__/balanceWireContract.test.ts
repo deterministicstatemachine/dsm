@@ -44,6 +44,8 @@ describe('balance wire contract (Rust -> TypeScript)', () => {
     // the transfer proof, and looked exactly like an unpublished policy.
     expect(row.policyAnchorB32).toBe('B9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D5MPJTB9D0');
     expect(row.policyAnchorB32.startsWith(row.anchorFingerprint)).toBe(true);
+    // The policy's icon field, which the wallet draws the token's coin from.
+    expect(row.iconUrl).toBe('dsm:coin:v1:FIXTURE');
   });
 
   /// decimals must arrive as a real number, since the mapper's guard is

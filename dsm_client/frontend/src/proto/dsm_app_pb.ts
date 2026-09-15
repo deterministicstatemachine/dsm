@@ -24722,6 +24722,19 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
    */
   canonicalTokenId = "";
 
+  /**
+   * The icon field of the token's anchored policy, as Rust read it.
+   *
+   * Presentation only. A token created with coin artwork carries its canonical
+   * silhouette here ("dsm:coin:v1:" + Base32 Crockford) and the wallet draws the
+   * coin from it in its own theme; without artwork the wallet cuts the ticker
+   * through the coin. Empty for protocol assets and for policies that name no
+   * icon. Rust never interprets it and nothing resolves a token by it.
+   *
+   * @generated from field: string icon_url = 11;
+   */
+  iconUrl = "";
+
   constructor(data?: PartialMessage<BalanceGetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -24740,6 +24753,7 @@ export class BalanceGetResponse extends Message<BalanceGetResponse> {
     { no: 8, name: "policy_anchor_b32", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 9, name: "anchor_fingerprint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 10, name: "canonical_token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 11, name: "icon_url", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BalanceGetResponse {

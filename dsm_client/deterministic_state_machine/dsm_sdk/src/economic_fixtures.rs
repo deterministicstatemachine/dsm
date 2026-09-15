@@ -294,6 +294,18 @@ pub fn restart_router() -> AppRouterImpl {
 /// The router must already hold ERA for the creation fee — call `funded_router`
 /// or `claim_era` first.
 pub fn mint_asset(router: &AppRouterImpl, ticker: &str, decimals: u32, amount: u64) -> [u8; 32] {
+    mint_asset_with_icon(router, ticker, decimals, amount, "")
+}
+
+/// [`mint_asset`] with the policy's icon field set, for tests of what a token's policy carries to
+/// the wallet (its coin artwork).
+pub fn mint_asset_with_icon(
+    router: &AppRouterImpl,
+    ticker: &str,
+    decimals: u32,
+    amount: u64,
+    icon_url: &str,
+) -> [u8; 32] {
     use crate::bridge::{AppInvoke, AppRouter};
     use dsm::types::proto as generated;
     use prost::Message as _;
@@ -323,7 +335,7 @@ pub fn mint_asset(router: &AppRouterImpl, ticker: &str, decimals: u32, amount: u
                         unlimited_supply: true,
                         mint_burn_threshold: 1,
                         description: String::new(),
-                        icon_url: String::new(),
+                        icon_url: icon_url.into(),
                         allowlist_device_ids: Vec::new(),
                     }
                     .encode_to_vec(),

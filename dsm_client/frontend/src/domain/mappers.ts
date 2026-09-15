@@ -139,7 +139,9 @@ export function mapBalanceList(list: any[]): DomainBalance[] {
     const decimals = typeof b.decimals === 'number' ? b.decimals : 0;
     // Rendered by Rust; carried, never recomputed.
     const displayAmount = String(b.displayAmount ?? '');
-    return { tokenId, tokenName, balance, decimals, symbol, displayAmount };
+    // The token policy's icon field, carried from Rust.
+    const iconUrl = String(b.iconUrl ?? '');
+    return { tokenId, tokenName, balance, decimals, symbol, displayAmount, iconUrl };
   });
 }
 

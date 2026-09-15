@@ -42,6 +42,9 @@ fn emit_balances_list_fixture() {
             .chars()
             .take(8)
             .collect(),
+        // The policy's icon field, carried as the policy states it; the wallet draws
+        // the token's coin from it.
+        icon_url: "dsm:coin:v1:FIXTURE".to_string(),
     };
     let list = dsm_sdk::generated::BalancesListResponse {
         balances: vec![row],

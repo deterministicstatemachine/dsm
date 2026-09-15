@@ -685,3 +685,29 @@
 }
 
 .tcd-success-detail strong:first-child { margin-top: 0; }
+
+/* Coin artwork */
+.tcd-coin-preview {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.tcd-coin-img {
+  width: 96px;
+  height: 96px;
+  image-rendering: pixelated;
+}
+
+.tcd-coin-img--review {
+  width: 40px;
+  height: 40px;
+}
+
+.tcd-coin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}

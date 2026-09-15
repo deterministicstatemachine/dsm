@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
+import { TokenCoin } from '../../TokenCoin';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
@@ -191,7 +192,10 @@ function SendTabInner({
                 {(() => {
                   const sym = (selectedSendBalance.symbol || selectedSendBalance.tokenId || '').toLowerCase();
                   const isBtc = sym.includes('btc') || sym.includes('dbtc');
-                  return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
+                  if (isBtc || sym === 'era') {
+                    return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
+                  }
+                  return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
                 })()}
                 {selectedSendBalance.symbol || selectedSendBalance.tokenId}
               </span>
@@ -232,7 +236,10 @@ function SendTabInner({
           <label htmlFor="amount">{(() => {
             const sym = (sendForm.token || '').toLowerCase();
             const isBtc = sym.includes('btc') || sym.includes('dbtc');
-            return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
+            if (isBtc || sym === 'era' || !selectedSendBalance) {
+              return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
+            }
+            return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
           })()} Amount</label>
           <div className="amount-input-group">
             <input id="amount" type="number" step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'} className="form-input" required />

@@ -163,9 +163,23 @@ pub(crate) fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse)
                 reply.decimals = row.decimals;
                 reply.canonical_token_id = row.token_id.clone();
                 set_anchor(reply, &row.policy_commit);
+                reply.icon_url = policy_icon(&row.policy_commit);
             }
             reply.display_amount = format_base_units_for_display(reply.available, reply.decimals);
         }
+    }
+}
+
+/// The icon field of a token's anchored policy, from bytes verified against the commit.
+///
+/// Carried as the policy states it: the wallet draws coin artwork from it. A policy that is not
+/// stored here, or does not parse, has no icon to carry.
+fn policy_icon(policy_commit: &[u8; 32]) -> String {
+    match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
+        Ok(Some(bytes)) => super::token_routes::parse_token_policy(&bytes)
+            .and_then(|policy| policy.icon_url)
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

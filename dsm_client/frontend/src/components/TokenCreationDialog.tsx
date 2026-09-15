@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './TokenCreationDialog.css';
+import { TokenCoin } from './TokenCoin';
+import { encodeCoinSource, silhouetteFromRgba } from '../utils/coinArtwork';
+import { readImageRgba } from '../utils/imageRgba';
 import { dsmClient } from '@/services/dsmClient';
 import { getTokenCreationFeeEra } from '@/dsm/policies';
 
@@ -18,6 +21,8 @@ interface WizardState {
   alias: string;
   description: string;
   iconUrl: string;
+  /** Cut out the image's background instead of its logo. */
+  artworkInvert: boolean;
   decimals: number;
   unlimitedSupply: boolean;
   maxSupply: string;
@@ -34,6 +39,7 @@ const DEFAULT: WizardState = {
   alias: '',
   description: '',
   iconUrl: '',
+  artworkInvert: false,
   decimals: 2,
   unlimitedSupply: false,
   maxSupply: '1000000',
@@ -112,6 +118,106 @@ const KIND_META: { kind: TokenKind; icon: string; name: string; desc: string }[]
   { kind: 'FUNGIBLE', icon: 'F', name: 'FUNGIBLE', desc: 'Interchangeable units' },
 ];
 
+// ── Sub-component: coin artwork ─────────────────────────────────────────────
+const PREVIEW_COIN_SIZE = 160;
+
+function useSettled<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const handle = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(handle);
+  }, [value, delayMs]);
+  return settled;
+}
+
+function CoinArtworkField({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
+  const [image, setImage] = useState<{ rgba: Uint8ClampedArray; width: number; height: number } | null>(null);
+  const [reading, setReading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const reads = useRef(0);
+  const ticker = useSettled(state.ticker || 'TOKEN', 400);
+
+  const cutOut = (source: { rgba: Uint8ClampedArray; width: number; height: number }, invert: boolean) => {
+    try {
+      set({ iconUrl: encodeCoinSource(silhouetteFromRgba(source.rgba, source.width, source.height, { invert })), artworkInvert: invert });
+      setError(null);
+    } catch (e) {
+      set({ iconUrl: '', artworkInvert: invert });
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const upload = async (file: File) => {
+    const read = ++reads.current;
+    setReading(true);
+    setError(null);
+    try {
+      const source = await readImageRgba(file);
+      if (read !== reads.current) return;
+      setImage(source);
+      cutOut(source, state.artworkInvert);
+    } catch (e) {
+      if (read !== reads.current) return;
+      setImage(null);
+      set({ iconUrl: '' });
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (read === reads.current) setReading(false);
+    }
+  };
+
+  return (
+    <div className="tcd-field">
+      <label className="tcd-label" htmlFor="tcd-coin-art">
+        Coin artwork <span className="tcd-optional">(optional)</span>
+      </label>
+      <div className="tcd-coin-preview">
+        <TokenCoin iconUrl={state.iconUrl} ticker={ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img" alt="Your token's coin" />
+      </div>
+      <input
+        id="tcd-coin-art"
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        disabled={reading}
+        onChange={e => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          if (file) void upload(file);
+        }}
+      />
+      {state.iconUrl && (
+        <div className="tcd-coin-actions">
+          {image && (
+            <label className="tcd-label">
+              <input type="checkbox" checked={state.artworkInvert} onChange={e => cutOut(image, e.target.checked)} />{' '}
+              Cut out the background instead
+            </label>
+          )}
+          <button
+            type="button"
+            className="tcd-btn tcd-btn--sec"
+            onClick={() => {
+              reads.current++;
+              setImage(null);
+              setReading(false);
+              setError(null);
+              set({ iconUrl: '', artworkInvert: false });
+            }}
+          >
+            Use the ticker instead
+          </button>
+        </div>
+      )}
+      <span className="tcd-hint">
+        Your logo is cut through the coin the way ERA&apos;s lettering is, in every screen colour. Without an image the
+        ticker is used. The artwork is part of the policy and cannot be changed after creation.
+      </span>
+      {reading && <span className="tcd-hint" role="status">Reading image…</span>}
+      {error && <span className="tcd-hint" role="alert">{error}</span>}
+    </div>
+  );
+}
+
 function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardState>) => void }) {
   return (
     <div>
@@ -185,18 +291,7 @@ function Step1({ state, set }: { state: WizardState; set: (p: Partial<WizardStat
         <span className="tcd-char-count">{state.description.length} / 200</span>
       </div>
 
-      <div className="tcd-field">
-        <label className="tcd-label" htmlFor="tcd-icon">
-          Icon URL <span className="tcd-optional">(optional)</span>
-        </label>
-        <input
-          id="tcd-icon"
-          className="tcd-input"
-          placeholder="https://…/icon.png"
-          value={state.iconUrl}
-          onChange={e => set({ iconUrl: e.target.value })}
-        />
-      </div>
+      <CoinArtworkField state={state} set={set} />
     </div>
   );
 }
@@ -417,12 +512,12 @@ function Step3({
             <span className="tcd-review-val" style={{ fontSize: 10 }}>{state.description.trim()}</span>
           </div>
         )}
-        {state.iconUrl.trim() && (
-          <div className="tcd-review-row">
-            <span className="tcd-review-key">Icon</span>
-            <span className="tcd-review-val" style={{ fontSize: 9 }}>{state.iconUrl.trim()}</span>
-          </div>
-        )}
+        <div className="tcd-review-row">
+          <span className="tcd-review-key">Coin</span>
+          <span className="tcd-review-val">
+            <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img tcd-coin-img--review" />
+          </span>
+        </div>
       </div>
       <div className="tcd-hint" style={{ marginTop: 8, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.06)', lineHeight: 1.5 }}>
         A CPTA policy will be published first (content-addressed, immutable).
@@ -444,6 +539,7 @@ function SuccessScreen({
   return (
     <div className="tcd-card">
       <div className="tcd-success">
+        <TokenCoin iconUrl={state.iconUrl} ticker={state.ticker} size={PREVIEW_COIN_SIZE} className="tcd-coin-img" />
         <div className="tcd-success-icon">OK</div>
         <div className="tcd-success-title">Policy Published &amp; Token Created</div>
         <div className="tcd-success-detail">
