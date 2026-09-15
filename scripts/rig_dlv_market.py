@@ -9,7 +9,8 @@ usage:
   rig_dlv_market.py create-vault <name> <serial> <port> <anchorA> <anchorB> <reserveA> <reserveB> <feeBps>
   rig_dlv_market.py vaults       <name> <serial> <port>                      # My vaults lines (reserves / ad seq / pending)
   rig_dlv_market.py swap         <name> <serial> <port> <inputBase> <fromAnchor> <toAnchor> [quote|execute|full]   # amount is the INPUT; the quote's output is exact
-  rig_dlv_market.py reconcile    <name> <serial> <port>
+  rig_dlv_market.py reconcile    <name> <serial> <port>                      # exit 0 ONLY when a pending settlement was reconciled and the vault is seen past it; 2 failed/unobserved; 3 nothing pending (nothing reconciled here)
+  rig_dlv_market.py wait-applied <name> <serial> <port> <min_ad_seq> [timeout_s]   # exit 0 once the one vault shows ad seq >= min_ad_seq with nothing pending; 2 on timeout
   rig_dlv_market.py balances     <name> <serial> <port>
   rig_dlv_market.py offline      <name> <serial> <port>                      # am force-stop (adb survives)
   rig_dlv_market.py online       <name> <serial> <port>                      # relaunch + settle foreground
@@ -107,6 +108,28 @@ def open_swap():
     go_home(); home_brick('SOFI'); wait_text('SWAP', 20); sofi_brick('SWAP'); wait_text(None, 20, any_of=['From token', 'Quote', 'Swap']); time.sleep(1.0)
 
 # ── commands ─────────────────────────────────────────────────────────────────
+def parse_liquidity(text):
+    """What the Liquidity screen positively shows. `rendered` only once the vault count and one
+    reserves line per vault are on screen; `seq` only for exactly one vault."""
+    m = re.search(r'My vaults \((\d+)\)', text)
+    count = int(m.group(1)) if m else None
+    reserves = [l.strip() for l in text.split('\n') if l.strip().startswith('reserves:')]
+    seqs = [int(x) for x in re.findall(r'seq=(\d+)', text)]
+    pending = sum(int(x) for x in re.findall(r'(\d+) settled trades? to reconcile', text))
+    rendered = count is not None and (count == 0 or len(reserves) >= count)
+    return {'rendered': rendered, 'vaults': count, 'reserves': reserves[0] if len(reserves) == 1 else reserves,
+            'seq': seqs[0] if count == 1 and len(seqs) == 1 else None, 'pending': pending}
+
+def observe_liquidity(pred, timeout):
+    """Refresh Liquidity until `pred(state)` holds; the state that satisfied it, or None on timeout."""
+    t0 = time.time(); last = None
+    while time.time() - t0 < timeout:
+        js_click_sel('button[aria-label="Refresh"]'); time.sleep(3)
+        last = parse_liquidity(d.screen_text())
+        if pred(last): return last
+    log(f"not observed within {timeout}s; last: {last}")
+    return None
+
 if cmd == 'offline':
     d.shell(f'am force-stop {PKG}'); time.sleep(1.5)
     log(f"force-stopped; pid={d.shell(f'pidof {PKG}').strip() or 'none'}"); sys.exit(0)
@@ -221,18 +244,36 @@ if cmd == 'vaults':
     go_home(); sys.exit(0)
 
 if cmd == 'reconcile':
-    open_liquidity(); js_click_sel('button[aria-label="Refresh"]')
-    # The pending-trade line and its Reconcile button render only after the refresh completes.
-    t0 = time.time()
-    while time.time() - t0 < 60 and 'settled trade' not in d.screen_text(): time.sleep(1)
-    log(f"before: {[l for l in d.screen_text().split(chr(10)) if 'settled trade' in l or 'reserves:' in l]}")
-    if 'settled trade' not in d.screen_text():
-        # The owner's own sync catch-up may already have applied it; the proofs judge generations and reserves.
-        log("nothing to reconcile (no pending settled trade)"); go_home(); sys.exit(0)
+    # FAILS CLOSED. Exit 0 only when a pending settlement was reconciled AND the vault is then
+    # observed past it (nothing pending, advertisement sequence advanced). A vault list that never
+    # rendered is not "nothing to reconcile" (2), and nothing pending means nothing was reconciled
+    # here (3): a sync may have applied it, which wait-applied observes.
+    open_liquidity()
+    before = observe_liquidity(lambda st: st['rendered'], 60)
+    log(f"before: {before}")
+    if before is None:
+        log("the vault list never rendered; nothing is known"); go_home(); sys.exit(2)
+    if before['vaults'] != 1 or before['seq'] is None:
+        log("expected exactly one vault with an advertisement sequence"); go_home(); sys.exit(2)
+    if before['pending'] == 0:
+        log("nothing pending: no reconciliation was performed or observed"); go_home(); sys.exit(3)
     r = js_click_text('Reconcile', exact=True); log(f"Reconcile: {r}")
     got = wait_text(None, 240, any_of=['Reconciled', 'reconcile failed', 'error'])
-    log(f"result: {got} :: {[l for l in d.screen_text().split(chr(10)) if 'Reconciled' in l or 'reserves:' in l or 'settled trade' in l or 'error' in l.lower()]}")
-    sys.exit(0 if got == 'Reconciled' else 2)
+    log(f"result: {got}")
+    if got != 'Reconciled':
+        go_home(); sys.exit(2)
+    after = observe_liquidity(lambda st: st['rendered'] and st['pending'] == 0 and st['seq'] is not None and st['seq'] > before['seq'], 120)
+    log(f"after: {after}")
+    go_home(); sys.exit(0 if after is not None else 2)
+
+if cmd == 'wait-applied':
+    # Positive observation that this LP's vault has applied its settlements, whoever applied them
+    # (this device's own sync catch-up, or reconcile): the one vault at ad seq >= min_seq, nothing pending.
+    min_seq = int(args[0]); timeout = int(args[1]) if len(args) > 1 else 600
+    open_liquidity()
+    st = observe_liquidity(lambda x: x['rendered'] and x['vaults'] == 1 and x['seq'] is not None and x['seq'] >= min_seq and x['pending'] == 0, timeout)
+    log(f"applied: {st}")
+    go_home(); sys.exit(0 if st is not None else 2)
 
 if cmd == 'swap':
     amount, frm, to = args[0], args[1], args[2]
