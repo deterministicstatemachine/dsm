@@ -13689,6 +13689,37 @@ mod funded_creation_tests {
         );
     }
 
+    /// Advertise `vault_id` over `t_a/t_b` through the production route, as its
+    /// owner.
+    fn advertise_vault(
+        owner: &AppRouterImpl,
+        vault_id: &[u8; 32],
+        t_a: &[u8; 32],
+        t_b: &[u8; 32],
+        key: &str,
+    ) {
+        use prost::Message as _;
+        let publish = generated::PublishRoutingAdvertisementRequest {
+            vault_id: vault_id.to_vec(),
+            token_a: t_a.to_vec(),
+            token_b: t_b.to_vec(),
+            fee_bps: 30,
+            unlock_spec_digest: Vec::new(),
+            unlock_spec_key: key.to_string(),
+            owner_public_key: Vec::new(),
+            vault_proto_bytes: Vec::new(),
+        };
+        let res = crate::runtime::get_runtime().block_on(async {
+            owner
+                .invoke(AppInvoke {
+                    method: "route.publishRoutingAdvertisement".to_string(),
+                    args: pack(publish.encode_to_vec()),
+                })
+                .await
+        });
+        assert!(res.success, "advertise {key}: {:?}", res.error_message);
+    }
+
     /// Two advertised vaults over two pairs sharing one asset — `a/b` owned
     /// and `b/c` owned — and a trader holding `a`, `b` and adopting `c`. The
     /// market a two-hop route crosses.
@@ -13717,7 +13748,6 @@ mod funded_creation_tests {
         trader_tag: u8,
         adopts_c: bool,
     ) -> TwoPairMarket {
-        use prost::Message as _;
         install_identity();
         let owner_dev = participant("owner", 0x41);
         let owner = owner_dev.router();
@@ -13726,25 +13756,7 @@ mod funded_creation_tests {
         let pc_c = crate::economic_fixtures::mint_asset(owner, "CCC", 2, 40_000);
         owner_dev.enter();
         let advertise = |vault_id: &[u8; 32], t_a: &[u8; 32], t_b: &[u8; 32], key: &str| {
-            let publish = generated::PublishRoutingAdvertisementRequest {
-                vault_id: vault_id.to_vec(),
-                token_a: t_a.to_vec(),
-                token_b: t_b.to_vec(),
-                fee_bps: 30,
-                unlock_spec_digest: Vec::new(),
-                unlock_spec_key: key.to_string(),
-                owner_public_key: Vec::new(),
-                vault_proto_bytes: Vec::new(),
-            };
-            let res = crate::runtime::get_runtime().block_on(async {
-                owner
-                    .invoke(AppInvoke {
-                        method: "route.publishRoutingAdvertisement".to_string(),
-                        args: pack(publish.encode_to_vec()),
-                    })
-                    .await
-            });
-            assert!(res.success, "advertise {key}: {:?}", res.error_message);
+            advertise_vault(owner, vault_id, t_a, t_b, key)
         };
         let vault_ab = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
             owner, &pc_a, &pc_b, 10_000, 5_000,
@@ -14512,22 +14524,166 @@ mod funded_creation_tests {
         );
     }
 
+    /// **DISCOVERED, BOUND AND SETTLED AS ONE** (amendment 2c-H B3). The trader
+    /// names only `a` and `c` — no pair — at the profile's depth. The binder
+    /// reads the bounded graph, keeps the pairs a route can cross, composes
+    /// those vaults, and binds `a → b → c` with the hops coupled end to end,
+    /// mirroring both vaults. The trader signs, publishes `X`, and one
+    /// `dlv.unlockRouted` with no vault named settles the route as ONE
+    /// settlement: one bundle over both vaults, `a` down by the input, `c` up
+    /// by exactly the bound final output, `b` untouched, both vaults one
+    /// generation on.
+    #[test]
+    #[serial]
+    fn a_two_hop_route_is_discovered_bound_and_settled_as_one_settlement() {
+        use prost::Message as _;
+        let m = two_pair_market("trader-discovered", 0x5F);
+        m.trader_dev.enter();
+        let trader = m.trader_dev.router();
+        let before = route_balances(&m);
+        let invoke = |method: &str, body: Vec<u8>| {
+            crate::runtime::get_runtime().block_on(async {
+                trader
+                    .invoke(AppInvoke {
+                        method: method.to_string(),
+                        args: pack(body),
+                    })
+                    .await
+            })
+        };
+
+        let bind = invoke(
+            "route.findAndBindBestPath",
+            generated::FindAndBindRouteRequest {
+                input_token: m.pc_a.to_vec(),
+                output_token: m.pc_c.to_vec(),
+                input_amount_u128: (1_000u128).to_be_bytes().to_vec(),
+                max_hops: 0,
+                nonce: vec![0x5F; 32],
+            }
+            .encode_to_vec(),
+        );
+        assert!(
+            bind.success,
+            "the two-pair route binds: {:?}",
+            bind.error_message
+        );
+        let unsigned_bytes = crate::util::text_id::decode_base32_crockford(&app_state_value(&bind))
+            .expect("route bytes");
+        let unsigned = generated::RouteCommitV1::decode(unsigned_bytes.as_slice()).expect("rc");
+        assert_eq!(
+            unsigned
+                .hops
+                .iter()
+                .map(|h| h.vault_id.clone())
+                .collect::<Vec<_>>(),
+            vec![m.vault_ab.to_vec(), m.vault_bc.to_vec()],
+            "hop 0 crosses a/b, hop 1 crosses b/c"
+        );
+        assert_eq!(unsigned.hops[0].token_out, m.pc_b.to_vec());
+        assert_eq!(
+            unsigned.hops[0].token_out, unsigned.hops[1].token_in,
+            "hop 0 hands its output asset to hop 1"
+        );
+        assert_eq!(
+            unsigned.hops[0].expected_output_amount_u128, unsigned.hops[1].input_amount_u128,
+            "hop 0's exact output is hop 1's exact input"
+        );
+        assert_eq!(
+            unsigned.expected_final_output_amount_u128,
+            unsigned.hops[1].expected_output_amount_u128,
+            "the route's final output is its last hop's"
+        );
+        let final_out = u128::from_be_bytes(
+            <[u8; 16]>::try_from(unsigned.expected_final_output_amount_u128.as_slice())
+                .expect("u128"),
+        ) as u64;
+        let dlv_manager = trader.bitcoin_tap.dlv_manager();
+        for vault in [&m.vault_ab, &m.vault_bc] {
+            assert!(
+                crate::runtime::get_runtime()
+                    .block_on(dlv_manager.get_vault(vault))
+                    .is_ok(),
+                "the binder mirrored every hop's vault"
+            );
+        }
+
+        let signed = invoke("route.signRouteCommit", unsigned_bytes);
+        assert!(signed.success, "sign: {:?}", signed.error_message);
+        let signed_bytes = crate::util::text_id::decode_base32_crockford(&app_state_value(&signed))
+            .expect("signed bytes");
+        let rc = generated::RouteCommitV1::decode(signed_bytes.as_slice()).expect("signed rc");
+        let x = crate::sdk::route_commit_sdk::compute_external_commitment(&rc);
+        let published = invoke(
+            "route.publishExternalCommitment",
+            generated::ExternalCommitmentV1 {
+                version: 1,
+                x: x.to_vec(),
+                publisher_public_key: Vec::new(),
+                label: String::new(),
+            }
+            .encode_to_vec(),
+        );
+        assert!(
+            published.success,
+            "publish x: {:?}",
+            published.error_message
+        );
+
+        let res = unlock_route(&m, &rc);
+        assert!(res.success, "the route settles: {:?}", res.error_message);
+        let b = settle_outcome(&res, "realized");
+        assert_eq!(
+            bound_bundle(&b).transitions().len(),
+            2,
+            "one bundle over both vaults"
+        );
+        assert_eq!(
+            route_balances(&m),
+            (before.0 - 1_000, before.1, before.2 + final_out),
+            "a down by the input, c up by exactly the bound final output, b untouched"
+        );
+        assert_eq!(
+            (
+                composed(&m.vault_ab, &m.pc_a, &m.pc_b).0,
+                composed(&m.vault_bc, &m.bc_lo, &m.bc_hi).0,
+            ),
+            (1, 1),
+            "both vaults one generation on"
+        );
+    }
+
     /// The binder binds no route deeper than beta can settle, whatever depth
-    /// the caller asks for: `a → c` is refused at `max_hops = 0` (the
-    /// profile's depth) and at `max_hops = 99` (clamped to it), while `a → b`
-    /// binds one hop and its vault is mirrored. In beta the refusal is
-    /// `EmptyAdvertisementSet`: discovery is scoped to the named pair, and no
-    /// vault advertises `a/c` — the depth is bounded twice over, by discovery
-    /// and by `sofi_profile::bounded_search_depth` (proven on its own there).
-    /// The wallet therefore never signs a route the execution boundary refuses.
+    /// the caller asks for. With the profile at two hops (2c-H H12) and a third
+    /// pair, c/d, advertised:
+    ///
+    /// - `max_hops = 1` reads the named pair only, and no vault advertises
+    ///   a/c: refused;
+    /// - `max_hops = 0` (the profile's depth) and `max_hops = 99` (clamped to
+    ///   it) bind `a → b → c`, in order;
+    /// - `a → d` needs three pairs: at `max_hops = 99` nothing within two hops
+    ///   reaches `d`, so it is refused and nothing deeper is searched;
+    /// - `a → b` binds its one hop, and every bound hop's vault is mirrored.
     #[test]
     #[serial]
     fn the_binder_searches_no_deeper_than_beta_can_settle() {
         use prost::Message as _;
         let m = two_pair_market("trader-clamped", 0x59);
+        m.owner_dev.enter();
+        let owner = m.owner_dev.router();
+        let pc_d = crate::economic_fixtures::mint_asset(owner, "DDD", 2, 40_000);
+        let (cd_lo, cd_hi) = if m.pc_c < pc_d {
+            (m.pc_c, pc_d)
+        } else {
+            (pc_d, m.pc_c)
+        };
+        let vault_cd = crate::sdk::funded_vault_fixture::create_funded_amm_vault(
+            owner, &cd_lo, &cd_hi, 10_000, 10_000,
+        );
+        advertise_vault(owner, &vault_cd, &cd_lo, &cd_hi, "sofi/spec/two-pair-cd");
+
         m.trader_dev.enter();
         let trader = m.trader_dev.router();
-        let _ = &m.owner_dev;
         let bind = |output: &[u8; 32], max_hops: u32, nonce: u8| {
             crate::runtime::get_runtime().block_on(async {
                 trader
@@ -14547,33 +14703,67 @@ mod funded_creation_tests {
                     .await
             })
         };
-        for max_hops in [0u32, 99] {
-            let res = bind(&m.pc_c, max_hops, 0x60);
+        let hops_of = |res: &AppResult| -> Vec<Vec<u8>> {
+            let bytes = crate::util::text_id::decode_base32_crockford(&app_state_value(res))
+                .expect("route bytes");
+            generated::RouteCommitV1::decode(bytes.as_slice())
+                .expect("rc")
+                .hops
+                .into_iter()
+                .map(|h| h.vault_id)
+                .collect()
+        };
+
+        let res = bind(&m.pc_c, 1, 0x60);
+        assert!(!res.success, "max_hops 1: a → c crosses two pairs");
+        let msg = res.error_message.clone().unwrap_or_default();
+        assert!(
+            msg.contains("path search rejected: EmptyAdvertisementSet"),
+            "max_hops 1 reads the named pair only, and no vault advertises a/c: {msg}"
+        );
+        for (max_hops, nonce) in [(0u32, 0x61u8), (99, 0x62)] {
+            let res = bind(&m.pc_c, max_hops, nonce);
             assert!(
-                !res.success,
-                "max_hops {max_hops}: a → c crosses two pairs, and discovery is scoped to the named pair"
+                res.success,
+                "max_hops {max_hops}: a → b → c binds: {:?}",
+                res.error_message
             );
-            let msg = res.error_message.clone().unwrap_or_default();
-            assert!(
-                msg.contains("path search rejected: EmptyAdvertisementSet"),
-                "max_hops {max_hops}: no vault advertises the named pair, and nothing deeper \
-                 is searched: {msg}"
+            assert_eq!(
+                hops_of(&res),
+                vec![m.vault_ab.to_vec(), m.vault_bc.to_vec()],
+                "max_hops {max_hops}: the two-hop route, in order"
             );
         }
-        let res = bind(&m.pc_b, 99, 0x61);
-        assert!(res.success, "a → b binds one hop: {:?}", res.error_message);
-        let unsigned_bytes = crate::util::text_id::decode_base32_crockford(&app_state_value(&res))
-            .expect("route bytes");
-        let unsigned = generated::RouteCommitV1::decode(unsigned_bytes.as_slice()).expect("rc");
-        assert_eq!(unsigned.hops.len(), 1, "the bound route is one hop");
-        assert_eq!(unsigned.hops[0].vault_id, m.vault_ab.to_vec());
-        let dlv_manager = trader.bitcoin_tap.dlv_manager();
+        let res = bind(&pc_d, 99, 0x63);
         assert!(
-            crate::runtime::get_runtime()
-                .block_on(dlv_manager.get_vault(&m.vault_ab))
-                .is_ok(),
-            "the binder mirrored the hop's vault for the trader"
+            !res.success,
+            "a → d needs three hops and the search is clamped to two: {:?}",
+            res.error_message
         );
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("path search rejected"),
+            "refused by the bounded search: {:?}",
+            res.error_message
+        );
+        let res = bind(&m.pc_b, 99, 0x64);
+        assert!(res.success, "a → b binds one hop: {:?}", res.error_message);
+        assert_eq!(
+            hops_of(&res),
+            vec![m.vault_ab.to_vec()],
+            "the direct pair is one hop"
+        );
+        let dlv_manager = trader.bitcoin_tap.dlv_manager();
+        for vault in [&m.vault_ab, &m.vault_bc] {
+            assert!(
+                crate::runtime::get_runtime()
+                    .block_on(dlv_manager.get_vault(vault))
+                    .is_ok(),
+                "the binder mirrored every bound hop's vault"
+            );
+        }
     }
 
     /// The `value` of an AppStateResponse a route returned.

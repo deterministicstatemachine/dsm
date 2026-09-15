@@ -809,11 +809,12 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
-    /// `route.findAndBindBestPath` — run chunk #2 path search over
-    /// the locally-known advertisements (caller should
-    /// `syncVaultsForPair` first to refresh) and bind the chosen Path
-    /// into an UNSIGNED `RouteCommitV1` (chunk #3 binder).  Returns
-    /// the unsigned proto Base32-encoded; caller follows up with
+    /// `route.findAndBindBestPath` — discover the advertised liquidity a
+    /// route may cross (the named pair for one hop; the bounded graph for
+    /// more), compose every candidate vault from its owner's proven state,
+    /// search for the best path within ONE settlement domain, mirror every hop
+    /// vault, and bind the path into an UNSIGNED `RouteCommitV1`. Returns the
+    /// unsigned proto Base32-encoded; the caller follows up with
     /// `route.signRouteCommit` to stamp the wallet pk + signature.
     async fn route_find_and_bind_best_path(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
@@ -858,15 +859,28 @@ impl AppRouterImpl {
         let mut nonce = [0u8; 32];
         nonce.copy_from_slice(&req.nonce);
 
-        // Fetch + verify ads for the canonical pair.  We trust the
-        // local set: the verified-search wrapper drops any tampered
-        // ads on its way through `fetch_and_verify_vault_proto`.
-        let ads = match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
-            &req.input_token,
-            &req.output_token,
-        )
-        .await
-        {
+        // DISCOVERY IS THE BINDER'S. One hop needs only the named pair's
+        // advertisements. More needs the advertised GRAPH, and reads it
+        // bounded and deterministic (`load_active_advertisements_for_graph`):
+        // keys only from one storage member, a refusal past the key cap, the
+        // pairs pruned to those a route of `max_hops` can cross, and bodies for
+        // the survivors only. Every survivor is then composed below exactly as
+        // a pair's are, and the verified-search wrapper drops tampered ads.
+        let loaded = if max_hops > 1 {
+            crate::sdk::routing_sdk::load_active_advertisements_for_graph(
+                &req.input_token,
+                &req.output_token,
+                max_hops,
+            )
+            .await
+        } else {
+            crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+                &req.input_token,
+                &req.output_token,
+            )
+            .await
+        };
+        let ads = match loaded {
             Ok(v) => v.into_iter().map(|p| p.advertisement).collect::<Vec<_>>(),
             Err(e) => {
                 return err(format!("route.findAndBindBestPath: load ads failed: {e}"));
@@ -897,6 +911,12 @@ impl AppRouterImpl {
         let mut hop_parent_bindings: std::collections::HashMap<
             [u8; 32],
             crate::sdk::route_commit_sdk::HopParentBinding,
+        > = std::collections::HashMap::new();
+        // Each composed vault's settlement domain, so the search binds no route
+        // whose vaults could not be bound as one (amendment 2c-H H15).
+        let mut settlement_domains: std::collections::HashMap<
+            [u8; 32],
+            crate::sdk::routing_path_sdk::SettlementDomain,
         > = std::collections::HashMap::new();
         for mut ad in ads.into_iter() {
             if ad.vault_id.len() != 32 {
@@ -1053,6 +1073,15 @@ impl AppRouterImpl {
                             parent_binding: composed.c_n,
                         },
                     );
+                    // THE VAULT'S SETTLEMENT DOMAIN: the set and quorum its
+                    // composed state commits (Req 6.16, Req 9.4).
+                    settlement_domains.insert(
+                        vid,
+                        crate::sdk::routing_path_sdk::SettlementDomain {
+                            storage_set_id: composed.storage_set_id,
+                            quorum: composed.state.quorum,
+                        },
+                    );
                     ads_after_composition.push(ad);
                 }
                 Err(e) => {
@@ -1071,8 +1100,12 @@ impl AppRouterImpl {
         // no N-best enumeration and no pre-signed fallback. If the vault
         // moves between quote and unlock, the gate rejects and the caller
         // re-quotes + re-signs.
-        let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
+        // ONE SETTLEMENT DOMAIN PER ROUTE (amendment 2c-H H15): the binder
+        // excludes a mixed-set route before it is ever signed; the unlock and
+        // `bind_settlement` refuse one again.
+        let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path_within_one_domain(
             &ads,
+            &settlement_domains,
             &req.input_token,
             &req.output_token,
             input_amount,

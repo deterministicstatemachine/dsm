@@ -22,12 +22,20 @@
 //!   * No "claimed" lifecycle state — SoFi vaults are continuously
 //!     usable until exhausted (reserves drained) or withdrawn
 //!     (owner-initiated).
+//!
+//! A multi-hop search reads the advertised GRAPH instead of one pair
+//! (`load_active_advertisements_for_graph`), bounded and deterministic: keys
+//! only, from ONE storage member, at most
+//! [`MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH`] of them or a refusal; the
+//! pairs the keys name are pruned to those a route of the allowed depth can
+//! cross, and only the survivors' bodies are fetched.
 
 use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
 use crate::util::text_id::encode_base32_crockford;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// BLAKE3 domain tag binding the advertisement to the full vault proto.
 pub(crate) const ROUTING_VAULT_AD_DOMAIN: dsm::crypto::domain::TaggedHashDomain<'static> =
@@ -89,6 +97,78 @@ pub(crate) fn advertisement_prefix_for_pair(token_a: &[u8], token_b: &[u8]) -> S
         a = encode_base32_crockford(lower),
         b = encode_base32_crockford(higher),
     )
+}
+
+/// The canonical pair an advertisement key names, or `None` for anything that
+/// is not exactly `advertisement_key(pair, vault_id)` — another root, a
+/// non-canonical pair order, a missing or extra segment, a vault id that is not
+/// 32 bytes, or an encoding that does not round-trip. Pure: nothing is fetched,
+/// which is what lets a search prune pairs before reading a single body.
+pub(crate) fn advertised_pair_from_key(key: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let rest = key.strip_prefix(ROUTING_VAULT_AD_ROOT)?;
+    let mut segments = rest.split('/');
+    let (a, b, id) = (segments.next()?, segments.next()?, segments.next()?);
+    if segments.next().is_some() {
+        return None;
+    }
+    let a = crate::util::text_id::decode_base32_crockford(a)?;
+    let b = crate::util::text_id::decode_base32_crockford(b)?;
+    let vault_id = <[u8; 32]>::try_from(crate::util::text_id::decode_base32_crockford(id)?).ok()?;
+    (advertisement_key(&a, &b, &vault_id) == key).then_some((a, b))
+}
+
+/// The pairs, of `pairs`, that can lie on a route from `input` to `output` of
+/// at most `max_hops` hops. Tokens are nodes and each pair an undirected edge;
+/// an edge survives when the shortest way in from `input`, plus one, plus the
+/// shortest way out to `output` fits the depth. Unrelated liquidity, and pairs
+/// only a deeper route could use, are never read.
+pub(crate) fn pairs_on_a_route(
+    pairs: &BTreeSet<(Vec<u8>, Vec<u8>)>,
+    input: &[u8],
+    output: &[u8],
+    max_hops: usize,
+) -> BTreeSet<(Vec<u8>, Vec<u8>)> {
+    fn distances(
+        from: &[u8],
+        pairs: &BTreeSet<(Vec<u8>, Vec<u8>)>,
+        limit: usize,
+    ) -> BTreeMap<Vec<u8>, usize> {
+        let mut dist: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+        let mut queue = std::collections::VecDeque::new();
+        dist.insert(from.to_vec(), 0);
+        queue.push_back(from.to_vec());
+        while let Some(node) = queue.pop_front() {
+            let d = dist[&node];
+            if d >= limit {
+                continue;
+            }
+            for (a, b) in pairs {
+                let next = if *a == node {
+                    b
+                } else if *b == node {
+                    a
+                } else {
+                    continue;
+                };
+                if !dist.contains_key(next) {
+                    dist.insert(next.clone(), d + 1);
+                    queue.push_back(next.clone());
+                }
+            }
+        }
+        dist
+    }
+    let from_input = distances(input, pairs, max_hops);
+    let to_output = distances(output, pairs, max_hops);
+    let fits = |u: &Vec<u8>, v: &Vec<u8>| match (from_input.get(u), to_output.get(v)) {
+        (Some(d_in), Some(d_out)) => d_in + 1 + d_out <= max_hops,
+        _ => false,
+    };
+    pairs
+        .iter()
+        .filter(|(a, b)| fits(a, b) || fits(b, a))
+        .cloned()
+        .collect()
 }
 
 /// Inputs for `publish_active_advertisement` — keeps the call surface
@@ -335,7 +415,6 @@ pub(crate) async fn load_all_advertisements_for_pair(
     token_a: &[u8],
     token_b: &[u8],
 ) -> Result<Vec<PublishedRoutingAdvertisement>, dsm::types::error::DsmError> {
-    use std::collections::HashMap;
     const LIST_LIMIT: u32 = 200;
 
     let prefix = advertisement_prefix_for_pair(token_a, token_b);
@@ -376,6 +455,16 @@ pub(crate) async fn load_all_advertisements_for_pair(
         }
     }
 
+    Ok(latest_per_vault(fetched))
+}
+
+/// One advertisement per vault: the highest `updated_state_number`, the
+/// lex-smaller key on a tie; returned in vault-id order.
+fn latest_per_vault(
+    mut fetched: Vec<PublishedRoutingAdvertisement>,
+) -> Vec<PublishedRoutingAdvertisement> {
+    use std::collections::HashMap;
+
     fetched.sort_by(|left, right| left.key.cmp(&right.key));
     let mut deduped: HashMap<Vec<u8>, PublishedRoutingAdvertisement> = HashMap::new();
     for entry in fetched {
@@ -406,7 +495,104 @@ pub(crate) async fn load_all_advertisements_for_pair(
             .cmp(&right.advertisement.vault_id)
             .then(left.key.cmp(&right.key))
     });
-    Ok(out)
+    out
+}
+
+/// Most advertisement KEYS one multi-hop search considers.
+///
+/// An AVAILABILITY boundary, not a security one. Advertisement authenticity is
+/// established later, by composition against the owner's proven state; an
+/// untrusted or noisy index can fill `sofi/vault/` with well-formed keys and
+/// make the graph search refuse before any body is read. That denies
+/// multi-hop DISCOVERY (a direct pair still quotes) and is never an economic
+/// failure: nothing settles without the owner-proven composition and the
+/// trader's own signed route.
+pub(crate) const MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH: usize = 512;
+
+/// Every ACTIVE advertisement a route from `input_token` to `output_token` of
+/// at most `max_hops` hops could cross — the graph a multi-hop search walks,
+/// bounded and deterministic:
+///
+/// ```text
+/// keys only, from ONE storage member          one view per run, never mixed
+/// more than 512 keys                          refused, never truncated
+/// each key's pair parsed from the key         nothing fetched to prune
+/// pairs pruned to a route of <= max_hops      unrelated liquidity never read
+/// bodies fetched for the survivors only       a body naming another pair: dropped
+/// one advertisement per vault, active only    the pair loader's own rule
+/// ```
+pub(crate) async fn load_active_advertisements_for_graph(
+    input_token: &[u8],
+    output_token: &[u8],
+    max_hops: usize,
+) -> Result<Vec<PublishedRoutingAdvertisement>, dsm::types::error::DsmError> {
+    let listing = BitcoinTapSdk::storage_list_all_keys_pinned(
+        ROUTING_VAULT_AD_ROOT,
+        MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH,
+    )
+    .await?;
+    if listing.exceeded {
+        return Err(dsm::types::error::DsmError::invalid_operation(format!(
+            "routing graph: storage member {} lists more than {} advertisement keys under {}; \
+             multi-hop discovery is refused rather than truncated (a direct pair still quotes)",
+            listing.endpoint, MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH, ROUTING_VAULT_AD_ROOT
+        )));
+    }
+    let listed = listing.keys.len();
+    let mut keys_by_pair: BTreeMap<(Vec<u8>, Vec<u8>), Vec<String>> = BTreeMap::new();
+    for key in listing.keys {
+        if let Some(pair) = advertised_pair_from_key(&key) {
+            keys_by_pair.entry(pair).or_default().push(key);
+        }
+    }
+    let pairs: BTreeSet<(Vec<u8>, Vec<u8>)> = keys_by_pair.keys().cloned().collect();
+    let survivors = pairs_on_a_route(&pairs, input_token, output_token, max_hops);
+    log::info!(
+        "[routing.graph] member {} listed {listed} advertisement key(s) over {} pair(s); {} \
+         pair(s) lie on a route of at most {max_hops} hop(s)",
+        listing.endpoint,
+        pairs.len(),
+        survivors.len()
+    );
+    let mut fetched: Vec<PublishedRoutingAdvertisement> = Vec::new();
+    for (pair, keys) in keys_by_pair {
+        if !survivors.contains(&pair) {
+            continue;
+        }
+        for key in keys {
+            let payload = match BitcoinTapSdk::storage_get_bytes(&key).await {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("[routing.graph] skipping {key}: fetch failed: {e}");
+                    continue;
+                }
+            };
+            let advertisement =
+                match generated::RoutingVaultAdvertisementV1::decode(payload.as_slice()) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        log::warn!("[routing.graph] skipping {key}: decode failed: {e}");
+                        continue;
+                    }
+                };
+            if (
+                advertisement.token_a.as_slice(),
+                advertisement.token_b.as_slice(),
+            ) != (pair.0.as_slice(), pair.1.as_slice())
+            {
+                log::warn!(
+                    "[routing.graph] skipping {key}: its advertisement names another pair than \
+                     its key"
+                );
+                continue;
+            }
+            fetched.push(PublishedRoutingAdvertisement { key, advertisement });
+        }
+    }
+    Ok(latest_per_vault(fetched)
+        .into_iter()
+        .filter(|p| p.advertisement.lifecycle_state == LIFECYCLE_ACTIVE)
+        .collect())
 }
 
 /// Fetch the full vault proto referenced by an advertisement and verify
@@ -702,6 +888,206 @@ mod tests {
         .await
         .expect("publish_active_advertisement");
         proto
+    }
+
+    /// A key names exactly one canonical pair, recovered from the key alone —
+    /// and anything that is not exactly an advertisement key names nothing.
+    #[test]
+    fn an_advertisement_key_names_its_pair_and_nothing_else() {
+        let (lo, hi) = (token(0xC1), token(0xC2));
+        let v = vid(0xC1);
+        assert_eq!(
+            advertised_pair_from_key(&advertisement_key(&hi, &lo, &v)),
+            Some((lo.clone(), hi.clone())),
+            "either argument order names the canonical pair"
+        );
+        let b32 = encode_base32_crockford;
+        for bad in [
+            format!(
+                "{ROUTING_VAULT_PROTO_ROOT}{}/{}/{}",
+                b32(&lo),
+                b32(&hi),
+                b32(&v)
+            ),
+            format!(
+                "{ROUTING_VAULT_AD_ROOT}{}/{}/{}",
+                b32(&hi),
+                b32(&lo),
+                b32(&v)
+            ),
+            format!(
+                "{ROUTING_VAULT_AD_ROOT}{}/{}/{}/extra",
+                b32(&lo),
+                b32(&hi),
+                b32(&v)
+            ),
+            format!("{ROUTING_VAULT_AD_ROOT}{}/{}", b32(&lo), b32(&hi)),
+            format!(
+                "{ROUTING_VAULT_AD_ROOT}{}/{}/{}",
+                b32(&lo),
+                b32(&hi),
+                b32(&v[..31])
+            ),
+            format!(
+                "{ROUTING_VAULT_AD_ROOT}{}/{}/not-base32!",
+                b32(&lo),
+                b32(&hi)
+            ),
+        ] {
+            assert_eq!(advertised_pair_from_key(&bad), None, "{bad}");
+        }
+    }
+
+    /// The prune keeps exactly the pairs a route of the allowed depth can
+    /// cross: `a → c` in two hops keeps a/b and b/c and drops c/d (only a
+    /// deeper route reaches it) and x/y (unrelated); one hop keeps nothing
+    /// (no a/c vault); `a → d` needs three.
+    #[test]
+    fn only_pairs_a_route_can_cross_within_the_depth_survive() {
+        let pair = |x: &str, y: &str| {
+            let (l, h) = canonical_token_pair(x.as_bytes(), y.as_bytes());
+            (l.to_vec(), h.to_vec())
+        };
+        let all: BTreeSet<_> = [
+            pair("a", "b"),
+            pair("b", "c"),
+            pair("c", "d"),
+            pair("x", "y"),
+        ]
+        .into_iter()
+        .collect();
+        let set = |ps: &[(Vec<u8>, Vec<u8>)]| ps.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            pairs_on_a_route(&all, b"a", b"c", 2),
+            set(&[pair("a", "b"), pair("b", "c")])
+        );
+        assert!(pairs_on_a_route(&all, b"a", b"c", 1).is_empty());
+        assert!(pairs_on_a_route(&all, b"a", b"d", 2).is_empty());
+        assert_eq!(
+            pairs_on_a_route(&all, b"a", b"d", 3),
+            set(&[pair("a", "b"), pair("b", "c"), pair("c", "d")])
+        );
+        assert_eq!(
+            pairs_on_a_route(&all, b"a", b"b", 2),
+            set(&[pair("a", "b")]),
+            "a direct pair takes no detour through b/c"
+        );
+    }
+
+    /// Bodies are read ONLY for pairs a route can cross. `a → c` in two hops
+    /// returns the a/b and b/c vaults, and the store was never asked for the
+    /// unrelated d/e advertisement nor for c/d, which only a deeper route uses.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_graph_loader_reads_bodies_only_for_pairs_a_route_can_cross() {
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
+        let (a, b, c, d, e) = (
+            token(0xE1),
+            token(0xE2),
+            token(0xE3),
+            token(0xE4),
+            token(0xE5),
+        );
+        publish_simple(0xE1, &a, &b, &vid(0xE1), 1_000, 1_000).await;
+        publish_simple(0xE2, &b, &c, &vid(0xE2), 1_000, 1_000).await;
+        publish_simple(0xE3, &d, &e, &vid(0xE3), 1_000, 1_000).await;
+        publish_simple(0xE4, &c, &d, &vid(0xE4), 1_000, 1_000).await;
+        let reads_before = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::dbtc_storage_get_log().len();
+
+        let ads = load_active_advertisements_for_graph(&a, &c, 2)
+            .await
+            .expect("graph");
+        let mut ids: Vec<Vec<u8>> = ads
+            .iter()
+            .map(|p| p.advertisement.vault_id.clone())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec![vid(0xE1).to_vec(), vid(0xE2).to_vec()]);
+
+        let reads: Vec<String> = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::dbtc_storage_get_log()
+            .into_iter()
+            .skip(reads_before)
+            .collect();
+        assert!(reads.contains(&advertisement_key(&a, &b, &vid(0xE1))));
+        for pruned in [
+            advertisement_key(&d, &e, &vid(0xE3)),
+            advertisement_key(&c, &d, &vid(0xE4)),
+        ] {
+            assert!(!reads.contains(&pruned), "{pruned} was never read");
+        }
+    }
+
+    /// The key cap is a refusal, never a truncation: exactly the cap is
+    /// served, and one key more refuses the search before any body is read.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_graph_loader_refuses_past_its_key_cap_instead_of_truncating() {
+        use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
+        BitcoinTapSdk::reset_dbtc_storage_test_state();
+        let (a, b) = (token(0xF1), token(0xF2));
+        let nth_vault = |n: usize| {
+            let mut v = [0x5Au8; 32];
+            v[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            v
+        };
+        for n in 0..MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH {
+            BitcoinTapSdk::seed_dbtc_storage_object(
+                advertisement_key(&a, &b, &nth_vault(n)),
+                b"not an advertisement".to_vec(),
+            );
+        }
+        assert!(
+            load_active_advertisements_for_graph(&a, &b, 2)
+                .await
+                .is_ok(),
+            "exactly the cap is served"
+        );
+        BitcoinTapSdk::seed_dbtc_storage_object(
+            advertisement_key(
+                &a,
+                &b,
+                &nth_vault(MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH),
+            ),
+            b"not an advertisement".to_vec(),
+        );
+        let reads_before = BitcoinTapSdk::dbtc_storage_get_log().len();
+        let refusal = load_active_advertisements_for_graph(&a, &b, 2)
+            .await
+            .expect_err("one key past the cap refuses the search");
+        assert!(
+            refusal
+                .to_string()
+                .contains(&MAX_ROUTING_ADVERTISEMENT_KEYS_PER_SEARCH.to_string()),
+            "the refusal names the cap: {refusal}"
+        );
+        assert_eq!(
+            BitcoinTapSdk::dbtc_storage_get_log().len(),
+            reads_before,
+            "refused before any body was read"
+        );
+    }
+
+    /// A body stored under one pair's key that names ANOTHER pair is not that
+    /// pair's liquidity: the key said a/b, the advertisement says d/e, and the
+    /// graph for `a → b` holds nothing.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_body_that_names_another_pair_than_its_key_is_dropped() {
+        use crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk;
+        BitcoinTapSdk::reset_dbtc_storage_test_state();
+        let (a, b, d, e) = (token(0xD1), token(0xD2), token(0xD4), token(0xD5));
+        publish_simple(0xD3, &d, &e, &vid(0xD3), 1_000, 1_000).await;
+        let body = BitcoinTapSdk::storage_get_bytes(&advertisement_key(&d, &e, &vid(0xD3)))
+            .await
+            .expect("the d/e advertisement");
+        BitcoinTapSdk::seed_dbtc_storage_object(advertisement_key(&a, &b, &vid(0xD3)), body);
+        let ads = load_active_advertisements_for_graph(&a, &b, 2)
+            .await
+            .expect("graph");
+        assert!(
+            ads.is_empty(),
+            "an a/b key carrying a d/e advertisement is not a/b liquidity"
+        );
     }
 
     #[tokio::test]
