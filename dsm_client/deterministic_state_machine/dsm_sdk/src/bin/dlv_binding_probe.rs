@@ -14,7 +14,7 @@
 //! — because it is the same code.
 //!
 //! ```text
-//! dlv_binding_probe <vault_id_b32> <parent_c_n_b32> <generation> [storage_set_id_b32]
+//! dlv_binding_probe <vault_id_b32> <token_a_b32> <token_b_b32> <fee_bps> [<generation>:<parent_c_n_b32> ...]
 //! ```
 //!
 //! Emits `key=value` lines and exits 0 whenever the READ succeeded — including
@@ -23,23 +23,40 @@
 //! and conflating "could not ask" with "wrong answer" is the exact defect the
 //! four-valued observation exists to prevent.
 
-use dsm_sdk::sdk::binding_occupancy::probe_vault_bindings;
+use dsm_sdk::sdk::binding_occupancy::{probe_vault_bindings, BindingProbe};
 use dsm_sdk::util::text_id::decode_base32_crockford;
 
-/// The probe's four arguments, parsed. Named because a bare tuple of three
-/// arrays and an int is unreadable at the call site and trips the complexity
+/// The probe's arguments, parsed. Named because a bare tuple of three arrays,
+/// an int and a list is unreadable at the call site and trips the complexity
 /// lint besides.
 struct ProbeArgs {
     vault_id: [u8; 32],
     token_a: [u8; 32],
     token_b: [u8; 32],
     fee_bps: u32,
+    /// Parents to observe by generation and `c_n`, whatever the current anchor.
+    pinned: Vec<(u64, [u8; 32])>,
 }
 
 fn arg32(v: &str, what: &str) -> Result<[u8; 32], String> {
     let bytes = decode_base32_crockford(v).ok_or_else(|| format!("{what} is not base32"))?;
     <[u8; 32]>::try_from(bytes.as_slice())
         .map_err(|_| format!("{what} is not 32 bytes (got {})", bytes.len()))
+}
+
+fn pinned_arg(v: &str) -> Result<(u64, [u8; 32]), String> {
+    let (generation, c_n) = v
+        .split_once(':')
+        .ok_or_else(|| format!("pinned parent {v} is not <generation>:<parent_c_n_b32>"))?;
+    let generation = generation
+        .parse::<u64>()
+        .map_err(|e| format!("pinned generation {generation} is not a u64: {e}"))?;
+    Ok((generation, arg32(c_n, "pinned parent_c_n")?))
+}
+
+fn print_row(generation: u64, c_n: &[u8; 32], probe: &BindingProbe, role: &str) {
+    println!("== generation={generation} role={role}");
+    print!("{}", probe.render(c_n));
 }
 
 fn main() -> std::process::ExitCode {
@@ -61,8 +78,10 @@ fn main() -> std::process::ExitCode {
 
 async fn run() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 5 {
-        eprintln!("usage: dlv_binding_probe <vault_id_b32> <token_a_b32> <token_b_b32> <fee_bps>");
+    if args.len() < 5 {
+        eprintln!(
+            "usage: dlv_binding_probe <vault_id_b32> <token_a_b32> <token_b_b32> <fee_bps> [<generation>:<parent_c_n_b32> ...]"
+        );
         return std::process::ExitCode::from(2);
     }
     let parsed = (|| -> Result<ProbeArgs, String> {
@@ -73,6 +92,10 @@ async fn run() -> std::process::ExitCode {
             fee_bps: args[4]
                 .parse::<u32>()
                 .map_err(|e| format!("fee_bps is not a u32: {e}"))?,
+            pinned: args[5..]
+                .iter()
+                .map(|v| pinned_arg(v))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     })();
     let a = match parsed {
@@ -83,17 +106,26 @@ async fn run() -> std::process::ExitCode {
         }
     };
 
-    match probe_vault_bindings(&a.vault_id, &a.token_a, &a.token_b, a.fee_bps).await {
+    // A host tool has no app startup to set the storage base dir, and the SDK
+    // panics without one. Each probe run gets its own scratch directory.
+    let scratch = std::env::temp_dir().join(format!("dlv_binding_probe-{}", std::process::id()));
+    if let Err(e) = dsm_sdk::storage_utils::set_storage_base_dir(scratch) {
+        eprintln!("dlv_binding_probe: could not set a storage base dir: {e}");
+        return std::process::ExitCode::from(3);
+    }
+
+    match probe_vault_bindings(&a.vault_id, &a.token_a, &a.token_b, a.fee_bps, &a.pinned).await {
         Ok(rows) => {
-            let last = rows.len().saturating_sub(1);
-            for (i, (generation, c_n, probe)) in rows.iter().enumerate() {
-                // The last row is the FRONTIER; the rest were consumed.
-                println!(
-                    "== generation={generation} role={}",
-                    if i == last { "frontier" } else { "consumed" }
-                );
-                print!("{}", probe.render(c_n));
+            // Consumed parents the composition folded, then the pinned ones, then
+            // the FRONTIER.
+            for (generation, c_n, probe) in &rows.consumed {
+                print_row(*generation, c_n, probe, "consumed");
             }
+            for (generation, c_n, probe) in &rows.pinned {
+                print_row(*generation, c_n, probe, "pinned");
+            }
+            let (generation, c_n, probe) = &rows.frontier;
+            print_row(*generation, c_n, probe, "frontier");
             std::process::ExitCode::SUCCESS
         }
         Err(e) => {

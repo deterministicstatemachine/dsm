@@ -2,11 +2,13 @@
 """Drive the SoFi/DLV market on the rig through the PRODUCTION UI (CDP substitutes for finger taps only).
 
 usage:
-  rig_dlv_market.py create-token <name> <serial> <port> <TICKER> <alias> <decimals> <supply> <alloc>
+  rig_dlv_market.py create-token <name> <serial> <port> <TICKER> <alias> <decimals>   # unlimited supply, mint/burn on, nothing allocated
+  rig_dlv_market.py add-token    <name> <serial> <port> <policyAnchor>       # ADD TOKEN by CPTA anchor (adoption)
+  rig_dlv_market.py mint         <name> <serial> <port> <SYMBOL> <amountBase> # creator mints through the policy
   rig_dlv_market.py anchors      <name> <serial> <port>                      # ticker -> CPTA anchor (from the Liquidity picker)
-  rig_dlv_market.py create-vault <name> <serial> <port> <anchorA> <anchorB> <reserveA> <reserveB> <feeBps> <policyAnchor>
+  rig_dlv_market.py create-vault <name> <serial> <port> <anchorA> <anchorB> <reserveA> <reserveB> <feeBps>
   rig_dlv_market.py vaults       <name> <serial> <port>                      # My vaults lines (reserves / ad seq / pending)
-  rig_dlv_market.py swap         <name> <serial> <port> <amountBase> <fromAnchor> <toAnchor> [quote|execute|full]
+  rig_dlv_market.py swap         <name> <serial> <port> <inputBase> <fromAnchor> <toAnchor> [quote|execute|full]   # amount is the INPUT; the quote's output is exact
   rig_dlv_market.py reconcile    <name> <serial> <port>
   rig_dlv_market.py balances     <name> <serial> <port>
   rig_dlv_market.py offline      <name> <serial> <port>                      # am force-stop (adb survives)
@@ -124,23 +126,73 @@ if cmd == 'balances':
     log(f"balances: {rows}"); go_home(); sys.exit(0)
 
 if cmd == 'create-token':
-    ticker, alias, decimals, supply, alloc = args[0], args[1], args[2], args[3], args[4]
+    ticker, alias, decimals = args[0], args[1], args[2]
     go_home(); home_brick('TOKENS'); wait_text('Create Token', 20); time.sleep(1)
     js_click_text('+ Create Token', exact=False); wait_text('Create Token Policy', 20)
     log(f"ticker: {js_set_input('input#tcd-ticker', ticker)} alias: {js_set_input('input#tcd-alias', alias)}")
     js_click_sel('.tcd-btn--pri'); time.sleep(1.2)
     # step 2: decimals slider (native setter), supply, allocation
     d.eval_js(f"(() => {{ const el=document.querySelector('input[type=range].tcd-slider'); if(!el) return 'NOEL'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,'{decimals}'); el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return el.value; }})()")
-    log(f"supply: {js_set_input('input#tcd-supply', supply)} alloc: {js_set_input('input#tcd-alloc', alloc)}")
+    # Beta refuses capped issuance and a non-zero initial allocation, and mint/burn is off by
+    # default: switch on unlimited supply and mint/burn authority; nothing is allocated.
+    for toggle in ('tcd-unlimited', 'tcd-mintburn'):
+        state = d.eval_js("(() => { const el=document.getElementById('%s'); if(!el) return 'NOEL'; if(!el.checked) el.click(); return String(el.checked); })()" % toggle)
+        log(f"{toggle}: {state}")
     js_click_sel('.tcd-btn--pri'); time.sleep(1.2)
     r = js_click_sel('.tcd-btn--create'); log(f"publish: {r}")
     wait_text('Policy Published', 120)
     card = d.eval_js("(document.querySelector('.tcd-card')||{}).innerText||''")
-    m = re.search(r'POLICY ANCHOR \(CPTA\)\s+([0-9A-HJKMNP-TV-Z]{52})', card)
+    m = re.search(r'POLICY ANCHOR \(CPTA\)\s*([0-9A-HJKMNP-TV-Z]{52})', card, re.I)
     log(f"created {ticker}; anchor={m.group(1) if m else 'NOT FOUND'}")
     print("ANCHOR:", m.group(1) if m else '')
     js_click_sel('.tcd-btn--pri'); time.sleep(1)   # Done
     go_home(); sys.exit(0)
+
+if cmd == 'add-token':
+    anchor = args[0]
+    go_home(); home_brick('TOKENS'); wait_text('Add Token', 20); time.sleep(1)
+    log(f"open: {js_click_text('+ Add Token (CPTA)', exact=True)}"); time.sleep(0.8)
+    log(f"anchor: {js_set_input('input[aria-label=\"CPTA policy anchor\"]', anchor)[:12]}…")
+    log(f"ADD: {js_click_text('ADD', exact=True)}")
+    t0 = time.time(); got = None
+    while time.time() - t0 < 120:
+        status = d.eval_js("[...document.querySelectorAll('[role=status]')].map(e=>e.innerText).join(' || ')")
+        banner = d.eval_js("[...document.querySelectorAll('.error-banner,.warning-banner,[role=alert]')].map(e=>e.innerText).join(' || ')")
+        busy = d.eval_js("[...document.querySelectorAll('button')].some(b=>b.innerText.trim()==='ADDING...')")
+        if status and not busy: got = 'added'; log(f"status: {status[:200]}"); break
+        if banner and not busy: got = 'refused'; log(f"banner: {banner[:200]}"); break
+        time.sleep(0.8)
+    log(f"result: {got}")
+    go_home(); sys.exit(0 if got == 'added' else 2)
+
+if cmd == 'mint':
+    symbol, amount = args[0], args[1]
+    go_home(); home_brick('TOKENS'); wait_text('Add Token', 20); time.sleep(1.5)
+    # The success banner is cleared by the post-mint balance refresh, so the row's own
+    # balance text changing is the durable signal; the banner is only a faster path.
+    # Match the balance span itself ("<amount> <SYMBOL>"): once the row expands, its detail panel
+    # repeats the ticker, so anchoring on the ticker span finds the wrong container.
+    row_balance = lambda: d.eval_js(f"""(() => {{ const re=new RegExp('^([0-9][0-9.,]*) '+{symbol!r}+'(?![A-Za-z0-9])');
+      const hit=[...document.querySelectorAll('span')].map(x=>x.textContent.trim().match(re)).find(m=>m); return hit ? hit[1] : 'NOBAL'; }})()""")
+    before = row_balance(); log(f"balance before: {before}")
+    r = d.eval_js(f"""(() => {{ const S={symbol!r};
+      const el=[...document.querySelectorAll('span,div')].filter(e=>e.textContent.trim()===S).pop();
+      if(!el) return 'NOROW'; el.scrollIntoView({{block:'center',behavior:'instant'}}); {MOUSE}; return 'EXPANDED'; }})()""")
+    log(f"row {symbol}: {r}"); time.sleep(1.2)
+    log(f"MINT: {js_click_text('MINT', exact=True)}"); time.sleep(0.8)
+    log(f"amount: {js_set_input('input[aria-label=\"mint amount\"]', amount)}")
+    log(f"CONFIRM: {js_click_text('CONFIRM', exact=True)}")
+    t0 = time.time(); got = None
+    while time.time() - t0 < 180 and got is None:
+        sc = d.screen_text().lower()
+        if f'minted {amount}'.lower() in sc: got = 'minted'
+        elif any(w in sc for w in ('failed', 'refused', 'error')): got = 'error'
+        else:
+            now = row_balance()
+            if now not in (before, 'NOBAL'): got = 'minted'; log(f"balance after: {now}")
+        time.sleep(0.7)
+    log(f"result: {got} :: {screen()[:240]}")
+    go_home(); sys.exit(0 if got == 'minted' else 2)
 
 if cmd == 'anchors':
     open_liquidity(); js_click_text('+ Create vault', exact=False); wait_text('New AMM vault', 20)
@@ -149,18 +201,17 @@ if cmd == 'anchors':
     js_click_text('Cancel', exact=True); go_home(); sys.exit(0)
 
 if cmd == 'create-vault':
-    a, b, ra, rb, fee, pol = args[0], args[1], args[2], args[3], args[4], args[5]
+    a, b, ra, rb, fee = args[0], args[1], args[2], args[3], args[4]
     open_liquidity(); js_click_text('+ Create vault', exact=False); wait_text('New AMM vault', 20)
     log(f"tokenA: {js_set_select('select#liq-token-a', a)[:20]}"); time.sleep(0.5)
     log(f"tokenB: {js_set_select('select#liq-token-b', b)[:20]}")
     log(f"reserves: {js_set_input('input#liq-reserve-a', ra)} / {js_set_input('input#liq-reserve-b', rb)} fee: {js_set_input('input#liq-fee', fee)}")
-    log(f"policy: {js_set_input('textarea#liq-policy', pol)[:16]}…")
     time.sleep(0.5)
     r = js_click_text('Create', exact=True); log(f"Create: {r}")
     wait_text('Create AMM vault', 20); log(f"confirm: {js_click_sel('button.bilateral-btn-accept')}")
-    got = wait_text(None, 120, any_of=['Vault created', 'error', 'failed'])
+    got = wait_text(None, 180, any_of=['Vault created + published', 'not yet advertised', 'error', 'failed', 'must be lex-lower'])
     log(f"result: {got} :: {screen()[:300]}")
-    sys.exit(0 if got == 'Vault created' else 2)
+    sys.exit(0 if got == 'Vault created + published' else 3 if got == 'not yet advertised' else 4 if got == 'must be lex-lower' else 2)
 
 if cmd == 'vaults':
     open_liquidity(); js_click_sel('button[aria-label="Refresh"]'); time.sleep(3)
@@ -170,8 +221,14 @@ if cmd == 'vaults':
     go_home(); sys.exit(0)
 
 if cmd == 'reconcile':
-    open_liquidity(); js_click_sel('button[aria-label="Refresh"]'); time.sleep(3)
+    open_liquidity(); js_click_sel('button[aria-label="Refresh"]')
+    # The pending-trade line and its Reconcile button render only after the refresh completes.
+    t0 = time.time()
+    while time.time() - t0 < 60 and 'settled trade' not in d.screen_text(): time.sleep(1)
     log(f"before: {[l for l in d.screen_text().split(chr(10)) if 'settled trade' in l or 'reserves:' in l]}")
+    if 'settled trade' not in d.screen_text():
+        # The owner's own sync catch-up may already have applied it; the proofs judge generations and reserves.
+        log("nothing to reconcile (no pending settled trade)"); go_home(); sys.exit(0)
     r = js_click_text('Reconcile', exact=True); log(f"Reconcile: {r}")
     got = wait_text(None, 240, any_of=['Reconciled', 'reconcile failed', 'error'])
     log(f"result: {got} :: {[l for l in d.screen_text().split(chr(10)) if 'Reconciled' in l or 'reserves:' in l or 'settled trade' in l or 'error' in l.lower()]}")
@@ -189,12 +246,14 @@ if cmd == 'swap':
         t0 = time.time(); got = None
         while time.time() - t0 < 90:
             s2 = d.screen_text()
-            if 'exact output' in s2 and 'discovered' in s2: got = 'quoted'; break
+            if 'exact output' in s2: got = 'quoted'; break
             b = d.eval_js("[...document.querySelectorAll('.warning-banner,.error-banner')].map(b=>b.innerText).join(' || ')")
             if 'Failed' in b or 'No liquidity' in b or 'error' in b.lower(): got = b; break
             time.sleep(0.7)
         card = [l for l in d.screen_text().split('\n') if 'exact output' in l or 'discovered' in l or ('vault' in l and 'fee' in l) or (l.strip().split(' ')[0].isdigit() and len(l) > 40)]
+        hops = re.search(r'(\d+) hops? bound', d.screen_text())
         log(f"quote: {got} :: {card[:4]}")
+        print("HOPS:", hops.group(1) if hops else '?')
         if got != 'quoted': log(f"SCREEN: {screen()[:400]}"); sys.exit(2)
         if mode == 'quote': sys.exit(0)
     # execute the (possibly stale) quote that is on screen
