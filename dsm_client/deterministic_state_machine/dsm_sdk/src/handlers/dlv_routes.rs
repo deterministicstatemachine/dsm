@@ -11530,6 +11530,124 @@ mod funded_creation_tests {
         crate::sdk::storage_io::fake_fleet::heal_keys_with_prefix("sofi/trader-acceptance/");
     }
 
+    /// A SETTLEMENT STRANDED BETWEEN ITS BIND AND ITS ADMISSION IS FINISHED BY
+    /// THE SYNC AFTER A RESTART, AND NOT BEFORE (hardware 2026-09-15; ownership
+    /// ruled the same day). The settle binds and advances, then its admission
+    /// cannot publish its evidence and stays pending: no trader acceptance, no
+    /// locator, nothing to certify, the fence held. In the same process the
+    /// sync leaves the admission to the handler that created it. After a
+    /// restart the head carried it from disk, so the sync finishes it from
+    /// frozen state; the acceptance's locator appears and completion releases
+    /// the fence.
+    #[test]
+    #[serial]
+    fn a_settlement_stranded_before_its_admission_is_finished_by_the_sync_after_a_restart() {
+        const WITNESS: &str = "immutable::DSM/economic-transition-witness/v1::";
+        install_identity();
+        let (vault_id, (pc_a, pc_b), _owner_dev, traders) =
+            market_with_traders("sofi/spec/resume-stranded-admission", &[("trader0", 0x51)]);
+        let trader_dev = &traders[0];
+        trader_dev.enter();
+        let trader = trader_dev.router();
+        let (rel_key, fenced_parent) = trader_position_of(trader_dev);
+        let out = crate::sdk::routing_path_sdk::constant_product_output(1_000, 10_000, 5_000, 30)
+            .expect("curve output");
+
+        crate::sdk::storage_io::fake_fleet::fail_keys_with_prefix(WITNESS);
+        let (res, x) = trader_settles(
+            trader,
+            &trader_dev.ak_pk.clone(),
+            &trader_dev.device_id,
+            &vault_id,
+            &pc_a,
+            &pc_b,
+            0,
+            (10_000, 5_000),
+            1_000,
+            out,
+            0xD5,
+        );
+        crate::sdk::storage_io::fake_fleet::heal_keys_with_prefix(WITNESS);
+        assert!(!res.success, "the admission cannot publish its evidence");
+        assert!(
+            res.error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("BOUND but this device could not admit"),
+            "{:?}",
+            res.error_message
+        );
+
+        trader_dev.enter();
+        let b =
+            crate::storage::client_db::trader_parent_fence::active_fence(&rel_key, &fenced_parent)
+                .expect("fence read")
+                .expect("the bind fenced the trader's parent")
+                .tx_id;
+        held_fence(&rel_key, &fenced_parent, &b);
+        let pending_position = |core: &crate::sdk::core_sdk::CoreSDK| {
+            core.device_head()
+                .and_then(|h| h.pending_economic_admission().map(|p| p.economic_position))
+        };
+        let stranded = pending_position(&trader.core_sdk)
+            .expect("the advance committed with its admission pending");
+        let locator = crate::sdk::trader_acceptance_locator::locator_key(&b);
+        assert!(
+            crate::sdk::storage_io::fake_fleet::any_member_holding(&locator).is_none(),
+            "no acceptance locator exists while the admission is pending"
+        );
+        let sync = |r: &crate::handlers::app_router_impl::AppRouterImpl| {
+            crate::runtime::get_runtime().block_on(r.run_storage_sync_request(
+                dsm::types::proto::StorageSyncRequest {
+                    pull_inbox: false,
+                    push_pending: true,
+                    limit: 0,
+                },
+            ))
+        };
+
+        // SAME PROCESS: the admission belongs to the handler that created it.
+        let _ = sync(trader);
+        trader_dev.enter();
+        assert_eq!(
+            pending_position(&trader.core_sdk),
+            Some(stranded),
+            "the sync does not finish an admission this process created"
+        );
+        held_fence(&rel_key, &fenced_parent, &b);
+
+        // RESTART: the head carries the admission from disk.
+        let restarted = crate::economic_fixtures::restart_router();
+        trader_dev.enter();
+        for _ in 0..2 {
+            let _ = sync(&restarted);
+            trader_dev.enter();
+        }
+        assert_eq!(
+            pending_position(&restarted.core_sdk),
+            None,
+            "the sync finished the stranded admission"
+        );
+        assert!(
+            crate::sdk::storage_io::fake_fleet::any_member_holding(&locator).is_some(),
+            "the acceptance's locator is published"
+        );
+        let fence =
+            crate::storage::client_db::trader_parent_fence::get_fence(&rel_key, &fenced_parent, &b)
+                .expect("fence read")
+                .expect("fence row");
+        assert!(
+            matches!(fence.state, dsm::dlv::trader_fence::FenceState::Released),
+            "completion released the fence, got {:?}",
+            fence.state
+        );
+        let receipt_key = crate::sdk::settlement_receipt_codec::vault_receipt_key(&vault_id, &x);
+        assert!(
+            crate::sdk::storage_io::fake_fleet::any_member_holding(&receipt_key).is_some(),
+            "the vault receipt is published"
+        );
+    }
+
     /// THE UNCERTIFIED BYPASS PATH CANNOT REALIZE, OWNER-APPLY OR RELEASE
     /// (2c-D §14). A bind through the production driver, a raw advance with no
     /// admission, and a genuinely signed legacy receipt published at its key:

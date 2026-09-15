@@ -1361,6 +1361,76 @@ fn trader_acceptance_for(
     .map_err(|e| DsmError::invalid_operation(format!("trader acceptance: {e}")))
 }
 
+/// ONE admission finish at a time on this device. The sync's crash recovery and
+/// a live handler can both reach [`finish_admission`]; finishes must not
+/// interleave. Held across the whole finish, which never re-enters itself.
+fn admission_finish_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Whether `pending` is still this device's admission to finish.
+///
+/// * `Ok(None)`: the head still carries it (same position and operation), so
+///   finish it.
+/// * `Ok(Some(outcome))`: another finisher already admitted exactly it (its
+///   position is the admitted one and the admitted root is its post-root), so
+///   this call is a duplicate. Return that admission's outcome and write
+///   nothing.
+/// * `Err`: superseded or incoherent. Nothing is written.
+fn admission_already_finished(
+    core: &CoreSDK,
+    pending: &PendingEconomicAdmission,
+) -> Result<Option<AdmittedOutcome>, DsmError> {
+    let head = core
+        .device_head()
+        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
+    if head.pending_economic_admission().is_some_and(|current| {
+        current.economic_position == pending.economic_position
+            && current.operation_digest == pending.operation_digest
+    }) {
+        return Ok(None);
+    }
+    let coords = *pending
+        .accepted_coords()
+        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
+    match economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))? {
+        Some((position, root))
+            if position == pending.economic_position && root == coords.post_economic_root =>
+        {
+            let proof_prefix = format!(
+                "immutable::{}::",
+                String::from_utf8_lossy(
+                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT.source_bytes()
+                )
+            );
+            let proof = crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_purpose_and_root(
+                &proof_prefix,
+                "economic-proof-artifact",
+                &root,
+            )
+            .map_err(|e| storage_err("load frozen economic proof", e))?;
+            Ok(Some(AdmittedOutcome {
+                economic_position: position,
+                economic_proof_addr: proof.map(|bytes| {
+                    immutable_inner(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+                        &bytes,
+                    )
+                }),
+            }))
+        }
+        _ => Err(DsmError::storage(
+            format!(
+                "the pending admission at position {} is no longer this device's to finish: \
+                 the head carries another or none, and it is not the admitted coordinate",
+                pending.economic_position
+            ),
+            None::<std::io::Error>,
+        )),
+    }
+}
+
 /// Everything after local acceptance. Separated so recovery re-enters here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_admission(
@@ -1377,6 +1447,14 @@ pub(crate) async fn finish_admission(
     // here may reach the network before ECON_ADMITTED.
     mut post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<AdmittedOutcome, DsmError> {
+    // SERIALIZED COMPARE-AND-FINISH: one finish at a time, and only of the
+    // admission the head still carries. A duplicate returns the admitted
+    // outcome; a superseded one refuses before anything is signed or written.
+    let _one_finish = admission_finish_lock().lock().await;
+    if let Some(outcome) = admission_already_finished(core, &pending)? {
+        return Ok(outcome);
+    }
+    let operation_digest = pending.operation_digest;
     let head = core
         .device_head()
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
@@ -1629,6 +1707,7 @@ pub(crate) async fn finish_admission(
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
         new_validated.economic_position(),
+        &operation_digest,
         &new_validated.economic_root(),
         &leaves,
         &set.id(),
@@ -1668,6 +1747,13 @@ pub(crate) async fn resume_pending_admission(
     let genesis = head.genesis_digest();
     let devid = head.devid();
     let set = canonical_set(network_id)?;
+
+    // A duplicate resume (another finisher already admitted exactly this
+    // admission) returns that outcome rather than tripping the coordinate check
+    // below; a superseded one refuses without writing.
+    if let Some(outcome) = admission_already_finished(core, &pending)? {
+        return Ok(outcome);
+    }
 
     // The validated PREDECESSOR: the admitted coordinate, or activation-shape
     // for a first admission. Its root must equal the pending pre-root — a
