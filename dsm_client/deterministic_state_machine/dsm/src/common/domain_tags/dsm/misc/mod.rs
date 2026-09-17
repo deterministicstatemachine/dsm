@@ -10,14 +10,23 @@ use crate::crypto::domain::TaggedHashDomain;
 mod addressing;
 mod economic;
 mod protocol;
+mod sofi;
 mod testing;
 mod token_ops;
 
 pub use addressing::*;
 pub use economic::*;
 pub use protocol::*;
+pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
+
+/// The SoFi v8 tags, collected separately so the flat `TAGS` list below stays
+/// untouched by the v8 allocation.
+#[cfg(test)]
+pub(super) fn sofi_tags() -> &'static [TaggedHashDomain<'static>] {
+    sofi::SOFI_TAGS
+}
 
 #[cfg(test)]
 #[cfg(test)]
