@@ -34,6 +34,7 @@ pub mod arith;
 pub mod conformance;
 pub mod derive;
 pub mod fisher_yates;
+pub mod lineage;
 pub mod resolution;
 pub mod smt;
 pub mod validation;

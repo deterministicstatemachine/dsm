@@ -220,6 +220,13 @@ pub(crate) fn producer_tree_and_pre_state(
             dsm::economic::state::EconomicLeafState::SettlementReceipt(_)
             | dsm::economic::state::EconomicLeafState::ConsumedSource(_)
             | dsm::economic::state::EconomicLeafState::BundleAcceptance(_) => {}
+            // A SoFi relationship leaf IS a predecessor a write set reads —
+            // its whole content is the base `hʲ` the next operation advances
+            // from — but the reader is `sofi::validation`, which fetches it by
+            // key with the vault's own evidence. This pre-state map exists for
+            // the bilateral write sets and has no slot it belongs in; adding a
+            // half-slot here would be a second place for the base to live.
+            dsm::economic::state::EconomicLeafState::Relationship(_) => {}
         }
     }
     if tree.root() != validated.economic_root() {
@@ -1180,7 +1187,10 @@ fn leaf_is_externally_citable(state: &dsm::economic::state::EconomicLeafState) -
     use dsm::economic::state::EconomicLeafState as L;
     match state {
         L::VaultReserve(_) | L::SettlementReceipt(_) | L::BundleAcceptance(_) => true,
-        L::Balance(_) | L::ConsumedSource(_) => false,
+        // A relationship leaf is cited by the DLV side through the core's own
+        // path, not through this artifact, and it names a trader — publishing
+        // it here would export who trades with whom for no verifier's benefit.
+        L::Balance(_) | L::ConsumedSource(_) | L::Relationship(_) => false,
     }
 }
 

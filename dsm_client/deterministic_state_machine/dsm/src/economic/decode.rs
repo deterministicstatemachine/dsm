@@ -288,6 +288,14 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 vault_sequence: c.u64()?,
             }))
         }
+        // The SoFi relationship leaf (P15-6). The class is keyed here because
+        // a class-keyed decoder does NOT get an exhaustiveness error when a
+        // new enum arm appears — the compiler forced every `match` on the enum
+        // and said nothing about this one, which is precisely how a variant
+        // ends up encodable and undecodable.
+        class::SOFI_TRADER_RELATIONSHIP_LEAF => Ok(EconomicLeafState::Relationship(
+            crate::sofi::wire::TraderRelationshipLeaf::at(c)?,
+        )),
         class::ECONOMIC_SETTLEMENT_RECEIPT_STATE => {
             c.envelope(
                 EconomicSettlementReceiptState::CLASS,

@@ -299,6 +299,13 @@ pub enum EconomicLeafState {
     SettlementReceipt(EconomicSettlementReceiptState),
     ConsumedSource(EconomicConsumedSourceState),
     BundleAcceptance(EconomicBundleAcceptanceState),
+    /// A SoFi relationship leaf `hʲ` for one vault (P15-6).
+    ///
+    /// It holds no amount: it is the trader's side of a relationship, and its
+    /// only movement is the chain `hʲ⁺¹ = H(rel-leaf ‖ hʲ ‖ E)` that BindExt
+    /// writes. The bytes are `sofi::wire`'s, so there is ONE encoding of this
+    /// object and a second one cannot drift from it.
+    Relationship(crate::sofi::wire::TraderRelationshipLeaf),
 }
 
 impl EconomicLeafState {
@@ -311,6 +318,7 @@ impl EconomicLeafState {
             Self::SettlementReceipt(_) => EconomicSettlementReceiptState::CLASS,
             Self::ConsumedSource(_) => EconomicConsumedSourceState::CLASS,
             Self::BundleAcceptance(_) => EconomicBundleAcceptanceState::CLASS,
+            Self::Relationship(_) => crate::ccb::class::SOFI_TRADER_RELATIONSHIP_LEAF,
         }
     }
 
@@ -322,6 +330,7 @@ impl EconomicLeafState {
             Self::SettlementReceipt(s) => s.encode(),
             Self::ConsumedSource(s) => s.encode(),
             Self::BundleAcceptance(s) => s.encode(),
+            Self::Relationship(s) => Ok(s.encode()),
         }
     }
 
@@ -345,9 +354,12 @@ impl EconomicLeafState {
         match self {
             Self::Balance(s) => Some(s.amount),
             Self::VaultReserve(s) => Some(s.amount),
-            Self::SettlementReceipt(_) | Self::ConsumedSource(_) | Self::BundleAcceptance(_) => {
-                None
-            }
+            Self::SettlementReceipt(_)
+            | Self::ConsumedSource(_)
+            | Self::BundleAcceptance(_)
+            // A relationship leaf is a CHAIN, not a quantity: advancing it
+            // adds nothing spendable, so it needs no funding source.
+            | Self::Relationship(_) => None,
         }
     }
 
@@ -369,6 +381,7 @@ impl EconomicLeafState {
             // holding different values — a conflict, not two leaves. That is
             // the property that makes "exactly one per operation" enforceable.
             Self::BundleAcceptance(s) => (self.class(), vec![s.economic_operation_id]),
+            Self::Relationship(s) => (self.class(), vec![s.vault_id]),
         }
     }
 
@@ -384,6 +397,12 @@ impl EconomicLeafState {
                 keys::settlement_receipt_key(genesis, device_id, &s.vault_id, &s.receipt_id)
             }
             Self::ConsumedSource(s) => keys::consumed_source_key(genesis, device_id, &s.source_id),
+            // `k_{T,v}` — the SoFi relationship key, which is the ONE
+            // derivation for this leaf in both trees (F1). It is not restated
+            // here in another form.
+            Self::Relationship(s) => {
+                crate::sofi::derive::relationship_key(genesis, device_id, &s.vault_id)
+            }
             Self::BundleAcceptance(s) => {
                 keys::bundle_acceptance_key(genesis, device_id, &s.economic_operation_id)
             }
