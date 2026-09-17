@@ -207,7 +207,7 @@ A storage node is index-only persistence: it stores and serves bytes, keeps writ
 ## Formal verification
 
 - **TLA+** (`tla/`): `DSM.tla` and the protocol core, bilateral liveness, Tripwire, non-interference, offline finality, the single-appliance offline anchor, economic-register observation, and the dBTC abstract, concrete, and trust-reduction models, each with TLC configs. Claims are indexed in [PROOF_CLAIMS.md](tla/PROOF_CLAIMS.md); run with `tla/run_tlc.sh`.
-- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 22 files covering the core theorem set with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
+- **Lean 4** (`lean4/`, toolchain `v4.23.0`): 25 files covering the core theorem set with no `sorry`; the `lean` CI job builds them on every run. A sorry-free build is a build, not a witness; the frame theorems carry their own witnesses and mutation checks.
 - **Vertical validation** (`tools/vertical_validation`): `tla-check`, `proof-check`, `property-tests`, `implementation-traces` (transfer chain, signature rejection, fork divergence against the real state machine), `adversarial`, `crypto-kat`, `bilateral-throughput`, `benchmark`, `formal-report`, and `full`. The `formal-validation` CI job runs it.
 - **Production safety scan** (`ci/production_safety_checks.sh`): the ban list (wall clock, JSON in protocol paths, hex, envelope version) enforced as a CI gate.
 
