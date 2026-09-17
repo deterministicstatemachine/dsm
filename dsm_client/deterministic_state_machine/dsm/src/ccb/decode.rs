@@ -28,6 +28,11 @@ use super::settlement::{
     Allocation, AllocationBundle, ConsumedDlvTransition, DsmSuccessorEvidence, MarketTerms, Route,
     RouteLeg, SettlementBundle, TradeIntent, ENTROPY_LEN,
 };
+use crate::common::domain_tags::{
+    TAG_DSM_FEE_POLICY_OBJECT, TAG_DSM_MARKET_POLICY_OBJECT, TAG_DSM_RELEASE_POLICY_OBJECT,
+};
+use crate::storage_object::immutable_addr;
+
 use super::state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetMembers,
     VaultStateV2,
@@ -144,6 +149,22 @@ impl<'a> Cursor<'a> {
 
 pub(crate) fn invalid(e: CcbError) -> DecodeError {
     DecodeError::Invalid(e.to_string())
+}
+
+/// The content address of a policy object, under its class's own namespace.
+///
+/// A vault state names its policies by address, so this is how a verifier goes
+/// from "the address the state named" to "these exact bytes" — and, run the
+/// other way, how it refuses bytes that do not authenticate to what it asked
+/// for. Unknown classes have no addressing rule and get none invented for them.
+pub fn policy_object_address(object_class: u16, bytes: &[u8]) -> Option<[u8; 32]> {
+    let namespace = match object_class {
+        class::MARKET_POLICY => TAG_DSM_MARKET_POLICY_OBJECT,
+        class::RELEASE_POLICY => TAG_DSM_RELEASE_POLICY_OBJECT,
+        class::FEE_POLICY => TAG_DSM_FEE_POLICY_OBJECT,
+        _ => return None,
+    };
+    Some(immutable_addr(namespace, bytes))
 }
 
 /// The three policy readers, in place. They are shared rather than repeated,

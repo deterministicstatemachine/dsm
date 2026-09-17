@@ -9,8 +9,8 @@ use crate::ccb::{class, push_bytes, push_digest32, push_u16, push_u32, push_u64,
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 
 use super::{
-    SofiWireError, CANONICAL_MAX_LEGS, MAX_CLOSURE_REFS, MAX_CORE_ENTRIES, ROUTE_MIN_LEGS,
-    VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    SofiWireError, CANONICAL_MAX_LEGS, MAX_CLOSURE_REFS, MAX_CORE_ENTRIES,
+    MAX_SETTLEMENT_PREIMAGE_BYTES, ROUTE_MIN_LEGS, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
 /// Every v8 object ships at schema 1.
@@ -1031,6 +1031,20 @@ impl RouteLegSet {
 // The DLV tree, the cores, B° and vault genesis (P15-4, 6, 7, 8, 11, 12)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// `P(E)` has a frozen byte bound (R8-12). An object over it has no canonical
+/// representation at all, so the codec refuses it on both sides rather than
+/// leaving the rule to a later layer.
+fn check_preimage_bytes(bytes: &[u8]) -> Result<(), SofiWireError> {
+    if bytes.len() > MAX_SETTLEMENT_PREIMAGE_BYTES {
+        return Err(SofiWireError::ObjectTooLarge {
+            field: "settlement preimage",
+            bytes: bytes.len(),
+            max: MAX_SETTLEMENT_PREIMAGE_BYTES,
+        });
+    }
+    Ok(())
+}
+
 fn check_status(status: u16) -> Result<(), SofiWireError> {
     if status != VAULT_STATUS_ACTIVE && status != VAULT_STATUS_RETIRED {
         return Err(SofiWireError::UnknownVaultStatus { status });
@@ -1778,8 +1792,12 @@ impl SettlementBody {
                 closure,
             } => {
                 check_hops(hops)?;
+                // One core reference per carried core, in P(E)'s own order
+                // (which is sorted by vault id). The references are DIGESTS,
+                // so they carry no order of their own and nothing here can
+                // bind them to the cores — `sofi::validation` does that, and
+                // must, because the cores are not in scope at this layer.
                 check_count("dlv cores", 1, CANONICAL_MAX_LEGS, dlv_cores.len())?;
-                check_strictly_ascending("dlv cores", dlv_cores)?;
                 push_env(&mut out, class::SOFI_SETTLEMENT_SWAP);
                 push_digest32(&mut out, token_in);
                 push_u64(&mut out, *amount_in);
@@ -1831,7 +1849,6 @@ impl SettlementBody {
                 let trader_core = c.digest32()?;
                 let n = read_count(c, "dlv cores", 1, CANONICAL_MAX_LEGS)?;
                 let dlv_cores: Vec<D32> = (0..n).map(|_| c.digest32()).collect::<Result<_, _>>()?;
-                check_strictly_ascending("dlv cores", &dlv_cores).map_err(wire_invalid)?;
                 let closure = PreEClosureIndex::at(c)?;
                 Ok(Self::Swap {
                     token_in,
@@ -1885,14 +1902,24 @@ impl SettlementPreimage {
         trader_core: TraderCore,
         dlv_cores: Vec<DlvCore>,
     ) -> Result<Self, SofiWireError> {
-        check_count("dlv cores", 1, CANONICAL_MAX_LEGS, dlv_cores.len())?;
+        // EXACTLY one core per DLV parent the settlement references. Without
+        // this, two different canonical `P(E)` byte strings — one carrying a
+        // spare core — recompute to the same single-vault E, because the
+        // derivation reads only the first. That is a second preimage for one
+        // commitment, with no hash collision anywhere in it.
+        let expected = settlement.leg_count();
+        check_count("dlv cores", expected, expected, dlv_cores.len())?;
         let keys: Vec<D32> = dlv_cores.iter().map(|c| *c.vault_id()).collect();
         check_strictly_ascending("dlv cores", &keys)?;
-        Ok(Self {
+        let preimage = Self {
             settlement,
             trader_core,
             dlv_cores,
-        })
+        };
+        // An oversized P(E) has NO admissible canonical representation, so the
+        // object refuses to exist rather than existing unencodable.
+        check_preimage_bytes(&preimage.encode_unchecked()?)?;
+        Ok(preimage)
     }
 
     pub fn settlement(&self) -> &SettlementBody {
@@ -1905,7 +1932,7 @@ impl SettlementPreimage {
         &self.dlv_cores
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+    fn encode_unchecked(&self) -> Result<Vec<u8>, SofiWireError> {
         let mut out = Vec::new();
         push_env(&mut out, class::SOFI_SETTLEMENT_PREIMAGE);
         out.extend_from_slice(&self.settlement.encode()?);
@@ -1917,7 +1944,16 @@ impl SettlementPreimage {
         Ok(out)
     }
 
+    pub fn encode(&self) -> Result<Vec<u8>, SofiWireError> {
+        let out = self.encode_unchecked()?;
+        check_preimage_bytes(&out)?;
+        Ok(out)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        // Refused BEFORE parsing: an oversized preimage is not a thing to be
+        // examined and then rejected, it is bytes that name no object.
+        check_preimage_bytes(bytes).map_err(wire_invalid)?;
         let mut c = Cursor { b: bytes, i: 0 };
         c.envelope(class::SOFI_SETTLEMENT_PREIMAGE, SCHEMA_V1)?;
         let settlement = SettlementBody::at(&mut c)?;
