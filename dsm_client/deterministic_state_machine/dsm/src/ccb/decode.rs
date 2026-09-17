@@ -146,6 +146,69 @@ pub(crate) fn invalid(e: CcbError) -> DecodeError {
     DecodeError::Invalid(e.to_string())
 }
 
+/// The three policy readers, in place. They are shared rather than repeated,
+/// so a vault state and a standalone policy object can never drift apart in
+/// what they accept — and the FAMILY rule lives here, which is why a release
+/// policy of any other family simply has no decoding.
+fn market_policy_at(c: &mut Cursor<'_>) -> Result<MarketPolicy, DecodeError> {
+    c.envelope(class::MARKET_POLICY, MarketPolicy::SCHEMA)?;
+    let fam = c.u16()?;
+    let ver = c.u16()?;
+    if fam != family::CONSTANT_PRODUCT_EXACT_INPUT || ver != family::BETA_VERSION {
+        return Err(DecodeError::Invalid(format!(
+            "market family {fam:#06x} v{ver} is not the beta profile"
+        )));
+    }
+    let token_a = c.digest32()?;
+    let token_b = c.digest32()?;
+    MarketPolicy::beta_constant_product(token_a, token_b).map_err(invalid)
+}
+
+fn release_policy_at(c: &mut Cursor<'_>) -> Result<ReleasePolicy, DecodeError> {
+    c.envelope(class::RELEASE_POLICY, ReleasePolicy::SCHEMA)?;
+    let fam = c.u16()?;
+    let ver = c.u16()?;
+    if fam != family::OWNER_LOCAL_FULL_CLOSE || ver != family::BETA_VERSION {
+        return Err(DecodeError::Invalid(format!(
+            "release family {fam:#06x} v{ver} is not the beta profile"
+        )));
+    }
+    Ok(ReleasePolicy::beta_owner_local_full_close())
+}
+
+/// Decode a standalone `MarketPolicy` — class `0x0007`, schema 1, strict. A
+/// vault state names its policies by content address, so a verifier decodes
+/// them on their own.
+pub fn decode_market_policy(bytes: &[u8]) -> Result<MarketPolicy, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    let v = market_policy_at(&mut c)?;
+    finish_exact(&c, v)
+}
+
+/// Decode a standalone `ReleasePolicy` — class `0x0009`, schema 1, strict.
+pub fn decode_release_policy(bytes: &[u8]) -> Result<ReleasePolicy, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    let v = release_policy_at(&mut c)?;
+    finish_exact(&c, v)
+}
+
+/// Decode a standalone `FeePolicy` — class `0x000A`, schema 1, strict.
+pub fn decode_fee_policy(bytes: &[u8]) -> Result<FeePolicy, DecodeError> {
+    let mut c = Cursor { b: bytes, i: 0 };
+    let v = fee_policy_at(&mut c)?;
+    finish_exact(&c, v)
+}
+
+/// Trailing bytes are a decode failure, never slack.
+fn finish_exact<T>(c: &Cursor<'_>, value: T) -> Result<T, DecodeError> {
+    if c.i != c.b.len() {
+        return Err(DecodeError::TrailingBytes {
+            extra: c.b.len() - c.i,
+        });
+    }
+    Ok(value)
+}
+
 /// Decode a `GenesisParamsV3` — class `0x0018`, schema 1, strict.
 pub fn decode_genesis_params(bytes: &[u8]) -> Result<super::genesis::GenesisParamsV3, DecodeError> {
     let mut c = Cursor { b: bytes, i: 0 };
@@ -260,32 +323,13 @@ pub(crate) fn vault_state_at(c: &mut Cursor<'_>) -> Result<VaultStateV2, DecodeE
 
     // 7 MarketPolicy — rebuilt through the validating constructor, so a
     // decoded policy cannot carry a family the beta profile refuses.
-    c.envelope(class::MARKET_POLICY, MarketPolicy::SCHEMA)?;
-    let fam = c.u16()?;
-    let ver = c.u16()?;
-    if fam != family::CONSTANT_PRODUCT_EXACT_INPUT || ver != family::BETA_VERSION {
-        return Err(DecodeError::Invalid(format!(
-            "market family {fam:#06x} v{ver} is not the beta profile"
-        )));
-    }
-    let token_a = c.digest32()?;
-    let token_b = c.digest32()?;
-    let market_policy = MarketPolicy::beta_constant_product(token_a, token_b).map_err(invalid)?;
+    let market_policy = market_policy_at(c)?;
 
     // 8 ReleasePolicy.
-    c.envelope(class::RELEASE_POLICY, ReleasePolicy::SCHEMA)?;
-    let fam = c.u16()?;
-    let ver = c.u16()?;
-    if fam != family::OWNER_LOCAL_FULL_CLOSE || ver != family::BETA_VERSION {
-        return Err(DecodeError::Invalid(format!(
-            "release family {fam:#06x} v{ver} is not the beta profile"
-        )));
-    }
-    let release_policy = ReleasePolicy::beta_owner_local_full_close();
+    let release_policy = release_policy_at(c)?;
 
     // 9 FeePolicy.
-    c.envelope(class::FEE_POLICY, FeePolicy::SCHEMA)?;
-    let fee_policy = FeePolicy::new(c.u32()?).map_err(invalid)?;
+    let fee_policy = fee_policy_at(c)?;
 
     // 10 EncumbranceSet — elements rebuilt and re-validated; duplicate or
     // misordered input is refused by the constructor, not repaired.
