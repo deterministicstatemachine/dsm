@@ -19,12 +19,18 @@
 //! that it is canonical; collection keeps what pinned roots reach
 //! ([`tree::collect_garbage`]).
 //!
+//! [`fold`] is the verifier's side of the same tree: a core states every
+//! entry's path against ONE root, and one batch fold turns them into the
+//! post-root without holding the tree at all.
+//!
 //! Dark: nothing in the node, the SDK or the state machine calls it yet.
 
+pub mod fold;
 pub mod node;
 pub mod store;
 pub mod tree;
 
+pub use fold::{batch_fold, verify_batch, FoldEntry, FoldError, Folded};
 pub use node::Node;
 pub use store::{validate_staged_frontier, MemoryNodeStore, NodeStore};
 pub use tree::{
