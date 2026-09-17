@@ -736,20 +736,24 @@ fn fulfillment_conformance_refuses_every_malformed_exercise() {
         Err(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical)
     );
 
-    // An extra witness exceeds the table's cardinality.
+    // An extra witness is now CANONICAL BYTES — the codec bound is the byte
+    // bound, not the beta route cap [R16-6] — and is refused one layer up,
+    // where completeness is decided: the set is not the derived one.
     let mut three = ids.clone();
     three.push([0xFF; 32]);
-    assert!(matches!(
-        TraderFulfillmentBody::new(
-            *good.precommit_id(),
-            three,
-            good.attempts().to_vec(),
-            42,
-            ALG,
-            &KEY
-        ),
-        Err(SofiWireError::Cardinality { .. })
-    ));
+    let extra = TraderFulfillmentBody::new(
+        *good.precommit_id(),
+        three,
+        good.attempts().to_vec(),
+        42,
+        ALG,
+        &KEY,
+    )
+    .expect("a third witness encodes; cardinality is not the codec's business");
+    assert_eq!(
+        check_fulfillment_against_precommit(&p, &extra, &SHADOWS),
+        Err(FulfillmentConformanceError::PolicyFulfillmentSetNotCanonical)
+    );
 
     // A witness bound to another shadow (another E / parent binding) is not derived.
     assert_eq!(
