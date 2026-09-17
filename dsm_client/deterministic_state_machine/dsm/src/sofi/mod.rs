@@ -20,7 +20,8 @@
 //! strict codecs ([`wire`]), domain-separated keys and identities
 //! ([`derive`]), the routing permutation ([`fisher_yates`]), successor-cell
 //! arithmetic ([`arith`]), three-valued validation composition and the
-//! mechanical fulfillment-against-precommit checks ([`conformance`]).
+//! mechanical fulfillment-against-precommit checks ([`conformance`]), and the
+//! persistent DLV tree with structurally shared shadows ([`smt`]).
 //!
 //! ## What it is not
 //!
@@ -33,4 +34,5 @@ pub mod arith;
 pub mod conformance;
 pub mod derive;
 pub mod fisher_yates;
+pub mod smt;
 pub mod wire;
