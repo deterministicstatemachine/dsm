@@ -80,8 +80,84 @@
 //! OutcomeCellAbort` — envelope only, zero fields.
 //!
 //! `0x004A RouteLegSet` (`Γ`): 1 `legs` `seq<(vault_id, parent_root,
-//! setup_ref, shadow_core)>` all digest32, `2..=ROUTE_MAX_LEGS`, strictly
-//! ascending by `vault_id`.
+//! setup_ref, shadow_core)>` all digest32, `ROUTE_MIN_LEGS..=CANONICAL_MAX_LEGS`,
+//! strictly ascending by `vault_id`.
+//!
+//! ## The DLV tree, the cores, `B°` and vault genesis
+//!
+//! `0x004B VaultStateLeaf` (the value preimage of the vault's own leaf, at key
+//! `H(vault-state-key/v1 ‖ v)`):
+//! 1 `owner_genesis` digest32 · 2 `owner_device_id` digest32 (the ORIGIN
+//! device: `vault_id` provenance, not eternal controller identity) ·
+//! 3 `create_position` u64 · 4 `market_policy` digest32 (content address of a
+//! `0x0007` object) · 5 `fee_policy` digest32 (`0x000A`) · 6 `release_policy`
+//! digest32 (`0x0009`) · 7 `storage_set_id` digest32 · 8 `generation` u64 ·
+//! 9 `reserve_a` u64 · 10 `reserve_b` u64 · 11 `status` u16, exactly
+//! `VAULT_STATUS_ACTIVE` or `VAULT_STATUS_RETIRED`. A policy is named by
+//! content address, so the pair's tokens and the release rule are fetched and
+//! verified, never restated here.
+//!
+//! `0x004C VaultRelationshipLeaf` (at key `k_{T,v}`): 1 `trader_genesis` ·
+//! 2 `trader_device_id` · 3 `leaf` digest32 (`hʲ`). The key material is
+//! explicit, so the tree can be rebuilt by replay.
+//!
+//! Both leaf values are `H(vault-leaf-state/v1 ‖ CCB(leaf))`. One tag is safe
+//! because the leaf's own envelope is inside the preimage.
+//!
+//! `0x004D TraderRelationshipLeaf` (the `R_econ` leaf state, at `k_{T,v}`):
+//! 1 `vault_id` digest32 · 2 `leaf` digest32 (`hʲ`).
+//!
+//! Core entries, each carrying a full authentication path against the core's
+//! `pre_root` (default-sibling compression is deferred):
+//! `0x004E CoreEntryMutation`: 1 `key` · 2 `pre` · 3 `post` · 4 `path`
+//! `seq<digest32>` of exactly `ECONOMIC_SMT_HEIGHT`, leaf-to-root.
+//! `0x004F CoreEntryRead`: 1 `key` · 2 `value` · 3 `path`.
+//! `0x0050 CoreEntryRelationship`: 1 `genesis` · 2 `device_id` · 3 `vault_id`
+//! (together they derive the key, so it is never restated) · 4 `base` digest32
+//! (`hʲ`) · 5 `path`. Its post is `H(rel-leaf/v1 ‖ base ‖ E)`, filled by
+//! BindExt — which is why the entry cannot carry it.
+//!
+//! `0x0051 TraderCore` (`T°`): 1 `genesis` · 2 `device_id` · 3 `position` u64
+//! (`q`, so E cannot be replayed at another position) · 4 `pre_root` digest32
+//! · 5 `entries` `seq<0x004E | 0x004F | 0x0050>`, `1..=MAX_CORE_ENTRIES`,
+//! strictly ascending by entry key.
+//!
+//! `0x0052 DlvCore` (`V°_j`): 1 `vault_id` · 2 `pre_root` · 3
+//! `trader_genesis` · 4 `trader_device_id` · 5 `relationship_base` digest32
+//! (`T°`'s pre at `k_{T,v}`; `h⁰` on a first operation) · 6 `entries`.
+//!
+//! `B°` is a union; the nested envelope is the branch.
+//! `0x0053 SettlementSwap`: 1 `token_in` digest32 · 2 `amount_in` u64 ·
+//! 3 `token_out` digest32 · 4 `exact_out` u64 (the intent) · 5 `hops`
+//! `seq<(vault_id, parent_root, setup_ref, token_in, amount_in, token_out,
+//! amount_out)>` in hop order, `1..=CANONICAL_MAX_LEGS`, vault ids pairwise
+//! distinct · 6 `trader_core` digest32 (`c_T°`) · 7 `dlv_cores`
+//! `seq<digest32>` sorted by vault id · 8 `closure` nested `0x0041`.
+//! `0x0054 SettlementClose`: 1 `vault_id` · 2 `parent_root` · 3 `setup_ref` ·
+//! 4 `owner_authority` nested `0x0055 | 0x0056` · 5 `reserve_a` u64 ·
+//! 6 `reserve_b` u64 · 7 `trader_core` · 8 `dlv_core` · 9 `closure`.
+//!
+//! `0x0055 OwnerAuthorityOrigin`: envelope only. The only branch semantic
+//! validation accepts.
+//! `0x0056 OwnerAuthorityDsmSuccessor`: 1 `authority_class` u16 ·
+//! 2 `authority_addr` digest32 — an opaque typed reference to a future DSM
+//! succession-authority object. Canonically encodable so activating it needs
+//! no byte change; ALWAYS Invalid (never Unavailable) until then, and no
+//! production builder emits it.
+//!
+//! `X_route = H(route-digest/v1 ‖ CCB(RouteDigestPreimage))`, over a union:
+//! `0x0057 RouteDigestSwap`: 1 `hops`, the same entries as the Swap branch.
+//! `0x0058 RouteDigestClose`: 1 `vault_id` · 2 `parent_root` · 3 `setup_ref` ·
+//! 4 `reserve_a` u64 · 5 `reserve_b` u64.
+//!
+//! `0x0059 SettlementPreimage` (`P(E)`): 1 `settlement` nested `0x0053 |
+//! 0x0054` · 2 `trader_core` nested `0x0051` · 3 `dlv_cores` `seq<0x0052>`
+//! sorted by vault id.
+//!
+//! `0x005A VaultGenesisPreimage`: 1 `owner_genesis` · 2 `owner_device_id` ·
+//! 3 `create_position` u64 · 4 `state` nested `0x004B`.
+//! `0x005B VaultCreation`: 1 `vault_id` · 2 `genesis_root` digest32 (`R_0`) ·
+//! 3 `amount_a` u64 · 4 `amount_b` u64.
 
 pub mod objects;
 
@@ -92,9 +168,29 @@ pub const STORAGE_MEMBER_COUNT: usize = 5;
 /// Storage finality: three matching write-once cells. `3 + 3 > 5`.
 pub const STORAGE_FINALITY_COUNT: usize = 3;
 /// Beta route cardinality: two hops across two distinct vaults.
+///
+/// This is an ADMISSION and BUILDER limit, never a codec one [R16-6]. The
+/// canonical objects below accept any leg count the byte bound allows, so a
+/// three-hop route has canonical bytes and a golden digest today; what beta
+/// refuses is executing one. Keeping the cap in the codec would have made the
+/// bytes of a legal route undefined, and every later relaxation a format change.
 pub const ROUTE_MAX_LEGS: usize = 2;
 /// The smallest leg count the route (multivault) form of E admits.
 pub const ROUTE_MIN_LEGS: usize = 2;
+/// The encoded size of the smallest leg entry: three digests.
+const SMALLEST_LEG_BYTES: usize = 96;
+/// The largest leg count any canonical object can carry — the settlement
+/// preimage bound divided by the smallest leg encoding. It is an allocation
+/// guard derived from the byte bound, so a hostile count is refused before it
+/// is allocated; it is not a protocol cardinality.
+pub const CANONICAL_MAX_LEGS: usize = MAX_SETTLEMENT_PREIMAGE_BYTES / SMALLEST_LEG_BYTES;
+/// The largest entry count one core may carry, on the same footing: the
+/// smallest entry is a read of 64 bytes plus a 256-deep path.
+pub const MAX_CORE_ENTRIES: usize = MAX_SETTLEMENT_PREIMAGE_BYTES / (64 + 32 * 256);
+/// `VaultStateLeaf.status`: both reserves above zero, and tradeable.
+pub const VAULT_STATUS_ACTIVE: u16 = 0x0001;
+/// `VaultStateLeaf.status`: closed, both reserves zero. Terminal.
+pub const VAULT_STATUS_RETIRED: u16 = 0x0002;
 
 // ── R8-12 normative validation bounds (frozen for beta) ─────────────────────
 //
@@ -147,6 +243,10 @@ pub enum SofiWireError {
     ForbiddenClosureClass { object_class: u16 },
     /// A length does not fit its prefix.
     LengthOverflow,
+    /// `status` is not one of the two declared vault statuses.
+    UnknownVaultStatus { status: u16 },
+    /// An authentication path is not exactly `ECONOMIC_SMT_HEIGHT` deep.
+    PathDepth { expected: usize, got: usize },
 }
 
 impl core::fmt::Display for SofiWireError {
@@ -186,6 +286,14 @@ impl core::fmt::Display for SofiWireError {
                 "class {object_class:#06x} may not be content-bound in the pre-E closure"
             ),
             Self::LengthOverflow => write!(f, "length does not fit its prefix"),
+            Self::UnknownVaultStatus { status } => write!(
+                f,
+                "vault status {status:#06x} is neither Active nor Retired"
+            ),
+            Self::PathDepth { expected, got } => write!(
+                f,
+                "authentication path is {got} siblings deep; the tree fixes {expected}"
+            ),
         }
     }
 }

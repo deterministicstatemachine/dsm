@@ -108,6 +108,20 @@ pub const TAG_DSM_SOFI_VAULT_ID: TaggedHashDomain<'static> =
 pub const TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-genesis-locator/v1");
 
+// ── The DLV tree's leaves, and the route digest (P15-4, P15-8) ─────────────
+
+/// `H(tag ‖ v)` — where a vault's own state leaf sits in its DLV tree.
+pub const TAG_DSM_SOFI_VAULT_STATE_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-state-key/v1");
+/// `H(tag ‖ CCB(leaf))` — the value of EITHER DLV leaf class. The leaf's own
+/// envelope is the discriminant, so one tag cannot conflate the two.
+pub const TAG_DSM_SOFI_VAULT_LEAF_STATE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-leaf-state/v1");
+/// `X_route = H(tag ‖ CCB(RouteDigestPreimage))` — over the variant-
+/// discriminated union, so a Swap digest can never be read as a Close one.
+pub const TAG_DSM_SOFI_ROUTE_DIGEST: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/route-digest/v1");
+
 // ── Reserved: allocated so the names cannot be reused; no derivation exists ─
 
 /// Reserved for a future storage-membership handover transition. Not ruled.
@@ -149,6 +163,9 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_PREIMAGE_LOCATOR,
     TAG_DSM_SOFI_VAULT_ID,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_VAULT_LEAF_STATE,
+    TAG_DSM_SOFI_ROUTE_DIGEST,
     TAG_DSM_SOFI_MEMBERSHIP_HANDOVER,
     TAG_DSM_SOFI_TRADE_DIGEST,
     TAG_DSM_SOFI_REF_WINDOW,
