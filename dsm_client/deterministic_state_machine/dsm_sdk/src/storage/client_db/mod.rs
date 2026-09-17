@@ -50,6 +50,7 @@ pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
 pub mod settlement_slot_claim_local; // this device's frozen slot-claim envelopes (namespaced)
+pub mod sofi_smt_nodes; // SoFi v8 persistent DLV tree nodes and root pins (dark; namespaced)
 mod system_peers;
 pub mod token_registry;
 mod tokens;
@@ -598,6 +599,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             storage_set_id    BLOB NOT NULL,
             UNIQUE (vault_id, parent_sequence)
         );
+
+        -- SoFi v8: the persistent DLV tree. A node is stored under its Merkle
+        -- value and never rewritten; a root lives while it holds a pin. Nodes
+        -- and a pin are committed in one transaction.
+        CREATE TABLE IF NOT EXISTS sofi_smt_nodes(
+            addr BLOB PRIMARY KEY CHECK (length(addr) = 32),
+            node BLOB NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS sofi_smt_pins(
+            root BLOB PRIMARY KEY CHECK (length(root) = 32),
+            pins INTEGER NOT NULL CHECK (pins > 0)
+        ) WITHOUT ROWID;
 
         -- Req 6.23: the initiating-trader parent fence. Written BEFORE the
         -- first mutating QuorumBind op; restored before post-restart bilateral
