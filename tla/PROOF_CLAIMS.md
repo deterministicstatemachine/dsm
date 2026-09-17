@@ -148,3 +148,28 @@ preimage hypothesis. Neither is a global claim about BLAKE3: a universal
 "distinct preimages give distinct 256-bit outputs" is false by pigeonhole, and
 "no populated economic preimage produces the all-zero digest" is not implied by
 preimage resistance.
+
+## SoFi v8 settlement (plan revision 10.3)
+
+```text
+lean4/DSMSofiSuccessorCells.lean   the ALGEBRA of the storage layer and the walk
+lean4/DSMSofiAtomicity.lean        identities, hash order, validation, realization,
+                                   the resolution ladder, the fence
+
+tla/DSM_SofiSuccessorCells.tla     the MEMBERS under interleaving and faults
+tla/DSM_SofiFulfillment.tla        the OPERATION under rivals, completers, late
+                                   evidence and parent canonicality settling
+```
+
+The TLC half is bounded: one parent with two attempts at the members, and two
+parents, two traders and one descendant position for the operation. Both models
+are finite, so "a registered F resolves" is checked as quiescence ⇒ resolved over
+every reachable state rather than as a temporal property. The quorum algebra is
+not restated in TLA+; the member-level behaviour is not restated in the operation
+model.
+
+**Boundary.** These are properties of the models of plan revision 10.3. The v8
+Rust is not written yet (Phase E), so no correspondence to shipping code is
+claimed; Phase E owes conformance vectors and mutation-tested gates against
+these invariants.
+

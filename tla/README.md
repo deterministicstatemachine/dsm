@@ -271,3 +271,98 @@ FAILED [expected-to-fail] ...
          but saw no violation at all — the invariant is decoration
 ```
 
+
+## SoFi v8 settlement: DSM_SofiSuccessorCells.tla and DSM_SofiFulfillment.tla
+
+A route is one unilateral trader operation, P → G₁…Gₙ → F → realization. Two
+modules check it at two levels, and each leaves the other level alone:
+
+```text
+lean4/DSMSofiSuccessorCells.lean  the ALGEBRA: 3 + 3 > 5, write-once, Dead sound on a
+lean4/DSMSofiAtomicity.lean       partial read, C = C_q, identities, the ladder
+
+tla/DSM_SofiSuccessorCells.tla    the MEMBERS: per-value holder counts, one write at a
+                                  time, partial reads and Dead records, registration-
+                                  gated cells, the attempt walk, faults outside F0
+
+tla/DSM_SofiFulfillment.tla       the OPERATION over registered facts: rivals between
+                                  the witnesses and F, abandonment, completers, late
+                                  evidence, parent canonicality settling, the
+                                  resolution ladder (R14-1), the fence, genesis
+```
+
+**Liveness as quiescence.** Every action in both models is bounded, so every
+behaviour is finite, and under weak fairness on the required actions a behaviour
+ends in a state where none of them is enabled. "A registered F resolves under
+evidence availability" (R13-5) and "witnesses never lock" are therefore
+invariants of the form *quiescent ⇒ resolved*. They run in the standard gate, not
+in the opt-in liveness pass, and their falsifications are ordinary invariant
+violations. Trader actions are discretionary and never required.
+
+Each standard config has an `_AdverseFacts` twin (an Invalid operation, and in
+the fulfillment model an unvalidated vault creation) that must pass the same
+invariants, so no falsification below owes its violation to those facts.
+
+### Falsifications and non-vacuity (machine-gated)
+
+Each config lists one invariant and must violate exactly it.
+
+| Module | Config | Removes / claims | Must violate |
+|---|---|---|---|
+| cells | `_OverwriteAllowed` | write-once | `FinalityIsPermanent` |
+| cells | `_PermanentStoreLoss` | durability (F0) | `FinalityIsPermanent` |
+| cells | `_PermanentStoreLossRegister` | durability of K_ful | `RegistrationIsPermanent` |
+| cells | `_EquivocatingMember` | non-equivocation (F0) | `FinalUnique` |
+| cells | `_QuorumTwo` | finality at three | `FinalUnique` |
+| cells | `_QuorumTwoRegister` | registration at three | `OneFulfillmentPerPosition` |
+| cells | `_UnreadDroppedFromCount` | unread members in `u` | `RecordsNeverContradict` |
+| cells | `_TimeoutRecordsDead` | ArithDead before a Dead record | `RecordsNeverContradict` |
+| cells | `_NumericHole` | `a > 0 ⇒ resolved(a − 1)` | `NoNumericHoles` |
+| cells | `_AttemptLiveOmitted` | AttemptLive | `ConsumedImpliesAttemptLive` |
+| cells | `_AttemptLiveOmittedTwoConsumers` | AttemptLive | `OneConsumerPerParent` |
+| cells | `_CellsBeforeFulfillment` | the registration gate on cells | `CellsOnlyAfterFulfillmentRegistered` |
+| cells | `_CellsBeforeFulfillmentSelfSplit` | the registration gate on cells | `SelfSplitCreatesNoCells` |
+| cells | `_FulfillmentSpray` | the F's own attempt vector | `CellsOnlyAfterFulfillmentRegistered` |
+| cells | `_RelayWithoutKeyBinding` | P's key on F ingress | `RelayNeverForges` |
+| cells | `_UnavailableAsInvalid` | three-valued validation | `UnavailableNeverRejects` |
+| cells | `_InvalidFinalNotSkipped` | the Invalid skip | `ObjectiveRejectionImpliesSkipped` |
+| cells | `_ConsumptionReachable` | *claim:* nothing is consumed | `NeverConsumed` |
+| cells | `_SecondAttemptConsumptionReachable` | *claim:* attempt 1 never consumes | `NeverConsumedAtSecondAttempt` |
+| cells | `_DeadRecordReachable` | *claim:* no key is recorded Dead | `NeverDeadRecorded` |
+| cells | `_SelfSplitReachable` | *claim:* a position never splits | `NoSelfSplit` |
+| fulfillment | `_PrecommitAsExercise` | P occupies no position | `PrecommitNonEconomic` |
+| fulfillment | `_LockingPolicyFulfillments` | non-locking witnesses | `PolicyFulfillmentNeverLocks` |
+| fulfillment | `_PartialFulfillment` | the complete witness set | `FulfillmentAtomic` |
+| fulfillment | `_CompleteWithoutCanonicalParents` | established parent canonicality | `OnlyCanonicalParentsConsumed` |
+| fulfillment | `_ThirdPartyAbort` | objective Abort | `AbortOnlyOnObjectiveFailure` |
+| fulfillment | `_LaterKeyAbort` | Abort on the F's OWN keys | `AbortOnlyOnObjectiveFailure` |
+| fulfillment | `_CompleteRejectedNotSkipped` | arm (i) without Complete | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_OrphanNotSkipped` | arm (ii) without Complete | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_StaleLegNotSkipped` | arm (iii′) without Complete | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_VoidBeforeValidation` | R14-1 | `ResolutionPermanent` |
+| fulfillment | `_OrdinaryClaimBypassesFence` | the fence for every claim kind | `AtMostOneStorageUnresolvedFulfillmentPerLineage` |
+| fulfillment | `_DescendantValidatedByStorage` | the Core local fence | `SpeculativeDescendantsNeverCanonicalUnderInvalidBranch` |
+| fulfillment | `_RegisteredGenesisAccepted` | validated creation | `GenesisCanonicalOnlyIfCreationValid` |
+| fulfillment | `_PermanentEvidenceUnavailability` | R13-5's evidence assumption | `QuiescentFulfillmentResolved` |
+| fulfillment | `_TraderOnlyCompletion` | completion by anyone | `QuiescentFulfillmentResolved` |
+| fulfillment | `_GuaranteedSuccessClaim` | *claim:* valid, canonical F never Voids | `RegisteredValidFulfillmentNeverVoids` |
+| fulfillment | `_RouteRealizable` | *claim:* the route never realizes | `RouteNeverRealized` |
+
+**Plan names that changed, and why.** `UnreadCountedEmpty` → `UnreadDroppedFromCount`:
+under the ruled formula Empty counts toward `u`, so counting an unread member as
+Empty is arithmetically harmless (the Lean module proves it); the unsound variant
+drops the member from the count. `TimeoutAdvancesKey` → `TimeoutRecordsDead`: the
+storage projection refuses the next attempt until the key is resolved, so a timeout
+can only advance the key by being recorded Dead. `NoReservation` /
+`CellsBeforeRegistration` → `CellsBeforeFulfillment`; `ReservationSpray` →
+`FulfillmentSpray`.
+
+**Not modelled here, and why.** `ParentByRootValueOnly`: `K^(0)` hashes the
+vault id with the root, fixed by the Phase B derivation vectors. `InfiniteAdversary`:
+not a premise R13-5 needs. Every register a registered F depends on — its own
+attempt keys, `K_out`, its position — is write-once across five members, so the
+interference any one F can see is bounded by construction; there is no unbounded
+behaviour for the config to exhibit. `StaleArmRequiresRegistration`:
+a final cell already implies a registered F. `ExerciseIsIrreversibleAfterFirstPublication`
+was corrected by R11-4 to registration: `RegistrationIsPermanent` here, and
+`one_member_publication_is_not_exercise` in Lean.
