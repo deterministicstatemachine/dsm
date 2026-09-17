@@ -43,13 +43,24 @@
     * Values (E, FulfillmentId, claims) are opaque naturals. Hashing and object
       identity are DSMSofiAtomicity's.
     * The walk's per-key facts (final value, Dead, validation, orphan, rival
-      consumption, route outcome) are inputs; `Coherent` restates what the cell
-      layer above proves about them.
+      consumption, route outcome, the trader parent's branch) are inputs;
+      `Coherent` restates what the cell layer above proves about them.
+    * Those semantic facts are keyed by E, while `K_out(F)` is keyed by
+      FulfillmentId. That is sound and NOT an assumption that E determines F:
+      E is scoped to one trader position (P15-1), at most one fulfillment ever
+      registers there (`at_most_one_registered_fulfillment_per_position`), and a
+      cell or an outcome exists only for a registered fulfillment
+      (`fulfillment_registration_is_exercise_boundary`). So for any E a verifier
+      reads these facts about, the fulfillment they belong to is that unique
+      registered one. Several CANDIDATE fulfillments may share one E; none of
+      them writes anything (R15-2).
 
   What this module does NOT claim:
 
     * Semantic validity of any E, or the resolution of a trader position
-      (DSMSofiAtomicity).
+      (DSMSofiAtomicity). Arm (iv) enters here as the input
+      `traderParentImpossible`; WHY a trader parent is terminal is the ladder's
+      business, not this module's.
     * That the member's ingress code enforces `RStep`. `RStep` is the rule; the
       member is Phase E.
     * Liveness: nothing here says a key ever becomes final or dead.
@@ -89,6 +100,7 @@
     18. a chunk restarting the walk cursor    -> `walk_chunking_preserves_result`
     19. a counter wrapping at u64::MAX        -> `checked_counters_never_wrap`
     20. the attempt inside producer identity  -> `storage_reachable_producer_identity_excludes_attempt`
+    21. arm (iv) dropped from RouteImpossible -> `trader_parent_impossible_makes_a_final_route_skippable`
 
   All mutations were reverted; this file is the unmutated module.
 -/
@@ -874,6 +886,10 @@ structure World where
   consumedElsewhere : Val → Bool
   outcomeComplete : Val → Bool
   outcomeAbort : Val → Bool
+  /-- Arm (iv), P15-3/R17-3: the operation's own TRADER parent at `p` is
+  terminal on another branch, or on none. It is a fact about the trader's
+  lineage, not about this vault, and it reads no validation evidence. -/
+  traderParentImpossible : Val → Bool := fun _ => false
   canonicalParent : Bool
 
 /-- Storage coherence the cell layer proves: a final key is never dead, and an
@@ -883,9 +899,11 @@ structure Coherent (w : World) : Prop where
   outcome_unique : ∀ e, ¬ (w.outcomeComplete e = true ∧ w.outcomeAbort e = true)
 
 /-- R7-17 / P9-2: permanent proof that a route can never be consumed.
-Only Invalid counts; Unavailable never does. -/
+Only Invalid counts; Unavailable never does. Arm (iv) is the trader parent
+(P15-3), which likewise needs no evidence. -/
 def RouteImpossible (w : World) (e : Val) : Bool :=
   w.validation e == .invalid || w.orphanLeg e || w.consumedElsewhere e
+    || w.traderParentImpossible e
 
 /-- A storage-final E at a DLV key is skippable only on objective evidence. -/
 def finalSkippable (w : World) (e : Val) : Bool :=
@@ -901,7 +919,8 @@ def Consumed (w : World) (a : Nat) (e : Val) : Prop :=
   w.canonicalParent = true ∧ AttemptLive w a ∧ w.keyFinal a = some e
     ∧ w.validation e = .valid
     ∧ (w.isRoute e = true →
-        w.outcomeComplete e = true ∧ w.orphanLeg e = false ∧ w.consumedElsewhere e = false)
+        w.outcomeComplete e = true ∧ w.orphanLeg e = false ∧ w.consumedElsewhere e = false
+          ∧ w.traderParentImpossible e = false)
 
 theorem consumed_not_skipped {w : World} (hc : Coherent w) {a : Nat} {e : Val}
     (h : Consumed w a e) : Skipped w a = false := by
@@ -910,13 +929,13 @@ theorem consumed_not_skipped {w : World} (hc : Coherent w) {a : Nat} {e : Val}
   have hfs : finalSkippable w e = false := by
     unfold finalSkippable
     by_cases hroute : w.isRoute e = true
-    · obtain ⟨hcomp, horph, hce⟩ := hr hroute
+    · obtain ⟨hcomp, horph, hce, htp⟩ := hr hroute
       have hab : w.outcomeAbort e = false := by
         cases hx : w.outcomeAbort e
         · rfl
         · exact absurd ⟨hcomp, hx⟩ (hc.outcome_unique e)
       rw [if_pos hroute]
-      simp [RouteImpossible, hv, horph, hce, hab]
+      simp [RouteImpossible, hv, horph, hce, hab, htp]
     · rw [if_neg hroute, hv]
       decide
   show (w.keyDead a || (w.keyFinal a).any (finalSkippable w)) = false
@@ -987,6 +1006,18 @@ theorem route_impossible_final_leg_is_skippable (w : World) (a : Nat) (e : Val)
     (himp : RouteImpossible w e = true) : Skipped w a = true :=
   objective_rejection_implies_skipped w a e hf (Or.inr ⟨hroute, himp⟩)
 
+/-- ARM (iv) (P15-3, R17-3): a storage-final route cell whose TRADER parent is
+terminal on another branch — or on none — is skippable, with NO validation
+evidence and no Complete premise. Nothing rolls back: the cell was never an
+execution of its own, and the trader position is Invalid by the ladder's rung 2
+rather than Void. -/
+theorem trader_parent_impossible_makes_a_final_route_skippable (w : World) (a : Nat) (e : Val)
+    (hf : w.keyFinal a = some e) (hroute : w.isRoute e = true)
+    (htp : w.traderParentImpossible e = true)
+    -- Deliberately unused: the arm decides with the evidence still missing.
+    (_hun : w.validation e = .unavailable) : Skipped w a = true :=
+  route_impossible_final_leg_is_skippable w a e hf hroute (by simp [RouteImpossible, htp])
+
 /-- The rejected alternative: gating route skip on Complete. -/
 def SkippedGated (w : World) (a : Nat) : Bool :=
   w.keyDead a || (w.keyFinal a).any (fun e =>
@@ -1032,6 +1063,9 @@ structure Evolves (w w' : World) : Prop where
   orphan_stays : ∀ e, w.orphanLeg e = true → w'.orphanLeg e = true
   consumed_elsewhere_stays : ∀ e, w.consumedElsewhere e = true → w'.consumedElsewhere e = true
   abort_stays : ∀ e, w.outcomeAbort e = true → w'.outcomeAbort e = true
+  /-- A terminal trader parent never retracts. -/
+  trader_parent_stays : ∀ e, w.traderParentImpossible e = true →
+    w'.traderParentImpossible e = true := by intro _ h; exact h
 
 theorem invalid_stays {w w' : World} (hev : Evolves w w') {e : Val}
     (h : w.validation e = .invalid) : w'.validation e = .invalid := by
@@ -1043,10 +1077,11 @@ theorem route_impossibility_is_permanent {w w' : World} (hev : Evolves w w') {e 
     (h : RouteImpossible w e = true) : RouteImpossible w' e = true := by
   unfold RouteImpossible at *
   simp only [Bool.or_eq_true, beq_iff_eq] at *
-  rcases h with (h | h) | h
-  · exact Or.inl (Or.inl (invalid_stays hev h))
-  · exact Or.inl (Or.inr (hev.orphan_stays e h))
-  · exact Or.inr (hev.consumed_elsewhere_stays e h)
+  rcases h with ((h | h) | h) | h
+  · exact Or.inl (Or.inl (Or.inl (invalid_stays hev h)))
+  · exact Or.inl (Or.inl (Or.inr (hev.orphan_stays e h)))
+  · exact Or.inl (Or.inr (hev.consumed_elsewhere_stays e h))
+  · exact Or.inr (hev.trader_parent_stays e h)
 
 theorem final_skippable_is_monotone {w w' : World} (hev : Evolves w w') {e : Val}
     (h : finalSkippable w e = true) : finalSkippable w' e = true := by
@@ -1075,8 +1110,9 @@ theorem rejected_final_is_monotone {w w' : World} (hev : Evolves w w') {a : Nat}
 
 theorem unavailable_never_establishes_route_impossibility (w : World) (e : Val)
     (hu : w.validation e = .unavailable) (ho : w.orphanLeg e = false)
-    (hc : w.consumedElsewhere e = false) : RouteImpossible w e = false := by
-  simp [RouteImpossible, hu, ho, hc]
+    (hc : w.consumedElsewhere e = false) (htp : w.traderParentImpossible e = false) :
+    RouteImpossible w e = false := by
+  simp [RouteImpossible, hu, ho, hc, htp]
 
 theorem validation_unavailable_never_implies_rejection (w : World) (a : Nat) (e : Val)
     (hf : w.keyFinal a = some e) (hsingle : w.isRoute e = false)
@@ -1275,6 +1311,7 @@ theorem storage_reachable_does_not_imply_canonical :
 #print axioms attempt_live_is_load_bearing
 #print axioms objective_rejection_implies_skipped
 #print axioms route_impossible_final_leg_is_skippable
+#print axioms trader_parent_impossible_makes_a_final_route_skippable
 #print axioms withheld_leg_recovers_under_R7_17
 #print axioms withheld_leg_wedges_if_gated_on_complete
 #print axioms invalid_stays

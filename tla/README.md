@@ -287,9 +287,21 @@ tla/DSM_SofiSuccessorCells.tla    the MEMBERS: per-value holder counts, one writ
 
 tla/DSM_SofiFulfillment.tla       the OPERATION over registered facts: rivals between
                                   the witnesses and F, abandonment, completers, late
-                                  evidence, parent canonicality settling, the
-                                  resolution ladder (R14-1), the fence, genesis
+                                  evidence, parent canonicality settling, the trader
+                                  parent's branch selection (P15-3), the resolution
+                                  ladder (R14-1), the fence, genesis
 ```
+
+**The trader parent (P15-3, R17-3).** `parent` carries the claim at `p` that P
+was built on: `"single"` for an ordinary claim, or one conditional claim as
+`"open"` → `"taken"` / `"other"` / `"none"`, selected once by
+`SelectParentBranch`. Both kinds are initial states, so one run covers each. The
+two rungs sit BELOW registration and ABOVE every route result: `q` is Pending
+while `p` is, and Invalid once `p` selected another root or none. Arm (iv) of
+`RouteImpossible` is that same fact, and it reads no evidence — which is what
+lets a stranded cell of such an operation be skipped while `RouteValidation` is
+still Unavailable. An open parent is in `ProgressEnabled`: the operation is
+waiting on something a completer cannot supply.
 
 **Liveness as quiescence.** Every action in both models is bounded, so every
 behaviour is finite, and under weak fairness on the required actions a behaviour
@@ -347,6 +359,9 @@ Each config lists one invariant and must violate exactly it.
 | fulfillment | `_TraderOnlyCompletion` | completion by anyone | `QuiescentFulfillmentResolved` |
 | fulfillment | `_GuaranteedSuccessClaim` | *claim:* valid, canonical F never Voids | `RegisteredValidFulfillmentNeverVoids` |
 | fulfillment | `_RouteRealizable` | *claim:* the route never realizes | `RouteNeverRealized` |
+| fulfillment | `_ParentBranchIgnored` | the branch T0 selected (P15-3) | `MismatchedParentNeverRealizes` |
+| fulfillment | `_PendingParentIsImpossible` | an undecided T0 decides nothing | `PendingParentDecidesNothing` |
+| fulfillment | `_ParentArmReachable` | *claim:* the parent arm never decides Invalid | `ParentArmNeverDecidesInvalid` |
 
 **Plan names that changed, and why.** `UnreadCountedEmpty` → `UnreadDroppedFromCount`:
 under the ruled formula Empty counts toward `u`, so counting an unread member as

@@ -34,5 +34,6 @@ pub mod arith;
 pub mod conformance;
 pub mod derive;
 pub mod fisher_yates;
+pub mod resolution;
 pub mod smt;
 pub mod wire;

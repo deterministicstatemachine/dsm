@@ -32,7 +32,14 @@
     - RESOLUTION    Realized and Void are exclusive; resolution is permanent once
                     non-Pending; registered is not validated; a lost parent gives
                     Void, never Invalid; a registered F resolves once evidence is
-                    available
+                    available AND its own trader parent has resolved
+    - TRADER PARENT a conditional parent that has not resolved keeps the position
+                    Pending and decides nothing; one that selected another root, or
+                    none, makes it Invalid with no evidence at all; the arm is
+                    monotone (P15-3, R17-3)
+    - CANDIDATES    E ↔ F is not one-to-one: many candidate F share one (P, E, q)
+                    and one RouteValidation, and at most one of them registers
+                    (R15-2)
     - LINEAGE       Invalid terminates the lineage; a descendant needs a selected
                     predecessor root; the storage fence admits no claim of ANY kind
                     above an unresolved fulfillment, so at most one is unresolved
@@ -107,6 +114,8 @@
     30. id and signing digest share a tag      -> `identity_and_signing_digest_are_domain_separated`
     31. Invalid counted as validated ancestry  -> `invalid_terminates_lineage`
     32. Void selecting the Realize root        -> `route_validation_excludes_parent_canonicality`
+    33. the parent's selected branch unchecked -> `conditional_parent_on_another_branch_is_invalid`
+    34. an undecided parent read as terminal   -> `conditional_parent_pending_keeps_the_position_pending`
 
   `p_g_f_hash_order_acyclic` is not a mutation target: acyclicity follows from the
   hash order itself, so admitting a current-E class cannot falsify it. The design
@@ -621,7 +630,9 @@ theorem route_validation_refines {gset : List Nat} {ev ev' : Evidence} (h : EvRe
     Refines (routeValidation gset ev) (routeValidation gset ev') :=
   and_refines (allV_map_refines gset h.1) (and_refines h.2.1 h.2.2)
 
-/-- The validation a verifier evaluates for a registered fulfillment. -/
+/-- The validation a verifier evaluates for ANY conforming fulfillment of a
+precommit, registered or not: the verdict is a function of P's canonical
+witness set, which is why several candidates share it (R15-2). -/
 def fulfillmentValidation (F : FBody) (ev : Evidence) : Validation := routeValidation F.gset ev
 
 /-- STATIC: every fulfillment of one precommit sees the same RouteValidation,
@@ -962,8 +973,55 @@ theorem a_registered_rival_refuses_fulfillment {hm : HashModel} {shadowOf : Nat 
 
 -- ── §7 one operation: consumption, resolution, atomicity ──────────────────
 
-/-- What a verifier has established about one registered fulfillment. Keys are
-DLV parents `R_j`; per-parent facts are at the fulfillment's own attempt. -/
+/-- The claim at `p` that P names as its trader parent `T0` (P15-3, R17-3).
+A trader may build P on a conditional parent before that parent resolves,
+because the storage fence only requires `p` to be storage-resolved: it is
+guessing which branch `p` will take. -/
+inductive ParentState where
+  /-- An ordinary single-root claim; P conformance pinned its root at ingress. -/
+  | single
+  /-- A conditional claim whose branch selection is not yet known. -/
+  | openBranch
+  /-- A conditional claim that selected the root P was built on. -/
+  | taken
+  /-- A conditional claim that selected the opposite branch. -/
+  | otherBranch
+  /-- A conditional claim that resolved Invalid: no root was ever selected. -/
+  | noRoot
+  deriving DecidableEq, Repr
+
+def parentCompatible : ParentState → Bool
+  | .single => true
+  | .taken => true
+  | _ => false
+
+def parentImpossible : ParentState → Bool
+  | .otherBranch => true
+  | .noRoot => true
+  | _ => false
+
+def parentPending : ParentState → Bool
+  | .openBranch => true
+  | _ => false
+
+/-- While the parent is open BOTH are false: an undecided parent decides
+nothing, so it neither consumes nor makes the route impossible. Once it is
+terminal exactly one holds. -/
+theorem parent_states_are_exclusive (q : ParentState) :
+    (parentCompatible q = true → parentImpossible q = false)
+      ∧ (parentPending q = true → parentCompatible q = false ∧ parentImpossible q = false)
+      ∧ (parentPending q = false → (parentCompatible q = true ↔ parentImpossible q = false)) := by
+  cases q <;> refine ⟨?_, ?_, ?_⟩ <;> intro h <;> simp_all [parentCompatible, parentImpossible, parentPending]
+
+theorem parent_compatible_is_not_pending {q : ParentState} (h : parentCompatible q = true) :
+    parentPending q = false ∧ parentImpossible q = false := by
+  cases q <;> simp_all [parentCompatible, parentImpossible, parentPending]
+
+/-- What a verifier has established about one fulfillment at one position. A
+fulfillment that has not registered is carried with `registered := false`, and
+the ladder answers Pending for it — the position's terminal answer comes from
+the one fulfillment that does register (R15-2). Keys are DLV parents `R_j`;
+per-parent facts are at the fulfillment's own attempt. -/
 structure Facts where
   registered : Bool
   validation : Validation
@@ -975,13 +1033,17 @@ structure Facts where
   orphan : Nat → Bool
   complete : Bool
   abort : Bool
+  /-- The claim at `p` this operation was built on. An ordinary parent is the
+  default, which is what every pre-P15-3 fact set means. -/
+  parent : ParentState := .single
 
 def legOk (x : Facts) (e R : Nat) : Bool := x.canonical R && x.live R && x.cell R == some e
 
-/-- `ConsumedRoute(F, E)`; a single-vault trade is the one-leg case. -/
+/-- `ConsumedRoute(F, E)`; a single-vault trade is the one-leg case. The
+trader parent must have taken the branch this operation was built on. -/
 def ConsumedRoute (x : Facts) (legs : List Nat) (e : Nat) : Bool :=
   x.registered && x.validation == .valid && legs.all (legOk x e)
-    && (decide (legs.length < 2) || x.complete)
+    && (decide (legs.length < 2) || x.complete) && parentCompatible x.parent
 
 def StorageResolved (x : Facts) (legs : List Nat) : Bool :=
   x.registered && legs.all (fun R => x.dead R || (x.cell R).isSome)
@@ -1005,11 +1067,16 @@ inductive Resolution where
   | void
   deriving DecidableEq, Repr
 
-/-- The resolution ladder. Void requires `RouteValidation = Valid`: that is what
-"Pending otherwise, including Unavailable" and "permanent once non-Pending"
-jointly require (see `literal_ladder_is_not_permanent`). -/
+/-- The resolution ladder. Rungs 1 and 2 are the trader parent (P15-3): they
+sit above every route result, because a position built on a branch the parent
+never took is Invalid whatever its own legs did. Void requires
+`RouteValidation = Valid`: that is what "Pending otherwise, including
+Unavailable" and "permanent once non-Pending" jointly require (see
+`literal_ladder_is_not_permanent`). -/
 def resolve (x : Facts) (legs : List Nat) (e : Nat) : Resolution :=
   if x.registered = false then .pending
+  else if parentPending x.parent = true then .pending
+  else if parentImpossible x.parent = true then .invalid
   else if ConsumedRoute x legs e = true then .realized
   else if x.validation = .invalid then .invalid
   else if x.validation = .valid ∧ StorageResolved x legs = true ∧ VoidEvidence x legs e = true then .void
@@ -1043,17 +1110,20 @@ structure Evolves (x x' : Facts) : Prop where
   orphan : ∀ R, x.orphan R = true → x'.orphan R = true
   complete : x.complete = true → x'.complete = true
   abort : x.abort = true → x'.abort = true
+  /-- An open branch may be selected; a terminal one never changes. -/
+  parent : x.parent ≠ .openBranch → x'.parent = x.parent := by intro _; rfl
 
 theorem consumedRoute_iff (x : Facts) (legs : List Nat) (e : Nat) :
     ConsumedRoute x legs e = true ↔
       x.registered = true ∧ x.validation = .valid
         ∧ (∀ R ∈ legs, x.canonical R = true ∧ x.live R = true ∧ x.cell R = some e)
-        ∧ (legs.length < 2 ∨ x.complete = true) := by
+        ∧ (legs.length < 2 ∨ x.complete = true)
+        ∧ parentCompatible x.parent = true := by
   simp [ConsumedRoute, legOk, and_assoc]
 
 theorem legLost_false_of_ok {x : Facts} {legs : List Nat} {e R : Nat} (hc : Coherent x legs e)
     (hcr : ConsumedRoute x legs e = true) (hR : R ∈ legs) : legLost x e R = false := by
-  obtain ⟨_, _, hall, _⟩ := (consumedRoute_iff x legs e).mp hcr
+  obtain ⟨_, _, hall, _, _⟩ := (consumedRoute_iff x legs e).mp hcr
   obtain ⟨hcan, _, hcell⟩ := hall R hR
   have hd : x.dead R = false := by
     cases h : x.dead R
@@ -1095,18 +1165,113 @@ theorem resolve_realized_iff (x : Facts) (legs : List Nat) (e : Nat) :
     by_cases h1 : x.registered = false
     · rw [if_pos h1] at h; cases h
     · rw [if_neg h1] at h
-      by_cases h2 : ConsumedRoute x legs e = true
-      · exact h2
-      · rw [if_neg h2] at h
-        by_cases h3 : x.validation = .invalid
-        · rw [if_pos h3] at h; cases h
-        · rw [if_neg h3] at h
-          split at h <;> cases h
+      by_cases hp : parentPending x.parent = true
+      · rw [if_pos hp] at h; cases h
+      · rw [if_neg hp] at h
+        by_cases hi : parentImpossible x.parent = true
+        · rw [if_pos hi] at h; cases h
+        · rw [if_neg hi] at h
+          by_cases h2 : ConsumedRoute x legs e = true
+          · exact h2
+          · rw [if_neg h2] at h
+            by_cases h3 : x.validation = .invalid
+            · rw [if_pos h3] at h; cases h
+            · rw [if_neg h3] at h
+              split at h <;> cases h
   · intro h
-    have hreg : x.registered = true := ((consumedRoute_iff x legs e).mp h).1
+    obtain ⟨hreg, _, _, _, hcompat⟩ := (consumedRoute_iff x legs e).mp h
+    obtain ⟨hpend, himp⟩ := parent_compatible_is_not_pending hcompat
     have h1 : ¬ x.registered = false := by simp [hreg]
+    have hp : ¬ parentPending x.parent = true := by simp [hpend]
+    have hi : ¬ parentImpossible x.parent = true := by simp [himp]
     unfold resolve
-    rw [if_neg h1, if_pos h]
+    rw [if_neg h1, if_neg hp, if_neg hi, if_pos h]
+
+/-- THE TRADER PARENT, RUNG 1 (P15-3): a conditional parent that has not
+resolved keeps the position Pending. The parent alone consumes nothing and
+makes nothing impossible — an undecided branch is not a verdict. -/
+theorem conditional_parent_pending_keeps_the_position_pending {x : Facts} {legs : List Nat}
+    {e : Nat} (hopen : x.parent = .openBranch) :
+    resolve x legs e = .pending ∧ ConsumedRoute x legs e = false
+      ∧ parentCompatible x.parent = false ∧ parentImpossible x.parent = false := by
+  refine ⟨?_, ?_, by rw [hopen]; rfl, by rw [hopen]; rfl⟩
+  · unfold resolve
+    by_cases hreg : x.registered = false
+    · rw [if_pos hreg]
+    · rw [if_neg hreg, if_pos (by rw [hopen]; rfl : parentPending x.parent = true)]
+  · simp [ConsumedRoute, hopen, parentCompatible]
+
+/-- THE TRADER PARENT, RUNG 2 (P15-3): a parent that selected the other branch,
+or no root at all, makes the position Invalid — not Void. The operation was
+never the one its own lineage took, whatever its legs did. -/
+theorem conditional_parent_on_another_branch_is_invalid {x : Facts} {legs : List Nat} {e : Nat}
+    (hreg : x.registered = true) (himp : parentImpossible x.parent = true) :
+    resolve x legs e = .invalid ∧ ConsumedRoute x legs e = false := by
+  have hpend : parentPending x.parent = false := by
+    cases hq : x.parent <;> simp_all [parentImpossible, parentPending]
+  refine ⟨?_, ?_⟩
+  · unfold resolve
+    rw [if_neg (by simp [hreg]), if_neg (by simp [hpend]), if_pos himp]
+  · have : parentCompatible x.parent = false := by
+      cases hq : x.parent <;> simp_all [parentImpossible, parentCompatible]
+    simp [ConsumedRoute, this]
+
+/-- Arm (iv) needs NO validation evidence: a terminal parent that selected no
+root decides the position while `RouteValidation` is still Unavailable, which
+is what lets a stranded DLV cell of such an operation be skipped. -/
+theorem terminal_parent_with_no_root_is_invalid_without_evidence {x : Facts} {legs : List Nat}
+    {e : Nat} (hreg : x.registered = true) (hno : x.parent = .noRoot)
+    -- Deliberately unused: THAT is the content. The verdict lands with the
+    -- validation evidence still missing.
+    (_hun : x.validation = .unavailable) : resolve x legs e = .invalid := by
+  exact (conditional_parent_on_another_branch_is_invalid hreg (by rw [hno]; rfl)).1
+
+/-- A concrete position on a branch its parent never took: registered, valid,
+every leg final on this E, Complete — and still Invalid, because `p` selected
+the other root. Its two siblings differ only in the parent's state. Without
+these witnesses the rung theorems above could be vacuously true of a predicate
+that never holds. -/
+def builtOnTheOtherBranch : Facts where
+  registered := true
+  validation := .valid
+  canonical := fun _ => true
+  live := fun _ => true
+  cell := fun _ => some 50
+  dead := fun _ => false
+  consumedElsewhere := fun _ => false
+  orphan := fun _ => false
+  complete := true
+  abort := false
+  parent := .otherBranch
+
+def awaitingItsParent : Facts := { builtOnTheOtherBranch with parent := .openBranch }
+def onTheTakenBranch : Facts := { builtOnTheOtherBranch with parent := .taken }
+def terminalParentNoRoot : Facts := { builtOnTheOtherBranch with parent := .noRoot }
+
+/-- THE RUNGS ARE NOT VACUOUS, and they separate three outcomes on facts that
+differ ONLY in what the trader parent did. -/
+theorem the_trader_parent_rungs_are_not_vacuous :
+    resolve builtOnTheOtherBranch [10] 50 = .invalid
+      ∧ resolve terminalParentNoRoot [10] 50 = .invalid
+      ∧ resolve awaitingItsParent [10] 50 = .pending
+      ∧ resolve onTheTakenBranch [10] 50 = .realized
+      ∧ ConsumedRoute builtOnTheOtherBranch [10] 50 = false
+      ∧ ConsumedRoute onTheTakenBranch [10] 50 = true := by decide
+
+/-- THE ARM IS MONOTONE: a terminal parent never changes, so neither predicate
+ever retracts. Only an open branch can move, and it moves once. -/
+theorem trader_parent_arm_is_monotone {x x' : Facts} (hev : Evolves x x') :
+    (parentImpossible x.parent = true → parentImpossible x'.parent = true)
+      ∧ (parentCompatible x.parent = true → parentCompatible x'.parent = true) := by
+  constructor
+  · intro h
+    have hne : x.parent ≠ .openBranch := by
+      intro hq; rw [hq] at h; exact absurd h (by decide)
+    rw [hev.parent hne]; exact h
+  · intro h
+    have hne : x.parent ≠ .openBranch := by
+      intro hq; rw [hq] at h; exact absurd h (by decide)
+    rw [hev.parent hne]; exact h
 
 /-- ATOMIC, ALL OR NONE, over P's legs: a conforming fulfillment is realized only
 by consuming EVERY DLV parent P names; otherwise it consumes none. -/
@@ -1168,15 +1333,16 @@ theorem stranded_e_cell_is_not_partial_execution {x : Facts} {legs : List Nat} {
     (hlost : x.orphan R' = true ∨ x.consumedElsewhere R' = true) :
     (x.cell R = some e ∧ ∀ R'', ConsumedLeg x legs e R'' = false)
       ∧ (x.registered = true → x.validation = .valid → StorageResolved x legs = true →
-          resolve x legs e = .void) := by
+          parentCompatible x.parent = true → resolve x legs e = .void) := by
   have hno := route_impossible_orphan_and_consumed_elsewhere_arms hc hR' hlost
-  refine ⟨⟨hstranded, fun R'' => by simp [ConsumedLeg, hno]⟩, fun hreg hv hsr => ?_⟩
+  refine ⟨⟨hstranded, fun R'' => by simp [ConsumedLeg, hno]⟩, fun hreg hv hsr hcompat => ?_⟩
+  obtain ⟨hpend, himp⟩ := parent_compatible_is_not_pending hcompat
   have hve : VoidEvidence x legs e = true := by
     have : legLost x e R' = true := by
       rcases hlost with h | h <;> simp [legLost, h]
     simp only [VoidEvidence, Bool.or_eq_true, List.any_eq_true]
     exact Or.inl ⟨R', hR', this⟩
-  simp [resolve, hreg, hno, hv, hsr, hve]
+  simp [resolve, hreg, hno, hv, hsr, hve, hpend, himp]
 
 /-- Contention: a rival consumed `R_A = 10` between the witnesses and F. -/
 def contended : Facts where
@@ -1207,15 +1373,18 @@ theorem fulfillment_may_void_under_contention :
 
 theorem consumedRoute_mono {x x' : Facts} (hev : Evolves x x') {legs : List Nat} {e : Nat}
     (h : ConsumedRoute x legs e = true) : ConsumedRoute x' legs e = true := by
-  obtain ⟨hreg, hv, hall, hlen⟩ := (consumedRoute_iff x legs e).mp h
+  obtain ⟨hreg, hv, hall, hlen, hcompat⟩ := (consumedRoute_iff x legs e).mp h
   have hv' : x'.validation = .valid := by
     have := hev.validation; rw [hv] at this; exact valid_refines_only_to_valid this
-  refine (consumedRoute_iff x' legs e).mpr ⟨hev.registered hreg, hv', fun R hR => ?_, ?_⟩
+  refine (consumedRoute_iff x' legs e).mpr ⟨hev.registered hreg, hv', fun R hR => ?_, ?_, ?_⟩
   · obtain ⟨a, b, c⟩ := hall R hR
     exact ⟨hev.canonical R a, hev.live R b, hev.cell R e c⟩
   · rcases hlen with h | h
     · exact Or.inl h
     · exact Or.inr (hev.complete h)
+  · have hne : x.parent ≠ .openBranch := by
+      intro hq; rw [hq] at hcompat; exact absurd hcompat (by decide)
+    rw [hev.parent hne]; exact hcompat
 
 theorem storageResolved_mono {x x' : Facts} (hev : Evolves x x') {legs : List Nat}
     (h : StorageResolved x legs = true) : StorageResolved x' legs = true := by
@@ -1265,37 +1434,54 @@ theorem resolution_is_permanent {x x' : Facts} {legs : List Nat} {e : Nat}
   have hreg' := hev.registered hreg
   have h1 : ¬ x.registered = false := by simp [hreg]
   have h1' : ¬ x'.registered = false := by simp [hreg']
+  -- An open parent makes the position Pending, which hnp excludes; so the
+  -- parent is terminal, and a terminal parent never changes.
+  have hpend : parentPending x.parent = false := by
+    cases hq : parentPending x.parent
+    · rfl
+    · exact absurd (by unfold resolve; rw [if_neg h1, if_pos hq]) hnp
+  have hne : x.parent ≠ .openBranch := by
+    intro hq; rw [hq] at hpend; exact absurd hpend (by decide)
+  have hpar : x'.parent = x.parent := hev.parent hne
+  have hp : ¬ parentPending x.parent = true := by simp [hpend]
+  have hp' : ¬ parentPending x'.parent = true := by rw [hpar]; simp [hpend]
   unfold resolve at hnp ⊢
-  rw [if_neg h1, if_neg h1']
-  rw [if_neg h1] at hnp
-  by_cases hcr : ConsumedRoute x legs e = true
-  · rw [if_pos hcr, if_pos (consumedRoute_mono hev hcr)]
-  · rw [if_neg hcr]
-    rw [if_neg hcr] at hnp
-    by_cases hinv : x.validation = .invalid
-    · have hinv' : x'.validation = .invalid := by
-        have := hev.validation; rw [hinv] at this; exact invalid_refines_only_to_invalid this
-      have hcr' : ¬ ConsumedRoute x' legs e = true := by simp [ConsumedRoute, hinv']
-      rw [if_pos hinv, if_neg hcr', if_pos hinv']
-    · rw [if_neg hinv]
-      rw [if_neg hinv] at hnp
-      by_cases hvoid : x.validation = .valid ∧ StorageResolved x legs = true ∧ VoidEvidence x legs e = true
-      · obtain ⟨hv, hsr, hve⟩ := hvoid
-        have hv' : x'.validation = .valid := by
-          have := hev.validation; rw [hv] at this; exact valid_refines_only_to_valid this
-        have hve' := voidEvidence_mono hev hve
-        have hcr' : ¬ ConsumedRoute x' legs e = true := by
-          intro h
-          rw [realized_excludes_void_evidence hc' h] at hve'
-          cases hve'
-        have hinv' : ¬ x'.validation = .invalid := by rw [hv']; decide
-        have hvoid' : x'.validation = .valid ∧ StorageResolved x' legs = true ∧ VoidEvidence x' legs e = true :=
-          ⟨hv', storageResolved_mono hev hsr, hve'⟩
-        have hvoid : x.validation = .valid ∧ StorageResolved x legs = true ∧ VoidEvidence x legs e = true :=
-          ⟨hv, hsr, hve⟩
-        rw [if_pos hvoid, if_neg hcr', if_neg hinv', if_pos hvoid']
-      · rw [if_neg hvoid] at hnp
-        exact absurd rfl hnp
+  rw [if_neg h1, if_neg h1', if_neg hp, if_neg hp']
+  rw [if_neg h1, if_neg hp] at hnp
+  by_cases himp : parentImpossible x.parent = true
+  · have himp' : parentImpossible x'.parent = true := by rw [hpar]; exact himp
+    rw [if_pos himp, if_pos himp']
+  · have himp' : ¬ parentImpossible x'.parent = true := by rw [hpar]; exact himp
+    rw [if_neg himp, if_neg himp']
+    rw [if_neg himp] at hnp
+    by_cases hcr : ConsumedRoute x legs e = true
+    · rw [if_pos hcr, if_pos (consumedRoute_mono hev hcr)]
+    · rw [if_neg hcr]
+      rw [if_neg hcr] at hnp
+      by_cases hinv : x.validation = .invalid
+      · have hinv' : x'.validation = .invalid := by
+          have := hev.validation; rw [hinv] at this; exact invalid_refines_only_to_invalid this
+        have hcr' : ¬ ConsumedRoute x' legs e = true := by simp [ConsumedRoute, hinv']
+        rw [if_pos hinv, if_neg hcr', if_pos hinv']
+      · rw [if_neg hinv]
+        rw [if_neg hinv] at hnp
+        by_cases hvoid : x.validation = .valid ∧ StorageResolved x legs = true ∧ VoidEvidence x legs e = true
+        · obtain ⟨hv, hsr, hve⟩ := hvoid
+          have hv' : x'.validation = .valid := by
+            have := hev.validation; rw [hv] at this; exact valid_refines_only_to_valid this
+          have hve' := voidEvidence_mono hev hve
+          have hcr' : ¬ ConsumedRoute x' legs e = true := by
+            intro h
+            rw [realized_excludes_void_evidence hc' h] at hve'
+            cases hve'
+          have hinv' : ¬ x'.validation = .invalid := by rw [hv']; decide
+          have hvoid' : x'.validation = .valid ∧ StorageResolved x' legs = true ∧ VoidEvidence x' legs e = true :=
+            ⟨hv', storageResolved_mono hev hsr, hve'⟩
+          have hvoid : x.validation = .valid ∧ StorageResolved x legs = true ∧ VoidEvidence x legs e = true :=
+            ⟨hv, hsr, hve⟩
+          rw [if_pos hvoid, if_neg hcr', if_neg hinv', if_pos hvoid']
+        · rw [if_neg hvoid] at hnp
+          exact absurd rfl hnp
 
 /-- FINDING: the ladder read literally (Void without a validation premise) is
 not permanent. A verifier sees Void while evidence is unavailable; the evidence
@@ -1322,7 +1508,7 @@ theorem literal_ladder_is_not_permanent :
       ∧ resolveLiteral laterInvalid [10] 50 = .invalid
       ∧ resolve unavailableThenVoid [10] 50 = .pending := by
   refine ⟨⟨fun h => h, trivial, fun _ h => h, fun _ h => h, fun _ _ h => h, fun _ h => h,
-    fun _ h => h, fun _ h => h, fun h => h, fun h => h⟩, ⟨fun _ _ => rfl, (by decide),
+    fun _ h => h, fun _ h => h, fun h => h, fun h => h, fun _ => rfl⟩, ⟨fun _ _ => rfl, (by decide),
     (fun h => by cases h), (fun h => by simp [ConsumedRoute, laterInvalid, unavailableThenVoid] at h),
     (fun _ h => by simp [laterInvalid, unavailableThenVoid] at h)⟩, (by decide), (by decide), (by decide)⟩
 
@@ -1338,18 +1524,43 @@ theorem fulfillment_registrable_after_parent_loss_resolves_void (hm : HashModel)
     (shadowOf : Nat → Nat → Nat) (s : Sys) (P : PBody) (F : FBody) (y : Nat) {x : Facts}
     {legs : List Nat} {e R : Nat} (hc : Coherent x legs e) (hR : R ∈ legs)
     (hlost : x.consumedElsewhere R = true) (hreg : x.registered = true)
-    (hv : x.validation = .valid) (hsr : StorageResolved x legs = true) :
+    (hv : x.validation = .valid) (hsr : StorageResolved x legs = true)
+    (hcompat : parentCompatible x.parent = true) :
     (FIngress hm shadowOf (consumeStep R y s) P F ↔ FIngress hm shadowOf s P F)
       ∧ resolve x legs e = .void
       ∧ ∀ x', Evolves x x' → Coherent x' legs e → resolve x' legs e = .void := by
   have hno := route_impossible_orphan_and_consumed_elsewhere_arms hc hR (Or.inr hlost)
+  obtain ⟨hpend, himp⟩ := parent_compatible_is_not_pending hcompat
   have hve : VoidEvidence x legs e = true := by
     simp only [VoidEvidence, Bool.or_eq_true, List.any_eq_true]
     exact Or.inl ⟨R, hR, by simp [legLost, hlost]⟩
-  have hres : resolve x legs e = .void := by simp [resolve, hreg, hno, hv, hsr, hve]
+  have hres : resolve x legs e = .void := by
+    simp [resolve, hreg, hno, hv, hsr, hve, hpend, himp]
   exact ⟨Iff.rfl, hres,
     fun x' hev hc' => by rw [resolution_is_permanent hev hc' (by rw [hres]; decide), hres]⟩
 
+
+/-- R15-2: `E ↔ F` IS NOT ONE-TO-ONE, AND REGISTRATION IS WHAT IS UNIQUE.
+`Conforming` leaves the attempt vector free, so many candidate fulfillments
+reference one `(P, E, q)` — `route_validation_is_static` quantifies over exactly
+that. What `K_ful(q)` gives is that at most one of them ever registers: a
+candidate arriving at a position that already holds one IS that one. -/
+theorem at_most_one_candidate_registers_per_position {hm : HashModel}
+    {shadowOf : Nat → Nat → Nat} {s : Sys} {P : PBody} {F1 F2 : FBody}
+    (hheld : s.kful F1.q = some F1) (hq : F2.q = F1.q)
+    (h2 : FIngress hm shadowOf s P F2) : F2 = F1 := by
+  obtain ⟨_, _, _, _, hk, _⟩ := h2
+  rw [hq, hheld] at hk
+  rcases hk with h | h
+  · cases h
+  · exact (Option.some.inj h).symm
+
+/-- A candidate that never registers never resolves the position: the ladder
+answers Pending for it forever, and the position's terminal answer comes from
+the one fulfillment that did register. -/
+theorem a_candidate_that_never_registers_stays_pending (x : Facts) (legs : List Nat) (e : Nat)
+    (h : x.registered = false) : resolve x legs e = .pending := by
+  unfold resolve; rw [if_pos h]
 
 /-- NO GUARANTEE WITHOUT A PREPARE LOCK. Witnesses do not lock (§6), so a
 registered, fully valid fulfillment is not guaranteed to realize; the only way to
@@ -1409,12 +1620,23 @@ Pending. -/
 theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
     {legs : List Nat} {e : Nat} (hreg : x.registered = true)
     (hev : x.validation ≠ .unavailable) (hsr : StorageResolved x legs = true)
+    (hpar : parentPending x.parent = false)
     (hfate : ∀ R ∈ legs, (x.canonical R = true ∧ x.live R = true) ∨ x.orphan R = true
       ∨ x.consumedElsewhere R = true) :
     resolve x legs e ≠ .pending := by
   have h1 : ¬ x.registered = false := by simp [hreg]
+  have hp : ¬ parentPending x.parent = true := by simp [hpar]
   unfold resolve
-  rw [if_neg h1]
+  rw [if_neg h1, if_neg hp]
+  by_cases himp : parentImpossible x.parent = true
+  · rw [if_pos himp]; decide
+  rw [if_neg himp]
+  have himpF : parentImpossible x.parent = false := by
+    cases h : parentImpossible x.parent
+    · rfl
+    · exact absurd h himp
+  have hcompat : parentCompatible x.parent = true :=
+    ((parent_states_are_exclusive x.parent).2.2 hpar).mpr himpF
   by_cases hcr : ConsumedRoute x legs e = true
   · rw [if_pos hcr]; decide
   · rw [if_neg hcr]
@@ -1435,7 +1657,7 @@ theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
         · have hall_ok : ¬ ∀ R ∈ legs, x.canonical R = true ∧ x.live R = true ∧ x.cell R = some e := by
             intro hok
             apply hcr
-            refine (consumedRoute_iff x legs e).mpr ⟨hreg, hv, hok, ?_⟩
+            refine (consumedRoute_iff x legs e).mpr ⟨hreg, hv, hok, ?_, hcompat⟩
             rcases hlen with (h | h) | h
             · exact Or.inl h
             · exact Or.inr h
@@ -1471,21 +1693,15 @@ theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
 theorem without_evidence_a_registered_fulfillment_stays_pending :
     ∀ x', Evolves unavailableThenVoid x' → x'.validation = .unavailable →
       resolve x' [10] 50 ≠ .realized ∧ resolve x' [10] 50 ≠ .void := by
-  intro x' _ hu
+  intro x' hevx hu
+  have hpar : x'.parent = .single := by
+    have := hevx.parent (by decide); simpa [unavailableThenVoid] using this
   have hcr : ConsumedRoute x' [10] 50 = false := by simp [ConsumedRoute, hu]
   constructor
   · intro h; rw [(resolve_realized_iff _ _ _).mp h] at hcr; cases hcr
   · intro h
     unfold resolve at h
-    split at h
-    · cases h
-    · split at h
-      · rename_i hc; rw [hcr] at hc; cases hc
-      · split at h
-        · cases h
-        · split at h
-          · rename_i hcond; rw [hu] at hcond; exact absurd hcond.1 (by decide)
-          · cases h
+    simp [hpar, parentPending, parentImpossible, hcr, hu] at h
 
 -- ── §8 lineage, the predecessor fence, SofiVoid ───────────────────────────
 
@@ -1864,6 +2080,13 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms legLost_false_of_ok
 #print axioms realized_excludes_void_evidence
 #print axioms resolve_realized_iff
+#print axioms parent_states_are_exclusive
+#print axioms parent_compatible_is_not_pending
+#print axioms conditional_parent_pending_keeps_the_position_pending
+#print axioms conditional_parent_on_another_branch_is_invalid
+#print axioms terminal_parent_with_no_root_is_invalid_without_evidence
+#print axioms the_trader_parent_rungs_are_not_vacuous
+#print axioms trader_parent_arm_is_monotone
 #print axioms fulfillment_atomic_all_or_none
 #print axioms per_leg_consumption_is_partial_execution
 #print axioms route_impossible_orphan_and_consumed_elsewhere_arms
@@ -1878,6 +2101,8 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms literal_ladder_is_not_permanent
 #print axioms registered_is_not_validated
 #print axioms fulfillment_registrable_after_parent_loss_resolves_void
+#print axioms at_most_one_candidate_registers_per_position
+#print axioms a_candidate_that_never_registers_stays_pending
 #print axioms no_guarantee_without_prepare_lock
 #print axioms selected_root_is_committed
 #print axioms route_validation_excludes_parent_canonicality
