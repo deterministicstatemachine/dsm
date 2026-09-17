@@ -245,6 +245,49 @@ pub mod class {
     pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
     /// `Γ` — the canonical route-leg set folded into a route E.
     pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;
+
+    // ── The DLV tree, the cores, B° and vault genesis (E1b-2) ───────────
+    //
+    // P15-4, P15-6, P15-7, P15-8, P15-11 and P15-12. Unions follow the house
+    // rule: the nested envelope IS the discriminant, so B°'s two branches,
+    // `X_route`'s two branches, the owner authority's two branches and the
+    // three core-entry kinds are each their own class.
+
+    /// A vault's own state leaf in its DLV tree (`V_n`).
+    pub const SOFI_VAULT_STATE_LEAF: u16 = 0x004B;
+    /// A trader's relationship leaf in a vault's DLV tree.
+    pub const SOFI_VAULT_RELATIONSHIP_LEAF: u16 = 0x004C;
+    /// A trader's relationship leaf in its OWN economic tree (`R_econ`).
+    pub const SOFI_TRADER_RELATIONSHIP_LEAF: u16 = 0x004D;
+    /// Core entry: a leaf mutated from `pre` to `post`.
+    pub const SOFI_CORE_ENTRY_MUTATION: u16 = 0x004E;
+    /// Core entry: a leaf read, not written.
+    pub const SOFI_CORE_ENTRY_READ: u16 = 0x004F;
+    /// Core entry: a relationship leaf whose post is filled by BindExt.
+    pub const SOFI_CORE_ENTRY_RELATIONSHIP: u16 = 0x0050;
+    /// `T°` — the trader core, scoped to `(G, DevID, q)`.
+    pub const SOFI_TRADER_CORE: u16 = 0x0051;
+    /// `V°_j` — one vault's core, carrying the trader marker.
+    pub const SOFI_DLV_CORE: u16 = 0x0052;
+    /// `B°` branch: a swap over one or more hops.
+    pub const SOFI_SETTLEMENT_SWAP: u16 = 0x0053;
+    /// `B°` branch: a full close of one vault.
+    pub const SOFI_SETTLEMENT_CLOSE: u16 = 0x0054;
+    /// Owner authority: the vault's origin device. The only live branch.
+    pub const SOFI_OWNER_AUTHORITY_ORIGIN: u16 = 0x0055;
+    /// Owner authority: a DSM succession successor. Encodable, and ALWAYS
+    /// refused by semantic validation until DSM succession is activated.
+    pub const SOFI_OWNER_AUTHORITY_DSM_SUCCESSOR: u16 = 0x0056;
+    /// `X_route` preimage branch: swap hops.
+    pub const SOFI_ROUTE_DIGEST_SWAP: u16 = 0x0057;
+    /// `X_route` preimage branch: a close.
+    pub const SOFI_ROUTE_DIGEST_CLOSE: u16 = 0x0058;
+    /// `P(E)` — the canonical settlement preimage.
+    pub const SOFI_SETTLEMENT_PREIMAGE: u16 = 0x0059;
+    /// `VaultGenesisPreimage` — what `GenesisAccepted` validates against.
+    pub const SOFI_VAULT_GENESIS_PREIMAGE: u16 = 0x005A;
+    /// `VaultCreation` — the owner's insert-only creation record at `p_create`.
+    pub const SOFI_VAULT_CREATION: u16 = 0x005B;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

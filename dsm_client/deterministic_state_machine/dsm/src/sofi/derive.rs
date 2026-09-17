@@ -18,15 +18,17 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_ROUTE_LEG_SET, TAG_DSM_SOFI_ROUTE_OUTCOME_V2, TAG_DSM_SOFI_SETTLEMENT_CORE_V3,
     TAG_DSM_SOFI_SETUP_ID, TAG_DSM_SOFI_SETUP_REF, TAG_DSM_SOFI_SETUP_SIGN,
     TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT, TAG_DSM_SOFI_SUCC_CELL_V2,
-    TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID,
+    TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_ROUTE_DIGEST,
     TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
+    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 
 use super::wire::{
-    DlvPolicyFulfillmentBody, RouteLegSet, SofiResolutionClaim, SofiSetupBody,
-    TraderFulfillmentBody, TraderPrecommitBody,
+    DlvPolicyFulfillmentBody, RouteDigestPreimage, RouteLegSet, SettlementBody, SettlementPreimage,
+    RouteLegEntry, SofiResolutionClaim, SofiSetupBody, SofiWireError, TraderFulfillmentBody,
+    TraderPrecommitBody, VaultRelationshipLeaf, VaultStateLeaf, CANONICAL_MAX_LEGS, ROUTE_MIN_LEGS,
 };
 
 type D32 = [u8; 32];
@@ -51,6 +53,29 @@ pub fn vault_id(owner_genesis: &D32, owner_device_id: &D32, create_position: u64
             &create_position.to_be_bytes(),
         ],
     )
+}
+
+/// `H(vault-state-key/v1 ‖ v)` — where a vault's own state leaf sits in its
+/// DLV tree. One key per vault, so the state cannot be split across leaves.
+pub fn vault_state_key(vault_id: &D32) -> D32 {
+    h(TAG_DSM_SOFI_VAULT_STATE_KEY, &[vault_id])
+}
+
+/// The value of a vault's own state leaf: `H(vault-leaf-state/v1 ‖ CCB)`.
+pub fn vault_state_leaf_value(leaf: &VaultStateLeaf) -> Result<D32, SofiWireError> {
+    Ok(h(TAG_DSM_SOFI_VAULT_LEAF_STATE, &[&leaf.encode()?]))
+}
+
+/// The value of a trader's relationship leaf in a vault's tree. Same tag as
+/// the state leaf, which is safe because the leaf's own envelope is inside the
+/// preimage: the two classes can never collide.
+pub fn vault_relationship_leaf_value(leaf: &VaultRelationshipLeaf) -> D32 {
+    h(TAG_DSM_SOFI_VAULT_LEAF_STATE, &[&leaf.encode()])
+}
+
+/// `X_route = H(route-digest/v1 ‖ CCB(RouteDigestPreimage))`.
+pub fn route_digest(preimage: &RouteDigestPreimage) -> Result<D32, SofiWireError> {
+    Ok(h(TAG_DSM_SOFI_ROUTE_DIGEST, &[&preimage.encode()?]))
 }
 
 /// `H(vault-genesis-locator/v1 ‖ v)`.
@@ -247,6 +272,91 @@ pub fn external_commitment_route(
             &route_leg_set_digest(legs),
         ],
     )
+}
+
+/// `RecomputeE`: the one derivation from a settlement preimage to `E`.
+///
+/// The FORM is a function of the preimage alone — the branch of `B°` and its
+/// leg count — so a caller cannot choose a reading. A one-leg operation, swap
+/// or close, is the single-vault form; two or more legs is the multivault
+/// form. `X_route`'s variant comes from the same branch, so a close digest can
+/// never be folded as a swap one [R17-4].
+pub fn recompute_e(preimage: &SettlementPreimage) -> Result<D32, SofiWireError> {
+    let settlement = preimage.settlement();
+    let b_core = settlement_core_digest(&settlement.encode()?);
+    let trader_core = trader_core_digest(&preimage.trader_core().encode()?);
+    let route = route_digest(&settlement.route_digest_preimage())?;
+    if settlement.leg_count() < ROUTE_MIN_LEGS {
+        let core = preimage
+            .dlv_cores()
+            .first()
+            .ok_or(SofiWireError::Cardinality {
+                field: "dlv cores",
+                min: 1,
+                max: 1,
+                got: 0,
+            })?;
+        let (vault_id, parent_root, setup_ref) = match settlement {
+            SettlementBody::Swap { hops, .. } => {
+                let hop = &hops[0];
+                (hop.vault_id, hop.parent_root, hop.setup_ref)
+            }
+            SettlementBody::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                ..
+            } => (*vault_id, *parent_root, *setup_ref),
+        };
+        return Ok(external_commitment_single(
+            &vault_id,
+            &parent_root,
+            &setup_ref,
+            &trader_core,
+            &dlv_core_digest(&core.encode()?),
+            &b_core,
+            &route,
+        ));
+    }
+    let legs = RouteLegSet::new(
+        preimage
+            .dlv_cores()
+            .iter()
+            .map(|core| {
+                let hop = match settlement {
+                    SettlementBody::Swap { hops, .. } => hops
+                        .iter()
+                        .find(|h| h.vault_id == *core.vault_id())
+                        .ok_or(SofiWireError::Cardinality {
+                            field: "dlv cores",
+                            min: 1,
+                            max: CANONICAL_MAX_LEGS,
+                            got: 0,
+                        })?,
+                    SettlementBody::Close { .. } => {
+                        return Err(SofiWireError::Cardinality {
+                            field: "close legs",
+                            min: 1,
+                            max: 1,
+                            got: preimage.dlv_cores().len(),
+                        })
+                    }
+                };
+                Ok(RouteLegEntry {
+                    vault_id: hop.vault_id,
+                    parent_root: hop.parent_root,
+                    setup_ref: hop.setup_ref,
+                    shadow_core: dlv_core_digest(&core.encode()?),
+                })
+            })
+            .collect::<Result<Vec<_>, SofiWireError>>()?,
+    )?;
+    Ok(external_commitment_route(
+        &trader_core,
+        &b_core,
+        &route,
+        &legs,
+    ))
 }
 
 /// `L(E) = H(preimage-locator/v1 ‖ E)`.
