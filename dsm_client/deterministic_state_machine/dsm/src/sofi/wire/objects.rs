@@ -1778,8 +1778,12 @@ impl SettlementBody {
                 closure,
             } => {
                 check_hops(hops)?;
+                // One core reference per carried core, in P(E)'s own order
+                // (which is sorted by vault id). The references are DIGESTS,
+                // so they carry no order of their own and nothing here can
+                // bind them to the cores — `sofi::validation` does that, and
+                // must, because the cores are not in scope at this layer.
                 check_count("dlv cores", 1, CANONICAL_MAX_LEGS, dlv_cores.len())?;
-                check_strictly_ascending("dlv cores", dlv_cores)?;
                 push_env(&mut out, class::SOFI_SETTLEMENT_SWAP);
                 push_digest32(&mut out, token_in);
                 push_u64(&mut out, *amount_in);
@@ -1831,7 +1835,6 @@ impl SettlementBody {
                 let trader_core = c.digest32()?;
                 let n = read_count(c, "dlv cores", 1, CANONICAL_MAX_LEGS)?;
                 let dlv_cores: Vec<D32> = (0..n).map(|_| c.digest32()).collect::<Result<_, _>>()?;
-                check_strictly_ascending("dlv cores", &dlv_cores).map_err(wire_invalid)?;
                 let closure = PreEClosureIndex::at(c)?;
                 Ok(Self::Swap {
                     token_in,

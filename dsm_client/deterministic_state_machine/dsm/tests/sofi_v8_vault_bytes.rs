@@ -977,8 +977,12 @@ fn constructors_refuse_every_malformed_shape() {
         Err(SofiWireError::NotStrictlyAscending { .. })
     ));
 
-    // Unsorted core digests in the swap branch, and in the preimage.
-    let unsorted = SettlementBody::Swap {
+    // B°'s `dlv_cores` are DIGESTS, positional against P(E)'s vault-sorted
+    // cores, so they carry no order of their own and this layer cannot bind
+    // them — `sofi::validation` does, and refuses a body naming another core.
+    // What the codec still refuses is a core sequence out of vault order in
+    // P(E) itself, which IS an ordering this layer can see.
+    let swap = SettlementBody::Swap {
         token_in: b(0x51),
         amount_in: 100,
         token_out: b(0x52),
@@ -988,20 +992,10 @@ fn constructors_refuse_every_malformed_shape() {
         dlv_cores: vec![b(0xC2), b(0xC1)],
         closure: PreEClosureIndex::new(Vec::new()).unwrap(),
     };
-    assert!(matches!(
-        unsorted.encode(),
-        Err(SofiWireError::NotStrictlyAscending { .. })
-    ));
-    let swap = SettlementBody::Swap {
-        token_in: b(0x51),
-        amount_in: 100,
-        token_out: b(0x52),
-        exact_out: 80,
-        hops: vec![hop(0xC1, 100, 90), hop(0xC2, 90, 80)],
-        trader_core: b(0xD1),
-        dlv_cores: vec![b(0xC1), b(0xC2)],
-        closure: PreEClosureIndex::new(Vec::new()).unwrap(),
-    };
+    assert!(
+        swap.encode().is_ok(),
+        "a digest sequence has no order of its own"
+    );
     assert!(matches!(
         SettlementPreimage::new(
             swap,
