@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 13;
+pub const EXPECTED_STANDARD_SPECS: usize = 55;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -536,6 +536,347 @@ impl TlaRunner {
                 // the wrong reason.
                 expect_violation: Some("ConflictUnreachable".into()),
             },
+            // ── DELIBERATE FALSIFICATIONS AND NON-VACUITY, SoFi v8 ───────────
+            // Each config lists exactly one invariant. A mutation config flips one
+            // gate and must violate it; a *-reachable / *-claim config states
+            // something false (a witness must exist) and must violate it.
+            // ── SoFi v8 successor cells, at the members (plan revision 10.3) ──
+            // Holder counts per value over the five members; partial reads and
+            // Dead records; registration-gated cells; the attempt walk. The
+            // quorum algebra itself is lean4/DSMSofiSuccessorCells.lean.
+            TlaSpec {
+                label: "SofiSuccessorCells".into(),
+                spec_file: "DSM_SofiSuccessorCells.tla".into(),
+                config_file: "DSM_SofiSuccessorCells.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "FinalUnique".into(),
+                    "FinalityIsPermanent".into(),
+                    "RecordsNeverContradict".into(),
+                    "NoNumericHoles".into(),
+                    "CellsOnlyAfterFulfillmentRegistered".into(),
+                    "RelayNeverForges".into(),
+                    "OneFulfillmentPerPosition".into(),
+                    "RegistrationIsPermanent".into(),
+                    "SelfSplitCreatesNoCells".into(),
+                    "OneConsumerPerParent".into(),
+                    "ConsumedImpliesAttemptLive".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "UnavailableNeverRejects".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+            },
+            // The same invariants with U's operation Invalid.
+            TlaSpec {
+                label: "SofiSuccessorCells/adverse-facts".into(),
+                spec_file: "DSM_SofiSuccessorCells.tla".into(),
+                config_file: "DSM_SofiSuccessorCells_AdverseFacts.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "FinalUnique".into(),
+                    "FinalityIsPermanent".into(),
+                    "RecordsNeverContradict".into(),
+                    "NoNumericHoles".into(),
+                    "CellsOnlyAfterFulfillmentRegistered".into(),
+                    "RelayNeverForges".into(),
+                    "OneFulfillmentPerPosition".into(),
+                    "RegistrationIsPermanent".into(),
+                    "SelfSplitCreatesNoCells".into(),
+                    "OneConsumerPerParent".into(),
+                    "ConsumedImpliesAttemptLive".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "UnavailableNeverRejects".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+            },
+            expect_violation(
+                "SofiSuccessorCells/overwrite-allowed",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_OverwriteAllowed.cfg",
+                "FinalityIsPermanent",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/permanent-store-loss",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_PermanentStoreLoss.cfg",
+                "FinalityIsPermanent",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/permanent-store-loss-register",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_PermanentStoreLossRegister.cfg",
+                "RegistrationIsPermanent",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/equivocating-member",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_EquivocatingMember.cfg",
+                "FinalUnique",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/quorum-two",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_QuorumTwo.cfg",
+                "FinalUnique",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/quorum-two-register",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_QuorumTwoRegister.cfg",
+                "OneFulfillmentPerPosition",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/unread-dropped-from-count",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_UnreadDroppedFromCount.cfg",
+                "RecordsNeverContradict",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/timeout-records-dead",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_TimeoutRecordsDead.cfg",
+                "RecordsNeverContradict",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/numeric-hole",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_NumericHole.cfg",
+                "NoNumericHoles",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/attempt-live-omitted",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AttemptLiveOmitted.cfg",
+                "ConsumedImpliesAttemptLive",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/attempt-live-omitted-two-consumers",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_AttemptLiveOmittedTwoConsumers.cfg",
+                "OneConsumerPerParent",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/cells-before-fulfillment",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_CellsBeforeFulfillment.cfg",
+                "CellsOnlyAfterFulfillmentRegistered",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/cells-before-fulfillment-self-split",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_CellsBeforeFulfillmentSelfSplit.cfg",
+                "SelfSplitCreatesNoCells",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/fulfillment-spray",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_FulfillmentSpray.cfg",
+                "CellsOnlyAfterFulfillmentRegistered",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/relay-without-key-binding",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RelayWithoutKeyBinding.cfg",
+                "RelayNeverForges",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/unavailable-as-invalid",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_UnavailableAsInvalid.cfg",
+                "UnavailableNeverRejects",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/invalid-final-not-skipped",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_InvalidFinalNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/consumption-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_ConsumptionReachable.cfg",
+                "NeverConsumed",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/second-attempt-consumption-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_SecondAttemptConsumptionReachable.cfg",
+                "NeverConsumedAtSecondAttempt",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/dead-record-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_DeadRecordReachable.cfg",
+                "NeverDeadRecorded",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/self-split-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_SelfSplitReachable.cfg",
+                "NoSelfSplit",
+            ),
+            // ── SoFi v8: one unilateral trader operation, run concurrently ──
+            // P -> G -> F -> realization over registered facts: rivals,
+            // completers, late evidence, parent canonicality, the resolution
+            // ladder (R14-1), the fence, and liveness as quiescence (R13-5).
+            TlaSpec {
+                label: "SofiFulfillment".into(),
+                spec_file: "DSM_SofiFulfillment.tla".into(),
+                config_file: "DSM_SofiFulfillment.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "PrecommitNonEconomic".into(),
+                    "FulfillmentAtomic".into(),
+                    "OnlyCanonicalParentsConsumed".into(),
+                    "AbortOnlyOnObjectiveFailure".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "ResolutionPermanent".into(),
+                    "ContiguousPositions".into(),
+                    "AtMostOneStorageUnresolvedFulfillmentPerLineage".into(),
+                    "SpeculativeDescendantsNeverCanonicalUnderInvalidBranch".into(),
+                    "GenesisCanonicalOnlyIfCreationValid".into(),
+                    "QuiescentFulfillmentResolved".into(),
+                    "PolicyFulfillmentNeverLocks".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+            },
+            // The same invariants with the route Invalid and vault B's creation
+            // unvalidated.
+            TlaSpec {
+                label: "SofiFulfillment/adverse-facts".into(),
+                spec_file: "DSM_SofiFulfillment.tla".into(),
+                config_file: "DSM_SofiFulfillment_AdverseFacts.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "PrecommitNonEconomic".into(),
+                    "FulfillmentAtomic".into(),
+                    "OnlyCanonicalParentsConsumed".into(),
+                    "AbortOnlyOnObjectiveFailure".into(),
+                    "ObjectiveRejectionImpliesSkipped".into(),
+                    "ResolutionPermanent".into(),
+                    "ContiguousPositions".into(),
+                    "AtMostOneStorageUnresolvedFulfillmentPerLineage".into(),
+                    "SpeculativeDescendantsNeverCanonicalUnderInvalidBranch".into(),
+                    "GenesisCanonicalOnlyIfCreationValid".into(),
+                    "QuiescentFulfillmentResolved".into(),
+                    "PolicyFulfillmentNeverLocks".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec![],
+                supports_trace_replay: false,
+                expect_violation: None,
+            },
+            expect_violation(
+                "SofiFulfillment/precommit-as-exercise",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PrecommitAsExercise.cfg",
+                "PrecommitNonEconomic",
+            ),
+            expect_violation(
+                "SofiFulfillment/locking-policy-fulfillments",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_LockingPolicyFulfillments.cfg",
+                "PolicyFulfillmentNeverLocks",
+            ),
+            expect_violation(
+                "SofiFulfillment/partial-fulfillment",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PartialFulfillment.cfg",
+                "FulfillmentAtomic",
+            ),
+            expect_violation(
+                "SofiFulfillment/complete-without-canonical-parents",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_CompleteWithoutCanonicalParents.cfg",
+                "OnlyCanonicalParentsConsumed",
+            ),
+            expect_violation(
+                "SofiFulfillment/third-party-abort",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ThirdPartyAbort.cfg",
+                "AbortOnlyOnObjectiveFailure",
+            ),
+            expect_violation(
+                "SofiFulfillment/later-key-abort",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_LaterKeyAbort.cfg",
+                "AbortOnlyOnObjectiveFailure",
+            ),
+            expect_violation(
+                "SofiFulfillment/complete-rejected-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_CompleteRejectedNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiFulfillment/orphan-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OrphanNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiFulfillment/stale-leg-not-skipped",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_StaleLegNotSkipped.cfg",
+                "ObjectiveRejectionImpliesSkipped",
+            ),
+            expect_violation(
+                "SofiFulfillment/void-before-validation",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_VoidBeforeValidation.cfg",
+                "ResolutionPermanent",
+            ),
+            expect_violation(
+                "SofiFulfillment/ordinary-claim-bypasses-fence",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_OrdinaryClaimBypassesFence.cfg",
+                "AtMostOneStorageUnresolvedFulfillmentPerLineage",
+            ),
+            expect_violation(
+                "SofiFulfillment/descendant-validated-by-storage",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_DescendantValidatedByStorage.cfg",
+                "SpeculativeDescendantsNeverCanonicalUnderInvalidBranch",
+            ),
+            expect_violation(
+                "SofiFulfillment/registered-genesis-accepted",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_RegisteredGenesisAccepted.cfg",
+                "GenesisCanonicalOnlyIfCreationValid",
+            ),
+            expect_violation(
+                "SofiFulfillment/permanent-evidence-unavailability",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PermanentEvidenceUnavailability.cfg",
+                "QuiescentFulfillmentResolved",
+            ),
+            expect_violation(
+                "SofiFulfillment/trader-only-completion",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_TraderOnlyCompletion.cfg",
+                "QuiescentFulfillmentResolved",
+            ),
+            expect_violation(
+                "SofiFulfillment/guaranteed-success-claim",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_GuaranteedSuccessClaim.cfg",
+                "RegisteredValidFulfillmentNeverVoids",
+            ),
+            expect_violation(
+                "SofiFulfillment/route-realizable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_RouteRealizable.cfg",
+                "RouteNeverRealized",
+            ),
         ]
     }
 
@@ -659,6 +1000,22 @@ impl TlaRunner {
         }
 
         Ok(results)
+    }
+}
+
+/// A registry entry whose config must violate exactly `invariant`: a deliberate
+/// falsification (one gate removed) or a negated non-vacuity claim. The config
+/// lists that invariant alone, so no other invariant can report first.
+fn expect_violation(label: &str, spec_file: &str, config_file: &str, invariant: &str) -> TlaSpec {
+    TlaSpec {
+        label: label.into(),
+        spec_file: spec_file.into(),
+        config_file: config_file.into(),
+        invariants: vec![invariant.into()],
+        properties: vec![],
+        linked_implementation_traces: vec![],
+        supports_trace_replay: false,
+        expect_violation: Some(invariant.into()),
     }
 }
 
