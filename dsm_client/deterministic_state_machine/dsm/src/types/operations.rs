@@ -965,6 +965,40 @@ pub enum Operation {
         mode: TransactionMode,
     },
     /// Invalidate a vault, returning any locked tokens to the creator.
+    /// SoFi v8: the relationship setup claim (F1). Non-economic — it inserts
+    /// exactly one relationship leaf at `h⁰` and moves no value — but signed,
+    /// because the setup binds `(G, DevID, p, v)` to this identity's key.
+    SofiSetup {
+        /// Canonical `SofiSetupBody` bytes (class `0x0036`).
+        setup_body: Vec<u8>,
+        /// SPHINCS+ over the setup signing digest.
+        signature: Vec<u8>,
+    },
+    /// SoFi v8: the owner's vault creation at `p_create` (P15-12). It debits
+    /// the funding and inserts the creation record; the vault's own genesis
+    /// lives in its tree, not in this operation.
+    SofiVaultCreate {
+        /// Canonical `VaultGenesisPreimage` bytes (class `0x005A`).
+        genesis_preimage: Vec<u8>,
+        /// Canonical `VaultCreation` bytes (class `0x005B`).
+        creation: Vec<u8>,
+        /// SPHINCS+ over the operation.
+        signature: Vec<u8>,
+    },
+    /// SoFi v8: the trader's fulfillment `F` — the exercise (F2 stage 3).
+    ///
+    /// One variant covers a trade, a route and a close: which of those it is
+    /// lives in `B°`'s branch inside `P(E)`, never in the operation's name.
+    /// It installs `C_q` at `K_root(q)`; whether the route realizes is decided
+    /// afterwards, by resolution.
+    SofiFulfill {
+        /// Canonical `TraderFulfillmentBody` bytes (class `0x0039`).
+        fulfillment_body: Vec<u8>,
+        /// `PrecommitId` — the `P` this exercises, fetched by content address.
+        precommit_id: Vec<u8>,
+        /// SPHINCS+ over the fulfillment signing digest, under P's key.
+        signature: Vec<u8>,
+    },
     DlvInvalidate {
         /// 32-byte vault identifier.
         vault_id: Vec<u8>,
@@ -1043,6 +1077,12 @@ impl Operation {
             // balance; the v2 apply moves the OUTPUT leg out of the vault
             // reserves — egress for the same reasons as their predecessors.
             | DlvCreateFundedV2 { .. }
+            // A vault creation moves the owner's funding out of its spendable
+            // balance, and a fulfillment commits a position whose write set
+            // debits the trader. Both are egress; the setup is not, because it
+            // writes a relationship leaf and nothing else.
+            | SofiVaultCreate { .. }
+            | SofiFulfill { .. }
             | DlvOwnerApplyV2 { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
@@ -1072,6 +1112,9 @@ impl Operation {
             | DlvCreate { .. }
             // Adoption commits a policy leaf; no value moves.
             | AdoptToken { .. }
+            // A SoFi setup inserts one relationship leaf at `h⁰`. Nothing
+            // leaves the device: it is the right to trade, not a trade.
+            | SofiSetup { .. }
             | Noop => false,
         }
     }
@@ -1155,6 +1198,15 @@ impl Operation {
             DlvCreate { .. } => EgressAsset::NotEgress,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
+            // A SoFi setup moves nothing.
+            SofiSetup { .. } => EgressAsset::NotEgress,
+            // The asset a creation funds, and the one a fulfillment debits,
+            // are inside `VaultGenesisPreimage` and `P(E)` respectively —
+            // named by their own canonical bytes, not by the operation. The
+            // spend gate therefore cannot name them here, and saying
+            // otherwise would be inventing a token id the operation does not
+            // carry.
+            SofiVaultCreate { .. } | SofiFulfill { .. } => EgressAsset::Unidentified,
             // Settlement names its asset exactly: the trader's INPUT leg is what
             // leaves. Unlike the vault-keyed ops above, this is not
             // `Unidentified` — the authorization carries the policy commit and
@@ -1311,6 +1363,38 @@ impl Operation {
         }
 
         match self {
+            // SoFi v8, tags 34-36. Each carries the canonical CCB bytes of the
+            // object it is about, so the operation adds no second encoding of
+            // anything: what is signed here is exactly what the registry
+            // froze, plus the signature itself.
+            SofiSetup {
+                setup_body,
+                signature,
+            } => {
+                put_u8(&mut out, 34);
+                put_bytes(&mut out, setup_body);
+                put_bytes(&mut out, signature);
+            }
+            SofiVaultCreate {
+                genesis_preimage,
+                creation,
+                signature,
+            } => {
+                put_u8(&mut out, 35);
+                put_bytes(&mut out, genesis_preimage);
+                put_bytes(&mut out, creation);
+                put_bytes(&mut out, signature);
+            }
+            SofiFulfill {
+                fulfillment_body,
+                precommit_id,
+                signature,
+            } => {
+                put_u8(&mut out, 36);
+                put_bytes(&mut out, fulfillment_body);
+                put_bytes(&mut out, precommit_id);
+                put_bytes(&mut out, signature);
+            }
             Genesis => {
                 put_u8(&mut out, 0);
             }
@@ -2902,6 +2986,9 @@ impl Operation {
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
             | Operation::DlvOwnerApplyV2 { signature, .. }
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. }
                 if !signature.is_empty() =>
             {
                 Some(signature.clone())
@@ -2946,6 +3033,9 @@ impl Operation {
             Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
             Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
+            Operation::SofiSetup { .. } => "sofi_setup",
+            Operation::SofiVaultCreate { .. } => "sofi_vault_create",
+            Operation::SofiFulfill { .. } => "sofi_fulfill",
         }
     }
 
@@ -2971,7 +3061,10 @@ impl Operation {
             | Operation::DlvRouteSettle { signature, .. }
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. } => {
+            | Operation::DlvOwnerApplyV2 { signature, .. }
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. } => {
                 signature.clear();
             }
             _ => {}
@@ -3002,7 +3095,10 @@ impl Operation {
             | Operation::DlvRouteSettle { signature, .. }
             | Operation::DlvClose { signature, .. }
             | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. } => {
+            | Operation::DlvOwnerApplyV2 { signature, .. }
+            | Operation::SofiSetup { signature, .. }
+            | Operation::SofiVaultCreate { signature, .. }
+            | Operation::SofiFulfill { signature, .. } => {
                 *signature = sig;
             }
             _ => {}
@@ -3112,6 +3208,9 @@ impl Ops for Operation {
             Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
             Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
+            Operation::SofiSetup { .. } => "sofi_setup",
+            Operation::SofiVaultCreate { .. } => "sofi_vault_create",
+            Operation::SofiFulfill { .. } => "sofi_fulfill",
         }
     }
 

@@ -1807,6 +1807,13 @@ impl DeviceState {
                 | Operation::DlvClose { .. }
                 | Operation::DlvCreateFundedV2 { .. }
                 | Operation::DlvOwnerApplyV2 { .. }
+                // SoFi v8: the setup binds an identity to a vault, the
+                // creation moves the owner's funding, and the fulfillment is
+                // the exercise itself. None of them is a receipt with a second
+                // party's signature to fall back on.
+                | Operation::SofiSetup { .. }
+                | Operation::SofiVaultCreate { .. }
+                | Operation::SofiFulfill { .. }
         ) {
             let op_name = operation.get_operation_type();
             crate::core::state_machine::transition::verify_operation_signature(

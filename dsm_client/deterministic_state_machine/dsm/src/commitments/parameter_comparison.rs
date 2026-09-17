@@ -697,6 +697,38 @@ pub fn extract_operation_parameters(
             );
             Ok(params)
         }
+        // SoFi v8. The comparable parameters are the canonical bytes of the
+        // objects the operation is about, and the operation's own type — a
+        // forward commitment that fixes either fixes the whole operation,
+        // because those bytes ARE the operation's content.
+        Operation::SofiSetup { setup_body, .. } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"sofi_setup".to_vec());
+            params.insert("setup_body".to_string(), setup_body.clone());
+            Ok(params)
+        }
+        Operation::SofiVaultCreate {
+            genesis_preimage,
+            creation,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"sofi_vault_create".to_vec());
+            params.insert("genesis_preimage".to_string(), genesis_preimage.clone());
+            params.insert("creation".to_string(), creation.clone());
+            Ok(params)
+        }
+        Operation::SofiFulfill {
+            fulfillment_body,
+            precommit_id,
+            ..
+        } => {
+            let mut params = HashMap::new();
+            params.insert("operation_type".to_string(), b"sofi_fulfill".to_vec());
+            params.insert("fulfillment_body".to_string(), fulfillment_body.clone());
+            params.insert("precommit_id".to_string(), precommit_id.clone());
+            Ok(params)
+        }
         Operation::DlvClose {
             vault_id,
             leg_a_policy_commit,

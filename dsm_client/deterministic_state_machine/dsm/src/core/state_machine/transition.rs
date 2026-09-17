@@ -409,6 +409,22 @@ pub fn enforce_operation_authorization(operation: &Operation) -> Result<(), DsmE
         // would be a second signature over the same facts with nothing new
         // to bind.
         Operation::FaucetClaim { .. } => {}
+        // SoFi v8: every one of these is signed by the trader or the owner,
+        // and an unsigned one is refused here rather than at a later layer
+        // that might not run. The setup binds an identity to a vault, the
+        // creation moves the owner's funding, and the fulfillment IS the
+        // exercise — none of them has a second authorization to fall back on.
+        Operation::SofiSetup { signature, .. }
+        | Operation::SofiVaultCreate { signature, .. }
+        | Operation::SofiFulfill { signature, .. } => {
+            if signature.is_empty() {
+                return Err(DsmError::invalid_operation(format!(
+                    "{} carries no signature; a SoFi operation is authorized by its \
+                     own signature and by nothing else",
+                    operation.get_operation_type()
+                )));
+            }
+        }
         // Bilateral / paired operations carry both proof and signature.
         Operation::Transfer { signature, .. } => {
             // Transfer's get_proof_of_authorization returns the signature
