@@ -36,4 +36,5 @@ pub mod derive;
 pub mod fisher_yates;
 pub mod resolution;
 pub mod smt;
+pub mod validation;
 pub mod wire;
