@@ -133,6 +133,12 @@ pub struct ObservedEconomicChange {
     pub vault_reserves_changed: bool,
     pub settlement_receipts_changed: bool,
     pub consumed_sources_changed: bool,
+    /// A SoFi relationship leaf moved (P15-6). It carries no amount, but it is
+    /// still an `R_econ` write — an operation that claims to touch nothing and
+    /// advances a relationship has reached a leaf it has no write set for.
+    pub relationships_changed: bool,
+    /// A vault creation was inserted (P15-12).
+    pub vault_creations_changed: bool,
 }
 
 impl ObservedEconomicChange {
@@ -141,6 +147,8 @@ impl ObservedEconomicChange {
             || self.vault_reserves_changed
             || self.settlement_receipts_changed
             || self.consumed_sources_changed
+            || self.relationships_changed
+            || self.vault_creations_changed
     }
 }
 
@@ -156,13 +164,16 @@ impl core::fmt::Display for EconomicTripwire {
         write!(
             f,
             "economic tripwire: operation classified {:?} but economic state changed \
-             (balances={}, reserves={}, receipts={}, consumed_sources={}) — the classification \
-             is wrong, or the operation reached a leaf it has no write set for",
+             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}, \
+             vault_creations={}) — the classification is wrong, or the operation reached a leaf \
+             it has no write set for",
             self.claimed,
             self.observed.balances_changed,
             self.observed.vault_reserves_changed,
             self.observed.settlement_receipts_changed,
-            self.observed.consumed_sources_changed
+            self.observed.consumed_sources_changed,
+            self.observed.relationships_changed,
+            self.observed.vault_creations_changed
         )
     }
 }
