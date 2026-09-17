@@ -14,8 +14,10 @@
 //! every other node, so each trader's full successor shadow of the same DLV
 //! parent costs a handful of nodes rather than a copy of the vault
 //! ([`tree::apply`]). Nodes and the pin that keeps a root alive are committed
-//! together ([`store::NodeStore::commit`]); collection keeps what pinned roots
-//! reach ([`tree::collect_garbage`]).
+//! together ([`store::NodeStore::commit`]), which takes the builder's opaque
+//! [`tree::Shadow`] because no check over a loose node graph could establish
+//! that it is canonical; collection keeps what pinned roots reach
+//! ([`tree::collect_garbage`]).
 //!
 //! Dark: nothing in the node, the SDK or the state machine calls it yet.
 
@@ -24,7 +26,7 @@ pub mod store;
 pub mod tree;
 
 pub use node::Node;
-pub use store::{MemoryNodeStore, NodeStore};
+pub use store::{validate_staged_frontier, MemoryNodeStore, NodeStore};
 pub use tree::{
     apply, collect_garbage, commit_shadow, get, prove, reachable, verify, Mutation, Proof, Shadow,
 };
