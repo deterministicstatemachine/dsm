@@ -111,6 +111,25 @@ impl ValidatedEconomicRoot {
         }
     }
 
+    /// The SoFi counterpart of `advance_validated`, for a position whose
+    /// claim is conditional (`C_q`).
+    ///
+    /// **Only `sofi::lineage::advance_resolved` may call this**, and
+    /// `ci/sofi_advance_resolved_is_the_only_caller.sh` proves it: the
+    /// conjunction that earns a validated root at `q` lives there, and a
+    /// second caller would be a second, unreviewed definition of what
+    /// "validated" means. It is the same puncture as
+    /// `rehydrate_from_admitted_store`, kept just as narrow.
+    pub(crate) fn from_resolved_sofi_position(
+        economic_position: u64,
+        economic_root: [u8; 32],
+    ) -> Self {
+        Self {
+            economic_position,
+            economic_root,
+        }
+    }
+
     pub fn economic_position(&self) -> u64 {
         self.economic_position
     }

@@ -39,6 +39,11 @@ echo ""
 # assemble a commit input. Field visibility and a cfg gate have no runtime
 # behaviour, so this is proven against the artifact, not by a test.
 bash ci/sofi_shadow_nonforgeable.sh
+echo ""
+
+# A validated economic root is verifier-derived; its two deliberate punctures
+# stay where the conjunctions that earn them are written.
+bash ci/sofi_validated_root_constructors.sh
 
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."

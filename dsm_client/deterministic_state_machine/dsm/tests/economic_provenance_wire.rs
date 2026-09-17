@@ -379,8 +379,12 @@ fn every_leaf_class_round_trips_through_the_decoder() {
             bundle: [0xB0; 32],
             economic_operation_id: [0x50; 32],
         }),
+        EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
+            vault_id: VAULT,
+            leaf: [0x60; 32],
+        }),
     ];
-    let mut covered = [false; 5];
+    let mut covered = [false; 6];
     for state in &samples {
         let slot = match state {
             EconomicLeafState::Balance(_) => 0,
@@ -388,6 +392,7 @@ fn every_leaf_class_round_trips_through_the_decoder() {
             EconomicLeafState::SettlementReceipt(_) => 2,
             EconomicLeafState::ConsumedSource(_) => 3,
             EconomicLeafState::BundleAcceptance(_) => 4,
+            EconomicLeafState::Relationship(_) => 5,
         };
         covered[slot] = true;
         let bytes = state.encode().expect("encodable");

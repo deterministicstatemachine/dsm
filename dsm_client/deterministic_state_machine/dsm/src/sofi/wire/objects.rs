@@ -1189,13 +1189,20 @@ impl TraderRelationshipLeaf {
         out
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
+    /// Nested decode, for `R_econ`'s class-keyed leaf reader. It shares the
+    /// field order with [`Self::decode`] rather than restating it, so the two
+    /// cannot drift.
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         c.envelope(class::SOFI_TRADER_RELATIONSHIP_LEAF, SCHEMA_V1)?;
-        let v = Self {
+        Ok(Self {
             vault_id: c.digest32()?,
             leaf: c.digest32()?,
-        };
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
         finish(&c, v)
     }
 }
