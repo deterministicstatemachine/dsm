@@ -132,7 +132,10 @@
 //! `seq<(vault_id, parent_root, setup_ref, token_in, amount_in, token_out,
 //! amount_out)>` in hop order, `1..=CANONICAL_MAX_LEGS`, vault ids pairwise
 //! distinct · 6 `trader_core` digest32 (`c_T°`) · 7 `dlv_cores`
-//! `seq<digest32>` sorted by vault id · 8 `closure` nested `0x0041`.
+//! `seq<digest32>` — `c°_{V,j}` for each core, positionally against `P(E)`'s
+//! own cores, which are sorted by vault id. They are digests, so they carry no
+//! order of their own; `sofi::validation` binds each one to the core `P(E)`
+//! carries · 8 `closure` nested `0x0041`.
 //! `0x0054 SettlementClose`: 1 `vault_id` · 2 `parent_root` · 3 `setup_ref` ·
 //! 4 `owner_authority` nested `0x0055 | 0x0056` · 5 `reserve_a` u64 ·
 //! 6 `reserve_b` u64 · 7 `trader_core` · 8 `dlv_core` · 9 `closure`.

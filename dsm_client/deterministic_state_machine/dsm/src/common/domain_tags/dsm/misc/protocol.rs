@@ -117,6 +117,18 @@ pub const TAG_DSM_DEVTREE_DELEGATION_GENESIS_SENTINEL_V1: TaggedHashDomain<'stat
 /// can never validate against a transition origin.
 pub const TAG_DSM_DEVTREE_TRANSITION_GENESIS_SENTINEL_V1: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/devtree-transition/genesis-sentinel/v1");
+/// Content-addressing namespaces for the three policy objects a vault names.
+/// A vault state carries them as addresses, so a verifier that fetches one
+/// re-derives `immutable_addr(tag, CCB(policy))` and refuses bytes that do not
+/// authenticate to the address it asked for — the arithmetic first, the class
+/// agreement after decoding.
+pub const TAG_DSM_MARKET_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/market-policy-object/v1");
+pub const TAG_DSM_RELEASE_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/release-policy-object/v1");
+pub const TAG_DSM_FEE_POLICY_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/fee-policy-object/v1");
+
 /// Canonical DLV state commitment: `c_n = H(tag ‖ 0x00 ‖ CCB(V_n))`, over the
 /// `VaultStateV2` encoding of the CCB object registry (class `0x0001`).
 pub const TAG_DSM_VAULT_STATE: TaggedHashDomain<'static> =

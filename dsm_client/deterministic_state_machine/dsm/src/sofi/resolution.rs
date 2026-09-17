@@ -364,7 +364,13 @@ pub fn classify_attempt(
         if facts.registered && facts.outcome == Some(OutcomeCell::Abort) {
             return (AttemptClass::Skipped, Some(SkipReason::AbortFinalRoute));
         }
-        if leg.canonical_parent && leg.attempt_live && facts.registered {
+        // A final cell is a CONSUMPTION only when the whole operation consumed
+        // — the same E across every required leg, validation Valid, the trader
+        // parent compatible, and, for a route, an objective Complete. A leg's
+        // own facts are not enough: one FinalE(E) cell is not one executed
+        // swap (F4), and treating it as one is what would let a multi-leg
+        // route consume a parent it never realized on.
+        if consumed_route(facts) && leg.final_on_e() {
             return (AttemptClass::Consumed, None);
         }
     }
@@ -379,6 +385,9 @@ pub fn classify_attempt(
 /// Where the walk over one DLV parent's attempt keys ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkOutcome {
+    /// The attempt counter has no successor. Refused, never wrapped and never
+    /// saturated onto a key that is already decided.
+    CounterExhausted { attempt: u64 },
     /// The parent was consumed at this attempt index.
     Consumed { attempt: u64 },
     /// Every key up to `attempt` was skipped, and that one is not resolved.
@@ -405,7 +414,10 @@ where
             Some((facts, leg)) => match classify_attempt(&facts, &leg).0 {
                 AttemptClass::Consumed => return WalkOutcome::Consumed { attempt },
                 AttemptClass::Unresolved => return WalkOutcome::Unresolved { attempt },
-                AttemptClass::Skipped => attempt = attempt.saturating_add(1),
+                AttemptClass::Skipped => match attempt.checked_add(1) {
+                    Some(next) => attempt = next,
+                    None => return WalkOutcome::CounterExhausted { attempt },
+                },
             },
         }
     }
@@ -989,8 +1001,16 @@ mod tests {
             cell: CellResolution::Dead,
             ..good_leg()
         };
+        // The facts describe the ROUTE the key belongs to, because a key is
+        // consumed only when its whole operation is.
+        let dead_legs = [dead];
+        let live_legs = [good_leg()];
         let facts_for = |attempt: u64| {
-            let leg = if attempt < 3 { dead } else { good_leg() };
+            let (legs, leg): (&[LegFacts], LegFacts) = if attempt < 3 {
+                (&dead_legs, dead)
+            } else {
+                (&live_legs, good_leg())
+            };
             Some((
                 RouteFacts {
                     registered: true,
@@ -998,7 +1018,7 @@ mod tests {
                     parent_pre_root: PRE,
                     validation: Valid,
                     storage_resolved: true,
-                    legs: &[],
+                    legs,
                     outcome: None,
                 },
                 leg,
@@ -1023,6 +1043,76 @@ mod tests {
         assert_eq!(
             walk(5, 16, |_| None),
             WalkOutcome::Unresolved { attempt: 5 }
+        );
+    }
+
+    /// A final cell of a MULTI-LEG route is not a consumption on its own: the
+    /// route consumes only when every required leg did and the outcome says
+    /// Complete. One FinalE(E) cell is not one executed swap.
+    #[test]
+    fn a_final_leg_of_an_incomplete_route_is_not_consumed() {
+        let legs = [good_leg(), pending_leg()];
+        let facts = RouteFacts {
+            outcome: None,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            classify_attempt(&facts, &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        // With every leg final AND the objective Complete, it consumes.
+        let done = [good_leg(), good_leg()];
+        let complete = RouteFacts {
+            outcome: Some(OutcomeCell::Complete),
+            ..realized(&done)
+        };
+        assert_eq!(
+            classify_attempt(&complete, &done[0]),
+            (AttemptClass::Consumed, None)
+        );
+    }
+
+    /// A final cell whose route is not statically Valid is not a consumption
+    /// either — consumption carries the validation premise (F4).
+    #[test]
+    fn a_final_leg_of_an_unvalidated_route_is_not_consumed() {
+        let legs = [good_leg()];
+        let unavailable = RouteFacts {
+            validation: Unavailable,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            classify_attempt(&unavailable, &legs[0]).0,
+            AttemptClass::Unresolved
+        );
+    }
+
+    /// The attempt counter is checked, never saturated: a walk that reaches
+    /// `u64::MAX` refuses rather than re-examining a key it already decided.
+    #[test]
+    fn the_attempt_counter_is_checked_not_saturated() {
+        let dead = LegFacts {
+            cell: CellResolution::Dead,
+            ..good_leg()
+        };
+        let legs = [dead];
+        let facts_for = |_attempt: u64| {
+            Some((
+                RouteFacts {
+                    registered: true,
+                    parent: ParentPosition::SingleRoot,
+                    parent_pre_root: PRE,
+                    validation: Valid,
+                    storage_resolved: true,
+                    legs: &legs,
+                    outcome: None,
+                },
+                dead,
+            ))
+        };
+        assert_eq!(
+            walk(u64::MAX, 4, facts_for),
+            WalkOutcome::CounterExhausted { attempt: u64::MAX }
         );
     }
 }
