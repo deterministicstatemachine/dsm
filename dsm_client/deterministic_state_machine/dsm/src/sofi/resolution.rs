@@ -103,8 +103,6 @@ pub fn effect_of(resolution: Resolution) -> PositionEffect {
 pub struct LegFacts {
     /// The storage resolution of `K^(a_j)`.
     pub cell: CellResolution,
-    /// `E`, the external commitment this operation is bound to.
-    pub external_commitment: [u8; 32],
     /// The named parent `R_j` is this vault's canonical ancestry.
     pub canonical_parent: bool,
     /// `∀ b < a_j. Skipped(K^(b))`.
@@ -116,14 +114,19 @@ pub struct LegFacts {
 }
 
 impl LegFacts {
-    /// The leg's cell holds exactly this operation's `E`, finally.
-    pub fn final_on_e(&self) -> bool {
-        self.cell == CellResolution::Final(self.external_commitment)
+    /// The leg's cell holds exactly `e`, finally.
+    ///
+    /// The commitment is the ROUTE's, never the leg's: one operation is bound
+    /// to one `E`, and every required leg must be final on that same one. A
+    /// per-leg commitment would let a "route" be assembled out of legs that
+    /// each finalized a different operation.
+    pub fn final_on(&self, e: &[u8; 32]) -> bool {
+        self.cell == CellResolution::Final(*e)
     }
 
-    /// The leg's cell is final on some other operation's commitment.
-    pub fn final_on_other(&self) -> bool {
-        matches!(self.cell, CellResolution::Final(v) if v != self.external_commitment)
+    /// The leg's cell is final on some OTHER operation's commitment.
+    pub fn final_on_other(&self, e: &[u8; 32]) -> bool {
+        matches!(self.cell, CellResolution::Final(v) if v != *e)
     }
 }
 
@@ -135,6 +138,9 @@ impl LegFacts {
 /// selected for the guessed branch to be the taken one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteFacts<'legs> {
+    /// `E` — the ONE external commitment this operation is bound to. Every
+    /// required leg must be final on exactly this value.
+    pub external_commitment: [u8; 32],
     /// `FulfillmentRegistered(q, F)` — the exercise boundary.
     pub registered: bool,
     /// What is known about the claim at `p`.
@@ -163,7 +169,7 @@ impl RouteFacts<'_> {
     fn a_reserved_key_is_lost(&self) -> bool {
         self.legs
             .iter()
-            .any(|l| l.cell == CellResolution::Dead || l.final_on_other())
+            .any(|l| l.cell == CellResolution::Dead || l.final_on_other(&self.external_commitment))
     }
 
     fn a_parent_is_lost(&self) -> bool {
@@ -215,7 +221,7 @@ pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
         && facts
             .legs
             .iter()
-            .all(|l| l.canonical_parent && l.attempt_live && l.final_on_e())
+            .all(|l| l.canonical_parent && l.attempt_live && l.final_on(&facts.external_commitment))
         && (!facts.multi_leg() || facts.outcome == Some(OutcomeCell::Complete))
 }
 
@@ -349,7 +355,7 @@ pub fn classify_attempt(
     if leg.cell == CellResolution::Dead {
         return (AttemptClass::Skipped, Some(SkipReason::Dead));
     }
-    if leg.final_on_e() {
+    if leg.final_on(&facts.external_commitment) {
         // A final cell of an operation that cannot realize is stranded, never
         // a partial execution: nothing rolls back, because the cell was never
         // consumed as an economic execution on its own.
@@ -370,11 +376,11 @@ pub fn classify_attempt(
         // own facts are not enough: one FinalE(E) cell is not one executed
         // swap (F4), and treating it as one is what would let a multi-leg
         // route consume a parent it never realized on.
-        if consumed_route(facts) && leg.final_on_e() {
+        if consumed_route(facts) && leg.final_on(&facts.external_commitment) {
             return (AttemptClass::Consumed, None);
         }
     }
-    if leg.final_on_other() {
+    if leg.final_on_other(&facts.external_commitment) {
         // Another operation's commitment sits here. Whether that consumed the
         // parent is that operation's question, not this one's.
         return (AttemptClass::Unresolved, None);
@@ -439,7 +445,6 @@ mod tests {
     fn good_leg() -> LegFacts {
         LegFacts {
             cell: CellResolution::Final(E),
-            external_commitment: E,
             canonical_parent: true,
             attempt_live: true,
             parent_orphaned: false,
@@ -458,6 +463,7 @@ mod tests {
     /// leg has consumed: the Realized baseline every case below perturbs.
     fn realized<'l>(legs: &'l [LegFacts]) -> RouteFacts<'l> {
         RouteFacts {
+            external_commitment: E,
             registered: true,
             parent: ParentPosition::SingleRoot,
             parent_pre_root: PRE,
@@ -824,6 +830,7 @@ mod tests {
                         {
                             let legs = [LegFacts { cell, ..good_leg() }];
                             let facts = RouteFacts {
+                                external_commitment: E,
                                 registered: true,
                                 parent,
                                 parent_pre_root: PRE,
@@ -1013,6 +1020,7 @@ mod tests {
             };
             Some((
                 RouteFacts {
+                    external_commitment: E,
                     registered: true,
                     parent: ParentPosition::SingleRoot,
                     parent_pre_root: PRE,
@@ -1099,6 +1107,7 @@ mod tests {
         let facts_for = |_attempt: u64| {
             Some((
                 RouteFacts {
+                    external_commitment: E,
                     registered: true,
                     parent: ParentPosition::SingleRoot,
                     parent_pre_root: PRE,
@@ -1113,6 +1122,40 @@ mod tests {
         assert_eq!(
             walk(u64::MAX, 4, facts_for),
             WalkOutcome::CounterExhausted { attempt: u64::MAX }
+        );
+    }
+
+    /// ONE route, ONE E. Two legs that each finalized a DIFFERENT operation do
+    /// not add up to a consumed route, however registered, valid and Complete
+    /// the fulfillment is. With a per-leg commitment this was representable —
+    /// and it would have let a "route" be assembled out of other operations'
+    /// cells.
+    #[test]
+    fn legs_final_on_different_commitments_are_not_one_route() {
+        let legs = [
+            good_leg(),
+            LegFacts {
+                cell: CellResolution::Final(OTHER_E),
+                ..good_leg()
+            },
+        ];
+        let facts = RouteFacts {
+            outcome: Some(OutcomeCell::Complete),
+            ..realized(&legs)
+        };
+        assert_eq!(facts.external_commitment, E);
+        assert!(
+            !consumed_route(&facts),
+            "a leg final on another operation's E is not this route's consumption"
+        );
+        assert_ne!(resolve_position(&facts), Resolution::Realized);
+        // It is the loss of the route, not a consumption: the second leg's key
+        // is final on someone else's commitment.
+        assert_eq!(resolve_position(&facts), Resolution::Void);
+        // And the stray leg is never classified as consuming this route.
+        assert_eq!(
+            classify_attempt(&facts, &legs[1]).0,
+            AttemptClass::Unresolved
         );
     }
 }

@@ -293,6 +293,12 @@ pub fn external_commitment_route(
 /// form. `X_route`'s variant comes from the same branch, so a close digest can
 /// never be folded as a swap one [R17-4].
 pub fn recompute_e(preimage: &SettlementPreimage) -> Result<D32, SofiWireError> {
+    // No bound check here, and none is missing: an oversized `P(E)` cannot
+    // reach this function because it cannot exist. `SettlementPreimage` has
+    // private fields and exactly two entry points — `new` and `decode` — and
+    // both refuse anything over `MAX_SETTLEMENT_PREIMAGE_BYTES`. Re-checking
+    // it here would be a branch no test could reach, which is the kind of
+    // decoration a mutation gate rightly finds hollow.
     let settlement = preimage.settlement();
     let b_core = settlement_core_digest(&settlement.encode()?);
     let trader_core = trader_core_digest(&preimage.trader_core().encode()?);

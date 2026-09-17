@@ -33,7 +33,7 @@
 //! be `< u64::MAX` so `q = p + 1` exists) · 4 `parent_claim_ref` nested
 //! `0x003B | 0x003C` · 5 `external_commitment` digest32 (`E`) · 6 `legs`
 //! `seq<(vault_id digest32, parent_root digest32, setup_ref digest32)>`,
-//! `1..=ROUTE_MAX_LEGS`, strictly ascending by `vault_id` · 7 `realize_root`
+//! `1..=CANONICAL_MAX_LEGS`, strictly ascending by `vault_id` · 7 `realize_root`
 //! digest32 · 8 `void_root` digest32 · 9 `storage_set_id` digest32 ·
 //! 10 `signature_alg` u16 · 11 `claimant_public_key` bytes.
 //!
@@ -44,8 +44,8 @@
 //!
 //! `0x0039 TraderFulfillmentBody`:
 //! 1 `precommit_id` digest32 · 2 `policy_fulfillment_set` `seq<digest32>`,
-//! `1..=ROUTE_MAX_LEGS`, strictly ascending · 3 `attempts`
-//! `seq<(vault_id digest32, attempt u64)>`, `1..=ROUTE_MAX_LEGS`, strictly
+//! `1..=CANONICAL_MAX_LEGS`, strictly ascending · 3 `attempts`
+//! `seq<(vault_id digest32, attempt u64)>`, `1..=CANONICAL_MAX_LEGS`, strictly
 //! ascending by `vault_id` · 4 `position` u64 (`q`) · 5 `signature_alg` u16 ·
 //! 6 `claimant_public_key` bytes. F never restates a P field.
 //!
@@ -155,7 +155,11 @@
 //!
 //! `0x0059 SettlementPreimage` (`P(E)`): 1 `settlement` nested `0x0053 |
 //! 0x0054` · 2 `trader_core` nested `0x0051` · 3 `dlv_cores` `seq<0x0052>`
-//! sorted by vault id.
+//! sorted by vault id, EXACTLY one per DLV parent the settlement references
+//! (a swap's hop count, a close's one). The whole encoding is bounded by
+//! `MAX_SETTLEMENT_PREIMAGE_BYTES` on both sides of the codec: an oversized
+//! preimage has no canonical representation, so it cannot be built, encoded,
+//! decoded, or folded into an `E`.
 //!
 //! `0x005A VaultGenesisPreimage`: 1 `owner_genesis` · 2 `owner_device_id` ·
 //! 3 `create_position` u64 · 4 `state` nested `0x004B`.
@@ -248,6 +252,13 @@ pub enum SofiWireError {
     LengthOverflow,
     /// `status` is not one of the two declared vault statuses.
     UnknownVaultStatus { status: u16 },
+    /// An object exceeds the frozen byte bound for its class, so it has no
+    /// canonical representation.
+    ObjectTooLarge {
+        field: &'static str,
+        bytes: usize,
+        max: usize,
+    },
     /// An authentication path is not exactly `ECONOMIC_SMT_HEIGHT` deep.
     PathDepth { expected: usize, got: usize },
 }
@@ -289,6 +300,11 @@ impl core::fmt::Display for SofiWireError {
                 "class {object_class:#06x} may not be content-bound in the pre-E closure"
             ),
             Self::LengthOverflow => write!(f, "length does not fit its prefix"),
+            Self::ObjectTooLarge { field, bytes, max } => write!(
+                f,
+                "{field}: {bytes} bytes exceeds the {max}-byte bound, so it has \
+                 no canonical encoding"
+            ),
             Self::UnknownVaultStatus { status } => write!(
                 f,
                 "vault status {status:#06x} is neither Active nor Retired"

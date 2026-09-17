@@ -38,8 +38,8 @@ use super::conformance::Validation;
 use super::derive;
 use super::smt::{batch_fold, FoldEntry};
 use super::wire::{
-    CoreEntry, DlvCore, OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop, TraderCore,
-    TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf, VaultStateLeaf,
+    next_position, CoreEntry, DlvCore, OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop,
+    TraderCore, TraderPrecommitBody, TraderRelationshipLeaf, VaultRelationshipLeaf, VaultStateLeaf,
     MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
@@ -386,7 +386,7 @@ pub fn validate(
     verdict.note(require(
         trader_core.genesis() == precommit.genesis()
             && trader_core.device_id() == precommit.device_id()
-            && trader_core.position() == precommit.position().saturating_add(1),
+            && Some(trader_core.position()) == next_position(precommit.position()).ok(),
         Invalid::CoreIdentityMismatch,
     ));
     // P15-2: the void root is where the lineage returns to, so it IS the core's

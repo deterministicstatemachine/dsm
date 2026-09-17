@@ -1067,3 +1067,149 @@ fn the_new_classes_are_allocated_exactly_once() {
         );
     }
 }
+
+/// `P(E)` carries EXACTLY one core per DLV parent the settlement references.
+/// A spare core is not a harmless extra: the single-vault derivation reads the
+/// first core only, so two distinct canonical byte strings would recompute to
+/// the same `E` — a second preimage with no hash collision in it.
+#[test]
+fn a_settlement_preimage_carries_one_core_per_referenced_parent() {
+    let one_hop = SettlementBody::Swap {
+        token_in: b(0x51),
+        amount_in: 100,
+        token_out: b(0x52),
+        exact_out: 90,
+        hops: vec![hop(0xC1, 100, 90)],
+        trader_core: b(0xD1),
+        dlv_cores: vec![b(0xC1)],
+        closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+    };
+    // A spare core.
+    assert!(matches!(
+        SettlementPreimage::new(
+            one_hop.clone(),
+            trader_core(&[b(0x71)]),
+            vec![dlv_core(0xC1), dlv_core(0xC2)]
+        ),
+        Err(SofiWireError::Cardinality { .. })
+    ));
+    // And a missing one, on a two-hop settlement.
+    let two_hops = SettlementBody::Swap {
+        token_in: b(0x51),
+        amount_in: 100,
+        token_out: b(0x52),
+        exact_out: 80,
+        hops: vec![hop(0xC1, 100, 90), hop(0xC2, 90, 80)],
+        trader_core: b(0xD1),
+        dlv_cores: vec![b(0xC1), b(0xC2)],
+        closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+    };
+    assert!(matches!(
+        SettlementPreimage::new(two_hops, trader_core(&[b(0x71)]), vec![dlv_core(0xC1)]),
+        Err(SofiWireError::Cardinality { .. })
+    ));
+    // A close carries exactly one.
+    let close = SettlementBody::Close {
+        vault_id: b(0xC1),
+        parent_root: b(0xC3),
+        setup_ref: b(0xC4),
+        owner_authority: OwnerAuthority::Origin,
+        reserve_a: 1,
+        reserve_b: 2,
+        trader_core: b(0xD1),
+        dlv_core: b(0xD2),
+        closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+    };
+    assert!(matches!(
+        SettlementPreimage::new(
+            close,
+            trader_core(&[b(0x71)]),
+            vec![dlv_core(0xC1), dlv_core(0xC2)]
+        ),
+        Err(SofiWireError::Cardinality { .. })
+    ));
+    // The matching shapes are fine.
+    assert!(
+        SettlementPreimage::new(one_hop, trader_core(&[b(0x71)]), vec![dlv_core(0xC1)]).is_ok()
+    );
+}
+
+/// An oversized `P(E)` has no canonical representation: it cannot be built,
+/// encoded, decoded or folded into an `E`. The bound is the object's, not a
+/// later layer's opinion about it.
+#[test]
+fn an_oversized_settlement_preimage_has_no_canonical_form() {
+    // Cores are what make a preimage big: each entry carries a 256-deep path.
+    let entries_per_core = 12;
+    let mut cores: Vec<DlvCore> = Vec::new();
+    let mut hops: Vec<SwapHop> = Vec::new();
+    let mut n = 0u8;
+    loop {
+        let vault = 0x80 + n;
+        let mut entries: Vec<CoreEntry> = (0..entries_per_core)
+            .map(|i| mutation_entry(b(0x10 + i as u8)))
+            .collect();
+        entries.sort_by_key(|e| e.key());
+        cores.push(DlvCore::new(b(vault), b(0x62), OWNER_G, OWNER_DEV, b(0x63), entries).unwrap());
+        hops.push(hop(vault, 100, 90));
+        n += 1;
+        let probe: usize = cores
+            .iter()
+            .map(|c| c.encode().unwrap().len())
+            .sum::<usize>();
+        if probe > MAX_SETTLEMENT_PREIMAGE_BYTES || n > 40 {
+            break;
+        }
+    }
+    cores.sort_by_key(|c| *c.vault_id());
+    hops.sort_by_key(|h| h.vault_id);
+    let settlement = SettlementBody::Swap {
+        token_in: b(0x51),
+        amount_in: 100,
+        token_out: b(0x52),
+        exact_out: 90,
+        hops,
+        trader_core: b(0xD1),
+        dlv_cores: cores
+            .iter()
+            .map(|c| dsm::sofi::derive::dlv_core_digest(&c.encode().unwrap()))
+            .collect(),
+        closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+    };
+    let refusal = SettlementPreimage::new(settlement, trader_core(&[b(0x71)]), cores);
+    assert!(
+        matches!(refusal, Err(SofiWireError::ObjectTooLarge { .. })),
+        "an oversized preimage must not be constructible: {refusal:?}"
+    );
+
+    // The decoder refuses oversized input BEFORE parsing it.
+    let oversized = vec![0u8; MAX_SETTLEMENT_PREIMAGE_BYTES + 1];
+    assert!(matches!(
+        SettlementPreimage::decode(&oversized),
+        Err(DecodeError::Invalid(_))
+    ));
+
+    // The bound is an invariant of the TYPE, not a check scattered over its
+    // callers: `new` and `decode` are the only ways to obtain one, and both
+    // refuse. So `recompute_e` never sees an oversized preimage — there is no
+    // way to hand it one.
+
+    // And a preimage at the bound is still a perfectly good object.
+    let small = SettlementPreimage::new(
+        SettlementBody::Swap {
+            token_in: b(0x51),
+            amount_in: 100,
+            token_out: b(0x52),
+            exact_out: 90,
+            hops: vec![hop(0xC1, 100, 90)],
+            trader_core: b(0xD1),
+            dlv_cores: vec![b(0xC1)],
+            closure: PreEClosureIndex::new(Vec::new()).unwrap(),
+        },
+        trader_core(&[b(0x71)]),
+        vec![dlv_core(0xC1)],
+    )
+    .unwrap();
+    assert!(small.encode().unwrap().len() <= MAX_SETTLEMENT_PREIMAGE_BYTES);
+    assert!(dsm::sofi::derive::recompute_e(&small).is_ok());
+}
