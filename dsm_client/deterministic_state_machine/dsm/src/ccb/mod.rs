@@ -191,6 +191,60 @@ pub mod class {
     /// consumption in every vault the route crosses — the eighth provenance
     /// arm (amendment 2c-H, H9). Schema 1.
     pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
+
+    // ── SoFi v8: the unilateral trader operation ────────────────────────
+    //
+    // `TraderPrecommit P → DLVPolicyFulfillment G_1 … G_n → TraderFulfillment
+    // F`. Encoders and the normative field tables live in `crate::sofi::wire`;
+    // the discriminants live here because §3 is a single namespace. Unions
+    // follow the house rule: the nested object's envelope IS the
+    // discriminant, so every variant is its own class.
+
+    /// `SofiSetupBody` — the relationship setup claim (F1).
+    pub const SOFI_SETUP_BODY: u16 = 0x0036;
+    /// `TraderPrecommitBody` `P` — signed, non-economic (F2 stage 1).
+    pub const SOFI_TRADER_PRECOMMIT_BODY: u16 = 0x0037;
+    /// `DlvPolicyFulfillmentBody` `G_j` — deterministic policy-fulfillment
+    /// witness identity, no issuer (F2 stage 2).
+    pub const SOFI_DLV_POLICY_FULFILLMENT_BODY: u16 = 0x0038;
+    /// `TraderFulfillmentBody` `F` — the exercise when registered (F2 stage 3).
+    pub const SOFI_TRADER_FULFILLMENT_BODY: u16 = 0x0039;
+    /// `SofiResolutionClaim` `C_q` — the outcome-independent conditional
+    /// position installed with F.
+    pub const SOFI_RESOLUTION_CLAIM: u16 = 0x003A;
+    /// `ParentClaimRef` variant: an exact single-root economic claim.
+    pub const SOFI_PARENT_SINGLE_ROOT_CLAIM: u16 = 0x003B;
+    /// `ParentClaimRef` variant: a conditional SoFi position by `FulfillmentId`.
+    pub const SOFI_PARENT_CONDITIONAL_CLAIM: u16 = 0x003C;
+    /// `ValidationRef` variant: a content-addressed immutable object.
+    pub const SOFI_REF_CONTENT_ADDR: u16 = 0x003D;
+    /// `ValidationRef` variant: an exact single-root economic claim.
+    pub const SOFI_REF_SINGLE_ROOT_CLAIM: u16 = 0x003E;
+    /// `ValidationRef` variant: a conditional position at `(G, DevID, p)`.
+    pub const SOFI_REF_CONDITIONAL_CLAIM: u16 = 0x003F;
+    /// `ValidationRef` variant: a relationship setup by `ρ`.
+    pub const SOFI_REF_SETUP: u16 = 0x0040;
+    /// `𝒞_E^pre` — the canonical pre-E validation closure index (lives in `B°`).
+    pub const SOFI_PRE_E_CLOSURE_INDEX: u16 = 0x0041;
+    /// `PolicyFulfillmentAuxRef` — a content-addressed auxiliary evidence
+    /// candidate. Never an identity field, never a singleton slot.
+    pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
+    /// Resolution record: fulfillment registered.
+    pub const SOFI_RECORD_FULFILLMENT_REGISTERED: u16 = 0x0043;
+    /// Resolution record: successor key arithmetically dead.
+    pub const SOFI_RECORD_SUCCESSOR_DEAD: u16 = 0x0044;
+    /// Resolution record: successor key final with one E.
+    pub const SOFI_RECORD_SUCCESSOR_FINAL: u16 = 0x0045;
+    /// Resolution record: route outcome final Complete.
+    pub const SOFI_RECORD_OUTCOME_COMPLETE: u16 = 0x0046;
+    /// Resolution record: route outcome final Abort.
+    pub const SOFI_RECORD_OUTCOME_ABORT: u16 = 0x0047;
+    /// Route-outcome cell value `Complete` — zero fields.
+    pub const SOFI_OUTCOME_CELL_COMPLETE: u16 = 0x0048;
+    /// Route-outcome cell value `Abort` — zero fields.
+    pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
+    /// `Γ` — the canonical route-leg set folded into a route E.
+    pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

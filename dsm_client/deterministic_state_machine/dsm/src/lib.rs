@@ -93,6 +93,7 @@ pub mod bitcoin;
 pub mod performance;
 pub mod prelude;
 pub mod recovery;
+pub mod sofi; // SoFi v8 wire registry and pure derivations (dark)
 pub mod storage;
 pub mod telemetry;
 pub mod types;
