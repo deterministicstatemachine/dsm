@@ -602,12 +602,19 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         -- SoFi v8: the persistent DLV tree. A node is stored under its Merkle
         -- value and never rewritten; a root lives while it holds a pin. Nodes
-        -- and a pin are committed in one transaction.
-        CREATE TABLE IF NOT EXISTS sofi_smt_nodes(
+        -- and a pin are committed in one transaction, and a commit is refused
+        -- unless the staged frontier is closed.
+        --
+        -- v2 supersedes the first shape, whose rows predate that closure
+        -- invariant and are therefore not trusted. The tree is dark and holds
+        -- no authority, so the old tables are dropped rather than migrated.
+        DROP TABLE IF EXISTS sofi_smt_nodes;
+        DROP TABLE IF EXISTS sofi_smt_pins;
+        CREATE TABLE IF NOT EXISTS sofi_smt_nodes_v2(
             addr BLOB PRIMARY KEY CHECK (length(addr) = 32),
             node BLOB NOT NULL
         ) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS sofi_smt_pins(
+        CREATE TABLE IF NOT EXISTS sofi_smt_pins_v2(
             root BLOB PRIMARY KEY CHECK (length(root) = 32),
             pins INTEGER NOT NULL CHECK (pins > 0)
         ) WITHOUT ROWID;
