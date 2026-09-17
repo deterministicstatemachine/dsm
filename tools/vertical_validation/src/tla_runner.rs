@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 55;
+pub const EXPECTED_STANDARD_SPECS: usize = 58;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -737,6 +737,8 @@ impl TlaRunner {
                     "AbortOnlyOnObjectiveFailure".into(),
                     "ObjectiveRejectionImpliesSkipped".into(),
                     "ResolutionPermanent".into(),
+                    "MismatchedParentNeverRealizes".into(),
+                    "PendingParentDecidesNothing".into(),
                     "ContiguousPositions".into(),
                     "AtMostOneStorageUnresolvedFulfillmentPerLineage".into(),
                     "SpeculativeDescendantsNeverCanonicalUnderInvalidBranch".into(),
@@ -763,6 +765,8 @@ impl TlaRunner {
                     "AbortOnlyOnObjectiveFailure".into(),
                     "ObjectiveRejectionImpliesSkipped".into(),
                     "ResolutionPermanent".into(),
+                    "MismatchedParentNeverRealizes".into(),
+                    "PendingParentDecidesNothing".into(),
                     "ContiguousPositions".into(),
                     "AtMostOneStorageUnresolvedFulfillmentPerLineage".into(),
                     "SpeculativeDescendantsNeverCanonicalUnderInvalidBranch".into(),
@@ -876,6 +880,30 @@ impl TlaRunner {
                 "DSM_SofiFulfillment.tla",
                 "DSM_SofiFulfillment_RouteRealizable.cfg",
                 "RouteNeverRealized",
+            ),
+            // P15-3 / R17-3: the trader parent. Ignoring which branch the
+            // parent took lets a route realize on a branch its own lineage
+            // never took; treating an undecided parent as terminal invalidates
+            // a position that is only waiting.
+            expect_violation(
+                "SofiFulfillment/parent-branch-ignored",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ParentBranchIgnored.cfg",
+                "MismatchedParentNeverRealizes",
+            ),
+            expect_violation(
+                "SofiFulfillment/pending-parent-is-impossible",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_PendingParentIsImpossible.cfg",
+                "PendingParentDecidesNothing",
+            ),
+            // Non-vacuity: the arm decides a position Invalid by itself, with
+            // RouteValidation still Valid.
+            expect_violation(
+                "SofiFulfillment/parent-arm-reachable",
+                "DSM_SofiFulfillment.tla",
+                "DSM_SofiFulfillment_ParentArmReachable.cfg",
+                "ParentArmNeverDecidesInvalid",
             ),
         ]
     }

@@ -29,6 +29,9 @@ EXTENDS Naturals, FiniteSets, TLC
 \*   F         a precommit plus its attempt at RA, fixed at exercise time
 \*   T may instead make an incompatible transition "S" at its position, and may
 \*   claim position q + 1 ("C2" conditional, "S2" ordinary).
+\*   T0        the claim at p that P1 names as its trader parent: either an
+\*             ordinary single-root claim, or a conditional SoFi claim whose
+\*             branch selection is decided later, by p's own resolution
 \*
 \* RULINGS ENCODED
 \*   R9/R12   P and G are non-economic; G is deterministic and never locks.
@@ -37,6 +40,10 @@ EXTENDS Naturals, FiniteSets, TLC
 \*            by another E -- none gated on Complete (R7-17).
 \*   R13-5    a registered F resolves under evidence availability.
 \*   R14-1    Void requires RouteValidation = Valid; missing evidence is Pending.
+\*   P15-3    a conditional trader parent adds two rungs BELOW registration and
+\*   R17-3    above any route result: q is Pending while p is, and Invalid once
+\*            p selected another root or none. Arm (iv) of RouteImpossible is
+\*            the same fact, and it needs no validation evidence.
 \*
 \* LIVENESS AS QUIESCENCE. Every action here is bounded, so every behaviour is
 \* finite. Under weak fairness on the required (honest-completer) actions, a
@@ -67,6 +74,8 @@ CONSTANTS
     OrphanNotSkipped,                  \* [FALSE] arm (ii) gated on Complete
     StaleLegNotSkipped,                \* [FALSE] arm (iii') gated on Complete
     VoidBeforeValidation,              \* [FALSE] Void without RouteValidation = Valid
+    ParentBranchIgnored,               \* [FALSE] which branch T0 selected is not checked
+    PendingParentIsImpossible,         \* [FALSE] an undecided T0 is treated as terminal
     OrdinaryClaimBypassesFence,        \* [FALSE] fence applied to conditional claims only
     DescendantValidatedByStorage,      \* [FALSE] q + 1 validated on storage resolution
     RegisteredGenesisAccepted,         \* [FALSE] the walk starts from a stored genesis
@@ -100,6 +109,13 @@ KeyOf(f, r) == <<r, AttemptAt(f, r)>>
 Keys == {<<RA, 0>>, <<RA, 1>>, <<RB, 0>>}
 KeyStates == {"empty", "dead"} \cup Commitments
 
+\* The claim at p that P1 was built on. "single" is an ordinary claim, whose
+\* root P conformance already pinned at ingress. The rest are one conditional
+\* claim: "open" before p resolves, then the branch it selected -- "taken" is
+\* the root P built on, "other" is the opposite branch, "none" is p resolving
+\* Invalid and selecting no root at all.
+ParentStates == {"single", "open", "taken", "other", "none"}
+
 \* Position values share one shape so TLC can compare them.
 SlotNone == <<"none", 0>>
 SlotS == <<"S", 0>>
@@ -116,9 +132,11 @@ VARIABLES
     canon,     \* [Parents -> unknown | canonical | orphan], from the parent's own lineage
     online,    \* traders able to act (matters only under TraderOnlyCompletion)
     claim2,    \* T's claim at q + 1
+    parent,    \* the claim at p that P1 names: ParentStates
     resHist    \* [Traders -> first non-Pending resolution observed]
 
-vars == <<pStored, gStored, slot, covers, key, out, evid, canon, online, claim2, resHist>>
+vars == <<pStored, gStored, slot, covers, key, out, evid, canon, online, claim2,
+          parent, resHist>>
 
 \* =============================================================================
 \* THE VERIFIER: validation, the walk, consumption, resolution
@@ -131,6 +149,19 @@ Validation(p) ==
 Registered(tr) == slot[tr] \in Fulfillments
 RegPrecommit(tr) == PrecommitOf(slot[tr])
 FKeys(tr) == {KeyOf(slot[tr], r) : r \in covers[tr]}
+
+\* THE TRADER PARENT (P15-3, R17-3). A trader may build P on a conditional
+\* parent before that parent resolves, because the storage fence only requires
+\* p to be storage-resolved: it is guessing which branch p will take. The guess
+\* is settled here, never at ingress.
+\*
+\* While the parent is open both predicates are false, so an undecided parent
+\* decides nothing: it neither consumes nor skips.
+ParentPending == parent = "open"
+ParentImpossible ==
+    \/ parent \in {"other", "none"}
+    \/ PendingParentIsImpossible /\ ParentPending
+ParentCompatible == ParentBranchIgnored \/ parent \in {"single", "taken"}
 
 \* The walk starts only from an accepted genesis (F10).
 WalkStart(r) == r = RA \/ CreationValidB \/ RegisteredGenesisAccepted
@@ -149,11 +180,13 @@ ConsumedByOtherRB == \E k \in Keys : k[1] = RB /\ key[k] \in Commitments \ {E1}
 \* RA's single-leg consumer; nothing refers back to the cell's own parent.
 ArmI == Validation(P1) = "Invalid"
 ArmII(r) == \E r2 \in LegsOf(P1) \ {r} : canon[r2] = "orphan"
+ArmIVAt0 == ~ParentBranchIgnored /\ ParentImpossible
 
 RouteRejectedAtRA0 ==
     \/ ArmI /\ (CompleteRejectedNotSkipped => CompleteNow)
     \/ ArmII(RA) /\ (OrphanNotSkipped => CompleteNow)
     \/ ConsumedByOtherRB /\ (StaleLegNotSkipped => CompleteNow)
+    \/ ArmIVAt0
     \/ AbortedAt(<<RA, 0>>)
 
 \* The attempt-0 key at RA, which every later attempt at RA depends on.
@@ -173,10 +206,18 @@ ConsumedSingle ==
 
 ArmIII(r) == IF r = RB THEN ConsumedSingle ELSE ConsumedByOtherRB
 
+\* Arm (iv): T0 is terminal on another branch, or on none. It refers to no
+\* evidence, so a stranded cell of such an operation is skippable while
+\* RouteValidation is still Unavailable. It creates no Void -- the position is
+\* Invalid by rung 2 -- and exists only to stop an impossible operation
+\* stranding a DLV successor key.
+ArmIV == ~ParentBranchIgnored /\ ParentImpossible
+
 RouteImpossibleAt(r) ==
     \/ ArmI /\ (CompleteRejectedNotSkipped => CompleteNow)
     \/ ArmII(r) /\ (OrphanNotSkipped => CompleteNow)
     \/ ArmIII(r) /\ (StaleLegNotSkipped => CompleteNow)
+    \/ ArmIV
 
 Skipped(k) ==
     IF k = <<RA, 0>> THEN Skipped0
@@ -188,6 +229,7 @@ ConsumedRoute ==
     /\ Registered(T)
     /\ RegPrecommit(T) = P1
     /\ Validation(P1) = "Valid"
+    /\ ParentCompatible
     /\ \A r \in covers[T] :
           /\ CompleteWithoutCanonicalParents \/ canon[r] = "canonical"
           /\ WalkStart(r)
@@ -211,9 +253,16 @@ VoidEvidence(tr) ==
     \/ \E r \in covers[tr] : canon[r] = "orphan" \/ ConsumersOf(r) \ {e} # {}
     \/ tr = T /\ out = "Abort"
 
-\* The resolution ladder (F2). Step 3 carries R14-1.
+\* The resolution ladder (F2). Rungs 1 and 2 are the trader parent (P15-3);
+\* they sit above every route result, because a position built on a branch the
+\* parent never took is Invalid whatever its own legs did. Step 5 carries
+\* R14-1. Only T has a modelled parent; U's single leg stands alone.
 Resolve(tr) ==
     IF ~Registered(tr) THEN "Pending"
+    ELSE IF tr = T /\ ~ParentBranchIgnored /\ ~PendingParentIsImpossible
+            /\ ParentPending
+         THEN "Pending"
+    ELSE IF tr = T /\ ~ParentBranchIgnored /\ ParentImpossible THEN "Invalid"
     ELSE IF Realized(tr) THEN "Realized"
     ELSE IF Validation(RegPrecommit(tr)) = "Invalid" THEN "Invalid"
     ELSE IF /\ (VoidBeforeValidation \/ Validation(RegPrecommit(tr)) = "Valid")
@@ -239,7 +288,7 @@ StoreP(p) ==
                  THEN [slot EXCEPT ![Trader(p)] = SlotPrecommit]
                  ELSE slot
     /\ Hist
-    /\ UNCHANGED <<gStored, covers, key, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<gStored, covers, key, out, evid, canon, online, claim2, parent>>
 
 \* Anyone computes and publishes a witness for a leg of a stored P.
 StoreG(p, r) ==
@@ -248,7 +297,7 @@ StoreG(p, r) ==
     /\ <<p, r>> \notin gStored
     /\ gStored' = gStored \cup {<<p, r>>}
     /\ Hist
-    /\ UNCHANGED <<pStored, slot, covers, key, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, slot, covers, key, out, evid, canon, online, claim2, parent>>
 
 RequiredWitnesses(p) == IF PartialFulfillment THEN {RA} ELSE LegsOf(p)
 
@@ -271,14 +320,14 @@ Register(f) ==
     /\ slot' = [slot EXCEPT ![Trader(p)] = f]
     /\ covers' = [covers EXCEPT ![Trader(p)] = {r \in LegsOf(p) : <<p, r>> \in gStored}]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, key, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, key, out, evid, canon, online, claim2, parent>>
 
 \* An incompatible trader transition at q.
 Transition ==
     /\ slot[T] = SlotNone
     /\ slot' = [slot EXCEPT ![T] = SlotS]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, covers, key, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, covers, key, out, evid, canon, online, claim2, parent>>
 
 \* A completer writes a registered F's E into its key. Two registered writers
 \* at one key may split it Dead.
@@ -288,7 +337,7 @@ WriteKey(k, tr) ==
     /\ CompleterOK(tr)
     /\ key' = [key EXCEPT ![k] = EOf(RegPrecommit(tr))]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, out, evid, canon, online, claim2, parent>>
 
 SplitGuard(k) ==
     /\ key[k] = "empty"
@@ -299,7 +348,7 @@ SplitKey(k) ==
     /\ SplitGuard(k)
     /\ key' = [key EXCEPT ![k] = "dead"]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, out, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, out, evid, canon, online, claim2, parent>>
 
 CompleteGuard ==
     /\ Registered(T) /\ RegPrecommit(T) = P1 /\ out = NONE /\ CompleterOK(T)
@@ -316,28 +365,38 @@ WriteOutcome(o) ==
     /\ IF o = "Complete" THEN CompleteGuard ELSE AbortGuard
     /\ out' = o
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, evid, canon, online, claim2, parent>>
 
 PublishEvidence(p) ==
     /\ p \in pStored
     /\ p \notin evid
     /\ evid' = evid \cup {p}
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, canon, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, canon, online, claim2, parent>>
 
 \* The parent's own lineage settles whether it is canonical. Exogenous, once.
 SettleParent(r, c) ==
     /\ canon[r] = "unknown"
     /\ canon' = [canon EXCEPT ![r] = c]
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, online, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, online, claim2, parent>>
+
+\* p resolves and its branch selection becomes known, exogenously and once —
+\* the same shape as SettleParent. "taken" is the root P built on, "other" the
+\* opposite branch, "none" a position that resolved Invalid and selected no
+\* root at all.
+SelectParentBranch(b) ==
+    /\ parent = "open"
+    /\ parent' = b
+    /\ Hist
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, canon, online, claim2>>
 
 GoOffline(tr) ==
     /\ TraderOnlyCompletion
     /\ tr \in online
     /\ online' = online \ {tr}
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, canon, claim2>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, canon, claim2, parent>>
 
 StorageResolvedT ==
     \/ slot[T] = SlotS
@@ -350,7 +409,7 @@ ClaimNext(kind) ==
     /\ StorageResolvedT \/ (OrdinaryClaimBypassesFence /\ kind = "S2")
     /\ claim2' = kind
     /\ Hist
-    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, canon, online>>
+    /\ UNCHANGED <<pStored, gStored, slot, covers, key, out, evid, canon, online, parent>>
 
 \* Nothing left to do. Quiescence is checked by the invariants below, not by
 \* TLC's deadlock detection.
@@ -366,6 +425,7 @@ Next ==
     \/ \E o \in {"Complete", "Abort"} : WriteOutcome(o)
     \/ \E p \in Precommits : PublishEvidence(p)
     \/ \E r \in Parents, c \in {"canonical", "orphan"} : SettleParent(r, c)
+    \/ \E b \in {"taken", "other", "none"} : SelectParentBranch(b)
     \/ \E tr \in Traders : GoOffline(tr)
     \/ \E kind \in {"C2", "S2"} : ClaimNext(kind)
     \/ Idle
@@ -381,6 +441,9 @@ Init ==
     /\ canon = [r \in Parents |-> "unknown"]
     /\ online = Traders
     /\ claim2 = NONE
+    \* Both trader-parent kinds are initial states, so one run covers an
+    \* ordinary parent and a conditional one whose branch is still open.
+    /\ parent \in {"single", "open"}
     /\ resHist = [tr \in Traders |-> "Pending"]
 
 Spec == Init /\ [][Next]_vars
@@ -391,6 +454,7 @@ Spec == Init /\ [][Next]_vars
 
 ProgressEnabled ==
     \/ \E r \in Parents : canon[r] = "unknown"
+    \/ ParentPending
     \/ \E k \in Keys, tr \in Traders : key[k] = "empty" /\ tr \in Writers(k) /\ CompleterOK(tr)
     \/ CompleteGuard
     \/ AbortGuard
@@ -414,6 +478,7 @@ TypeOK ==
     /\ evid \subseteq Precommits
     /\ canon \in [Parents -> {"unknown", "canonical", "orphan"}]
     /\ claim2 \in {NONE, "C2", "S2"}
+    /\ parent \in ParentStates
     /\ resHist \in [Traders -> {"Pending", "Realized", "Invalid", "Void"}]
 
 \* P and G are non-economic: a position holds only a registered F or a
@@ -448,6 +513,18 @@ ObjectiveRejectionImpliesSkipped ==
 ResolutionPermanent ==
     \A tr \in Traders : resHist[tr] # "Pending" => Resolve(tr) = resHist[tr]
 
+\* P15-3 rung 2 / arm (iv): a route built on a branch the parent never took can
+\* never realize, whatever its own legs did.
+MismatchedParentNeverRealizes ==
+    parent \in {"other", "none"} => Resolve(T) # "Realized"
+
+\* P15-3 rung 1: an undecided parent decides nothing. It may not push q to a
+\* terminal answer, and it may not make the route impossible on its own.
+PendingParentDecidesNothing ==
+    ParentPending /\ Registered(T) /\ Validation(P1) # "Invalid" =>
+        /\ Resolve(T) = "Pending"
+        /\ \A r \in Parents : canon[r] # "orphan" => ~ArmIV
+
 \* The storage fence, for every claim kind.
 ContiguousPositions == claim2 # NONE => slot[T] # SlotNone
 
@@ -478,6 +555,15 @@ QuiescentFulfillmentResolved ==
 \* precommit's witnesses say.
 PolicyFulfillmentNeverLocks ==
     ~ProgressEnabled /\ ~RivalProgressEnabled => Registered(U) \/ ConsumersOf(RA) # {}
+
+\* -----------------------------------------------------------------------------
+\* NON-VACUITY: the trader-parent arm decides a position by itself.
+\* DSM_SofiFulfillment_ParentArmReachable.cfg expects this to be FALSE.
+ParentArmNeverDecidesInvalid ==
+    ~ /\ Registered(T)
+      /\ parent \in {"other", "none"}
+      /\ Validation(P1) # "Invalid"
+      /\ Resolve(T) = "Invalid"
 
 \* -----------------------------------------------------------------------------
 \* CLAIMS EXPECTED TO BE FALSE. Listed only in configs that must violate them:
