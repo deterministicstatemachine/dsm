@@ -103,8 +103,6 @@ pub fn effect_of(resolution: Resolution) -> PositionEffect {
 pub struct LegFacts {
     /// The storage resolution of `K^(a_j)`.
     pub cell: CellResolution,
-    /// `E`, the external commitment this operation is bound to.
-    pub external_commitment: [u8; 32],
     /// The named parent `R_j` is this vault's canonical ancestry.
     pub canonical_parent: bool,
     /// `∀ b < a_j. Skipped(K^(b))`.
@@ -116,14 +114,19 @@ pub struct LegFacts {
 }
 
 impl LegFacts {
-    /// The leg's cell holds exactly this operation's `E`, finally.
-    pub fn final_on_e(&self) -> bool {
-        self.cell == CellResolution::Final(self.external_commitment)
+    /// The leg's cell holds exactly `e`, finally.
+    ///
+    /// The commitment is the ROUTE's, never the leg's: one operation is bound
+    /// to one `E`, and every required leg must be final on that same one. A
+    /// per-leg commitment would let a "route" be assembled out of legs that
+    /// each finalized a different operation.
+    pub fn final_on(&self, e: &[u8; 32]) -> bool {
+        self.cell == CellResolution::Final(*e)
     }
 
-    /// The leg's cell is final on some other operation's commitment.
-    pub fn final_on_other(&self) -> bool {
-        matches!(self.cell, CellResolution::Final(v) if v != self.external_commitment)
+    /// The leg's cell is final on some OTHER operation's commitment.
+    pub fn final_on_other(&self, e: &[u8; 32]) -> bool {
+        matches!(self.cell, CellResolution::Final(v) if v != *e)
     }
 }
 
@@ -135,6 +138,9 @@ impl LegFacts {
 /// selected for the guessed branch to be the taken one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteFacts<'legs> {
+    /// `E` — the ONE external commitment this operation is bound to. Every
+    /// required leg must be final on exactly this value.
+    pub external_commitment: [u8; 32],
     /// `FulfillmentRegistered(q, F)` — the exercise boundary.
     pub registered: bool,
     /// What is known about the claim at `p`.
@@ -163,7 +169,7 @@ impl RouteFacts<'_> {
     fn a_reserved_key_is_lost(&self) -> bool {
         self.legs
             .iter()
-            .any(|l| l.cell == CellResolution::Dead || l.final_on_other())
+            .any(|l| l.cell == CellResolution::Dead || l.final_on_other(&self.external_commitment))
     }
 
     fn a_parent_is_lost(&self) -> bool {
@@ -215,7 +221,7 @@ pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
         && facts
             .legs
             .iter()
-            .all(|l| l.canonical_parent && l.attempt_live && l.final_on_e())
+            .all(|l| l.canonical_parent && l.attempt_live && l.final_on(&facts.external_commitment))
         && (!facts.multi_leg() || facts.outcome == Some(OutcomeCell::Complete))
 }
 
@@ -349,7 +355,7 @@ pub fn classify_attempt(
     if leg.cell == CellResolution::Dead {
         return (AttemptClass::Skipped, Some(SkipReason::Dead));
     }
-    if leg.final_on_e() {
+    if leg.final_on(&facts.external_commitment) {
         // A final cell of an operation that cannot realize is stranded, never
         // a partial execution: nothing rolls back, because the cell was never
         // consumed as an economic execution on its own.
@@ -364,11 +370,17 @@ pub fn classify_attempt(
         if facts.registered && facts.outcome == Some(OutcomeCell::Abort) {
             return (AttemptClass::Skipped, Some(SkipReason::AbortFinalRoute));
         }
-        if leg.canonical_parent && leg.attempt_live && facts.registered {
+        // A final cell is a CONSUMPTION only when the whole operation consumed
+        // — the same E across every required leg, validation Valid, the trader
+        // parent compatible, and, for a route, an objective Complete. A leg's
+        // own facts are not enough: one FinalE(E) cell is not one executed
+        // swap (F4), and treating it as one is what would let a multi-leg
+        // route consume a parent it never realized on.
+        if consumed_route(facts) && leg.final_on(&facts.external_commitment) {
             return (AttemptClass::Consumed, None);
         }
     }
-    if leg.final_on_other() {
+    if leg.final_on_other(&facts.external_commitment) {
         // Another operation's commitment sits here. Whether that consumed the
         // parent is that operation's question, not this one's.
         return (AttemptClass::Unresolved, None);
@@ -379,6 +391,9 @@ pub fn classify_attempt(
 /// Where the walk over one DLV parent's attempt keys ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalkOutcome {
+    /// The attempt counter has no successor. Refused, never wrapped and never
+    /// saturated onto a key that is already decided.
+    CounterExhausted { attempt: u64 },
     /// The parent was consumed at this attempt index.
     Consumed { attempt: u64 },
     /// Every key up to `attempt` was skipped, and that one is not resolved.
@@ -405,7 +420,10 @@ where
             Some((facts, leg)) => match classify_attempt(&facts, &leg).0 {
                 AttemptClass::Consumed => return WalkOutcome::Consumed { attempt },
                 AttemptClass::Unresolved => return WalkOutcome::Unresolved { attempt },
-                AttemptClass::Skipped => attempt = attempt.saturating_add(1),
+                AttemptClass::Skipped => match attempt.checked_add(1) {
+                    Some(next) => attempt = next,
+                    None => return WalkOutcome::CounterExhausted { attempt },
+                },
             },
         }
     }
@@ -427,7 +445,6 @@ mod tests {
     fn good_leg() -> LegFacts {
         LegFacts {
             cell: CellResolution::Final(E),
-            external_commitment: E,
             canonical_parent: true,
             attempt_live: true,
             parent_orphaned: false,
@@ -446,6 +463,7 @@ mod tests {
     /// leg has consumed: the Realized baseline every case below perturbs.
     fn realized<'l>(legs: &'l [LegFacts]) -> RouteFacts<'l> {
         RouteFacts {
+            external_commitment: E,
             registered: true,
             parent: ParentPosition::SingleRoot,
             parent_pre_root: PRE,
@@ -812,6 +830,7 @@ mod tests {
                         {
                             let legs = [LegFacts { cell, ..good_leg() }];
                             let facts = RouteFacts {
+                                external_commitment: E,
                                 registered: true,
                                 parent,
                                 parent_pre_root: PRE,
@@ -989,16 +1008,25 @@ mod tests {
             cell: CellResolution::Dead,
             ..good_leg()
         };
+        // The facts describe the ROUTE the key belongs to, because a key is
+        // consumed only when its whole operation is.
+        let dead_legs = [dead];
+        let live_legs = [good_leg()];
         let facts_for = |attempt: u64| {
-            let leg = if attempt < 3 { dead } else { good_leg() };
+            let (legs, leg): (&[LegFacts], LegFacts) = if attempt < 3 {
+                (&dead_legs, dead)
+            } else {
+                (&live_legs, good_leg())
+            };
             Some((
                 RouteFacts {
+                    external_commitment: E,
                     registered: true,
                     parent: ParentPosition::SingleRoot,
                     parent_pre_root: PRE,
                     validation: Valid,
                     storage_resolved: true,
-                    legs: &[],
+                    legs,
                     outcome: None,
                 },
                 leg,
@@ -1023,6 +1051,111 @@ mod tests {
         assert_eq!(
             walk(5, 16, |_| None),
             WalkOutcome::Unresolved { attempt: 5 }
+        );
+    }
+
+    /// A final cell of a MULTI-LEG route is not a consumption on its own: the
+    /// route consumes only when every required leg did and the outcome says
+    /// Complete. One FinalE(E) cell is not one executed swap.
+    #[test]
+    fn a_final_leg_of_an_incomplete_route_is_not_consumed() {
+        let legs = [good_leg(), pending_leg()];
+        let facts = RouteFacts {
+            outcome: None,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            classify_attempt(&facts, &legs[0]),
+            (AttemptClass::Unresolved, None)
+        );
+        // With every leg final AND the objective Complete, it consumes.
+        let done = [good_leg(), good_leg()];
+        let complete = RouteFacts {
+            outcome: Some(OutcomeCell::Complete),
+            ..realized(&done)
+        };
+        assert_eq!(
+            classify_attempt(&complete, &done[0]),
+            (AttemptClass::Consumed, None)
+        );
+    }
+
+    /// A final cell whose route is not statically Valid is not a consumption
+    /// either — consumption carries the validation premise (F4).
+    #[test]
+    fn a_final_leg_of_an_unvalidated_route_is_not_consumed() {
+        let legs = [good_leg()];
+        let unavailable = RouteFacts {
+            validation: Unavailable,
+            ..realized(&legs)
+        };
+        assert_eq!(
+            classify_attempt(&unavailable, &legs[0]).0,
+            AttemptClass::Unresolved
+        );
+    }
+
+    /// The attempt counter is checked, never saturated: a walk that reaches
+    /// `u64::MAX` refuses rather than re-examining a key it already decided.
+    #[test]
+    fn the_attempt_counter_is_checked_not_saturated() {
+        let dead = LegFacts {
+            cell: CellResolution::Dead,
+            ..good_leg()
+        };
+        let legs = [dead];
+        let facts_for = |_attempt: u64| {
+            Some((
+                RouteFacts {
+                    external_commitment: E,
+                    registered: true,
+                    parent: ParentPosition::SingleRoot,
+                    parent_pre_root: PRE,
+                    validation: Valid,
+                    storage_resolved: true,
+                    legs: &legs,
+                    outcome: None,
+                },
+                dead,
+            ))
+        };
+        assert_eq!(
+            walk(u64::MAX, 4, facts_for),
+            WalkOutcome::CounterExhausted { attempt: u64::MAX }
+        );
+    }
+
+    /// ONE route, ONE E. Two legs that each finalized a DIFFERENT operation do
+    /// not add up to a consumed route, however registered, valid and Complete
+    /// the fulfillment is. With a per-leg commitment this was representable —
+    /// and it would have let a "route" be assembled out of other operations'
+    /// cells.
+    #[test]
+    fn legs_final_on_different_commitments_are_not_one_route() {
+        let legs = [
+            good_leg(),
+            LegFacts {
+                cell: CellResolution::Final(OTHER_E),
+                ..good_leg()
+            },
+        ];
+        let facts = RouteFacts {
+            outcome: Some(OutcomeCell::Complete),
+            ..realized(&legs)
+        };
+        assert_eq!(facts.external_commitment, E);
+        assert!(
+            !consumed_route(&facts),
+            "a leg final on another operation's E is not this route's consumption"
+        );
+        assert_ne!(resolve_position(&facts), Resolution::Realized);
+        // It is the loss of the route, not a consumption: the second leg's key
+        // is final on someone else's commitment.
+        assert_eq!(resolve_position(&facts), Resolution::Void);
+        // And the stray leg is never classified as consuming this route.
+        assert_eq!(
+            classify_attempt(&facts, &legs[1]).0,
+            AttemptClass::Unresolved
         );
     }
 }
