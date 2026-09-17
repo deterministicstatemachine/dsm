@@ -29,11 +29,54 @@ pub struct Mutation {
 
 /// A successor tree built from a parent root: its root and the nodes it adds.
 /// Nothing is stored until [`commit_shadow`].
+///
+/// **This type is the trust boundary of the whole tree.** Its fields are
+/// private and only [`apply`] builds one, because canonicality of a node graph
+/// cannot be re-established from the outside: `Single(h)` and an `Internal(h)`
+/// over `Single(h-1)` plus a default have the same Merkle value, and a valid
+/// stored subtree can be grafted under the wrong prefix. A store therefore
+/// trusts the builder's product, and checks only what it can — that the staged
+/// frontier is closed (see [`super::store::validate_staged_frontier`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shadow {
-    pub parent: [u8; 32],
-    pub root: [u8; 32],
-    pub new_nodes: Vec<Node>,
+    parent: [u8; 32],
+    root: [u8; 32],
+    new_nodes: Vec<Node>,
+}
+
+impl Shadow {
+    /// The root this shadow was built from.
+    pub fn parent(&self) -> [u8; 32] {
+        self.parent
+    }
+
+    /// The successor root.
+    pub fn root(&self) -> [u8; 32] {
+        self.root
+    }
+
+    /// The nodes this shadow adds; every other node is shared with the parent.
+    pub fn new_nodes(&self) -> &[Node] {
+        &self.new_nodes
+    }
+
+    /// Fabricate a shadow that [`apply`] would never produce, for the store
+    /// tests that prove a malformed commit input is refused with no side
+    /// effects.
+    ///
+    /// The gate is `any(test, feature = "testing")` rather than plain `test`
+    /// because the durable store lives in `dsm_sdk`, whose tests are a separate
+    /// compilation unit: a `cfg(test)` seam here is invisible to them. A normal
+    /// build resolves no dev-dependencies, so this stays out of every
+    /// production artifact — `ci/sofi_shadow_nonforgeable.sh` proves it.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn forge_for_tests(parent: [u8; 32], root: [u8; 32], new_nodes: Vec<Node>) -> Shadow {
+        Shadow {
+            parent,
+            root,
+            new_nodes,
+        }
+    }
 }
 
 /// An inclusion (`value` is `Some`) or non-inclusion (`None`) proof, as the
@@ -262,7 +305,7 @@ pub fn commit_shadow<S: NodeStore + ?Sized>(
     store: &mut S,
     shadow: &Shadow,
 ) -> Result<(), SmtError> {
-    store.commit(&shadow.new_nodes, &shadow.root)
+    store.commit(shadow)
 }
 
 /// The leaf value at `key` under `root`.
@@ -494,8 +537,8 @@ mod tests {
         let store = MemoryNodeStore::new();
         let empty = empty_economic_root();
         let shadow = apply(&store, &empty, &[]).unwrap();
-        assert_eq!(shadow.root, empty);
-        assert!(shadow.new_nodes.is_empty());
+        assert_eq!(shadow.root(), empty);
+        assert!(shadow.new_nodes().is_empty());
         let key = [7u8; 32];
         let proof = prove(&store, &empty, &key).unwrap();
         assert_eq!(proof.value, None);
@@ -519,7 +562,7 @@ mod tests {
         }
         let shadow = apply(&store, &root, &batch).unwrap();
         commit_shadow(&mut store, &shadow).unwrap();
-        root = shadow.root;
+        root = shadow.root();
         assert_matches_reference(&store, &root, &reference, &ks);
         // Batch 2: update five, remove seven, insert the rest.
         let mut batch = Vec::new();
@@ -537,7 +580,7 @@ mod tests {
         }
         let shadow = apply(&store, &root, &batch).unwrap();
         commit_shadow(&mut store, &shadow).unwrap();
-        root = shadow.root;
+        root = shadow.root();
         assert_matches_reference(&store, &root, &reference, &ks);
     }
 
@@ -553,9 +596,9 @@ mod tests {
         let full = apply(&store, &empty_economic_root(), &insert).unwrap();
         commit_shadow(&mut store, &full).unwrap();
         let removals: Vec<Mutation> = ks.iter().map(|k| remove(*k)).collect();
-        let emptied = apply(&store, &full.root, &removals).unwrap();
-        assert_eq!(emptied.root, empty_economic_root());
-        assert!(emptied.new_nodes.is_empty());
+        let emptied = apply(&store, &full.root(), &removals).unwrap();
+        assert_eq!(emptied.root(), empty_economic_root());
+        assert!(emptied.new_nodes().is_empty());
     }
 
     /// The same leaves reach the same nodes, however they were batched.
@@ -579,21 +622,21 @@ mod tests {
         let detour: Vec<Mutation> = extra.iter().map(|k| set(*k, [0xEE; 32])).collect();
         let s = apply(&many, &root, &detour).unwrap();
         commit_shadow(&mut many, &s).unwrap();
-        root = s.root;
+        root = s.root();
         for (i, k) in ks.iter().enumerate().rev() {
             let s = apply(&many, &root, &[set(*k, value(i))]).unwrap();
             commit_shadow(&mut many, &s).unwrap();
-            root = s.root;
+            root = s.root();
         }
         let undo: Vec<Mutation> = extra.iter().map(|k| remove(*k)).collect();
         let s = apply(&many, &root, &undo).unwrap();
         commit_shadow(&mut many, &s).unwrap();
-        root = s.root;
+        root = s.root();
 
-        assert_eq!(root, direct.root);
+        assert_eq!(root, direct.root());
         assert_eq!(
             reachable(&many, &[root]).unwrap(),
-            reachable(&one, &[direct.root]).unwrap(),
+            reachable(&one, &[direct.root()]).unwrap(),
             "same leaves, same node set"
         );
     }
@@ -611,12 +654,12 @@ mod tests {
             .collect();
         let parent = apply(&store, &empty_economic_root(), &all).unwrap();
         commit_shadow(&mut store, &parent).unwrap();
-        let parent_nodes = reachable(&store, &[parent.root]).unwrap();
+        let parent_nodes = reachable(&store, &[parent.root()]).unwrap();
 
         let target = ks[517];
         let mut internal_depth = 0usize;
         let mut height = ECONOMIC_SMT_HEIGHT;
-        let mut address = parent.root;
+        let mut address = parent.root();
         while let Some(Node::Internal { left, right }) = store.get_node(&address).unwrap() {
             internal_depth += 1;
             address = if get_bit(&target, split_bit(height)) == 0 {
@@ -627,10 +670,10 @@ mod tests {
             height -= 1;
         }
 
-        let shadow = apply(&store, &parent.root, &[set(target, [0x77; 32])]).unwrap();
-        assert_eq!(shadow.new_nodes.len(), internal_depth + 1);
+        let shadow = apply(&store, &parent.root(), &[set(target, [0x77; 32])]).unwrap();
+        assert_eq!(shadow.new_nodes().len(), internal_depth + 1);
         commit_shadow(&mut store, &shadow).unwrap();
-        let shadow_nodes = reachable(&store, &[shadow.root]).unwrap();
+        let shadow_nodes = reachable(&store, &[shadow.root()]).unwrap();
         assert_eq!(
             shadow_nodes.difference(&parent_nodes).count(),
             internal_depth + 1
@@ -654,7 +697,7 @@ mod tests {
         )
         .unwrap();
         commit_shadow(&mut store, &three).unwrap();
-        let two = apply(&store, &three.root, &[remove(b)]).unwrap();
+        let two = apply(&store, &three.root(), &[remove(b)]).unwrap();
         commit_shadow(&mut store, &two).unwrap();
 
         let mut direct = MemoryNodeStore::new();
@@ -666,13 +709,13 @@ mod tests {
         .unwrap();
         commit_shadow(&mut direct, &expected).unwrap();
 
-        assert_eq!(two.root, expected.root);
+        assert_eq!(two.root(), expected.root());
         assert_eq!(
-            reachable(&store, &[two.root]).unwrap(),
-            reachable(&direct, &[expected.root]).unwrap()
+            reachable(&store, &[two.root()]).unwrap(),
+            reachable(&direct, &[expected.root()]).unwrap()
         );
         assert_eq!(
-            two.new_nodes.len(),
+            two.new_nodes().len(),
             2,
             "the root and a's lifted leaf node, nothing else"
         );
@@ -713,34 +756,34 @@ mod tests {
         commit_shadow(&mut store, &tree).unwrap();
 
         let present = ks[3];
-        let proof = prove(&store, &tree.root, &present).unwrap();
+        let proof = prove(&store, &tree.root(), &present).unwrap();
         assert!(verify(
-            &tree.root,
+            &tree.root(),
             &present,
             Some(&value(3)),
             &proof.siblings
         ));
         assert!(
-            !verify(&tree.root, &present, Some(&value(4)), &proof.siblings),
+            !verify(&tree.root(), &present, Some(&value(4)), &proof.siblings),
             "wrong value"
         );
         assert!(
-            !verify(&tree.root, &present, None, &proof.siblings),
+            !verify(&tree.root(), &present, None, &proof.siblings),
             "claimed absent"
         );
         let mut bent = proof.siblings.clone();
         bent[255][0] ^= 1;
         assert!(
-            !verify(&tree.root, &present, Some(&value(3)), &bent),
+            !verify(&tree.root(), &present, Some(&value(3)), &bent),
             "bent sibling"
         );
 
         let absent = [0xFE; 32];
-        let proof = prove(&store, &tree.root, &absent).unwrap();
+        let proof = prove(&store, &tree.root(), &absent).unwrap();
         assert_eq!(proof.value, None);
-        assert!(verify(&tree.root, &absent, None, &proof.siblings));
+        assert!(verify(&tree.root(), &absent, None, &proof.siblings));
         assert!(!verify(
-            &tree.root,
+            &tree.root(),
             &absent,
             Some(&[0u8; 32]),
             &proof.siblings
@@ -761,35 +804,35 @@ mod tests {
         commit_shadow(&mut store, &parent).unwrap();
         let shadow = apply(
             &store,
-            &parent.root,
+            &parent.root(),
             &[set(ks[9], [0x55; 32]), remove(ks[10])],
         )
         .unwrap();
         commit_shadow(&mut store, &shadow).unwrap();
 
-        let parent_nodes = reachable(&store, &[parent.root]).unwrap();
-        let shadow_only = reachable(&store, &[shadow.root])
+        let parent_nodes = reachable(&store, &[parent.root()]).unwrap();
+        let shadow_only = reachable(&store, &[shadow.root()])
             .unwrap()
             .difference(&parent_nodes)
             .count();
         assert!(shadow_only > 0);
 
-        store.unpin(&shadow.root).unwrap();
+        store.unpin(&shadow.root()).unwrap();
         assert_eq!(collect_garbage(&mut store).unwrap(), shadow_only);
         assert_eq!(store.node_count(), parent_nodes.len());
         for (i, k) in ks.iter().enumerate() {
-            let proof = prove(&store, &parent.root, k).unwrap();
-            assert!(verify(&parent.root, k, Some(&value(i)), &proof.siblings));
+            let proof = prove(&store, &parent.root(), k).unwrap();
+            assert!(verify(&parent.root(), k, Some(&value(i)), &proof.siblings));
         }
         assert_eq!(
-            get(&store, &shadow.root, &ks[9]),
+            get(&store, &shadow.root(), &ks[9]),
             Err(SmtError::MissingNode)
         );
 
-        store.unpin(&parent.root).unwrap();
+        store.unpin(&parent.root()).unwrap();
         assert_eq!(collect_garbage(&mut store).unwrap(), parent_nodes.len());
         assert_eq!(store.node_count(), 0);
-        assert_eq!(store.unpin(&parent.root), Err(SmtError::NotPinned));
+        assert_eq!(store.unpin(&parent.root()), Err(SmtError::NotPinned));
     }
 
     #[test]
@@ -806,7 +849,7 @@ mod tests {
         let other = apply(&store, &empty_economic_root(), &[set([0x42; 32], [1; 32])]).unwrap();
         commit_shadow(&mut store, &other).unwrap();
         // Lose one node of the pinned tree.
-        let Some(Node::Internal { left, .. }) = store.get_node(&tree.root).unwrap() else {
+        let Some(Node::Internal { left, .. }) = store.get_node(&tree.root()).unwrap() else {
             panic!("a ten-leaf root is internal");
         };
         store.remove_nodes(&[left]).unwrap();
@@ -864,7 +907,7 @@ mod tests {
                 }
                 let shadow = apply(&store, &root, &muts).unwrap();
                 commit_shadow(&mut store, &shadow).unwrap();
-                root = shadow.root;
+                root = shadow.root();
                 prop_assert_eq!(root, reference.root());
                 for key in &touched {
                     let proof = prove(&store, &root, key).unwrap();

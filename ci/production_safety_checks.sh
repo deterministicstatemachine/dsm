@@ -33,6 +33,12 @@ cargo clippy --workspace --all-features -- \
 
 echo ""
 echo "✓ Clippy production safety checks passed!"
+echo ""
+
+# The persistent DLV tree trusts its builder: nothing outside `tree::apply` may
+# assemble a commit input. Field visibility and a cfg gate have no runtime
+# behaviour, so this is proven against the artifact, not by a test.
+bash ci/sofi_shadow_nonforgeable.sh
 
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."

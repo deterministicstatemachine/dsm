@@ -2,17 +2,19 @@
 
 //! Durable home of the persistent DLV tree ([`dsm::sofi::smt`]).
 //!
-//! Two tables. `sofi_smt_nodes` maps an address to the canonical bytes of the
+//! Two tables. `sofi_smt_nodes_v2` maps an address to the canonical bytes of the
 //! node that hashes to it — write-once, and verified against the address on
-//! every read. `sofi_smt_pins` counts the pins on each root.
+//! every read. `sofi_smt_pins_v2` counts the pins on each root.
 //!
-//! A commit writes a tree's new nodes and its root's pin in ONE transaction, so
-//! a crash leaves either both or neither. Collection runs in one IMMEDIATE
-//! transaction too, so no commit interleaves with its mark and sweep.
+//! A commit takes the builder's opaque [`Shadow`] and writes its new nodes and
+//! its root's pin in ONE transaction, so a crash leaves either both or neither.
+//! Before it writes anything it runs [`validate_staged_frontier`], so a commit
+//! whose dependencies are not present is refused whole. Collection runs in one
+//! IMMEDIATE transaction too, so no commit interleaves with its mark and sweep.
 //!
 //! Dark: nothing calls this yet.
 
-use dsm::sofi::smt::{collect_garbage, Node, NodeStore, SmtError};
+use dsm::sofi::smt::{collect_garbage, validate_staged_frontier, Node, NodeStore, Shadow, SmtError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 fn store_err(e: rusqlite::Error) -> SmtError {
@@ -40,7 +42,7 @@ impl<'c> SqliteNodeStore<'c> {
         }
         self.conn
             .query_row(
-                "SELECT 1 FROM sofi_smt_nodes WHERE addr = ?1",
+                "SELECT 1 FROM sofi_smt_nodes_v2 WHERE addr = ?1",
                 params![root.as_slice()],
                 |_| Ok(()),
             )
@@ -55,7 +57,7 @@ impl NodeStore for SqliteNodeStore<'_> {
         let bytes: Option<Vec<u8>> = self
             .conn
             .query_row(
-                "SELECT node FROM sofi_smt_nodes WHERE addr = ?1",
+                "SELECT node FROM sofi_smt_nodes_v2 WHERE addr = ?1",
                 params![address.as_slice()],
                 |row| row.get(0),
             )
@@ -64,19 +66,20 @@ impl NodeStore for SqliteNodeStore<'_> {
         bytes.map(|b| Node::decode_at(address, &b)).transpose()
     }
 
-    fn commit(&mut self, nodes: &[Node], root: &[u8; 32]) -> Result<(), SmtError> {
+    fn commit(&mut self, shadow: &Shadow) -> Result<(), SmtError> {
+        validate_staged_frontier(self, shadow)?;
         let tx = self.conn.unchecked_transaction().map_err(store_err)?;
-        for node in nodes {
+        for node in shadow.new_nodes() {
             let address = node.address();
             let bytes = node.encode();
             tx.execute(
-                "INSERT OR IGNORE INTO sofi_smt_nodes (addr, node) VALUES (?1, ?2)",
+                "INSERT OR IGNORE INTO sofi_smt_nodes_v2 (addr, node) VALUES (?1, ?2)",
                 params![address.as_slice(), bytes],
             )
             .map_err(store_err)?;
             let stored: Vec<u8> = tx
                 .query_row(
-                    "SELECT node FROM sofi_smt_nodes WHERE addr = ?1",
+                    "SELECT node FROM sofi_smt_nodes_v2 WHERE addr = ?1",
                     params![address.as_slice()],
                     |row| row.get(0),
                 )
@@ -87,9 +90,9 @@ impl NodeStore for SqliteNodeStore<'_> {
             }
         }
         tx.execute(
-            "INSERT INTO sofi_smt_pins (root, pins) VALUES (?1, 1)
+            "INSERT INTO sofi_smt_pins_v2 (root, pins) VALUES (?1, 1)
              ON CONFLICT(root) DO UPDATE SET pins = pins + 1",
-            params![root.as_slice()],
+            params![shadow.root().as_slice()],
         )
         .map_err(store_err)?;
         tx.commit().map_err(store_err)
@@ -101,7 +104,7 @@ impl NodeStore for SqliteNodeStore<'_> {
         }
         self.conn
             .execute(
-                "INSERT INTO sofi_smt_pins (root, pins) VALUES (?1, 1)
+                "INSERT INTO sofi_smt_pins_v2 (root, pins) VALUES (?1, 1)
                  ON CONFLICT(root) DO UPDATE SET pins = pins + 1",
                 params![root.as_slice()],
             )
@@ -114,7 +117,7 @@ impl NodeStore for SqliteNodeStore<'_> {
         let released = self
             .conn
             .execute(
-                "DELETE FROM sofi_smt_pins WHERE root = ?1 AND pins = 1",
+                "DELETE FROM sofi_smt_pins_v2 WHERE root = ?1 AND pins = 1",
                 params![root.as_slice()],
             )
             .map_err(store_err)?;
@@ -124,7 +127,7 @@ impl NodeStore for SqliteNodeStore<'_> {
         let decremented = self
             .conn
             .execute(
-                "UPDATE sofi_smt_pins SET pins = pins - 1 WHERE root = ?1 AND pins > 1",
+                "UPDATE sofi_smt_pins_v2 SET pins = pins - 1 WHERE root = ?1 AND pins > 1",
                 params![root.as_slice()],
             )
             .map_err(store_err)?;
@@ -137,7 +140,7 @@ impl NodeStore for SqliteNodeStore<'_> {
     fn pinned_roots(&self) -> Result<Vec<[u8; 32]>, SmtError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT root FROM sofi_smt_pins")
+            .prepare("SELECT root FROM sofi_smt_pins_v2")
             .map_err(store_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -149,7 +152,7 @@ impl NodeStore for SqliteNodeStore<'_> {
     fn node_addresses(&self) -> Result<Vec<[u8; 32]>, SmtError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT addr FROM sofi_smt_nodes")
+            .prepare("SELECT addr FROM sofi_smt_nodes_v2")
             .map_err(store_err)?;
         let rows = stmt
             .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -161,7 +164,7 @@ impl NodeStore for SqliteNodeStore<'_> {
     fn remove_nodes(&mut self, addresses: &[[u8; 32]]) -> Result<(), SmtError> {
         let mut stmt = self
             .conn
-            .prepare("DELETE FROM sofi_smt_nodes WHERE addr = ?1")
+            .prepare("DELETE FROM sofi_smt_nodes_v2 WHERE addr = ?1")
             .map_err(store_err)?;
         for address in addresses {
             stmt.execute(params![address.as_slice()])
@@ -190,6 +193,7 @@ pub fn collect_garbage_with_conn(conn: &mut Connection) -> Result<usize, SmtErro
 mod tests {
     use super::*;
     use dsm::economic::tree::{empty_economic_root, EconomicSmt};
+    use dsm::economic::tree::{default_node, ECONOMIC_SMT_HEIGHT};
     use dsm::sofi::smt::{apply, commit_shadow, get, prove, reachable, verify, Mutation};
 
     fn keys(n: usize) -> Vec<[u8; 32]> {
@@ -211,6 +215,39 @@ mod tests {
         let mut v = [0x5Au8; 32];
         v[..8].copy_from_slice(&(i as u64).to_be_bytes());
         v
+    }
+
+    /// A key whose top bit chooses `side`, so a pair of them sits under one
+    /// internal node.
+    fn keyed(side: u8, byte: u8) -> [u8; 32] {
+        let mut k = [byte; 32];
+        k[0] = if side == 0 { 0x00 } else { 0x80 };
+        k
+    }
+
+    /// Two single-leaf subtrees at `height`, and the internal node over them.
+    fn pair_at(height: u16, byte: u8) -> (Node, Node, Node) {
+        let left = Node::Single {
+            height,
+            key: keyed(0, byte),
+            value: [byte; 32],
+        };
+        let right = Node::Single {
+            height,
+            key: keyed(1, byte),
+            value: [byte ^ 0x0F; 32],
+        };
+        let root = Node::Internal {
+            left: left.address(),
+            right: right.address(),
+        };
+        (root, left, right)
+    }
+
+    /// A commit input `apply` would never produce. Only the test build can
+    /// build one; `ci/sofi_shadow_nonforgeable.sh` proves production cannot.
+    fn forge(root: [u8; 32], nodes: Vec<Node>) -> Shadow {
+        Shadow::forge_for_tests(empty_economic_root(), root, nodes)
     }
 
     fn open(path: &std::path::Path) -> Connection {
@@ -243,7 +280,7 @@ mod tests {
                 .collect();
             let shadow = apply(&store, &empty_economic_root(), &muts).unwrap();
             commit_shadow(&mut store, &shadow).unwrap();
-            shadow.root
+            shadow.root()
         };
         let conn = open(&path);
         let store = SqliteNodeStore::new(&conn);
@@ -263,29 +300,122 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = open(&dir.path().join("dsm_client.db"));
         let mut store = SqliteNodeStore::new(&conn);
-        let good = Node::Single {
-            height: 12,
+        let root = Node::Single {
+            height: 256,
             key: [1; 32],
             value: [2; 32],
         };
         let victim = Node::Single {
-            height: 12,
+            height: 256,
             key: [3; 32],
             value: [4; 32],
         };
         // Different bytes already sit at the victim's address.
         conn.execute(
-            "INSERT INTO sofi_smt_nodes (addr, node) VALUES (?1, ?2)",
-            params![victim.address().as_slice(), good.encode()],
+            "INSERT INTO sofi_smt_nodes_v2 (addr, node) VALUES (?1, ?2)",
+            params![victim.address().as_slice(), root.encode()],
         )
         .unwrap();
-        let root = [0x0B; 32];
         assert_eq!(
-            store.commit(&[good, victim], &root),
+            store.commit(&forge(root.address(), vec![root, victim])),
             Err(SmtError::ConflictingNode)
         );
         assert_eq!(store.node_addresses().unwrap(), vec![victim.address()]);
         assert!(store.pinned_roots().unwrap().is_empty());
+    }
+
+    /// The durable store runs the same staged-frontier closure as the memory
+    /// one, before it writes anything: a root nothing reaches, a child or a
+    /// grandchild missing, or a node at an impossible height are each refused
+    /// with zero nodes and zero pins.
+    #[test]
+    fn a_commit_whose_frontier_is_not_closed_is_refused_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("dsm_client.db"));
+        let mut store = SqliteNodeStore::new(&conn);
+
+        let refused = |store: &mut SqliteNodeStore<'_>, shadow, expected: SmtError| {
+            assert_eq!(store.commit(&shadow), Err(expected));
+            assert!(store.node_addresses().unwrap().is_empty());
+            assert!(store.pinned_roots().unwrap().is_empty());
+        };
+
+        // An unknown root, with nothing staged.
+        refused(
+            &mut store,
+            forge([0x5E; 32], Vec::new()),
+            SmtError::MissingNode,
+        );
+
+        // A staged root missing one child, then missing a grandchild.
+        let (root, left, right) = pair_at(255, 0x31);
+        refused(
+            &mut store,
+            forge(root.address(), vec![root, left]),
+            SmtError::MissingNode,
+        );
+        let (inner, grandchild, absent) = pair_at(254, 0x47);
+        let deep = Node::Internal {
+            left: inner.address(),
+            right: right.address(),
+        };
+        refused(
+            &mut store,
+            forge(deep.address(), vec![deep, inner, right, grandchild]),
+            SmtError::MissingNode,
+        );
+
+        // A leaf folded to the wrong height.
+        let shallow = Node::Single {
+            height: 254,
+            key: keyed(0, 0x7A),
+            value: [0x7A; 32],
+        };
+        let bent = Node::Internal {
+            left: shallow.address(),
+            right: right.address(),
+        };
+        assert!(matches!(
+            store.commit(&forge(bent.address(), vec![bent, shallow, right])),
+            Err(SmtError::CorruptNode { .. })
+        ));
+        assert!(store.node_addresses().unwrap().is_empty());
+        assert!(store.pinned_roots().unwrap().is_empty());
+
+        // An internal node where a leaf sits, reached by a full descent.
+        let bottom = Node::Internal {
+            left: [3; 32],
+            right: [4; 32],
+        };
+        let mut chain = vec![bottom];
+        let mut node = bottom;
+        for height in 1..=ECONOMIC_SMT_HEIGHT {
+            node = Node::Internal {
+                left: node.address(),
+                right: default_node(height - 1),
+            };
+            chain.push(node);
+        }
+        assert!(matches!(
+            store.commit(&forge(node.address(), chain)),
+            Err(SmtError::CorruptNode { .. })
+        ));
+        assert!(store.node_addresses().unwrap().is_empty());
+        assert!(store.pinned_roots().unwrap().is_empty());
+
+        // The closed frontier, the empty root, and an already stored root pass.
+        store
+            .commit(&forge(
+                deep.address(),
+                vec![deep, inner, right, grandchild, absent],
+            ))
+            .unwrap();
+        assert_eq!(store.node_addresses().unwrap().len(), 5);
+        store
+            .commit(&forge(empty_economic_root(), Vec::new()))
+            .unwrap();
+        store.commit(&forge(deep.address(), Vec::new())).unwrap();
+        assert_eq!(store.pinned_roots().unwrap().len(), 2);
     }
 
     #[test]
@@ -298,7 +428,7 @@ mod tests {
             right: [8; 32],
         };
         conn.execute(
-            "INSERT INTO sofi_smt_nodes (addr, node) VALUES (?1, ?2)",
+            "INSERT INTO sofi_smt_nodes_v2 (addr, node) VALUES (?1, ?2)",
             params![[0x99u8; 32].as_slice(), node.encode()],
         )
         .unwrap();
@@ -329,7 +459,7 @@ mod tests {
             commit_shadow(&mut store, &parent).unwrap();
             let shadow = apply(
                 &store,
-                &parent.root,
+                &parent.root(),
                 &[
                     Mutation {
                         key: ks[4],
@@ -343,13 +473,18 @@ mod tests {
             )
             .unwrap();
             commit_shadow(&mut store, &shadow).unwrap();
-            let parent_nodes = reachable(&store, &[parent.root]).unwrap();
-            let shadow_only = reachable(&store, &[shadow.root])
+            let parent_nodes = reachable(&store, &[parent.root()]).unwrap();
+            let shadow_only = reachable(&store, &[shadow.root()])
                 .unwrap()
                 .difference(&parent_nodes)
                 .count();
-            store.unpin(&shadow.root).unwrap();
-            (parent.root, shadow.root, shadow_only, parent_nodes.len())
+            store.unpin(&shadow.root()).unwrap();
+            (
+                parent.root(),
+                shadow.root(),
+                shadow_only,
+                parent_nodes.len(),
+            )
         };
         assert!(shadow_only > 0);
         assert_eq!(collect_garbage_with_conn(&mut conn).unwrap(), shadow_only);
@@ -378,10 +513,10 @@ mod tests {
         )
         .unwrap();
         commit_shadow(&mut store, &one).unwrap();
-        store.pin(&one.root).unwrap();
-        store.unpin(&one.root).unwrap();
-        store.unpin(&one.root).unwrap();
-        assert_eq!(store.unpin(&one.root), Err(SmtError::NotPinned));
+        store.pin(&one.root()).unwrap();
+        store.unpin(&one.root()).unwrap();
+        store.unpin(&one.root()).unwrap();
+        assert_eq!(store.unpin(&one.root()), Err(SmtError::NotPinned));
         assert!(store.pinned_roots().unwrap().is_empty());
     }
 }

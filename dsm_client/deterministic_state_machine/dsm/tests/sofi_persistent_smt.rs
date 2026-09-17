@@ -52,7 +52,7 @@ fn pinned_readers_survive_concurrent_shadows_and_collection() {
         let mut s = store.write().unwrap();
         let shadow = apply(&*s, &empty_economic_root(), &inserts(0..400)).unwrap();
         commit_shadow(&mut *s, &shadow).unwrap();
-        shadow.root
+        shadow.root()
     };
 
     std::thread::scope(|scope| {
@@ -90,7 +90,7 @@ fn pinned_readers_survive_concurrent_shadows_and_collection() {
                 )
                 .unwrap();
                 commit_shadow(&mut *s, &shadow).unwrap();
-                s.unpin(&shadow.root).unwrap();
+                s.unpin(&shadow.root()).unwrap();
                 collect_garbage(&mut *s).unwrap();
             }
         });
@@ -119,7 +119,7 @@ fn benchmark_hundred_thousand_leaves_and_shadow_forks() {
     let nodes = store.node_count();
     let mut singles = 0u64;
     let mut internals = 0u64;
-    for address in reachable(&store, &[tree.root]).unwrap() {
+    for address in reachable(&store, &[tree.root()]).unwrap() {
         match store.get_node(&address).unwrap() {
             Some(Node::Single { .. }) => singles += 1,
             Some(Node::Internal { .. }) => internals += 1,
@@ -131,15 +131,15 @@ fn benchmark_hundred_thousand_leaves_and_shadow_forks() {
 
     let t = Instant::now();
     for i in (0..LEAVES).step_by(100) {
-        assert_eq!(get(&store, &tree.root, &key(i)).unwrap(), Some(value(i)));
+        assert_eq!(get(&store, &tree.root(), &key(i)).unwrap(), Some(value(i)));
     }
     let reads = t.elapsed();
 
     let t = Instant::now();
     for i in (0..LEAVES).step_by(100) {
-        let proof = prove(&store, &tree.root, &key(i)).unwrap();
+        let proof = prove(&store, &tree.root(), &key(i)).unwrap();
         assert!(verify(
-            &tree.root,
+            &tree.root(),
             &key(i),
             Some(&value(i)),
             &proof.siblings
@@ -156,11 +156,11 @@ fn benchmark_hundred_thousand_leaves_and_shadow_forks() {
             })
             .collect();
         let t = Instant::now();
-        let shadow = apply(&store, &tree.root, &muts).unwrap();
+        let shadow = apply(&store, &tree.root(), &muts).unwrap();
         let fork = t.elapsed();
         fork_lines.push(format!(
             "  shadow fork, {width:>2} mutations: {fork:>10.2?}, {} new nodes",
-            shadow.new_nodes.len()
+            shadow.new_nodes().len()
         ));
     }
 
