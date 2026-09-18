@@ -35,6 +35,7 @@ fn kind_code(kind: &PendingAdmissionKind) -> i64 {
         PendingAdmissionKind::DsmBacked => 0,
         PendingAdmissionKind::OfflineLoad { .. } => 1,
         PendingAdmissionKind::OfflineUnload { .. } => 2,
+        PendingAdmissionKind::SofiFulfillment { .. } => 3,
     }
 }
 
@@ -77,7 +78,9 @@ pub fn put_pending_admission_with_conn(
     let coords = pending
         .accepted_coords()
         .map_err(|e| anyhow!("refusing to persist a pre-acceptance admission: {e}"))?;
-    let fenced: Option<Vec<u8>> = pending.kind.fenced_asset().map(|a| a.to_vec());
+    // The column holds whatever 32 bytes the KIND needs back, which is the
+    // fenced asset for a boundary and the fulfillment id for a SoFi position.
+    let fenced: Option<Vec<u8>> = pending.kind.durable_digest().map(|a| a.to_vec());
     tx.execute(
         "INSERT INTO economic_pending_admissions(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
@@ -205,6 +208,18 @@ pub fn load_pending_admission_with_conn(
                     asset_policy_commit: asset,
                 }
             }
+        }
+        3 => {
+            // Without the id the admission cannot be matched to the
+            // fulfillment that finishes it, and a pending admission is
+            // finished, never abandoned. Refuse rather than guess.
+            let fulfillment_id = digest32(
+                fenced.ok_or_else(|| {
+                    anyhow!("a SoFi fulfillment admission has no fulfillment id — cannot resume")
+                })?,
+                "fulfillment_id",
+            )?;
+            PendingAdmissionKind::SofiFulfillment { fulfillment_id }
         }
         other => return Err(anyhow!("unknown pending admission kind {other}")),
     };
