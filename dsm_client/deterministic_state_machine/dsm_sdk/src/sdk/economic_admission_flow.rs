@@ -2483,7 +2483,7 @@ pub(crate) async fn verify_release_against_register(
     let claim = claim
         .single_root()
         .map_err(|conditional| Unavailable(conditional.to_string()))?;
-    let body = claim.body.clone();
+    let body = claim.body().clone();
     if body.trader_genesis != release.recipient_genesis
         || body.trader_devid != release.recipient_devid
         || body.economic_position != release.recipient_economic_position

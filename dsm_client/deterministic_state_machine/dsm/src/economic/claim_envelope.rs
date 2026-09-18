@@ -44,13 +44,36 @@ const MAX_KEY_OR_SIG_BYTES: usize = 65_535;
 /// attribution, checked separately by [`verify_claim_attribution`], and the
 /// two are kept apart because a member can do the second without the first
 /// being sufficient.
+/// **Fields are private, and [`decode_and_verify_economic_root_claim`] is the
+/// only thing that builds one.** This type is a CAPABILITY: holding it is the
+/// proof that a signature verified, and every consumer takes it on exactly
+/// that meaning — `RegisteredEconomicRoot::from_verified_single_root` re-runs
+/// no verification, because the argument's existence is the verification.
+///
+/// Public fields made that meaning unenforced. A caller could write the
+/// struct literal from arbitrary bytes and hand the result straight to a
+/// consumer that trusts it, which is the anti-flattening invariant defeated
+/// one level up: the registered root was made opaque while the capability it
+/// consumes stayed forgeable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEconomicRootClaim {
-    pub body: EconomicRootClaimBody,
+    body: EconomicRootClaimBody,
     /// The exact bytes the member stores. Retained rather than re-derived: a
     /// byte-different re-encode reads as a different value at a write-once
     /// cell.
-    pub envelope_bytes: Vec<u8>,
+    envelope_bytes: Vec<u8>,
+}
+
+impl VerifiedEconomicRootClaim {
+    /// The body whose signature verified.
+    pub fn body(&self) -> &EconomicRootClaimBody {
+        &self.body
+    }
+
+    /// The exact envelope bytes the signature covered.
+    pub fn envelope_bytes(&self) -> &[u8] {
+        &self.envelope_bytes
+    }
 }
 
 /// Why an envelope is not a usable claim.
@@ -213,15 +236,15 @@ pub fn verify_claim_attribution(
     caller: &AuthenticatedCaller,
     configured_storage_set_id: &[u8; 32],
 ) -> Result<(), AttributionError> {
-    if claim.body.claimant_public_key != caller.public_key {
+    if claim.body().claimant_public_key != caller.public_key {
         return Err(AttributionError::ClaimantIsNotCaller);
     }
-    if claim.body.trader_devid != caller.device_id {
+    if claim.body().trader_devid != caller.device_id {
         return Err(AttributionError::DeviceIsNotCaller);
     }
-    if claim.body.root_register_storage_set_id != *configured_storage_set_id {
+    if claim.body().root_register_storage_set_id != *configured_storage_set_id {
         return Err(AttributionError::WrongStorageSet {
-            claimed: claim.body.root_register_storage_set_id,
+            claimed: claim.body().root_register_storage_set_id,
             configured: *configured_storage_set_id,
         });
     }
@@ -290,7 +313,7 @@ impl RegisteredEconomicClaim {
     /// The trader whose position this is, from whichever arm.
     pub fn trader(&self) -> ([u8; 32], [u8; 32]) {
         match self {
-            Self::SingleRoot(c) => (c.body.trader_genesis, c.body.trader_devid),
+            Self::SingleRoot(c) => (c.body().trader_genesis, c.body().trader_devid),
             Self::ConditionalSofi(c) => (c.genesis, c.device_id),
         }
     }
@@ -299,7 +322,7 @@ impl RegisteredEconomicClaim {
     /// which is why the position can never discriminate between them.
     pub fn economic_position(&self) -> u64 {
         match self {
-            Self::SingleRoot(c) => c.body.economic_position,
+            Self::SingleRoot(c) => c.body().economic_position,
             Self::ConditionalSofi(c) => c.position,
         }
     }
@@ -411,6 +434,64 @@ mod tests {
         }
     }
 
+    /// THE VERIFIED CLAIM IS A CAPABILITY, AND IT CANNOT BE FABRICATED.
+    ///
+    /// `RegisteredEconomicRoot::from_verified_single_root` re-runs no
+    /// signature check — the argument's EXISTENCE is the verification. That
+    /// only holds if the argument cannot be conjured, and with public fields
+    /// it could: a caller wrote the struct literal from arbitrary bytes and
+    /// handed it straight to a consumer that trusts it. Making the registered
+    /// root opaque while its input stayed forgeable moved the hole up one
+    /// type rather than closing it.
+    ///
+    /// What this test can assert at runtime is the positive half: the one
+    /// construction path runs the signature check and refuses a bad one. The
+    /// negative half — that no OTHER path exists — is a visibility property,
+    /// and `ci/sofi_validated_root_constructors.sh` is what holds it, because
+    /// no runtime test can observe a field becoming public.
+    #[test]
+    fn the_only_verified_claim_is_one_whose_signature_verified() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let body = crate::economic::claim::EconomicRootClaimBody::new(
+            [0x11; 32],
+            [0x22; 32],
+            4,
+            [0xC0; 32],
+            [0xD0; 32],
+            [0x77; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
+        )
+        .unwrap();
+        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+
+        // The capability, and it carries exactly what it verified.
+        let verified = decode_and_verify_economic_root_claim(&envelope).unwrap();
+        assert_eq!(*verified.body(), body);
+        assert_eq!(verified.envelope_bytes(), envelope.as_slice());
+
+        // The SAME body under a foreign signature yields no capability. This
+        // is the object a fabricator would want, and the only door to it is
+        // shut.
+        let (_, other_sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let forged = sign_economic_root_claim(&body, &other_sk).unwrap();
+        assert_eq!(
+            decode_and_verify_economic_root_claim(&forged),
+            Err(ClaimEnvelopeError::SignatureInvalid)
+        );
+
+        // And a registered root is reachable only through the capability, so
+        // the forged envelope produces nothing downstream either.
+        let registered =
+            crate::economic::register::RegisteredEconomicRoot::from_verified_single_root(
+                decode_registered_economic_claim(&envelope)
+                    .unwrap()
+                    .single_root()
+                    .unwrap(),
+            );
+        assert_eq!(registered.post_economic_root(), [0xC0; 32]);
+    }
+
     /// THE OTHER ARM STILL WORKS, and the two framings cannot be confused.
     ///
     /// A single-root claim is a protobuf envelope; `C_q` is a bare CCB object
@@ -445,8 +526,8 @@ mod tests {
 
         match decode_registered_economic_claim(&envelope).unwrap() {
             RegisteredEconomicClaim::SingleRoot(v) => {
-                assert_eq!(v.body, body);
-                assert_eq!(v.envelope_bytes, envelope);
+                assert_eq!(*v.body(), body);
+                assert_eq!(v.envelope_bytes(), envelope);
                 // And this arm DOES supply a root — the union did not make the
                 // ordinary path fallible for everyone.
                 assert_eq!(

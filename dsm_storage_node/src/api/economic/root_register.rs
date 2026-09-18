@@ -116,9 +116,9 @@ pub async fn post_claim(
 
     // The cell, from the body — never from the caller.
     let k_root = economic_root_register_key(
-        &verified.body.trader_genesis,
-        &verified.body.trader_devid,
-        verified.body.economic_position,
+        &verified.body().trader_genesis,
+        &verified.body().trader_devid,
+        verified.body().economic_position,
     );
     let digest = economic_root_claim_envelope_digest(&body);
     match db::claim_economic_root(
@@ -126,8 +126,8 @@ pub async fn post_claim(
         &k_root,
         &body,
         &digest,
-        &verified.body.claimant_public_key,
-        &verified.body.root_register_storage_set_id,
+        &verified.body().claimant_public_key,
+        &verified.body().root_register_storage_set_id,
     )
     .await
     {

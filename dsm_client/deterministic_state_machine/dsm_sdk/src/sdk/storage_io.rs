@@ -600,9 +600,9 @@ pub mod fake_registers {
                     }
                 }
                 Ok(dsm::economic::register::economic_root_register_key(
-                    &verified.body.trader_genesis,
-                    &verified.body.trader_devid,
-                    verified.body.economic_position,
+                    &verified.body().trader_genesis,
+                    &verified.body().trader_devid,
+                    verified.body().economic_position,
                 )
                 .to_vec())
             }

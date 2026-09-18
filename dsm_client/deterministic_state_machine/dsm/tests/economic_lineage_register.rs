@@ -190,9 +190,10 @@ fn a_signed_claim_round_trips_and_a_tampered_one_does_not() {
     let envelope = sign_economic_root_claim(&b, &sk).expect("signable");
 
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
-    assert_eq!(verified.body, b);
+    assert_eq!(*verified.body(), b);
     assert_eq!(
-        verified.envelope_bytes, envelope,
+        verified.envelope_bytes(),
+        envelope,
         "the member stores the EXACT bytes; a re-encode is a different value at a write-once cell"
     );
 
@@ -226,9 +227,9 @@ fn a_claim_signed_for_one_position_does_not_verify_at_another() {
     let envelope = sign_economic_root_claim(&at7, &sk).expect("signable");
     let verified = decode_and_verify_economic_root_claim(&envelope).expect("verifies");
 
-    assert_eq!(verified.body.economic_position, 7);
+    assert_eq!(verified.body().economic_position, 7);
     assert_ne!(
-        economic_root_register_key(&G, &DEV, verified.body.economic_position),
+        economic_root_register_key(&G, &DEV, verified.body().economic_position),
         economic_root_register_key(&G, &DEV, 8)
     );
 }

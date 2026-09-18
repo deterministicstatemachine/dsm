@@ -551,9 +551,9 @@ async fn a_member_that_answers_nothing_is_unattributed_on_both_sides() {
                 let v = dsm::economic::claim_envelope::decode_and_verify_economic_root_claim(&env)
                     .expect("vector decodes");
                 let k = economic_root_register_key(
-                    &v.body.trader_genesis,
-                    &v.body.trader_devid,
-                    v.body.economic_position,
+                    &v.body().trader_genesis,
+                    &v.body().trader_devid,
+                    v.body().economic_position,
                 );
                 (
                     format!(
