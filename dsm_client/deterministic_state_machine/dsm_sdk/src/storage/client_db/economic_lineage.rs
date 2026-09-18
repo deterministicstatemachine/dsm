@@ -14,6 +14,8 @@
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
+use dsm::economic::lineage::AdmittedEconomicPosition;
+
 use super::get_connection;
 
 fn digest32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
@@ -58,43 +60,118 @@ pub fn get_frozen_root_claim(economic_position: u64) -> Result<Option<([u8; 32],
         .transpose()
 }
 
-/// The admitted economic coordinate, if any.
-pub fn get_admitted() -> Result<Option<(u64, [u8; 32])>> {
+type AdmittedRow = (
+    i64,
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+);
+
+const SELECT_ADMITTED: &str = "SELECT economic_position, claim_kind, economic_root, \
+     fulfillment_id, realize_root, void_root FROM economic_admitted_v2 WHERE id = 1";
+
+fn read_admitted_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedRow> {
+    Ok((
+        r.get::<_, i64>(0)?,
+        r.get::<_, i64>(1)?,
+        r.get::<_, Option<Vec<u8>>>(2)?,
+        r.get::<_, Option<Vec<u8>>>(3)?,
+        r.get::<_, Option<Vec<u8>>>(4)?,
+        r.get::<_, Option<Vec<u8>>>(5)?,
+    ))
+}
+
+/// Reconstruct the admitted position from its row.
+///
+/// A row whose fields do not match its own `claim_kind` is REFUSED, never
+/// patched into the nearest plausible shape: this is the coordinate a restart
+/// builds its whole lineage on, and a guess here is a guess about which root
+/// the lineage selected.
+fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
+    let (position, kind, root, fulfillment, realize, void) = row;
+    let economic_position = u64::try_from(position).map_err(|_| anyhow!("position negative"))?;
+    match kind {
+        0 => Ok(AdmittedEconomicPosition::SingleRoot {
+            economic_position,
+            economic_root: digest32(
+                root.ok_or_else(|| anyhow!("single-root admission has no root"))?,
+                "economic_root",
+            )?,
+        }),
+        1 => Ok(AdmittedEconomicPosition::ResolvedSofi {
+            economic_position,
+            selected_root: digest32(
+                root.ok_or_else(|| anyhow!("resolved SoFi admission has no selected root"))?,
+                "economic_root",
+            )?,
+            fulfillment_id: digest32(
+                fulfillment.ok_or_else(|| anyhow!("resolved SoFi admission has no fulfillment"))?,
+                "fulfillment_id",
+            )?,
+        }),
+        2 => Ok(AdmittedEconomicPosition::UnresolvedSofi {
+            economic_position,
+            fulfillment_id: digest32(
+                fulfillment.ok_or_else(|| anyhow!("conditional admission has no fulfillment"))?,
+                "fulfillment_id",
+            )?,
+            realize_root: digest32(
+                realize.ok_or_else(|| anyhow!("conditional admission has no realize root"))?,
+                "realize_root",
+            )?,
+            void_root: digest32(
+                void.ok_or_else(|| anyhow!("conditional admission has no void root"))?,
+                "void_root",
+            )?,
+        }),
+        other => Err(anyhow!("unknown admitted claim kind {other}")),
+    }
+}
+
+/// The admitted economic position, if any — WITH its claim kind.
+pub fn get_admitted() -> Result<Option<AdmittedEconomicPosition>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let row = conn
-        .query_row(
-            "SELECT economic_position, economic_root FROM economic_admitted WHERE id = 1",
-            [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-        )
+        .query_row(SELECT_ADMITTED, [], read_admitted_row)
         .optional()?;
-    row.map(|(p, root)| {
-        Ok((
-            u64::try_from(p).map_err(|_| anyhow!("position negative"))?,
-            digest32(root, "economic_root")?,
-        ))
-    })
-    .transpose()
+    row.map(admitted_from_row).transpose()
 }
 
-/// The admitted coordinate, read INSIDE a caller's transaction — the CAS
+/// The admitted coordinate as a `(position, root)` pair.
+///
+/// TEST SUPPORT ONLY, and gated so it cannot be reached from production. The
+/// pair is the shape that made a conditional position inexpressible in the
+/// first place, so production reads [`get_admitted`] and matches the kind. A
+/// test that wants the pair is asserting about an ordinary position, and this
+/// refuses rather than inventing a root for a conditional one.
+#[cfg(test)]
+pub fn get_admitted_coordinate() -> Result<Option<(u64, [u8; 32])>> {
+    Ok(get_admitted()?.map(|admitted| {
+        let position = admitted.economic_position();
+        match admitted {
+            AdmittedEconomicPosition::SingleRoot { economic_root, .. } => (position, economic_root),
+            AdmittedEconomicPosition::ResolvedSofi { selected_root, .. } => {
+                (position, selected_root)
+            }
+            AdmittedEconomicPosition::UnresolvedSofi { .. } => {
+                panic!("the admitted position at {position} is conditional and unresolved")
+            }
+        }
+    }))
+}
+
+/// The admitted position, read INSIDE a caller's transaction — the CAS
 /// re-assert the admission commit runs before making acceptance durable.
-pub fn get_admitted_with_conn(conn: &rusqlite::Connection) -> Result<Option<(u64, [u8; 32])>> {
+pub fn get_admitted_with_conn(
+    conn: &rusqlite::Connection,
+) -> Result<Option<AdmittedEconomicPosition>> {
     let row = conn
-        .query_row(
-            "SELECT economic_position, economic_root FROM economic_admitted WHERE id = 1",
-            [],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-        )
+        .query_row(SELECT_ADMITTED, [], read_admitted_row)
         .optional()?;
-    row.map(|(p, root)| {
-        Ok((
-            u64::try_from(p).map_err(|_| anyhow!("position negative"))?,
-            digest32(root, "economic_root")?,
-        ))
-    })
-    .transpose()
+    row.map(admitted_from_row).transpose()
 }
 
 /// Record admission + install the leaf cache, INSIDE the caller's transaction
@@ -113,11 +190,16 @@ pub fn record_admitted_with_conn(
     now: i64,
 ) -> Result<()> {
     tx.execute(
-        "INSERT INTO economic_admitted (id, economic_position, economic_root, updated_at)
-         VALUES (1, ?1, ?2, ?3)
+        "INSERT INTO economic_admitted_v2 (id, economic_position, claim_kind, economic_root, \
+             fulfillment_id, realize_root, void_root, updated_at)
+         VALUES (1, ?1, 0, ?2, NULL, NULL, NULL, ?3)
          ON CONFLICT(id) DO UPDATE SET
              economic_position = excluded.economic_position,
+             claim_kind = excluded.claim_kind,
              economic_root = excluded.economic_root,
+             fulfillment_id = excluded.fulfillment_id,
+             realize_root = excluded.realize_root,
+             void_root = excluded.void_root,
              updated_at = excluded.updated_at",
         params![
             i64::try_from(economic_position).map_err(|_| anyhow!("position overflow"))?,

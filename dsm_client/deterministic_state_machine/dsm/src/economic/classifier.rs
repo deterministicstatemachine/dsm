@@ -25,6 +25,7 @@
 //! one can never become a `ValidatedEconomicRoot` — which is the honest
 //! outcome, and categorically different from claiming the operation was inert.
 
+use crate::economic::state::EconomicLeafState;
 use crate::types::operations::Operation;
 
 /// What an operation does to `R_econ`.
@@ -146,8 +147,6 @@ pub struct ObservedEconomicChange {
     /// still an `R_econ` write — an operation that claims to touch nothing and
     /// advances a relationship has reached a leaf it has no write set for.
     pub relationships_changed: bool,
-    /// A vault creation was inserted (P15-12).
-    pub vault_creations_changed: bool,
 }
 
 impl ObservedEconomicChange {
@@ -157,7 +156,6 @@ impl ObservedEconomicChange {
             || self.settlement_receipts_changed
             || self.consumed_sources_changed
             || self.relationships_changed
-            || self.vault_creations_changed
     }
 }
 
@@ -173,21 +171,59 @@ impl core::fmt::Display for EconomicTripwire {
         write!(
             f,
             "economic tripwire: operation classified {:?} but economic state changed \
-             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}, \
-             vault_creations={}) — the classification is wrong, or the operation reached a leaf \
-             it has no write set for",
+             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}) \
+             — the classification is wrong, or the operation reached a leaf it has no write \
+             set for",
             self.claimed,
             self.observed.balances_changed,
             self.observed.vault_reserves_changed,
             self.observed.settlement_receipts_changed,
             self.observed.consumed_sources_changed,
-            self.observed.relationships_changed,
-            self.observed.vault_creations_changed
+            self.observed.relationships_changed
         )
     }
 }
 
 impl std::error::Error for EconomicTripwire {}
+
+/// What a transition's witness actually writes, by leaf family.
+///
+/// Derived from the mutation list a verifier already holds, which is what
+/// makes the tripwire an independent check rather than a restatement of the
+/// classification: the witness is the operation's own account of the leaves it
+/// touches, and this reads it without consulting `classify` at all.
+///
+/// The match is exhaustive on purpose. A new `EconomicLeafState` variant — the
+/// vault-creation record P15-12 still owes — cannot be added without the
+/// compiler demanding an arm here, so no leaf family can become observable
+/// without the tripwire learning to see it.
+pub fn observed_from_witness(
+    witness: &crate::economic::witness::EconomicTransitionWitness,
+) -> ObservedEconomicChange {
+    let mut observed = ObservedEconomicChange::default();
+    for mutation in &witness.mutations {
+        for state in [&mutation.pre_state, &mutation.post_state]
+            .into_iter()
+            .flatten()
+        {
+            match state {
+                EconomicLeafState::Balance(_) => observed.balances_changed = true,
+                EconomicLeafState::VaultReserve(_) => observed.vault_reserves_changed = true,
+                EconomicLeafState::SettlementReceipt(_) => {
+                    observed.settlement_receipts_changed = true
+                }
+                EconomicLeafState::ConsumedSource(_) => observed.consumed_sources_changed = true,
+                EconomicLeafState::BundleAcceptance(_) => {
+                    // Acceptance rides the settle write set and is accounted
+                    // with the receipts it certifies.
+                    observed.settlement_receipts_changed = true
+                }
+                EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
+            }
+        }
+    }
+    observed
+}
 
 /// The structural tripwire: a classification claiming no economic write must
 /// be contradicted by any economic write.

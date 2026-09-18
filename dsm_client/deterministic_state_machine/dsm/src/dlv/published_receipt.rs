@@ -436,7 +436,13 @@ mod tests {
         let key = EconomicLeafState::SettlementReceipt(state).leaf_key(&G, &DEV);
         Fixture {
             receipt: legacy_receipt(G, DEV, trade()),
-            validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(POSITION, tree.root()),
+            validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: POSITION,
+                    economic_root: tree.root(),
+                },
+            )
+            .expect("an ordinary admitted position"),
             path: tree.siblings(&key).to_vec(),
         }
     }
@@ -608,7 +614,13 @@ mod tests {
     #[test]
     fn a_path_checked_against_another_validated_root_is_refused() {
         let mut f = honest();
-        f.validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(POSITION, [0x77; 32]);
+        f.validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: POSITION,
+                economic_root: [0x77; 32],
+            },
+        )
+        .expect("an ordinary admitted position");
         assert!(matches!(
             verify(&f),
             Err(PublishedReceiptInvalid::FactsNotCommittedUnderTheValidatedRoot { .. })

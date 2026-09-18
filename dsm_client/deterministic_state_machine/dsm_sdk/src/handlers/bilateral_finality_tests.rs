@@ -235,7 +235,7 @@ async fn harness_carries_one_generation_a_to_b_through_production_code() {
     // name exactly the position the sender's lineage admitted for this debit,
     // and THE debit mutation index of a pure-debit write set.
     p.a.enter();
-    let (admitted_pos, _) = cdb::economic_lineage::get_admitted()
+    let (admitted_pos, _) = cdb::economic_lineage::get_admitted_coordinate()
         .expect("admitted read")
         .expect("the send admission is terminal before delivery");
     let envelope_bytes: Vec<u8> = {

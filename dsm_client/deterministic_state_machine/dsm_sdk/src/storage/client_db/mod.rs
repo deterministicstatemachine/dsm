@@ -402,7 +402,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// replayed one — the machinery to regenerate must be absent);
 /// `economic_root_claim_local` (the frozen economic-root claim envelope per
 /// position, signed ONCE and durably retained BEFORE the first
-/// register-member write); `economic_admitted` (the device's admitted
+/// register-member write); `economic_admitted_v2` (the device's admitted
 /// economic position + root — the durable coordinate 3.4 deferred, written in
 /// the same tx that clears the pending admission); `economic_leaf_cache`
 /// (producer-side R_econ leaves, strategy A: a CACHE whose recomputed root
@@ -712,18 +712,31 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- deferred until it had a producer. Exactly one row (id=1); written
         -- in the SAME transaction that clears the pending admission, so
         -- "admitted" and "no longer pending" cannot disagree.
-        CREATE TABLE IF NOT EXISTS economic_admitted(
+        -- v2: the admitted position carries its CLAIM KIND. The v1 row was a
+        -- bare (position, root) pair, which cannot express a conditional
+        -- position: something has to go in the root column, and whatever goes
+        -- there is indistinguishable from a selected root on reload. Beta does
+        -- not migrate — the v1 table is dropped below.
+        CREATE TABLE IF NOT EXISTS economic_admitted_v2(
             id                INTEGER PRIMARY KEY CHECK (id = 1),
             economic_position INTEGER NOT NULL,
-            economic_root     BLOB NOT NULL, -- 32B
+            -- 0 single-root, 1 resolved SoFi, 2 unresolved SoFi
+            claim_kind        INTEGER NOT NULL,
+            -- The USABLE root: present for kinds 0 and 1, NULL for kind 2,
+            -- because an unresolved position has selected none.
+            economic_root     BLOB,          -- 32B or NULL
+            fulfillment_id    BLOB,          -- 32B, kinds 1 and 2
+            realize_root      BLOB,          -- 32B, kind 2
+            void_root         BLOB,          -- 32B, kind 2
             updated_at        INTEGER NOT NULL
         );
+        DROP TABLE IF EXISTS economic_admitted;
 
         -- v8: producer-side R_econ leaves (strategy A). A CACHE, never an
-        -- authority: on load its recomputed root MUST equal economic_admitted
+        -- authority: on load its recomputed root MUST equal economic_admitted_v2
         -- root, else it is discarded and rebuilt by replaying admitted
         -- witnesses (strategy B, the recovery truth). Written in the same tx
-        -- as economic_admitted.
+        -- as economic_admitted_v2.
         CREATE TABLE IF NOT EXISTS economic_leaf_cache(
             leaf_key   BLOB PRIMARY KEY,     -- 32B derived key
             leaf_value BLOB NOT NULL,        -- 32B economic_leaf_value

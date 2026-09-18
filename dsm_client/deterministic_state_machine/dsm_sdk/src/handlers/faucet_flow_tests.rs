@@ -208,7 +208,7 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
         head.pending_economic_admission().is_none(),
         "admitted ⇒ unfenced"
     );
-    let (position, _root) = client_db::economic_lineage::get_admitted()
+    let (position, _root) = client_db::economic_lineage::get_admitted_coordinate()
         .expect("read admitted")
         .expect("admitted recorded");
     assert_eq!(position, 1);
@@ -339,7 +339,7 @@ async fn admissions_are_never_double_finished_and_positions_stay_monotonic() {
     let third = claim_era_faucet(&core, NETWORK).await.expect("claim 3");
     assert_eq!(third.economic_position, 3);
     assert_eq!(core.device_head().unwrap().balance(&era()), 300);
-    let (position, _root) = client_db::economic_lineage::get_admitted()
+    let (position, _root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("admitted");
     assert_eq!(position, 3);
@@ -358,7 +358,7 @@ async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
     assert_eq!(outcome.economic_position, 1);
     let head = core.device_head().expect("head");
     let (genesis, devid) = (head.genesis_digest(), head.devid());
-    let (_, admitted_root) = client_db::economic_lineage::get_admitted()
+    let (_, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("admitted");
 
