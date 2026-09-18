@@ -400,7 +400,7 @@ fn walk_positions(
                 encode_crockford(peer_devid)
             ))
         })?;
-        let body = claim.body.clone();
+        let body = claim.body().clone();
 
         // 2. The manifest, by content address.
         let manifest_bytes = fetcher.immutable(

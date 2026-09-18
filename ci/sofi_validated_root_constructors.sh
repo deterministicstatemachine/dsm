@@ -85,4 +85,48 @@ if [[ "$ctors" -ne 1 ]]; then
 fi
 echo "  ✓ one constructor, from a verified single-root claim"
 
-echo "✓ a validated root is still verifier-derived, and a registered one is a projection"
+# 4. The FIRST arrow: `VerifiedEconomicRootClaim` is itself unforgeable.
+#
+#    Gate 3 makes a registered root a projection of a verified claim, and
+#    `from_verified_single_root` re-runs no signature check — the argument's
+#    existence IS the verification. That is worth nothing if the argument can
+#    be written as a struct literal, which is how the hole moved up one type
+#    the first time. The chain this gate protects is both arrows:
+#
+#        raw envelope -> opaque VerifiedEconomicRootClaim -> opaque RegisteredEconomicRoot
+#
+envelope="$core/dsm/src/economic/claim_envelope.rs"
+[[ -f "$envelope" ]] || {
+  echo "[FAIL] the claim-envelope module is not where this gate expects it"
+  exit 1
+}
+body=$(awk '/^pub struct VerifiedEconomicRootClaim \{/{f=1} f{print} f&&/^\}/{exit}' "$envelope")
+if grep -qE '^\s+pub(\(| )' <<<"$body"; then
+  echo "[FAIL] VerifiedEconomicRootClaim has a public field — the 'already verified'"
+  echo "       capability could be fabricated from arbitrary bytes:"
+  grep -nE '^\s+pub(\(| )' <<<"$body"
+  exit 1
+fi
+echo "  ✓ verified-claim fields are private"
+
+# Exactly one place constructs it, and it is the decode-and-verify path.
+literals=$(grep -E 'VerifiedEconomicRootClaim \{' "$envelope" \
+  | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+if [[ "$literals" -ne 1 ]]; then
+  echo "[FAIL] expected exactly ONE struct literal of VerifiedEconomicRootClaim in"
+  echo "       $envelope; found $literals"
+  exit 1
+fi
+others=$(grep -rln 'VerifiedEconomicRootClaim {' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | grep -v "economic/claim_envelope.rs" || true)
+if [[ -n "$others" ]]; then
+  echo "[FAIL] VerifiedEconomicRootClaim is constructed outside its own module:"
+  echo "$others"
+  exit 1
+fi
+if ! awk '/fn decode_and_verify_economic_root_claim/{f=1} f&&/Ok\(VerifiedEconomicRootClaim \{/{found=1} f&&/^\}/{exit} END{exit !found}' "$envelope"; then
+  echo "[FAIL] the one constructor is not inside decode_and_verify_economic_root_claim"
+  exit 1
+fi
+echo "  ✓ one construction path, inside decode-and-verify"
+
+echo "✓ raw envelope -> verified claim -> registered root: every arrow is opaque"
