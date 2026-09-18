@@ -77,6 +77,20 @@ pub enum PendingAdmissionKind {
     /// credited. The new checkpoint cannot parent further progression until
     /// admitted.
     OfflineUnload { asset_policy_commit: [u8; 32] },
+    /// SoFi v8: an outstanding `TraderFulfillment` (P15-14).
+    ///
+    /// It fences a POSITION, not an asset: the claim at `q` is conditional
+    /// (`C_q`) until the route resolves, so nothing may advance past it. That
+    /// is a fence on the LINEAGE, and while it stands [`fence_allows`] blocks
+    /// every `ClosedWriteSet` — not just the route's own tokens. What still
+    /// runs is what never advances `R_econ`: offline bearer activity, which
+    /// this kind leaves alone by fencing no asset at all.
+    ///
+    /// It is also the one kind the local device may not be able to finish
+    /// alone. Once `F` is registered any relayer may write the cells and the
+    /// outcome, so this admission is completed by facts that arrive rather
+    /// than by an action this device takes (F2 stage 3).
+    SofiFulfillment { fulfillment_id: [u8; 32] },
 }
 
 impl PendingAdmissionKind {
@@ -90,6 +104,29 @@ impl PendingAdmissionKind {
             | Self::OfflineUnload {
                 asset_policy_commit,
             } => Some(*asset_policy_commit),
+            // A fulfillment fences its POSITION. Naming an asset here would
+            // be false twice over: the lineage fence already stops every
+            // economic write regardless of asset, and the callers of this
+            // accessor gate bearer spends — they would gate the wrong ones.
+            Self::SofiFulfillment { .. } => None,
+        }
+    }
+
+    /// The 32 bytes this kind needs to be reconstructed from durable storage.
+    ///
+    /// Deliberately NOT [`Self::fenced_asset`]: that answers "which asset is
+    /// fenced", and every caller of it gates bearer spends. Handing those
+    /// callers a fulfillment id would fence an asset that does not exist.
+    pub fn durable_digest(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::DsmBacked => None,
+            Self::OfflineLoad {
+                asset_policy_commit,
+            }
+            | Self::OfflineUnload {
+                asset_policy_commit,
+            } => Some(*asset_policy_commit),
+            Self::SofiFulfillment { fulfillment_id } => Some(*fulfillment_id),
         }
     }
 }

@@ -765,7 +765,13 @@ fn dlv_fold_entries(
     Ok(out)
 }
 
-fn fold_core(entries: &[FoldEntry], pre_root: &D32, core: &'static str) -> Result<D32, Refusal> {
+/// The core's entries, folded against the pre-root the core itself states.
+///
+/// Both refusals are `CoreDoesNotFold` and name which one happened. Reporting
+/// a fold failure as `WriteSetNotExact` would name a rule the verifier never
+/// checked here: a write set can be exactly the branch's own and still carry
+/// paths from another tree.
+fn fold_core(entries: &[FoldEntry], pre_root: &D32) -> Result<D32, Refusal> {
     let folded = batch_fold(entries).map_err(|_| {
         Refusal::Invalid(Invalid::CoreDoesNotFold {
             reason: "the entries' paths are not of one tree",
@@ -776,8 +782,7 @@ fn fold_core(entries: &[FoldEntry], pre_root: &D32, core: &'static str) -> Resul
         Invalid::CoreDoesNotFold {
             reason: "the entries do not fold to the core's own pre-root",
         },
-    )
-    .map_err(|_| Refusal::Invalid(Invalid::WriteSetNotExact { core }))?;
+    )?;
     Ok(folded.post_root)
 }
 
@@ -1006,7 +1011,7 @@ fn validate_swap(
             }
         }
         match dlv_fold_entries(core, &e, evidence) {
-            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root(), "V°").map(|_| ())),
+            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).map(|_| ())),
             Err(refusal) => verdict.note(Err(refusal)),
         }
     }
@@ -1056,7 +1061,7 @@ fn validate_swap(
     ));
 
     match trader_fold_entries(trader_core, &e, evidence) {
-        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root(), "T°").and_then(
+        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root()).and_then(
             |post_root| {
                 require(
                     post_root == *precommit.realize_root(),
@@ -1178,7 +1183,7 @@ fn validate_close(
     }
     if let Some(core) = core {
         match dlv_fold_entries(core, &e, evidence) {
-            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root(), "V°").map(|_| ())),
+            Ok(entries) => verdict.note(fold_core(&entries, core.pre_root()).map(|_| ())),
             Err(refusal) => verdict.note(Err(refusal)),
         }
     }
@@ -1221,7 +1226,7 @@ fn validate_close(
     }
 
     match trader_fold_entries(trader_core, &e, evidence) {
-        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root(), "T°").and_then(
+        Ok(entries) => verdict.note(fold_core(&entries, trader_core.pre_root()).and_then(
             |post_root| {
                 require(
                     post_root == *precommit.realize_root(),
@@ -1764,6 +1769,95 @@ mod tests {
             f.precommit.claimant_public_key(),
         )
         .unwrap()
+    }
+
+    /// A core whose paths are not all of one tree does not fold, and the
+    /// refusal says so. It is not reported as a write-set violation: the write
+    /// set here is exactly the branch's own.
+    #[test]
+    fn a_core_whose_paths_are_not_one_tree_does_not_fold() {
+        let f = swap_fixture();
+        let mut entries = f.preimage.trader_core().entries().to_vec();
+        match &mut entries[0] {
+            CoreEntry::Mutation { path, .. }
+            | CoreEntry::Read { path, .. }
+            | CoreEntry::Relationship { path, .. } => path[0] = token(0x7C),
+        }
+        let (precommit, bent) = with_trader_core(&f, entries);
+        assert_eq!(
+            validate(&precommit, &bent, &f.evidence),
+            Err(Refusal::Invalid(Invalid::CoreDoesNotFold {
+                reason: "the entries' paths are not of one tree",
+            }))
+        );
+    }
+
+    /// Restating the wrong root in BOTH places does not buy a trader anything.
+    /// `P.void_root == T°.pre_root` then holds, and the entries still do not
+    /// fold to it — so the second fold rule is what refuses this, naming the
+    /// fold rather than the write set.
+    #[test]
+    fn a_pre_root_the_entries_do_not_produce_does_not_fold() {
+        let f = swap_fixture();
+        let forged = token(0x7C);
+        let core = TraderCore::new(
+            G,
+            DEV,
+            P_POS + 1,
+            forged,
+            f.preimage.trader_core().entries().to_vec(),
+        )
+        .unwrap();
+        let SettlementBody::Swap {
+            token_in,
+            amount_in,
+            token_out,
+            exact_out,
+            hops,
+            dlv_cores,
+            closure,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a swap")
+        };
+        let preimage = SettlementPreimage::new(
+            SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core: derive::trader_core_digest(&core.encode().unwrap()),
+                dlv_cores,
+                closure,
+            },
+            core,
+            f.preimage.dlv_cores().to_vec(),
+        )
+        .unwrap();
+        let precommit = TraderPrecommitBody::new(
+            G,
+            DEV,
+            P_POS,
+            *f.precommit.parent_claim_ref(),
+            derive::recompute_e(&preimage).unwrap(),
+            f.precommit.legs().to_vec(),
+            *f.precommit.realize_root(),
+            // The void root agrees with the forged pre-root, so P15-2's first
+            // check passes and only the fold can catch this.
+            forged,
+            *f.precommit.storage_set_id(),
+            f.precommit.signature_alg(),
+            f.precommit.claimant_public_key(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::CoreDoesNotFold {
+                reason: "the entries do not fold to the core's own pre-root",
+            }))
+        );
     }
 
     #[test]
