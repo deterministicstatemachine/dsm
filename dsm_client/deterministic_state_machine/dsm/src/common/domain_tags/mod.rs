@@ -143,7 +143,9 @@ mod tests {
     /// deliberately when adding a tag — the same idiom as the CI Lean gate's
     /// hardcoded module count. It is the weakest of the three checks and is
     /// here only to make an accidental edit to the registry loud.
-    const EXPECTED_TAG_COUNT: usize = 388;
+    // 389 since E1c-2a froze `DSM/sofi/vault-creation-key/v1`, the R_econ key
+    // the owner's creation record occupies (P15-12).
+    const EXPECTED_TAG_COUNT: usize = 389;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

@@ -17,10 +17,11 @@ use crate::common::domain_tags::{
     TAG_DSM_SOFI_REL_INDEX, TAG_DSM_SOFI_REL_KEY, TAG_DSM_SOFI_REL_LEAF,
     TAG_DSM_SOFI_ROUTE_LEG_SET, TAG_DSM_SOFI_ROUTE_OUTCOME_V2, TAG_DSM_SOFI_SETTLEMENT_CORE_V3,
     TAG_DSM_SOFI_SETUP_ID, TAG_DSM_SOFI_SETUP_REF, TAG_DSM_SOFI_SETUP_SIGN,
-    TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT, TAG_DSM_SOFI_SUCC_CELL_V2,
-    TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID, TAG_DSM_SOFI_ROUTE_DIGEST,
-    TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID,
-    TAG_DSM_SOFI_VAULT_LEAF_STATE, TAG_DSM_SOFI_VAULT_STATE_KEY,
+    TAG_DSM_SOFI_VAULT_CREATION_KEY, TAG_DSM_SOFI_STORAGE_SEED_V4, TAG_DSM_SOFI_SUCC_ATTEMPT,
+    TAG_DSM_SOFI_SUCC_CELL_V2, TAG_DSM_SOFI_TRADER_CORE_V3, TAG_DSM_SOFI_TRADER_PRECOMMIT_ID,
+    TAG_DSM_SOFI_ROUTE_DIGEST, TAG_DSM_SOFI_TRADER_PRECOMMIT_SIGN,
+    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_ID, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+    TAG_DSM_SOFI_VAULT_STATE_KEY,
 };
 use crate::common::domain_tags::TAG_DSM_ECONOMIC_LEAF_STATE;
 use crate::crypto::blake3::dsm_domain_hasher;
@@ -92,6 +93,19 @@ pub fn route_digest(preimage: &RouteDigestPreimage) -> Result<D32, SofiWireError
 /// `H(vault-genesis-locator/v1 ‖ v)`.
 pub fn vault_genesis_locator(vault_id: &D32) -> D32 {
     h(TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, &[vault_id])
+}
+
+/// `H(vault-creation-key/v1 ‖ G_o ‖ DevID_o ‖ v)` — where the owner's
+/// creation record lives in `R_econ` (P15-12).
+///
+/// Scoped to the owner's identity like every other economic key, even though
+/// `vault_id` already derives from it: the key names a leaf in ONE device's
+/// tree, and the convention is what keeps that legible.
+pub fn vault_creation_key(owner_genesis: &D32, owner_device_id: &D32, vault_id: &D32) -> D32 {
+    h(
+        TAG_DSM_SOFI_VAULT_CREATION_KEY,
+        &[owner_genesis, owner_device_id, vault_id],
+    )
 }
 
 /// `k_{T,v} = H(rel-key/v1 ‖ G ‖ DevID ‖ v)`.

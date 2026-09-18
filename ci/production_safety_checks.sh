@@ -45,6 +45,11 @@ echo ""
 # stay where the conjunctions that earn them are written.
 bash ci/sofi_validated_root_constructors.sh
 
+# A vault genesis must not be consumable from a PRESENTED creation operation.
+# The funding pair is stated by a signed operation, never asserted, and F10
+# still owes the binding from that operation to the accepted owner transition.
+bash ci/sofi_genesis_acceptance_binding.sh
+
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
 cd tla

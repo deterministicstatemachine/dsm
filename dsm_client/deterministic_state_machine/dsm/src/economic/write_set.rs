@@ -93,7 +93,7 @@ pub enum WriteSetError {
     /// which arms happen to exist.
     ///
     /// THE FULFILLMENT ONLY. A setup and a vault creation have no route and
-    /// nothing to resolve — see [`Self::SofiInsertWriteSetNotSpecified`].
+    /// nothing to resolve: each has its own write set, right here.
     SofiWriteSetBelongsToTheResolvedPath,
     /// The operation's classification is contradicted by its own witness: it
     /// claims to write no economic leaf and the witness writes one.
@@ -102,17 +102,6 @@ pub enum WriteSetError {
     /// write set. This one catches the case where the write set consulted was
     /// the wrong one — or where there is none to consult.
     Tripwire(crate::economic::classifier::EconomicTripwire),
-    /// A SoFi setup or vault creation — an ORDINARY transition (P15-6, P15-12)
-    /// whose insert is not implemented.
-    ///
-    /// Both write into `R_econ` and are validated HERE, not by resolution: a
-    /// setup inserts exactly one relationship leaf at `h⁰`, and the owner's
-    /// creation at `p_create` debits the funding and inserts the creation
-    /// record. Neither insert exists yet — the creation record has no economic
-    /// leaf class or key at all — so the operation is refused, and the refusal
-    /// names the missing rule instead of claiming a resolution that does not
-    /// apply to it.
-    SofiInsertWriteSetNotSpecified,
     /// A `Transfer` whose `to_device_id` is not 32 bytes.
     MalformedRecipient,
     /// The producer's pre-state cannot fund the debit.
@@ -176,13 +165,6 @@ impl core::fmt::Display for WriteSetError {
                  sofi::lineage::advance_resolved, never through advance_validated"
             ),
             Self::Tripwire(t) => write!(f, "{t}"),
-            Self::SofiInsertWriteSetNotSpecified => write!(
-                f,
-                "a SoFi setup or vault creation is an ORDINARY transition whose insert \
-                 (P15-6 relationship leaf, P15-12 creation record) is not implemented: \
-                 it has no route and nothing to resolve, so it is refused here until \
-                 that write set exists"
-            ),
             Self::MalformedRecipient => write!(f, "transfer recipient is not a 32-byte device id"),
             Self::InsufficientBalance { have, need, .. } => write!(
                 f,
@@ -336,6 +318,27 @@ enum SemanticWriteSet {
         amount: u64,
         facts_required: FactsKind,
     },
+    /// `SofiSetup` (P15-6): exactly ONE relationship leaf, inserted FROM
+    /// ZERO, and no value movement at all.
+    ///
+    /// Insert-only is the rule, not a detail. `h⁰` is derived from the setup
+    /// id, so a setup that OVERWROTE an existing relationship would reset a
+    /// chain that has already advanced — every `hʲ` after it would be
+    /// unreachable, and the leaf's whole job is to be that chain.
+    SofiSetup { vault_id: [u8; 32], leaf: [u8; 32] },
+    /// `SofiVaultCreate` (P15-12): two balance debits and the creation record
+    /// inserted FROM ZERO, as ONE write set.
+    ///
+    /// Not "two debits and separately a record": the funding leaving the
+    /// owner's balances and the record of what it funded are the same
+    /// economic act, and splitting them would allow either half alone.
+    /// Canonical pair (`a < b`), both amounts non-zero.
+    SofiVaultCreate {
+        vault_id: [u8; 32],
+        leg_a: ([u8; 32], u64),
+        leg_b: ([u8; 32], u64),
+        creation: crate::sofi::wire::VaultCreation,
+    },
     /// `DlvCreateFundedV2`: two balance debits + two vault-reserve credits at
     /// generation 0, each reserve credit funded by the matching balance debit
     /// (`SameTransitionMove`). Legs are canonical (`a < b`), both non-zero.
@@ -427,6 +430,7 @@ enum FactsKind {
 /// witnessed. Role for `Transfer` derives from the authenticated local DevID.
 fn semantic_write_set(
     operation: &Operation,
+    local_genesis: &[u8; 32],
     local_devid: &[u8; 32],
 ) -> Result<SemanticWriteSet, WriteSetError> {
     match operation {
@@ -701,14 +705,94 @@ fn semantic_write_set(
         // by its own preimage and its position is earned by the route's
         // resolution, so `advance_validated` is the wrong constructor.
         Operation::SofiFulfill { .. } => Err(WriteSetError::SofiWriteSetBelongsToTheResolvedPath),
-        // A SETUP and a VAULT CREATION are ORDINARY transitions (P15-6,
-        // P15-12) and belong exactly here. They have no route and nothing to
-        // resolve; their inserts are simply not implemented, and the creation
-        // record has no economic leaf class or key yet. Saying they "belong to
-        // the resolved path" — as this arm did when all three shared it —
-        // sends the next reader looking for a resolution that does not exist.
-        Operation::SofiSetup { .. } | Operation::SofiVaultCreate { .. } => {
-            Err(WriteSetError::SofiInsertWriteSetNotSpecified)
+        // A SETUP inserts exactly one relationship leaf and moves no value
+        // (P15-6). `h⁰` is derived here from the setup id rather than read
+        // off the operation, so a setup cannot name a starting leaf.
+        Operation::SofiSetup { setup_body, .. } => {
+            let body = crate::sofi::wire::SofiSetupBody::decode(setup_body).map_err(|_| {
+                WriteSetError::MalformedVaultOperation {
+                    detail: "a setup body that is not canonical has no write set",
+                }
+            })?;
+            // BOTH coordinates, not just the device. The leaf's KEY is
+            // derived from the authenticated `(G, DevID)` while `h⁰` is
+            // derived from the BODY's — so a body naming a foreign genesis
+            // would place a leaf computed from that foreign identity at this
+            // device's key, and the two would disagree about whose
+            // relationship it is. Binding both is what makes them one claim.
+            if body.genesis() != local_genesis || body.device_id() != local_devid {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "a setup writes into its own identity's tree",
+                });
+            }
+            let setup_id = crate::sofi::derive::setup_id(
+                body.genesis(),
+                body.device_id(),
+                body.position(),
+                body.vault_id(),
+            );
+            Ok(SemanticWriteSet::SofiSetup {
+                vault_id: *body.vault_id(),
+                leaf: crate::sofi::derive::relationship_leaf_genesis(&setup_id),
+            })
+        }
+        // A CREATION debits the funding and inserts the record, as one write
+        // set (P15-12). The funding assets are the operation's signed
+        // execution coordinates; `genesis_accepted` is what holds them to the
+        // authenticated market policy.
+        Operation::SofiVaultCreate {
+            genesis_preimage,
+            creation,
+            funding_a_policy_commit,
+            funding_b_policy_commit,
+            ..
+        } => {
+            let preimage = crate::sofi::wire::VaultGenesisPreimage::decode(genesis_preimage)
+                .map_err(|_| WriteSetError::MalformedVaultOperation {
+                    detail: "a genesis preimage that is not canonical has no write set",
+                })?;
+            let record = crate::sofi::wire::VaultCreation::decode(creation).map_err(|_| {
+                WriteSetError::MalformedVaultOperation {
+                    detail: "a creation record that is not canonical has no write set",
+                }
+            })?;
+            // Same binding for the creation: `vault_id` derives from the
+            // preimage's owner coordinates, and the debits land at keys
+            // derived from the authenticated ones.
+            if preimage.owner_genesis != *local_genesis || preimage.owner_device_id != *local_devid
+            {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "a creation debits its own owner's balances",
+                });
+            }
+            // `v` is the owner's derivation, and the record names the same
+            // vault. Neither is taken on the operation's word.
+            let vault_id = preimage.vault_id();
+            if record.vault_id != vault_id {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the creation record names another vault than the preimage derives",
+                });
+            }
+            // The funding IS the genesis reserves: a creation that debited
+            // less than it funded would mint reserves out of nothing.
+            if record.amount_a != preimage.state.reserve_a
+                || record.amount_b != preimage.state.reserve_b
+            {
+                return Err(WriteSetError::MalformedVaultOperation {
+                    detail: "the funded amounts are not the genesis reserves",
+                });
+            }
+            let (vault_id, leg_a, leg_b) = dlv_pair_legs(
+                &vault_id,
+                (*funding_a_policy_commit, record.amount_a),
+                (*funding_b_policy_commit, record.amount_b),
+            )?;
+            Ok(SemanticWriteSet::SofiVaultCreate {
+                vault_id,
+                leg_a,
+                leg_b,
+                creation: record,
+            })
         }
         other => match crate::economic::classifier::classify(other) {
             crate::economic::classifier::EconomicEffect::UnsupportedValueTransition => {
@@ -785,7 +869,7 @@ pub fn build_write_set(
     context: &EconomicWriteContext,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     let pre_balances = pre_state.balances;
-    let semantic = semantic_write_set(operation, device_id)?;
+    let semantic = semantic_write_set(operation, genesis, device_id)?;
 
     // OPERATION AND CONTEXT MUST AGREE, checked before anything is planned.
     // A settle without bundle context cannot produce the acceptance leaf its
@@ -1178,6 +1262,70 @@ pub fn build_write_set(
                 });
             }
         }
+        // P15-6: one relationship insert, from zero, and nothing else.
+        SemanticWriteSet::SofiSetup { vault_id, leaf } => {
+            if *facts != CreditSourceFacts::None {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            let state =
+                EconomicLeafState::Relationship(crate::sofi::wire::TraderRelationshipLeaf {
+                    vault_id,
+                    leaf,
+                });
+            let key = state.leaf_key(genesis, device_id);
+            // FROM ZERO. `h⁰` is a function of the setup id, so overwriting an
+            // existing relationship would reset a chain that has already
+            // advanced and orphan every `hʲ` after it. A second setup for the
+            // same vault is refused, not applied.
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a relationship leaf for this vault already exists",
+                });
+            }
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post: Some(state),
+                source: None,
+            });
+        }
+        // P15-12: two debits and the record, as one write set.
+        SemanticWriteSet::SofiVaultCreate {
+            vault_id,
+            leg_a,
+            leg_b,
+            creation,
+        } => {
+            if *facts != CreditSourceFacts::None {
+                return Err(WriteSetError::FactsDoNotMatchOperation);
+            }
+            for (policy_commit, amount) in [leg_a, leg_b] {
+                planned.push(plan_balance_debit(
+                    genesis,
+                    device_id,
+                    pre_balances,
+                    policy_commit,
+                    amount,
+                )?);
+            }
+            let state = EconomicLeafState::VaultCreation(creation);
+            let key = state.leaf_key(genesis, device_id);
+            // Insert-only, and that is what makes the record's presence under
+            // a validated root a proof the vault was created on this lineage
+            // (P15-12). A vault id is created once.
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation record for this vault already exists",
+                });
+            }
+            let _ = vault_id;
+            planned.push(PlannedLeaf {
+                key,
+                pre: None,
+                post: Some(state),
+                source: None,
+            });
+        }
         SemanticWriteSet::DlvWithdraw {
             vault_id,
             leg_a,
@@ -1473,8 +1621,6 @@ pub fn verify_operation_write_set(
     device_id: &[u8; 32],
     witness: &EconomicTransitionWitness,
 ) -> Result<(), WriteSetError> {
-    let _ = genesis;
-
     // THE TRIPWIRE, ON THE REAL PATH AND BEFORE ANYTHING ELSE.
     //
     // It asks a different question from every check below: not "does this
@@ -1493,7 +1639,7 @@ pub fn verify_operation_write_set(
     )
     .map_err(WriteSetError::Tripwire)?;
 
-    let semantic = semantic_write_set(operation, device_id)?;
+    let semantic = semantic_write_set(operation, genesis, device_id)?;
 
     // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN:
     // vault-reserve leaves exist only in the DLV write sets, and settlement
@@ -1513,6 +1659,14 @@ pub fn verify_operation_write_set(
     // set that produces the successor it is keyed to — every other operation
     // refuses the class outright through `classify`, which is how receipts are
     // already kept out and why no arm needs its own emptiness check.
+    // EACH SOFI LEAF IS LEGAL FOR EXACTLY ONE OPERATION. Adding the enum
+    // variants did not force this — the closure below ends in a catch-all, so
+    // a new class would have been refused outright, and a class authorized for
+    // the wrong operation would never have been noticed. A setup carrying a
+    // creation record, or a creation carrying a relationship leaf, is refused
+    // here by class.
+    let relationships_legal = matches!(semantic, SemanticWriteSet::SofiSetup { .. });
+    let creations_legal = matches!(semantic, SemanticWriteSet::SofiVaultCreate { .. });
     let acceptances_legal = matches!(
         semantic,
         SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. }
@@ -1522,6 +1676,8 @@ pub fn verify_operation_write_set(
     let mut reserves: Vec<ObservedReserve> = Vec::new();
     let mut receipts: Vec<(u32, EconomicSettlementReceiptState)> = Vec::new();
     let mut acceptances: Vec<(u32, EconomicBundleAcceptanceState)> = Vec::new();
+    let mut relationships: Vec<(u32, crate::sofi::wire::TraderRelationshipLeaf)> = Vec::new();
+    let mut creations: Vec<(u32, crate::sofi::wire::VaultCreation)> = Vec::new();
     for (i, m) in witness.mutations.iter().enumerate() {
         let index = u32::try_from(i).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
         let classify = |s: &Option<EconomicLeafState>| -> Result<(), WriteSetError> {
@@ -1532,6 +1688,8 @@ pub fn verify_operation_write_set(
                 Some(EconomicLeafState::VaultReserve(_)) if reserves_legal => Ok(()),
                 Some(EconomicLeafState::SettlementReceipt(_)) if receipts_legal => Ok(()),
                 Some(EconomicLeafState::BundleAcceptance(_)) if acceptances_legal => Ok(()),
+                Some(EconomicLeafState::Relationship(_)) if relationships_legal => Ok(()),
+                Some(EconomicLeafState::VaultCreation(_)) if creations_legal => Ok(()),
                 Some(_) => Err(WriteSetError::UnexpectedLeafClass),
             }
         };
@@ -1564,6 +1722,24 @@ pub fn verify_operation_write_set(
             }
             (None, Some(EconomicLeafState::BundleAcceptance(a))) => {
                 acceptances.push((index, a.clone()));
+            }
+            // Both SoFi leaves are INSERT-ONLY, so a pre-state is not a
+            // different shape of the same write — it is a different write.
+            (None, Some(EconomicLeafState::Relationship(r))) => {
+                relationships.push((index, *r));
+            }
+            (Some(EconomicLeafState::Relationship(_)), _) => {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a setup inserts a relationship leaf from zero; it never replaces one",
+                })
+            }
+            (None, Some(EconomicLeafState::VaultCreation(c))) => {
+                creations.push((index, *c));
+            }
+            (Some(EconomicLeafState::VaultCreation(_)), _) => {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation record is insert-only; a vault is created once",
+                })
             }
             (Some(EconomicLeafState::BundleAcceptance(_)), _) => {
                 return Err(WriteSetError::WrongWriteSet {
@@ -2072,6 +2248,69 @@ pub fn verify_operation_write_set(
             }
             Ok(())
         }
+        // P15-6: exactly one relationship insert, and NO value movement.
+        SemanticWriteSet::SofiSetup { vault_id, leaf } => {
+            if !consumed.is_empty() || !balances.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a setup is non-economic: it moves no balance and consumes no source",
+                });
+            }
+            if relationships.len() != 1 || witness.mutations.len() != 1 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a setup is exactly one relationship insertion",
+                });
+            }
+            let (_, r) = &relationships[0];
+            if r.vault_id != vault_id || r.leaf != leaf {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the relationship leaf is not this setup's vault at h⁰",
+                });
+            }
+            Ok(())
+        }
+        // P15-12: two debits and the record, and nothing else.
+        SemanticWriteSet::SofiVaultCreate {
+            vault_id,
+            leg_a,
+            leg_b,
+            creation,
+        } => {
+            if !consumed.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation consumes no external source: it is funded from the \
+                             owner's own balances",
+                });
+            }
+            if balances.len() != 2 || creations.len() != 1 || witness.mutations.len() != 3 {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a creation is exactly two balance debits and one creation record",
+                });
+            }
+            // BY ASSET, not by position: a witness's mutations are ordered by
+            // derived key, which has nothing to do with which leg is which.
+            for leg in [leg_a, leg_b] {
+                let observed = expect_one_balance(&balances, leg.0)?;
+                let expected =
+                    observed
+                        .pre_amount
+                        .checked_sub(leg.1)
+                        .ok_or(WriteSetError::WrongWriteSet {
+                            detail: "a creation debit underflows the owner's balance",
+                        })?;
+                if observed.post_amount != expected {
+                    return Err(WriteSetError::WrongWriteSet {
+                        detail: "a creation debit is not the funded amount",
+                    });
+                }
+            }
+            let (_, c) = &creations[0];
+            if *c != creation || c.vault_id != vault_id {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the creation record is not the one the operation carries",
+                });
+            }
+            Ok(())
+        }
         SemanticWriteSet::DlvWithdraw {
             vault_id,
             leg_a,
@@ -2265,6 +2504,8 @@ mod sofi_refusal_tests {
             Operation::SofiVaultCreate {
                 genesis_preimage: vec![0x5A, 0x00],
                 creation: vec![0x5B, 0x00],
+                funding_a_policy_commit: [0x5C; 32],
+                funding_b_policy_commit: [0x5D; 32],
                 signature: vec![0xA1; 8],
             },
             Operation::SofiFulfill {
@@ -2275,23 +2516,18 @@ mod sofi_refusal_tests {
         ]
     }
 
-    /// A SOFI OPERATION IS REFUSED BY NAME — and the three do not share a
-    /// name, because they do not share a reason.
+    /// ONLY THE FULFILLMENT IS REFUSED NOW. The setup and the vault creation
+    /// are ORDINARY transitions (P15-6, P15-12) and this is their home: each
+    /// produces a write set here.
     ///
-    /// A FULFILLMENT belongs to the resolved path: its position is earned by
-    /// the route's resolution, so `advance_validated` is the wrong
-    /// constructor. A SETUP and a VAULT CREATION are ORDINARY transitions
-    /// (P15-6, P15-12) that belong exactly here and whose inserts are not
-    /// implemented — the creation record has no economic leaf class or key
-    /// yet. Both refusals are correct; only one of them is about resolution.
-    ///
-    /// The original of this test asserted the resolved-path reason for all
-    /// three, which pinned a false statement about two of them. Before that,
-    /// the catch-all said "writes no economic leaf", false of all three:
-    /// `classify` says `ClosedWriteSet`. A true refusal for a false reason is
-    /// one arm away from becoming an acceptance.
+    /// The history is the point. All three once fell into a catch-all that
+    /// said "writes no economic leaf" — false of all three, since `classify`
+    /// calls them `ClosedWriteSet`. Then all three claimed to "belong to the
+    /// resolved path" — true only of the fulfillment. Both refusals were
+    /// correct in outcome and wrong in reason, and each wrong reason described
+    /// a rule that did not exist. Now two of them have the rule.
     #[test]
-    fn each_sofi_operation_is_refused_for_its_own_reason() {
+    fn a_fulfillment_is_resolved_elsewhere_and_the_other_two_are_written_here() {
         for op in sofi_operations() {
             let name = op.get_operation_type();
             assert_eq!(
@@ -2299,133 +2535,36 @@ mod sofi_refusal_tests {
                 EconomicEffect::ClosedWriteSet,
                 "{name}: it does move value under a closed write set"
             );
-            let err = match semantic_write_set(&op, &[0x22; 32]) {
-                Ok(_) => panic!("{name}: no advance_validated write set exists for this"),
-                Err(e) => e,
-            };
-            let expected = match op {
-                Operation::SofiFulfill { .. } => {
-                    WriteSetError::SofiWriteSetBelongsToTheResolvedPath
+            match (&op, semantic_write_set(&op, &[0x11; 32], &[0x22; 32])) {
+                (Operation::SofiFulfill { .. }, Err(e)) => assert_eq!(
+                    e,
+                    WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
+                    "a fulfillment's position is earned by the route's resolution"
+                ),
+                (Operation::SofiFulfill { .. }, Ok(_)) => {
+                    panic!("a fulfillment has no advance_validated write set")
                 }
-                _ => WriteSetError::SofiInsertWriteSetNotSpecified,
-            };
-            assert_eq!(err, expected, "{name}: the refusal must name ITS rule");
-            assert_ne!(
-                err,
-                WriteSetError::NoEconomicWriteSet,
-                "{name}: that reason was never true of a SoFi operation"
-            );
-        }
-    }
-
-    /// THE TRIPWIRE RUNS ON THE REAL PATH, and it catches what nothing else
-    /// here can.
-    ///
-    /// `check_tripwire` had ZERO production callers before this: it and
-    /// `ObservedEconomicChange` were referenced only from `dsm/tests/`, so the
-    /// structural check the module documents was not enforced anywhere.
-    ///
-    /// The case it owns: an operation classified as writing NOTHING, carrying
-    /// a witness that writes a leaf. A write-set comparison cannot catch that,
-    /// because such an operation has no write set to compare against — it is
-    /// refused as "writes no economic leaf" while its witness sits there full
-    /// of them, and the diagnosis names the wrong thing.
-    #[test]
-    fn the_tripwire_catches_a_witness_that_contradicts_the_classification() {
-        use crate::economic::mutation::EconomicLeafMutation;
-        use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
-        use crate::economic::witness::EconomicTransitionWitness;
-
-        // `Noop` writes nothing, by classification.
-        let op = Operation::Noop;
-        assert_eq!(classify(&op), EconomicEffect::None);
-
-        let writes_a_balance = EconomicTransitionWitness {
-            pre_economic_root: [0x01; 32],
-            post_economic_root: [0x02; 32],
-            economic_operation_id: [0x03; 32],
-            operation_digest: [0x04; 32],
-            mutations: vec![EconomicLeafMutation {
-                pre_state: None,
-                post_state: Some(EconomicLeafState::Balance(EconomicBalanceState {
-                    policy_commit: [0xE0; 32],
-                    amount: 1,
-                })),
-                siblings: Vec::new(),
-            }],
-            credit_sources: Vec::new(),
-        };
-
-        match verify_operation_write_set(&op, &[0x11; 32], &[0x22; 32], &writes_a_balance) {
-            Err(WriteSetError::Tripwire(t)) => {
-                assert_eq!(t.claimed, EconomicEffect::None);
-                assert!(t.observed.balances_changed);
-                assert!(t.observed.any());
+                // The fixtures carry placeholder bodies, so these refuse as
+                // MALFORMED — which is itself the point: they are refused for
+                // what their bytes are, not for being SoFi.
+                (_, Err(e)) => assert!(
+                    matches!(e, WriteSetError::MalformedVaultOperation { .. }),
+                    "{name}: an ordinary transition is judged by its own bytes, got {e:?}"
+                ),
+                (_, Ok(_)) => {}
             }
-            other => panic!("the tripwire must fire first, got {other:?}"),
-        }
-
-        // The same operation with an EMPTY witness is refused too — but by the
-        // write-set rule, not the tripwire. The two reasons stay distinct.
-        let writes_nothing = EconomicTransitionWitness {
-            mutations: Vec::new(),
-            ..writes_a_balance.clone()
-        };
-        match verify_operation_write_set(&op, &[0x11; 32], &[0x22; 32], &writes_nothing) {
-            Err(WriteSetError::Tripwire(_)) => {
-                panic!("nothing was written; this is not a tripwire")
-            }
-            Err(_) => {}
-            Ok(()) => panic!("a Noop has no economic write set"),
         }
     }
 
-    /// A RELATIONSHIP leaf is observable. The flag added in #912 had no
-    /// producer — nothing ever set it — so the tripwire could not see a SoFi
-    /// relationship write at all.
+    /// The resolved-path refusal names the fulfillment, so nobody reads it as
+    /// a statement about all three.
     #[test]
-    fn a_relationship_leaf_is_observed_by_the_tripwire() {
-        use crate::economic::mutation::EconomicLeafMutation;
-        use crate::economic::state::EconomicLeafState;
-        use crate::economic::witness::EconomicTransitionWitness;
-
-        let witness = EconomicTransitionWitness {
-            pre_economic_root: [0x01; 32],
-            post_economic_root: [0x02; 32],
-            economic_operation_id: [0x03; 32],
-            operation_digest: [0x04; 32],
-            mutations: vec![EconomicLeafMutation {
-                pre_state: None,
-                post_state: Some(EconomicLeafState::Relationship(
-                    crate::sofi::wire::TraderRelationshipLeaf {
-                        vault_id: [0xC1; 32],
-                        leaf: [0x0B; 32],
-                    },
-                )),
-                siblings: Vec::new(),
-            }],
-            credit_sources: Vec::new(),
-        };
-        let observed = crate::economic::classifier::observed_from_witness(&witness);
-        assert!(observed.relationships_changed, "it is an R_econ write");
-        assert!(observed.any());
-        assert!(!observed.balances_changed, "and it carries no amount");
-    }
-
-    /// Only the fulfillment is sent to the resolved path, and the message says
-    /// so. A setup or a creation pointed at `advance_resolved` would send the
-    /// next reader hunting for a route that does not exist.
-    #[test]
-    fn only_a_fulfillment_is_sent_to_the_resolved_path() {
+    fn the_resolved_path_refusal_is_about_the_fulfillment() {
         let resolved = WriteSetError::SofiWriteSetBelongsToTheResolvedPath.to_string();
         assert!(resolved.contains("advance_resolved"));
-        assert!(resolved.contains("fulfillment"));
-
-        let ordinary = WriteSetError::SofiInsertWriteSetNotSpecified.to_string();
         assert!(
-            !ordinary.contains("advance_resolved"),
-            "an ordinary transition must not be pointed at the resolved path: {ordinary}"
+            resolved.contains("fulfillment"),
+            "it must say WHICH operation belongs to that path: {resolved}"
         );
-        assert!(ordinary.contains("ORDINARY") && ordinary.contains("not implemented"));
     }
 }

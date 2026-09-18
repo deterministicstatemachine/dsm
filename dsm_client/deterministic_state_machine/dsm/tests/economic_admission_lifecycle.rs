@@ -1018,3 +1018,145 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
         .expect("the beta network is known");
     dsm::ccb::StorageSetMembers::new(pinned).expect("pinned beta set")
 }
+
+// ── F1: `p` and `R_T^setup` are established by the ordinary transition ──────
+
+/// THE TWO SETUP CONJUNCTS ARE REACHABLE, and they refuse.
+///
+/// `R_T^setup` had zero readers before this: a correctly signed first setup
+/// could put ANY 32 bytes there, and the `(G, DevID, v)` index would then pin
+/// a `ρ` committing them forever — the uniqueness rule holding over a field
+/// nothing had checked. `p` was equally unbound.
+///
+/// Both are established HERE, by the ordinary transition, without waiting for
+/// E2: `advance_validated` already holds the predecessor and the root derived
+/// from the verified mutation sequence, which is exactly the normative
+/// relation. (`ClaimRef_p` still needs the parent envelope, so it stays E2's.)
+#[test]
+fn a_setup_transition_binds_its_position_and_its_derived_root() {
+    use dsm::economic::state::EconomicLeafState;
+    use dsm::economic::tree::EconomicSmt;
+
+    let vault_id = dsm::sofi::derive::vault_id(&G, &DEV, 7);
+    // The predecessor is the activation root at position 0, so `p` is 0.
+    let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
+    let sigma = dsm::sofi::derive::setup_id(&G, &DEV, zero.economic_position(), &vault_id);
+    let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
+        vault_id,
+        leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
+    });
+    let mut tree = EconomicSmt::new();
+    let pre_root = tree.root();
+    tree.insert(
+        state.leaf_key(&G, &DEV),
+        state.leaf_value().expect("a leaf value"),
+    );
+    let derived_root = tree.root();
+
+    // A body whose `p` and `R_T^setup` are the derived ones, and three that
+    // are wrong in exactly one way each.
+    let body = |position: u64, setup_root: [u8; 32]| {
+        dsm::sofi::wire::SofiSetupBody::new(
+            G,
+            DEV,
+            position,
+            vault_id,
+            [0x66; 32],
+            setup_root,
+            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &[0x01; 64],
+        )
+        .expect("a setup body")
+    };
+    let op_for = |b: &dsm::sofi::wire::SofiSetupBody| Operation::SofiSetup {
+        setup_body: b.encode(),
+        signature: vec![0xA1; 8],
+    };
+
+    // ONE WITNESS PER OPERATION. `advance_validated` binds the accepted
+    // substrate's operation digest to the witness's before it reaches the
+    // setup conjuncts, so reusing a witness across bodies would be refused by
+    // that check and prove nothing about these two.
+    let fx = faucet_fixture(1);
+    let go = |b: &dsm::sofi::wire::SofiSetupBody| {
+        let op = op_for(b);
+        let mut build_tree = EconomicSmt::new();
+        let built = dsm::economic::write_set::build_write_set(
+            &op,
+            &G,
+            &DEV,
+            &dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            &dsm::economic::write_set::EconomicPreState::balances_only(
+                &std::collections::BTreeMap::new(),
+            ),
+            &mut build_tree,
+            &dsm::economic::write_set::CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+        )
+        .expect("a setup builds");
+        // NOT asserted equal to `derived_root` here: `h⁰` is derived from the
+        // BODY's own position, so a body naming another `p` produces a
+        // self-consistent write set with a DIFFERENT root. That is precisely
+        // why the position conjunct is needed — self-consistency is not a
+        // binding to the real predecessor.
+        let witness = EconomicTransitionWitness::new(
+            pre_root,
+            built.post_root,
+            dsm::economic::faucet::dsm_economic_operation_id(&G, &DEV, &C_DSM_PLUS),
+            dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            built.mutations,
+            built.credit_sources,
+        )
+        .expect("a witness");
+        let manifest = manifest_for(&witness);
+        let registered = registered_for(&manifest, 1, witness.post_economic_root);
+        advance_validated(
+            &zero,
+            &registered,
+            &manifest,
+            &witness,
+            &accepted_for(&op),
+            &OneTicket {
+                envelope: fx.envelope.clone(),
+            },
+            &G,
+            &DEV,
+            b"dsm-testnet",
+            &fx.pk,
+        )
+        .map(|_| ())
+    };
+
+    // A body naming another predecessor position.
+    assert!(
+        matches!(
+            go(&body(zero.economic_position() + 5, derived_root)),
+            Err(EconomicValidationError::SetupPositionIsNotThePredecessor { .. })
+        ),
+        "p is the position the parent claim names"
+    );
+
+    // A body asserting a root its own transition does not produce — the case
+    // the field's whole job is to make impossible.
+    assert!(
+        matches!(
+            go(&body(zero.economic_position(), [0xEE; 32])),
+            Err(EconomicValidationError::SetupRootIsNotTheDerivedRoot { .. })
+        ),
+        "R_T^setup is derived, never asserted"
+    );
+
+    // And the correct body reaches the conjuncts and passes them. It may be
+    // refused further down for faucet-fixture reasons; what this asserts is
+    // that it is NOT refused by either setup conjunct, which is what makes
+    // the two refusals above meaningful rather than unreachable.
+    let outcome = go(&body(zero.economic_position(), derived_root));
+    assert!(
+        !matches!(
+            outcome,
+            Err(EconomicValidationError::SetupPositionIsNotThePredecessor { .. })
+                | Err(EconomicValidationError::SetupRootIsNotTheDerivedRoot { .. })
+        ),
+        "the derived body must pass both setup conjuncts, got {outcome:?}"
+    );
+}

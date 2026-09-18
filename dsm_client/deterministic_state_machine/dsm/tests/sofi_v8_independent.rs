@@ -1179,3 +1179,65 @@ fn class_discriminants_do_not_collide() {
         );
     }
 }
+
+/// E1c-2a's new bytes, against the independent hasher and a frozen golden.
+///
+/// Two objects are being frozen: the key the owner's creation record occupies
+/// in `R_econ`, and the leaf value committed at it. Both are checked against
+/// bytes written from the tables here — never against the production encoder,
+/// which is the thing under test.
+#[test]
+fn the_creation_key_and_leaf_match_the_independent_hasher() {
+    const VAULT: [u8; 32] = [0xC1; 32];
+
+    // 1. `vault_creation_key = H(vault-creation-key/v1 ‖ G_o ‖ DevID_o ‖ v)`.
+    let key = d::vault_creation_key(&G, &DEV, &VAULT);
+    assert_eq!(
+        key,
+        indep::h("DSM/sofi/vault-creation-key/v1", &[&G, &DEV, &VAULT])
+    );
+    assert_eq!(
+        cf(&key),
+        "QGD7JDM2EVWH2V26RSB7XE26NBT11265N97C4TAJX7TH3H3YPZ3G"
+    );
+
+    // It is NOT the storage locator: an economic address and a storage
+    // coordinate are different namespaces, and one derivation serving both is
+    // how they collide.
+    assert_ne!(key, d::vault_genesis_locator(&VAULT));
+
+    // 2. The creation leaf's CCB bytes are the `0x005B` wire object's — one
+    //    encoding, so the record in `R_econ` and the record the operation
+    //    carries cannot drift.
+    let record = VaultCreation {
+        vault_id: VAULT,
+        genesis_root: [0x0C; 32],
+        amount_a: 1_000,
+        amount_b: 2_000,
+    };
+    let expected_ccb = [
+        indep::env(0x005B),
+        VAULT.to_vec(),
+        [0x0C; 32].to_vec(),
+        indep::u64be(1_000),
+        indep::u64be(2_000),
+    ]
+    .concat();
+    assert_eq!(record.encode(), expected_ccb);
+
+    // 3. And the economic leaf VALUE over those exact bytes.
+    let state = dsm::economic::state::EconomicLeafState::VaultCreation(record);
+    assert_eq!(state.encode().expect("encodable"), expected_ccb);
+    let value = state.leaf_value().expect("a leaf value");
+    assert_eq!(
+        value,
+        indep::h("DSM/economic-leaf-state/v1", &[&expected_ccb])
+    );
+    assert_eq!(
+        cf(&value),
+        "403GTT1AX78AHE9YA46SFXNPK0Y706N0P6TZDY161WKTSQ54M740"
+    );
+
+    // 4. The leaf derives its own key from the owner's coordinates.
+    assert_eq!(state.leaf_key(&G, &DEV), key);
+}
