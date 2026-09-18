@@ -232,6 +232,11 @@ pub(crate) fn producer_tree_and_pre_state(
             // the bilateral write sets and has no slot it belongs in; adding a
             // half-slot here would be a second place for the base to live.
             dsm::economic::state::EconomicLeafState::Relationship(_) => {}
+            // A creation record is write-once and insert-only: a write set
+            // that found one in its pre-state would be creating a vault that
+            // already exists, which its own arm refuses. Nothing reads it as a
+            // predecessor.
+            dsm::economic::state::EconomicLeafState::VaultCreation(_) => {}
         }
     }
     if tree.root() != validated.economic_root() {
@@ -1191,7 +1196,15 @@ pub(crate) async fn admitted_market_settle<A>(
 fn leaf_is_externally_citable(state: &dsm::economic::state::EconomicLeafState) -> bool {
     use dsm::economic::state::EconomicLeafState as L;
     match state {
-        L::VaultReserve(_) | L::SettlementReceipt(_) | L::BundleAcceptance(_) => true,
+        // The creation record is citable BECAUSE of P15-12's binding: a foreign
+        // verifier accepts a vault's genesis only by proving this exact leaf
+        // into the owner's validated root, and it cannot build that path
+        // unless the artifact publishes the leaf. Withholding it would make
+        // the binding unprovable by anyone but the owner.
+        L::VaultReserve(_)
+        | L::SettlementReceipt(_)
+        | L::BundleAcceptance(_)
+        | L::VaultCreation(_) => true,
         // A relationship leaf is cited by the DLV side through the core's own
         // path, not through this artifact, and it names a trader — publishing
         // it here would export who trades with whom for no verifier's benefit.

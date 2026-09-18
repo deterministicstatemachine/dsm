@@ -15,6 +15,17 @@ use crate::crypto::domain::TaggedHashDomain;
 /// `k_{T,v} = H(tag ‖ G ‖ DevID ‖ v)` — the relationship leaf key.
 pub const TAG_DSM_SOFI_REL_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/rel-key/v1");
+/// `H(tag ‖ G_o ‖ DevID_o ‖ v)` — the owner's vault-CREATION record key in
+/// `R_econ` (P15-12).
+///
+/// Shaped like [`TAG_DSM_SOFI_REL_KEY`] because it is the same kind of thing:
+/// a SoFi leaf in the owner's own economic tree, scoped to the identity whose
+/// tree it is. Deliberately NOT the vault-genesis locator, which addresses a
+/// vault's genesis at the storage layer (F10) — one derivation serving two
+/// namespaces is how a storage coordinate and an economic key end up
+/// colliding.
+pub const TAG_DSM_SOFI_VAULT_CREATION_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-creation-key/v1");
 /// `σ = H(tag ‖ G ‖ DevID ‖ u64be(p) ‖ v)` — the pre-state-independent setup id.
 pub const TAG_DSM_SOFI_SETUP_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/setup-id/v1");
@@ -163,6 +174,7 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_PREIMAGE_LOCATOR,
     TAG_DSM_SOFI_VAULT_ID,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CREATION_KEY,
     TAG_DSM_SOFI_VAULT_STATE_KEY,
     TAG_DSM_SOFI_VAULT_LEAF_STATE,
     TAG_DSM_SOFI_ROUTE_DIGEST,

@@ -105,6 +105,10 @@
     21. authority from a setup at q itself     -> `close_by_current_authority`
     22. network scope removed                  -> `cross_network_route_is_invalid`
     23. setup without the exact envelope digest -> `setup_bound_to_exact_envelope`
+    23a. `setupRoot` free rather than derived from the parent root by the
+         P15-6 absent->h0 insertion -> `setup_root_is_derived_not_chosen`
+         (drop the `SetupPostRoot` conjunct from `SetupIngress` and two
+         setups at one parent can disagree about the root)
     24. the walk starts from a stored genesis  -> `genesis_requires_validated_creation`
     25. a known bound violation Unavailable    -> `bound_violation_is_invalid_never_unavailable`
     26. an exhausted budget Invalid            -> `budget_exhaustion_never_yields_invalid`
@@ -1934,24 +1938,98 @@ structure SetupBody where
 def setupRef (hm : HashModel) (b : SetupBody) : Nat :=
   hm.H [TAG_SETUP_REF, b.genesis, b.device, b.p, b.vault, b.claimRef, b.setupRoot, b.key]
 
-/-- Setup ingress at one member: the exact root-claim envelope digest at
-`K_root(p)`, and the `(G, DevID, v)` index empty or already `(p, ρ)`. -/
-def SetupIngress (hm : HashModel) (kroot : Nat → Option Nat) (index : Option (Nat × Nat))
-    (b : SetupBody) : Prop :=
-  kroot b.p = some b.claimRef ∧ (index = none ∨ index = some (b.p, setupRef hm b))
+def TAG_SETUP_ID : Nat := 11
+def TAG_REL_GENESIS : Nat := 12
+def TAG_REL_KEY : Nat := 13
+
+/-- `σ = H(setup-id ‖ G ‖ DevID ‖ p ‖ v)`. -/
+def setupId (hm : HashModel) (b : SetupBody) : Nat :=
+  hm.H [TAG_SETUP_ID, b.genesis, b.device, b.p, b.vault]
+
+/-- `h⁰ = H(rel-genesis ‖ σ)`. -/
+def relLeafGenesis (hm : HashModel) (sigma : Nat) : Nat := hm.H [TAG_REL_GENESIS, sigma]
+
+/-- `k_{T,v} = H(rel-key ‖ G ‖ DevID ‖ v)`. -/
+def relKey (hm : HashModel) (b : SetupBody) : Nat :=
+  hm.H [TAG_REL_KEY, b.genesis, b.device, b.vault]
+
+/-- The P15-6 insertion, as an abstract SMT insert of an ABSENT key.
+
+`smtInsert R k v` is the root after writing `v` at `k` in the tree rooted at
+`R`; `absentAt R k` says `k` holds nothing there. Modelled abstractly because
+what matters here is that `R_T^setup` is a FUNCTION of `(R_p, k, L⁰)` — not
+how the tree computes it. -/
+structure SmtModel where
+  insert : Nat → Nat → Nat → Nat
+  absentAt : Nat → Nat → Prop
+
+/-- `R_T^setup := SMT_Insert(R_p, k_{T,v}, ABSENT → L⁰)`.
+
+Derived, never asserted. The `absentAt` premise is the same insert-from-zero
+rule the write set enforces: a root produced by OVERWRITING an existing
+relationship leaf is not this value. -/
+def SetupPostRoot (hm : HashModel) (sm : SmtModel) (Rp : Nat) (b : SetupBody) (R : Nat) : Prop :=
+  sm.absentAt Rp (relKey hm b) ∧
+    R = sm.insert Rp (relKey hm b) (relLeafGenesis hm (setupId hm b))
+
+/-- Setup ingress at one member.
+
+Four conjuncts, not two. The first two were already here: the exact root-claim
+envelope digest at `K_root(p)`, and the `(G, DevID, v)` index empty or already
+`(p, ρ)`.
+
+The last two are what stops the uniqueness theorem below from ranging over an
+UNCHECKED field. `setupRoot` is part of `SetupBody` and therefore part of `ρ`,
+so without them a correctly signed first setup — index empty — could put any
+value there, and the index would pin a `ρ` committing it forever. The theorem
+would prove that later ingresses agree on those bytes, never that the bytes
+describe the actual trader root.
+
+`parent` gives the root the claim at `p` names; `SetupPostRoot` derives
+`R_T^setup` from it by the P15-6 absent→`h⁰` insertion, and the body must
+equal that. `b.p` is the position the parent claim names — the ordinary setup
+transition lands at `p + 1`. -/
+def SetupIngress (hm : HashModel) (sm : SmtModel) (kroot : Nat → Option Nat)
+    (parent : Nat → Option Nat) (index : Option (Nat × Nat)) (b : SetupBody) : Prop :=
+  kroot b.p = some b.claimRef ∧
+    (index = none ∨ index = some (b.p, setupRef hm b)) ∧
+    (∃ Rp, parent b.p = some Rp ∧ SetupPostRoot hm sm Rp b b.setupRoot)
+
+/-- `R_T^setup` IS DETERMINED by the parent root and the body's coordinates.
+
+The conjunct's point, stated on its own: two admitted setups that name the same
+parent position cannot disagree about the root, because neither of them chose
+it. Before the conjunct existed this was false — `setupRoot` was free. -/
+theorem setup_root_is_derived_not_chosen {hm : HashModel} {sm : SmtModel}
+    {kroot parent : Nat → Option Nat} {index : Option (Nat × Nat)} {b1 b2 : SetupBody}
+    (h1 : SetupIngress hm sm kroot parent index b1)
+    (h2 : SetupIngress hm sm kroot parent index b2)
+    (hp : b1.p = b2.p) (hg : b1.genesis = b2.genesis) (hd : b1.device = b2.device)
+    (hv : b1.vault = b2.vault) :
+    b1.setupRoot = b2.setupRoot := by
+  obtain ⟨R1, hpar1, _, hr1⟩ := h1.2.2
+  obtain ⟨R2, hpar2, _, hr2⟩ := h2.2.2
+  have hR : R1 = R2 := by
+    rw [hp, hpar2] at hpar1; exact (Option.some.inj hpar1).symm
+  have hk : relKey hm b1 = relKey hm b2 := by
+    simp [relKey, hg, hd, hv]
+  have hs : setupId hm b1 = setupId hm b2 := by
+    simp [setupId, hg, hd, hp, hv]
+  rw [hr1, hr2, hR, hk, hs]
 
 /-- SETUP IS BOUND TO THE EXACT ENVELOPE: two setups admitted at one position
 name the same root-claim envelope digest, and an occupied index admits only its
 own `ρ` — alternate envelopes of one body are idempotent. -/
-theorem setup_bound_to_exact_envelope {hm : HashModel} {kroot : Nat → Option Nat}
-    {index : Option (Nat × Nat)} {b1 b2 : SetupBody}
-    (h1 : SetupIngress hm kroot index b1) (h2 : SetupIngress hm kroot index b2) (hp : b1.p = b2.p) :
+theorem setup_bound_to_exact_envelope {hm : HashModel} {sm : SmtModel}
+    {kroot parent : Nat → Option Nat} {index : Option (Nat × Nat)} {b1 b2 : SetupBody}
+    (h1 : SetupIngress hm sm kroot parent index b1)
+    (h2 : SetupIngress hm sm kroot parent index b2) (hp : b1.p = b2.p) :
     b1.claimRef = b2.claimRef ∧ (index ≠ none → setupRef hm b1 = setupRef hm b2) := by
   refine ⟨?_, fun hne => ?_⟩
   · have := h1.1; rw [hp, h2.1] at this; exact (Option.some.inj this).symm
-  · rcases h1.2 with h | h
+  · rcases h1.2.1 with h | h
     · exact absurd h hne
-    · rcases h2.2 with h' | h'
+    · rcases h2.2.1 with h' | h'
       · exact absurd h' hne
       · rw [h] at h'
         exact (Prod.mk.inj (Option.some.inj h')).2
@@ -2125,6 +2203,7 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms Validation.and_invalid_right
 #print axioms cross_network_route_is_invalid
 #print axioms setup_bound_to_exact_envelope
+#print axioms setup_root_is_derived_not_chosen
 #print axioms setup_ref_is_signature_independent
 #print axioms leaf_non_inclusion_admits_the_first_operation_once
 #print axioms later_operations_keep_both_sides_equal

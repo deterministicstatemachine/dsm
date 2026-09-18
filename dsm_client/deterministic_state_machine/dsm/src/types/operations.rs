@@ -985,6 +985,21 @@ pub enum Operation {
         genesis_preimage: Vec<u8>,
         /// Canonical `VaultCreation` bytes (class `0x005B`).
         creation: Vec<u8>,
+        /// The two assets the funding is debited from, in canonical order
+        /// (`a < b`).
+        ///
+        /// SIGNED EXECUTION COORDINATES, not a second source of market truth.
+        /// `semantic_write_set` is pure — it cannot resolve
+        /// `VaultStateLeaf.market_policy` to a pair — so without these the
+        /// debit P15-12 requires cannot be derived from the operation at all,
+        /// and balances would move outside any declared write set. The same
+        /// precedent `DlvCreateFundedV2` already sets with its leg commits.
+        ///
+        /// The authority remains the market policy the vault state commits:
+        /// `genesis_accepted` resolves it by content address and refuses
+        /// unless these two equal the pair it decodes.
+        funding_a_policy_commit: [u8; 32],
+        funding_b_policy_commit: [u8; 32],
         /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
         /// is the ONE SoFi operation that signs those: `vault_id` and `R_0`
         /// are derivations of the preimage it carries, so it has no protocol
@@ -1387,11 +1402,15 @@ impl Operation {
             SofiVaultCreate {
                 genesis_preimage,
                 creation,
+                funding_a_policy_commit,
+                funding_b_policy_commit,
                 signature,
             } => {
                 put_u8(&mut out, 35);
                 put_bytes(&mut out, genesis_preimage);
                 put_bytes(&mut out, creation);
+                put_bytes(&mut out, funding_a_policy_commit);
+                put_bytes(&mut out, funding_b_policy_commit);
                 put_bytes(&mut out, signature);
             }
             SofiFulfill {
@@ -2914,6 +2933,34 @@ impl Operation {
                     ticket_index,
                 }
             }
+            // SOFI v8, TAGS 34-36. The SAME defect tag 31 records above, in
+            // the same function: `to_bytes` shipped without its inverse, so
+            // these operations could be encoded and committed and then not
+            // reconstructed. `economic/successor_evidence.rs` decodes the
+            // exact frozen bytes through here during foreign and replay
+            // verification, so a missing arm is not cosmetic — it is a
+            // committed operation no verifier can read back.
+            //
+            // Each arm mirrors its encoder field for field, in order.
+            34 => SofiSetup {
+                setup_body: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            35 => SofiVaultCreate {
+                genesis_preimage: get_bytes(&mut input)?,
+                creation: get_bytes(&mut input)?,
+                // Both funding commits, in the encoder's order. Dropping
+                // either would decode to an operation that debits different
+                // assets than the one whose signature was checked.
+                funding_a_policy_commit: get_arr32(&mut input)?,
+                funding_b_policy_commit: get_arr32(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            36 => SofiFulfill {
+                fulfillment_body: get_bytes(&mut input)?,
+                precommit_id: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must

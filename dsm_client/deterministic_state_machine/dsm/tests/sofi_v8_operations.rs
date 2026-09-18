@@ -24,6 +24,8 @@ fn sofi_operations() -> Vec<Operation> {
         Operation::SofiVaultCreate {
             genesis_preimage: vec![0x5A, 0x00],
             creation: vec![0x5B, 0x00],
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
         },
         Operation::SofiFulfill {
@@ -251,6 +253,8 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let unsigned_create = Operation::SofiVaultCreate {
         genesis_preimage: vec![0x5A, 0x00],
         creation: vec![0x5B, 0x00],
+        funding_a_policy_commit: [0x5C; 32],
+        funding_b_policy_commit: [0x5D; 32],
         signature: Vec::new(),
     };
 
@@ -311,4 +315,65 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
             what: "SofiVaultCreate"
         })
     );
+}
+
+/// EVERY SOFI OPERATION SURVIVES `to_bytes` → `from_bytes`, signed and
+/// unsigned.
+///
+/// This is the gate whose ABSENCE let the codec ship one-way. The file's other
+/// round-trip test is named `every_sofi_operation_round_trips_a_signature`,
+/// but it only exercises `with_signature` / `with_cleared_signature` — it
+/// never touches `from_bytes`, so all three tags encoded fine and decoded to
+/// "unknown op tag". Tag 31 above records the identical defect being found
+/// the hard way, when successor-evidence replay crossed it.
+///
+/// `economic/successor_evidence.rs` decodes the exact frozen operation bytes
+/// through `from_bytes` during foreign and replay verification, so a missing
+/// arm means a committed operation no verifier can reconstruct.
+#[test]
+fn every_sofi_operation_round_trips_through_the_byte_codec() {
+    for unsigned in sofi_operations() {
+        let name = unsigned.get_operation_type();
+        for op in [unsigned.clone(), unsigned.with_signature(SIG.to_vec())] {
+            let bytes = op.to_bytes();
+            let decoded = Operation::from_bytes(&bytes)
+                .unwrap_or_else(|e| panic!("{name}: encodable but not decodable: {e}"));
+            assert_eq!(decoded, op, "{name}: the decode is not the operation");
+            // And it is canonical: re-encoding reproduces the same bytes.
+            assert_eq!(decoded.to_bytes(), bytes, "{name}: re-encode drifted");
+        }
+    }
+}
+
+/// The creation's TWO funding commits both survive the round trip, in order.
+///
+/// They are the fields most likely to be dropped or transposed by a decoder
+/// written from memory: the operation would still decode, and it would name
+/// different assets than the signature covered.
+#[test]
+fn a_creation_round_trips_both_funding_commits_in_order() {
+    let op = Operation::SofiVaultCreate {
+        genesis_preimage: vec![0x5A, 0x00],
+        creation: vec![0x5B, 0x00],
+        funding_a_policy_commit: [0xA1; 32],
+        funding_b_policy_commit: [0xB2; 32],
+        signature: SIG.to_vec(),
+    };
+    let decoded = Operation::from_bytes(&op.to_bytes()).expect("decodes");
+    match decoded {
+        Operation::SofiVaultCreate {
+            funding_a_policy_commit,
+            funding_b_policy_commit,
+            ..
+        } => {
+            assert_eq!(funding_a_policy_commit, [0xA1; 32]);
+            assert_eq!(funding_b_policy_commit, [0xB2; 32], "not transposed");
+        }
+        other => panic!("a creation, got {other:?}"),
+    }
+
+    // A truncated field is refused, not zero-padded into a different asset.
+    let mut short = op.to_bytes();
+    short.truncate(short.len() - 1);
+    assert!(Operation::from_bytes(&short).is_err());
 }

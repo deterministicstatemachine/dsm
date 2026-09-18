@@ -46,6 +46,9 @@ use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
+use dsm::economic::lineage::ValidatedEconomicRoot;
+use dsm::economic::tree::EconomicSmt;
+use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{validate, Evidence, Invalid, Refusal};
 use dsm::sofi::wire::{
@@ -73,6 +76,16 @@ pub enum BuildError {
     /// `P` is not validly signed, so the fulfillment would name a precommit
     /// storage refuses.
     PrecommitSignature(SignatureError),
+    /// A vault genesis a verifier would refuse — the market policy does not
+    /// authenticate, or its pair is not canonical.
+    Genesis(GenesisError),
+    /// This identity already holds a relationship with that vault. `h⁰` is a
+    /// function of the setup id, so a second setup would reset a chain that
+    /// has already advanced.
+    SetupAlreadyExists,
+    /// The producer's tree is not the predecessor's root, so `R_T^setup`
+    /// computed from it would describe a mutation of some other state.
+    PreTreeIsNotThePredecessor,
 }
 
 impl core::fmt::Display for BuildError {
@@ -85,6 +98,17 @@ impl core::fmt::Display for BuildError {
                 f,
                 "a verifier refuses this operation with no evidence at all \
                  ({reason:?}); it is not a trade, it is a way to strand one"
+            ),
+            Self::Genesis(e) => write!(f, "{e}"),
+            Self::PreTreeIsNotThePredecessor => write!(
+                f,
+                "the producer's economic tree is not the validated predecessor's root: \
+                 R_T^setup derived from it would describe a mutation of another state"
+            ),
+            Self::SetupAlreadyExists => write!(
+                f,
+                "this identity already holds a relationship with that vault; h⁰ is the \
+                 setup id's derivation and a second setup would reset the chain"
             ),
             Self::PrecommitSignature(e) => write!(
                 f,
@@ -169,9 +193,72 @@ impl PrecommitDraft {
 
 /// The relationship setup (F1). Non-economic: it establishes the right to
 /// trade with one vault, and moves nothing.
-pub fn build_setup(body: &SofiSetupBody) -> Result<Produced, BuildError> {
+/// `R_T^setup` IS DERIVED HERE, exactly as the verifier derives it.
+///
+/// The body is built rather than accepted, because two of its fields are not
+/// the caller's to choose: `p` is the position the parent claim names, and
+/// `setup_root` is the trader economic root AFTER the P15-6 absent→`h⁰`
+/// insertion is applied to the root at that position. A producer that took a
+/// body would let a caller put arbitrary bytes in `R_T^setup`, sign them, and
+/// discover at admission that the transition is refused — or, worse, have a
+/// first setup pin an index entry committing bytes nothing ever checked.
+///
+/// `pre_tree` is the producer's own `R_econ` at `p`; the insertion is computed
+/// against it so the root is the one the mutation sequence will actually
+/// yield.
+#[allow(clippy::too_many_arguments)]
+pub fn build_setup(
+    previous: &ValidatedEconomicRoot,
+    pre_tree: &EconomicSmt,
+    genesis: D32,
+    device_id: D32,
+    vault_id: D32,
+    claim_ref: D32,
+    signature_alg: u16,
+    claimant_public_key: &[u8],
+) -> Result<Produced, BuildError> {
+    // `p`, `R_p` AND `R_T^setup` COME FROM ONE PREDECESSOR CONTEXT. A naked
+    // `position` argument let a caller pass p = 12 against the real tree at
+    // p = 7 and get a perfectly self-consistent σ(12) → h⁰(12) →
+    // R_T^setup(12, real tree) — an operation the verifier then deterministically
+    // refuses. Fail-closed, but the producer should not be able to build
+    // something known-impossible at construction time.
+    let position = previous.economic_position();
+    if pre_tree.root() != previous.economic_root() {
+        return Err(BuildError::PreTreeIsNotThePredecessor);
+    }
+    let sigma = derive::setup_id(&genesis, &device_id, position, &vault_id);
+    let leaf = dsm::sofi::wire::TraderRelationshipLeaf {
+        vault_id,
+        leaf: derive::relationship_leaf_genesis(&sigma),
+    };
+    let state = dsm::economic::state::EconomicLeafState::Relationship(leaf);
+    let key = state.leaf_key(&genesis, &device_id);
+    // INSERT-FROM-ZERO, the same rule the write set enforces: a producer that
+    // overwrote an existing relationship would compute a root the verifier
+    // refuses to reach.
+    if pre_tree.get(&key).is_some() {
+        return Err(BuildError::SetupAlreadyExists);
+    }
+    let mut post = pre_tree.clone();
+    post.insert(
+        key,
+        state
+            .leaf_value()
+            .map_err(|_| BuildError::SetupAlreadyExists)?,
+    );
+    let body = SofiSetupBody::new(
+        genesis,
+        device_id,
+        position,
+        vault_id,
+        claim_ref,
+        post.root(),
+        signature_alg,
+        claimant_public_key,
+    )?;
     Ok(Produced {
-        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(body)),
+        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(&body)),
         operation: Operation::SofiSetup {
             setup_body: body.encode(),
             signature: Vec::new(),
@@ -187,19 +274,43 @@ pub fn build_setup(body: &SofiSetupBody) -> Result<Produced, BuildError> {
 /// derive or a root its own state does not produce.
 pub fn build_vault_create(
     preimage: &VaultGenesisPreimage,
-    amount_a: u64,
-    amount_b: u64,
+    market_policy_bytes: &[u8],
 ) -> Result<Produced, BuildError> {
     let vault_id = preimage.vault_id();
+    // THE FUNDING ASSETS ARE DERIVED, NOT TAKEN. A caller that could pass the
+    // two commits could pass the wrong ones, and `genesis_accepted` would
+    // refuse the result — after the owner had signed it. So the producer
+    // resolves them from the SAME authority the verifier uses: the policy the
+    // vault state commits, authenticated by re-addressing its bytes.
+    let derived = dsm::ccb::decode::policy_object_address(
+        dsm::ccb::class::MARKET_POLICY,
+        market_policy_bytes,
+    )
+    .ok_or(BuildError::Genesis(GenesisError::MarketPolicyDoesNotDecode))?;
+    if derived != preimage.state.market_policy {
+        return Err(BuildError::Genesis(
+            GenesisError::MarketPolicyIsNotTheCommittedOne,
+        ));
+    }
+    let market = dsm::ccb::decode::decode_market_policy(market_policy_bytes)
+        .map_err(|_| BuildError::Genesis(GenesisError::MarketPolicyDoesNotDecode))?;
+    let (token_a, token_b) = (*market.token_a(), *market.token_b());
+    if token_a >= token_b {
+        return Err(BuildError::Genesis(GenesisError::TokenPairNotOrdered));
+    }
+    // The amounts are the genesis reserves, not a second pair of arguments
+    // that could disagree with them (P15-12).
     let creation = VaultCreation {
         vault_id,
         genesis_root: dsm::sofi::lineage::genesis_root(&vault_id, &preimage.state)?,
-        amount_a,
-        amount_b,
+        amount_a: preimage.state.reserve_a,
+        amount_b: preimage.state.reserve_b,
     };
     let operation = Operation::SofiVaultCreate {
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
+        funding_a_policy_commit: token_a,
+        funding_b_policy_commit: token_b,
         signature: Vec::new(),
     };
     Ok(Produced {
@@ -483,6 +594,20 @@ mod tests {
 
     fn d(byte: u8) -> D32 {
         [byte; 32]
+    }
+
+    /// The vault's market policy, and the address it is committed by. Derived
+    /// from the bytes so a fixture cannot commit one market and present
+    /// another.
+    fn market_bytes() -> Vec<u8> {
+        dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41))
+            .unwrap()
+            .encode()
+    }
+
+    fn market_addr() -> D32 {
+        dsm::ccb::decode::policy_object_address(dsm::ccb::class::MARKET_POLICY, &market_bytes())
+            .unwrap()
     }
 
     fn path() -> Vec<D32> {
@@ -814,7 +939,7 @@ mod tests {
             owner_genesis: G,
             owner_device_id: DEV,
             create_position: P_POS,
-            market_policy: d(0x31),
+            market_policy: market_addr(),
             fee_policy: d(0x32),
             release_policy: d(0x33),
             storage_set_id: d(0x77),
@@ -829,7 +954,23 @@ mod tests {
             create_position: P_POS,
             state: state.clone(),
         };
-        let created = build_vault_create(&preimage, 1_000, 2_000).unwrap();
+        let created = build_vault_create(&preimage, &market_bytes()).unwrap();
+        // The funding assets are the authenticated pair, and the amounts are
+        // the genesis reserves — neither is a caller's argument.
+        match &created.operation {
+            Operation::SofiVaultCreate {
+                funding_a_policy_commit,
+                funding_b_policy_commit,
+                creation,
+                ..
+            } => {
+                assert_eq!(*funding_a_policy_commit, d(0x40));
+                assert_eq!(*funding_b_policy_commit, d(0x41));
+                let record = VaultCreation::decode(creation).unwrap();
+                assert_eq!((record.amount_a, record.amount_b), (1_000, 2_000));
+            }
+            _ => panic!("a creation"),
+        }
         // A creation has no protocol object digest of its own, so it signs the
         // operation — and it is the verifier's own rule, byte for byte.
         assert_eq!(
@@ -853,11 +994,13 @@ mod tests {
             "not a bare concatenation of the objects it carries"
         );
         // And the signature the device will check is over exactly those bytes.
-        let signed = Operation::SofiVaultCreate {
-            genesis_preimage: genesis_preimage.clone(),
-            creation: creation.clone(),
-            signature: sign(created.signs.bytes()),
-        };
+        // Signed by the payload the producer named, on the operation the
+        // producer built — reconstructing it here would be a second copy that
+        // could drift from the one the bytes cover.
+        let signed = created
+            .operation
+            .clone()
+            .with_signature(sign(created.signs.bytes()));
         assert_eq!(
             dsm::sofi::signature::verify_operation(&signed, &keypair().0),
             Ok(())
@@ -874,18 +1017,137 @@ mod tests {
         assert_eq!(decoded.genesis_root, tree.root());
     }
 
+    /// A PRODUCER CANNOT EMIT FUNDING THE VERIFIER WILL REFUSE, because it
+    /// does not choose it: the pair comes from the same authenticated policy
+    /// `genesis_accepted` resolves. Bytes that are not the committed policy
+    /// stop the build instead of producing an operation the owner would sign
+    /// and a verifier would then reject.
+    #[test]
+    fn a_producer_refuses_a_creation_whose_policy_does_not_authenticate() {
+        let state = VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_POS,
+            market_policy: market_addr(),
+            fee_policy: d(0x32),
+            release_policy: d(0x33),
+            storage_set_id: d(0x77),
+            generation: 0,
+            reserve_a: 1_000,
+            reserve_b: 2_000,
+            status: VAULT_STATUS_ACTIVE,
+        };
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_POS,
+            state,
+        };
+        // A valid policy — for another market.
+        let other = dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x50), d(0x51))
+            .unwrap()
+            .encode();
+        assert_eq!(
+            build_vault_create(&preimage, &other),
+            Err(BuildError::Genesis(
+                GenesisError::MarketPolicyIsNotTheCommittedOne
+            ))
+        );
+        // Bytes that are not a policy at all.
+        assert_eq!(
+            build_vault_create(&preimage, &[0xAB; 8]),
+            Err(BuildError::Genesis(
+                GenesisError::MarketPolicyIsNotTheCommittedOne
+            ))
+        );
+        // The committed one builds.
+        assert!(build_vault_create(&preimage, &market_bytes()).is_ok());
+    }
+
     /// A setup signs `m_setup` — its own object's digest — and NOT the
     /// operation that carries it. The same object reaches a storage member
     /// with no operation around it, and `m_setup` is what the member checks.
     #[test]
     fn a_setup_signs_its_object_and_not_the_operation() {
-        let setup = SofiSetupBody::new(G, DEV, P_POS, d(0xC1), d(0x66), d(0x67), ALG, &keypair().0)
-            .unwrap();
-        let produced = build_setup(&setup).unwrap();
+        // ONE predecessor context: the position and the root travel together,
+        // so the producer cannot compute R_T^setup against a tree that is not
+        // the predecessor's.
+        let tree = EconomicSmt::new();
+        let previous = |root: D32| {
+            ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: P_POS,
+                    economic_root: root,
+                },
+            )
+            .unwrap()
+        };
+        let produced = build_setup(
+            &previous(tree.root()),
+            &tree,
+            G,
+            DEV,
+            d(0xC1),
+            d(0x66),
+            ALG,
+            &keypair().0,
+        )
+        .unwrap();
         assert!(matches!(produced.operation, Operation::SofiSetup { .. }));
+        let setup = match &produced.operation {
+            Operation::SofiSetup { setup_body, .. } => SofiSetupBody::decode(setup_body).unwrap(),
+            _ => panic!("a setup"),
+        };
         assert_eq!(
             produced.signs,
             SigningPayload::SetupDigest(derive::setup_signing_digest(&setup))
+        );
+
+        // `R_T^setup` IS DERIVED: the root after the absent→h⁰ insertion, not
+        // anything the caller chose.
+        let sigma = derive::setup_id(&G, &DEV, P_POS, &d(0xC1));
+        let state = dsm::economic::state::EconomicLeafState::Relationship(
+            dsm::sofi::wire::TraderRelationshipLeaf {
+                vault_id: d(0xC1),
+                leaf: derive::relationship_leaf_genesis(&sigma),
+            },
+        );
+        let mut expected = EconomicSmt::new();
+        expected.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
+        assert_eq!(*setup.setup_root(), expected.root());
+
+        // And a SECOND setup for the same vault is refused, never recomputed:
+        // h⁰ is the setup id's derivation, so it would reset a live chain.
+        assert_eq!(
+            build_setup(
+                &previous(expected.root()),
+                &expected,
+                G,
+                DEV,
+                d(0xC1),
+                d(0x66),
+                ALG,
+                &keypair().0
+            ),
+            Err(BuildError::SetupAlreadyExists)
+        );
+
+        // A tree that is not the predecessor's root is refused outright: `p`,
+        // `R_p` and `R_T^setup` come from ONE context, so a producer cannot
+        // mix a real tree with another position's root and emit something
+        // self-consistent that the verifier deterministically refuses.
+        assert_eq!(
+            build_setup(
+                &previous(d(0xEE)),
+                &tree,
+                G,
+                DEV,
+                d(0xC2),
+                d(0x66),
+                ALG,
+                &keypair().0
+            ),
+            Err(BuildError::PreTreeIsNotThePredecessor)
         );
         assert_ne!(
             produced.signs.bytes(),
@@ -893,10 +1155,10 @@ mod tests {
             "a setup does not additionally sign the operation"
         );
         // What the producer says to sign is exactly what the device verifies.
-        let signed = Operation::SofiSetup {
-            setup_body: setup.encode(),
-            signature: sign(produced.signs.bytes()),
-        };
+        let signed = produced
+            .operation
+            .clone()
+            .with_signature(sign(produced.signs.bytes()));
         assert_eq!(
             dsm::sofi::signature::verify_operation(&signed, &keypair().0),
             Ok(())

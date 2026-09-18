@@ -147,6 +147,13 @@ pub struct ObservedEconomicChange {
     /// still an `R_econ` write — an operation that claims to touch nothing and
     /// advances a relationship has reached a leaf it has no write set for.
     pub relationships_changed: bool,
+    /// A vault-creation record was inserted (P15-12).
+    ///
+    /// Removed in #915 because no leaf class existed and nothing could ever
+    /// set it — a permanently-false flag is decoration. It returns with its
+    /// leaf, and the exhaustive match below is what made that automatic
+    /// rather than remembered.
+    pub vault_creations_changed: bool,
 }
 
 impl ObservedEconomicChange {
@@ -156,6 +163,7 @@ impl ObservedEconomicChange {
             || self.settlement_receipts_changed
             || self.consumed_sources_changed
             || self.relationships_changed
+            || self.vault_creations_changed
     }
 }
 
@@ -171,15 +179,16 @@ impl core::fmt::Display for EconomicTripwire {
         write!(
             f,
             "economic tripwire: operation classified {:?} but economic state changed \
-             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}) \
-             — the classification is wrong, or the operation reached a leaf it has no write \
-             set for",
+             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}, \
+             vault_creations={}) — the classification is wrong, or the operation reached a \
+             leaf it has no write set for",
             self.claimed,
             self.observed.balances_changed,
             self.observed.vault_reserves_changed,
             self.observed.settlement_receipts_changed,
             self.observed.consumed_sources_changed,
-            self.observed.relationships_changed
+            self.observed.relationships_changed,
+            self.observed.vault_creations_changed
         )
     }
 }
@@ -219,6 +228,7 @@ pub fn observed_from_witness(
                     observed.settlement_receipts_changed = true
                 }
                 EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
+                EconomicLeafState::VaultCreation(_) => observed.vault_creations_changed = true,
             }
         }
     }
