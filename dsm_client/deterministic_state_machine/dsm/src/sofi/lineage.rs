@@ -269,9 +269,20 @@ pub struct CreationFunding {
 }
 
 impl CreationFunding {
-    /// The pair as the signed operation states it, or `None` for anything
-    /// that is not a vault creation.
-    pub fn from_operation(operation: &crate::types::operations::Operation) -> Option<Self> {
+    /// The pair AN operation states — not proof it is THE operation.
+    ///
+    /// `stated_by`, not `proven_by`, and the difference is the whole point.
+    /// This reads two fields off a signed `SofiVaultCreate`. It establishes
+    /// that some creation named this pair; it establishes NOTHING about
+    /// whether that creation is the one whose verified write set produced the
+    /// accepted owner transition holding this vault's `VaultCreation` leaf.
+    ///
+    /// A caller that has not already bound the operation to that exact
+    /// transition is presenting "an operation", and F10 needs "the
+    /// operation" — see the blocker on [`genesis_accepted`]. A
+    /// `CreationFunding` must never be treated as a `VerifiedVaultCreation`;
+    /// they are different strengths of evidence.
+    pub fn stated_by(operation: &crate::types::operations::Operation) -> Option<Self> {
         match operation {
             crate::types::operations::Operation::SofiVaultCreate {
                 funding_a_policy_commit,
@@ -435,7 +446,7 @@ pub fn genesis_accepted(
     // `VaultStateLeaf.market_policy` before anything is read out of them.
     //
     // `funding`: the two commits, read off the signed operation by
-    // `CreationFunding::from_operation` and checked against the pair the
+    // `CreationFunding::stated_by` and checked against the pair the
     // authenticated policy decodes — never used AS the pair, and no longer
     // assertable as a bare tuple.
     //
@@ -791,7 +802,7 @@ mod tests {
     /// The funding pair as the SIGNED OPERATION states it — the only way to
     /// obtain one, so a test cannot assert a pair production could not.
     fn funding(a: D32, b: D32) -> CreationFunding {
-        CreationFunding::from_operation(&crate::types::operations::Operation::SofiVaultCreate {
+        CreationFunding::stated_by(&crate::types::operations::Operation::SofiVaultCreate {
             genesis_preimage: Vec::new(),
             creation: Vec::new(),
             funding_a_policy_commit: a,
@@ -960,9 +971,7 @@ mod tests {
     #[test]
     fn the_funding_pair_comes_from_an_operation_but_is_not_yet_bound_to_the_transition() {
         // Not conjurable: only a creation yields one.
-        assert!(
-            CreationFunding::from_operation(&crate::types::operations::Operation::Noop).is_none()
-        );
+        assert!(CreationFunding::stated_by(&crate::types::operations::Operation::Noop).is_none());
         assert_eq!(funding(d(0x40), d(0x41)).pair(), (d(0x40), d(0x41)));
 
         // THE OPEN GAP. The same creation record — same leaf, same inclusion
