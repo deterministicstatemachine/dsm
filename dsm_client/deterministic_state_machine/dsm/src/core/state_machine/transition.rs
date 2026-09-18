@@ -880,6 +880,16 @@ pub fn apply_transition(
 /// The canonical signing payload is `operation.with_cleared_signature().to_bytes()`.
 /// This function is fail-closed: missing, empty, or invalid signatures all produce
 /// errors.
+/// The EXACT bytes an operation's signature covers: its canonical encoding
+/// with the signature field cleared.
+///
+/// One rule, in one place. A producer that hashed or framed these bytes
+/// differently would be a second definition of "signed", and the verifier only
+/// implements this one.
+pub fn operation_signing_bytes(operation: &Operation) -> Vec<u8> {
+    operation.with_cleared_signature().to_bytes()
+}
+
 pub(crate) fn verify_operation_signature(
     operation: &Operation,
     public_key: &[u8],
@@ -899,8 +909,7 @@ pub(crate) fn verify_operation_signature(
             "{op_name} missing signature"
         )));
     }
-    let cleared = operation.with_cleared_signature();
-    let op_bytes = cleared.to_bytes();
+    let op_bytes = operation_signing_bytes(operation);
     let verify_hash = domain_hash(crate::common::domain_tags::TAG_DSM_OP_VERIFY, &op_bytes);
     log::info!(
         "[verify_operation_signature] {op_name}: op_bytes.len={} hash(first8)={:?} sig.len={} pk.len={}",

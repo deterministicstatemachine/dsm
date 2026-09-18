@@ -217,6 +217,14 @@ impl std::error::Error for FenceError {}
 /// whether the route realized depends on evidence a member never evaluates. A
 /// descendant admitted on that basis would be built on a root the lineage had
 /// not chosen, and half of the time it is the wrong one.
+///
+/// **This is the predicate, not yet the fence.** It decides a claim correctly
+/// and refuses one it cannot, but no descendant admission path calls it: the
+/// registered-claim kind is still `SingleRoot`-only, so there is nothing that
+/// hands it a `PredecessorClaim::Conditional` in production. E1c introduces
+/// `RegisteredEconomicClaim::ConditionalSofi(C_q)` and wires this into every
+/// descendant admission path. Until then the rule is implemented and proven,
+/// and it is not enforced.
 pub fn descendant_fence(
     predecessor: PredecessorClaim,
     descendant_pre_root: &D32,
