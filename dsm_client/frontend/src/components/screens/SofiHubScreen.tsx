@@ -5,6 +5,7 @@
 
 import React, { useCallback } from 'react';
 import { ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -22,19 +23,19 @@ const BRICKS: Brick[] = [
     label: 'SWAP',
     target: 'swap',
     glyph: '⇄',
-    description: 'Trade one token for another at the pool price. You see the exact amount before you confirm.',
+    description: 'Trade one token for another',
   },
   {
     label: 'LIQUIDITY',
     target: 'liquidity',
     glyph: '◎',
-    description: 'Put two tokens into a pool and earn a fee on every trade made against it.',
+    description: 'Provide a pool, earn the fees',
   },
   {
     label: 'MAIL',
     target: 'mail',
     glyph: '✉',
-    description: 'Send tokens or a note to someone, even while they are offline. They claim it when they are back.',
+    description: 'Send tokens to someone offline',
   },
 ];
 
@@ -45,10 +46,18 @@ export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
   );
 
   return (
-    <ScreenFrame title="SoFi" onBack={() => onNavigate?.('home')}>
-      <p className="sb-hint">
-        Sovereign finance: pools, trades and mail that settle directly between devices, with no exchange in the middle.
-      </p>
+    <ScreenFrame
+      title="SoFi"
+      onBack={() => onNavigate?.('home')}
+      info={(
+        <InfoTip title="SoFi">
+          <p>Sovereign finance: pools, trades and mail that settle directly between devices, with no exchange in the middle.</p>
+          <p><b>Swap</b> trades one token for another at a pool&apos;s price. You see the exact amount you will get before you confirm; if the pool moves first, the trade is refused and you can quote again.</p>
+          <p><b>Liquidity</b> puts two of your tokens into a pool. Every trade against it pays you the pool&apos;s fee, and you can take everything back at any time.</p>
+          <p><b>Mail</b> sends tokens or a note to someone&apos;s key. They do not need to be online: it waits for them on the storage nodes until they claim it.</p>
+        </InfoTip>
+      )}
+    >
       <div className="sb-menu" role="menu" aria-label="SoFi sub-menu">
         {BRICKS.map((brick) => (
           <div

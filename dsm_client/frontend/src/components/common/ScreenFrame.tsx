@@ -12,6 +12,8 @@ type FrameProps = {
   title: string;
   /** Renders a back chevron in the header. B on the shell does the same. */
   onBack?: () => void;
+  /** An InfoTip rendered beside the title. */
+  info?: React.ReactNode;
   /** Icon buttons for the right side of the header. */
   actions?: React.ReactNode;
   /** A `ScreenTabs` strip, rendered under the header. */
@@ -28,6 +30,7 @@ type FrameProps = {
 export function ScreenFrame({
   title,
   onBack,
+  info,
   actions,
   tabs,
   banner,
@@ -46,6 +49,7 @@ export function ScreenFrame({
           </button>
         ) : null}
         <h2 className="sb-screen__title">{title}</h2>
+        {info}
         {actions ? <div className="sb-screen__actions">{actions}</div> : null}
       </div>
       {tabs}

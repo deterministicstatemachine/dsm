@@ -16,6 +16,7 @@ import DepositCard from './DepositCard';
 import VaultCard from './VaultCard';
 import { Disclosure, Notice, scrollToTop } from '../../common/ScreenFrame';
 import { useBackButton } from '../../../hooks/useBackButton';
+import { InfoTip } from '../../common/InfoTip';
 import { isSettledDeposit } from './labels';
 
 export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): JSX.Element {
@@ -170,10 +171,14 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
 
       {!activeAccount ? (
         <section className="sb-card">
-          <div className="sb-card__title">Set up Bitcoin</div>
-          <p className="sb-hint">
-            Deposits and withdrawals need a Bitcoin account on this device. Create a new one, or import a wallet you already have.
-          </p>
+          <div className="sb-card__title">
+            <span>Set up Bitcoin</span>
+            <InfoTip title="Set up Bitcoin" label="About Bitcoin setup">
+              <p>Deposits and withdrawals need a Bitcoin account on this device: it holds the on-chain BTC that becomes dBTC, and receives BTC when you withdraw.</p>
+              <p><b>New wallet</b> creates one and shows its recovery phrase once. <b>Import</b> takes a recovery phrase, an extended private key or a single key you already have.</p>
+            </InfoTip>
+          </div>
+          <p className="sb-hint">Create a new wallet, or import one you already have.</p>
           {accountsPanel}
         </section>
       ) : (
@@ -250,7 +255,13 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
 
         {activeAccount && !isWif && (
           <>
-            <div className="sb-section-title">Receive address</div>
+            <div className="sb-titlebar">
+              <div className="sb-section-title">Receive address</div>
+              <InfoTip title="Receive address" label="About receive addresses">
+                <p>Every index is a different address from the same wallet. Funds sent to any of them belong to you; the active one is what the wallet shows and withdraws to.</p>
+                <p>Pick an index to preview it, then <b>Use this</b> to make it active.</p>
+              </InfoTip>
+            </div>
             <div className="sb-input-row">
               <select
                 className="sb-input sb-input--small"
@@ -273,9 +284,7 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
                 {data.addressSelectLoading ? '…' : 'Use this'}
               </button>
             </div>
-            <p className="sb-hint sb-hint--tight">
-              Every index is a different address from the same wallet. Active: #{data.address?.index ?? 0}.
-            </p>
+            <p className="sb-hint sb-hint--tight">Active: #{data.address?.index ?? 0}.</p>
           </>
         )}
         {activeAccount && isWif && (
@@ -291,8 +300,13 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
 
         {data.vaults.length > 0 && (
           <>
-            <div className="sb-section-title">Vaults ({data.vaults.length})</div>
-            <p className="sb-hint">The on-chain vaults behind your dBTC. Status only: a withdrawal plans itself across them.</p>
+            <div className="sb-titlebar">
+              <div className="sb-section-title">Vaults ({data.vaults.length})</div>
+              <InfoTip title="Vaults" label="About vaults">
+                <p>The on-chain vaults behind your dBTC: each holds BTC locked for a deposit. This list is status only.</p>
+                <p><b>Active</b> vaults back your balance. <b>Pending</b> ones are still confirming. <b>Spent</b> and <b>Void</b> are history. A withdrawal plans itself across the active ones; you never pick one.</p>
+              </InfoTip>
+            </div>
             {data.vaults.map((v) => (
               <VaultCard key={v.vaultId} vault={v} />
             ))}

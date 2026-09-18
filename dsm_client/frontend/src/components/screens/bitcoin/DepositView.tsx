@@ -4,6 +4,7 @@ import { initiateDeposit, fundAndBroadcast, formatBtc, parseBtcToSats, mempoolEx
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
 import ConfirmModal from '../../ConfirmModal';
 import ExplorerLink from './ExplorerLink';
+import { InfoTip } from '../../common/InfoTip';
 import type { DbtcBalance, NativeBtcBalance } from '../../../services/bitcoinTap';
 
 type Props = {
@@ -69,11 +70,12 @@ export default function DepositView({ balance, nativeBalance, network, onBack, o
       <div className="sb-subhead">
         <button type="button" className="sb-icon-btn" onClick={onBack} aria-label="Back" title="Back">{'‹'}</button>
         <h3>Deposit BTC</h3>
+        <InfoTip title="Deposit BTC" label="About deposits">
+          <p>Moves BTC from your on-chain balance into this wallet as dBTC, one for one.</p>
+          <p>The BTC is locked on the Bitcoin network and the deposit shows under <b>Activity</b> while the network confirms it. Once it has enough confirmations the dBTC is credited on its own; nothing more to do.</p>
+          <p>The funding transaction is paid from your on-chain balance, including its network fee.</p>
+        </InfoTip>
       </div>
-
-      <p className="sb-hint">
-        Moves BTC from your on-chain balance into this wallet as dBTC. It arrives once the Bitcoin network has confirmed it.
-      </p>
 
       <div className="sb-card">
         <div className="sb-kv">

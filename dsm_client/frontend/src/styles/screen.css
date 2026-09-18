@@ -537,6 +537,117 @@
 .btc-address { display: flex; align-items: flex-start; gap: 8px; }
 .btc-address .sb-mono { flex: 1 1 auto; min-width: 0; padding-top: 6px; }
 
+/* The i button, and the popup it opens. The popup covers the frame (not the
+   whole shell): absolute against .sb-screen, so it is not clipped by the
+   scrolling body it was opened from. */
+.sb-info {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: rgba(var(--text-rgb), 0.08);
+  color: var(--text-dark);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.sb-info:active { transform: translateY(1px); }
+.sb-info--static { background: var(--bg); color: var(--text-dark); border-color: var(--bg); cursor: default; }
+.sb-screen__head > .sb-info { margin-right: 2px; }
+
+.sb-titlebar { display: flex; align-items: center; gap: 6px; margin: 12px 0 6px; }
+.sb-titlebar:first-child { margin-top: 0; }
+.sb-titlebar > .sb-section-title,
+.sb-titlebar > h3.sb-section-title { flex: 1 1 auto; margin: 0; }
+.sb-subhead > .sb-info { margin-left: 2px; }
+.sb-card__title .sb-info { width: 16px; height: 16px; font-size: 10px; }
+.sb-field > label .sb-info,
+.sb-label .sb-info { width: 15px; height: 15px; font-size: 9px; margin-left: 4px; }
+
+.sb-popover-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: rgba(var(--text-rgb), 0.62);
+}
+.sb-popover {
+  width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--bg);
+  border-radius: 12px;
+  background: var(--text-dark);
+  color: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  outline: none;
+  text-align: left;
+}
+.sb-popover__head { display: flex; align-items: center; gap: 8px; }
+.sb-popover__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--bg);
+}
+.sb-popover__close {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid var(--bg);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--bg);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sb-popover__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--bg);
+}
+.sb-popover__body p { margin: 0 0 8px; }
+.sb-popover__body p:last-child { margin-bottom: 0; }
+.sb-popover__body b { font-weight: 700; }
+.sb-popover__body ul { margin: 0 0 8px; padding-left: 16px; }
+.sb-popover__body li { margin-bottom: 4px; }
+.sb-popover .sb-popover__ok {
+  background: var(--bg);
+  color: var(--text-dark);
+  border-color: var(--bg);
+  box-shadow: none;
+}
+
 /* Sub-view header (Deposit / Withdraw) inside a tab. */
 .sb-subhead { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
 .sb-subhead h3 { flex: 1 1 auto; margin: 0; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }

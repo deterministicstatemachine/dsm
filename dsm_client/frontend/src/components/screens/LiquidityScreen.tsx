@@ -23,6 +23,7 @@ import { getAllBalances } from '../../dsm/wallet';
 import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import { Disclosure, Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 import { useBackButton } from '../../hooks/useBackButton';
 
 type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'closing' | 'created' | 'error';
@@ -326,6 +327,13 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     <ScreenFrame
       title="Liquidity"
       onBack={() => onNavigate?.('home')}
+      info={(
+        <InfoTip title="Liquidity">
+          <p>A pool holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee. You can take everything back at any time with <b>Withdraw all</b>; that retires the pool for good.</p>
+          <p><b>Open</b> means traders can find the pool. <b>Publishing</b> means its proofs are still reaching the storage set; it goes live on its own. <b>Not listed</b> means it exists but is not advertised yet.</p>
+          <p>Traders settle against your pool while you are offline. When that has happened, the card says how many trades are waiting; <b>Reconcile</b> writes them into the pool&apos;s balances. Nothing is lost while you wait.</p>
+        </InfoTip>
+      )}
       actions={
         <button
           type="button"
@@ -345,10 +353,6 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         </>
       }
     >
-      <p className="sb-hint">
-        A pool holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee; you can take everything back at any time.
-      </p>
-
       <div className="sb-section-title">My vaults ({vaults.length})</div>
       {phase === 'loading' && <div className="sb-empty">Loading{'\u2026'}</div>}
       {phase !== 'loading' && vaults.length === 0 && (
@@ -408,14 +412,10 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               // frozen birth proofs on every sync until a quorum of its storage
               // set holds them; until then the vault is not market-active and
               // Publish is suppressed (Rust refuses it too).
-              <p className="sb-hint sb-hint--tight">
-                Its proofs are still reaching the storage set. It goes live on its own; nothing to do yet.
-              </p>
+              <p className="sb-hint sb-hint--tight">Going live on its own. Nothing to do yet.</p>
             )}
             {!v.closed && v.publicationState === 'published' && !v.routingAdvertised && !canPublish && (
-              <p className="sb-hint sb-hint--tight">
-                Traders cannot discover this vault, and it cannot be re-advertised. Withdraw and create a new one.
-              </p>
+              <p className="sb-hint sb-hint--tight">Cannot be advertised. Withdraw and create a new pool.</p>
             )}
 
             {(!v.closed || canPublish) && (
@@ -476,10 +476,15 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
 
       {showCreate && (
         <div className="sb-card" style={{ marginTop: 4 }}>
-          <div className="sb-card__title">New pool</div>
-          <p className="sb-hint">
-            Pick two tokens you hold and how much of each to put in. The ratio sets the starting price.
-          </p>
+          <div className="sb-card__title">
+            <span>New pool</span>
+            <InfoTip title="New pool" label="About new pools">
+              <p>Pick two tokens you hold and how much of each to put in. The ratio between the two amounts sets the pool&apos;s starting price.</p>
+              <p><b>Reserve A</b> and <b>Reserve B</b> are entered in the token&apos;s base units, exactly as the wallet stores them.</p>
+              <p><b>Fee</b> is your cut of every trade, in basis points: 30 bps is 0.30%.</p>
+              <p>The pool is created and advertised in one step. If the advertisement cannot go out yet, the card shows Publish once it can.</p>
+            </InfoTip>
+          </div>
           {/* The pair is SELECTED, never typed. The option's value is the
               token's CPTA anchor — its identity — while the label is the
               ticker, which is display only. Free text made the two the same
@@ -498,7 +503,6 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           <div className="sb-field">
             <label htmlFor="liq-reserve-a">Reserve A</label>
             <input id="liq-reserve-a" type="number" min="0" className="sb-input sb-input--small sb-input--mono" value={reserveA} onChange={(e) => setReserveA(e.target.value)} placeholder="0" />
-            <p className="sb-hint sb-hint--tight">How much of token A goes into the pool, in base units.</p>
           </div>
           <div className="sb-field">
             <label htmlFor="liq-token-b">Token B</label>
@@ -516,12 +520,10 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           <div className="sb-field">
             <label htmlFor="liq-reserve-b">Reserve B</label>
             <input id="liq-reserve-b" type="number" min="0" className="sb-input sb-input--small sb-input--mono" value={reserveB} onChange={(e) => setReserveB(e.target.value)} placeholder="0" />
-            <p className="sb-hint sb-hint--tight">How much of token B goes into the pool, in base units.</p>
           </div>
           <div className="sb-field">
             <label htmlFor="liq-fee">Fee (bps)</label>
             <input id="liq-fee" type="number" min="0" max="9999" className="sb-input sb-input--small sb-input--mono" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
-            <p className="sb-hint sb-hint--tight">Your cut of every trade. 30 bps is 0.30%.</p>
           </div>
           <div className="sb-actions" style={{ marginBottom: 0 }}>
             <button type="button" className="sb-btn" onClick={() => setShowCreate(false)} disabled={phase === 'creating' || phase === 'publishing'}>Cancel</button>

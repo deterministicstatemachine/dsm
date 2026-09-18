@@ -26,6 +26,7 @@ import {
 } from '../../../dsm/route_commit';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
+import { InfoTip } from '../../common/InfoTip';
 import type { Balance } from './helpers';
 
 type Phase =
@@ -324,10 +325,13 @@ function SwapTabInner({
         ))}
       </datalist>
 
-      <h3 className="sb-section-title">Swap</h3>
-      <p className="sb-hint">
-        Trades one token for another through a liquidity pool. You see the exact amount you will get before you confirm; if the pool moves first, the trade is refused and you can quote again.
-      </p>
+      <div className="sb-titlebar">
+        <h3 className="sb-section-title">Swap</h3>
+        <InfoTip title="Swap" label="About swapping">
+          <p>Trades one token for another through a liquidity pool. Quote first: you see the exact amount you will get before you confirm. If the pool moves before the trade lands, it is refused and you simply quote again.</p>
+          <p>Tokens are named by their <b>anchor</b>, not their ticker, because two tokens can share a ticker. Pick one you hold from the suggestions, or paste the anchor from the token&apos;s card under Tokens.</p>
+        </InfoTip>
+      </div>
 
       <div className="sb-field">
         <label htmlFor="swap-amount">You pay</label>
@@ -370,9 +374,6 @@ function SwapTabInner({
           className="sb-input sb-input--mono"
           aria-label="Output token id"
         />
-        <p className="sb-hint sb-hint--tight">
-          Tokens are named by their anchor, not their ticker: two tokens can share a ticker. Copy it from the token&apos;s card under Tokens.
-        </p>
       </div>
 
       {quoted && (

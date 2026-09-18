@@ -12,6 +12,7 @@ import logger from '../../../utils/logger';
 import ConfirmModal from '../../ConfirmModal';
 import ExplorerLink from './ExplorerLink';
 import { Disclosure } from '../../common/ScreenFrame';
+import { InfoTip } from '../../common/InfoTip';
 import type {
   DbtcBalance,
   VaultSummary,
@@ -142,11 +143,12 @@ export default function WithdrawView({
       <div className="sb-subhead">
         <button type="button" className="sb-icon-btn" onClick={onBack} aria-label="Back" title="Back">{'‹'}</button>
         <h3>Withdraw to Bitcoin</h3>
+        <InfoTip title="Withdraw to Bitcoin" label="About withdrawals">
+          <p>Sends dBTC out of this wallet to any Bitcoin address, as BTC.</p>
+          <p>Enter what the recipient should receive. <b>Review</b> shows the Bitcoin network fee, which is added on top and taken from your dBTC, before anything is sent. Nothing moves until you confirm.</p>
+          <p>The withdrawal is paid out of the on-chain vaults behind your dBTC. It finalizes once the Bitcoin network confirms it; the amount shows as leaving until then.</p>
+        </InfoTip>
       </div>
-
-      <p className="sb-hint">
-        Sends dBTC out of this wallet to any Bitcoin address. Enter what the recipient should receive; the Bitcoin network fee is added on top and shown before anything is sent.
-      </p>
 
       <div className="sb-card">
         <div className="sb-kv">
@@ -245,7 +247,7 @@ export default function WithdrawView({
           )}
 
           <Disclosure summary={`Route details (${reviewResult.legs.length} leg${reviewResult.legs.length === 1 ? '' : 's'})`} className="sb-details--plain">
-            <p className="sb-hint">A withdrawal is paid out of the on-chain vaults behind your dBTC. Active vaults: {activeVaultCount}.</p>
+            <p className="sb-hint">Active vaults: {activeVaultCount}.</p>
             <div className="sb-kv"><span className="sb-kv__k">Plan</span><span className="sb-kv__v">{planClassLabel(reviewResult.planClass)}</span></div>
             {reviewResult.legs.map((leg, index) => (
               <div key={`${leg.vaultId}-${index}`} className="sb-card" style={{ padding: '4px 8px' }}>

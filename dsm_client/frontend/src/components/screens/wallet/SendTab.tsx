@@ -6,6 +6,7 @@ import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
 import { TokenCoin } from '../../TokenCoin';
 import { Notice } from '../../common/ScreenFrame';
+import { InfoTip } from '../../common/InfoTip';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
@@ -195,17 +196,21 @@ function SendTabInner({
       </div>
 
       <div className="sb-field">
-        <span className="sb-label">How to send</span>
+        <span className="sb-label">
+          How to send
+          <InfoTip title="How to send" label="About sending modes">
+            <p><b>Online</b> goes through the storage nodes. The recipient does not need to be nearby or awake; it lands in their inbox.</p>
+            <p><b>Offline</b> goes phone to phone over Bluetooth. Both phones must be next to each other with Bluetooth on, and both must be on the wallet screen.</p>
+          </InfoTip>
+        </span>
         <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
           <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
           <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
         </div>
-        {txMode === 'offline' ? (
+        {txMode === 'offline' && (
           <Notice>
-            <strong>Offline needs Bluetooth.</strong> Both phones must be next to each other with Bluetooth on.
+            <strong>Offline needs Bluetooth.</strong> Both phones next to each other, Bluetooth on.
           </Notice>
-        ) : (
-          <p className="sb-hint sb-hint--tight">Goes through the storage nodes; the recipient does not need to be nearby.</p>
         )}
       </div>
 

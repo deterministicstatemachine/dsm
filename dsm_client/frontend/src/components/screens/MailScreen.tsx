@@ -22,6 +22,7 @@ import { createPostedDlv } from '../../dsm/dlv';
 import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 import { useBackButton } from '../../hooks/useBackButton';
 
 type RowStatus = 'pending' | 'syncing' | 'mirrored' | 'claiming' | 'claimed' | 'error';
@@ -190,6 +191,13 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
     <ScreenFrame
       title="Mail"
       onBack={() => onNavigate?.('home')}
+      info={(
+        <InfoTip title="Mail" label="About mail">
+          <p>Mail carries tokens or a note to someone&apos;s key. Neither of you needs to be online at the same time: it waits on the storage nodes until the recipient claims it.</p>
+          <p><b>Inbox</b> lists what is waiting for you. <b>Sync all</b> fetches it; then <b>Claim</b> moves it into your wallet.</p>
+          <p><b>Compose</b> needs the recipient&apos;s public key and the policy anchor the mail is locked under (copy it from the token&apos;s card under Tokens). Token and amount are optional: leave them empty to send only a note.</p>
+        </InfoTip>
+      )}
       actions={tab === 'inbox' ? (
         <button
           type="button"
@@ -214,9 +222,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
     >
       {tab === 'inbox' && (
         <>
-          <p className="sb-hint">
-            Tokens and notes sent to you are held for you on the storage nodes until you claim them.
-          </p>
           {inboxError && <Notice kind="error" onClose={() => setInboxError('')}>{inboxError}</Notice>}
           {inboxStatus && !inboxError && <Notice>{inboxStatus}</Notice>}
           <div className="sb-actions" style={{ marginTop: 0 }}>
@@ -263,9 +268,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
 
       {tab === 'compose' && (
         <>
-          <p className="sb-hint">
-            Posts tokens or a note to someone&apos;s key. They do not need to be online; it waits for them on the storage nodes.
-          </p>
           <div className="sb-field">
             <label htmlFor="mail-recipient">Recipient public key</label>
             <textarea id="mail-recipient" className="sb-input sb-input--mono" rows={3} value={recipientPk} onChange={(e) => setRecipientPk(e.target.value)} placeholder="Paste their Kyber public key (Base32)" />
@@ -273,7 +275,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
           <div className="sb-field">
             <label htmlFor="mail-policy">Policy anchor</label>
             <textarea id="mail-policy" className="sb-input sb-input--mono" rows={2} value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="52-character Base32 anchor" />
-            <p className="sb-hint sb-hint--tight">The release policy the mail is locked under. Copy it from the token&apos;s card under Tokens.</p>
           </div>
           <div className="sb-field">
             <label htmlFor="mail-token">Token (optional)</label>
