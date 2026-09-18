@@ -145,7 +145,7 @@ export default function WithdrawView({
         <h3>Withdraw to Bitcoin</h3>
         <InfoTip title="Withdraw to Bitcoin" label="About withdrawals">
           <p>Sends dBTC out of this wallet to any Bitcoin address, as BTC.</p>
-          <p>Enter how much dBTC to spend. The Bitcoin network fee comes out of that amount, so the recipient gets a little less. <b>Review</b> shows both numbers before anything is sent, and nothing moves until you confirm.</p>
+          <p>Enter how much dBTC to spend. The Bitcoin network fee comes out of that amount, so the recipient gets less than you type. <b>Review</b> shows exactly what leaves your balance and what arrives, and nothing moves until you confirm.</p>
           <p>The withdrawal is paid out of the on-chain vaults behind your dBTC. It finalizes once the Bitcoin network confirms it. Until then the amount is held aside and is not part of your spendable balance.</p>
         </InfoTip>
       </div>
