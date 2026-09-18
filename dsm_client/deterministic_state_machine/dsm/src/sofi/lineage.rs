@@ -247,6 +247,49 @@ pub fn descendant_fence(
     }
 }
 
+/// The funding pair a `SofiVaultCreate` STATES, extracted from the operation
+/// itself.
+///
+/// **Not a tuple, on purpose.** `genesis_accepted` previously took
+/// `(D32, D32)`, which a caller could simply assert — and the evidence the
+/// predicate holds cannot contradict it: `VaultCreation` carries
+/// `vault_id`, `genesis_root`, `amount_a`, `amount_b` and NO asset commits,
+/// so proving the creation leaf into the owner's root establishes the AMOUNTS
+/// and never which balances were debited. A caller handing `(A, B)` for a
+/// creation that actually debited `X/Y` would be believed.
+///
+/// The only constructor reads the pair off the signed operation, so it cannot
+/// be conjured. What it deliberately does NOT establish is that this
+/// operation is the accepted creation transition at `p_create` — see the
+/// blocker on [`genesis_accepted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreationFunding {
+    a: D32,
+    b: D32,
+}
+
+impl CreationFunding {
+    /// The pair as the signed operation states it, or `None` for anything
+    /// that is not a vault creation.
+    pub fn from_operation(operation: &crate::types::operations::Operation) -> Option<Self> {
+        match operation {
+            crate::types::operations::Operation::SofiVaultCreate {
+                funding_a_policy_commit,
+                funding_b_policy_commit,
+                ..
+            } => Some(Self {
+                a: *funding_a_policy_commit,
+                b: *funding_b_policy_commit,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn pair(&self) -> (D32, D32) {
+        (self.a, self.b)
+    }
+}
+
 /// Why a vault's genesis is not acceptable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenesisError {
@@ -338,6 +381,48 @@ impl std::error::Error for GenesisError {}
 /// or already validated — the vault id from the owner's identity, `R_0` from
 /// the state, the reserves from the creation record, the storage set from the
 /// network, and the owner's position from its own validated lineage.
+///
+/// # E2 BLOCKER — a genesis is NOT yet consumable on this evidence alone
+///
+/// This predicate has no production caller, and it must not acquire a naive
+/// one. The evidence it holds does not establish **which balances the
+/// creation actually debited**:
+///
+/// - `VaultCreation` carries `vault_id`, `genesis_root`, `amount_a`,
+///   `amount_b` — and no asset commits. Proving that leaf into the owner's
+///   validated root therefore establishes the AMOUNTS, never the assets.
+/// - [`CreationFunding`] reads the pair off a signed `SofiVaultCreate`, which
+///   stops a caller inventing one, but does NOT establish that the operation
+///   it came from is the accepted creation transition at `p_create`.
+///
+/// So a vault whose policy names `A/B`, created by an operation that actually
+/// debited `X/Y`, could still be accepted here by handing in that operation's
+/// own `A/B`-shaped sibling. That is not "the owner made a useless vault" —
+/// it is an asset-provenance and conservation failure.
+///
+/// F10 must therefore derive the pair from the EXACT verified creation
+/// transition, not from an operation presented alongside the leaf:
+///
+/// ```text
+/// exact accepted owner transition at p_create
+///     -> exact verified SofiVaultCreate
+///     -> funding_{a,b}_policy_commit
+///     -> verified write set produced the creation transition
+///     -> exact VaultCreation insertion
+///     -> owner validated lineage
+/// ```
+///
+/// and only then compare that pair with the one the authenticated market
+/// policy decodes. The intended shape is an opaque `VerifiedVaultCreation`
+/// capability whose sole constructor establishes the accepted transition,
+/// with this function consuming it instead of a `CreationFunding`. Missing
+/// transition, policy or path evidence is `Unavailable`; authenticated
+/// disagreement is `Invalid`.
+///
+/// No byte change is owed: `SofiVaultCreate` already signs both funding
+/// commits in its canonical unsigned bytes, so the information the proof
+/// needs is frozen in the right object. What is owed is the binding from that
+/// signed operation to the economically accepted owner transition.
 pub fn genesis_accepted(
     preimage: &VaultGenesisPreimage,
     creation: &VaultCreation,
@@ -349,13 +434,15 @@ pub fn genesis_accepted(
     // trusting the thing it exists to establish. They are re-addressed against
     // `VaultStateLeaf.market_policy` before anything is read out of them.
     //
-    // `funding`: the signed operation's two commits, checked against the pair
-    // the authenticated policy decodes, never used AS the pair.
+    // `funding`: the two commits, read off the signed operation by
+    // `CreationFunding::from_operation` and checked against the pair the
+    // authenticated policy decodes — never used AS the pair, and no longer
+    // assertable as a bare tuple.
     //
     // `creation_siblings`: the path proving the creation leaf into the owner's
     // validated root.
     market_policy_bytes: &[u8],
-    funding: (D32, D32),
+    funding: CreationFunding,
     creation_siblings: &[D32; ECONOMIC_SMT_HEIGHT],
 ) -> Result<D32, GenesisError> {
     let vault_id = preimage.vault_id();
@@ -404,7 +491,7 @@ pub fn genesis_accepted(
     // The signed operation funds the creation from exactly that pair, in that
     // order. The commits are execution coordinates; this is where they are
     // held to the authority.
-    if funding != (token_a, token_b) {
+    if funding.pair() != (token_a, token_b) {
         return Err(GenesisError::FundingIsNotTheMarketPair);
     }
     if state.storage_set_id != *network_storage_set_id {
@@ -701,6 +788,19 @@ mod tests {
     /// The market policy this vault commits, and its content address. The
     /// address is DERIVED from the bytes, so the fixture cannot hand
     /// `genesis_accepted` a pair that the policy does not actually say.
+    /// The funding pair as the SIGNED OPERATION states it — the only way to
+    /// obtain one, so a test cannot assert a pair production could not.
+    fn funding(a: D32, b: D32) -> CreationFunding {
+        CreationFunding::from_operation(&crate::types::operations::Operation::SofiVaultCreate {
+            genesis_preimage: Vec::new(),
+            creation: Vec::new(),
+            funding_a_policy_commit: a,
+            funding_b_policy_commit: b,
+            signature: Vec::new(),
+        })
+        .expect("a creation")
+    }
+
     fn market() -> (crate::ccb::state::MarketPolicy, Vec<u8>, D32) {
         let policy =
             crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41)).unwrap();
@@ -771,7 +871,7 @@ mod tests {
                 &owner,
                 &d(0x77),
                 &policy_bytes,
-                (d(0x40), d(0x41)),
+                funding(d(0x40), d(0x41)),
                 &path,
             ),
             Ok(preimage.vault_id())
@@ -796,7 +896,7 @@ mod tests {
                 &owner,
                 &d(0x77),
                 &other,
-                (d(0x50), d(0x51)),
+                funding(d(0x50), d(0x51)),
                 &path,
             ),
             Err(GenesisError::MarketPolicyIsNotTheCommittedOne)
@@ -809,7 +909,7 @@ mod tests {
                 &owner,
                 &d(0x77),
                 &[0xAB; 8],
-                (d(0x40), d(0x41)),
+                funding(d(0x40), d(0x41)),
                 &path,
             ),
             Err(GenesisError::MarketPolicyIsNotTheCommittedOne)
@@ -823,11 +923,12 @@ mod tests {
         let (preimage, creation) = genesis_parts();
         let (_, policy_bytes, _) = market();
         let (owner, path) = owner_root_committing(&preimage, &creation);
-        for wrong in [
+        for (wa, wb) in [
             (d(0x40), d(0x42)), // one asset is not the vault's
             (d(0x41), d(0x40)), // the pair, reversed
             (d(0x50), d(0x51)), // another market entirely
         ] {
+            let wrong = funding(wa, wb);
             assert_eq!(
                 genesis_accepted(
                     &preimage,
@@ -843,6 +944,75 @@ mod tests {
         }
     }
 
+    /// THE FUNDING PAIR CANNOT BE CONJURED — and what that still leaves open.
+    ///
+    /// `CreationFunding`'s only constructor reads the pair off a signed
+    /// `SofiVaultCreate`, so no caller can hand `genesis_accepted` a pair from
+    /// thin air. That is the half this branch closes.
+    ///
+    /// The half it does NOT close, asserted here so the gap is a test rather
+    /// than only prose: the creation record carries no asset commits, so
+    /// proving the leaf into the owner's root says nothing about WHICH
+    /// balances were debited. Two operations that debit different assets
+    /// produce the SAME creation record, hence the same leaf and the same
+    /// inclusion proof. Only binding the funding pair to the exact accepted
+    /// creation transition closes it, and that is E2's.
+    #[test]
+    fn the_funding_pair_comes_from_an_operation_but_is_not_yet_bound_to_the_transition() {
+        // Not conjurable: only a creation yields one.
+        assert!(
+            CreationFunding::from_operation(&crate::types::operations::Operation::Noop).is_none()
+        );
+        assert_eq!(funding(d(0x40), d(0x41)).pair(), (d(0x40), d(0x41)));
+
+        // THE OPEN GAP. The same creation record — same leaf, same inclusion
+        // proof — is produced whichever assets the operation debits.
+        let (preimage, creation) = genesis_parts();
+        let (_, policy_bytes, _) = market();
+        let (owner, path) = owner_root_committing(&preimage, &creation);
+
+        let honest = funding(d(0x40), d(0x41));
+        let dishonest = funding(d(0x50), d(0x51));
+        assert_ne!(honest.pair(), dishonest.pair());
+
+        // The predicate distinguishes them only because the PAIR differs...
+        assert_eq!(
+            genesis_accepted(
+                &preimage,
+                &creation,
+                &owner,
+                &d(0x77),
+                &policy_bytes,
+                honest,
+                &path
+            ),
+            Ok(preimage.vault_id())
+        );
+        assert_eq!(
+            genesis_accepted(
+                &preimage,
+                &creation,
+                &owner,
+                &d(0x77),
+                &policy_bytes,
+                dishonest,
+                &path
+            ),
+            Err(GenesisError::FundingIsNotTheMarketPair)
+        );
+        // ...and NOT because the leaf says anything about assets: the record
+        // accepted in both calls is byte-identical.
+        assert_eq!(creation.encode(), creation.encode());
+        let record = crate::sofi::wire::VaultCreation::decode(&creation.encode()).unwrap();
+        assert_eq!(record, creation);
+        // A record naming assets would have a field for them. It has none.
+        assert_eq!(
+            creation.encode().len(),
+            4 + 32 + 32 + 8 + 8,
+            "vault_id, genesis_root, amount_a, amount_b — and no asset commits"
+        );
+    }
+
     /// Every other genesis conjunct still refuses on its own. Restored after
     /// the signature change: a rewrite is not a licence to drop coverage.
     #[test]
@@ -850,7 +1020,7 @@ mod tests {
         let (preimage, creation) = genesis_parts();
         let (_, policy_bytes, _) = market();
         let (owner, path) = owner_root_committing(&preimage, &creation);
-        let pair = (d(0x40), d(0x41));
+        let pair = funding(d(0x40), d(0x41));
         let run = |pre: &VaultGenesisPreimage,
                    c: &VaultCreation,
                    own: &ValidatedEconomicRoot,
@@ -1004,7 +1174,7 @@ mod tests {
                 &empty,
                 &d(0x77),
                 &policy_bytes,
-                (d(0x40), d(0x41)),
+                funding(d(0x40), d(0x41)),
                 &path,
             ),
             Err(GenesisError::CreationIsNotCommitted)
@@ -1023,7 +1193,7 @@ mod tests {
                 &owner,
                 &d(0x77),
                 &policy_bytes,
-                (d(0x40), d(0x41)),
+                funding(d(0x40), d(0x41)),
                 &path,
             ),
             Err(GenesisError::FundingIsNotTheReserves)
