@@ -11,18 +11,30 @@ import BitcoinTapTab from './bitcoin/BitcoinTapTab';
 import { ensureBleAdvertisingIfContacts } from '../../contexts/ContactsContext';
 import { stopBleAdvertisingViaRouter } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';
+import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import '../../styles/EnhancedWallet.css';
+
+type WalletTab = 'overview' | 'send' | 'swap' | 'history' | 'bitcoin';
+
+const TABS: ReadonlyArray<{ id: WalletTab; label: string }> = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'send', label: 'Send' },
+  { id: 'swap', label: 'Swap' },
+  { id: 'history', label: 'History' },
+  { id: 'bitcoin', label: 'Bitcoin' },
+];
 
 interface EnhancedWalletScreenProps {
   eraTokenSrc?: string;
   btcLogoSrc?: string;
-  initialTab?: 'overview' | 'send' | 'swap' | 'history' | 'bitcoin';
+  initialTab?: WalletTab;
 }
 
 const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc, btcLogoSrc, initialTab }) => {
   // Layout
   const headerRef = useRef<HTMLDivElement | null>(null);
-  const [headerHeight, setHeaderHeight] = useState<number>(56);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [headerHeight, setHeaderHeight] = useState<number>(40);
 
   useEffect(() => {
     const measure = () => {
@@ -60,7 +72,12 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
     };
   }, []);
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'send' | 'swap' | 'history' | 'bitcoin'>(initialTab || 'overview');
+  const [activeTab, setActiveTab] = useState<WalletTab>(initialTab || 'overview');
+
+  // A tab is a new page: it opens at the top, not wherever the last one was scrolled to.
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [activeTab]);
 
   const eraGif = eraTokenSrc || 'images/logos/era_token_gb.gif';
   const btcGif = btcLogoSrc || 'images/logos/btc-logo.gif';
@@ -92,176 +109,139 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
   const switchToHistory = useCallback(() => setActiveTab('history'), []);
   const switchToOverview = useCallback(() => setActiveTab('overview'), []);
 
+  const headerActions = (
+    <>
+      <InboxOverlay headerHeight={headerHeight} loadWalletData={data.loadWalletData} />
+      <button
+        type="button"
+        onClick={() => void data.handleRefresh()}
+        className={`sb-icon-btn${data.refreshing ? ' spinning' : ''}`}
+        disabled={data.refreshing}
+        title="Refresh"
+        aria-label="Refresh"
+      >
+        <img src="images/icons/icon_refresh.svg" alt="" />
+      </button>
+    </>
+  );
+
   if (data.loading) {
+    // No "DSM Wallet" title until the wallet has loaded: the title is the
+    // signal, to people and to tests, that the screen is ready to use.
     return (
-      <div className="enhanced-wallet-screen loading">
-        <div className="loading-spinner"><div className="spinner"/></div>
-        <p>Loading wallet{'\u2026'}</p>
-      </div>
+      <ScreenFrame title="Loading" className="enhanced-wallet-screen loading">
+        <div className="sb-empty">Loading wallet{'…'}</div>
+      </ScreenFrame>
     );
   }
+
   if (data.error && !data.identity) {
     return (
-      <div className="enhanced-wallet-screen error">
-        <div className="error-container">
-          <h3>Error</h3>
-          <p>{data.error}</p>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => void data.loadWalletData()} className="retry-button">Try Again</button>
-            <button onClick={() => data.setError(null)} className="retry-button" aria-label="Dismiss error">Dismiss</button>
-          </div>
+      <ScreenFrame title="DSM Wallet" className="enhanced-wallet-screen">
+        <Notice kind="error">{data.error}</Notice>
+        <div className="sb-actions">
+          <button type="button" onClick={() => void data.loadWalletData()} className="sb-btn sb-btn--primary">Try Again</button>
+          <button type="button" onClick={() => data.setError(null)} className="sb-btn" aria-label="Dismiss error">Dismiss</button>
         </div>
-      </div>
+      </ScreenFrame>
     );
   }
 
   return (
-    <div className={`enhanced-wallet-screen ${data.refreshing ? 'refreshing' : ''} ${data.touchFeedback ? `feedback-${data.touchFeedback}` : ''}`} style={{ position: 'relative' }}>
-      {/* Header */}
-      <div className="wallet-header" ref={headerRef}>
-        <h2>DSM Wallet</h2>
-        <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
-          <InboxOverlay headerHeight={headerHeight} loadWalletData={data.loadWalletData} />
-          <button
-            onClick={() => void data.handleRefresh()}
-            className={`refresh-icon ${data.refreshing ? 'spinning' : ''}`}
-            disabled={data.refreshing}
-            title="Refresh"
-            aria-label="Refresh"
-            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 6, border: '1px solid var(--border)', borderRadius: 4, background: 'transparent' }}
-          >
-            <img src="images/icons/icon_refresh.svg" alt="Refresh" style={{ width: 16, height: 16, imageRendering: 'pixelated' }} />
-          </button>
-        </div>
-      </div>
-
-      {/* Error banner */}
-      {data.error && (
-        <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>{data.error}</span>
-          <button onClick={() => data.setError(null)} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14 }}>{'\u00D7'}</button>
-        </div>
+    <ScreenFrame
+      title="DSM Wallet"
+      className={`enhanced-wallet-screen ${data.refreshing ? 'refreshing' : ''} ${data.touchFeedback ? `feedback-${data.touchFeedback}` : ''}`}
+      headRef={headerRef}
+      bodyRef={bodyRef}
+      bodyClassName="tab-content"
+      actions={headerActions}
+      tabs={<ScreenTabs tabs={TABS} active={activeTab} onChange={setActiveTab} ariaLabel="Wallet sections" />}
+      banner={
+        <>
+          {data.error && (
+            <Notice kind="error" banner onClose={() => data.setError(null)}>{data.error}</Notice>
+          )}
+          {data.warning && (
+            <Notice banner onClose={() => data.setWarning(null)}>{data.warning}</Notice>
+          )}
+        </>
+      }
+    >
+      {activeTab === 'overview' && (
+        <OverviewTab
+          balances={data.balances}
+          transactions={data.transactions}
+          aliasLookup={data.aliasLookup}
+          eraGif={eraGif}
+          genesisB32={data.genesisB32}
+          deviceB32={data.deviceB32}
+          onSwitchToSend={switchToSend}
+          onSwitchToHistory={switchToHistory}
+        />
       )}
 
-      {data.warning && (
-        <div className="warning-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.08)', border: '1px solid var(--border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>{data.warning}</span>
-          <button onClick={() => data.setWarning(null)} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14 }}>{'\u00D7'}</button>
-        </div>
+      {activeTab === 'send' && (
+        <SendTab
+          contacts={data.contacts}
+          balances={data.balances}
+          eraGif={eraGif}
+          btcGif={btcGif}
+          onCancel={switchToOverview}
+          onSendComplete={handleSendComplete}
+          loadWalletData={data.loadWalletData}
+          setError={data.setError}
+        />
       )}
 
-      {/* Tabs */}
-      <div className="tab-navigation">
-        {(['overview', 'send', 'swap', 'history', 'bitcoin'] as const).map((tab) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} className={`tab-button ${activeTab === tab ? 'active' : ''}`}>
-            {tab === 'bitcoin' ? 'BTC Tap' : tab.charAt(0).toUpperCase() + tab.slice(1)}
-          </button>
-        ))}
-      </div>
+      {activeTab === 'swap' && (
+        <SwapTab
+          balances={data.balances}
+          deviceB32={data.deviceB32}
+          onCancel={switchToOverview}
+          onSwapComplete={handleSwapComplete}
+          loadWalletData={data.loadWalletData}
+          setError={data.setError}
+        />
+      )}
 
-      {/* Content */}
-      <div className="tab-content">
-        {activeTab === 'overview' && (
-          <OverviewTab
-            balances={data.balances}
-            transactions={data.transactions}
-            aliasLookup={data.aliasLookup}
-            eraGif={eraGif}
-            genesisB32={data.genesisB32}
-            deviceB32={data.deviceB32}
-            onSwitchToSend={switchToSend}
-            onSwitchToHistory={switchToHistory}
-          />
-        )}
+      {activeTab === 'bitcoin' && (
+        <BitcoinTapTab btcLogoSrc={btcGif} />
+      )}
 
-        {activeTab === 'send' && (
-          <SendTab
-            contacts={data.contacts}
-            balances={data.balances}
-            eraGif={eraGif}
-            btcGif={btcGif}
-            onCancel={switchToOverview}
-            onSendComplete={handleSendComplete}
-            loadWalletData={data.loadWalletData}
-            setError={data.setError}
-          />
-        )}
-
-        {activeTab === 'swap' && (
-          <SwapTab
-            balances={data.balances}
-            deviceB32={data.deviceB32}
-            onCancel={switchToOverview}
-            onSwapComplete={handleSwapComplete}
-            loadWalletData={data.loadWalletData}
-            setError={data.setError}
-          />
-        )}
-
-        {activeTab === 'bitcoin' && (
-          <BitcoinTapTab btcLogoSrc={btcGif} />
-        )}
-
-        {activeTab === 'history' && (
-          <HistoryTab
-            transactions={data.transactions}
-            aliasLookup={data.aliasLookup}
-          />
-        )}
-      </div>
+      {activeTab === 'history' && (
+        <HistoryTab
+          transactions={data.transactions}
+          aliasLookup={data.aliasLookup}
+        />
+      )}
 
       {/* Toast */}
       {toast && (
         <div
           role="status"
           aria-live="polite"
+          className="sb-notice sb-notice--success"
           style={{
             position: 'absolute',
             top: headerHeight + 8,
-            left: '50%',
-            transform: 'translateX(-50%)',
+            left: 12,
+            right: 12,
             zIndex: 10010,
-            maxWidth: 'calc(100% - 24px)',
-            padding: '6px 10px',
-            background: 'rgba(var(--text-rgb),0.92)',
-            border: '2px solid var(--border)',
-            borderRadius: 8,
-            color: 'var(--bg)',
-            fontSize: 11,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
+            margin: 0,
           }}
         >
-          <span
-            style={{
-              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-              color: 'inherit',
-              opacity: 1,
-            }}
-          >
-            {toast}
-          </span>
+          <span>{toast}</span>
           <button
             type="button"
             onClick={() => data.setTouchFeedback(null)}
             aria-label="Dismiss"
-            className="button-brick"
-            style={{
-              padding: '2px 6px',
-              borderRadius: 8,
-              border: '1px solid var(--border)',
-              background: 'transparent',
-              color: 'inherit',
-              fontSize: 11,
-              lineHeight: 1,
-            }}
+            className="sb-notice__close"
           >
-            {'\u00D7'}
+            {'×'}
           </button>
         </div>
       )}
-    </div>
+    </ScreenFrame>
   );
 };
 

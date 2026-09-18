@@ -78,7 +78,7 @@
     .nav-icon-svg{width:24px;height:24px;transition:all .15s ease-in-out;opacity:.9;filter:brightness(0) invert(1)}
     .screen-nav-icon[data-nav="wallet"] .nav-icon-svg{width:26px;height:26px}
     .screen-nav-icon:hover .nav-icon-svg{opacity:1;transform:scale(1.1)}
-    #dsm-app-root{width:100%;height:100%;position:relative;z-index:3;background-color:var(--bg);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;max-width:100%;box-sizing:border-box;overscroll-behavior-y:contain;padding:20px;text-align:center}
+    #dsm-app-root{width:100%;height:100%;position:relative;z-index:3;background-color:var(--bg);display:flex;flex-direction:column;overflow:hidden;max-width:100%;box-sizing:border-box;overscroll-behavior-y:contain;padding:0;text-align:left}
     .scanlines{position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(to bottom,transparent,transparent 50%,rgba(0,0,0,.15) 50%,rgba(0,0,0,.15));background-size:100% 2px;z-index:12;pointer-events:none;opacity:.8;mix-blend-mode:multiply}
     .screen:has(.qr-code-above-scanlines) .scanlines{z-index:1!important}
     .qr-code-above-scanlines{position:fixed!important;z-index:99999!important}
@@ -419,7 +419,7 @@
     .select:active div,.start:active div{transform:translateY(1px) scale(.95);box-shadow:none}
     .select-button-label,.start-button-label{position:absolute;font-size:9px !important;font-weight:700 !important;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace !important;color:var(--shell-label-color, var(--accent-yellow)) !important;text-shadow:0 1px 2px rgba(0,0,0,.8);pointer-events:none;z-index:62;width:55px;text-align:center;left:50%;transform:translateX(-50%);letter-spacing:1px}
     .start-button-label{top:calc(50% - 38px)}.select-button-label{top:calc(50% - 3px)}
-    .dsm-content{color:var(--text-dark);font-size:12px;line-height:1.8;display:flex;flex-direction:column;align-items:center;padding-top:40px}
+    .dsm-content{color:var(--text-dark);font-size:12px;line-height:1.8;display:flex;flex-direction:column;align-items:center;width:100%;box-sizing:border-box;padding:40px 20px 0;text-align:center;flex:0 0 auto}
     .dsm-logo-placeholder{width:200px;height:100px;background:transparent;border:none;border-radius:8px;display:flex;align-items:center;justify-content:center;margin-bottom:30px;font-size:10px;color:var(--text-disabled)}
     .dsm-menu{display:flex;flex-direction:column;gap:10px;margin-top:20px;width:100%;max-width:300px}
     .dsm-menu-item{background:transparent;border:2px solid var(--text-dark);padding:12px;color:var(--text-dark);font-size:10px;cursor:pointer;transition:all .2s;position:relative}

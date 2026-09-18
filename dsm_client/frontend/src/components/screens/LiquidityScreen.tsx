@@ -22,7 +22,7 @@ import { decodeBase32Crockford } from '../../utils/textId';
 import { getAllBalances } from '../../dsm/wallet';
 import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
-import '../../styles/EnhancedWallet.css';
+import { Disclosure, Notice, ScreenFrame } from '../common/ScreenFrame';
 
 type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'closing' | 'created' | 'error';
 
@@ -302,7 +302,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       }
 
       setPhase('created');
-      setToast(`Vault created + published. id=${r.vaultIdBase32.slice(0, 12)}…`);
+      setToast(`Vault created and published. id=${r.vaultIdBase32.slice(0, 12)}\u2026`);
       setShowCreate(false);
       setTokenA('');
       setTokenB('');
@@ -316,218 +316,222 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     }
   }, [tokenA, tokenB, reserveA, reserveB, feeBps, refresh]);
 
+  const busy = phase === 'creating' || phase === 'publishing' || phase === 'republishing' || phase === 'closing';
+
   return (
-    <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
-      <div className="wallet-header">
-        <h2>Liquidity</h2>
-        <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
-          <button
-            type="button"
-            onClick={() => onNavigate?.('home')}
-            className="cancel-button"
-            style={{ fontSize: 11, padding: '4px 10px' }}
-          >
-            Back
-          </button>
-          <button
-            type="button"
-            onClick={() => void refresh()}
-            disabled={phase === 'loading' || phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
-            className="refresh-icon"
-            aria-label="Refresh"
-            title="Refresh"
-            style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 6, border: '1px solid var(--border)', borderRadius: 4, background: 'transparent' }}
-          >
-            <img src="images/icons/icon_refresh.svg" alt="Refresh" style={{ width: 16, height: 16, imageRendering: 'pixelated' }} />
-          </button>
-        </div>
-      </div>
+    <ScreenFrame
+      title="Liquidity"
+      onBack={() => onNavigate?.('home')}
+      actions={
+        <button
+          type="button"
+          onClick={() => void refresh()}
+          disabled={phase === 'loading' || busy}
+          className="sb-icon-btn"
+          aria-label="Refresh"
+          title="Refresh"
+        >
+          <img src="images/icons/icon_refresh.svg" alt="" />
+        </button>
+      }
+      banner={
+        <>
+          {error && <Notice kind="error" banner onClose={() => setError('')}>{error}</Notice>}
+          {toast && <Notice kind="success" banner onClose={() => setToast('')}>{toast}</Notice>}
+        </>
+      }
+    >
+      <p className="sb-hint">
+        A pool holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee; you can take everything back at any time.
+      </p>
 
-      {error && (
-        <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
-          {error}
-        </div>
-      )}
-
-      {toast && (
-        <div className="warning-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb),0.08)', border: '1px solid var(--border)', fontSize: 12 }} role="status" aria-live="polite">
-          {toast}
+      <div className="sb-section-title">My vaults ({vaults.length})</div>
+      {phase === 'loading' && <div className="sb-empty">Loading{'\u2026'}</div>}
+      {phase !== 'loading' && vaults.length === 0 && (
+        <div className="sb-empty">
+          No AMM vaults owned by this wallet.
+          <br />
+          Create one below to start earning fees on swaps.
         </div>
       )}
-
-      <div className="tab-content">
-        <h4 style={{ fontSize: 12, marginBottom: 8 }}>My vaults ({vaults.length})</h4>
-        {phase === 'loading' && <div style={{ fontSize: 11, opacity: 0.7 }}>Loading…</div>}
-        {phase !== 'loading' && vaults.length === 0 && (
-          <div className="empty-state">
-            <p>No AMM vaults owned by this wallet.</p>
-            <p style={{ fontSize: 10, opacity: 0.7 }}>Create one below to start earning fees on swaps.</p>
-          </div>
-        )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {vaults.map((v) => {
-            const isPublishing =
-              phase === 'republishing' && pendingPublishId === v.vaultIdBase32;
-            return (
-              <div key={v.vaultIdBase32} className="balance-card" style={{ padding: '8px 12px' }}>
-                <div className="balance-info">
-                  <span className="token-symbol">
-                    {v.tokenATicker} / {v.tokenBTicker}
-                  </span>
-                  <span className="balance-amount">fee {v.feeBps} bps</span>
-                </div>
-                <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
-                  reserves: {v.reserveA.toString()} / {v.reserveB.toString()}
-                </div>
-                {v.pendingUnapplied > 0n && (
-                  <div
-                    style={{ fontSize: 10, marginTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}
-                  >
-                    {/* Settled and final already — the reserves above are
-                        simply behind until the owner writes them down. */}
-                    <span>
-                      {v.pendingUnapplied.toString()} settled trade
-                      {v.pendingUnapplied === 1n ? '' : 's'} to reconcile
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => void handleReconcile(v)}
-                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
-                      className="cancel-button"
-                      style={{ fontSize: 10, padding: '2px 8px' }}
-                      title="Fold settlements traders have already completed into this vault's reserves"
-                    >
-                      {pendingPublishId === v.vaultIdBase32 ? 'Reconciling…' : 'Reconcile'}
-                    </button>
-                  </div>
-                )}
-                <div style={{ fontSize: 10, opacity: 0.7, marginTop: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                  <span>
-                    vault {v.vaultIdBase32.slice(0, 16)}… · {v.routingAdvertised ? `ad: ✓ seq=${v.advertisedStateNumber.toString()}` : 'ad: ✗ not published'}
-                    {v.publicationState !== 'published' && (
-                      // FUNDED IS NOT PUBLISHED. The wallet keeps replaying the
-                      // vault's frozen birth proofs on every sync until a quorum
-                      // of its storage set holds them; until then the vault is
-                      // not market-active and Publish is suppressed (Rust refuses
-                      // it too — the screen only reflects that).
-                      <span title="Birth proofs not yet at quorum on the vault's storage set — replayed on every sync">
-                        {' '}· publication pending
-                      </span>
-                    )}
-                  </span>
-                  {v.closed ? (
-                    // Terminal. The vault holds nothing and its id is single-use;
-                    // nothing here is actionable any more.
-                    <span title="This vault was closed: all liquidity was returned and its id cannot be reused">
-                      closed
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setConfirmClose(v)}
-                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing' || phase === 'closing'}
-                      className="cancel-button"
-                      style={{ fontSize: 10, padding: '2px 8px' }}
-                      title={
-                        v.pendingUnapplied > 0n
-                          ? 'Reconcile the settled trades first — a close must consume the vault\'s current state'
-                          : 'Withdraw ALL liquidity and retire this vault (irreversible)'
-                      }
-                    >
-                      {phase === 'closing' && pendingPublishId === v.vaultIdBase32 ? 'Closing…' : 'Withdraw all'}
-                    </button>
-                  )}
-                  {!v.closed && !v.routingAdvertised && v.publicationState === 'published' && v.unlockSpecDigest && v.unlockSpecKey && (
-                    // Hide the button for a vault whose persisted DLV-policy
-                    // digest is absent: it cannot be advertised, and the
-                    // owner re-creates it (the digest is derived at birth).
-                    <button
-                      type="button"
-                      onClick={() => void handleRepublish(v)}
-                      disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
-                      className="cancel-button"
-                      style={{ fontSize: 10, padding: '2px 8px' }}
-                      title="Republish routing advertisement so traders on other devices can discover this vault"
-                    >
-                      {isPublishing ? 'Publishing…' : 'Publish'}
-                    </button>
-                  )}
-                </div>
+      {vaults.map((v) => {
+        const isPublishing = phase === 'republishing' && pendingPublishId === v.vaultIdBase32;
+        const isClosing = phase === 'closing' && pendingPublishId === v.vaultIdBase32;
+        const canPublish = !v.closed && !v.routingAdvertised && v.publicationState === 'published' && Boolean(v.unlockSpecDigest) && Boolean(v.unlockSpecKey);
+        const status = v.closed
+          ? { label: 'Closed', cls: ' sb-tag--dim' }
+          : v.publicationState !== 'published'
+            ? { label: 'Publishing', cls: ' sb-tag--dim' }
+            : v.routingAdvertised
+              ? { label: 'Open', cls: ' sb-tag--solid' }
+              : { label: 'Not listed', cls: '' };
+        return (
+          <div key={v.vaultIdBase32} className="sb-card">
+            <div className="sb-row" style={{ padding: 0, borderBottom: 0 }}>
+              <div className="sb-row__main">
+                <div className="sb-row__title">{v.tokenATicker} / {v.tokenBTicker}</div>
+                <div className="sb-row__sub">Fee {(v.feeBps / 100).toFixed(2)}% per trade</div>
               </div>
-            );
-          })}
-        </div>
+              <span className={`sb-tag${status.cls}`}>{status.label}</span>
+            </div>
+            <div className="sb-kv" style={{ marginTop: 6 }}>
+              <span className="sb-kv__k">In the pool</span>
+              <span className="sb-kv__v">{v.reserveA.toString()} {v.tokenATicker} {'\u00B7'} {v.reserveB.toString()} {v.tokenBTicker}</span>
+            </div>
 
-        <div style={{ marginTop: 16 }}>
-          {!showCreate && (
-            <button
-              type="button"
-              onClick={() => setShowCreate(true)}
-              className="send-button button-brick"
-              disabled={phase === 'creating' || phase === 'publishing' || phase === 'republishing'}
-            >
-              + Create vault
-            </button>
-          )}
-        </div>
+            {v.pendingUnapplied > 0n && (
+              // Settled and final already — the reserves above are simply
+              // behind until the owner writes them down.
+              <div className="sb-notice" style={{ marginTop: 8 }}>
+                <span>
+                  {v.pendingUnapplied.toString()} settled trade
+                  {v.pendingUnapplied === 1n ? '' : 's'} to reconcile
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleReconcile(v)}
+                  disabled={busy}
+                  className="sb-btn sb-btn--small"
+                  title="Fold settlements traders have already completed into this vault's reserves"
+                >
+                  {phase === 'republishing' && pendingPublishId === v.vaultIdBase32 ? 'Reconciling\u2026' : 'Reconcile'}
+                </button>
+              </div>
+            )}
 
-        {showCreate && (
-          <div className="balance-section" style={{ marginTop: 16 }}>
-            <h4 style={{ fontSize: 12, marginBottom: 8 }}>New AMM vault</h4>
-            {/* The pair is SELECTED, never typed. The option's value is the
-                token's CPTA anchor — its identity — while the label is the
-                ticker, which is display only. Free text made the two the same
-                thing, and a ticker can name more than one token. */}
-            <div className="form-group">
-              <label htmlFor="liq-token-a">Token A</label>
-              <select id="liq-token-a" className="form-input" value={tokenA} onChange={(e) => setTokenA(e.target.value)}>
-                <option value="">select a held asset…</option>
-                {holdings.map((h) => (
+            {!v.closed && v.publicationState !== 'published' && (
+              // FUNDED IS NOT PUBLISHED. The wallet keeps replaying the vault's
+              // frozen birth proofs on every sync until a quorum of its storage
+              // set holds them; until then the vault is not market-active and
+              // Publish is suppressed (Rust refuses it too).
+              <p className="sb-hint sb-hint--tight">
+                Its proofs are still reaching the storage set. It goes live on its own; nothing to do yet.
+              </p>
+            )}
+            {!v.closed && v.publicationState === 'published' && !v.routingAdvertised && !canPublish && (
+              <p className="sb-hint sb-hint--tight">
+                Traders cannot discover this vault, and it cannot be re-advertised. Withdraw and create a new one.
+              </p>
+            )}
+
+            {(!v.closed || canPublish) && (
+              <div className="sb-actions" style={{ margin: '8px 0 0' }}>
+                {canPublish && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRepublish(v)}
+                    disabled={busy}
+                    className="sb-btn sb-btn--small sb-btn--primary"
+                    title="Republish routing advertisement so traders on other devices can discover this vault"
+                  >
+                    {isPublishing ? 'Publishing\u2026' : 'Publish'}
+                  </button>
+                )}
+                {!v.closed && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClose(v)}
+                    disabled={busy}
+                    className="sb-btn sb-btn--small"
+                    title={
+                      v.pendingUnapplied > 0n
+                        ? 'Reconcile the settled trades first — a close must consume the vault\'s current state'
+                        : 'Withdraw ALL liquidity and retire this vault (irreversible)'
+                    }
+                  >
+                    {isClosing ? 'Closing\u2026' : 'Withdraw all'}
+                  </button>
+                )}
+              </div>
+            )}
+
+            <Disclosure summary="Details" className="sb-details--plain">
+              <div className="sb-kv"><span className="sb-kv__k">Vault</span><span className="sb-kv__v sb-kv__v--mono">{v.vaultIdBase32}</span></div>
+              <div className="sb-kv"><span className="sb-kv__k">Fee</span><span className="sb-kv__v">fee {v.feeBps} bps</span></div>
+              <div className="sb-kv"><span className="sb-kv__k">Reserves</span><span className="sb-kv__v">reserves: {v.reserveA.toString()} / {v.reserveB.toString()}</span></div>
+              <div className="sb-kv"><span className="sb-kv__k">Routing ad</span><span className="sb-kv__v">{v.routingAdvertised ? `ad: \u2713 seq=${v.advertisedStateNumber.toString()}` : 'ad: \u2717 not published'}</span></div>
+              <div className="sb-kv"><span className="sb-kv__k">Publication</span><span className="sb-kv__v">{v.publicationState === 'published' ? 'published' : 'publication pending'}</span></div>
+              {v.closed && <p className="sb-hint sb-hint--tight">Closed: all liquidity was returned and this vault id cannot be reused.</p>}
+            </Disclosure>
+          </div>
+        );
+      })}
+
+      {!showCreate && (
+        <div className="sb-actions">
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="sb-btn sb-btn--primary"
+            disabled={busy}
+          >
+            + Create vault
+          </button>
+        </div>
+      )}
+
+      {showCreate && (
+        <div className="sb-card" style={{ marginTop: 4 }}>
+          <div className="sb-card__title">New pool</div>
+          <p className="sb-hint">
+            Pick two tokens you hold and how much of each to put in. The ratio sets the starting price.
+          </p>
+          {/* The pair is SELECTED, never typed. The option's value is the
+              token's CPTA anchor — its identity — while the label is the
+              ticker, which is display only. Free text made the two the same
+              thing, and a ticker can name more than one token. */}
+          <div className="sb-field">
+            <label htmlFor="liq-token-a">Token A</label>
+            <select id="liq-token-a" className="sb-input sb-input--small" value={tokenA} onChange={(e) => setTokenA(e.target.value)}>
+              <option value="">select a held asset…</option>
+              {holdings.map((h) => (
+                <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
+                  {h.ticker} {'\u00B7'} {h.anchorFingerprint}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="sb-field">
+            <label htmlFor="liq-reserve-a">Reserve A</label>
+            <input id="liq-reserve-a" type="number" min="0" className="sb-input sb-input--small sb-input--mono" value={reserveA} onChange={(e) => setReserveA(e.target.value)} placeholder="0" />
+            <p className="sb-hint sb-hint--tight">How much of token A goes into the pool, in base units.</p>
+          </div>
+          <div className="sb-field">
+            <label htmlFor="liq-token-b">Token B</label>
+            <select id="liq-token-b" className="sb-input sb-input--small" value={tokenB} onChange={(e) => setTokenB(e.target.value)}>
+              <option value="">select a held asset…</option>
+              {holdings
+                .filter((h) => h.policyAnchorB32 !== tokenA)
+                .map((h) => (
                   <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
-                    {h.ticker} · {h.anchorFingerprint}
+                    {h.ticker} {'\u00B7'} {h.anchorFingerprint}
                   </option>
                 ))}
-              </select>
-            </div>
-            <div className="form-group">
-              <label htmlFor="liq-token-b">Token B</label>
-              <select id="liq-token-b" className="form-input" value={tokenB} onChange={(e) => setTokenB(e.target.value)}>
-                <option value="">select a held asset…</option>
-                {holdings
-                  .filter((h) => h.policyAnchorB32 !== tokenA)
-                  .map((h) => (
-                    <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
-                      {h.ticker} · {h.anchorFingerprint}
-                    </option>
-                  ))}
-              </select>
-            </div>
-            <div className="form-group">
-              <label htmlFor="liq-reserve-a">Reserve A</label>
-              <input id="liq-reserve-a" type="number" min="0" className="form-input" value={reserveA} onChange={(e) => setReserveA(e.target.value)} placeholder="0" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="liq-reserve-b">Reserve B</label>
-              <input id="liq-reserve-b" type="number" min="0" className="form-input" value={reserveB} onChange={(e) => setReserveB(e.target.value)} placeholder="0" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="liq-fee">Fee (bps)</label>
-              <input id="liq-fee" type="number" min="0" max="9999" className="form-input" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
-            </div>
-            <div className="form-actions">
-              <button type="button" className="cancel-button" onClick={() => setShowCreate(false)} disabled={phase === 'creating' || phase === 'publishing'}>Cancel</button>
-              <button
-                type="button"
-                className="send-button button-brick"
-                onClick={() => setShowConfirm(true)}
-                disabled={!formValid || phase === 'creating' || phase === 'publishing'}
-              >
-                {phase === 'creating' ? 'Creating…' : phase === 'publishing' ? 'Publishing…' : 'Create'}
-              </button>
-            </div>
+            </select>
           </div>
-        )}
-      </div>
+          <div className="sb-field">
+            <label htmlFor="liq-reserve-b">Reserve B</label>
+            <input id="liq-reserve-b" type="number" min="0" className="sb-input sb-input--small sb-input--mono" value={reserveB} onChange={(e) => setReserveB(e.target.value)} placeholder="0" />
+            <p className="sb-hint sb-hint--tight">How much of token B goes into the pool, in base units.</p>
+          </div>
+          <div className="sb-field">
+            <label htmlFor="liq-fee">Fee (bps)</label>
+            <input id="liq-fee" type="number" min="0" max="9999" className="sb-input sb-input--small sb-input--mono" value={feeBps} onChange={(e) => setFeeBps(e.target.value)} />
+            <p className="sb-hint sb-hint--tight">Your cut of every trade. 30 bps is 0.30%.</p>
+          </div>
+          <div className="sb-actions" style={{ marginBottom: 0 }}>
+            <button type="button" className="sb-btn" onClick={() => setShowCreate(false)} disabled={phase === 'creating' || phase === 'publishing'}>Cancel</button>
+            <button
+              type="button"
+              className="sb-btn sb-btn--primary"
+              onClick={() => setShowConfirm(true)}
+              disabled={!formValid || phase === 'creating' || phase === 'publishing'}
+            >
+              {phase === 'creating' ? 'Creating\u2026' : phase === 'publishing' ? 'Publishing\u2026' : 'Create'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <ConfirmModal
         visible={showConfirm}
@@ -555,6 +559,6 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
         }}
         onCancel={() => setConfirmClose(null)}
       />
-    </div>
+    </ScreenFrame>
   );
 }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// SoFi hub — sub-menu reached from the home `SOFI` brick.  Keeps the
-// home brick set short by tucking the lower-frequency SoFi flows
-// (liquidity, mail) behind one extra tap.  Visual idiom matches the
-// home menu (same `dsm-menu` + `home-brick` CSS classes).
+// SoFi hub — sub-menu reached from the home `SOFI` brick. Keeps the home brick
+// set short by tucking the lower-frequency SoFi flows (liquidity, mail) behind
+// one extra tap. Each destination is one brick with a plain-language line.
 
 import React, { useCallback } from 'react';
+import { ScreenFrame } from '../common/ScreenFrame';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -13,6 +13,7 @@ interface Props {
 type Brick = {
   label: string;
   target: string;
+  glyph: string;
   description: string;
 };
 
@@ -20,17 +21,20 @@ const BRICKS: Brick[] = [
   {
     label: 'SWAP',
     target: 'swap',
-    description: 'Trade against published AMM vaults — picks best route, signs envelope, settles atomically.',
+    glyph: '⇄',
+    description: 'Trade one token for another at the pool price. You see the exact amount before you confirm.',
   },
   {
     label: 'LIQUIDITY',
     target: 'liquidity',
-    description: 'AMM vaults you own — reserves, fees, routing ad status, create new.',
+    glyph: '◎',
+    description: 'Put two tokens into a pool and earn a fee on every trade made against it.',
   },
   {
     label: 'MAIL',
     target: 'mail',
-    description: 'Posted-DLV inbox + compose to a Kyber public key.',
+    glyph: '✉',
+    description: 'Send tokens or a note to someone, even while they are offline. They claim it when they are back.',
   },
 ];
 
@@ -41,26 +45,15 @@ export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
   );
 
   return (
-    <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
-      <div className="wallet-header">
-        <h2>SoFi</h2>
-        <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
-          <button
-            type="button"
-            onClick={() => onNavigate?.('home')}
-            className="cancel-button"
-            style={{ fontSize: 11, padding: '4px 10px' }}
-          >
-            Back
-          </button>
-        </div>
-      </div>
-
-      <div className="dsm-menu" role="menu" aria-label="SoFi sub-menu">
+    <ScreenFrame title="SoFi" onBack={() => onNavigate?.('home')}>
+      <p className="sb-hint">
+        Sovereign finance: pools, trades and mail that settle directly between devices, with no exchange in the middle.
+      </p>
+      <div className="sb-menu" role="menu" aria-label="SoFi sub-menu">
         {BRICKS.map((brick) => (
           <div
             key={brick.target}
-            className="dsm-menu-item home-brick"
+            className="sb-menu__item"
             data-label={brick.label}
             role="menuitem"
             tabIndex={0}
@@ -71,20 +64,16 @@ export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
                 go(brick.target)();
               }
             }}
-            title={brick.description}
           >
-            <span className="brick-label visible">{brick.label}</span>
+            <span className="sb-menu__glyph" aria-hidden="true">{brick.glyph}</span>
+            <span className="sb-menu__text">
+              <span className="sb-menu__label">{brick.label}</span>
+              <span className="sb-menu__desc">{brick.description}</span>
+            </span>
+            <span className="sb-menu__chev" aria-hidden="true">{'›'}</span>
           </div>
         ))}
       </div>
-
-      <div style={{ marginTop: 12, padding: '0 12px', fontSize: 10, opacity: 0.6 }}>
-        {BRICKS.map((brick) => (
-          <div key={`hint-${brick.target}`} style={{ marginBottom: 4 }}>
-            <strong>{brick.label}</strong> · {brick.description}
-          </div>
-        ))}
-      </div>
-    </div>
+    </ScreenFrame>
   );
 }

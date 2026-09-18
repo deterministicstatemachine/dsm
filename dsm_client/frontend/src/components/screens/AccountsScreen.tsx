@@ -345,17 +345,16 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   return (
     <div className="dsm-content" style={{
       alignSelf: 'stretch',
-      width: 'calc(100% + 40px)',
-      minHeight: 'calc(100% + 20px)',
-      height: 'calc(100% + 20px)',
+      width: '100%',
+      minHeight: '100%',
+      height: '100%',
       boxSizing: 'border-box',
       padding: '0 8px',
-      margin: '-20px -20px 0',
+      margin: 0,
       // The container is a fixed height, so vertical overflow must scroll: an
       // expanded token card is taller than the screen and its MINT / BURN /
       // FORGET row sits below the fold. `hidden` made those controls
-      // unreachable. Horizontal stays hidden — the width deliberately bleeds
-      // 40px past the parent via the negative margins.
+      // unreachable.
       overflowX: 'hidden',
       overflowY: 'auto',
       background: 'linear-gradient(0deg, rgba(var(--text-rgb),0.08), rgba(var(--text-rgb),0.02)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.1) 0px, rgba(var(--text-rgb),0.1) 2px, transparent 2px, transparent 4px)',

@@ -5,6 +5,7 @@ import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
 import { TokenCoin } from '../../TokenCoin';
+import { Notice } from '../../common/ScreenFrame';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
@@ -170,57 +171,51 @@ function SendTabInner({
     setShowSendConfirm(true);
   }, []);
 
+  const coin = (() => {
+    const sym = (selectedSendBalance?.symbol || selectedSendBalance?.tokenId || sendForm.token || '').toLowerCase();
+    const isBtc = sym.includes('btc') || sym.includes('dbtc');
+    if (isBtc || sym === 'era' || !selectedSendBalance) {
+      return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'} />;
+    }
+    return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif} />;
+  })();
+
   return (
     <div className="send-tab">
-      <h3>Send Transaction</h3>
-      <div className="balance-section" style={{ marginBottom: 16 }}>
-        <h4 style={{ fontSize: 12, marginBottom: 8 }}>Available Balance</h4>
-        {!selectedSendBalance ? (
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-                <img src={eraGif} alt="ERA" className="era-gif small"/>
-                ERA
-              </span>
-              <span className="balance-amount">0</span>
-            </div>
-          </div>
+      <h3 className="sb-section-title">Send Transaction</h3>
+
+      <div className="sb-card" style={{ padding: '6px 10px' }}>
+        <div className="sb-kv" style={{ alignItems: 'center' }}>
+          <span className="sb-kv__k">Available</span>
+          <span className="sb-kv__v" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 13, fontWeight: 700 }}>
+            {coin}
+            {selectedSendBalance ? String(selectedSendBalance.balance ?? '0') : '0'} {selectedSendBalance?.symbol || selectedSendBalance?.tokenId || 'ERA'}
+          </span>
+        </div>
+      </div>
+
+      <div className="sb-field">
+        <span className="sb-label">How to send</span>
+        <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
+          <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
+          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
+        </div>
+        {txMode === 'offline' ? (
+          <Notice>
+            <strong>Offline needs Bluetooth.</strong> Both phones must be next to each other with Bluetooth on.
+          </Notice>
         ) : (
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-                {(() => {
-                  const sym = (selectedSendBalance.symbol || selectedSendBalance.tokenId || '').toLowerCase();
-                  const isBtc = sym.includes('btc') || sym.includes('dbtc');
-                  if (isBtc || sym === 'era') {
-                    return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
-                  }
-                  return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
-                })()}
-                {selectedSendBalance.symbol || selectedSendBalance.tokenId}
-              </span>
-              <span className="balance-amount">{String(selectedSendBalance.balance ?? '0')}</span>
-            </div>
-            {selectedSendBalance.usdValue && <div className="balance-usd">{selectedSendBalance.usdValue}</div>}
-          </div>
+          <p className="sb-hint sb-hint--tight">Goes through the storage nodes; the recipient does not need to be nearby.</p>
         )}
       </div>
-      <div className="mode-toggle" role="group" aria-label="Transaction mode">
-        <button type="button" className={`mode-button ${txMode === 'online' ? 'active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
-        <button type="button" className={`mode-button ${txMode === 'offline' ? 'active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
-      </div>
-      {txMode === 'offline' && (
-        <div className="bluetooth-warning" style={{ padding: '8px 12px', marginBottom: 12, fontSize: 10, border: '2px solid var(--border)' }}>
-          <strong>OFFLINE MODE REQUIRES BLUETOOTH</strong><br/>Both devices must be present and have Bluetooth enabled.
-        </div>
-      )}
+
       <form onSubmit={handleSubmit}>
-        <div className="form-group">
+        <div className="sb-field">
           <label htmlFor="recipient">Recipient Contact</label>
           {contacts.length === 0 ? (
-            <div className="empty-state"><p>No contacts found.</p><p>Add a contact on the Contacts screen to enable sending.</p></div>
+            <div className="sb-empty">No contacts yet. Add one on the Contacts screen to send.</div>
           ) : (
-            <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="form-input" required>
+            <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="sb-input" required>
               {/* An explicit empty option. Without it the select DISPLAYS the
                   first contact while the form holds no selection at all, which
                   on a send form reads as "this person is selected" when nobody
@@ -232,39 +227,55 @@ function SendTabInner({
             </select>
           )}
         </div>
-        <div className="form-group">
-          <label htmlFor="amount">{(() => {
-            const sym = (sendForm.token || '').toLowerCase();
-            const isBtc = sym.includes('btc') || sym.includes('dbtc');
-            if (isBtc || sym === 'era' || !selectedSendBalance) {
-              return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
-            }
-            return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
-          })()} Amount</label>
-          <div className="amount-input-group">
-            <input id="amount" type="number" step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'} className="form-input" required />
-            <select value={sendForm.token} onChange={(e) => setSendForm((p) => ({ ...p, token: e.target.value }))} className="token-selector">
+
+        <div className="sb-field">
+          <label htmlFor="amount">Amount</label>
+          <div className="sb-input-row">
+            <input
+              id="amount"
+              type="number"
+              step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'}
+              min="0"
+              value={sendForm.amount}
+              onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))}
+              placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'}
+              className="sb-input sb-input--mono"
+              required
+            />
+            <select
+              value={sendForm.token}
+              onChange={(e) => setSendForm((p) => ({ ...p, token: e.target.value }))}
+              className="sb-input"
+              style={{ flex: '0 0 auto', width: 'auto', maxWidth: 110 }}
+              aria-label="Token"
+            >
               {tokenOptions.map((b) => (
                 <option key={b.tokenId} value={b.tokenId}>{b.symbol || b.tokenId}</option>
               ))}
             </select>
           </div>
         </div>
-        <div className="form-group"><label htmlFor="note">Note (Optional)</label><input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="Transaction note" className="form-input" /></div>
-        <div className="form-actions">
-          <button type="button" onClick={onCancel} className="cancel-button">Cancel</button>
-          {/* The recipient, spelled out immediately above the action that
-              commits it. A device id is the only unambiguous name for who is
-              about to receive this, and it belongs where the decision is made
-              rather than several fields further up. */}
-          <div className="send-recipient-confirm" data-testid="send-recipient-confirm">
-            {selectedContact
-              ? `To: ${selectedContact.deviceId.slice(0, 8)}`
-              : 'Select a recipient'}
-          </div>
+
+        <div className="sb-field">
+          <label htmlFor="note">Note (optional)</label>
+          <input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="What is this for?" className="sb-input" />
+        </div>
+
+        {/* The recipient, spelled out immediately above the action that
+            commits it. A device id is the only unambiguous name for who is
+            about to receive this, and it belongs where the decision is made
+            rather than several fields further up. */}
+        <div className="send-recipient-confirm sb-hint sb-hint--tight sb-mono" data-testid="send-recipient-confirm">
+          {selectedContact
+            ? `To: ${selectedContact.deviceId.slice(0, 8)}`
+            : 'Select a recipient'}
+        </div>
+
+        <div className="sb-actions">
+          <button type="button" onClick={onCancel} className="sb-btn">Cancel</button>
           <button
             type="submit"
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={!sendForm.selectedContactKey || contacts.length === 0 || sendingTx}
           >
             {sendingTx ? 'Sending…' : 'Send'}

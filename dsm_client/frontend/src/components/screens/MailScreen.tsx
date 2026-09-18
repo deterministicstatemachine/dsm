@@ -21,7 +21,7 @@ import {
 import { createPostedDlv } from '../../dsm/dlv';
 import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
-import '../../styles/EnhancedWallet.css';
+import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 
 type RowStatus = 'pending' | 'syncing' | 'mirrored' | 'claiming' | 'claimed' | 'error';
 type RowState = { status: RowStatus; detail?: string };
@@ -183,153 +183,119 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
   }, [recipientPk, policyAnchor, content, tokenId, amount]);
 
   return (
-    <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
-      <div className="wallet-header">
-        <h2>Mail</h2>
-        <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
-          <button
-            type="button"
-            onClick={() => onNavigate?.('home')}
-            className="cancel-button"
-            style={{ fontSize: 11, padding: '4px 10px' }}
-          >
-            Back
-          </button>
-          {tab === 'inbox' && (
+    <ScreenFrame
+      title="Mail"
+      onBack={() => onNavigate?.('home')}
+      actions={tab === 'inbox' ? (
+        <button
+          type="button"
+          onClick={() => void refreshInbox()}
+          disabled={inboxBusy}
+          className="sb-icon-btn"
+          aria-label="Refresh inbox"
+          title="Refresh"
+        >
+          <img src="images/icons/icon_refresh.svg" alt="" />
+        </button>
+      ) : undefined}
+      tabs={<ScreenTabs tabs={[{ id: 'inbox', label: 'Inbox' }, { id: 'compose', label: 'Compose' }] as const} active={tab} onChange={setTab} ariaLabel="Mail sections" />}
+      banner={
+        <>
+          {/* Cross-tab send banners — keep send feedback visible after the
+           * post-send tab switch so the user always gets confirmation. */}
+          {sendError && <Notice kind="error" banner onClose={() => setSendError('')}>{sendError}</Notice>}
+          {sendStatus && !sendError && <Notice kind="success" banner onClose={() => setSendStatus('')}>{sendStatus}</Notice>}
+        </>
+      }
+    >
+      {tab === 'inbox' && (
+        <>
+          <p className="sb-hint">
+            Tokens and notes sent to you are held for you on the storage nodes until you claim them.
+          </p>
+          {inboxError && <Notice kind="error" onClose={() => setInboxError('')}>{inboxError}</Notice>}
+          {inboxStatus && !inboxError && <Notice>{inboxStatus}</Notice>}
+          <div className="sb-actions" style={{ marginTop: 0 }}>
+            <button type="button" className="sb-btn sb-btn--primary" onClick={() => void handleSyncAll()} disabled={inboxBusy || pending.length === 0}>
+              {inboxBusy ? 'Syncing\u2026' : 'Sync all'}
+            </button>
+          </div>
+          {pending.length === 0 && !inboxBusy && (
+            <div className="sb-empty">
+              No pending posted DLVs.
+              <br />
+              Tap refresh to check the storage nodes.
+            </div>
+          )}
+          {pending.map((v) => {
+            const st = rowState[v.dlvIdBase32]?.status ?? 'pending';
+            const detail = rowState[v.dlvIdBase32]?.detail;
+            const claimable = st === 'mirrored';
+            return (
+              <div key={v.dlvIdBase32} className="sb-card">
+                <div className="sb-row" style={{ padding: 0, borderBottom: 0 }}>
+                  <div className="sb-row__main">
+                    <div className="sb-row__title sb-mono">{v.dlvIdBase32.slice(0, 16)}{'\u2026'}</div>
+                    <div className="sb-row__sub">from {v.creatorPublicKeyBase32.slice(0, 16)}{'\u2026'}</div>
+                  </div>
+                  <span className={`sb-tag${st === 'claimed' ? ' sb-tag--solid' : st === 'error' ? ' sb-tag--dim' : ''}`} data-row-status={st}>{st}</span>
+                </div>
+                {detail && <p className="sb-hint sb-hint--tight">{detail}</p>}
+                <div className="sb-actions" style={{ margin: '8px 0 0' }}>
+                  <button
+                    type="button"
+                    className={`sb-btn sb-btn--small${claimable ? ' sb-btn--primary' : ''}`}
+                    disabled={!claimable}
+                    onClick={() => void handleClaim(v.dlvIdBase32)}
+                  >
+                    {st === 'claiming' ? 'Claiming\u2026' : st === 'claimed' ? 'Claimed \u2713' : st === 'pending' ? 'Sync to claim' : 'Claim'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {tab === 'compose' && (
+        <>
+          <p className="sb-hint">
+            Posts tokens or a note to someone&apos;s key. They do not need to be online; it waits for them on the storage nodes.
+          </p>
+          <div className="sb-field">
+            <label htmlFor="mail-recipient">Recipient public key</label>
+            <textarea id="mail-recipient" className="sb-input sb-input--mono" rows={3} value={recipientPk} onChange={(e) => setRecipientPk(e.target.value)} placeholder="Paste their Kyber public key (Base32)" />
+          </div>
+          <div className="sb-field">
+            <label htmlFor="mail-policy">Policy anchor</label>
+            <textarea id="mail-policy" className="sb-input sb-input--mono" rows={2} value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="52-character Base32 anchor" />
+            <p className="sb-hint sb-hint--tight">The release policy the mail is locked under. Copy it from the token&apos;s card under Tokens.</p>
+          </div>
+          <div className="sb-field">
+            <label htmlFor="mail-token">Token (optional)</label>
+            <input id="mail-token" type="text" className="sb-input" value={tokenId} onChange={(e) => setTokenId(e.target.value)} placeholder="e.g. ERA — leave empty for a note only" />
+          </div>
+          <div className="sb-field">
+            <label htmlFor="mail-amount">Amount (optional)</label>
+            <input id="mail-amount" type="number" min="0" className="sb-input sb-input--mono" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
+          </div>
+          <div className="sb-field">
+            <label htmlFor="mail-content">Content</label>
+            <textarea id="mail-content" className="sb-input" rows={3} value={content} onChange={(e) => setContent(e.target.value)} placeholder="Message" />
+          </div>
+          <div className="sb-actions">
+            <button type="button" className="sb-btn" onClick={() => setTab('inbox')} disabled={sendPhase === 'sending'}>Cancel</button>
             <button
               type="button"
-              onClick={() => void refreshInbox()}
-              disabled={inboxBusy}
-              className="refresh-icon"
-              aria-label="Refresh inbox"
-              title="Refresh"
-              style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 6, border: '1px solid var(--border)', borderRadius: 4, background: 'transparent' }}
+              className="sb-btn sb-btn--primary"
+              onClick={() => setShowSendConfirm(true)}
+              disabled={!composeValid || sendPhase === 'sending'}
             >
-              <img src="images/icons/icon_refresh.svg" alt="Refresh" style={{ width: 16, height: 16, imageRendering: 'pixelated' }} />
+              {sendPhase === 'sending' ? 'Sending\u2026' : 'Send'}
             </button>
-          )}
-        </div>
-      </div>
-
-      {/* Cross-tab send banners — keep send feedback visible after the
-       * post-send tab switch so the user always gets confirmation. */}
-      {sendError && (
-        <div className="error-banner" style={{ padding: '8px 12px', margin: '0 0 8px', background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
-          {sendError}
-        </div>
+          </div>
+        </>
       )}
-      {sendStatus && !sendError && (
-        <div className="warning-banner" style={{ padding: '8px 12px', margin: '0 0 8px', background: 'rgba(var(--text-rgb),0.08)', border: '1px solid var(--border)', fontSize: 12 }} role="status" aria-live="polite">
-          {sendStatus}
-        </div>
-      )}
-
-      <div className="tab-navigation">
-        {(['inbox', 'compose'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`tab-button ${tab === t ? 'active' : ''}`}
-          >
-            {t === 'inbox' ? 'Inbox' : 'Compose'}
-          </button>
-        ))}
-      </div>
-
-      <div className="tab-content">
-        {tab === 'inbox' && (
-          <>
-            {inboxError && (
-              <div className="error-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb), 0.12)', border: '2px dashed var(--border)', fontSize: 12 }}>
-                {inboxError}
-              </div>
-            )}
-            {inboxStatus && !inboxError && (
-              <div className="warning-banner" style={{ padding: '8px 12px', marginBottom: 8, background: 'rgba(var(--text-rgb),0.08)', border: '1px solid var(--border)', fontSize: 12 }} role="status" aria-live="polite">
-                {inboxStatus}
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-              <button type="button" className="send-button button-brick" onClick={() => void handleSyncAll()} disabled={inboxBusy || pending.length === 0}>
-                {inboxBusy ? 'Syncing…' : 'Sync all'}
-              </button>
-            </div>
-            {pending.length === 0 && !inboxBusy && (
-              <div className="empty-state">
-                <p>No pending posted DLVs.</p>
-                <p style={{ fontSize: 10, opacity: 0.7 }}>Tap Refresh to check storage nodes.</p>
-              </div>
-            )}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {pending.map((v) => {
-                const st = rowState[v.dlvIdBase32]?.status ?? 'pending';
-                const detail = rowState[v.dlvIdBase32]?.detail;
-                const claimable = st === 'mirrored';
-                return (
-                  <div key={v.dlvIdBase32} className="balance-card" style={{ padding: '8px 12px' }}>
-                    <div className="balance-info">
-                      <span className="token-symbol">{v.dlvIdBase32.slice(0, 16)}…</span>
-                      <span className="balance-amount" data-row-status={st}>{st}</span>
-                    </div>
-                    <div style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>
-                      from {v.creatorPublicKeyBase32.slice(0, 16)}…
-                    </div>
-                    {detail && (
-                      <div style={{ fontSize: 10, color: 'var(--error, #c00)', marginTop: 4 }}>{detail}</div>
-                    )}
-                    <div style={{ marginTop: 6 }}>
-                      <button
-                        type="button"
-                        className="send-button button-brick"
-                        disabled={!claimable}
-                        onClick={() => void handleClaim(v.dlvIdBase32)}
-                      >
-                        {st === 'claiming' ? 'Claiming…' : st === 'claimed' ? 'Claimed ✓' : 'Claim'}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-
-        {tab === 'compose' && (
-          <>
-            <div className="form-group">
-              <label htmlFor="mail-recipient">Recipient (Kyber-1024 pk, Base32 Crockford)</label>
-              <textarea id="mail-recipient" className="form-input" rows={3} value={recipientPk} onChange={(e) => setRecipientPk(e.target.value)} placeholder="paste 2500-char Base32" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="mail-policy">Policy anchor (32 bytes Base32 Crockford)</label>
-              <textarea id="mail-policy" className="form-input" rows={2} value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="paste 52-char Base32" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="mail-token">Token id (optional)</label>
-              <input id="mail-token" type="text" className="form-input" value={tokenId} onChange={(e) => setTokenId(e.target.value)} placeholder="e.g. ERA — leave empty for content-only" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="mail-amount">Amount (optional)</label>
-              <input id="mail-amount" type="number" min="0" className="form-input" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
-            </div>
-            <div className="form-group">
-              <label htmlFor="mail-content">Content</label>
-              <textarea id="mail-content" className="form-input" rows={3} value={content} onChange={(e) => setContent(e.target.value)} placeholder="Message" />
-            </div>
-            <div className="form-actions">
-              <button type="button" className="cancel-button" onClick={() => setTab('inbox')} disabled={sendPhase === 'sending'}>Cancel</button>
-              <button
-                type="button"
-                className="send-button button-brick"
-                onClick={() => setShowSendConfirm(true)}
-                disabled={!composeValid || sendPhase === 'sending'}
-              >
-                {sendPhase === 'sending' ? 'Sending…' : 'Send'}
-              </button>
-            </div>
-          </>
-        )}
-      </div>
 
       <ConfirmModal
         visible={showSendConfirm}
@@ -338,6 +304,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
         onConfirm={() => { setShowSendConfirm(false); void handleSend(); }}
         onCancel={() => setShowSendConfirm(false)}
       />
-    </div>
+    </ScreenFrame>
   );
 }

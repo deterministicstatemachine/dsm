@@ -308,123 +308,126 @@ function SwapTabInner({
     }
   }, [quoted, deviceB32, loadWalletData, onSwapComplete, setError]);
 
+  /** A held token's ticker for an anchor, or the anchor's first characters. Display only. */
+  const nameFor = (anchor: string): string => {
+    const hit = tokenSuggestions.find((t) => t.anchor === anchor.trim());
+    if (hit && hit.ticker) return hit.ticker;
+    const a = anchor.trim();
+    return a.length > 12 ? `${a.slice(0, 8)}\u2026` : a || '?';
+  };
+
   return (
-    <div>
+    <div className="swap-tab">
       <datalist id="swap-token-suggestions">
         {tokenSuggestions.map((t) => (
           <option key={t.anchor} value={t.anchor} label={t.ticker} />
         ))}
       </datalist>
 
-      <div className="form-group">
-        <label htmlFor="swap-from">From</label>
-        <div className="amount-input-group">
-          <input
-            id="swap-amount"
-            type="number"
-            min="0"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="0"
-            className="form-input"
-            aria-label="Input amount"
-          />
-          <input
-            id="swap-from"
-            type="text"
-            value={inputToken}
-            onChange={(e) => setInputToken(e.target.value)}
-            placeholder="From token"
-            list="swap-token-suggestions"
-            autoCapitalize="characters"
-            autoComplete="off"
-            className="form-input"
-            style={{ flex: 1, marginLeft: 8 }}
-            aria-label="Input token id"
-          />
-        </div>
+      <h3 className="sb-section-title">Swap</h3>
+      <p className="sb-hint">
+        Trades one token for another through a liquidity pool. You see the exact amount you will get before you confirm; if the pool moves first, the trade is refused and you can quote again.
+      </p>
+
+      <div className="sb-field">
+        <label htmlFor="swap-amount">You pay</label>
+        <input
+          id="swap-amount"
+          type="number"
+          min="0"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="0"
+          className="sb-input sb-input--mono"
+          aria-label="Input amount"
+        />
+        <input
+          id="swap-from"
+          type="text"
+          value={inputToken}
+          onChange={(e) => setInputToken(e.target.value)}
+          placeholder="Token anchor — pick one you hold"
+          list="swap-token-suggestions"
+          autoCapitalize="characters"
+          autoComplete="off"
+          className="sb-input sb-input--mono"
+          style={{ marginTop: 6 }}
+          aria-label="Input token id"
+        />
       </div>
 
-      <div className="form-group">
-        <label htmlFor="swap-to">To</label>
+      <div className="sb-field">
+        <label htmlFor="swap-to">You get</label>
         <input
           id="swap-to"
           type="text"
           value={outputToken}
           onChange={(e) => setOutputToken(e.target.value)}
-          placeholder="To token"
+          placeholder="Token anchor"
           list="swap-token-suggestions"
           autoCapitalize="characters"
           autoComplete="off"
-          className="form-input"
+          className="sb-input sb-input--mono"
           aria-label="Output token id"
         />
+        <p className="sb-hint sb-hint--tight">
+          Tokens are named by their anchor, not their ticker: two tokens can share a ticker. Copy it from the token&apos;s card under Tokens.
+        </p>
       </div>
 
       {quoted && (
-        <div className="balance-section" style={{ marginBottom: 12 }}>
-          <h4 style={{ fontSize: 12, marginBottom: 8 }}>Route</h4>
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol">
-                {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} bound
-              </span>
-              <span className="balance-amount">
-                {quoted.expectedOut.toString()} {outputToken.trim()}
-              </span>
-            </div>
-            <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
-              exact output — bound to current vault state
-            </div>
-            <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
-              {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} ·{' '}
-              {quoted.hops.map((h) => `vault ${h.vaultIdBase32.slice(0, 12)}…`).join(' → ')}
-            </div>
+        <div className="sb-card sb-card--hero">
+          <div className="sb-hero__label">You get exactly</div>
+          <div className="sb-hero__value" style={{ fontSize: 15 }}>
+            {quoted.expectedOut.toString()} {outputToken.trim()}
+          </div>
+          <div className="sb-hero__sub">
+            {nameFor(inputToken)} {'\u2192'} {nameFor(outputToken)} {'\u00B7'} exact output {'\u2014'} bound to current vault state
+          </div>
+          <div className="sb-hero__row">
+            <span>{quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} bound</span>
+            <b className="sb-mono" style={{ fontSize: 9 }}>
+              {quoted.hops.map((h) => `${h.vaultIdBase32.slice(0, 10)}\u2026`).join(' \u2192 ')}
+            </b>
           </div>
         </div>
       )}
 
       {phase !== 'idle' && phase !== 'quoted' && (
         <div
-          className="warning-banner"
-          style={{
-            padding: '8px 12px',
-            marginBottom: 12,
-            fontSize: 11,
-            border: '1px solid var(--border)',
-            background: phase === 'error' ? 'rgba(var(--text-rgb),0.12)' : 'rgba(var(--text-rgb),0.08)',
-            borderStyle: phase === 'error' ? 'dashed' : 'solid',
-          }}
+          className={`sb-notice${phase === 'error' ? ' sb-notice--error' : ''}`}
           role="status"
           aria-live="polite"
         >
-          <strong>{phaseLabel(phase)}</strong>
-          {phaseDetail && <div style={{ marginTop: 4, opacity: 0.85 }}>{phaseDetail}</div>}
+          <span>
+            <strong>{phaseLabel(phase)}</strong>
+            {phaseDetail && <div style={{ marginTop: 4, opacity: 0.85 }}>{phaseDetail}</div>}
+          </span>
         </div>
       )}
 
-      <div className="form-actions">
-        <button type="button" onClick={onCancel} className="cancel-button" disabled={busy}>
+      <div className="sb-actions">
+        <button type="button" onClick={onCancel} className="sb-btn" disabled={busy}>
           Cancel
         </button>
         {!quoted && (
           <button
             type="button"
             onClick={() => void handleQuote()}
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={!canQuote || busy}
           >
-            {phase === 'discovering' ? 'Quoting…' : 'Quote'}
+            {phase === 'discovering' ? 'Quoting\u2026' : 'Quote'}
           </button>
         )}
         {quoted && (
           <button
             type="button"
             onClick={() => setShowConfirm(true)}
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={busy}
           >
-            {busy ? 'Settling…' : 'Swap'}
+            {busy ? 'Settling\u2026' : 'Swap'}
           </button>
         )}
       </div>
@@ -432,7 +435,7 @@ function SwapTabInner({
       <ConfirmModal
         visible={showConfirm}
         title="Confirm swap"
-        message={`Swap ${amount} ${inputToken.trim()} for exactly ${quoted?.expectedOut.toString() ?? 0} ${outputToken.trim()} via ${quoted?.hops.length ?? 0} hop${(quoted?.hops.length ?? 0) === 1 ? '' : 's'}?`}
+        message={`Swap ${amount} ${nameFor(inputToken)} for exactly ${quoted?.expectedOut.toString() ?? 0} ${nameFor(outputToken)} via ${quoted?.hops.length ?? 0} hop${(quoted?.hops.length ?? 0) === 1 ? '' : 's'}?`}
         onConfirm={() => { setShowConfirm(false); void handleExecute(); }}
         onCancel={() => setShowConfirm(false)}
       />

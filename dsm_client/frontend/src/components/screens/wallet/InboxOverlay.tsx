@@ -105,19 +105,19 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
       {/* ---- Header button ---- */}
       <button
         onClick={handleOpen}
-        className={`b0x-button${badgeCount > 0 ? ' has-items' : ''}`}
+        type="button"
+        className={`sb-icon-btn b0x-button${badgeCount > 0 ? ' has-items' : ''}`}
         title={badgeCount > 0 ? `Inbox — ${badgeCount} new` : 'Inbox'}
         aria-label={badgeCount > 0 ? `Inbox (${badgeCount} new)` : 'Inbox'}
-        style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 8, border: '1px solid var(--border)', borderRadius: 4, background: 'transparent' }}
       >
-        <img src="images/icons/Mail-DSM-b0x.svg" alt="Inbox" style={{ width: 24, height: 24, imageRendering: 'pixelated' }} />
+        <img src="images/icons/Mail-DSM-b0x.svg" alt="" style={{ width: 20, height: 20 }} />
       </button>
 
       {/* ---- Overlay ---- */}
       {open && (
         <>
           <div onClick={handleClose} style={{ position: 'absolute', inset: 0, zIndex: 9997, background: 'transparent' }} />
-          <div role="dialog" aria-label="Inbox" style={{ position: 'absolute', top: headerHeight + 8, right: 12, width: 320, maxWidth: 'calc(100% - 24px)', maxHeight: 'calc(100% - 24px)', overflowY: 'auto', overflowX: 'hidden', zIndex: 9998, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: 12, boxSizing: 'border-box' }}>
+          <div role="dialog" aria-label="Inbox" style={{ position: 'absolute', top: headerHeight + 8, right: 8, width: 300, maxWidth: 'calc(100% - 16px)', maxHeight: 'calc(100% - 24px)', overflowY: 'auto', overflowX: 'hidden', zIndex: 9998, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: 12, boxSizing: 'border-box' }}>
 
             {/* Header row */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', borderBottom: '2px solid var(--border)' }}>

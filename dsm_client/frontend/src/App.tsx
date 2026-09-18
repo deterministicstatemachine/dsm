@@ -29,6 +29,7 @@ import { WalletProvider } from './contexts/WalletContext';
 import { ContactsProvider } from './contexts/ContactsContext';
 import { BridgeProvider } from './bridge/BridgeProvider';
 import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
+import './styles/screen.css';
 
 export default function App() {
   const runtime = useAppRuntimeStore();

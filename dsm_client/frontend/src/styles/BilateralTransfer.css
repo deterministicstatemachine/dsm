@@ -116,6 +116,7 @@
 .bilateral-transfer-message {
   margin-top: 10px;
   padding: 10px;
+  text-align: center;
   background: var(--bg, #9bbc0f);
   border: 2px dashed var(--border, #306230);
   border-radius: 6px;
