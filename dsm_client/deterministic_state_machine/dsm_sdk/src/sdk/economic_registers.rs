@@ -543,8 +543,8 @@ pub(crate) fn resolve_peer_with_cache<F: dsm::economic::peer_lineage::PeerEviden
     let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
         peer_genesis,
         peer_devid,
-        result.validated_root.economic_position(),
-        &result.validated_root.economic_root(),
+        result.validated_root().economic_position(),
+        &result.validated_root().economic_root(),
     );
     Ok(result)
 }
@@ -573,8 +573,8 @@ pub(crate) fn resolve_peer_with_cache_disabled<
     let _ = crate::storage::client_db::economic_lineage::record_peer_validated(
         peer_genesis,
         peer_devid,
-        result.validated_root.economic_position(),
-        &result.validated_root.economic_root(),
+        result.validated_root().economic_position(),
+        &result.validated_root().economic_root(),
     );
     Ok(result)
 }
@@ -927,7 +927,7 @@ pub(crate) fn verified_owner_reserve_leaves(
                  {economic_position} does not validate: {e:?}"
             ))
         })?;
-    let root = owner.validated_root.economic_root();
+    let root = owner.validated_root().economic_root();
     let artifact = tokio::task::block_in_place(|| {
         resolver.runtime.block_on(fetch_verified_economic_proof(
             proof_addr,

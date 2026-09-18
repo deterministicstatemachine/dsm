@@ -2185,14 +2185,18 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;
 
     // ── Wire ↔ validated-operation binding ─────────────────────────────────
-    if peer.verified_operation.with_cleared_signature().to_bytes() != wire.canonical_operation_bytes
+    if peer
+        .verified_operation()
+        .with_cleared_signature()
+        .to_bytes()
+        != wire.canonical_operation_bytes
     {
         return Err(terminal(
             "the wire's canonical operation bytes are not the validated debit operation"
                 .to_string(),
         ));
     }
-    if evidence_receipt.child_tip != peer.c_dsm_plus {
+    if evidence_receipt.child_tip != *peer.c_dsm_plus() {
         return Err(terminal(
             "the A-side receipt is for a different bilateral step than the validated debit \
              successor"

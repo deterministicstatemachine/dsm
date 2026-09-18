@@ -434,23 +434,22 @@ fn peer_vpt(verified_operation: Operation, debit_amount: u64) -> ValidatedPeerTr
         Vec::new(),
     )
     .unwrap();
-    ValidatedPeerTransition {
-        peer_genesis: G_SENDER,
-        peer_devid: DEV_SENDER,
-        validated_root:
-            dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                    economic_position: 4,
-                    economic_root: tree.root(),
-                },
-            )
-            .expect("an ordinary admitted position"),
+    ValidatedPeerTransition::single_root_for_test(
+        G_SENDER,
+        DEV_SENDER,
+        dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: 4,
+                economic_root: tree.root(),
+            },
+        )
+        .expect("an ordinary admitted position"),
         witness,
-        proven_ak: vec![0xAA; 64],
-        c_dsm_plus: [0xC5; 32],
-        embedded_parent: [0xC1; 32],
+        vec![0xAA; 64],
+        [0xC5; 32],
+        [0xC1; 32],
         verified_operation,
-    }
+    )
 }
 
 /// The consuming recipient's witness: one credit funded by the peer debit.
