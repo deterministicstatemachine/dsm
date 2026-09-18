@@ -771,14 +771,14 @@ pub fn advance_validated(
                 crate::economic::write_set::WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
             ))
         }
+        // A SETUP and a CREATION are ordinary transitions that legitimately
+        // reach here now (P15-6, P15-12), and neither is a DLV transition: a
+        // setup writes one relationship leaf, a creation debits and records.
+        // Named rather than left to the catch-all so the answer is a decision.
         Some(
             crate::types::operations::Operation::SofiSetup { .. }
             | crate::types::operations::Operation::SofiVaultCreate { .. },
-        ) => {
-            return Err(EconomicValidationError::WriteSet(
-                crate::economic::write_set::WriteSetError::SofiInsertWriteSetNotSpecified,
-            ))
-        }
+        ) => SuccessorValidity::NoDlvTransition,
         _ => SuccessorValidity::NoDlvTransition,
     };
 

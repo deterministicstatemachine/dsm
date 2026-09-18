@@ -373,12 +373,16 @@ mod tests {
         let operation = Operation::SofiVaultCreate {
             genesis_preimage: vec![0x01, 0x02],
             creation: vec![0x03, 0x04],
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
         };
         let bytes = crate::core::state_machine::transition::operation_signing_bytes(&operation);
         let signed = Operation::SofiVaultCreate {
             genesis_preimage: vec![0x01, 0x02],
             creation: vec![0x03, 0x04],
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
             signature: sphincs_sign(&sk, &bytes).unwrap(),
         };
         assert_eq!(verify_operation(&signed, &pk), Ok(()));

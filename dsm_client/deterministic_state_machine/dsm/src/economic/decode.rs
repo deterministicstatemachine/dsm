@@ -296,6 +296,9 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
         class::SOFI_TRADER_RELATIONSHIP_LEAF => Ok(EconomicLeafState::Relationship(
             crate::sofi::wire::TraderRelationshipLeaf::at(c)?,
         )),
+        class::SOFI_VAULT_CREATION => Ok(EconomicLeafState::VaultCreation(
+            crate::sofi::wire::VaultCreation::at(c)?,
+        )),
         class::ECONOMIC_SETTLEMENT_RECEIPT_STATE => {
             c.envelope(
                 EconomicSettlementReceiptState::CLASS,

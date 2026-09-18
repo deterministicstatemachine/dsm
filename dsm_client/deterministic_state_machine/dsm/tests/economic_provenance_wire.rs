@@ -383,8 +383,14 @@ fn every_leaf_class_round_trips_through_the_decoder() {
             vault_id: VAULT,
             leaf: [0x60; 32],
         }),
+        EconomicLeafState::VaultCreation(dsm::sofi::wire::VaultCreation {
+            vault_id: VAULT,
+            genesis_root: [0x61; 32],
+            amount_a: 1_000,
+            amount_b: 2_000,
+        }),
     ];
-    let mut covered = [false; 6];
+    let mut covered = [false; 7];
     for state in &samples {
         let slot = match state {
             EconomicLeafState::Balance(_) => 0,
@@ -393,6 +399,7 @@ fn every_leaf_class_round_trips_through_the_decoder() {
             EconomicLeafState::ConsumedSource(_) => 3,
             EconomicLeafState::BundleAcceptance(_) => 4,
             EconomicLeafState::Relationship(_) => 5,
+            EconomicLeafState::VaultCreation(_) => 6,
         };
         covered[slot] = true;
         let bytes = state.encode().expect("encodable");

@@ -24,6 +24,8 @@ fn sofi_operations() -> Vec<Operation> {
         Operation::SofiVaultCreate {
             genesis_preimage: vec![0x5A, 0x00],
             creation: vec![0x5B, 0x00],
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
             signature: Vec::new(),
         },
         Operation::SofiFulfill {
@@ -251,6 +253,8 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
     let unsigned_create = Operation::SofiVaultCreate {
         genesis_preimage: vec![0x5A, 0x00],
         creation: vec![0x5B, 0x00],
+        funding_a_policy_commit: [0x5C; 32],
+        funding_b_policy_commit: [0x5D; 32],
         signature: Vec::new(),
     };
 

@@ -200,6 +200,8 @@ pub fn build_vault_create(
     let operation = Operation::SofiVaultCreate {
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
+        funding_a_policy_commit: [0x5C; 32],
+        funding_b_policy_commit: [0x5D; 32],
         signature: Vec::new(),
     };
     Ok(Produced {
@@ -856,6 +858,8 @@ mod tests {
         let signed = Operation::SofiVaultCreate {
             genesis_preimage: genesis_preimage.clone(),
             creation: creation.clone(),
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
             signature: sign(created.signs.bytes()),
         };
         assert_eq!(

@@ -306,6 +306,14 @@ pub enum EconomicLeafState {
     /// writes. The bytes are `sofi::wire`'s, so there is ONE encoding of this
     /// object and a second one cannot drift from it.
     Relationship(crate::sofi::wire::TraderRelationshipLeaf),
+    /// The owner's vault-CREATION record (P15-12), insert-only.
+    ///
+    /// It IS the wire object — one encoding, as with the relationship leaf —
+    /// so the record committed in `R_econ` and the record the operation
+    /// carries cannot drift. Insert-only: a vault is created once, and the
+    /// leaf is never rewritten, which is what makes its presence under a
+    /// validated root a proof that the creation happened on that lineage.
+    VaultCreation(crate::sofi::wire::VaultCreation),
 }
 
 impl EconomicLeafState {
@@ -319,6 +327,7 @@ impl EconomicLeafState {
             Self::ConsumedSource(_) => EconomicConsumedSourceState::CLASS,
             Self::BundleAcceptance(_) => EconomicBundleAcceptanceState::CLASS,
             Self::Relationship(_) => crate::ccb::class::SOFI_TRADER_RELATIONSHIP_LEAF,
+            Self::VaultCreation(_) => crate::ccb::class::SOFI_VAULT_CREATION,
         }
     }
 
@@ -331,6 +340,7 @@ impl EconomicLeafState {
             Self::ConsumedSource(s) => s.encode(),
             Self::BundleAcceptance(s) => s.encode(),
             Self::Relationship(s) => Ok(s.encode()),
+            Self::VaultCreation(s) => Ok(s.encode()),
         }
     }
 
@@ -359,7 +369,10 @@ impl EconomicLeafState {
             | Self::BundleAcceptance(_)
             // A relationship leaf is a CHAIN, not a quantity: advancing it
             // adds nothing spendable, so it needs no funding source.
-            | Self::Relationship(_) => None,
+            | Self::Relationship(_)
+            // A creation record is a RECORD: the funding it names was debited
+            // by the same write set, so the record itself credits nothing.
+            | Self::VaultCreation(_) => None,
         }
     }
 
@@ -382,6 +395,7 @@ impl EconomicLeafState {
             // the property that makes "exactly one per operation" enforceable.
             Self::BundleAcceptance(s) => (self.class(), vec![s.economic_operation_id]),
             Self::Relationship(s) => (self.class(), vec![s.vault_id]),
+            Self::VaultCreation(s) => (self.class(), vec![s.vault_id]),
         }
     }
 
@@ -405,6 +419,12 @@ impl EconomicLeafState {
             }
             Self::BundleAcceptance(s) => {
                 keys::bundle_acceptance_key(genesis, device_id, &s.economic_operation_id)
+            }
+            // The owner's own tree, scoped to the owner — `vault_id` already
+            // derives from `(G_o, DevID_o, p_create)`, and the key says so
+            // anyway because every economic key names the tree it lives in.
+            Self::VaultCreation(s) => {
+                crate::sofi::derive::vault_creation_key(genesis, device_id, &s.vault_id)
             }
         }
     }

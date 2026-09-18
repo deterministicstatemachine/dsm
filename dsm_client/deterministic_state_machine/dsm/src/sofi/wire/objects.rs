@@ -2040,15 +2040,22 @@ impl VaultCreation {
         out
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
+    /// Decode at a cursor, for a nested reader. The economic leaf decoder
+    /// needs this: a creation record is also an `R_econ` leaf (P15-12), and
+    /// the leaf carries these exact bytes rather than a second encoding.
+    pub(crate) fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         c.envelope(class::SOFI_VAULT_CREATION, SCHEMA_V1)?;
-        let v = Self {
+        Ok(Self {
             vault_id: c.digest32()?,
             genesis_root: c.digest32()?,
             amount_a: c.u64()?,
             amount_b: c.u64()?,
-        };
+        })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        let v = Self::at(&mut c)?;
         finish(&c, v)
     }
 }

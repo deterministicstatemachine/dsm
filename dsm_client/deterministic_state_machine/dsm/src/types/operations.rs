@@ -985,6 +985,21 @@ pub enum Operation {
         genesis_preimage: Vec<u8>,
         /// Canonical `VaultCreation` bytes (class `0x005B`).
         creation: Vec<u8>,
+        /// The two assets the funding is debited from, in canonical order
+        /// (`a < b`).
+        ///
+        /// SIGNED EXECUTION COORDINATES, not a second source of market truth.
+        /// `semantic_write_set` is pure — it cannot resolve
+        /// `VaultStateLeaf.market_policy` to a pair — so without these the
+        /// debit P15-12 requires cannot be derived from the operation at all,
+        /// and balances would move outside any declared write set. The same
+        /// precedent `DlvCreateFundedV2` already sets with its leg commits.
+        ///
+        /// The authority remains the market policy the vault state commits:
+        /// `genesis_accepted` resolves it by content address and refuses
+        /// unless these two equal the pair it decodes.
+        funding_a_policy_commit: [u8; 32],
+        funding_b_policy_commit: [u8; 32],
         /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
         /// is the ONE SoFi operation that signs those: `vault_id` and `R_0`
         /// are derivations of the preimage it carries, so it has no protocol
@@ -1387,11 +1402,15 @@ impl Operation {
             SofiVaultCreate {
                 genesis_preimage,
                 creation,
+                funding_a_policy_commit,
+                funding_b_policy_commit,
                 signature,
             } => {
                 put_u8(&mut out, 35);
                 put_bytes(&mut out, genesis_preimage);
                 put_bytes(&mut out, creation);
+                put_bytes(&mut out, funding_a_policy_commit);
+                put_bytes(&mut out, funding_b_policy_commit);
                 put_bytes(&mut out, signature);
             }
             SofiFulfill {
