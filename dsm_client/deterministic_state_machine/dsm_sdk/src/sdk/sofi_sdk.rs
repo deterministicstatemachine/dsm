@@ -46,6 +46,7 @@ use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
+use dsm::economic::lineage::ValidatedEconomicRoot;
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
@@ -82,6 +83,9 @@ pub enum BuildError {
     /// function of the setup id, so a second setup would reset a chain that
     /// has already advanced.
     SetupAlreadyExists,
+    /// The producer's tree is not the predecessor's root, so `R_T^setup`
+    /// computed from it would describe a mutation of some other state.
+    PreTreeIsNotThePredecessor,
 }
 
 impl core::fmt::Display for BuildError {
@@ -96,6 +100,11 @@ impl core::fmt::Display for BuildError {
                  ({reason:?}); it is not a trade, it is a way to strand one"
             ),
             Self::Genesis(e) => write!(f, "{e}"),
+            Self::PreTreeIsNotThePredecessor => write!(
+                f,
+                "the producer's economic tree is not the validated predecessor's root: \
+                 R_T^setup derived from it would describe a mutation of another state"
+            ),
             Self::SetupAlreadyExists => write!(
                 f,
                 "this identity already holds a relationship with that vault; h⁰ is the \
@@ -199,15 +208,25 @@ impl PrecommitDraft {
 /// yield.
 #[allow(clippy::too_many_arguments)]
 pub fn build_setup(
+    previous: &ValidatedEconomicRoot,
+    pre_tree: &EconomicSmt,
     genesis: D32,
     device_id: D32,
-    position: u64,
     vault_id: D32,
     claim_ref: D32,
-    pre_tree: &EconomicSmt,
     signature_alg: u16,
     claimant_public_key: &[u8],
 ) -> Result<Produced, BuildError> {
+    // `p`, `R_p` AND `R_T^setup` COME FROM ONE PREDECESSOR CONTEXT. A naked
+    // `position` argument let a caller pass p = 12 against the real tree at
+    // p = 7 and get a perfectly self-consistent σ(12) → h⁰(12) →
+    // R_T^setup(12, real tree) — an operation the verifier then deterministically
+    // refuses. Fail-closed, but the producer should not be able to build
+    // something known-impossible at construction time.
+    let position = previous.economic_position();
+    if pre_tree.root() != previous.economic_root() {
+        return Err(BuildError::PreTreeIsNotThePredecessor);
+    }
     let sigma = derive::setup_id(&genesis, &device_id, position, &vault_id);
     let leaf = dsm::sofi::wire::TraderRelationshipLeaf {
         vault_id,
@@ -1050,9 +1069,30 @@ mod tests {
     /// with no operation around it, and `m_setup` is what the member checks.
     #[test]
     fn a_setup_signs_its_object_and_not_the_operation() {
+        // ONE predecessor context: the position and the root travel together,
+        // so the producer cannot compute R_T^setup against a tree that is not
+        // the predecessor's.
         let tree = EconomicSmt::new();
-        let produced =
-            build_setup(G, DEV, P_POS, d(0xC1), d(0x66), &tree, ALG, &keypair().0).unwrap();
+        let previous = |root: D32| {
+            ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: P_POS,
+                    economic_root: root,
+                },
+            )
+            .unwrap()
+        };
+        let produced = build_setup(
+            &previous(tree.root()),
+            &tree,
+            G,
+            DEV,
+            d(0xC1),
+            d(0x66),
+            ALG,
+            &keypair().0,
+        )
+        .unwrap();
         assert!(matches!(produced.operation, Operation::SofiSetup { .. }));
         let setup = match &produced.operation {
             Operation::SofiSetup { setup_body, .. } => SofiSetupBody::decode(setup_body).unwrap(),
@@ -1080,16 +1120,34 @@ mod tests {
         // h⁰ is the setup id's derivation, so it would reset a live chain.
         assert_eq!(
             build_setup(
+                &previous(expected.root()),
+                &expected,
                 G,
                 DEV,
-                P_POS,
                 d(0xC1),
                 d(0x66),
-                &expected,
                 ALG,
                 &keypair().0
             ),
             Err(BuildError::SetupAlreadyExists)
+        );
+
+        // A tree that is not the predecessor's root is refused outright: `p`,
+        // `R_p` and `R_T^setup` come from ONE context, so a producer cannot
+        // mix a real tree with another position's root and emit something
+        // self-consistent that the verifier deterministically refuses.
+        assert_eq!(
+            build_setup(
+                &previous(d(0xEE)),
+                &tree,
+                G,
+                DEV,
+                d(0xC2),
+                d(0x66),
+                ALG,
+                &keypair().0
+            ),
+            Err(BuildError::PreTreeIsNotThePredecessor)
         );
         assert_ne!(
             produced.signs.bytes(),
