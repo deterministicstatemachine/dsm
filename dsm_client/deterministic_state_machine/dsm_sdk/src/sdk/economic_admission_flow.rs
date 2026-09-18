@@ -1565,15 +1565,19 @@ pub(crate) async fn finish_admission(
     pending.state = EconomicAdmissionState::Registered;
     core.update_pending_admission_state(&pending)?;
 
-    // The VERIFIER's answer — the same predicate any foreign device runs.
-    let registered = RegisteredEconomicRoot {
-        trader_genesis: genesis,
-        trader_devid: devid,
-        economic_position: pending.economic_position,
-        post_economic_root: coords.post_economic_root,
-        admission_manifest_addr: manifest_addr,
-        storage_set_id: set.id(),
-    };
+    // The VERIFIER's answer — the same predicate any foreign device runs, from
+    // the same object. This device decodes and verifies the EXACT envelope it
+    // registered rather than re-assembling the fields from locals: a
+    // disagreement between what was registered and what is validated here
+    // would otherwise be unobservable, and a corrupted frozen row would pass.
+    let registered = RegisteredEconomicRoot::from_verified_single_root(
+        dsm::economic::claim_envelope::decode_registered_economic_claim(&frozen_root)
+            .map_err(|e| DsmError::invalid_operation(format!("registered claim: {e}")))?
+            .single_root()
+            .map_err(|conditional| {
+                DsmError::invalid_operation(format!("registered claim: {conditional}"))
+            })?,
+    );
     let accepted = AcceptedSubstrate::from_verified_dsm_successor(
         operation,
         coords.c_dsm_plus,

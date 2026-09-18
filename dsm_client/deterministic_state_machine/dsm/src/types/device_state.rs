@@ -1489,28 +1489,62 @@ impl DeviceState {
         what: &str,
     ) -> Result<(), DsmError> {
         let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
- DsmError::invalid_operation(format!(
- "advance: refusing {what} with no pending economic admission — a fulfillment installs a CONDITIONAL claim at its position, and without the admission fence the lineage would advance past a position that has selected no root",
- ))
- })?;
-        if !matches!(
-            pending.kind,
-            crate::economic::admission::PendingAdmissionKind::SofiFulfillment { .. }
-        ) {
+            DsmError::invalid_operation(format!(
+                "advance: refusing {what} with no pending economic admission — a \
+                 fulfillment installs a CONDITIONAL claim at its position, and without the \
+                 admission fence the lineage would advance past a position that has \
+                 selected no root",
+            ))
+        })?;
+        let crate::economic::admission::PendingAdmissionKind::SofiFulfillment { fulfillment_id } =
+            pending.kind
+        else {
             return Err(DsmError::invalid_operation(format!(
- "advance: refusing {what} — the pending admission is not a SoFi fulfillment admission; a fulfillment fences a position, and an asset-fencing admission does not authorize it",
- )));
-        }
+                "advance: refusing {what} — the pending admission is not a SoFi \
+                 fulfillment admission; a fulfillment fences a position, and an \
+                 asset-fencing admission does not authorize it",
+            )));
+        };
         if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
             return Err(DsmError::invalid_operation(format!(
- "advance: refusing {what} — the pending admission is not Prepared; a fencing admission belongs to an earlier acceptance and authorizes nothing new",
- )));
+                "advance: refusing {what} — the pending admission is not Prepared; a \
+                 fencing admission belongs to an earlier acceptance and authorizes \
+                 nothing new",
+            )));
         }
         let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
         if pending.operation_digest != op_digest {
             return Err(DsmError::invalid_operation(format!(
- "advance: refusing {what} whose digest does not match the pending economic admission — the admission authorizes exactly one operation",
- )));
+                "advance: refusing {what} whose digest does not match the pending \
+                 economic admission — the admission authorizes exactly one operation",
+            )));
+        }
+        // THE ID MUST BE THIS F'S. The admission's `fulfillment_id` is not
+        // decoration: it is the durable identity the resume path and the
+        // route's resolution are keyed to, so an admission carrying another
+        // F's id would fence this position under a name nothing can resolve.
+        // The digest above binds the BYTES; this binds the identity those
+        // bytes derive, and they are not the same claim.
+        let Operation::SofiFulfill {
+            fulfillment_body, ..
+        } = operation
+        else {
+            return Err(DsmError::invalid_operation(format!(
+                "advance: refusing {what} — not a fulfillment",
+            )));
+        };
+        let body =
+            crate::sofi::wire::TraderFulfillmentBody::decode(fulfillment_body).map_err(|_| {
+                DsmError::invalid_operation(format!(
+                    "advance: refusing {what} — its body is not a canonical \
+                     TraderFulfillmentBody",
+                ))
+            })?;
+        if fulfillment_id != crate::sofi::derive::fulfillment_id(&body) {
+            return Err(DsmError::invalid_operation(format!(
+                "advance: refusing {what} — the pending admission names a different \
+                 fulfillment; the id is this position's durable identity, not a label",
+            )));
         }
         Ok(())
     }
@@ -9080,6 +9114,82 @@ mod tests {
             run(&correct).is_ok(),
             "a fulfillment with its own Prepared admission must advance"
         );
+    }
+
+    /// THE ADMISSION'S FULFILLMENT ID IS BOUND TO THE ACTUAL F.
+    ///
+    /// The digest check binds the operation's BYTES; this binds the identity
+    /// those bytes derive, and they are different claims. An admission
+    /// carrying another F's id would fence this position under a name the
+    /// resume path and the route's resolution cannot resolve — the id is the
+    /// durable identity, not a label beside it.
+    #[test]
+    fn the_sofi_admission_must_name_this_fulfillment() {
+        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
+        use crate::economic::faucet::dsm_operation_digest;
+        use crate::sofi::derive;
+        use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
+
+        let (pk, sk) = generate_sphincs_keypair().unwrap();
+        let genesis = [0xAC; 32];
+        let devid = [0xBC; 32];
+        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
+        let body = TraderFulfillmentBody::new(
+            [0x0A; 32],
+            vec![[0x71; 32]],
+            vec![AttemptEntry {
+                vault_id: [0xC1; 32],
+                attempt: 0,
+            }],
+            6,
+            0x0001,
+            &pk,
+        )
+        .unwrap();
+        let operation = Operation::SofiFulfill {
+            fulfillment_body: body.encode(),
+            precommit_id: [0x0A; 32].to_vec(),
+            signature: sphincs_sign(&sk, &derive::fulfillment_signing_digest(&body)).unwrap(),
+        };
+        let digest = dsm_operation_digest(&operation.to_bytes());
+
+        let with_id = |fulfillment_id: [u8; 32]| {
+            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                PendingAdmissionKind::SofiFulfillment { fulfillment_id },
+                6,
+                [0x11; 32],
+                digest,
+            )))
+        };
+        let run = |h: &DeviceState| {
+            h.advance(
+                [0x3C; 32],
+                devid,
+                operation.clone(),
+                entropy(12),
+                None,
+                &[],
+                Some([0x11; 32]),
+                None,
+                None,
+                None,
+            )
+        };
+
+        // The right kind, the right state, the RIGHT operation digest — and
+        // another fulfillment's id. Everything the check looked at before
+        // passes; only the identity is wrong.
+        let msg = run(&with_id([0xEE; 32]))
+            .expect_err("the admission names a different fulfillment")
+            .to_string();
+        assert!(
+            msg.contains("names a different fulfillment"),
+            "named refusal, got: {msg}"
+        );
+
+        // Its own id: it advances.
+        assert!(run(&with_id(derive::fulfillment_id(&body))).is_ok());
     }
 
     /// THE DEVICE PATH VERIFIES A SOFI SIGNATURE, over the rule that

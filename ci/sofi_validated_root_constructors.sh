@@ -51,4 +51,38 @@ if [[ "$count" -ne 1 ]]; then
 fi
 echo "  ✓ one caller, inside advance_resolved"
 
-echo "✓ a validated root is still verifier-derived"
+# 3. `RegisteredEconomicRoot` has no public field either, and exactly one
+#    constructor — one that takes a VERIFIED claim.
+#
+#    Public fields made the claim union's refusal worthless: a caller could
+#    read `realize_root` off a conditional `C_q`, assemble the struct by hand,
+#    and hand the result to `advance_validated`. The union refuses to flatten;
+#    this is what stops a caller doing the flattening itself.
+register="$core/dsm/src/economic/register.rs"
+[[ -f "$register" ]] || {
+  echo "[FAIL] the register module is not where this gate expects it"
+  exit 1
+}
+body=$(awk '/^pub struct RegisteredEconomicRoot \{/{f=1} f{print} f&&/^\}/{exit}' "$register")
+if grep -qE '^\s+pub(\(| )' <<<"$body"; then
+  echo "[FAIL] RegisteredEconomicRoot has a public field — a caller could flatten a"
+  echo "       conditional claim into one by hand:"
+  grep -nE '^\s+pub(\(| )' <<<"$body"
+  exit 1
+fi
+echo "  ✓ registered-root fields are private"
+
+if ! grep -q 'pub fn from_verified_single_root' "$register"; then
+  echo "[FAIL] from_verified_single_root is missing: the one constructor must take a"
+  echo "       VerifiedEconomicRootClaim, not loose fields"
+  exit 1
+fi
+# Any other `-> Self` in that impl would be a second way in.
+ctors=$(awk '/^impl RegisteredEconomicRoot \{/{f=1} f&&/-> Self/{print} f&&/^\}/{exit}' "$register" | wc -l | tr -d ' ')
+if [[ "$ctors" -ne 1 ]]; then
+  echo "[FAIL] RegisteredEconomicRoot has $ctors constructors; exactly one projects a verified claim"
+  exit 1
+fi
+echo "  ✓ one constructor, from a verified single-root claim"
+
+echo "✓ a validated root is still verifier-derived, and a registered one is a projection"

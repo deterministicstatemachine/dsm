@@ -374,6 +374,25 @@ fn walk_positions(
         // authenticated forgery — permanently, since `Invalid` is terminal.
         let claim = decode_registered_economic_claim(&cell)
             .map_err(|e| invalid(format!("register winner at {position}: {e}")))?;
+
+        // THE COORDINATES COME FIRST, FOR BOTH ARMS. Checking them only after
+        // narrowing to the single-root arm meant a conditional claim naming
+        // some OTHER trader or position was reported as `Unresolved` — "this
+        // honest peer is mid-route" — when what was actually observed is a
+        // cell holding a claim for coordinates it does not occupy. That is a
+        // forgery, and `Unresolved` invites a retry that can never succeed.
+        let (claim_genesis, claim_devid) = claim.trader();
+        if claim_genesis != *peer_genesis
+            || claim_devid != *peer_devid
+            || claim.economic_position() != position
+        {
+            return Err(invalid(format!(
+                "register winner at {position} names different coordinates"
+            )));
+        }
+
+        // Only now is "conditional" the honest reading: the claim is for this
+        // trader at this position, and it has selected no root.
         let claim = claim.single_root().map_err(|conditional| {
             PeerLineageFailure::Unresolved(format!(
                 "peer {}/{} at position {position}: {conditional}",
@@ -382,14 +401,6 @@ fn walk_positions(
             ))
         })?;
         let body = claim.body.clone();
-        if body.trader_genesis != *peer_genesis
-            || body.trader_devid != *peer_devid
-            || body.economic_position != position
-        {
-            return Err(invalid(format!(
-                "register winner at {position} names different coordinates"
-            )));
-        }
 
         // 2. The manifest, by content address.
         let manifest_bytes = fetcher.immutable(
@@ -481,14 +492,10 @@ fn walk_positions(
         );
 
         // 5. The same conjuncts any device runs.
-        let registered = RegisteredEconomicRoot {
-            trader_genesis: *peer_genesis,
-            trader_devid: *peer_devid,
-            economic_position: position,
-            post_economic_root: body.post_economic_root,
-            admission_manifest_addr: body.admission_manifest_addr,
-            storage_set_id: body.root_register_storage_set_id,
-        };
+        // Projected from the verified claim rather than re-assembled from
+        // locals: the coordinates were checked against it above, so a copy
+        // here could only introduce a disagreement.
+        let registered = RegisteredEconomicRoot::from_verified_single_root(claim);
         let resolver = WalkingResolver {
             fetcher,
             expected_network_id,
@@ -650,6 +657,74 @@ mod tests {
         assert!(!matches!(err, PeerLineageFailure::Invalid(_)));
         assert!(!matches!(err, PeerLineageFailure::Quarantined(_)));
         assert!(!matches!(err, PeerLineageFailure::Incomplete(_)));
+    }
+
+    /// A CONDITIONAL CLAIM AT THE WRONG COORDINATES IS A FORGERY, not a peer
+    /// mid-route.
+    ///
+    /// The coordinate check used to run AFTER narrowing to the single-root
+    /// arm, so a `C_q` naming some other trader or position was reported as
+    /// `Unresolved` — "come back when their route resolves". Nothing would
+    /// ever resolve it: the cell holds a claim for coordinates it does not
+    /// occupy, which is the definition of the `Invalid` arm.
+    #[test]
+    fn a_conditional_claim_at_the_wrong_coordinates_is_invalid() {
+        let position = 3;
+        // A well-formed conditional claim — for someone else.
+        let foreign = SofiResolutionClaim {
+            genesis: [0x99; 32],
+            device_id: [0x88; 32],
+            position,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let fetcher = ConditionalCellFetcher {
+            position,
+            claim: foreign.encode(),
+        };
+        let err = validate_peer_lineage(
+            &fetcher,
+            NETWORK,
+            &PEER_G,
+            &PEER_D,
+            position,
+            Some(ValidatedStart {
+                economic_position: position - 1,
+                economic_root: [0x77; 32],
+            }),
+        )
+        .expect_err("a claim for other coordinates");
+        assert!(
+            matches!(err, PeerLineageFailure::Invalid(ref m) if m.contains("different coordinates")),
+            "wrong coordinates are a forgery, not an undecided route: {err:?}"
+        );
+
+        // The SAME claim at the right coordinates is Unresolved, so the
+        // distinction is the coordinates and nothing else.
+        let ours = SofiResolutionClaim {
+            genesis: PEER_G,
+            device_id: PEER_D,
+            ..foreign
+        };
+        let fetcher = ConditionalCellFetcher {
+            position,
+            claim: ours.encode(),
+        };
+        assert!(matches!(
+            validate_peer_lineage(
+                &fetcher,
+                NETWORK,
+                &PEER_G,
+                &PEER_D,
+                position,
+                Some(ValidatedStart {
+                    economic_position: position - 1,
+                    economic_root: [0x77; 32],
+                }),
+            ),
+            Err(PeerLineageFailure::Unresolved(_))
+        ));
     }
 
     /// NO PATH from a conditional cell to a validated root. The walk is the

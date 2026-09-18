@@ -443,17 +443,72 @@ impl std::error::Error for AttributionError {}
 /// **nothing** about whether `post_economic_root` is the result of a valid
 /// transition — see [`super::lineage`], and note there is deliberately no
 /// conversion from this type into a validated one.
+/// **Fields are private, and there is ONE constructor.** Public fields made
+/// this type assemblable from arbitrary bytes: anything could name a position
+/// and a root and hand the result to `advance_validated`, which is the whole
+/// door the claim union was introduced to shut. The union refuses to flatten
+/// a conditional claim into a root — and that is worth nothing if a caller can
+/// simply build the flattened struct itself.
+///
+/// So the only way to one of these is
+/// [`Self::from_verified_single_root`]: a claim whose envelope decoded
+/// canonically, whose signature verified under its own committed key, and
+/// which is a `SingleRoot` claim rather than a conditional one. Every field
+/// below is then a projection of that claim, not a caller's assertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredEconomicRoot {
-    pub trader_genesis: [u8; 32],
-    pub trader_devid: [u8; 32],
-    pub economic_position: u64,
-    pub post_economic_root: [u8; 32],
-    pub admission_manifest_addr: [u8; 32],
-    pub storage_set_id: [u8; 32],
+    trader_genesis: [u8; 32],
+    trader_devid: [u8; 32],
+    economic_position: u64,
+    post_economic_root: [u8; 32],
+    admission_manifest_addr: [u8; 32],
+    storage_set_id: [u8; 32],
 }
 
 impl RegisteredEconomicRoot {
+    /// THE constructor: project a verified single-root claim.
+    ///
+    /// It takes the claim rather than the fields precisely so there is nothing
+    /// for a caller to choose. A conditional claim cannot reach here — it has
+    /// no `VerifiedEconomicRootClaim` to offer, because
+    /// `RegisteredEconomicClaim::single_root` refuses it.
+    pub fn from_verified_single_root(
+        claim: &crate::economic::claim_envelope::VerifiedEconomicRootClaim,
+    ) -> Self {
+        Self {
+            trader_genesis: claim.body.trader_genesis,
+            trader_devid: claim.body.trader_devid,
+            economic_position: claim.body.economic_position,
+            post_economic_root: claim.body.post_economic_root,
+            admission_manifest_addr: claim.body.admission_manifest_addr,
+            storage_set_id: claim.body.root_register_storage_set_id,
+        }
+    }
+
+    pub fn trader_genesis(&self) -> [u8; 32] {
+        self.trader_genesis
+    }
+
+    pub fn trader_devid(&self) -> [u8; 32] {
+        self.trader_devid
+    }
+
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    pub fn post_economic_root(&self) -> [u8; 32] {
+        self.post_economic_root
+    }
+
+    pub fn admission_manifest_addr(&self) -> [u8; 32] {
+        self.admission_manifest_addr
+    }
+
+    pub fn storage_set_id(&self) -> [u8; 32] {
+        self.storage_set_id
+    }
+
     /// The cell these bytes occupy.
     pub fn register_key(&self) -> [u8; 32] {
         economic_root_register_key(
@@ -461,5 +516,77 @@ impl RegisteredEconomicRoot {
             &self.trader_devid,
             self.economic_position,
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod registered_root_construction_tests {
+    use super::*;
+    use crate::economic::claim::EconomicRootClaimBody;
+    use crate::economic::claim_envelope::{decode_registered_economic_claim, sign_economic_root_claim};
+
+    /// THE ONLY WAY TO A REGISTERED ROOT IS A VERIFIED CLAIM.
+    ///
+    /// With public fields, the claim union's refusal to flatten a conditional
+    /// claim into a root bought nothing: a caller could read `realize_root`
+    /// off a `C_q` and assemble the struct by hand, then hand it to
+    /// `advance_validated`. The type now has one constructor and it takes the
+    /// verified claim, so there is no field for a caller to choose.
+    #[test]
+    fn a_registered_root_is_a_projection_of_a_verified_claim() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let body = EconomicRootClaimBody::new(
+            [0x11; 32],
+            [0x22; 32],
+            9,
+            [0xC0; 32],
+            [0xD0; 32],
+            [0x77; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
+        )
+        .unwrap();
+        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+        let verified = decode_registered_economic_claim(&envelope)
+            .unwrap()
+            .single_root()
+            .unwrap()
+            .clone();
+
+        let registered = RegisteredEconomicRoot::from_verified_single_root(&verified);
+        // Every field is the claim's, not an argument.
+        assert_eq!(registered.trader_genesis(), [0x11; 32]);
+        assert_eq!(registered.trader_devid(), [0x22; 32]);
+        assert_eq!(registered.economic_position(), 9);
+        assert_eq!(registered.post_economic_root(), [0xC0; 32]);
+        assert_eq!(registered.admission_manifest_addr(), [0xD0; 32]);
+        assert_eq!(registered.storage_set_id(), [0x77; 32]);
+        assert_eq!(
+            registered.register_key(),
+            economic_root_register_key(&[0x11; 32], &[0x22; 32], 9)
+        );
+    }
+
+    /// A CONDITIONAL CLAIM CANNOT REACH THE CONSTRUCTOR AT ALL.
+    ///
+    /// Not because a check rejects it — because it has no
+    /// `VerifiedEconomicRootClaim` to offer. The refusal is in the type, which
+    /// is what makes it impossible to forget.
+    #[test]
+    fn a_conditional_claim_has_nothing_to_construct_from() {
+        let conditional = crate::sofi::wire::SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 9,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        };
+        let decoded = decode_registered_economic_claim(&conditional.encode()).unwrap();
+        // The only path to the constructor's argument refuses, and there is no
+        // second path: `RegisteredEconomicRoot` has no public fields and no
+        // other constructor.
+        assert!(decoded.single_root().is_err());
     }
 }

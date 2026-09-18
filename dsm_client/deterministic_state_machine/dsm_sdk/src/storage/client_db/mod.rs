@@ -717,6 +717,13 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- position: something has to go in the root column, and whatever goes
         -- there is indistinguishable from a selected root on reload. Beta does
         -- not migrate — the v1 table is dropped below.
+        --
+        -- THE CONDITIONAL KINDS ARE NOT YET WRITTEN. Every production writer
+        -- today records claim_kind = 0, because F ingress is dark and no
+        -- conditional position can be admitted. The shape and every reader are
+        -- in place and enforced; the WRITER arrives with the conditional
+        -- lifecycle, so conditional crash/restart persistence is not exercised
+        -- end to end yet.
         CREATE TABLE IF NOT EXISTS economic_admitted_v2(
             id                INTEGER PRIMARY KEY CHECK (id = 1),
             economic_position INTEGER NOT NULL,

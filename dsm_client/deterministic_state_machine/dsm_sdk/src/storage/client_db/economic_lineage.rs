@@ -92,40 +92,71 @@ fn read_admitted_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedRow> {
 fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
     let (position, kind, root, fulfillment, realize, void) = row;
     let economic_position = u64::try_from(position).map_err(|_| anyhow!("position negative"))?;
+    // EXACT SHAPES, both ways. A missing field for the kind was already
+    // refused; an EXTRA one was silently ignored, which is the same defect
+    // wearing the other face — a row carrying both a selected root and a
+    // realize/void pair is two disagreeing claims about which root this
+    // position holds, and picking the one the arm happens to read is exactly
+    // the guess this decoder exists to refuse. The row is the coordinate a
+    // restart rebuilds the whole lineage on.
+    let forbid = |field: &str, present: bool| -> Result<()> {
+        if present {
+            return Err(anyhow!(
+                "admitted claim kind {kind} carries a {field} it has no meaning for"
+            ));
+        }
+        Ok(())
+    };
     match kind {
-        0 => Ok(AdmittedEconomicPosition::SingleRoot {
-            economic_position,
-            economic_root: digest32(
-                root.ok_or_else(|| anyhow!("single-root admission has no root"))?,
-                "economic_root",
-            )?,
-        }),
-        1 => Ok(AdmittedEconomicPosition::ResolvedSofi {
-            economic_position,
-            selected_root: digest32(
-                root.ok_or_else(|| anyhow!("resolved SoFi admission has no selected root"))?,
-                "economic_root",
-            )?,
-            fulfillment_id: digest32(
-                fulfillment.ok_or_else(|| anyhow!("resolved SoFi admission has no fulfillment"))?,
-                "fulfillment_id",
-            )?,
-        }),
-        2 => Ok(AdmittedEconomicPosition::UnresolvedSofi {
-            economic_position,
-            fulfillment_id: digest32(
-                fulfillment.ok_or_else(|| anyhow!("conditional admission has no fulfillment"))?,
-                "fulfillment_id",
-            )?,
-            realize_root: digest32(
-                realize.ok_or_else(|| anyhow!("conditional admission has no realize root"))?,
-                "realize_root",
-            )?,
-            void_root: digest32(
-                void.ok_or_else(|| anyhow!("conditional admission has no void root"))?,
-                "void_root",
-            )?,
-        }),
+        0 => {
+            forbid("fulfillment id", fulfillment.is_some())?;
+            forbid("realize root", realize.is_some())?;
+            forbid("void root", void.is_some())?;
+            Ok(AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                economic_root: digest32(
+                    root.ok_or_else(|| anyhow!("single-root admission has no root"))?,
+                    "economic_root",
+                )?,
+            })
+        }
+        1 => {
+            forbid("realize root", realize.is_some())?;
+            forbid("void root", void.is_some())?;
+            Ok(AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root: digest32(
+                    root.ok_or_else(|| anyhow!("resolved SoFi admission has no selected root"))?,
+                    "economic_root",
+                )?,
+                fulfillment_id: digest32(
+                    fulfillment
+                        .ok_or_else(|| anyhow!("resolved SoFi admission has no fulfillment"))?,
+                    "fulfillment_id",
+                )?,
+            })
+        }
+        2 => {
+            // A selected root here would say the position HAS chosen, which is
+            // precisely what an unresolved position has not done.
+            forbid("selected root", root.is_some())?;
+            Ok(AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position,
+                fulfillment_id: digest32(
+                    fulfillment
+                        .ok_or_else(|| anyhow!("conditional admission has no fulfillment"))?,
+                    "fulfillment_id",
+                )?,
+                realize_root: digest32(
+                    realize.ok_or_else(|| anyhow!("conditional admission has no realize root"))?,
+                    "realize_root",
+                )?,
+                void_root: digest32(
+                    void.ok_or_else(|| anyhow!("conditional admission has no void root"))?,
+                    "void_root",
+                )?,
+            })
+        }
         other => Err(anyhow!("unknown admitted claim kind {other}")),
     }
 }
@@ -459,4 +490,134 @@ pub fn append_ek_step_with_conn(
         ],
     )?;
     Ok(next)
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod admitted_row_tests {
+    use super::*;
+
+    const ROOT: [u8; 32] = [0xC0; 32];
+    const FID: [u8; 32] = [0xF1; 32];
+    const REALIZE: [u8; 32] = [0xA1; 32];
+    const VOID: [u8; 32] = [0xB1; 32];
+
+    fn row(
+        kind: i64,
+        root: Option<[u8; 32]>,
+        fid: Option<[u8; 32]>,
+        realize: Option<[u8; 32]>,
+        void: Option<[u8; 32]>,
+    ) -> AdmittedRow {
+        (
+            7,
+            kind,
+            root.map(|r| r.to_vec()),
+            fid.map(|r| r.to_vec()),
+            realize.map(|r| r.to_vec()),
+            void.map(|r| r.to_vec()),
+        )
+    }
+
+    /// Each kind has ONE exact shape, and a row is refused both for a missing
+    /// field and for an extra one.
+    ///
+    /// The missing direction was already enforced; the extra direction was
+    /// silently ignored, which is the same defect wearing the other face. A
+    /// row carrying both a selected root and a realize/void pair makes two
+    /// disagreeing claims about which root the position holds, and reading
+    /// whichever the arm happens to name is the guess this decoder exists to
+    /// refuse — on the coordinate a restart rebuilds the entire lineage from.
+    #[test]
+    fn an_admitted_row_must_match_its_own_claim_kind_exactly() {
+        // The three exact shapes are accepted.
+        assert_eq!(
+            admitted_from_row(row(0, Some(ROOT), None, None, None)).unwrap(),
+            AdmittedEconomicPosition::SingleRoot {
+                economic_position: 7,
+                economic_root: ROOT,
+            }
+        );
+        assert_eq!(
+            admitted_from_row(row(1, Some(ROOT), Some(FID), None, None)).unwrap(),
+            AdmittedEconomicPosition::ResolvedSofi {
+                economic_position: 7,
+                selected_root: ROOT,
+                fulfillment_id: FID,
+            }
+        );
+        assert_eq!(
+            admitted_from_row(row(2, None, Some(FID), Some(REALIZE), Some(VOID))).unwrap(),
+            AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position: 7,
+                fulfillment_id: FID,
+                realize_root: REALIZE,
+                void_root: VOID,
+            }
+        );
+
+        // EXTRA fields — the direction that used to pass.
+        let extras = [
+            (
+                "single-root with a fulfillment",
+                row(0, Some(ROOT), Some(FID), None, None),
+            ),
+            (
+                "single-root with a realize root",
+                row(0, Some(ROOT), None, Some(REALIZE), None),
+            ),
+            (
+                "single-root with a void root",
+                row(0, Some(ROOT), None, None, Some(VOID)),
+            ),
+            (
+                "resolved with a realize root",
+                row(1, Some(ROOT), Some(FID), Some(REALIZE), None),
+            ),
+            (
+                "resolved with a void root",
+                row(1, Some(ROOT), Some(FID), None, Some(VOID)),
+            ),
+            // The worst of them: an unresolved position that also names a
+            // selected root, i.e. claims both to have chosen and not to have.
+            (
+                "unresolved with a selected root",
+                row(2, Some(ROOT), Some(FID), Some(REALIZE), Some(VOID)),
+            ),
+        ];
+        for (name, r) in extras {
+            assert!(
+                admitted_from_row(r).is_err(),
+                "{name}: an extra field must be refused, not ignored"
+            );
+        }
+
+        // MISSING fields stay refused.
+        let missing = [
+            ("single-root with no root", row(0, None, None, None, None)),
+            (
+                "resolved with no fulfillment",
+                row(1, Some(ROOT), None, None, None),
+            ),
+            ("resolved with no root", row(1, None, Some(FID), None, None)),
+            (
+                "unresolved with no realize root",
+                row(2, None, Some(FID), None, Some(VOID)),
+            ),
+            (
+                "unresolved with no void root",
+                row(2, None, Some(FID), Some(REALIZE), None),
+            ),
+            (
+                "unresolved with no fulfillment",
+                row(2, None, None, Some(REALIZE), Some(VOID)),
+            ),
+        ];
+        for (name, r) in missing {
+            assert!(admitted_from_row(r).is_err(), "{name}: must be refused");
+        }
+
+        // An unknown kind is refused rather than defaulted.
+        assert!(admitted_from_row(row(3, Some(ROOT), None, None, None)).is_err());
+    }
 }
