@@ -381,14 +381,14 @@ async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
     .await
     .expect("join");
     let peer = peer.expect("a faucet lineage MUST be foreign-walkable");
-    assert_eq!(peer.validated_root.economic_position(), 1);
+    assert_eq!(peer.validated_root().economic_position(), 1);
     assert_eq!(
-        peer.validated_root.economic_root(),
+        peer.validated_root().economic_root(),
         admitted_root,
         "the foreign walk and the local admission agree byte-for-byte"
     );
     assert!(matches!(
-        peer.verified_operation,
+        peer.verified_operation(),
         dsm::types::operations::Operation::FaucetClaim { .. }
     ));
 }

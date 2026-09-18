@@ -528,16 +528,21 @@ fn walk_positions(
         last.ok_or_else(|| {
             incomplete("walk had no steps — the start memo already covers the target")
         })?;
-    Ok(ValidatedPeerTransition {
-        peer_genesis: *peer_genesis,
-        peer_devid: *peer_devid,
-        validated_root: validated,
+    // SINGLE-ROOT BY CONSTRUCTION, not by label. Every position this walk
+    // traversed decoded as a single-root claim: a conditional `C_q` is refused
+    // above with `Unresolved`, resolved or not, because resolution is
+    // verifier-local and never rewrites the register cell. So the one lineage
+    // this function can honestly assert is the one it asserts here.
+    Ok(ValidatedPeerTransition::single_root_from_walk(
+        *peer_genesis,
+        *peer_devid,
+        validated,
         witness,
         proven_ak,
         c_dsm_plus,
         embedded_parent,
         verified_operation,
-    })
+    ))
 }
 
 #[cfg(test)]

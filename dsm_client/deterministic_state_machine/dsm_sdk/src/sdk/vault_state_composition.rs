@@ -817,8 +817,8 @@ async fn compose_vault_state_inner(
                     terms,
                     bound.bundle_digest,
                     &correspondence,
-                    &ev.trader.validated_root,
-                    &ev.trader.proven_ak,
+                    ev.trader.validated_root(),
+                    ev.trader.proven_ak(),
                 )
                 .map_err(|e| {
                     refused(
@@ -1049,9 +1049,9 @@ async fn certify_market_evidence(
 
     // ── The accepted effects, from the VERIFIED operation (C2-R2 LEFT) ─────
     let accepted = match AcceptedTransition::from_verified_operation_for_parent(
-        trader.embedded_parent,
-        trader.c_dsm_plus,
-        &trader.verified_operation,
+        *trader.embedded_parent(),
+        *trader.c_dsm_plus(),
+        trader.verified_operation(),
         cursor_c_n,
     ) {
         Ok(a) => a,
@@ -1069,7 +1069,7 @@ async fn certify_market_evidence(
     }
     | Operation::DlvRouteSettle {
         route_commit_bytes, ..
-    }) = &trader.verified_operation
+    }) = trader.verified_operation()
     else {
         return invalid(
             "the trader's validated transition at that position is not a settle".into(),
@@ -1094,7 +1094,7 @@ async fn certify_market_evidence(
             route: &terms.selected_route,
             route_commit_bytes: route_commit_bytes.as_slice(),
             vault_id,
-            proven_ak: &trader.proven_ak,
+            proven_ak: trader.proven_ak(),
         },
         cursor_state,
         cursor_c_n,
@@ -1137,7 +1137,7 @@ async fn certify_market_evidence(
         Ok(None) => return Absent("its inclusion proof is not held by any member yet".into()),
         Err(e) => return Unavailable(format!("its inclusion proof could not be read: {e}")),
     };
-    let root = trader.validated_root.economic_root();
+    let root = trader.validated_root().economic_root();
     let artifact = match dsm::economic::proof_artifact::decode_economic_proof_artifact(&proof_bytes)
     {
         Ok(a) => a,
@@ -1166,7 +1166,7 @@ async fn certify_market_evidence(
     };
     let receipt = match verify_published_receipt(
         &receipt,
-        &trader.validated_root,
+        trader.validated_root(),
         &path[..],
         acceptance.trader_genesis(),
         settler_devid,

@@ -63,33 +63,222 @@ pub struct FundedCredit {
     pub amount: u64,
 }
 
-/// A peer transition this verifier has **already validated**.
+/// A peer transition this verifier has **already validated**, carrying the
+/// lineage it descends from.
 ///
 /// Holding one is evidence: it contains a [`ValidatedEconomicRoot`], which
 /// cannot be constructed except by validating. That is what makes the
 /// acyclicity rule a type property rather than a convention.
+///
+/// There are exactly TWO arms, and the absence of a third is the point. An
+/// unresolved SoFi position has selected no root, so it can never be a
+/// *validated* transition at all: the walk refuses it with
+/// `PeerLineageFailure::Unresolved` and produces no value of this type. An
+/// `UnresolvedSofi` arm would make "a validated transition whose root was
+/// never selected" representable — a contradiction, not a state. The boundary
+/// divides cleanly instead:
+///
+/// ```text
+/// unresolved SoFi -> the walk refuses; no ValidatedPeerTransition exists
+/// resolved SoFi   -> a transition may exist; peer debit REFUSES it (P15-9)
+/// single root     -> a transition exists; peer debit may proceed
+/// ```
+///
+/// **The lineage is authoritative, not advisory.** Both arms wrap one opaque
+/// [`PeerTransitionFacts`] rather than carrying named fields, because Rust
+/// gives an enum's variant fields the visibility of the enum itself: named
+/// public fields would let any caller assemble a `SingleRoot` around a genuine
+/// root and a genuine witness, which is exactly the forgery the discriminant
+/// exists to prevent. No accessor yields an OWNED payload either, so facts
+/// cannot be lifted out of one arm and re-wrapped in the other.
 #[derive(Debug, Clone)]
-pub struct ValidatedPeerTransition {
-    pub peer_genesis: [u8; 32],
-    pub peer_devid: [u8; 32],
-    pub validated_root: ValidatedEconomicRoot,
-    pub witness: EconomicTransitionWitness,
+pub enum ValidatedPeerTransition {
+    /// An ordinary single-root lineage — the only lineage eligible to be a
+    /// peer-debit source.
+    SingleRoot(PeerTransitionFacts),
+    /// A position whose SoFi route resolved and selected a concrete root.
+    ///
+    /// The root is genuine and the transition is fully validated, and it is
+    /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
+    /// resolution happened. A boolean `is_unresolved` would get this wrong.
+    ///
+    /// **No production path constructs this today, deliberately (E1c-3).**
+    /// `validate_peer_lineage` refuses every conditional claim, resolved or
+    /// not, because a resolved position's register cell still holds `C_q` —
+    /// resolution is verifier-local and never rewrites the cell. The arm
+    /// exists so that when E2/E3 teaches the walk to traverse a resolved SoFi
+    /// position, the refusal in [`prevalidate_sender_debit`] is already there
+    /// rather than owed at the moment it starts mattering.
+    ResolvedSofi(PeerTransitionFacts),
+}
+
+/// The provenance a validated peer transition carries, whatever its lineage.
+///
+/// Its fields are private and it has no public constructor. That is what makes
+/// [`ValidatedPeerTransition`]'s variants unconstructible outside this module,
+/// and it is the whole reason the payload is a separate type.
+#[derive(Debug, Clone)]
+pub struct PeerTransitionFacts {
+    peer_genesis: [u8; 32],
+    peer_devid: [u8; 32],
+    validated_root: ValidatedEconomicRoot,
+    witness: EconomicTransitionWitness,
     /// The peer's P0–P6-proven AK, recovered during the walk — what the
     /// acceptance evidence's sender side must chain to.
-    pub proven_ak: Vec<u8>,
+    proven_ak: Vec<u8>,
     /// The peer's verified successor commitment — what the acceptance
     /// evidence's receipt `child_tip` must equal ("same bilateral step").
-    pub c_dsm_plus: [u8; 32],
+    c_dsm_plus: [u8; 32],
     /// The verified successor's own parent on the peer's bilateral chain —
     /// the other half of the `(embedded_parent, C_dsm+)` pair CORR.1 compares
     /// with a bundle's `(trader_parent, trader_successor)`. From the VERIFIED
     /// substrate, never from the bundle.
-    pub embedded_parent: [u8; 32],
+    embedded_parent: [u8; 32],
     /// The exact operation the peer's VERIFIED successor evidence carried.
     /// The peer-debit predicate reasons about it directly (Transfer-only,
     /// online mode, addressed to the consumer) instead of trusting the
     /// descriptor's story about what the peer did.
-    pub verified_operation: crate::types::operations::Operation,
+    verified_operation: crate::types::operations::Operation,
+}
+
+impl ValidatedPeerTransition {
+    /// The walk's constructor for an ordinary single-root lineage.
+    ///
+    /// **Only `peer_lineage::validate_peer_lineage` may call this.** It is the
+    /// one place that has proven every conjunct the lineage label asserts:
+    /// that the register winner at each position decoded as a single-root
+    /// claim, named these coordinates, and advanced validation. A second
+    /// caller would be asserting a lineage rather than establishing one, and
+    /// `ci/peer_debit_lineage_authoritative.sh` fails the build if one appears.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn single_root_from_walk(
+        peer_genesis: [u8; 32],
+        peer_devid: [u8; 32],
+        validated_root: ValidatedEconomicRoot,
+        witness: EconomicTransitionWitness,
+        proven_ak: Vec<u8>,
+        c_dsm_plus: [u8; 32],
+        embedded_parent: [u8; 32],
+        verified_operation: crate::types::operations::Operation,
+    ) -> Self {
+        Self::SingleRoot(PeerTransitionFacts {
+            peer_genesis,
+            peer_devid,
+            validated_root,
+            witness,
+            proven_ak,
+            c_dsm_plus,
+            embedded_parent,
+            verified_operation,
+        })
+    }
+
+    /// A single-root transition assembled directly, for FIXTURES ONLY.
+    ///
+    /// Gated on the `testing` feature, which both this crate and `dsm_sdk`
+    /// enable only through a dev-dependency, so it cannot reach a production
+    /// artifact. It exists because `tests/*.rs` are external consumers that
+    /// deliberately bypass the walk.
+    #[cfg(feature = "testing")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn single_root_for_test(
+        peer_genesis: [u8; 32],
+        peer_devid: [u8; 32],
+        validated_root: ValidatedEconomicRoot,
+        witness: EconomicTransitionWitness,
+        proven_ak: Vec<u8>,
+        c_dsm_plus: [u8; 32],
+        embedded_parent: [u8; 32],
+        verified_operation: crate::types::operations::Operation,
+    ) -> Self {
+        Self::single_root_from_walk(
+            peer_genesis,
+            peer_devid,
+            validated_root,
+            witness,
+            proven_ak,
+            c_dsm_plus,
+            embedded_parent,
+            verified_operation,
+        )
+    }
+
+    /// A resolved-SoFi transition, for MUTATION TESTS ONLY.
+    ///
+    /// This is the one way a `ResolvedSofi` value comes into existence
+    /// anywhere, and it is unreachable from production by construction —
+    /// `testing` is a dev-dependency-only feature. Without it the P15-9
+    /// refusal could not be exercised at all today, because no production path
+    /// yet produces a SoFi-lineage transition; with it, removing the refusal
+    /// turns a named test red.
+    ///
+    /// When E2/E3 adds the authoritative production derivation, it adds a
+    /// constructor beside `single_root_from_walk`. It does not change P15-9.
+    #[cfg(feature = "testing")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolved_sofi_for_test(
+        peer_genesis: [u8; 32],
+        peer_devid: [u8; 32],
+        validated_root: ValidatedEconomicRoot,
+        witness: EconomicTransitionWitness,
+        proven_ak: Vec<u8>,
+        c_dsm_plus: [u8; 32],
+        embedded_parent: [u8; 32],
+        verified_operation: crate::types::operations::Operation,
+    ) -> Self {
+        Self::ResolvedSofi(PeerTransitionFacts {
+            peer_genesis,
+            peer_devid,
+            validated_root,
+            witness,
+            proven_ak,
+            c_dsm_plus,
+            embedded_parent,
+            verified_operation,
+        })
+    }
+
+    /// PRIVATE on purpose: handing out `&PeerTransitionFacts` would let a
+    /// caller clone it and re-wrap it in the other arm.
+    fn facts(&self) -> &PeerTransitionFacts {
+        match self {
+            Self::SingleRoot(f) | Self::ResolvedSofi(f) => f,
+        }
+    }
+
+    pub fn peer_genesis(&self) -> &[u8; 32] {
+        &self.facts().peer_genesis
+    }
+
+    pub fn peer_devid(&self) -> &[u8; 32] {
+        &self.facts().peer_devid
+    }
+
+    /// The selected root. Both arms have one — that is why there is no third
+    /// arm.
+    pub fn validated_root(&self) -> &ValidatedEconomicRoot {
+        &self.facts().validated_root
+    }
+
+    pub fn witness(&self) -> &EconomicTransitionWitness {
+        &self.facts().witness
+    }
+
+    pub fn proven_ak(&self) -> &[u8] {
+        &self.facts().proven_ak
+    }
+
+    pub fn c_dsm_plus(&self) -> &[u8; 32] {
+        &self.facts().c_dsm_plus
+    }
+
+    pub fn embedded_parent(&self) -> &[u8; 32] {
+        &self.facts().embedded_parent
+    }
+
+    pub fn verified_operation(&self) -> &crate::types::operations::Operation {
+        &self.facts().verified_operation
+    }
 }
 
 /// The authenticated facts about the identity whose transition is being
@@ -345,6 +534,10 @@ pub enum ProvenanceError {
     /// The supplied peer transition's witness does not belong to the validated
     /// root it was handed with.
     PeerWitnessDoesNotMatchValidatedRoot,
+    /// P15-9: the peer's position descends from a SoFi conditional route, so
+    /// it is not an eligible debit source — regardless of whether that route
+    /// resolved and selected a concrete root.
+    SofiLineageNotEligible,
     /// The named peer mutation is not a debit of anything.
     PeerMutationIsNotADebit { index: u32 },
     /// The source funds a different asset than the credit it claims to fund.
@@ -425,6 +618,11 @@ impl core::fmt::Display for ProvenanceError {
                 "named debit mutation is not THE balance debit the peer's operation performed"
             ),
             Self::AcceptanceEvidence(e) => write!(f, "acceptance evidence: {e}"),
+            Self::SofiLineageNotEligible => write!(
+                f,
+                "peer position descends from a SoFi route, which is not an eligible debit \
+                 source even once resolved (P15-9)"
+            ),
             Self::PeerWitnessDoesNotMatchValidatedRoot => write!(
                 f,
                 "credit provenance: the peer witness does not produce the validated root it was \
@@ -631,14 +829,34 @@ pub fn validated_peer_debit_source_id(
     *h.finalize().as_bytes()
 }
 
-/// What sender-side prevalidation establishes: the peer's validated debit is
-/// THE debit of an online Transfer addressed to the consumer, with these
-/// exact coordinates. Everything here comes from the peer's VERIFIED
-/// operation and witness — never from a descriptor's story about them.
+/// A peer debit proven ELIGIBLE: it is the debit of an online Transfer
+/// addressed to the consumer, with these exact coordinates, **and it descends
+/// from an ordinary single-root lineage**.
+///
+/// The lineage half is why this type is opaque. Downstream code should not
+/// have to remember P15-9 and re-derive it; holding one of these already means
+/// the question was asked and answered. Everything in it comes from the peer's
+/// VERIFIED operation and witness — never from a descriptor's story about
+/// them.
+///
+/// Named `EligiblePeerDebit` rather than `ValidatedPeerDebit` because that name
+/// is already taken by the wire-level `CreditSource::ValidatedPeerDebit` and
+/// its `CreditSourceValidatedPeerDebit` body; those are a claim, this is the
+/// proof, and they must not read as the same thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SenderDebitPrevalidated {
-    pub debit_asset: [u8; 32],
-    pub debit_amount: u64,
+pub struct EligiblePeerDebit {
+    debit_asset: [u8; 32],
+    debit_amount: u64,
+}
+
+impl EligiblePeerDebit {
+    pub fn debit_asset(&self) -> [u8; 32] {
+        self.debit_asset
+    }
+
+    pub fn debit_amount(&self) -> u64 {
+        self.debit_amount
+    }
 }
 
 /// The sender-side conjuncts of the `ValidatedPeerDebit` predicate — ONE
@@ -657,17 +875,35 @@ pub fn prevalidate_sender_debit(
     expected_peer_devid: &[u8; 32],
     peer_debit_mutation_index: u32,
     consumer_devid: &[u8; 32],
-) -> Result<SenderDebitPrevalidated, ProvenanceError> {
+) -> Result<EligiblePeerDebit, ProvenanceError> {
+    // ── P15-9, BEFORE any other conjunct ──────────────────────────────────
+    // Lineage, not resolution state. A `ResolvedSofi` peer has a perfectly
+    // good concrete root and a fully validated transition, and it is refused
+    // anyway: the rule is about where the position came from, so a boolean
+    // like `is_unresolved` would let exactly the resolved case through.
+    //
+    // This runs first so the refusal cannot be mistaken for a failure of one
+    // of the conjuncts below — and so it still holds for a SoFi transition
+    // whose witness and operation are impeccable.
+    //
+    // The match is exhaustive on purpose. A future arm cannot be added to
+    // `ValidatedPeerTransition` without the compiler forcing a ruling here.
+    let peer = match peer {
+        ValidatedPeerTransition::SingleRoot(_) => peer,
+        ValidatedPeerTransition::ResolvedSofi(_) => {
+            return Err(ProvenanceError::SofiLineageNotEligible)
+        }
+    };
     // A genuine validated root paired with an unrelated witness is the one
     // forgery the type system cannot prevent on its own.
-    if peer.witness.post_economic_root != peer.validated_root.economic_root()
-        || peer.peer_genesis != *expected_peer_genesis
-        || peer.peer_devid != *expected_peer_devid
+    if peer.witness().post_economic_root != peer.validated_root().economic_root()
+        || peer.peer_genesis() != expected_peer_genesis
+        || peer.peer_devid() != expected_peer_devid
     {
         return Err(ProvenanceError::PeerWitnessDoesNotMatchValidatedRoot);
     }
     let debit = peer
-        .witness
+        .witness()
         .mutations
         .get(peer_debit_mutation_index as usize)
         .ok_or(ProvenanceError::IndexOutOfRange {
@@ -680,7 +916,7 @@ pub fn prevalidate_sender_debit(
     // "Some peer had a validated debit" is not the semantics. The debit must
     // be the sender's ONLINE Transfer, addressed to THIS consumer, and the
     // named mutation must be THE debit that operation performed.
-    let (op_recipient, op_amount, op_asset) = match &peer.verified_operation {
+    let (op_recipient, op_amount, op_asset) = match peer.verified_operation() {
         crate::types::operations::Operation::Transfer {
             to_device_id,
             amount,
@@ -696,7 +932,7 @@ pub fn prevalidate_sender_debit(
     if op_asset != debit_asset || op_amount != debit_amount {
         return Err(ProvenanceError::PeerDebitIndexIsNotTheOperationDebit);
     }
-    Ok(SenderDebitPrevalidated {
+    Ok(EligiblePeerDebit {
         debit_asset,
         debit_amount,
     })
@@ -971,7 +1207,8 @@ pub fn verify_credit_source(
                 p.peer_debit_mutation_index,
                 ctx.device_id,
             )?;
-            let (debit_asset, debit_amount) = (prevalidated.debit_asset, prevalidated.debit_amount);
+            let (debit_asset, debit_amount) =
+                (prevalidated.debit_asset(), prevalidated.debit_amount());
             // ── The acceptance — recipient-produced, never the proposal ────
             // The bundle's bytes are fetched by content address and verified
             // HERE: sender chain to the peer's proven AK, recipient chain to
@@ -1007,7 +1244,7 @@ pub fn verify_credit_source(
                 &bundle_bytes,
                 &crate::economic::peer_acceptance::AcceptanceParty {
                     devid: p.peer_devid,
-                    proven_ak: &peer.proven_ak,
+                    proven_ak: peer.proven_ak(),
                 },
                 &crate::economic::peer_acceptance::AcceptanceParty {
                     devid: *ctx.device_id,
@@ -1016,8 +1253,11 @@ pub fn verify_credit_source(
                 // The wire carries the UNSIGNED canonical preimage; the
                 // walker verified the SIGNED operation — clear before
                 // comparing or the equality can never hold.
-                &peer.verified_operation.with_cleared_signature().to_bytes(),
-                &peer.c_dsm_plus,
+                &peer
+                    .verified_operation()
+                    .with_cleared_signature()
+                    .to_bytes(),
+                peer.c_dsm_plus(),
                 &expected_b_pair,
                 &mut fetch_step,
             )
@@ -1243,7 +1483,7 @@ pub fn verify_credit_source(
                     d.trader_economic_position,
                 )
                 .map_err(ProvenanceError::OwnerLineage)?;
-            let trader_root = trader.validated_root.economic_root();
+            let trader_root = trader.validated_root().economic_root();
             // ── 3. The evidence bundle, by exact content address ──────────
             let bundle_bytes = resolver
                 .immutable_evidence(
@@ -1599,7 +1839,7 @@ fn check_reserve_consumption_leg(
     let owner = resolver
         .validated_peer_transition(owner_genesis, owner_devid, d.owner_economic_position)
         .map_err(ProvenanceError::OwnerLineage)?;
-    let owner_root = owner.validated_root.economic_root();
+    let owner_root = owner.validated_root().economic_root();
     // THE PROOF SOURCE IS THE GENERIC ARTIFACT — one object, shared
     // by both directions of a settlement, rather than a second copy
     // of the same leaves inside this bundle. Fetched by the INNER

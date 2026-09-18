@@ -50,6 +50,11 @@ bash ci/sofi_validated_root_constructors.sh
 # still owes the binding from that operation to the accepted owner transition.
 bash ci/sofi_genesis_acceptance_binding.sh
 
+# Only an ordinary single-root lineage can become an eligible peer debit
+# (P15-9). The discriminant is worthless if a caller can attach it, and
+# variant-field visibility changes no runtime behaviour.
+bash ci/peer_debit_lineage_authoritative.sh
+
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
 cd tla

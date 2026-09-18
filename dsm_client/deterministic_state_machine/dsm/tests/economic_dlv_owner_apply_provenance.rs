@@ -217,23 +217,22 @@ impl ProvenanceResolver for ApplyResolver {
                 Vec::new(),
             )
             .unwrap();
-            Ok(ValidatedPeerTransition {
-                peer_genesis: G_TRADER,
-                peer_devid: DEV_TRADER,
-                validated_root:
-                    dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                        dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                            economic_position: TRADER_POSITION,
-                            economic_root: self.trader_root,
-                        },
-                    )
-                    .expect("an ordinary admitted position"),
+            Ok(ValidatedPeerTransition::single_root_for_test(
+                G_TRADER,
+                DEV_TRADER,
+                dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                    dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                        economic_position: TRADER_POSITION,
+                        economic_root: self.trader_root,
+                    },
+                )
+                .expect("an ordinary admitted position"),
                 witness,
-                proven_ak: vec![0xAA; 64],
-                c_dsm_plus: [0xC5; 32],
-                embedded_parent: [0xC1; 32],
-                verified_operation: Operation::Noop,
-            })
+                vec![0xAA; 64],
+                [0xC5; 32],
+                [0xC1; 32],
+                Operation::Noop,
+            ))
         } else {
             Err(PeerLineageFailure::Incomplete(
                 "no such validated lineage".into(),

@@ -94,10 +94,10 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
     .await
     .expect("join")
     .expect("a two-step lineage (credit then debit) MUST be foreign-walkable");
-    assert_eq!(peer.validated_root.economic_position(), 2);
-    assert_eq!(peer.validated_root.economic_root(), admitted_root);
+    assert_eq!(peer.validated_root().economic_position(), 2);
+    assert_eq!(peer.validated_root().economic_root(), admitted_root);
     assert!(matches!(
-        peer.verified_operation,
+        peer.verified_operation(),
         dsm::types::operations::Operation::Burn { .. }
     ));
 }
@@ -791,11 +791,11 @@ async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
     .await
     .expect("join")
     .expect("the minted position MUST be foreign-walkable through the 0x0023 arm");
-    assert_eq!(peer.validated_root.economic_position(), 3);
-    assert_eq!(peer.validated_root.economic_root(), admitted_root);
+    assert_eq!(peer.validated_root().economic_position(), 3);
+    assert_eq!(peer.validated_root().economic_root(), admitted_root);
     assert!(
         matches!(
-            peer.verified_operation,
+            peer.verified_operation(),
             dsm::types::operations::Operation::Mint { .. }
         ),
         "the walked operation is the Mint itself"
