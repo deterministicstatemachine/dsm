@@ -155,6 +155,89 @@ pub fn advance_resolved(
     Ok(ValidatedEconomicRoot::from_resolved_sofi_position(q, root))
 }
 
+/// What the verifier knows about the claim at a predecessor position, for the
+/// core-local fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredecessorClaim {
+    /// An ordinary single-root claim. Its root is validated or it is not, and
+    /// that is the whole question.
+    SingleRoot,
+    /// A conditional SoFi claim `C_q` that has not resolved. It commits TWO
+    /// roots and has selected neither.
+    ConditionalUnresolved,
+    /// A conditional claim that resolved and selected a root.
+    ConditionalResolved { selected_root: D32 },
+    /// A conditional claim that resolved Invalid: no root was selected, and
+    /// none ever will be.
+    ConditionalTerminal,
+}
+
+/// Why a descendant may not be built on this predecessor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceError {
+    /// The predecessor is conditional and undecided. A descendant built now
+    /// would be built on a root the lineage has not chosen.
+    PredecessorIsUnresolved,
+    /// The predecessor resolved Invalid: the lineage ends there.
+    PredecessorIsTerminal,
+    /// The descendant is built on a root the predecessor did not select.
+    PreRootIsNotTheSelectedRoot { selected: D32, descendant_pre: D32 },
+}
+
+impl core::fmt::Display for FenceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PredecessorIsUnresolved => write!(
+                f,
+                "the claim at the predecessor position is conditional and has not \
+                 resolved: it commits two roots and has selected neither"
+            ),
+            Self::PredecessorIsTerminal => {
+                write!(
+                    f,
+                    "the predecessor resolved Invalid: the lineage ends there"
+                )
+            }
+            Self::PreRootIsNotTheSelectedRoot { .. } => write!(
+                f,
+                "the descendant is built on a root the predecessor did not select"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FenceError {}
+
+/// THE CORE-LOCAL FENCE (F2): nothing descends from a conditional predecessor
+/// until that predecessor has chosen a root.
+///
+/// The STORAGE fence is a different check and a weaker one — it requires the
+/// predecessor to be storage-resolved, which a member can see. This one is the
+/// verifier's: a position can be storage-resolved and still undecided, because
+/// whether the route realized depends on evidence a member never evaluates. A
+/// descendant admitted on that basis would be built on a root the lineage had
+/// not chosen, and half of the time it is the wrong one.
+pub fn descendant_fence(
+    predecessor: PredecessorClaim,
+    descendant_pre_root: &D32,
+) -> Result<(), FenceError> {
+    match predecessor {
+        PredecessorClaim::SingleRoot => Ok(()),
+        PredecessorClaim::ConditionalUnresolved => Err(FenceError::PredecessorIsUnresolved),
+        PredecessorClaim::ConditionalTerminal => Err(FenceError::PredecessorIsTerminal),
+        PredecessorClaim::ConditionalResolved { selected_root } => {
+            if selected_root == *descendant_pre_root {
+                Ok(())
+            } else {
+                Err(FenceError::PreRootIsNotTheSelectedRoot {
+                    selected: selected_root,
+                    descendant_pre: *descendant_pre_root,
+                })
+            }
+        }
+    }
+}
+
 /// Why a vault's genesis is not acceptable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenesisError {
@@ -636,5 +719,91 @@ mod tests {
         // It carries no amount, so it can never be read as a credit needing a
         // funding source.
         assert_eq!(state.credit_amount(), None);
+    }
+
+    // ── the core-local fence ─────────────────────────────────────────────
+
+    /// A conditional predecessor that has not resolved blocks EVERYTHING
+    /// beneath it, whichever of its two roots a descendant guesses.
+    #[test]
+    fn nothing_descends_from_an_unresolved_conditional_predecessor() {
+        for guess in [d(0xA0), d(0xA1), d(0x00)] {
+            assert_eq!(
+                descendant_fence(PredecessorClaim::ConditionalUnresolved, &guess),
+                Err(FenceError::PredecessorIsUnresolved)
+            );
+        }
+    }
+
+    /// Once it resolves, exactly one root is admissible — the one it selected.
+    #[test]
+    fn a_resolved_predecessor_admits_only_the_root_it_selected() {
+        let selected = d(0xA1);
+        assert_eq!(
+            descendant_fence(
+                PredecessorClaim::ConditionalResolved {
+                    selected_root: selected
+                },
+                &selected
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            descendant_fence(
+                PredecessorClaim::ConditionalResolved {
+                    selected_root: selected
+                },
+                &d(0xA0)
+            ),
+            Err(FenceError::PreRootIsNotTheSelectedRoot {
+                selected,
+                descendant_pre: d(0xA0)
+            })
+        );
+    }
+
+    #[test]
+    fn a_terminal_predecessor_ends_the_lineage_and_an_ordinary_one_does_not_fence() {
+        assert_eq!(
+            descendant_fence(PredecessorClaim::ConditionalTerminal, &d(0xA0)),
+            Err(FenceError::PredecessorIsTerminal)
+        );
+        assert_eq!(
+            descendant_fence(PredecessorClaim::SingleRoot, &d(0xA0)),
+            Ok(())
+        );
+    }
+
+    /// The fence and the advance agree: a position that `advance_resolved`
+    /// produced is exactly one a descendant may build on, and the root it
+    /// installed is the only one admissible.
+    #[test]
+    fn the_fence_admits_exactly_what_the_advance_installed() {
+        let pre = d(0xA0);
+        let realize = d(0xA1);
+        let p = precommit(pre, realize);
+        let f = fulfillment(&p);
+        for (resolution, expected) in [(Resolution::Realized, realize), (Resolution::Void, pre)] {
+            let advanced =
+                advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), resolution).unwrap();
+            assert_eq!(
+                descendant_fence(
+                    PredecessorClaim::ConditionalResolved {
+                        selected_root: advanced.economic_root()
+                    },
+                    &expected
+                ),
+                Ok(())
+            );
+            // And the branch it did NOT take is refused.
+            let other = if expected == realize { pre } else { realize };
+            assert!(descendant_fence(
+                PredecessorClaim::ConditionalResolved {
+                    selected_root: advanced.economic_root()
+                },
+                &other
+            )
+            .is_err());
+        }
     }
 }
