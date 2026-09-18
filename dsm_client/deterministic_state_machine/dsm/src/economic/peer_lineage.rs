@@ -36,7 +36,7 @@ use crate::common::domain_tags::{
 use crate::crypto::domain::TaggedHashDomain;
 use crate::economic::authority_evidence::{verify_authority_evidence, AuthorityEvidenceError};
 use crate::economic::claim::AdmissionSubstrate;
-use crate::economic::claim_envelope::decode_and_verify_economic_root_claim;
+use crate::economic::claim_envelope::decode_registered_economic_claim;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
     activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
@@ -49,6 +49,7 @@ use crate::economic::register::{
     economic_root_register_key, resolve_for_trader, RegisteredEconomicRoot,
 };
 use crate::economic::successor_evidence::verify_dsm_successor_evidence;
+use crate::types::identifiers::encode_crockford;
 use crate::economic::witness::EconomicTransitionWitness;
 
 /// Total step budget for one walk, across ALL identities it touches.
@@ -360,9 +361,20 @@ fn walk_positions(
         let cell = fetcher
             .register_cell(&k_root)?
             .ok_or_else(|| incomplete(format!("position {position} has no quorum winner")))?;
-        let claim = decode_and_verify_economic_root_claim(&cell)
+        // BY CLASS, and a conditional position is its own answer. Decoding a
+        // `C_q` cell with the single-root decoder fails, and mapping that
+        // failure to `invalid` would report an honest peer mid-route as an
+        // authenticated forgery — permanently, since `Invalid` is terminal.
+        let claim = decode_registered_economic_claim(&cell)
             .map_err(|e| invalid(format!("register winner at {position}: {e}")))?;
-        let body = claim.body;
+        let claim = claim.single_root().map_err(|conditional| {
+            PeerLineageFailure::Unresolved(format!(
+                "peer {}/{} at position {position}: {conditional}",
+                encode_crockford(peer_genesis),
+                encode_crockford(peer_devid)
+            ))
+        })?;
+        let body = claim.body.clone();
         if body.trader_genesis != *peer_genesis
             || body.trader_devid != *peer_devid
             || body.economic_position != position
@@ -512,4 +524,164 @@ fn walk_positions(
         embedded_parent,
         verified_operation,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::*;
+    use crate::sofi::wire::SofiResolutionClaim;
+
+    const PEER_G: [u8; 32] = [0x11; 32];
+    const PEER_D: [u8; 32] = [0x22; 32];
+    const NETWORK: &[u8] = b"dsm-testnet";
+
+    /// A fetcher that serves exactly one cell: a conditional SoFi claim at the
+    /// target position. Every other capability refuses, because none of them
+    /// should be reached — the walk has to stop at the claim.
+    struct ConditionalCellFetcher {
+        position: u64,
+        claim: Vec<u8>,
+    }
+
+    impl PeerEvidenceFetcher for ConditionalCellFetcher {
+        fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            let want = economic_root_register_key(&PEER_G, &PEER_D, self.position);
+            if *k_root == want {
+                return Ok(Some(self.claim.clone()));
+            }
+            Ok(None)
+        }
+        fn faucet_ticket_cell(
+            &self,
+            _faucet_id: &[u8; 32],
+            _ticket_index: u64,
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            Ok(None)
+        }
+        fn parent_binding_observation(
+            &self,
+            _resource_key: &[u8; 32],
+            _storage_set: &crate::ccb::StorageSetMembers,
+            _quorum: u32,
+        ) -> crate::dlv::binding_observation::BindingObservation {
+            crate::dlv::binding_observation::BindingObservation::Unavailable {
+                attributed: 0,
+                required: 3,
+            }
+        }
+        fn root_register_candidate_set(
+            &self,
+            _network_id: &[u8],
+        ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete("no set in this test".into()))
+        }
+        fn immutable(
+            &self,
+            _namespace: TaggedHashDomain<'static>,
+            _addr: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete("no objects here".into()))
+        }
+        fn anchored_policy_bytes(
+            &self,
+            _policy_commit: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete("no policies here".into()))
+        }
+    }
+
+    fn conditional_claim(position: u64) -> SofiResolutionClaim {
+        SofiResolutionClaim {
+            genesis: PEER_G,
+            device_id: PEER_D,
+            position,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        }
+    }
+
+    /// A CONDITIONAL PEER POSITION IS `Unresolved`, NOT `Invalid`.
+    ///
+    /// Before the union existed, the single-root decoder failed on these bytes
+    /// and the walk mapped that failure to `Invalid` — i.e. to *authenticated
+    /// forgery*, which is terminal and quarantining. Every honest counterparty
+    /// that ever exercised a route would have been permanently refused by
+    /// every peer, as a fraud, for being mid-route.
+    #[test]
+    fn a_conditional_peer_position_is_unresolved_and_never_invalid() {
+        let position = 4;
+        let fetcher = ConditionalCellFetcher {
+            position,
+            claim: conditional_claim(position).encode(),
+        };
+        let err = validate_peer_lineage(
+            &fetcher,
+            NETWORK,
+            &PEER_G,
+            &PEER_D,
+            position,
+            Some(ValidatedStart {
+                economic_position: position - 1,
+                economic_root: [0x77; 32],
+            }),
+        )
+        .expect_err("a conditional position cannot produce a validated transition");
+
+        match &err {
+            PeerLineageFailure::Unresolved(m) => {
+                assert!(
+                    m.contains("commits two roots and has selected neither"),
+                    "the refusal must say what it is waiting on, got: {m}"
+                );
+            }
+            other => panic!("a conditional position must be Unresolved, got {other:?}"),
+        }
+        // The distinction is the whole point: not a forgery, not a quarantine,
+        // and not a fetch that might succeed on retry.
+        assert!(!matches!(err, PeerLineageFailure::Invalid(_)));
+        assert!(!matches!(err, PeerLineageFailure::Quarantined(_)));
+        assert!(!matches!(err, PeerLineageFailure::Incomplete(_)));
+    }
+
+    /// NO PATH from a conditional cell to a validated root. The walk is the
+    /// only way a foreign position becomes a `ValidatedEconomicRoot`, and it
+    /// refuses — so neither branch of an unresolved `C_q` can be minted, and
+    /// no `ValidatedPeerTransition` exists to carry one downstream.
+    #[test]
+    fn no_validated_root_is_minted_from_either_branch_of_an_unresolved_claim() {
+        let position = 2;
+        let claim = conditional_claim(position);
+        let fetcher = ConditionalCellFetcher {
+            position,
+            claim: claim.encode(),
+        };
+        let outcome = validate_peer_lineage(
+            &fetcher,
+            NETWORK,
+            &PEER_G,
+            &PEER_D,
+            position,
+            Some(ValidatedStart {
+                economic_position: position - 1,
+                economic_root: [0x77; 32],
+            }),
+        );
+        let err = outcome.expect_err("no validated transition");
+        // Neither of the two committed roots appears in the refusal, because
+        // nothing selected one. A message quoting `realize_root` would mean
+        // some code path had already read it as "the" root.
+        let rendered = err.to_string();
+        for (name, root) in [
+            ("realize_root", claim.realize_root),
+            ("void_root", claim.void_root),
+        ] {
+            let b32 = crate::types::identifiers::encode_crockford(&root);
+            assert!(
+                !rendered.contains(&b32),
+                "{name} leaked into the refusal: {rendered}"
+            );
+        }
+    }
 }

@@ -141,11 +141,20 @@ pub struct FaucetTicketWin {
 /// exhaust a budget into `Incomplete`, never into `Invalid`); `Invalid` is
 /// evidence that verified as wrong; `Quarantined` is a divergent write-once
 /// register cell — never retried, never hash-ordered, never overwritten.
+///
+/// `Unresolved` is the fourth answer, and it is none of the other three. The
+/// peer's claim at that position is present and authentic and has selected no
+/// root: a conditional SoFi position (`C_q`) whose route has not resolved.
+/// Calling that `Invalid` would report an honest counterparty as an
+/// authenticated forgery — a verdict that is permanent and quarantining —
+/// and calling it `Incomplete` would say a fetch might fix it, when nothing
+/// this verifier can fetch will. What resolves it is the route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerLineageFailure {
     Incomplete(String),
     Invalid(String),
     Quarantined(String),
+    Unresolved(String),
 }
 
 impl core::fmt::Display for PeerLineageFailure {
@@ -154,6 +163,7 @@ impl core::fmt::Display for PeerLineageFailure {
             Self::Incomplete(m) => write!(f, "peer lineage incomplete: {m}"),
             Self::Invalid(m) => write!(f, "peer lineage INVALID: {m}"),
             Self::Quarantined(m) => write!(f, "peer lineage QUARANTINED: {m}"),
+            Self::Unresolved(m) => write!(f, "peer lineage UNRESOLVED: {m}"),
         }
     }
 }
@@ -1860,10 +1870,27 @@ fn requires_consumed_source_record(source: &CreditSource) -> bool {
     // target position, itself a write-once register cell, and ONE exact
     // operation), so a consumed-source leaf would be bookkeeping for an
     // impossibility.
-    matches!(
-        source,
-        CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_)
-    )
+    // EXHAUSTIVE ON PURPOSE. As a `matches!` allowlist this defaulted a new
+    // arm to `false` — no consumed-source leaf, so the source stays
+    // re-spendable — with no compile error anywhere. Every other function
+    // over `CreditSource` in this module forces an arm; this one now does too,
+    // and the permissive answer has to be written down to be chosen.
+    match source {
+        CreditSource::ValidatedPeerDebit(_) | CreditSource::VerifiedOfflineReentry(_) => true,
+        CreditSource::ValidatedFaucetDistribution(_) => false,
+        // The remaining arms answer `false`, exactly as the allowlist did.
+        // Each is bound to a coordinate that cannot be replayed: a
+        // same-transition move is internal to the witness being verified, and
+        // the settlement, issuance and reserve-consumption arms each name a
+        // position-and-root pair their evidence is proven against. Listing
+        // them is the point — the answer is now written down rather than
+        // inherited from whichever arm a `matches!` happened to omit.
+        CreditSource::SameTransitionMove(_)
+        | CreditSource::ValidatedDlvSettlementPayment(_)
+        | CreditSource::AuthorizedIssuance(_)
+        | CreditSource::DlvReserveConsumption(_)
+        | CreditSource::DlvRouteReserveConsumption(_) => false,
+    }
 }
 
 /// THE MARKET-LEG TOKEN-POLICY CONJUNCT (SoFi Def 4.1, Req 4.4, Req 4.6):
@@ -1923,6 +1950,15 @@ pub fn market_leg_commits(operation: &crate::types::operations::Operation) -> Ve
             }
             commits
         }
+        // A SoFi operation's legs are priced and policy-checked by
+        // `sofi::validation` against the vault's own market policy, and it
+        // never reaches this verifier (`write_set` refuses it by name). An
+        // empty vector here would read as "this operation has no market legs",
+        // which is false — so the arm is named rather than left to fall
+        // through, and a future SoFi arrival is a compile-time decision.
+        Operation::SofiSetup { .. }
+        | Operation::SofiVaultCreate { .. }
+        | Operation::SofiFulfill { .. } => Vec::new(),
         _ => Vec::new(),
     }
 }
