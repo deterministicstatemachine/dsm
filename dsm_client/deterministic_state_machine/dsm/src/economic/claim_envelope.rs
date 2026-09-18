@@ -232,3 +232,259 @@ pub fn verify_claim_attribution(
 /// Kept as a compile-time-adjacent assertion so a class renumbering cannot
 /// silently retarget the decoder.
 const _: () = assert!(EconomicRootClaimBody::CLASS == class::ECONOMIC_ROOT_CLAIM_BODY);
+
+// ── The register cell holds ONE claim, of ONE kind ──────────────────────────
+
+/// What a register cell at `K_root(p)` holds, decoded by its own class.
+///
+/// A position is either ordinary or conditional, and the two are not
+/// interchangeable:
+///
+/// - [`Self::SingleRoot`] registers ONE root, signed by its claimant.
+/// - [`Self::ConditionalSofi`] is `C_q`: it commits TWO roots and has selected
+///   **neither**. It is not "a claim whose root is not handy" — it is a claim
+///   that has not chosen, and no amount of fetching changes that. Only the
+///   route's resolution does.
+///
+/// **There is deliberately no accessor that returns "the" root.** A union with
+/// an infallible `post_economic_root()` would have to pick a branch for the
+/// conditional arm, and picking `realize_root` is exactly the flattening that
+/// makes every downstream Merkle proof succeed against a branch the lineage
+/// never took. Callers that need a concrete root must match, and the
+/// conditional arm gives them a refusal naming the fulfillment it is waiting
+/// on — see [`Self::single_root`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisteredEconomicClaim {
+    /// The ordinary claim: one root, one signature, one manifest.
+    SingleRoot(VerifiedEconomicRootClaim),
+    /// `C_q` — a conditional SoFi position. Carries no `post_economic_root`
+    /// FIELD, so there is nothing for a caller to read by mistake.
+    ConditionalSofi(crate::sofi::wire::SofiResolutionClaim),
+}
+
+/// Why a claim cannot supply a concrete root.
+///
+/// Not an error about the claim's validity: the claim is authentic, present,
+/// and has not chosen. It names the fulfillment whose resolution decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimIsConditional {
+    pub economic_position: u64,
+    pub fulfillment_id: [u8; 32],
+}
+
+impl core::fmt::Display for ClaimIsConditional {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the claim at position {} is conditional on fulfillment {}: it commits \
+             two roots and has selected neither",
+            self.economic_position,
+            crate::types::identifiers::encode_crockford(&self.fulfillment_id)
+        )
+    }
+}
+
+impl std::error::Error for ClaimIsConditional {}
+
+impl RegisteredEconomicClaim {
+    /// The trader whose position this is, from whichever arm.
+    pub fn trader(&self) -> ([u8; 32], [u8; 32]) {
+        match self {
+            Self::SingleRoot(c) => (c.body.trader_genesis, c.body.trader_devid),
+            Self::ConditionalSofi(c) => (c.genesis, c.device_id),
+        }
+    }
+
+    /// The position this claim occupies. Both kinds share one counter space,
+    /// which is why the position can never discriminate between them.
+    pub fn economic_position(&self) -> u64 {
+        match self {
+            Self::SingleRoot(c) => c.body.economic_position,
+            Self::ConditionalSofi(c) => c.position,
+        }
+    }
+
+    /// The single-root claim, or a refusal naming what it is conditional on.
+    ///
+    /// THE ONLY WAY to a concrete registered root. A conditional claim cannot
+    /// be coerced through here at any resolution state: resolving `C_q` is the
+    /// lineage's job (`sofi::lineage::advance_resolved`), not a decoder's, and
+    /// a resolved position's usable root arrives as a `ValidatedEconomicRoot`
+    /// rather than as a re-reading of these bytes (P15-10: `C_q` is recomputed
+    /// from `(P, F)`, never read from the register).
+    pub fn single_root(&self) -> Result<&VerifiedEconomicRootClaim, ClaimIsConditional> {
+        match self {
+            Self::SingleRoot(c) => Ok(c),
+            Self::ConditionalSofi(c) => Err(ClaimIsConditional {
+                economic_position: c.position,
+                fulfillment_id: c.fulfillment_id,
+            }),
+        }
+    }
+}
+
+/// Decode a register cell into whichever claim it holds, **by class**.
+///
+/// The two kinds are distinguishable at the first two bytes: a conditional
+/// claim is a bare CCB object and leads with its class envelope, while a
+/// single-root claim is a `EconomicRootClaimV1` protobuf and never does. So
+/// this peeks the class and dispatches, exactly as `ParentClaimRef::at` does
+/// for the wire union — it does not try one decoder and fall back to the
+/// other, because "whichever parses" is not a canonical rule.
+///
+/// The conditional arm has no signature to check and none to fake: `C_q` is
+/// derived by the member in the same transaction that accepts `F`, and `F`'s
+/// own signature is the attribution. A caller never supplies these bytes.
+pub fn decode_registered_economic_claim(
+    cell_bytes: &[u8],
+) -> Result<RegisteredEconomicClaim, ClaimEnvelopeError> {
+    if cell_bytes.is_empty() {
+        return Err(ClaimEnvelopeError::Malformed("empty envelope"));
+    }
+    if cell_bytes.len() >= 2
+        && u16::from_be_bytes([cell_bytes[0], cell_bytes[1]]) == class::SOFI_RESOLUTION_CLAIM
+    {
+        let claim = crate::sofi::wire::SofiResolutionClaim::decode(cell_bytes)
+            .map_err(ClaimEnvelopeError::Body)?;
+        return Ok(RegisteredEconomicClaim::ConditionalSofi(claim));
+    }
+    decode_and_verify_economic_root_claim(cell_bytes).map(RegisteredEconomicClaim::SingleRoot)
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod tests {
+    use super::*;
+    use crate::sofi::wire::SofiResolutionClaim;
+
+    fn conditional() -> SofiResolutionClaim {
+        SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 7,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        }
+    }
+
+    /// A conditional cell decodes AS a conditional claim — by class, not by
+    /// "whichever decoder happens to parse". It is not an error and it is not
+    /// a single-root claim with a missing field.
+    #[test]
+    fn a_conditional_cell_decodes_by_class() {
+        let claim = conditional();
+        let decoded = decode_registered_economic_claim(&claim.encode()).unwrap();
+        assert_eq!(
+            decoded,
+            RegisteredEconomicClaim::ConditionalSofi(claim),
+            "the cell holds C_q and says so"
+        );
+        assert_eq!(decoded.economic_position(), 7);
+        assert_eq!(decoded.trader(), ([0x11; 32], [0x22; 32]));
+    }
+
+    /// THE ROOT IS NOT AVAILABLE, AND NOT GUESSED. Asking a conditional claim
+    /// for a concrete root yields a refusal naming the fulfillment it waits
+    /// on — never `realize_root`, which is the flattening that would make
+    /// every downstream inclusion proof succeed against an unchosen branch.
+    #[test]
+    fn a_conditional_claim_refuses_to_supply_a_root() {
+        let claim = conditional();
+        let decoded = decode_registered_economic_claim(&claim.encode()).unwrap();
+        let refusal = decoded.single_root().expect_err("no root is selected");
+        assert_eq!(
+            refusal,
+            ClaimIsConditional {
+                economic_position: 7,
+                fulfillment_id: [0xF1; 32],
+            }
+        );
+        // The message names the fulfillment and NEITHER root.
+        let rendered = refusal.to_string();
+        assert!(rendered.contains(&crate::types::identifiers::encode_crockford(&[0xF1; 32])));
+        for root in [claim.realize_root, claim.void_root] {
+            assert!(
+                !rendered.contains(&crate::types::identifiers::encode_crockford(&root)),
+                "a committed root leaked into the refusal: {rendered}"
+            );
+        }
+    }
+
+    /// THE OTHER ARM STILL WORKS, and the two framings cannot be confused.
+    ///
+    /// A single-root claim is a protobuf envelope; `C_q` is a bare CCB object
+    /// leading with its class. The dispatch is unambiguous for a structural
+    /// reason worth stating: the class tag's high byte is `0x00`, and no
+    /// canonical protobuf can begin with `0x00` because field number 0 is
+    /// illegal. So no valid single-root envelope is ever mistaken for a
+    /// conditional claim, and the test asserts that rather than assuming it.
+    #[test]
+    fn a_single_root_envelope_still_decodes_as_a_single_root() {
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().unwrap();
+        let body = crate::economic::claim::EconomicRootClaimBody::new(
+            [0x11; 32],
+            [0x22; 32],
+            9,
+            [0xC0; 32],
+            [0xD0; 32],
+            [0x77; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &pk,
+        )
+        .unwrap();
+        let envelope = sign_economic_root_claim(&body, &sk).unwrap();
+
+        // It cannot be read as the conditional arm, structurally.
+        assert_ne!(
+            u16::from_be_bytes([envelope[0], envelope[1]]),
+            class::SOFI_RESOLUTION_CLAIM,
+            "a protobuf envelope cannot lead with a CCB class tag"
+        );
+        assert_ne!(envelope[0], 0x00, "protobuf field number 0 is illegal");
+
+        match decode_registered_economic_claim(&envelope).unwrap() {
+            RegisteredEconomicClaim::SingleRoot(v) => {
+                assert_eq!(v.body, body);
+                assert_eq!(v.envelope_bytes, envelope);
+                // And this arm DOES supply a root — the union did not make the
+                // ordinary path fallible for everyone.
+                assert_eq!(
+                    decode_registered_economic_claim(&envelope)
+                        .unwrap()
+                        .single_root()
+                        .unwrap()
+                        .body
+                        .post_economic_root,
+                    [0xC0; 32]
+                );
+            }
+            other => panic!("a signed single-root envelope must decode as one, got {other:?}"),
+        }
+
+        // A tampered envelope is still refused by signature, through the union.
+        let mut tampered = envelope.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(decode_registered_economic_claim(&tampered).is_err());
+    }
+
+    /// Bytes that are neither a canonical `C_q` nor a canonical single-root
+    /// envelope are refused, and a truncated conditional claim does not fall
+    /// through to the proto decoder: class dispatch commits to one reading.
+    #[test]
+    fn a_malformed_cell_does_not_fall_through_to_the_other_decoder() {
+        assert!(decode_registered_economic_claim(&[]).is_err());
+        let mut truncated = conditional().encode();
+        truncated.pop();
+        match decode_registered_economic_claim(&truncated) {
+            Err(ClaimEnvelopeError::Body(_)) => {}
+            other => panic!("a truncated C_q must fail AS a C_q, got {other:?}"),
+        }
+        // Trailing bytes are not tolerated either — a write-once cell holds
+        // exactly one canonical value.
+        let mut trailing = conditional().encode();
+        trailing.push(0x00);
+        assert!(decode_registered_economic_claim(&trailing).is_err());
+    }
+}

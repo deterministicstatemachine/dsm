@@ -2122,6 +2122,14 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         dsm::economic::provenance::PeerLineageFailure::Incomplete(m) => {
             incomplete(format!("sender lineage: {m}"))
         }
+        // The sender's position is conditional and its route has not
+        // resolved. NOT terminal: the sender is honest and mid-route, and
+        // `terminal` would refuse this transfer forever over a state that
+        // resolves on its own. It is also not a defect in what we hold, so
+        // the message says which it is rather than blaming a fetch.
+        dsm::economic::provenance::PeerLineageFailure::Unresolved(m) => {
+            incomplete(format!("sender lineage is undecided: {m}"))
+        }
     })?;
 
     // ── The sender-side conjuncts — the SAME implementation the verifier's
@@ -2437,9 +2445,17 @@ pub(crate) async fn verify_release_against_register(
             "no quorum winner at the released position yet".to_string(),
         ));
     };
-    let claim = dsm::economic::claim_envelope::decode_and_verify_economic_root_claim(&cell)
+    let claim = dsm::economic::claim_envelope::decode_registered_economic_claim(&cell)
         .map_err(|e| Mismatch(format!("registered claim: {e}")))?;
-    let body = claim.body;
+    // A CONDITIONAL POSITION IS NOT A HOSTILE RECIPIENT. `Mismatch` is the
+    // terminal verdict here — it quarantines the counterparty — and a claim
+    // that has simply not selected a root yet has done nothing wrong. It is
+    // `Unavailable`, which is the retrying verdict, because the route's
+    // resolution is exactly what makes it answerable later.
+    let claim = claim
+        .single_root()
+        .map_err(|conditional| Unavailable(conditional.to_string()))?;
+    let body = claim.body.clone();
     if body.trader_genesis != release.recipient_genesis
         || body.trader_devid != release.recipient_devid
         || body.economic_position != release.recipient_economic_position

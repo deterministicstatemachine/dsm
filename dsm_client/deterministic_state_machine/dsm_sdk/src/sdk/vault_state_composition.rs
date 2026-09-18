@@ -1037,6 +1037,13 @@ async fn certify_market_evidence(
         Err(PeerLineageFailure::Incomplete(e)) => {
             return Unavailable(format!("the trader's lineage could not be walked: {e}"))
         }
+        // A conditional position has NOT failed to validate — it has not
+        // chosen. This arm is written out because the catch-all below would
+        // have called it `invalid`, which in composition is a contradiction
+        // verdict about the trader, not a "come back later".
+        Err(PeerLineageFailure::Unresolved(e)) => {
+            return Unavailable(format!("the trader's lineage is undecided: {e}"))
+        }
         Err(e) => return invalid(format!("the trader's lineage does not validate: {e}")),
     };
 

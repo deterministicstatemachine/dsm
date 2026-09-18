@@ -115,7 +115,7 @@ impl ValidatedEconomicRoot {
     /// claim is conditional (`C_q`).
     ///
     /// **Only `sofi::lineage::advance_resolved` may call this**, and
-    /// `ci/sofi_advance_resolved_is_the_only_caller.sh` proves it: the
+    /// `ci/sofi_validated_root_constructors.sh` proves it: the
     /// conjunction that earns a validated root at `q` lives there, and a
     /// second caller would be a second, unreviewed definition of what
     /// "validated" means. It is the same puncture as
@@ -648,6 +648,19 @@ pub fn advance_validated(
             SuccessorValidity::DlvTransition {
                 kind: DlvTransitionKind::Close,
             }
+        }
+        // A SoFi operation cannot reach here — `verify_operation_write_set`
+        // refuses it by name above — and if it ever did, "no DLV transition"
+        // would be a false statement about an operation that moves DLV
+        // reserves. Named so the claim is deliberate rather than a fallthrough.
+        Some(
+            crate::types::operations::Operation::SofiSetup { .. }
+            | crate::types::operations::Operation::SofiVaultCreate { .. }
+            | crate::types::operations::Operation::SofiFulfill { .. },
+        ) => {
+            return Err(EconomicValidationError::WriteSet(
+                crate::economic::write_set::WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
+            ))
         }
         _ => SuccessorValidity::NoDlvTransition,
     };

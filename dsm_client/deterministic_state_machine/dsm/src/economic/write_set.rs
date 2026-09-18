@@ -85,6 +85,13 @@ pub enum WriteSetError {
     /// The operation writes no economic leaf; there is nothing to witness,
     /// and a witness claiming otherwise is refused.
     NoEconomicWriteSet,
+    /// A SoFi v8 operation. Its write set is real and closed, and it is
+    /// deliberately not derived here: a SoFi position is earned through
+    /// `sofi::lineage::advance_resolved` against the route's resolution, not
+    /// through `advance_validated`. Refused BY NAME rather than by falling
+    /// into the catch-all, so the reason is the rule and not an accident of
+    /// which arms happen to exist.
+    SofiWriteSetBelongsToTheResolvedPath,
     /// A `Transfer` whose `to_device_id` is not 32 bytes.
     MalformedRecipient,
     /// The producer's pre-state cannot fund the debit.
@@ -141,6 +148,12 @@ impl core::fmt::Display for WriteSetError {
             Self::NoEconomicWriteSet => {
                 write!(f, "operation writes no economic leaf; nothing to witness")
             }
+            Self::SofiWriteSetBelongsToTheResolvedPath => write!(
+                f,
+                "a SoFi v8 operation's write set is fixed by its own preimage and its \
+                 position is earned by the route's resolution: it is advanced through \
+                 sofi::lineage::advance_resolved, never through advance_validated"
+            ),
             Self::MalformedRecipient => write!(f, "transfer recipient is not a 32-byte device id"),
             Self::InsufficientBalance { have, need, .. } => write!(
                 f,
@@ -652,6 +665,17 @@ fn semantic_write_set(
                 new_sequence: *new_sequence,
             })
         }
+        // SOFI v8 IS REFUSED HERE BY NAME. These three do carry closed write
+        // sets (`classify` says `ClosedWriteSet`, correctly), but the set is
+        // fixed by the operation's own preimage and the position is earned by
+        // resolution — `advance_validated` is the wrong constructor for it.
+        // Before this arm existed they landed in the catch-all below and were
+        // refused as "no economic write set", which was true of nothing: the
+        // refusal was right and its reason was wrong, and a later arm added
+        // to the catch-all could have changed the outcome silently.
+        Operation::SofiSetup { .. }
+        | Operation::SofiVaultCreate { .. }
+        | Operation::SofiFulfill { .. } => Err(WriteSetError::SofiWriteSetBelongsToTheResolvedPath),
         other => match crate::economic::classifier::classify(other) {
             crate::economic::classifier::EconomicEffect::UnsupportedValueTransition => {
                 Err(WriteSetError::UnsupportedValueTransition)
@@ -2171,4 +2195,68 @@ fn expect_same_move(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod sofi_refusal_tests {
+    use super::*;
+    use crate::economic::classifier::{classify, EconomicEffect};
+
+    fn sofi_operations() -> Vec<Operation> {
+        vec![
+            Operation::SofiSetup {
+                setup_body: vec![0x36, 0x00],
+                signature: vec![0xA1; 8],
+            },
+            Operation::SofiVaultCreate {
+                genesis_preimage: vec![0x5A, 0x00],
+                creation: vec![0x5B, 0x00],
+                signature: vec![0xA1; 8],
+            },
+            Operation::SofiFulfill {
+                fulfillment_body: vec![0x39, 0x00],
+                precommit_id: vec![0x11; 32],
+                signature: vec![0xA1; 8],
+            },
+        ]
+    }
+
+    /// A SOFI OPERATION IS REFUSED BY NAME, not by falling into the catch-all.
+    ///
+    /// The distinction is the point. `advance_validated` is the wrong
+    /// constructor for a SoFi position — that belongs to
+    /// `sofi::lineage::advance_resolved`, against the route's resolution — and
+    /// before this arm existed the refusal arrived as "writes no economic
+    /// leaf", which is false of all three: `classify` says `ClosedWriteSet`.
+    /// A true refusal for a false reason is one arm away from becoming an
+    /// acceptance.
+    #[test]
+    fn a_sofi_operation_is_refused_by_name_not_by_fallthrough() {
+        for op in sofi_operations() {
+            let name = op.get_operation_type();
+            assert_eq!(
+                classify(&op),
+                EconomicEffect::ClosedWriteSet,
+                "{name}: it does move value under a closed write set"
+            );
+            let err = match semantic_write_set(&op, &[0x22; 32]) {
+                Ok(_) => panic!("{name}: a SoFi operation has no advance_validated write set"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err,
+                WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
+                "{name}: the refusal must name the rule"
+            );
+            assert_ne!(
+                err,
+                WriteSetError::NoEconomicWriteSet,
+                "{name}: that reason was never true of a SoFi operation"
+            );
+            // The message says which path owns it, so the next reader does not
+            // have to rediscover that `advance_resolved` exists.
+            assert!(err.to_string().contains("advance_resolved"));
+        }
+    }
 }

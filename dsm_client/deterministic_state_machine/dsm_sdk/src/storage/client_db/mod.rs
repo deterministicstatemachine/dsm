@@ -1283,7 +1283,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- REQUIRED argument instead, so every rebuild path must supply it.
         CREATE TABLE IF NOT EXISTS economic_pending_admissions(
             device_id               BLOB PRIMARY KEY,   -- 32B
-            kind                    INTEGER NOT NULL,   -- 0 dsm, 1 load, 2 unload
+            kind                    INTEGER NOT NULL,   -- 0 dsm, 1 load, 2 unload, 3 sofi fulfillment
             fenced_asset            BLOB,               -- 32B, NULL for kind 0
             lifecycle_state         INTEGER NOT NULL,   -- 0..4, forward only
             economic_position       INTEGER NOT NULL,
