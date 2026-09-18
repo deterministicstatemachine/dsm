@@ -20,9 +20,15 @@
 //! build_fulfillment(draft, p_signature, attempts)  ->  Produced (gives m_F)
 //! ```
 //!
-//! The operation's own signature is a third thing and a frozen one: SPHINCS+
-//! over `operation_signing_bytes`, the canonical encoding with the signature
-//! cleared. Producers surface those bytes rather than inventing a digest.
+//! ## What each operation's signature covers
+//!
+//! Three rules, and no generic fourth one. A setup signs `m_setup` and a
+//! fulfillment signs `m_F` — their own objects' digests, which is what a
+//! storage member checks when the same object arrives with no operation
+//! around it. Only a vault creation, which has no protocol object digest of
+//! its own, signs the operation's canonical unsigned bytes. Each producer
+//! returns that payload as [`SigningPayload`]; none of them invents a digest,
+//! and none of them asks for a second signature over the same facts.
 //!
 //! ## What a producer refuses
 //!
@@ -40,6 +46,7 @@ use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
+use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{validate, Evidence, Invalid, Refusal};
 use dsm::sofi::wire::{
     AttemptEntry, DlvCore, OwnerAuthority, ParentClaimRef, PreEClosureIndex, PrecommitLeg,
@@ -63,9 +70,9 @@ pub enum BuildError {
     /// named reason. Producing it would hand the trader an operation that is
     /// already refused.
     StaticallyInvalid(Invalid),
-    /// `P` must be signed before `F` can reference it: the fulfillment names a
-    /// precommit that storage will refuse without its signature.
-    PrecommitNotSigned,
+    /// `P` is not validly signed, so the fulfillment would name a precommit
+    /// storage refuses.
+    PrecommitSignature(SignatureError),
 }
 
 impl core::fmt::Display for BuildError {
@@ -79,10 +86,10 @@ impl core::fmt::Display for BuildError {
                 "a verifier refuses this operation with no evidence at all \
                  ({reason:?}); it is not a trade, it is a way to strand one"
             ),
-            Self::PrecommitNotSigned => write!(
+            Self::PrecommitSignature(e) => write!(
                 f,
-                "the precommit carries no signature: P is published and signed \
-                 before F may reference it"
+                "the precommit is not validly signed ({e}): P is published and \
+                 signed before F may reference it"
             ),
         }
     }
@@ -111,19 +118,20 @@ pub struct PublishedObject {
 }
 
 /// A produced operation: the transition, what must be published for anyone to
-/// verify it, and the exact bytes the operation's signature covers.
+/// verify it, and the exact bytes to sign.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Produced {
     /// The operation, with an EMPTY signature.
     pub operation: Operation,
-    /// The canonical unsigned operation bytes — what SPHINCS+ signs. This is
-    /// the frozen rule the verifier implements, not a digest invented here.
-    pub operation_signing_bytes: Vec<u8>,
+    /// What the operation's `signature` field must cover, and which of the
+    /// three rules fixed it. A setup signs `m_setup`, a fulfillment signs
+    /// `m_F`, and a vault creation signs the operation's own unsigned bytes.
+    /// There is no additional generic operation signature for the first two:
+    /// the object a storage member receives has no operation around it, and
+    /// `m_setup` / `m_F` are what it checks there.
+    pub signs: SigningPayload,
     /// Objects a verifier needs and cannot derive.
     pub publish: Vec<PublishedObject>,
-    /// `m_F` — the protocol digest the fulfillment envelope's signature
-    /// covers. `None` for operations that carry no fulfillment.
-    pub fulfillment_signing_digest: Option<D32>,
 }
 
 /// A precommit and its settlement preimage, built and checked, waiting for the
@@ -162,15 +170,13 @@ impl PrecommitDraft {
 /// The relationship setup (F1). Non-economic: it establishes the right to
 /// trade with one vault, and moves nothing.
 pub fn build_setup(body: &SofiSetupBody) -> Result<Produced, BuildError> {
-    let operation = Operation::SofiSetup {
-        setup_body: body.encode(),
-        signature: Vec::new(),
-    };
     Ok(Produced {
-        operation_signing_bytes: operation_signing_bytes(&operation),
-        operation,
+        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(body)),
+        operation: Operation::SofiSetup {
+            setup_body: body.encode(),
+            signature: Vec::new(),
+        },
         publish: Vec::new(),
-        fulfillment_signing_digest: None,
     })
 }
 
@@ -197,13 +203,13 @@ pub fn build_vault_create(
         signature: Vec::new(),
     };
     Ok(Produced {
-        // The operation's OWN frozen rule. There is no separate vault-create
-        // signing derivation in the registry, and inventing one here would be
-        // a rule no verifier implements.
-        operation_signing_bytes: operation_signing_bytes(&operation),
+        // A creation has no protocol object digest of its own: `vault_id` and
+        // `R_0` are derivations of the preimage it carries. So it signs the
+        // operation, by the one frozen rule — inventing a vault-create digest
+        // here would be a rule no verifier implements.
+        signs: SigningPayload::OperationBytes(operation_signing_bytes(&operation)),
         operation,
         publish: Vec::new(),
-        fulfillment_signing_digest: None,
     })
 }
 
@@ -380,10 +386,13 @@ pub fn build_fulfillment(
     precommit_signature: Vec<u8>,
     attempts: &[(D32, u64)],
 ) -> Result<Produced, BuildError> {
-    if precommit_signature.is_empty() {
-        return Err(BuildError::PrecommitNotSigned);
-    }
     let precommit = &draft.precommit;
+    // THE P SIGNATURE IS VERIFIED, NOT COUNTED. `F` names a `P` that storage
+    // will refuse unless `m_P` verifies under the key `P` commits, so a
+    // producer that only checked for non-empty bytes would hand the trader an
+    // exercise of a precommit nobody will accept — after the trader has
+    // already signed `m_F`, which is the irreversible half.
+    verify_precommit(precommit, &precommit_signature).map_err(BuildError::PrecommitSignature)?;
     let shadow_cores: Vec<D32> = draft
         .preimage
         .dlv_cores()
@@ -423,7 +432,7 @@ pub fn build_fulfillment(
         signature: Vec::new(),
     };
     Ok(Produced {
-        operation_signing_bytes: operation_signing_bytes(&operation),
+        signs: SigningPayload::FulfillmentDigest(derive::fulfillment_signing_digest(&fulfillment)),
         operation,
         // P travels WITH its signature: storage refuses an unsigned one, and a
         // verifier checks it against the key the parent claim commits.
@@ -437,7 +446,6 @@ pub fn build_fulfillment(
                 signature: Vec::new(),
             },
         ],
-        fulfillment_signing_digest: Some(derive::fulfillment_signing_digest(&fulfillment)),
     })
 }
 
@@ -453,9 +461,25 @@ mod tests {
     const DEV: D32 = [0x22; 32];
     const P_POS: u64 = 5;
     const ALG: u16 = 0x0001;
-    const P_SIG: [u8; 8] = [0xAB; 8];
     const PRE_ROOT: D32 = [0x61; 32];
     const REL_BASE: D32 = [0x63; 32];
+
+    /// A REAL keypair. The producer verifies `m_P` cryptographically, so a
+    /// constant stand-in would only prove the check was skipped. Generated
+    /// once: keygen is ~30ms and a signature ~500ms here.
+    fn keypair() -> &'static (Vec<u8>, Vec<u8>) {
+        static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().unwrap())
+    }
+
+    fn sign(message: &[u8]) -> Vec<u8> {
+        dsm::crypto::sphincs::sphincs_sign(&keypair().1, message).unwrap()
+    }
+
+    /// The trader's own signature over `m_P`, as the caller would return it.
+    fn sign_precommit(draft: &PrecommitDraft) -> Vec<u8> {
+        sign(&draft.precommit_signing_digest())
+    }
 
     fn d(byte: u8) -> D32 {
         [byte; 32]
@@ -536,7 +560,7 @@ mod tests {
             parent_claim: ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
             storage_set_id: d(0x77),
             signature_alg: ALG,
-            claimant_public_key: &[0x01; 64],
+            claimant_public_key: &keypair().0,
             trader_core: core,
         }
     }
@@ -568,26 +592,79 @@ mod tests {
             "m_P is the precommit's own frozen digest"
         );
 
-        // F cannot be built against an unsigned P: storage refuses one.
+        let p_signature = sign_precommit(&draft);
+        let produced = build_fulfillment(&draft, p_signature.clone(), &[(d(0xC1), 0)]).unwrap();
+        // The second signature is over `m_F` — the fulfillment's OWN digest,
+        // which is what a storage member checks on the bare object.
         assert_eq!(
-            build_fulfillment(&draft, Vec::new(), &[(d(0xC1), 0)]),
-            Err(BuildError::PrecommitNotSigned)
+            produced.signs,
+            SigningPayload::FulfillmentDigest(derive::fulfillment_signing_digest(
+                &TraderFulfillmentBody::decode(match &produced.operation {
+                    Operation::SofiFulfill {
+                        fulfillment_body, ..
+                    } => fulfillment_body,
+                    _ => panic!("a fulfillment"),
+                })
+                .unwrap()
+            ))
         );
-
-        let produced = build_fulfillment(&draft, P_SIG.to_vec(), &[(d(0xC1), 0)]).unwrap();
-        assert!(produced.fulfillment_signing_digest.is_some(), "m_F");
         assert_eq!(produced.publish[0].bytes, draft.precommit().encode());
         assert_eq!(
-            produced.publish[0].signature,
-            P_SIG.to_vec(),
+            produced.publish[0].signature, p_signature,
             "P is published WITH the signature its ingress checks"
         );
         assert!(produced.operation.get_signature().is_none());
+
+        // What the producer says to sign is exactly what the device verifies:
+        // the same rule, reached from both sides.
+        let signed = produced
+            .operation
+            .with_signature(sign(produced.signs.bytes()));
         assert_eq!(
-            produced.operation_signing_bytes,
-            dsm::core::state_machine::transition::operation_signing_bytes(&produced.operation),
-            "the operation's signing bytes are the verifier's own rule"
+            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
+            Ok(())
         );
+    }
+
+    /// The P signature is VERIFIED, not counted. A producer that only checked
+    /// for non-empty bytes would let the trader sign `m_F` — the irreversible
+    /// half — against a precommit storage then refuses.
+    #[test]
+    fn a_producer_refuses_a_precommit_that_is_not_validly_signed() {
+        let draft = draft_one_hop();
+        let attempts = [(d(0xC1), 0)];
+
+        assert_eq!(
+            build_fulfillment(&draft, Vec::new(), &attempts),
+            Err(BuildError::PrecommitSignature(SignatureError::Missing {
+                what: "TraderPrecommit"
+            }))
+        );
+        // Right length, wrong bytes.
+        assert_eq!(
+            build_fulfillment(&draft, vec![0xAB; 49_856], &attempts),
+            Err(BuildError::PrecommitSignature(
+                SignatureError::DoesNotVerify {
+                    what: "TraderPrecommit"
+                }
+            ))
+        );
+        // A real signature over the WRONG message: `m_F`'s digest is not
+        // `m_P`'s, and signing the wrong one does not make P publishable.
+        assert_eq!(
+            build_fulfillment(
+                &draft,
+                sign(&derive::precommit_id(draft.precommit())),
+                &attempts
+            ),
+            Err(BuildError::PrecommitSignature(
+                SignatureError::DoesNotVerify {
+                    what: "TraderPrecommit"
+                }
+            ))
+        );
+        // The real one is accepted.
+        assert!(build_fulfillment(&draft, sign_precommit(&draft), &attempts).is_ok());
     }
 
     /// THE ROUTE MUST CHAIN, and a producer refuses one that does not — with
@@ -629,8 +706,12 @@ mod tests {
             PRE_ROOT,
         )
         .unwrap();
-        let produced =
-            build_fulfillment(&draft, P_SIG.to_vec(), &[(d(0xC1), 0), (d(0xC2), 1)]).unwrap();
+        let produced = build_fulfillment(
+            &draft,
+            sign_precommit(&draft),
+            &[(d(0xC1), 0), (d(0xC2), 1)],
+        )
+        .unwrap();
         assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
     }
 
@@ -659,14 +740,14 @@ mod tests {
         let draft = draft_one_hop();
         // An attempt for a vault this P never names.
         assert_eq!(
-            build_fulfillment(&draft, P_SIG.to_vec(), &[(d(0xCF), 0)]),
+            build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xCF), 0)]),
             Err(BuildError::Conformance(
                 FulfillmentConformanceError::AttemptsDoNotCoverLegs
             ))
         );
         // An empty attempt vector is not even canonical bytes.
         assert!(matches!(
-            build_fulfillment(&draft, P_SIG.to_vec(), &[]),
+            build_fulfillment(&draft, sign_precommit(&draft), &[]),
             Err(BuildError::Wire(SofiWireError::Cardinality {
                 field: "attempts",
                 ..
@@ -714,7 +795,7 @@ mod tests {
             PRE_ROOT,
         )
         .unwrap();
-        let produced = build_fulfillment(&draft, P_SIG.to_vec(), &[(d(0xC1), 0)]).unwrap();
+        let produced = build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xC1), 0)]).unwrap();
         assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
         match draft.preimage().settlement() {
             SettlementBody::Close {
@@ -749,9 +830,13 @@ mod tests {
             state: state.clone(),
         };
         let created = build_vault_create(&preimage, 1_000, 2_000).unwrap();
+        // A creation has no protocol object digest of its own, so it signs the
+        // operation — and it is the verifier's own rule, byte for byte.
         assert_eq!(
-            created.operation_signing_bytes,
-            dsm::core::state_machine::transition::operation_signing_bytes(&created.operation),
+            created.signs,
+            SigningPayload::OperationBytes(
+                dsm::core::state_machine::transition::operation_signing_bytes(&created.operation)
+            ),
             "one signing rule, and it is the verifier's"
         );
         let Operation::SofiVaultCreate {
@@ -763,9 +848,19 @@ mod tests {
             panic!("a creation")
         };
         assert_ne!(
-            created.operation_signing_bytes,
+            created.signs.bytes(),
             [genesis_preimage.clone(), creation.clone()].concat(),
             "not a bare concatenation of the objects it carries"
+        );
+        // And the signature the device will check is over exactly those bytes.
+        let signed = Operation::SofiVaultCreate {
+            genesis_preimage: genesis_preimage.clone(),
+            creation: creation.clone(),
+            signature: sign(created.signs.bytes()),
+        };
+        assert_eq!(
+            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
+            Ok(())
         );
 
         // `vault_id` and `R_0` are the preimage's own derivations.
@@ -779,17 +874,32 @@ mod tests {
         assert_eq!(decoded.genesis_root, tree.root());
     }
 
-    /// A setup moves nothing and signs by the same one rule.
+    /// A setup signs `m_setup` — its own object's digest — and NOT the
+    /// operation that carries it. The same object reaches a storage member
+    /// with no operation around it, and `m_setup` is what the member checks.
     #[test]
-    fn a_setup_produces_its_own_operation() {
-        let setup =
-            SofiSetupBody::new(G, DEV, P_POS, d(0xC1), d(0x66), d(0x67), ALG, &[0x01; 64]).unwrap();
+    fn a_setup_signs_its_object_and_not_the_operation() {
+        let setup = SofiSetupBody::new(G, DEV, P_POS, d(0xC1), d(0x66), d(0x67), ALG, &keypair().0)
+            .unwrap();
         let produced = build_setup(&setup).unwrap();
         assert!(matches!(produced.operation, Operation::SofiSetup { .. }));
         assert_eq!(
-            produced.operation_signing_bytes,
-            dsm::core::state_machine::transition::operation_signing_bytes(&produced.operation)
+            produced.signs,
+            SigningPayload::SetupDigest(derive::setup_signing_digest(&setup))
         );
-        assert!(produced.fulfillment_signing_digest.is_none());
+        assert_ne!(
+            produced.signs.bytes(),
+            dsm::core::state_machine::transition::operation_signing_bytes(&produced.operation),
+            "a setup does not additionally sign the operation"
+        );
+        // What the producer says to sign is exactly what the device verifies.
+        let signed = Operation::SofiSetup {
+            setup_body: setup.encode(),
+            signature: sign(produced.signs.bytes()),
+        };
+        assert_eq!(
+            dsm::sofi::signature::verify_operation(&signed, &keypair().0),
+            Ok(())
+        );
     }
 }

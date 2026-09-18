@@ -1807,13 +1807,6 @@ impl DeviceState {
                 | Operation::DlvClose { .. }
                 | Operation::DlvCreateFundedV2 { .. }
                 | Operation::DlvOwnerApplyV2 { .. }
-                // SoFi v8: the setup binds an identity to a vault, the
-                // creation moves the owner's funding, and the fulfillment is
-                // the exercise itself. None of them is a receipt with a second
-                // party's signature to fall back on.
-                | Operation::SofiSetup { .. }
-                | Operation::SofiVaultCreate { .. }
-                | Operation::SofiFulfill { .. }
         ) {
             let op_name = operation.get_operation_type();
             crate::core::state_machine::transition::verify_operation_signature(
@@ -1821,6 +1814,29 @@ impl DeviceState {
                 &self.public_key,
                 op_name,
             )?;
+        }
+
+        // SOFI v8 SIGNS ITS PROTOCOL OBJECTS, NOT A SECOND COPY OF THEM.
+        //
+        // A setup signs `m_setup` and a fulfillment signs `m_F` — the digests
+        // of the objects themselves, which is what a storage member checks
+        // when the same object arrives with no operation wrapped around it.
+        // Verifying an additional generic operation signature here would
+        // demand a second signature nobody else can check, over bytes that
+        // exist only on this path.
+        //
+        // A vault creation has no object digest of its own and signs the
+        // operation, so `sofi::signature::verify_operation` is the one place
+        // that knows which rule each of the three follows. Every one of them
+        // is fail-closed and BEFORE the chain tip is computed: the signature
+        // is part of the committed operation bytes.
+        if matches!(
+            operation,
+            Operation::SofiSetup { .. }
+                | Operation::SofiVaultCreate { .. }
+                | Operation::SofiFulfill { .. }
+        ) {
+            crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
         }
 
         // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
@@ -8896,6 +8912,75 @@ mod tests {
     /// get their own named refusal, and the SAME advance succeeds with a
     /// matching `Prepared`/`DsmBacked` admission attached. MUTATION CONTROL:
     /// delete the gate block in `advance` and the first arm here credits a
+    /// THE DEVICE PATH VERIFIES A SOFI SIGNATURE, over the rule that
+    /// operation's object actually uses.
+    ///
+    /// Every other SoFi signature test checks the verifier directly. This one
+    /// drives `advance`, because that is the path a real transition takes —
+    /// and removing the check there left every one of those tests green.
+    #[test]
+    fn a_sofi_setup_advances_only_with_a_signature_over_its_own_digest() {
+        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+        use crate::sofi::derive;
+        use crate::sofi::wire::SofiSetupBody;
+
+        let (pk, sk) = generate_sphincs_keypair().unwrap();
+        let genesis = [0xA9u8; 32];
+        let devid = [0xB9u8; 32];
+        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
+        let body = SofiSetupBody::new(
+            genesis, devid, 5, [0xC1; 32], [0x66; 32], [0x67; 32], 0x0001, &pk,
+        )
+        .unwrap();
+        let run = |signature: Vec<u8>| {
+            head.advance(
+                [0x39u8; 32],
+                devid,
+                Operation::SofiSetup {
+                    setup_body: body.encode(),
+                    signature,
+                },
+                entropy(9),
+                None,
+                &[],
+                Some([0x11u8; 32]),
+                None,
+                None,
+                None,
+            )
+        };
+
+        // Unsigned, and signed over the wrong message: the operation's own
+        // canonical bytes, which is the generic rule a setup does NOT use.
+        let over_the_operation = sphincs_sign(
+            &sk,
+            &crate::core::state_machine::transition::operation_signing_bytes(
+                &Operation::SofiSetup {
+                    setup_body: body.encode(),
+                    signature: Vec::new(),
+                },
+            ),
+        )
+        .unwrap();
+        for (signature, case) in [
+            (Vec::new(), "unsigned"),
+            (vec![0xAB; 49_856], "garbage"),
+            (over_the_operation, "signed over the operation, not m_setup"),
+        ] {
+            assert!(
+                run(signature).is_err(),
+                "{case}: the device path must refuse it"
+            );
+        }
+
+        // And `m_setup` — the object's own digest — advances the head.
+        let signed = sphincs_sign(&sk, &derive::setup_signing_digest(&body)).unwrap();
+        assert!(
+            run(signed).is_ok(),
+            "a setup signed over m_setup must advance"
+        );
+    }
+
     /// transfer with no admission — this test goes red.
     #[test]
     fn a_credit_transfer_requires_the_full_admission_discipline() {
