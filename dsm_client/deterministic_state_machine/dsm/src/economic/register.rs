@@ -475,13 +475,14 @@ impl RegisteredEconomicRoot {
     pub fn from_verified_single_root(
         claim: &crate::economic::claim_envelope::VerifiedEconomicRootClaim,
     ) -> Self {
+        let body = claim.body();
         Self {
-            trader_genesis: claim.body.trader_genesis,
-            trader_devid: claim.body.trader_devid,
-            economic_position: claim.body.economic_position,
-            post_economic_root: claim.body.post_economic_root,
-            admission_manifest_addr: claim.body.admission_manifest_addr,
-            storage_set_id: claim.body.root_register_storage_set_id,
+            trader_genesis: body.trader_genesis,
+            trader_devid: body.trader_devid,
+            economic_position: body.economic_position,
+            post_economic_root: body.post_economic_root,
+            admission_manifest_addr: body.admission_manifest_addr,
+            storage_set_id: body.root_register_storage_set_id,
         }
     }
 
