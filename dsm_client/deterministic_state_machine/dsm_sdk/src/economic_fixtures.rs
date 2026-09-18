@@ -424,7 +424,7 @@ pub fn resume_pending(router: &AppRouterImpl) -> u64 {
 pub fn admitted_position(_router: &AppRouterImpl) -> Option<u64> {
     client_db::economic_lineage::get_admitted()
         .expect("read admitted lineage")
-        .map(|(position, _root)| position)
+        .map(|admitted| admitted.economic_position())
 }
 
 /// Does the head carry a pending admission, and in what state?

@@ -861,8 +861,13 @@ fn dlv_fund_drive(
         EMBEDDED_PARENT,
         SUBSTRATE_ADDR,
     );
-    let previous =
-        dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(7, pre_root);
+    let previous = dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+        dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+            economic_position: 7,
+            economic_root: pre_root,
+        },
+    )
+    .expect("an ordinary admitted position");
     advance_validated(
         &previous,
         &registered,

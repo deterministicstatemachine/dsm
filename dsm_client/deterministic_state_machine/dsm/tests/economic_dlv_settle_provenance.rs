@@ -491,9 +491,12 @@ impl SettleResolver {
             peer_devid: ow.devid,
             validated_root:
                 dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                    OWNER_POSITION,
-                    self.owner_root,
-                ),
+                    dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                        economic_position: OWNER_POSITION,
+                        economic_root: self.owner_root,
+                    },
+                )
+                .expect("an ordinary admitted position"),
             witness,
             proven_ak: ow.ak_public.clone(),
             c_dsm_plus: [0xC5; 32],

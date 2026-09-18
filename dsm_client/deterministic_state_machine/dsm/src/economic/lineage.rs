@@ -90,7 +90,7 @@ pub struct ValidatedEconomicRoot {
 }
 
 impl ValidatedEconomicRoot {
-    /// Rehydrate THIS DEVICE'S OWN admitted coordinate from its local durable
+    /// Rehydrate THIS DEVICE'S OWN admitted position from its local durable
     /// store.
     ///
     /// This deliberately punctures the no-constructor property for exactly one
@@ -104,10 +104,37 @@ impl ValidatedEconomicRoot {
     /// verifier calling it has a bug by definition. The alternative
     /// (re-verifying the whole lineage on every restart) remains the recovery
     /// truth when the local store is questionable.
-    pub fn rehydrate_from_admitted_store(economic_position: u64, economic_root: [u8; 32]) -> Self {
-        Self {
-            economic_position,
-            economic_root,
+    pub fn rehydrate_from_admitted_store(
+        admitted: AdmittedEconomicPosition,
+    ) -> Result<Self, PredecessorHasNotSelected> {
+        match admitted {
+            AdmittedEconomicPosition::SingleRoot {
+                economic_position,
+                economic_root,
+            }
+            | AdmittedEconomicPosition::ResolvedSofi {
+                economic_position,
+                selected_root: economic_root,
+                ..
+            } => Ok(Self {
+                economic_position,
+                economic_root,
+            }),
+            // THE DOOR THIS CLOSES. The store used to hand back a bare
+            // `(position, root)` and this returned a validated root for it, no
+            // questions asked. A conditional position has TWO roots and has
+            // selected neither, so whichever one got written would have been
+            // laundered into "validated" here — with no verifier involved, on
+            // the device's own say-so. There is no root to return, so none is
+            // returned.
+            AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position,
+                fulfillment_id,
+                ..
+            } => Err(PredecessorHasNotSelected {
+                economic_position,
+                fulfillment_id,
+            }),
         }
     }
 
@@ -136,6 +163,91 @@ impl ValidatedEconomicRoot {
 
     pub fn economic_root(&self) -> [u8; 32] {
         self.economic_root
+    }
+}
+
+/// The device's own admitted position, as the durable store records it.
+///
+/// A bare `(position, root)` pair cannot express a conditional position, which
+/// is exactly why one was dangerous: something has to be written in the root
+/// column, and whatever is written becomes indistinguishable from a selected
+/// root. The kind travels with the coordinate so the distinction survives a
+/// restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmittedEconomicPosition {
+    /// An ordinary position. Its root is the one the register holds.
+    SingleRoot {
+        economic_position: u64,
+        economic_root: [u8; 32],
+    },
+    /// A conditional SoFi position whose route resolved and selected a root.
+    /// Realized selects `realize_root`; Void selects the predecessor's root.
+    /// Either way exactly one root is usable, and it is this one.
+    ResolvedSofi {
+        economic_position: u64,
+        selected_root: [u8; 32],
+        fulfillment_id: [u8; 32],
+    },
+    /// A conditional SoFi position that has not resolved. It commits two roots
+    /// and has selected neither, so nothing descends from it.
+    UnresolvedSofi {
+        economic_position: u64,
+        fulfillment_id: [u8; 32],
+        realize_root: [u8; 32],
+        void_root: [u8; 32],
+    },
+}
+
+/// The predecessor is a conditional position that has selected no root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredecessorHasNotSelected {
+    pub economic_position: u64,
+    pub fulfillment_id: [u8; 32],
+}
+
+impl core::fmt::Display for PredecessorHasNotSelected {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the admitted position {} is conditional on fulfillment {} and has selected \
+             no root: nothing descends from it until the route resolves",
+            self.economic_position,
+            crate::types::identifiers::encode_crockford(&self.fulfillment_id)
+        )
+    }
+}
+
+impl std::error::Error for PredecessorHasNotSelected {}
+
+impl AdmittedEconomicPosition {
+    pub fn economic_position(&self) -> u64 {
+        match self {
+            Self::SingleRoot {
+                economic_position, ..
+            }
+            | Self::ResolvedSofi {
+                economic_position, ..
+            }
+            | Self::UnresolvedSofi {
+                economic_position, ..
+            } => *economic_position,
+        }
+    }
+
+    /// What the fence must decide about this position as a PARENT.
+    ///
+    /// The mapping is the whole point of carrying the kind: a resolved
+    /// conditional position parents exactly its selected root, an unresolved
+    /// one parents nothing, and an ordinary position is unconstrained.
+    pub fn predecessor_claim(&self) -> crate::sofi::lineage::PredecessorClaim {
+        use crate::sofi::lineage::PredecessorClaim;
+        match self {
+            Self::SingleRoot { .. } => PredecessorClaim::SingleRoot,
+            Self::ResolvedSofi { selected_root, .. } => PredecessorClaim::ConditionalResolved {
+                selected_root: *selected_root,
+            },
+            Self::UnresolvedSofi { .. } => PredecessorClaim::ConditionalUnresolved,
+        }
     }
 }
 
@@ -652,14 +764,19 @@ pub fn advance_validated(
         // A SoFi operation cannot reach here — `verify_operation_write_set`
         // refuses it by name above — and if it ever did, "no DLV transition"
         // would be a false statement about an operation that moves DLV
-        // reserves. Named so the claim is deliberate rather than a fallthrough.
-        Some(
-            crate::types::operations::Operation::SofiSetup { .. }
-            | crate::types::operations::Operation::SofiVaultCreate { .. }
-            | crate::types::operations::Operation::SofiFulfill { .. },
-        ) => {
+        // reserves. Each carries ITS OWN reason forward rather than one
+        // borrowed from whichever arm was written first.
+        Some(crate::types::operations::Operation::SofiFulfill { .. }) => {
             return Err(EconomicValidationError::WriteSet(
                 crate::economic::write_set::WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
+            ))
+        }
+        Some(
+            crate::types::operations::Operation::SofiSetup { .. }
+            | crate::types::operations::Operation::SofiVaultCreate { .. },
+        ) => {
+            return Err(EconomicValidationError::WriteSet(
+                crate::economic::write_set::WriteSetError::SofiInsertWriteSetNotSpecified,
             ))
         }
         _ => SuccessorValidity::NoDlvTransition,
@@ -673,4 +790,114 @@ pub fn advance_validated(
         validity,
         funded,
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod admitted_position_tests {
+    use super::*;
+    use crate::sofi::lineage::{descendant_fence, FenceError, PredecessorClaim};
+
+    const REALIZE: [u8; 32] = [0xA1; 32];
+    const VOID: [u8; 32] = [0xB1; 32];
+    const FID: [u8; 32] = [0xF1; 32];
+
+    /// AN UNRESOLVED POSITION MINTS NOTHING, from either of its two roots.
+    ///
+    /// The store used to hand back a bare `(position, root)` and this returned
+    /// a validated root for it unconditionally — no verifier, on the device's
+    /// own say-so. A conditional position has to put SOMETHING in a root
+    /// column, and whatever went there would have been laundered into
+    /// "validated" on the next restart.
+    #[test]
+    fn no_validated_root_is_minted_from_an_unresolved_position() {
+        let unresolved = AdmittedEconomicPosition::UnresolvedSofi {
+            economic_position: 9,
+            fulfillment_id: FID,
+            realize_root: REALIZE,
+            void_root: VOID,
+        };
+        let refusal = ValidatedEconomicRoot::rehydrate_from_admitted_store(unresolved)
+            .expect_err("it has selected no root");
+        assert_eq!(
+            refusal,
+            PredecessorHasNotSelected {
+                economic_position: 9,
+                fulfillment_id: FID,
+            }
+        );
+        // Neither committed root appears in the refusal: nothing read one.
+        let rendered = refusal.to_string();
+        for root in [REALIZE, VOID] {
+            assert!(
+                !rendered.contains(&crate::types::identifiers::encode_crockford(&root)),
+                "a committed root leaked: {rendered}"
+            );
+        }
+    }
+
+    /// A RESOLVED position yields EXACTLY the selected root — the one the
+    /// route chose, not the one it could have chosen.
+    #[test]
+    fn a_resolved_position_yields_exactly_the_selected_root() {
+        for selected in [REALIZE, VOID] {
+            let resolved = AdmittedEconomicPosition::ResolvedSofi {
+                economic_position: 9,
+                selected_root: selected,
+                fulfillment_id: FID,
+            };
+            let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(resolved).unwrap();
+            assert_eq!(validated.economic_root(), selected);
+            assert_eq!(validated.economic_position(), 9);
+
+            // And the fence admits a descendant on THAT root and no other.
+            assert_eq!(
+                descendant_fence(resolved.predecessor_claim(), &selected),
+                Ok(())
+            );
+            let other = if selected == REALIZE { VOID } else { REALIZE };
+            assert_eq!(
+                descendant_fence(resolved.predecessor_claim(), &other),
+                Err(FenceError::PreRootIsNotTheSelectedRoot {
+                    selected,
+                    descendant_pre: other,
+                })
+            );
+        }
+    }
+
+    /// The kind decides what the position can parent, and the three answers
+    /// are distinct.
+    #[test]
+    fn the_claim_kind_decides_what_may_descend() {
+        let ordinary = AdmittedEconomicPosition::SingleRoot {
+            economic_position: 9,
+            economic_root: REALIZE,
+        };
+        assert_eq!(ordinary.predecessor_claim(), PredecessorClaim::SingleRoot);
+        // An ordinary position is unconstrained by the fence: its own root is
+        // checked by the equality the caller already performs.
+        assert_eq!(
+            descendant_fence(ordinary.predecessor_claim(), &VOID),
+            Ok(())
+        );
+
+        let unresolved = AdmittedEconomicPosition::UnresolvedSofi {
+            economic_position: 9,
+            fulfillment_id: FID,
+            realize_root: REALIZE,
+            void_root: VOID,
+        };
+        assert_eq!(
+            unresolved.predecessor_claim(),
+            PredecessorClaim::ConditionalUnresolved
+        );
+        for attempt in [REALIZE, VOID] {
+            assert_eq!(
+                descendant_fence(unresolved.predecessor_claim(), &attempt),
+                Err(FenceError::PredecessorIsUnresolved),
+                "neither branch may be guessed"
+            );
+        }
+    }
 }

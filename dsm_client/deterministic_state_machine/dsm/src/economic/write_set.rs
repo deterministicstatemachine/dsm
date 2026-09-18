@@ -86,12 +86,33 @@ pub enum WriteSetError {
     /// and a witness claiming otherwise is refused.
     NoEconomicWriteSet,
     /// A SoFi v8 operation. Its write set is real and closed, and it is
-    /// deliberately not derived here: a SoFi position is earned through
+    /// deliberately not derived here: the position is earned through
     /// `sofi::lineage::advance_resolved` against the route's resolution, not
     /// through `advance_validated`. Refused BY NAME rather than by falling
     /// into the catch-all, so the reason is the rule and not an accident of
     /// which arms happen to exist.
+    ///
+    /// THE FULFILLMENT ONLY. A setup and a vault creation have no route and
+    /// nothing to resolve — see [`Self::SofiInsertWriteSetNotSpecified`].
     SofiWriteSetBelongsToTheResolvedPath,
+    /// The operation's classification is contradicted by its own witness: it
+    /// claims to write no economic leaf and the witness writes one.
+    ///
+    /// Distinct from every other arm here, which compare a witness against a
+    /// write set. This one catches the case where the write set consulted was
+    /// the wrong one — or where there is none to consult.
+    Tripwire(crate::economic::classifier::EconomicTripwire),
+    /// A SoFi setup or vault creation — an ORDINARY transition (P15-6, P15-12)
+    /// whose insert is not implemented.
+    ///
+    /// Both write into `R_econ` and are validated HERE, not by resolution: a
+    /// setup inserts exactly one relationship leaf at `h⁰`, and the owner's
+    /// creation at `p_create` debits the funding and inserts the creation
+    /// record. Neither insert exists yet — the creation record has no economic
+    /// leaf class or key at all — so the operation is refused, and the refusal
+    /// names the missing rule instead of claiming a resolution that does not
+    /// apply to it.
+    SofiInsertWriteSetNotSpecified,
     /// A `Transfer` whose `to_device_id` is not 32 bytes.
     MalformedRecipient,
     /// The producer's pre-state cannot fund the debit.
@@ -150,9 +171,17 @@ impl core::fmt::Display for WriteSetError {
             }
             Self::SofiWriteSetBelongsToTheResolvedPath => write!(
                 f,
-                "a SoFi v8 operation's write set is fixed by its own preimage and its \
+                "a SoFi fulfillment's write set is fixed by its own preimage and its \
                  position is earned by the route's resolution: it is advanced through \
                  sofi::lineage::advance_resolved, never through advance_validated"
+            ),
+            Self::Tripwire(t) => write!(f, "{t}"),
+            Self::SofiInsertWriteSetNotSpecified => write!(
+                f,
+                "a SoFi setup or vault creation is an ORDINARY transition whose insert \
+                 (P15-6 relationship leaf, P15-12 creation record) is not implemented: \
+                 it has no route and nothing to resolve, so it is refused here until \
+                 that write set exists"
             ),
             Self::MalformedRecipient => write!(f, "transfer recipient is not a 32-byte device id"),
             Self::InsufficientBalance { have, need, .. } => write!(
@@ -665,17 +694,22 @@ fn semantic_write_set(
                 new_sequence: *new_sequence,
             })
         }
-        // SOFI v8 IS REFUSED HERE BY NAME. These three do carry closed write
-        // sets (`classify` says `ClosedWriteSet`, correctly), but the set is
-        // fixed by the operation's own preimage and the position is earned by
-        // resolution — `advance_validated` is the wrong constructor for it.
-        // Before this arm existed they landed in the catch-all below and were
-        // refused as "no economic write set", which was true of nothing: the
-        // refusal was right and its reason was wrong, and a later arm added
-        // to the catch-all could have changed the outcome silently.
-        Operation::SofiSetup { .. }
-        | Operation::SofiVaultCreate { .. }
-        | Operation::SofiFulfill { .. } => Err(WriteSetError::SofiWriteSetBelongsToTheResolvedPath),
+        // SOFI v8 IS REFUSED HERE BY NAME — and the three do not share a
+        // reason, which is why they no longer share an arm.
+        //
+        // A FULFILLMENT belongs to the resolved path: its write set is fixed
+        // by its own preimage and its position is earned by the route's
+        // resolution, so `advance_validated` is the wrong constructor.
+        Operation::SofiFulfill { .. } => Err(WriteSetError::SofiWriteSetBelongsToTheResolvedPath),
+        // A SETUP and a VAULT CREATION are ORDINARY transitions (P15-6,
+        // P15-12) and belong exactly here. They have no route and nothing to
+        // resolve; their inserts are simply not implemented, and the creation
+        // record has no economic leaf class or key yet. Saying they "belong to
+        // the resolved path" — as this arm did when all three shared it —
+        // sends the next reader looking for a resolution that does not exist.
+        Operation::SofiSetup { .. } | Operation::SofiVaultCreate { .. } => {
+            Err(WriteSetError::SofiInsertWriteSetNotSpecified)
+        }
         other => match crate::economic::classifier::classify(other) {
             crate::economic::classifier::EconomicEffect::UnsupportedValueTransition => {
                 Err(WriteSetError::UnsupportedValueTransition)
@@ -1440,6 +1474,25 @@ pub fn verify_operation_write_set(
     witness: &EconomicTransitionWitness,
 ) -> Result<(), WriteSetError> {
     let _ = genesis;
+
+    // THE TRIPWIRE, ON THE REAL PATH AND BEFORE ANYTHING ELSE.
+    //
+    // It asks a different question from every check below: not "does this
+    // witness match the operation's write set", but "does an operation that
+    // claims to write NOTHING carry a witness that writes leaves". That is the
+    // one failure a write-set comparison cannot catch, because a
+    // misclassified operation may have no write set to compare against — it
+    // would be refused as "writes no economic leaf" while its witness sits
+    // there full of them, and the diagnosis would point at the wrong thing.
+    //
+    // It runs first so the contradiction is the reported reason, and it reads
+    // the witness rather than the classification it is checking.
+    crate::economic::classifier::check_tripwire(
+        crate::economic::classifier::classify(operation),
+        crate::economic::classifier::observed_from_witness(witness),
+    )
+    .map_err(WriteSetError::Tripwire)?;
+
     let semantic = semantic_write_set(operation, device_id)?;
 
     // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN:
@@ -2222,17 +2275,23 @@ mod sofi_refusal_tests {
         ]
     }
 
-    /// A SOFI OPERATION IS REFUSED BY NAME, not by falling into the catch-all.
+    /// A SOFI OPERATION IS REFUSED BY NAME — and the three do not share a
+    /// name, because they do not share a reason.
     ///
-    /// The distinction is the point. `advance_validated` is the wrong
-    /// constructor for a SoFi position — that belongs to
-    /// `sofi::lineage::advance_resolved`, against the route's resolution — and
-    /// before this arm existed the refusal arrived as "writes no economic
-    /// leaf", which is false of all three: `classify` says `ClosedWriteSet`.
-    /// A true refusal for a false reason is one arm away from becoming an
-    /// acceptance.
+    /// A FULFILLMENT belongs to the resolved path: its position is earned by
+    /// the route's resolution, so `advance_validated` is the wrong
+    /// constructor. A SETUP and a VAULT CREATION are ORDINARY transitions
+    /// (P15-6, P15-12) that belong exactly here and whose inserts are not
+    /// implemented — the creation record has no economic leaf class or key
+    /// yet. Both refusals are correct; only one of them is about resolution.
+    ///
+    /// The original of this test asserted the resolved-path reason for all
+    /// three, which pinned a false statement about two of them. Before that,
+    /// the catch-all said "writes no economic leaf", false of all three:
+    /// `classify` says `ClosedWriteSet`. A true refusal for a false reason is
+    /// one arm away from becoming an acceptance.
     #[test]
-    fn a_sofi_operation_is_refused_by_name_not_by_fallthrough() {
+    fn each_sofi_operation_is_refused_for_its_own_reason() {
         for op in sofi_operations() {
             let name = op.get_operation_type();
             assert_eq!(
@@ -2241,22 +2300,132 @@ mod sofi_refusal_tests {
                 "{name}: it does move value under a closed write set"
             );
             let err = match semantic_write_set(&op, &[0x22; 32]) {
-                Ok(_) => panic!("{name}: a SoFi operation has no advance_validated write set"),
+                Ok(_) => panic!("{name}: no advance_validated write set exists for this"),
                 Err(e) => e,
             };
-            assert_eq!(
-                err,
-                WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
-                "{name}: the refusal must name the rule"
-            );
+            let expected = match op {
+                Operation::SofiFulfill { .. } => {
+                    WriteSetError::SofiWriteSetBelongsToTheResolvedPath
+                }
+                _ => WriteSetError::SofiInsertWriteSetNotSpecified,
+            };
+            assert_eq!(err, expected, "{name}: the refusal must name ITS rule");
             assert_ne!(
                 err,
                 WriteSetError::NoEconomicWriteSet,
                 "{name}: that reason was never true of a SoFi operation"
             );
-            // The message says which path owns it, so the next reader does not
-            // have to rediscover that `advance_resolved` exists.
-            assert!(err.to_string().contains("advance_resolved"));
         }
+    }
+
+    /// THE TRIPWIRE RUNS ON THE REAL PATH, and it catches what nothing else
+    /// here can.
+    ///
+    /// `check_tripwire` had ZERO production callers before this: it and
+    /// `ObservedEconomicChange` were referenced only from `dsm/tests/`, so the
+    /// structural check the module documents was not enforced anywhere.
+    ///
+    /// The case it owns: an operation classified as writing NOTHING, carrying
+    /// a witness that writes a leaf. A write-set comparison cannot catch that,
+    /// because such an operation has no write set to compare against — it is
+    /// refused as "writes no economic leaf" while its witness sits there full
+    /// of them, and the diagnosis names the wrong thing.
+    #[test]
+    fn the_tripwire_catches_a_witness_that_contradicts_the_classification() {
+        use crate::economic::mutation::EconomicLeafMutation;
+        use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
+        use crate::economic::witness::EconomicTransitionWitness;
+
+        // `Noop` writes nothing, by classification.
+        let op = Operation::Noop;
+        assert_eq!(classify(&op), EconomicEffect::None);
+
+        let writes_a_balance = EconomicTransitionWitness {
+            pre_economic_root: [0x01; 32],
+            post_economic_root: [0x02; 32],
+            economic_operation_id: [0x03; 32],
+            operation_digest: [0x04; 32],
+            mutations: vec![EconomicLeafMutation {
+                pre_state: None,
+                post_state: Some(EconomicLeafState::Balance(EconomicBalanceState {
+                    policy_commit: [0xE0; 32],
+                    amount: 1,
+                })),
+                siblings: Vec::new(),
+            }],
+            credit_sources: Vec::new(),
+        };
+
+        match verify_operation_write_set(&op, &[0x11; 32], &[0x22; 32], &writes_a_balance) {
+            Err(WriteSetError::Tripwire(t)) => {
+                assert_eq!(t.claimed, EconomicEffect::None);
+                assert!(t.observed.balances_changed);
+                assert!(t.observed.any());
+            }
+            other => panic!("the tripwire must fire first, got {other:?}"),
+        }
+
+        // The same operation with an EMPTY witness is refused too — but by the
+        // write-set rule, not the tripwire. The two reasons stay distinct.
+        let writes_nothing = EconomicTransitionWitness {
+            mutations: Vec::new(),
+            ..writes_a_balance.clone()
+        };
+        match verify_operation_write_set(&op, &[0x11; 32], &[0x22; 32], &writes_nothing) {
+            Err(WriteSetError::Tripwire(_)) => {
+                panic!("nothing was written; this is not a tripwire")
+            }
+            Err(_) => {}
+            Ok(()) => panic!("a Noop has no economic write set"),
+        }
+    }
+
+    /// A RELATIONSHIP leaf is observable. The flag added in #912 had no
+    /// producer — nothing ever set it — so the tripwire could not see a SoFi
+    /// relationship write at all.
+    #[test]
+    fn a_relationship_leaf_is_observed_by_the_tripwire() {
+        use crate::economic::mutation::EconomicLeafMutation;
+        use crate::economic::state::EconomicLeafState;
+        use crate::economic::witness::EconomicTransitionWitness;
+
+        let witness = EconomicTransitionWitness {
+            pre_economic_root: [0x01; 32],
+            post_economic_root: [0x02; 32],
+            economic_operation_id: [0x03; 32],
+            operation_digest: [0x04; 32],
+            mutations: vec![EconomicLeafMutation {
+                pre_state: None,
+                post_state: Some(EconomicLeafState::Relationship(
+                    crate::sofi::wire::TraderRelationshipLeaf {
+                        vault_id: [0xC1; 32],
+                        leaf: [0x0B; 32],
+                    },
+                )),
+                siblings: Vec::new(),
+            }],
+            credit_sources: Vec::new(),
+        };
+        let observed = crate::economic::classifier::observed_from_witness(&witness);
+        assert!(observed.relationships_changed, "it is an R_econ write");
+        assert!(observed.any());
+        assert!(!observed.balances_changed, "and it carries no amount");
+    }
+
+    /// Only the fulfillment is sent to the resolved path, and the message says
+    /// so. A setup or a creation pointed at `advance_resolved` would send the
+    /// next reader hunting for a route that does not exist.
+    #[test]
+    fn only_a_fulfillment_is_sent_to_the_resolved_path() {
+        let resolved = WriteSetError::SofiWriteSetBelongsToTheResolvedPath.to_string();
+        assert!(resolved.contains("advance_resolved"));
+        assert!(resolved.contains("fulfillment"));
+
+        let ordinary = WriteSetError::SofiInsertWriteSetNotSpecified.to_string();
+        assert!(
+            !ordinary.contains("advance_resolved"),
+            "an ordinary transition must not be pointed at the resolved path: {ordinary}"
+        );
+        assert!(ordinary.contains("ORDINARY") && ordinary.contains("not implemented"));
     }
 }

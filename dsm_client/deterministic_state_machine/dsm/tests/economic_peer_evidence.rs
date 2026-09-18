@@ -439,9 +439,12 @@ fn peer_vpt(verified_operation: Operation, debit_amount: u64) -> ValidatedPeerTr
         peer_devid: DEV_SENDER,
         validated_root:
             dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                4,
-                tree.root(),
-            ),
+                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: 4,
+                    economic_root: tree.root(),
+                },
+            )
+            .expect("an ordinary admitted position"),
         witness,
         proven_ak: vec![0xAA; 64],
         c_dsm_plus: [0xC5; 32],

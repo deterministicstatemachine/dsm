@@ -108,7 +108,7 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
     // Recipient side: credit ADMITTED at position 1 (fresh activation),
     // unfenced, with the release promoted to deliverable.
     p.b.enter();
-    let (b_pos, _root) = client_db::economic_lineage::get_admitted()
+    let (b_pos, _root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("the recipient credit is admitted before anything is deliverable");
     assert_eq!(b_pos, 1);
@@ -153,7 +153,7 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
     // Sender side: finalized on the release (generation semantics), and its
     // own debit admitted.
     p.a.enter();
-    let (a_pos, _) = client_db::economic_lineage::get_admitted()
+    let (a_pos, _) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("sender admitted");
     assert_eq!(a_pos, 2, "faucet claim (1) + debit (2)");
@@ -161,7 +161,7 @@ async fn a_transfer_admits_on_both_sides_with_a_register_backed_release() {
 
 fn facts_sender_position(p: &Pair) -> u64 {
     p.a.enter();
-    let (pos, _) = client_db::economic_lineage::get_admitted()
+    let (pos, _) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("sender admitted");
     p.b.enter();
@@ -283,10 +283,16 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
     let sender_pos = facts_sender_position(&p);
     p.b.enter();
     let validated = {
-        let (pos, root) = client_db::economic_lineage::get_admitted()
+        let (pos, root) = client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap();
-        dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(pos, root)
+        dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: pos,
+                economic_root: root,
+            },
+        )
+        .expect("an ordinary admitted position")
     };
     let (mut tree, pre_state) =
         crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated).unwrap();
@@ -467,7 +473,7 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
     assert_eq!(p.b.era_balance(), 10, "applied once after recovery");
     p.b.enter();
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,

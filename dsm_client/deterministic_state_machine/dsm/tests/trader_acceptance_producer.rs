@@ -238,7 +238,13 @@ fn fixture() -> Fixture {
     Fixture {
         acceptance,
         terms: terms_signed_by(&sk),
-        validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(POSITION, root),
+        validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: POSITION,
+                economic_root: root,
+            },
+        )
+        .expect("an ordinary admitted position"),
         ak: pk,
     }
 }

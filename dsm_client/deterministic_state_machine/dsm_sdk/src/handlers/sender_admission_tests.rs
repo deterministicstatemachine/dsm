@@ -60,7 +60,7 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
     assert_eq!(outcome.new_device_state.balance(&era()), 60);
     let head = core.device_head().expect("head");
     assert!(head.pending_economic_admission().is_none(), "unfenced");
-    let (position, admitted_root) = client_db::economic_lineage::get_admitted()
+    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("admitted");
     assert_eq!(position, 2);
@@ -321,7 +321,7 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
     );
     assert_eq!(p.a.era_balance(), 100, "a refused creation burns nothing");
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -346,7 +346,7 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
     };
     assert_eq!(p.a.era_balance(), 100 - fee, "exactly the fee, burned");
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -398,7 +398,7 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
     assert_eq!(resp2.token_id, resp.token_id, "one commitment, one token");
     assert_eq!(p.a.era_balance(), 100 - fee, "no second fee");
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -423,7 +423,7 @@ async fn token_routes_admit_fee_only_create_and_burn_end_to_end() {
     assert!(burned.success, "{:?}", burned.error_message);
     assert_eq!(p.a.era_balance(), 100 - fee - 25);
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -444,7 +444,7 @@ async fn a_stale_resume_returns_the_admitted_outcome_and_leaves_a_newer_admissio
     let p = crate::test_support::two_device::Pair::boot(100, 0).await;
     let down = crate::economic_fixtures::members_to_break_quorum();
     let admitted = || {
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0
@@ -595,7 +595,7 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
         .cloned()
         .expect("the admission rides the head for resume");
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -622,7 +622,7 @@ async fn a_failed_finish_holds_the_outbox_and_resume_completes_the_same_admissio
         .expect("resume completes the same admission");
     p.a.enter();
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -719,7 +719,7 @@ async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
         .await;
     assert!(created.success, "{:?}", created.error_message);
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -749,7 +749,7 @@ async fn token_routes_admit_an_authorized_mint_that_is_foreign_walkable() {
         other => panic!("expected TokenMintResponse, got {other:?}"),
     };
     assert_eq!(resp.new_balance, 500, "the credit landed");
-    let (position, admitted_root) = client_db::economic_lineage::get_admitted()
+    let (position, admitted_root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("admitted");
     assert_eq!(position, 3, "the mint admitted position 3");
@@ -863,7 +863,7 @@ async fn mint_preflight_refuses_each_unsupported_policy_shape_by_name() {
                 .await;
             assert!(r.success, "create {ticker}: {:?}", r.error_message);
         }
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0
@@ -905,7 +905,7 @@ async fn mint_preflight_refuses_each_unsupported_policy_shape_by_name() {
         .await;
     assert!(ok.success, "{:?}", ok.error_message);
     assert_eq!(
-        client_db::economic_lineage::get_admitted()
+        client_db::economic_lineage::get_admitted_coordinate()
             .unwrap()
             .unwrap()
             .0,
@@ -922,7 +922,7 @@ async fn mint_preflight_refuses_each_unsupported_policy_shape_by_name() {
 async fn a_failed_issuance_evidence_build_leaves_no_trace() {
     let (core, _fleet) = setup_funded(0xD4).await;
     let head_root_before = core.device_head().expect("head").root();
-    let admitted_before = client_db::economic_lineage::get_admitted().unwrap();
+    let admitted_before = client_db::economic_lineage::get_admitted_coordinate().unwrap();
 
     let mint = dsm::types::operations::Operation::Mint {
         amount: dsm::types::token_types::Balance::from_state(25, [0u8; 32]),
@@ -956,7 +956,7 @@ async fn a_failed_issuance_evidence_build_leaves_no_trace() {
         "no fence survived"
     );
     assert_eq!(
-        client_db::economic_lineage::get_admitted().unwrap(),
+        client_db::economic_lineage::get_admitted_coordinate().unwrap(),
         admitted_before,
         "no admitted movement"
     );
@@ -1177,7 +1177,7 @@ async fn a_failed_finish_holds_the_mint_and_resume_completes_the_same_admission(
     resume_pending_admission(&core, NETWORK, pending)
         .await
         .expect("resume completes the held mint admission");
-    let (position, _root) = client_db::economic_lineage::get_admitted()
+    let (position, _root) = client_db::economic_lineage::get_admitted_coordinate()
         .unwrap()
         .expect("admitted");
     assert_eq!(position, 2, "the held mint admitted at its signed position");

@@ -343,8 +343,27 @@ pub fn genesis_accepted(
     if state.storage_set_id != *network_storage_set_id {
         return Err(GenesisError::StorageSetIsNotNetworkPinned);
     }
-    // The owner's own lineage must already have validated the position that
-    // inserts the creation; a genesis cannot bootstrap the owner.
+    // THE OWNER BINDING IS A POSITION COMPARISON, AND THAT IS NOT ENOUGH.
+    //
+    // What this establishes: the owner's own lineage validated through the
+    // position that is supposed to insert the creation. A genesis cannot
+    // bootstrap the owner.
+    //
+    // What it does NOT establish, and cannot today: that the creation record
+    // is actually committed under that validated root. The check a complete
+    // rule needs is an inclusion proof of the creation leaf — and there is no
+    // creation leaf. `SOFI_VAULT_CREATION` (0x005B) is a WIRE class carried in
+    // the operation; `R_econ` has no leaf class, no key derivation and no
+    // `EconomicLeafState` variant for it, and `SofiVaultCreate` has no write
+    // set (`economic::write_set` refuses it as
+    // `SofiInsertWriteSetNotSpecified`). P15-12's "inserts VaultCreation" is
+    // specified and unimplemented.
+    //
+    // So a genesis whose creation was never committed — or was committed in a
+    // transition the owner's lineage later abandoned — passes this check on
+    // the position alone. The insert and this binding land together in the
+    // follow-up: until then the rule here is deliberately weaker than P15-12,
+    // and saying so is better than a check that looks complete.
     if owner_validated.economic_position() < preimage.create_position {
         return Err(GenesisError::OwnerRootIsNotValidated {
             validated: owner_validated.economic_position(),
@@ -434,7 +453,13 @@ mod tests {
     }
 
     fn previous(root: D32) -> ValidatedEconomicRoot {
-        ValidatedEconomicRoot::rehydrate_from_admitted_store(P_POS, root)
+        ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: P_POS,
+                economic_root: root,
+            },
+        )
+        .expect("an ordinary admitted position")
     }
 
     #[test]
@@ -496,7 +521,13 @@ mod tests {
         // The predecessor is at another position.
         assert!(matches!(
             advance_resolved(
-                &ValidatedEconomicRoot::rehydrate_from_admitted_store(P_POS + 3, pre),
+                &ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                    crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                        economic_position: P_POS + 3,
+                        economic_root: pre,
+                    },
+                )
+                .expect("an ordinary admitted position"),
                 &p,
                 &f,
                 &good,
@@ -613,7 +644,13 @@ mod tests {
     #[test]
     fn a_well_formed_genesis_is_accepted() {
         let (preimage, creation) = genesis_parts();
-        let owner = ValidatedEconomicRoot::rehydrate_from_admitted_store(P_POS, d(0xA0));
+        let owner = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: P_POS,
+                economic_root: d(0xA0),
+            },
+        )
+        .expect("an ordinary admitted position");
         assert_eq!(
             genesis_accepted(&preimage, &creation, &owner, &d(0x77), (d(0x40), d(0x41))),
             Ok(preimage.vault_id())
@@ -623,7 +660,13 @@ mod tests {
     #[test]
     fn genesis_is_refused_on_each_missing_check() {
         let (preimage, creation) = genesis_parts();
-        let owner = ValidatedEconomicRoot::rehydrate_from_admitted_store(P_POS, d(0xA0));
+        let owner = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: P_POS,
+                economic_root: d(0xA0),
+            },
+        )
+        .expect("an ordinary admitted position");
         let pair = (d(0x40), d(0x41));
 
         // A creation naming another vault.
@@ -674,7 +717,13 @@ mod tests {
         );
 
         // An owner whose lineage has not reached the inserting position.
-        let behind = ValidatedEconomicRoot::rehydrate_from_admitted_store(P_POS - 1, d(0xA0));
+        let behind = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: P_POS - 1,
+                economic_root: d(0xA0),
+            },
+        )
+        .expect("an ordinary admitted position");
         assert!(matches!(
             genesis_accepted(&preimage, &creation, &behind, &d(0x77), pair),
             Err(GenesisError::OwnerRootIsNotValidated { .. })

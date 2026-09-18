@@ -222,9 +222,12 @@ impl ProvenanceResolver for ApplyResolver {
                 peer_devid: DEV_TRADER,
                 validated_root:
                     dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                        TRADER_POSITION,
-                        self.trader_root,
-                    ),
+                        dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                            economic_position: TRADER_POSITION,
+                            economic_root: self.trader_root,
+                        },
+                    )
+                    .expect("an ordinary admitted position"),
                 witness,
                 proven_ak: vec![0xAA; 64],
                 c_dsm_plus: [0xC5; 32],

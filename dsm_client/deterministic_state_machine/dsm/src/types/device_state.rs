@@ -1469,6 +1469,52 @@ impl DeviceState {
         Ok(())
     }
 
+    /// The SoFi counterpart: a `TraderFulfillment` requires its OWN pending
+    /// admission, of the kind that fences a position.
+    ///
+    /// `require_attached_dsm_admission` cannot serve here — it demands
+    /// `DsmBacked`, and a fulfillment's admission is
+    /// [`PendingAdmissionKind::SofiFulfillment`], which fences the lineage
+    /// rather than an asset. Before this existed, a `SofiFulfill` reached the
+    /// head with NO accepting gate at all: `classify` calls it a
+    /// `ClosedWriteSet` (it moves value), every other value-moving operation
+    /// has a `require_attached_*` call site, and this one had none.
+    ///
+    /// The digest binding is the same and is the point: an admission
+    /// authorizes exactly one operation, so a fulfillment cannot ride the
+    /// admission staged for a different one.
+    fn require_attached_sofi_admission(
+        &self,
+        operation: &Operation,
+        what: &str,
+    ) -> Result<(), DsmError> {
+        let pending = self.pending_economic_admission.as_ref().ok_or_else(|| {
+ DsmError::invalid_operation(format!(
+ "advance: refusing {what} with no pending economic admission — a fulfillment installs a CONDITIONAL claim at its position, and without the admission fence the lineage would advance past a position that has selected no root",
+ ))
+ })?;
+        if !matches!(
+            pending.kind,
+            crate::economic::admission::PendingAdmissionKind::SofiFulfillment { .. }
+        ) {
+            return Err(DsmError::invalid_operation(format!(
+ "advance: refusing {what} — the pending admission is not a SoFi fulfillment admission; a fulfillment fences a position, and an asset-fencing admission does not authorize it",
+ )));
+        }
+        if pending.state != crate::economic::admission::EconomicAdmissionState::Prepared {
+            return Err(DsmError::invalid_operation(format!(
+ "advance: refusing {what} — the pending admission is not Prepared; a fencing admission belongs to an earlier acceptance and authorizes nothing new",
+ )));
+        }
+        let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+        if pending.operation_digest != op_digest {
+            return Err(DsmError::invalid_operation(format!(
+ "advance: refusing {what} whose digest does not match the pending economic admission — the admission authorizes exactly one operation",
+ )));
+        }
+        Ok(())
+    }
+
     /// TEST-ONLY: advance with the Prepared economic admission that the
     /// accepting fences require for an economically-originating operation.
     ///
@@ -1837,6 +1883,15 @@ impl DeviceState {
                 | Operation::SofiFulfill { .. }
         ) {
             crate::sofi::signature::verify_operation(&operation, &self.public_key)?;
+        }
+
+        // A FULFILLMENT NEEDS ITS ADMISSION, like every other value-moving
+        // operation. `classify` calls it a `ClosedWriteSet`; every other
+        // operation in that class has a `require_attached_*` call site, and
+        // this one had none — so a `SofiFulfill` advanced the head with a
+        // valid signature and no accepting gate whatsoever.
+        if matches!(operation, Operation::SofiFulfill { .. }) {
+            self.require_attached_sofi_admission(&operation, "a SoFi fulfillment")?;
         }
 
         // BUILTIN ISSUANCE IS NOT SELF-AUTHORIZABLE.
@@ -8912,6 +8967,121 @@ mod tests {
     /// get their own named refusal, and the SAME advance succeeds with a
     /// matching `Prepared`/`DsmBacked` admission attached. MUTATION CONTROL:
     /// delete the gate block in `advance` and the first arm here credits a
+    /// A FULFILLMENT CANNOT ADVANCE WITHOUT ITS OWN ADMISSION.
+    ///
+    /// `classify` calls a `SofiFulfill` a `ClosedWriteSet` — it moves value —
+    /// and every other operation in that class has a `require_attached_*`
+    /// call site in `advance`. This one had none: a valid signature was the
+    /// whole gate, so a fulfillment installed its conditional claim with
+    /// nothing having accepted the position.
+    ///
+    /// The admission it needs is `SofiFulfillment`, which fences the LINEAGE.
+    /// A `DsmBacked` admission does not authorize it, and neither does an
+    /// admission staged for some other operation.
+    #[test]
+    fn a_sofi_fulfillment_cannot_advance_without_its_own_admission() {
+        use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+        use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
+        use crate::economic::faucet::dsm_operation_digest;
+        use crate::sofi::derive;
+        use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
+
+        let (pk, sk) = generate_sphincs_keypair().unwrap();
+        let genesis = [0xAA; 32];
+        let devid = [0xBB; 32];
+        let head = DeviceState::new(genesis, devid, pk.clone(), 64);
+
+        let body = TraderFulfillmentBody::new(
+            [0x0A; 32],
+            vec![[0x71; 32]],
+            vec![AttemptEntry {
+                vault_id: [0xC1; 32],
+                attempt: 0,
+            }],
+            6,
+            0x0001,
+            &pk,
+        )
+        .unwrap();
+        let operation = Operation::SofiFulfill {
+            fulfillment_body: body.encode(),
+            precommit_id: [0x0A; 32].to_vec(),
+            // Signed correctly: the signature is NOT what is under test.
+            signature: sphincs_sign(&sk, &derive::fulfillment_signing_digest(&body)).unwrap(),
+        };
+        let digest = dsm_operation_digest(&operation.to_bytes());
+
+        let run = |h: &DeviceState| {
+            h.advance(
+                [0x3A; 32],
+                devid,
+                operation.clone(),
+                entropy(11),
+                None,
+                &[],
+                Some([0x11; 32]),
+                None,
+                None,
+                None,
+            )
+        };
+
+        // 1. No admission at all — the gate that did not exist.
+        let msg = run(&head)
+            .expect_err("a fulfillment with no admission must be refused")
+            .to_string();
+        assert!(
+            msg.contains("no pending economic admission"),
+            "named refusal, got: {msg}"
+        );
+
+        // 2. A DSM-backed admission does not authorize a fulfillment.
+        let wrong_kind =
+            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                PendingAdmissionKind::DsmBacked,
+                6,
+                [0x11; 32],
+                digest,
+            )));
+        let msg = run(&wrong_kind)
+            .expect_err("the wrong admission kind must be refused")
+            .to_string();
+        assert!(
+            msg.contains("not a SoFi fulfillment admission"),
+            "named refusal, got: {msg}"
+        );
+
+        // 3. The right kind, bound to a DIFFERENT operation.
+        let wrong_digest =
+            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                PendingAdmissionKind::SofiFulfillment {
+                    fulfillment_id: derive::fulfillment_id(&body),
+                },
+                6,
+                [0x11; 32],
+                [0xFF; 32],
+            )));
+        let msg = run(&wrong_digest)
+            .expect_err("an admission authorizes exactly one operation")
+            .to_string();
+        assert!(msg.contains("does not match"), "named refusal, got: {msg}");
+
+        // 4. Its own Prepared SoFi admission: it advances.
+        let correct =
+            head.with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(
+                PendingAdmissionKind::SofiFulfillment {
+                    fulfillment_id: derive::fulfillment_id(&body),
+                },
+                6,
+                [0x11; 32],
+                digest,
+            )));
+        assert!(
+            run(&correct).is_ok(),
+            "a fulfillment with its own Prepared admission must advance"
+        );
+    }
+
     /// THE DEVICE PATH VERIFIES A SOFI SIGNATURE, over the rule that
     /// operation's object actually uses.
     ///

@@ -13340,13 +13340,18 @@ mod funded_creation_tests {
         let admitted = |dev: &crate::test_support::two_device::TestDevice, who: &str| {
             dev.enter();
             let head = dev.router().core_sdk.device_head().expect("head");
-            let (position, root) = crate::storage::client_db::economic_lineage::get_admitted()
-                .expect("admitted read")
-                .unwrap_or_else(|| panic!("{who} holds an admitted position"));
+            let (position, root) =
+                crate::storage::client_db::economic_lineage::get_admitted_coordinate()
+                    .expect("admitted read")
+                    .unwrap_or_else(|| panic!("{who} holds an admitted position"));
             let validated =
                 dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                    position, root,
-                );
+                    dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                        economic_position: position,
+                        economic_root: root,
+                    },
+                )
+                .expect("an ordinary admitted position");
             let (_, pre) =
                 crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&validated)
                     .expect("the admitted pre-state recomputes the admitted root");
