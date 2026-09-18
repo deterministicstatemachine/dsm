@@ -133,7 +133,7 @@ function SwapTabInner({
   onSwapComplete,
   loadWalletData,
   setError,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
   const [inputToken, setInputToken] = useState('');
   const [outputToken, setOutputToken] = useState('');
   const [amount, setAmount] = useState('');
@@ -328,7 +328,7 @@ function SwapTabInner({
   };
 
   /** The coin for an anchor the wallet holds; nothing for one it has never seen. */
-  const coinFor = (anchor: string, className?: string): JSX.Element | null => {
+  const coinFor = (anchor: string, className?: string): React.JSX.Element | null => {
     const hit = tokenSuggestions.find((t) => t.anchor === anchor.trim());
     if (!hit || !hit.ticker) return null;
     return <TokenMark ticker={hit.ticker} iconUrl={hit.iconUrl} className={className ?? 'sb-coin'} />;

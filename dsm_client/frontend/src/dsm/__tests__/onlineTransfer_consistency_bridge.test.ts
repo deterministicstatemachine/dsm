@@ -35,7 +35,7 @@ describe('online transfer sender/recipient consistency through WebView bridge', 
     } as any);
     
     const pack = new pb.ResultPack({ 
-      codec: pb.Codec.CODEC_PROTO, 
+      codec: pb.Codec.PROTO, 
       body: resp.toBinary() as any 
     } as any);
     

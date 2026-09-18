@@ -19,8 +19,6 @@ function installStandardWalletMocks(contactList: any[] = []) {
     deviceId: 'D'.repeat(32),
   });
   (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: contactList });
-  (dsmClient.getConnectedBluetoothDevices as any) = jest.fn().mockResolvedValue([]);
-  (dsmClient.getConnectedDeviceIds as any) = jest.fn().mockResolvedValue([]);
 }
 
 describe('EnhancedWalletScreen event-driven refresh', () => {
@@ -46,8 +44,6 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
 
     // Minimal contacts and BLE functions used by loadWalletData
     (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: [] });
-    (dsmClient.getConnectedBluetoothDevices as any) = jest.fn().mockResolvedValue([]);
-    (dsmClient.getConnectedDeviceIds as any) = jest.fn().mockResolvedValue([]);
 
     render(<EnhancedWalletScreen />);
 

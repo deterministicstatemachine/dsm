@@ -29,7 +29,7 @@ function SendTabInner({
   onSendComplete,
   loadWalletData,
   setError,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
   const fx = useFx();
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     // No default recipient. A money form that pre-selects whoever happens to

@@ -39,7 +39,7 @@ const BRICKS: Brick[] = [
   },
 ];
 
-export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
+export default function SofiHubScreen({ onNavigate }: Props): React.JSX.Element {
   const go = useCallback(
     (target: string) => () => onNavigate?.(target),
     [onNavigate],

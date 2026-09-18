@@ -82,7 +82,7 @@ interface DeviceTreeViewerProps {
  * off `snapshot.leaves[i].inclusionVerified`. All verification
  * booleans come from Rust.
  */
-export function DeviceTreeViewer(props: DeviceTreeViewerProps): JSX.Element {
+export function DeviceTreeViewer(props: DeviceTreeViewerProps): React.JSX.Element {
   const { loading, error, snapshot } = useDeviceTreeSnapshot(props.genesisHash);
 
   if (props.genesisHash === null) {

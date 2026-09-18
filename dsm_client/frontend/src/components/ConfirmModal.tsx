@@ -12,7 +12,7 @@ interface ConfirmModalProps {
   onCancel: () => void;
 }
 
-export default function ConfirmModal({ visible, title, message, onConfirm, onCancel }: ConfirmModalProps): JSX.Element | null {
+export default function ConfirmModal({ visible, title, message, onConfirm, onCancel }: ConfirmModalProps): React.JSX.Element | null {
   if (!visible) return null;
   return (
     <div className="bilateral-transfer-overlay" onClick={onCancel}>

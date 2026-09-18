@@ -33,7 +33,7 @@ function makeContactsResponse(): Uint8Array {
   // Wrap in ResultPack as the router does (Rust `pack_ok(...)`).
   const pack = new pb.ResultPack({
     schemaHash: zeroHash32(),
-    codec: pb.Codec.CODEC_PROTO,
+    codec: pb.Codec.PROTO,
     body: resp.toBinary() as any,
   });
   
@@ -72,7 +72,7 @@ function makeFramedEnvelope(envelope: pb.Envelope): Uint8Array {
 function wrapSuccessRaw(data: Uint8Array): Uint8Array {
   // Return BridgeRpcResponse with raw data (for direct bridge methods)
   const br = new pb.BridgeRpcResponse({ 
-    result: { case: 'success', value: { data } } 
+    result: { case: 'success', value: { data: new Uint8Array(data) } } 
   });
   return br.toBinary();
 }
@@ -113,7 +113,7 @@ function makeOkResultPack(): pb.ResultPack {
 
   return new pb.ResultPack({
     schemaHash: zeroHash(),
-    codec: pb.Codec.CODEC_PROTO,
+    codec: pb.Codec.PROTO,
     body: resp.toBinary() as any,
   });
 }
@@ -183,7 +183,7 @@ describe('online transfer', () => {
           if (innerMethod === 'wallet.send' || innerMethod === 'onlineTransfer' || innerMethod === 'wallet.sendSmart') {
             return wrapIngressOk(new pb.ResultPack({
               schemaHash: zeroHash(),
-              codec: pb.Codec.CODEC_PROTO,
+              codec: pb.Codec.PROTO,
               body: new pb.OnlineTransferResponse({
                 success: true,
                 transactionHash: zeroHash(),
@@ -293,7 +293,7 @@ describe('online transfer', () => {
     // Test the core parsing logic for sendOnlineTransferSmart
     const resultPack = new pb.ResultPack({
       schemaHash: zeroHash(),
-      codec: pb.Codec.CODEC_PROTO,
+      codec: pb.Codec.PROTO,
       body: new pb.OnlineTransferResponse({
         success: true,
         transactionHash: zeroHash(),

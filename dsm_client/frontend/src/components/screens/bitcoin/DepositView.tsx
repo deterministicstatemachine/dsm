@@ -17,7 +17,7 @@ type Props = {
 
 const PRESETS = ['0.001', '0.01', '0.1'];
 
-export default function DepositView({ balance, nativeBalance, network, onBack, onRefresh }: Props): JSX.Element {
+export default function DepositView({ balance, nativeBalance, network, onBack, onRefresh }: Props): React.JSX.Element {
   const [depositAmount, setDepositAmount] = useState('');
   const [depositLoading, setDepositLoading] = useState(false);
   const [depositResult, setDepositResult] = useState<string | null>(null);

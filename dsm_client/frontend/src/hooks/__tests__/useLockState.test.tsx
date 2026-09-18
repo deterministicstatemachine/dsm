@@ -2,6 +2,7 @@
 
 import React from 'react';
 import { render, act } from '@testing-library/react';
+import type { AppState } from '../../types/app';
 import { useLockState } from '../useLockState';
 import { LOCK_SETUP_COMPLETE_EVENT } from '../../services/lock/lockService';
 import { lockSessionViaRouter, unlockSessionViaRouter } from '../../dsm/WebViewBridge';
@@ -13,7 +14,7 @@ jest.mock('../../dsm/WebViewBridge', () => ({
 
 let hookResult: { lock: () => void; unlock: () => Promise<void> };
 
-function Harness(props: { appState: string }) {
+function Harness(props: { appState: AppState }) {
   hookResult = useLockState(props);
   return null;
 }

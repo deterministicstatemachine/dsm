@@ -19,7 +19,7 @@ type Props = {
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): JSX.Element {
+function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 

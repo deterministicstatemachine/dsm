@@ -28,8 +28,6 @@ function makeValidInstantiate(): pb.DlvInstantiateV1 {
       content: new Uint8Array([0xcc]) as any,
     }),
     creatorPublicKey: new Uint8Array(64).fill(0x11) as any,
-    tokenId: new Uint8Array() as any,
-    lockedAmountU128: new Uint8Array(16) as any,
     signature: new Uint8Array(64).fill(0x22) as any,
   });
 }

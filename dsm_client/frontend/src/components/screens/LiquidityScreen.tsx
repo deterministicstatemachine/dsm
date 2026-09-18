@@ -41,7 +41,7 @@ function bigIntFromString(s: string): bigint {
   return BigInt(s);
 }
 
-export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
+export default function LiquidityScreen({ onNavigate }: Props): React.JSX.Element {
   const fx = useFx();
   const [phase, setPhase] = useState<Phase>('loading');
   const [vaults, setVaults] = useState<AmmVaultSummary[]>([]);

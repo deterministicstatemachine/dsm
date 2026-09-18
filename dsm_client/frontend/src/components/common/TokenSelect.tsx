@@ -31,7 +31,7 @@ type Props = {
   disabled?: boolean;
 };
 
-export function TokenSelect({ id, label, value, options, onChange, placeholder = 'Select…', className, disabled }: Props): JSX.Element {
+export function TokenSelect({ id, label, value, options, onChange, placeholder = 'Select…', className, disabled }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);

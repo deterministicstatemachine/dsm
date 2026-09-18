@@ -17,7 +17,7 @@ type Props = {
   showRecoveredBadge?: boolean;
 };
 
-function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, showRecoveredBadge = false }: Props): JSX.Element {
+function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, showRecoveredBadge = false }: Props): React.JSX.Element {
   const amtBI = tx.amountSigned ?? tx.amount ?? 0n;
   const isOutgoing = amtBI < 0n;
   const token = (tx.tokenId?.length ?? 0) > 0 ? tx.tokenId! : 'ERA';

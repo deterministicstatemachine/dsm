@@ -32,7 +32,9 @@ import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 function packBody(body: Uint8Array): Uint8Array {
   const argPack = new pb.ArgPack({
     codec: pb.Codec.PROTO as any,
-    body,
+    // The proto field is typed over an ArrayBuffer; copy rather than assert
+    // that whatever buffer the caller handed us is one.
+    body: new Uint8Array(body),
   });
   return new Uint8Array(argPack.toBinary());
 }

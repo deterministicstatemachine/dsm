@@ -9,7 +9,7 @@ type Props = {
   onCopyFailed: (url: string) => void;
 };
 
-export default function ExplorerLink({ url, label, onCopied, onCopyFailed }: Props): JSX.Element {
+export default function ExplorerLink({ url, label, onCopied, onCopyFailed }: Props): React.JSX.Element {
   const copy = () => {
     navigator.clipboard.writeText(url).then(onCopied, () => onCopyFailed(url));
   };

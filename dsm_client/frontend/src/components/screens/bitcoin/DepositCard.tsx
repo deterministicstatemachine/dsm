@@ -13,7 +13,7 @@ type Props = {
   network: number;
 };
 
-export default function DepositCard({ deposit, onRefresh, network }: Props): JSX.Element {
+export default function DepositCard({ deposit, onRefresh, network }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);

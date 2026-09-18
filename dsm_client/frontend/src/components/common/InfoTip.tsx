@@ -15,7 +15,7 @@ type Props = {
   children: React.ReactNode;
 };
 
-export function InfoTip({ title, label, className, children }: Props): JSX.Element {
+export function InfoTip({ title, label, className, children }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const wasOpenRef = useRef(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);

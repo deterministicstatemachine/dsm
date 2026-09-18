@@ -155,7 +155,8 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   // Rust emits dsm-wallet-refresh beside the registry write, so the list
   // refreshes from persisted state whatever caused the change — including an
   // adoption that happened while this screen was already open.
-  useWalletRefreshListener(loadBalances, [loadBalances]);
+  // The listener wants nothing back; loadBalances answers with the rows it read.
+  useWalletRefreshListener(() => { void loadBalances(); }, [loadBalances]);
 
   /// Forget a token's identity, after saying plainly what that means.
   ///

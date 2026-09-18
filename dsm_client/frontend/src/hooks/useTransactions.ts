@@ -36,6 +36,10 @@ export interface Transaction {
   createdAt?: number;      // unix unix_ts (seconds) from backend
   memo?: string;           // optional memo/note
   tokenId?: string;        // token identifier from backend (e.g. "ERA", "dBTC")
+  /** Signed display form rendered by Rust. Never computed in this layer; a row
+   *  without it falls back to printing base units, which is not what the token
+   *  holds. */
+  displayAmount?: string;
 }
 
 let localReceivedCounter = 0;
@@ -370,6 +374,15 @@ export function useTransactions() {
         return undefined;
       })();
 
+      // Rust renders the amount; this layer only carries it. Dropping it here
+      // made every row that reads it print base units instead — 100000 where
+      // the token holds 1000.00.
+      const displayAmount: string | undefined = (() => {
+        const raw = anyT.displayAmount ?? anyT.display_amount;
+        if (typeof raw === 'string' && raw.length > 0) return raw;
+        return undefined;
+      })();
+
       return {
         txId,
         type,
@@ -388,6 +401,7 @@ export function useTransactions() {
         createdAt: createdAtNum,
         memo,
         tokenId,
+        displayAmount,
       };
     });
 

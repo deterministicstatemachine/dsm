@@ -1,30 +1,20 @@
 {
+  // `npm run type-check` covers the SOURCE TREE. It used to name a dozen files,
+  // so it passed while real type errors sat in the code it never opened — among
+  // them a Mail screen sending a field its API does not take.
+  //
+  // Only generated protobuf output is left out: it is not hand-written, and the
+  // legacy pair below predates the current generator.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "incremental": false
+    "incremental": false,
+    "noEmit": true
   },
-  "include": [
-    "src/components/screens/QRCodeScannerScreen.tsx",
-    "src/contexts/WalletContext.tsx",
-    "src/dsm/bridgeTypes.ts",
-    "src/dsm/decoding.ts",
-    "src/dsm/EventBridge.ts",
-    "src/dsm/WebViewBridge.ts",
-    "src/services/genesis.ts",
-    "src/services/identity.ts",
-    "src/services/appState.ts",
-    "src/services/dsmClient.ts",
-    "src/stores/walletStore.ts",
-    "src/types/**/*.d.ts",
-    "src/proto/gen/**/*.ts"
-  ],
+  "include": ["src"],
   "exclude": [
     "node_modules",
     "dist",
-    "src/__tests__/**",
-    "src/services/ble**",
-    "src/services/headerService.ts",
-    "src/services/dsmClientNew.ts",
-    "**/__mocks__/**"
+    "src/proto/dsm_app.ts",
+    "src/proto/google/protobuf/**"
   ]
 }

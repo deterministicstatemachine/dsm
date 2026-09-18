@@ -39,7 +39,7 @@ export function ScreenFrame({
   headRef,
   bodyRef,
   children,
-}: FrameProps): JSX.Element {
+}: FrameProps): React.JSX.Element {
   return (
     <div className={`sb-screen${className ? ` ${className}` : ''}`}>
       <div className="sb-screen__head" ref={headRef}>
@@ -69,7 +69,7 @@ type TabsProps<T extends string> = {
 };
 
 /** Segmented tab strip. Plain buttons, so keyboard and D-pad handling stay as they are. */
-export function ScreenTabs<T extends string>({ tabs, active, onChange, ariaLabel }: TabsProps<T>): JSX.Element {
+export function ScreenTabs<T extends string>({ tabs, active, onChange, ariaLabel }: TabsProps<T>): React.JSX.Element {
   return (
     <div className="sb-tabs" aria-label={ariaLabel}>
       {tabs.map((tab) => (
@@ -95,7 +95,7 @@ type DisclosureProps = {
 };
 
 /** Folded by default: what a first-time user does not need to see. */
-export function Disclosure({ summary, defaultOpen, className, children }: DisclosureProps): JSX.Element {
+export function Disclosure({ summary, defaultOpen, className, children }: DisclosureProps): React.JSX.Element {
   return (
     <details className={`sb-details${className ? ` ${className}` : ''}`} open={defaultOpen}>
       <summary>{summary}</summary>
@@ -112,7 +112,7 @@ type NoticeProps = {
   children: React.ReactNode;
 };
 
-export function Notice({ kind = 'info', onClose, banner, role, children }: NoticeProps): JSX.Element {
+export function Notice({ kind = 'info', onClose, banner, role, children }: NoticeProps): React.JSX.Element {
   const cls = ['sb-notice'];
   if (kind === 'error') cls.push('sb-notice--error');
   if (kind === 'success') cls.push('sb-notice--success');

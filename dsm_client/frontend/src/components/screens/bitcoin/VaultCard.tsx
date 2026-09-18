@@ -5,7 +5,7 @@ import { encodeBase32Crockford } from '../../../utils/textId';
 import { directionLabel, vaultStateLabel } from './labels';
 import type { VaultSummary, VaultDetail } from '../../../services/bitcoinTap';
 
-export default function VaultCard({ vault }: { vault: VaultSummary }): JSX.Element {
+export default function VaultCard({ vault }: { vault: VaultSummary }): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<VaultDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);

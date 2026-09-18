@@ -19,7 +19,7 @@ import { useBackButton } from '../../../hooks/useBackButton';
 import { InfoTip } from '../../common/InfoTip';
 import { isSettledDeposit } from './labels';
 
-export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): JSX.Element {
+export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): React.JSX.Element {
   const data = useBitcoinTapData();
   const wallet = useBitcoinWallet(data.loadData, data.setWalletMessage);
   const rootRef = useRef<HTMLDivElement | null>(null);

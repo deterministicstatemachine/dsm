@@ -57,7 +57,7 @@ export default function WithdrawView({
   network,
   onBack,
   onRefresh,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawDest, setWithdrawDest] = useState('');
   const [reviewLoading, setReviewLoading] = useState(false);

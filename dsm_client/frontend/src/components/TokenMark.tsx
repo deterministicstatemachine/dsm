@@ -27,7 +27,7 @@ function isBitcoin(name: string): boolean {
 }
 
 /** A token's coin, sized for a row by default. Renders nothing without a name. */
-export function TokenMark({ ticker, iconUrl, size = 48, className = 'sb-coin', alt = '' }: Props): JSX.Element | null {
+export function TokenMark({ ticker, iconUrl, size = 48, className = 'sb-coin', alt = '' }: Props): React.JSX.Element | null {
   const theme = useActiveTheme();
   const name = (ticker ?? '').trim();
   if (name.length === 0) return null;

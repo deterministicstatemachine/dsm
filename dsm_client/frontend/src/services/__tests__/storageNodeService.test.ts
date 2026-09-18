@@ -4,8 +4,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // Tests for storageNodeService
 
-const mockGetPreference = jest.fn(async () => null);
-const mockSetPreference = jest.fn(async () => {});
+const mockGetPreference = jest.fn(async (..._args: any[]) => null);
+const mockSetPreference = jest.fn(async (..._args: any[]) => {});
 const mockGetNodeHealth = jest.fn();
 const mockAddStorageNode = jest.fn();
 const mockRemoveStorageNode = jest.fn();

@@ -43,7 +43,7 @@ interface Props {
   onNavigate?: (screen: string) => void;
 }
 
-export default function MailScreen({ onNavigate }: Props): JSX.Element {
+export default function MailScreen({ onNavigate }: Props): React.JSX.Element {
   const fx = useFx();
   const [tab, setTab] = useState<Tab>('inbox');
 

@@ -43,7 +43,7 @@ function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
     payload: {
       case: 'bilateralPrepareResponse',
       value: new pb.BilateralPrepareResponse({
-        commitmentHash: new pb.Hash32({ v: commitmentHash }),
+        commitmentHash: new pb.Hash32({ v: new Uint8Array(commitmentHash) }),
       }),
     },
   });

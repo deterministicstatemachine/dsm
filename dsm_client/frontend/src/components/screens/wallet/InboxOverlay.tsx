@@ -47,7 +47,7 @@ function mapPendingItems(items: unknown[]): PendingItem[] {
 // ---------------------------------------------------------------------------
 type Props = { headerHeight: number; loadWalletData: () => Promise<void> };
 
-function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element {
+function InboxOverlayInner({ headerHeight, loadWalletData }: Props): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [records, setRecords] = useState<NotificationRecord[]>([]);
   const [pending, setPending] = useState<PendingItem[]>([]);
