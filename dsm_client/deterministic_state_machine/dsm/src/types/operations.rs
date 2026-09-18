@@ -971,7 +971,10 @@ pub enum Operation {
     SofiSetup {
         /// Canonical `SofiSetupBody` bytes (class `0x0036`).
         setup_body: Vec<u8>,
-        /// SPHINCS+ over the setup signing digest.
+        /// SPHINCS+ over `m_setup`, the body's own signing digest — and NOT
+        /// additionally over the operation. The same body reaches a storage
+        /// member with no operation around it, and `m_setup` is what the
+        /// member checks there.
         signature: Vec<u8>,
     },
     /// SoFi v8: the owner's vault creation at `p_create` (P15-12). It debits
@@ -982,7 +985,10 @@ pub enum Operation {
         genesis_preimage: Vec<u8>,
         /// Canonical `VaultCreation` bytes (class `0x005B`).
         creation: Vec<u8>,
-        /// SPHINCS+ over the operation.
+        /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
+        /// is the ONE SoFi operation that signs those: `vault_id` and `R_0`
+        /// are derivations of the preimage it carries, so it has no protocol
+        /// object digest of its own to sign.
         signature: Vec<u8>,
     },
     /// SoFi v8: the trader's fulfillment `F` — the exercise (F2 stage 3).
@@ -996,7 +1002,9 @@ pub enum Operation {
         fulfillment_body: Vec<u8>,
         /// `PrecommitId` — the `P` this exercises, fetched by content address.
         precommit_id: Vec<u8>,
-        /// SPHINCS+ over the fulfillment signing digest, under P's key.
+        /// SPHINCS+ over `m_F`, the body's own signing digest, under P's key —
+        /// and NOT additionally over the operation. `K_ful` ingress checks
+        /// exactly this digest on the bare object.
         signature: Vec<u8>,
     },
     DlvInvalidate {
@@ -1365,8 +1373,9 @@ impl Operation {
         match self {
             // SoFi v8, tags 34-36. Each carries the canonical CCB bytes of the
             // object it is about, so the operation adds no second encoding of
-            // anything: what is signed here is exactly what the registry
-            // froze, plus the signature itself.
+            // anything. What each signature COVERS is the object's own rule,
+            // not these bytes — see `sofi::signature`. Only a vault creation,
+            // which has no object digest of its own, signs the operation.
             SofiSetup {
                 setup_body,
                 signature,
