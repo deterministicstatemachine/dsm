@@ -27,6 +27,7 @@ import {
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
 import { InfoTip } from '../../common/InfoTip';
+import { TokenMark } from '../../TokenMark';
 import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
 import type { Balance } from './helpers';
@@ -152,12 +153,13 @@ function SwapTabInner({
    *  pasted — you do not hold what you are buying. */
   const tokenSuggestions = useMemo(() => {
     if (!Array.isArray(balances)) return [];
-    const seen = new Map<string, string>();
+    // The icon rides along so a leg can wear its token's coin.
+    const seen = new Map<string, { ticker: string; iconUrl?: string }>();
     for (const b of balances) {
       const anchor = b.policyAnchorB32 ?? '';
-      if (anchor.length > 0 && !seen.has(anchor)) seen.set(anchor, b.tokenId ?? '');
+      if (anchor.length > 0 && !seen.has(anchor)) seen.set(anchor, { ticker: b.tokenId ?? '', iconUrl: b.iconUrl });
     }
-    return Array.from(seen, ([anchor, ticker]) => ({ anchor, ticker }));
+    return Array.from(seen, ([anchor, meta]) => ({ anchor, ticker: meta.ticker, iconUrl: meta.iconUrl }));
   }, [balances]);
 
   const canQuote =
@@ -324,6 +326,13 @@ function SwapTabInner({
     const a = anchor.trim();
     return a.length > 12 ? `${a.slice(0, 8)}\u2026` : a || '?';
   };
+
+  /** The coin for an anchor the wallet holds; nothing for one it has never seen. */
+  const coinFor = (anchor: string, className?: string): JSX.Element | null => {
+    const hit = tokenSuggestions.find((t) => t.anchor === anchor.trim());
+    if (!hit || !hit.ticker) return null;
+    return <TokenMark ticker={hit.ticker} iconUrl={hit.iconUrl} className={className ?? 'sb-coin'} />;
+  };
   // The executor reads the current naming without taking it as a dependency.
   nameForRef.current = nameFor;
 
@@ -344,7 +353,10 @@ function SwapTabInner({
       </div>
 
       <div className="sb-field">
-        <label htmlFor="swap-amount">You pay</label>
+        <label htmlFor="swap-amount">
+          You pay
+          {coinFor(inputToken, 'sb-coin sb-coin--sm')}
+        </label>
         <input
           id="swap-amount"
           type="number"
@@ -371,7 +383,10 @@ function SwapTabInner({
       </div>
 
       <div className="sb-field">
-        <label htmlFor="swap-to">You get</label>
+        <label htmlFor="swap-to">
+          You get
+          {coinFor(outputToken, 'sb-coin sb-coin--sm')}
+        </label>
         <input
           id="swap-to"
           type="text"
@@ -389,7 +404,8 @@ function SwapTabInner({
       {quoted && (
         <div className="sb-card sb-card--hero">
           <div className="sb-hero__label">You get exactly</div>
-          <div className="sb-hero__value" style={{ fontSize: 15 }}>
+          <div className="sb-hero__value" style={{ fontSize: 15, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {coinFor(outputToken, 'sb-coin sb-coin--lg')}
             {quoted.expectedOut.toString()} {outputToken.trim()}
           </div>
           <div className="sb-hero__sub">

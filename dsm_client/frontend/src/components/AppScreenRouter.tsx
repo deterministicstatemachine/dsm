@@ -65,7 +65,7 @@ export default function AppScreenRouter({
 
   switch (currentScreen) {
     case 'wallet':
-      return <MemoWallet eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet btcLogoSrc={btcLogoSrc} />;
     case 'contacts':
       return <MemoContacts onNavigate={onNavigate} eraTokenSrc={eraTokenSrc} />;
     case 'storage':
@@ -83,7 +83,7 @@ export default function AppScreenRouter({
     case 'liquidity':
       return <MemoLiquidity onNavigate={onNavigate} />;
     case 'swap':
-      return <MemoWallet initialTab="swap" eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet initialTab="swap" btcLogoSrc={btcLogoSrc} />;
     case 'mail':
       return <MemoMail onNavigate={onNavigate} />;
     case 'lock_setup':
@@ -93,9 +93,9 @@ export default function AppScreenRouter({
     case 'mycontact':
       return <MemoMyContact />;
     case 'vault':
-      return <MemoWallet eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet btcLogoSrc={btcLogoSrc} />;
     case 'transactions':
-      return <MemoWallet initialTab="history" eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
+      return <MemoWallet initialTab="history" btcLogoSrc={btcLogoSrc} />;
     case 'accounts':
       return <MemoAccounts eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
     case 'recovery':

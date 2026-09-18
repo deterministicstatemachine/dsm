@@ -767,3 +767,74 @@
 .sb-fx-full fx-canvas { width: 100%; height: 100%; }
 .sb-fx-full canvas { margin: auto; }
 .sb-fx-full img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: pixelated; display: block; }
+
+/* A token's coin, beside whatever names that token. */
+.sb-coin {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  vertical-align: middle;
+}
+.sb-coin--lg { width: 26px; height: 26px; }
+.sb-coin--sm { width: 14px; height: 14px; }
+
+/* A coin leads the amount line, so the row centres on it rather than on a
+   text baseline the image does not share. */
+.sb-screen .transaction-amount-line { align-items: center; }
+
+/* Token picker: a listbox, because a native option cannot carry a coin. */
+.sb-tokensel { position: relative; display: inline-block; }
+.sb-tokensel__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.sb-tokensel__button:disabled { opacity: 0.45; cursor: not-allowed; }
+.sb-tokensel__ticker { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-tokensel__ticker--empty { opacity: 0.55; }
+.sb-tokensel__caret { flex: 0 0 auto; font-size: 9px; opacity: 0.7; }
+.sb-tokensel__list {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 168px;
+  margin: 0;
+  padding: 2px;
+  overflow-y: auto;
+  list-style: none;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 6px 18px rgba(var(--text-rgb), 0.35);
+}
+.sb-tokensel__opt {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.sb-tokensel__opt:hover,
+.sb-tokensel__opt:focus-visible { background: rgba(var(--text-rgb), 0.12); outline: none; }
+.sb-tokensel__opt.is-selected { background: rgba(var(--text-rgb), 0.18); font-weight: 700; }
+.sb-tokensel__note { flex: 0 0 auto; font-size: 9px; opacity: 0.6; }
+.sb-tokensel__empty { padding: 8px; font-size: 10px; opacity: 0.6; }
+/* Beside an amount field the picker is a fixed-width column, not a full row. */
+.sb-input-row .sb-tokensel--inline { flex: 0 0 auto; width: 104px; }

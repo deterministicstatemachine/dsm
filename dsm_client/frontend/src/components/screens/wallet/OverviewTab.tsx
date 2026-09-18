@@ -4,6 +4,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import TransactionItem from './TransactionItem';
 import { Disclosure } from '../../common/ScreenFrame';
 import type { Balance } from './helpers';
+import { TokenMark } from '../../TokenMark';
 import type { DomainTransaction } from '../../../domain/types';
 
 const MAX_OVERVIEW_BALANCES = 5;
@@ -12,14 +13,13 @@ type Props = {
   balances: Balance[];
   transactions: DomainTransaction[];
   aliasLookup: Map<string, string>;
-  eraGif: string;
   genesisB32: string;
   deviceB32: string;
   onSwitchToSend: () => void;
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, transactions, aliasLookup, eraGif, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): JSX.Element {
+function OverviewTabInner({ balances, transactions, aliasLookup, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 
@@ -45,7 +45,7 @@ function OverviewTabInner({ balances, transactions, aliasLookup, eraGif, genesis
     <div className="overview-tab">
       <section className="sb-card" aria-label="Your balances">
         <div className="sb-card__title">
-          <span className="sb-hero__label"><img src={eraGif} alt="" />Your Balances</span>
+          <span className="sb-hero__label">Your Balances</span>
         </div>
         {balances.length === 0 ? (
           <>
@@ -56,7 +56,10 @@ function OverviewTabInner({ balances, transactions, aliasLookup, eraGif, genesis
           <>
             {visibleBalances.map((b) => (
               <div key={b.tokenId} className="sb-kv" style={{ padding: '6px 0' }}>
-                <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0 }}>{b.symbol || b.tokenId}</span>
+                <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <TokenMark ticker={b.symbol || b.tokenId} iconUrl={b.iconUrl} />
+                  {b.symbol || b.tokenId}
+                </span>
                 <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>{String(b.balance ?? '0')}</span>
               </div>
             ))}

@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FxCanvas } from './FxCanvas';
 import { isFxEngineReady, loadFxEngine, type FxAnim } from './fxEngine';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
+import { TokenMark } from '../TokenMark';
 
 export type FxTone = 'good' | 'bad' | 'neutral';
 
@@ -14,6 +15,8 @@ export interface FxPopupProps {
   caption?: string;
   /** Amount caption drawn inside the confirm/fail scenes. */
   amount?: string;
+  /** The token this scene is about; its coin sits beside the heading. */
+  coin?: { ticker: string; iconUrl?: string };
   muted?: boolean;
   /** Close on its own a moment after the scene ends (default: not for `bad`). */
   autoClose?: boolean;
@@ -37,6 +40,7 @@ export function FxPopup({
   title,
   caption,
   amount,
+  coin,
   muted = false,
   autoClose,
   tone = 'good',
@@ -105,7 +109,10 @@ export function FxPopup({
         )}
         <div className="sb-fx-foot">
           <div className="sb-fx-text">
-            <div className="sb-fx-title">{title}</div>
+            <div className="sb-fx-title" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              {coin ? <TokenMark ticker={coin.ticker} iconUrl={coin.iconUrl} className="sb-coin sb-coin--sm" /> : null}
+              {title}
+            </div>
             {caption ? <div className="sb-fx-caption">{caption}</div> : null}
           </div>
           {engineReady !== false && (

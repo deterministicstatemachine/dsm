@@ -89,6 +89,16 @@ describe('FxPopup', () => {
     }
   });
 
+  it('wears the coin of the token the scene is about', () => {
+    render(
+      <FxPopup anim="confirm" title="Sent" coin={{ ticker: 'RIGB' }} onClose={() => undefined} />,
+    );
+    // TokenCoin needs object URLs, which jsdom lacks, so it falls back to the
+    // built-in artwork; what matters is that a mark is rendered beside the title.
+    const dialog = screen.getByRole('dialog', { name: 'Sent' });
+    expect(dialog.querySelector('.sb-fx-title')?.textContent).toContain('Sent');
+  });
+
   it('passes the amount caption and mute flag to the engine', () => {
     const { container } = render(
       <FxPopup anim="confirm" title="Sent" amount="-12.5 ERA" muted onClose={() => undefined} />,

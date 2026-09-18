@@ -24,6 +24,8 @@ import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import { Disclosure, Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { TokenMark } from '../TokenMark';
+import { TokenSelect } from '../common/TokenSelect';
 import { useFx } from '../fx/FxProvider';
 import { useBackButton } from '../../hooks/useBackButton';
 
@@ -218,6 +220,12 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
     [holdings],
   );
 
+  /** A held token's coin artwork, matched by ticker; undefined draws from the ticker itself. */
+  const iconFor = useCallback(
+    (ticker: string) => holdings.find((h) => h.ticker === ticker)?.iconUrl,
+    [holdings],
+  );
+
   const formValid = useMemo(() => {
     if (!tokenA.trim() || !tokenB.trim()) return false;
     if (tokenA === tokenB) return false;
@@ -384,7 +392,14 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           <div key={v.vaultIdBase32} className="sb-card">
             <div className="sb-row" style={{ padding: 0, borderBottom: 0 }}>
               <div className="sb-row__main">
-                <div className="sb-row__title">{v.tokenATicker} / {v.tokenBTicker}</div>
+                {/* Each coin sits immediately left of the ticker it belongs to. */}
+                <div className="sb-row__title" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <TokenMark ticker={v.tokenATicker} iconUrl={iconFor(v.tokenATicker)} className="sb-coin sb-coin--sm" />
+                  {v.tokenATicker}
+                  <span aria-hidden="true">/</span>
+                  <TokenMark ticker={v.tokenBTicker} iconUrl={iconFor(v.tokenBTicker)} className="sb-coin sb-coin--sm" />
+                  {v.tokenBTicker}
+                </div>
                 <div className="sb-row__sub">Fee {(v.feeBps / 100).toFixed(2)}% per trade</div>
               </div>
               <span className={`sb-tag${status.cls}`}>{status.label}</span>
@@ -498,14 +513,19 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               thing, and a ticker can name more than one token. */}
           <div className="sb-field">
             <label htmlFor="liq-token-a">Token A</label>
-            <select id="liq-token-a" className="sb-input sb-input--small" value={tokenA} onChange={(e) => setTokenA(e.target.value)}>
-              <option value="">select a held asset…</option>
-              {holdings.map((h) => (
-                <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
-                  {h.ticker} {'\u00B7'} {h.anchorFingerprint}
-                </option>
-              ))}
-            </select>
+            <TokenSelect
+              id="liq-token-a"
+              label="Token A"
+              placeholder="select a held asset…"
+              value={tokenA}
+              options={holdings.map((h) => ({
+                value: h.policyAnchorB32 ?? '',
+                ticker: h.ticker,
+                iconUrl: h.iconUrl,
+                note: h.anchorFingerprint,
+              }))}
+              onChange={setTokenA}
+            />
           </div>
           <div className="sb-field">
             <label htmlFor="liq-reserve-a">Reserve A</label>
@@ -513,16 +533,21 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
           </div>
           <div className="sb-field">
             <label htmlFor="liq-token-b">Token B</label>
-            <select id="liq-token-b" className="sb-input sb-input--small" value={tokenB} onChange={(e) => setTokenB(e.target.value)}>
-              <option value="">select a held asset…</option>
-              {holdings
+            <TokenSelect
+              id="liq-token-b"
+              label="Token B"
+              placeholder="select a held asset…"
+              value={tokenB}
+              options={holdings
                 .filter((h) => h.policyAnchorB32 !== tokenA)
-                .map((h) => (
-                  <option key={h.policyAnchorB32} value={h.policyAnchorB32}>
-                    {h.ticker} {'\u00B7'} {h.anchorFingerprint}
-                  </option>
-                ))}
-            </select>
+                .map((h) => ({
+                  value: h.policyAnchorB32 ?? '',
+                  ticker: h.ticker,
+                  iconUrl: h.iconUrl,
+                  note: h.anchorFingerprint,
+                }))}
+              onChange={setTokenB}
+            />
           </div>
           <div className="sb-field">
             <label htmlFor="liq-reserve-b">Reserve B</label>

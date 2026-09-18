@@ -21,6 +21,8 @@ export interface FxRequest {
   caption?: string;
   /** Amount caption inside the confirm/fail scenes (already signed, <= 17 chars). */
   amount?: string;
+  /** The token the scene is about; its coin sits beside the heading. */
+  coin?: { ticker: string; iconUrl?: string };
   muted?: boolean;
   autoClose?: boolean;
   tone?: FxTone;

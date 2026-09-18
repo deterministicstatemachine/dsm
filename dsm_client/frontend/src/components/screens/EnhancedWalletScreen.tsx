@@ -25,12 +25,11 @@ const TABS: ReadonlyArray<{ id: WalletTab; label: string }> = [
 ];
 
 interface EnhancedWalletScreenProps {
-  eraTokenSrc?: string;
   btcLogoSrc?: string;
   initialTab?: WalletTab;
 }
 
-const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc, btcLogoSrc, initialTab }) => {
+const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc, initialTab }) => {
   // Layout
   const headerRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -79,7 +78,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [activeTab]);
 
-  const eraGif = eraTokenSrc || 'images/logos/era_token_gb.gif';
   const btcGif = btcLogoSrc || 'images/logos/btc-logo.gif';
 
   const data = useWalletScreenData(activeTab);
@@ -172,7 +170,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
           balances={data.balances}
           transactions={data.transactions}
           aliasLookup={data.aliasLookup}
-          eraGif={eraGif}
           genesisB32={data.genesisB32}
           deviceB32={data.deviceB32}
           onSwitchToSend={switchToSend}
@@ -184,8 +181,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
         <SendTab
           contacts={data.contacts}
           balances={data.balances}
-          eraGif={eraGif}
-          btcGif={btcGif}
           onCancel={switchToOverview}
           onSendComplete={handleSendComplete}
           loadWalletData={data.loadWalletData}

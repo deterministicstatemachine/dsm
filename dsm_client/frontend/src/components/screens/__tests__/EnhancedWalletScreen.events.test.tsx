@@ -2,7 +2,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent, within } from '@testing-library/react';
 import EnhancedWalletScreen from '../EnhancedWalletScreen';
 import { dsmClient } from '../../../services/dsmClient';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
@@ -99,7 +99,13 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '1' } });
-    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
+    // The token picker is a listbox, not a native select: it shows each
+    // token's coin, which an <option> cannot render. The one token on offer
+    // DISPLAYS as "ERA" while its id is "ROOT", which is what this test is
+    // about, so take it by position and let the assertion below check that the
+    // identity, not the label, is what gets sent.
+    fireEvent.click(screen.getByRole('button', { name: 'Token' }));
+    fireEvent.click(within(screen.getByRole('listbox', { name: 'Token' })).getAllByRole('option')[0]);
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
@@ -189,7 +195,13 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
     fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: contact.deviceId } });
     fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
     fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
-    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
+    // The token picker is a listbox, not a native select: it shows each
+    // token's coin, which an <option> cannot render. The one token on offer
+    // DISPLAYS as "ERA" while its id is "ROOT", which is what this test is
+    // about, so take it by position and let the assertion below check that the
+    // identity, not the label, is what gets sent.
+    fireEvent.click(screen.getByRole('button', { name: 'Token' }));
+    fireEvent.click(within(screen.getByRole('listbox', { name: 'Token' })).getAllByRole('option')[0]);
     fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
