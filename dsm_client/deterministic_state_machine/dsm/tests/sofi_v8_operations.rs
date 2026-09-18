@@ -59,8 +59,10 @@ fn every_sofi_operation_round_trips_a_signature() {
             cleared.get_signature().is_none(),
             "{name}: with_cleared_signature must reach this variant"
         );
-        // The signing payload is the operation WITHOUT its signature, so
-        // clearing must actually change the bytes.
+        // The signature is committed by the canonical bytes — which is why a
+        // chain tip binds it — so clearing must actually change them. (What
+        // the signature COVERS is a separate rule per operation:
+        // `sofi::signature`. Only a vault creation signs these bytes.)
         assert_ne!(
             signed.to_bytes(),
             cleared.to_bytes(),
@@ -198,5 +200,115 @@ fn beta_admission_is_the_cap_not_the_codec() {
     assert_eq!(
         admissible(&reserved),
         Err(NotAdmissible::OwnerAuthorityNotActivated)
+    );
+}
+
+/// EACH SOFI OPERATION SIGNS ITS OWN THING, and the other rule is refused.
+///
+/// A setup signs `m_setup` and a fulfillment signs `m_F` — their own objects'
+/// digests, which is what a storage member checks when the object arrives with
+/// no operation around it. Only a vault creation, which has no object digest
+/// of its own, signs the operation's canonical unsigned bytes.
+///
+/// The cross-checks are the point: a signature produced under the OTHER rule
+/// must not authorize the operation. Otherwise "which bytes are signed" would
+/// be unobservable, and the member and the device could disagree forever.
+#[test]
+fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
+    use dsm::core::state_machine::transition::operation_signing_bytes;
+    use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+    use dsm::sofi::derive;
+    use dsm::sofi::signature::{verify_operation, SignatureError};
+    use dsm::sofi::wire::{AttemptEntry, SofiSetupBody, TraderFulfillmentBody};
+
+    let (pk, sk) = generate_sphincs_keypair().unwrap();
+    let d = |b: u8| [b; 32];
+
+    let setup =
+        SofiSetupBody::new(d(0x11), d(0x22), 5, d(0xC1), d(0x66), d(0x67), 0x0001, &pk).unwrap();
+    let fulfillment = TraderFulfillmentBody::new(
+        d(0x0A),
+        vec![d(0x71)],
+        vec![AttemptEntry {
+            vault_id: d(0xC1),
+            attempt: 0,
+        }],
+        6,
+        0x0001,
+        &pk,
+    )
+    .unwrap();
+
+    let unsigned_setup = Operation::SofiSetup {
+        setup_body: setup.encode(),
+        signature: Vec::new(),
+    };
+    let unsigned_fulfill = Operation::SofiFulfill {
+        fulfillment_body: fulfillment.encode(),
+        precommit_id: d(0x0A).to_vec(),
+        signature: Vec::new(),
+    };
+    let unsigned_create = Operation::SofiVaultCreate {
+        genesis_preimage: vec![0x5A, 0x00],
+        creation: vec![0x5B, 0x00],
+        signature: Vec::new(),
+    };
+
+    // Each operation's OWN rule authorizes it.
+    for (unsigned, message, name) in [
+        (
+            &unsigned_setup,
+            derive::setup_signing_digest(&setup).to_vec(),
+            "SofiSetup",
+        ),
+        (
+            &unsigned_fulfill,
+            derive::fulfillment_signing_digest(&fulfillment).to_vec(),
+            "SofiFulfill",
+        ),
+        (
+            &unsigned_create,
+            operation_signing_bytes(&unsigned_create),
+            "SofiVaultCreate",
+        ),
+    ] {
+        let signed = unsigned.with_signature(sphincs_sign(&sk, &message).unwrap());
+        assert_eq!(
+            verify_operation(&signed, &pk),
+            Ok(()),
+            "{name}: its own rule must authorize it"
+        );
+    }
+
+    // And the other rule does not. A setup or a fulfillment signed over the
+    // operation's bytes is exactly the generic signature this protocol does
+    // NOT ask for, and it is refused.
+    for (unsigned, name) in [
+        (&unsigned_setup, "SofiSetup"),
+        (&unsigned_fulfill, "SofiFulfill"),
+    ] {
+        let over_the_operation =
+            unsigned.with_signature(sphincs_sign(&sk, &operation_signing_bytes(unsigned)).unwrap());
+        assert_eq!(
+            verify_operation(&over_the_operation, &pk),
+            Err(SignatureError::DoesNotVerify { what: name }),
+            "{name}: a generic operation signature must not authorize it"
+        );
+    }
+
+    // Conversely, a creation signed over a digest of its own bytes is refused:
+    // there is no second creation rule to fall back on.
+    let create_over_a_digest = unsigned_create.with_signature(
+        sphincs_sign(
+            &sk,
+            dsm::crypto::blake3::hash_blake3(&operation_signing_bytes(&unsigned_create)).as_bytes(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        verify_operation(&create_over_a_digest, &pk),
+        Err(SignatureError::DoesNotVerify {
+            what: "SofiVaultCreate"
+        })
     );
 }
