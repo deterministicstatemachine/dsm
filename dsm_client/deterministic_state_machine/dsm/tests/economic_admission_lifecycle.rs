@@ -383,14 +383,43 @@ fn registered_for(
     position: u64,
     post_root: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    RegisteredEconomicRoot {
-        trader_genesis: G,
-        trader_devid: DEV,
-        economic_position: position,
-        post_economic_root: post_root,
-        admission_manifest_addr: manifest.addr().expect("addressable"),
-        storage_set_id: canonical_set_id(),
-    }
+    registered_naming(position, post_root, manifest.addr().expect("addressable"))
+}
+
+/// A registered root, built the ONLY way there is: sign a claim and project
+/// the verified result.
+///
+/// The fields are private now, so a test cannot poke one afterwards to
+/// manufacture a mismatch — it has to register a claim that genuinely says
+/// the wrong thing, which is what a hostile trader would have to do too.
+fn registered_naming(
+    position: u64,
+    post_root: [u8; 32],
+    manifest_addr: [u8; 32],
+) -> RegisteredEconomicRoot {
+    static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let (pk, sk) = KEYS.get_or_init(|| {
+        dsm::crypto::sphincs::generate_sphincs_keypair().expect("a claimant keypair")
+    });
+    let body = dsm::economic::claim::EconomicRootClaimBody::new(
+        G,
+        DEV,
+        position,
+        post_root,
+        manifest_addr,
+        canonical_set_id(),
+        dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+        pk,
+    )
+    .expect("a claim body");
+    let envelope =
+        dsm::economic::claim_envelope::sign_economic_root_claim(&body, sk).expect("sign");
+    RegisteredEconomicRoot::from_verified_single_root(
+        dsm::economic::claim_envelope::decode_registered_economic_claim(&envelope)
+            .expect("decodes")
+            .single_root()
+            .expect("a single-root claim"),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -637,8 +666,7 @@ fn a_registration_at_the_wrong_position_is_refused() {
 fn a_registration_naming_another_manifest_is_refused() {
     let fx = faucet_fixture(1);
     let manifest = manifest_for(&fx.witness);
-    let mut registered = registered_for(&manifest, 1, fx.post_root);
-    registered.admission_manifest_addr = [0xFF; 32];
+    let registered = registered_naming(1, fx.post_root, [0xFF; 32]);
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
         run(&fx, &registered, &manifest, &fx.witness, &accepted),

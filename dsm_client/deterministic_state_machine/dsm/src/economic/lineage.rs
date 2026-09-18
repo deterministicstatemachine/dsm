@@ -588,15 +588,15 @@ pub fn advance_validated(
             witness_pre: witness.pre_economic_root,
         });
     }
-    if registered.economic_position != previous.economic_position.saturating_add(1) {
+    if registered.economic_position() != previous.economic_position.saturating_add(1) {
         return Err(EconomicValidationError::PositionIsNotSuccessor {
             previous: previous.economic_position,
-            registered: registered.economic_position,
+            registered: registered.economic_position(),
         });
     }
-    if registered.post_economic_root != witness.post_economic_root {
+    if registered.post_economic_root() != witness.post_economic_root {
         return Err(EconomicValidationError::RegisteredRootDiffersFromWitness {
-            registered: registered.post_economic_root,
+            registered: registered.post_economic_root(),
             witness: witness.post_economic_root,
         });
     }
@@ -674,9 +674,9 @@ pub fn advance_validated(
         _ => return Err(EconomicValidationError::SubstrateKindMismatch),
     }
     let computed = manifest.addr().map_err(EconomicValidationError::Manifest)?;
-    if registered.admission_manifest_addr != computed {
+    if registered.admission_manifest_addr() != computed {
         return Err(EconomicValidationError::ManifestAddrMismatch {
-            registered: registered.admission_manifest_addr,
+            registered: registered.admission_manifest_addr(),
             computed,
         });
     }
@@ -723,7 +723,7 @@ pub fn advance_validated(
     let ctx = ProvenanceContext {
         genesis,
         device_id,
-        economic_position: registered.economic_position,
+        economic_position: registered.economic_position(),
         network_id,
         proven_ak,
         canonical_storage_set_id: canonical_set,
@@ -784,7 +784,7 @@ pub fn advance_validated(
 
     Ok((
         ValidatedEconomicRoot {
-            economic_position: registered.economic_position,
+            economic_position: registered.economic_position(),
             economic_root: derived,
         },
         validity,
