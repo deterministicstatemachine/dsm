@@ -63,8 +63,13 @@ export function FxProvider({ children, appState, soundEnabled }: ProviderProps) 
   const [queue, setQueue] = useState<Queued[]>([]);
   const nextId = useRef(0);
   const lastConfirmAt = useRef(0);
+  const appStateRef = useRef(appState);
+  appStateRef.current = appState;
 
   const play = useCallback((req: FxRequest) => {
+    // A locked wallet says nothing about money. Only the scene that announces
+    // the lock itself belongs over a lock screen.
+    if (appStateRef.current === 'locked' && req.anim !== 'lock') return;
     if (req.anim === 'confirm') lastConfirmAt.current = Date.now();
     setQueue((q) => {
       if (req.key && q.some((item) => item.key === req.key)) return q;
@@ -80,6 +85,13 @@ export function FxProvider({ children, appState, soundEnabled }: ProviderProps) 
   useEffect(() => {
     if (soundEnabled !== undefined) setFxMuted(!soundEnabled);
   }, [soundEnabled]);
+
+  // Locking clears whatever was waiting to be shown. This effect is declared
+  // ahead of the cues so the lock scene itself still gets through.
+  useEffect(() => {
+    if (appState !== 'locked') return;
+    setQueue((q) => q.filter((item) => item.anim === 'lock'));
+  }, [appState]);
 
   useFxCues(play, appState, lastConfirmAt);
 

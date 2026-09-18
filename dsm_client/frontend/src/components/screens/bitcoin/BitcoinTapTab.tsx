@@ -139,7 +139,7 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
           <span className="sb-hero__unit">dBTC</span>
         </div>
         {pendingSats > 0n && (
-          <div className="sb-hero__sub">{formatBtc(pendingSats)} on the way</div>
+          <div className="sb-hero__sub">{formatBtc(pendingSats)} held for a withdrawal</div>
         )}
         <div className="sb-hero__row">
           <span>On-chain BTC</span>
@@ -174,7 +174,7 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
           <div className="sb-card__title">
             <span>Set up Bitcoin</span>
             <InfoTip title="Set up Bitcoin" label="About Bitcoin setup">
-              <p>Deposits and withdrawals need a Bitcoin account on this device: it holds the on-chain BTC that becomes dBTC, and receives BTC when you withdraw.</p>
+              <p>Deposits and withdrawals need a Bitcoin account on this device: it holds the on-chain BTC that becomes dBTC, and the keys that pay a withdrawal out. You type the address each withdrawal goes to.</p>
               <p><b>New wallet</b> creates one and shows its recovery phrase once. <b>Import</b> takes a recovery phrase, an extended private key or a single key you already have.</p>
             </InfoTip>
           </div>
@@ -248,7 +248,7 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
         )}
         {pendingSats > 0n && (
           <div className="sb-kv">
-            <span className="sb-kv__k">Locked in HTLCs</span>
+            <span className="sb-kv__k">Held for withdrawal</span>
             <span className="sb-kv__v">{formatBtc(pendingSats)} BTC</span>
           </div>
         )}
@@ -258,8 +258,8 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
             <div className="sb-titlebar">
               <div className="sb-section-title">Receive address</div>
               <InfoTip title="Receive address" label="About receive addresses">
-                <p>Every index is a different address from the same wallet. Funds sent to any of them belong to you; the active one is what the wallet shows and withdraws to.</p>
-                <p>Pick an index to preview it, then <b>Use this</b> to make it active.</p>
+                <p>Every index is a different address from the same wallet. Funds sent to any of them belong to you; the active one is what this tab shows and copies.</p>
+                <p>Withdrawals go to the address you type in the Withdraw form. Pick an index to preview it, then <b>Use this</b> to make it active.</p>
               </InfoTip>
             </div>
             <div className="sb-input-row">

@@ -203,7 +203,7 @@ describe('BitcoinTapTab withdrawal planner flow', () => {
 
     render(<BitcoinTapTab />);
     fireEvent.click(await screen.findByText(/Withdraw/i, { selector: 'button' }));
-    fireEvent.change(await screen.findByLabelText(/Amount to Deliver/i), { target: { value: '0.002' } });
+    fireEvent.change(await screen.findByLabelText(/Amount to spend/i), { target: { value: '0.002' } });
     fireEvent.change(screen.getByLabelText(/Destination Bitcoin Address/i), { target: { value: 'tb1qwithdrawdest' } });
     fireEvent.click(screen.getByText(/Review Withdrawal/i, { selector: 'button' }));
 
@@ -218,7 +218,7 @@ describe('BitcoinTapTab withdrawal planner flow', () => {
     render(<BitcoinTapTab />);
 
     fireEvent.click(await screen.findByText(/Withdraw/i, { selector: 'button' }));
-    fireEvent.change(await screen.findByLabelText(/Amount to Deliver/i), { target: { value: '0.0025' } });
+    fireEvent.change(await screen.findByLabelText(/Amount to spend/i), { target: { value: '0.0025' } });
     fireEvent.change(screen.getByLabelText(/Destination Bitcoin Address/i), { target: { value: 'tb1qwithdrawdest' } });
     fireEvent.click(screen.getByText(/Review Withdrawal/i, { selector: 'button' }));
 

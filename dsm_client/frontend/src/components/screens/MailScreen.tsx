@@ -5,8 +5,16 @@
 // Inbox sub-tab: list active advertisements addressed to this device's
 // Kyber pk; per-row Claim button; bulk Refresh + Sync All.
 //
-// Compose sub-tab: paste recipient Kyber pk Base32, optional token + amount,
-// content textarea, Send button → ConfirmModal → toast on success.
+// Compose sub-tab: paste recipient Kyber pk Base32, the policy anchor the mail
+// is locked under, content textarea, Send button → ConfirmModal → toast on
+// success.
+//
+// Compose sends a note, not a token. Locking a token into the mail needs the
+// asset's 32-byte CPTA policy commit (dlv.ts buildFundingLegs refuses a funding
+// leg without one), and nothing on this screen resolves a ticker to that
+// identity — by design: a ticker can name more than one token. The Token and
+// Amount fields that used to sit here could only ever fail, so they are gone
+// until the commit is available to pass.
 //
 // All cryptographic work stays Rust-side (Track C.4 accept-or-stamp on
 // dlv.create + claim).
@@ -35,11 +43,6 @@ interface Props {
   onNavigate?: (screen: string) => void;
 }
 
-function bigIntFromString(s: string): bigint {
-  if (!/^[0-9]+$/.test(s)) throw new Error('amount must be a non-negative integer');
-  return BigInt(s);
-}
-
 export default function MailScreen({ onNavigate }: Props): JSX.Element {
   const fx = useFx();
   const [tab, setTab] = useState<Tab>('inbox');
@@ -53,8 +56,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
 
   // Compose state
   const [recipientPk, setRecipientPk] = useState('');
-  const [tokenId, setTokenId] = useState('');
-  const [amount, setAmount] = useState('');
   const [policyAnchor, setPolicyAnchor] = useState('');
   const [content, setContent] = useState('Hello');
   const [sendPhase, setSendPhase] = useState<SendPhase>('idle');
@@ -162,15 +163,9 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       if (policyBytes.length !== 32) {
         throw new Error(`policy anchor must decode to 32 bytes (got ${policyBytes.length})`);
       }
-      let lockedAmount: bigint | undefined;
-      if (amount.trim().length > 0) {
-        lockedAmount = bigIntFromString(amount.trim());
-      }
       const r = await createPostedDlv({
         recipientKyberPk: recipientBytes,
         policyDigest: policyBytes,
-        tokenId: tokenId.trim() || undefined,
-        lockedAmount,
         content: new TextEncoder().encode(content),
       });
       if (!r.success || !r.id) throw new Error(r.error || 'createPostedDlv failed');
@@ -179,8 +174,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       setSendStatus(`Sent. id=${r.id.slice(0, 12)}…`);
       // Reset compose state and switch to inbox so the user can see it land.
       setRecipientPk('');
-      setTokenId('');
-      setAmount('');
       setPolicyAnchor('');
       setContent('Hello');
       setTab('inbox');
@@ -189,7 +182,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       setSendError(msg);
       setSendPhase('error');
     }
-  }, [recipientPk, policyAnchor, content, tokenId, amount, fx]);
+  }, [recipientPk, policyAnchor, content, fx]);
 
   return (
     <ScreenFrame
@@ -197,9 +190,9 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       onBack={() => onNavigate?.('home')}
       info={(
         <InfoTip title="Mail" label="About mail">
-          <p>Mail carries tokens or a note to someone&apos;s key. Neither of you needs to be online at the same time: it waits on the storage nodes until the recipient claims it.</p>
+          <p>Mail carries a note to someone&apos;s key. Neither of you needs to be online at the same time: it waits on the storage nodes until the recipient claims it.</p>
           <p><b>Inbox</b> lists what is waiting for you. <b>Sync all</b> fetches it; then <b>Claim</b> moves it into your wallet.</p>
-          <p><b>Compose</b> needs the recipient&apos;s public key and the policy anchor the mail is locked under (copy it from the token&apos;s card under Tokens). Token and amount are optional: leave them empty to send only a note.</p>
+          <p><b>Compose</b> needs the recipient&apos;s public key and the policy anchor the mail is locked under (copy it from the token&apos;s card under Tokens). Sending a token along with the note is not available yet.</p>
         </InfoTip>
       )}
       actions={tab === 'inbox' ? (
@@ -281,14 +274,6 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
             <textarea id="mail-policy" className="sb-input sb-input--mono" rows={2} value={policyAnchor} onChange={(e) => setPolicyAnchor(e.target.value)} placeholder="52-character Base32 anchor" />
           </div>
           <div className="sb-field">
-            <label htmlFor="mail-token">Token (optional)</label>
-            <input id="mail-token" type="text" className="sb-input" value={tokenId} onChange={(e) => setTokenId(e.target.value)} placeholder="e.g. ERA — leave empty for a note only" />
-          </div>
-          <div className="sb-field">
-            <label htmlFor="mail-amount">Amount (optional)</label>
-            <input id="mail-amount" type="number" min="0" className="sb-input sb-input--mono" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
-          </div>
-          <div className="sb-field">
             <label htmlFor="mail-content">Content</label>
             <textarea id="mail-content" className="sb-input" rows={3} value={content} onChange={(e) => setContent(e.target.value)} placeholder="Message" />
           </div>
@@ -309,7 +294,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       <ConfirmModal
         visible={showSendConfirm}
         title="Send posted DLV"
-        message={`Send to recipient pk ${recipientPk.trim().slice(0, 12)}…${tokenId ? ` with ${amount || 0} ${tokenId}` : ' (content only)'}?`}
+        message={`Send this note to recipient pk ${recipientPk.trim().slice(0, 12)}…?`}
         onConfirm={() => { setShowSendConfirm(false); void handleSend(); }}
         onCancel={() => setShowSendConfirm(false)}
       />

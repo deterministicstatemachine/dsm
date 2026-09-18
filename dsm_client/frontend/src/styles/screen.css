@@ -561,6 +561,8 @@
   line-height: 1;
   cursor: pointer;
   vertical-align: middle;
+  /* The glyph is a lowercase i, whatever the label around it does. */
+  text-transform: none;
 }
 .sb-info:active { transform: translateY(1px); }
 .sb-info--static { background: var(--bg); color: var(--text-dark); border-color: var(--bg); cursor: default; }
@@ -584,6 +586,14 @@
   justify-content: center;
   padding: 14px;
   background: rgba(var(--text-rgb), 0.62);
+  /* A popup is a DOM child of whatever opened it, which may be a card title or
+     a field label. An explanation is prose, so it starts from prose typography
+     instead of inheriting UPPERCASE, tracking and bold from its opener. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  font-style: normal;
+  text-align: left;
 }
 .sb-popover {
   width: 100%;

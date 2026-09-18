@@ -145,8 +145,8 @@ export default function WithdrawView({
         <h3>Withdraw to Bitcoin</h3>
         <InfoTip title="Withdraw to Bitcoin" label="About withdrawals">
           <p>Sends dBTC out of this wallet to any Bitcoin address, as BTC.</p>
-          <p>Enter what the recipient should receive. <b>Review</b> shows the Bitcoin network fee, which is added on top and taken from your dBTC, before anything is sent. Nothing moves until you confirm.</p>
-          <p>The withdrawal is paid out of the on-chain vaults behind your dBTC. It finalizes once the Bitcoin network confirms it; the amount shows as leaving until then.</p>
+          <p>Enter how much dBTC to spend. The Bitcoin network fee comes out of that amount, so the recipient gets a little less. <b>Review</b> shows both numbers before anything is sent, and nothing moves until you confirm.</p>
+          <p>The withdrawal is paid out of the on-chain vaults behind your dBTC. It finalizes once the Bitcoin network confirms it. Until then the amount is held aside and is not part of your spendable balance.</p>
         </InfoTip>
       </div>
 
@@ -162,7 +162,7 @@ export default function WithdrawView({
       </div>
 
       <div className="sb-field">
-        <label htmlFor="withdraw-amount">Amount to deliver (BTC)</label>
+        <label htmlFor="withdraw-amount">Amount to spend (BTC)</label>
         <div className="sb-input-row">
           <input
             id="withdraw-amount"

@@ -87,6 +87,19 @@ function handleConfirmKey(e: KeyboardEvent): void {
   e.preventDefault();
   e.stopPropagation();
   e.stopImmediatePropagation();
+
+  // Stopping the event here keeps it from the list behind the popup, but it
+  // also keeps it from a control inside the popup. So press that control
+  // ourselves when it holds focus; otherwise the press is the popup's own
+  // confirm.
+  const focused = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+  const control = focused && typeof focused.closest === 'function'
+    ? focused.closest('button, [role="button"], a[href]')
+    : null;
+  if (control && control.closest('[role="dialog"]')) {
+    (control as HTMLElement).click();
+    return;
+  }
   entry.current();
 }
 

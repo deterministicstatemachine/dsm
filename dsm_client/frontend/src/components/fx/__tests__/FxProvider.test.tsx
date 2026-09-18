@@ -97,6 +97,19 @@ describe('FxProvider', () => {
     expect(screen.getByRole('dialog', { name: 'Lock enabled' })).toBeInTheDocument();
   });
 
+  it('says nothing about money over a locked wallet', () => {
+    const { rerender } = render(<Harness appState="wallet_ready" />);
+    fireEvent.click(screen.getByText('trigger'));
+    expect(screen.getByRole('dialog', { name: 'Pool created' })).toBeInTheDocument();
+
+    rerender(<Harness appState="locked" />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    act(() => { bridgeEvents.emit('deposit.completed', { depositId: 'd9', amount: '0.5' }); });
+    act(() => { bridgeEvents.emit('wallet.creditReceived', { source: 'test', tokenId: 'ERA' }); });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('mirrors the sound setting into the engine mute flag', () => {
     const { rerender } = render(<Harness soundEnabled={false} />);
     expect(window.STATEBOY_MUTED).toBe(true);

@@ -82,7 +82,7 @@ describe('BitcoinTapTab simple view', () => {
     // Account management and vault internals are folded away by default.
     expect(screen.getByText('New wallet')).not.toBeVisible();
     expect(screen.getByText('Vaults (1)')).not.toBeVisible();
-    expect(screen.queryByText(/Locked in HTLCs/i)).not.toBeVisible();
+    expect(screen.queryByText(/Held for withdrawal/i)).not.toBeVisible();
 
     fireEvent.click(screen.getByText('Advanced'));
     expect(screen.getByText('New wallet')).toBeVisible();

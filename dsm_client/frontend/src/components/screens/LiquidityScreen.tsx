@@ -337,7 +337,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       info={(
         <InfoTip title="Liquidity">
           <p>A pool holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee. You can take everything back at any time with <b>Withdraw all</b>; that retires the pool for good.</p>
-          <p><b>Open</b> means traders can find the pool. <b>Publishing</b> means its proofs are still reaching the storage set; it goes live on its own. <b>Not listed</b> means it exists but is not advertised yet.</p>
+          <p><b>Open</b> means traders can find the pool. <b>Publishing</b> means its proofs are still reaching the storage set; that part finishes on its own. <b>Not listed</b> means the proofs are in but the pool is not advertised yet: press <b>Publish</b> to list it.</p>
           <p>Traders settle against your pool while you are offline. When that has happened, the card says how many trades are waiting; <b>Reconcile</b> writes them into the pool&apos;s balances. Nothing is lost while you wait.</p>
         </InfoTip>
       )}
@@ -419,7 +419,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               // frozen birth proofs on every sync until a quorum of its storage
               // set holds them; until then the vault is not market-active and
               // Publish is suppressed (Rust refuses it too).
-              <p className="sb-hint sb-hint--tight">Going live on its own. Nothing to do yet.</p>
+              <p className="sb-hint sb-hint--tight">Proofs still landing. Nothing to do yet; Publish appears when they are in.</p>
             )}
             {!v.closed && v.publicationState === 'published' && !v.routingAdvertised && !canPublish && (
               <p className="sb-hint sb-hint--tight">Cannot be advertised. Withdraw and create a new pool.</p>

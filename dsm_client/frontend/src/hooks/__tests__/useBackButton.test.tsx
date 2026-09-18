@@ -87,6 +87,37 @@ describe('useBackButton', () => {
     }
   });
 
+  it('A presses the popup control that holds focus, and reaches nothing behind it', () => {
+    const listSelect = jest.fn((e: Event) => e.stopImmediatePropagation());
+    document.addEventListener('keydown', listSelect as EventListener, true);
+    const replay = jest.fn();
+    const confirm = jest.fn();
+    function Popup() {
+      useConfirmButton(true, confirm);
+      return (
+        <div role="dialog" aria-label="Sent" tabIndex={-1}>
+          <button type="button" onClick={replay}>Play again</button>
+        </div>
+      );
+    }
+    try {
+      render(<Popup />);
+      const btn = screen.getByRole('button', { name: 'Play again' });
+      btn.focus();
+      fireEvent.keyDown(btn, { key: 'Enter' });
+      expect(replay).toHaveBeenCalledTimes(1);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(listSelect).not.toHaveBeenCalled();
+
+      screen.getByRole('dialog').focus();
+      fireEvent.keyDown(document.body, { key: 'Enter' });
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(listSelect).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener('keydown', listSelect as EventListener, true);
+    }
+  });
+
   it('A leaves typing alone while a popup is open', () => {
     const pressed = jest.fn();
     function Typing() {
