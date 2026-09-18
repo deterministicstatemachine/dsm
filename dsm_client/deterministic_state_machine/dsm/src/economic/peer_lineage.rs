@@ -39,8 +39,8 @@ use crate::economic::claim::AdmissionSubstrate;
 use crate::economic::claim_envelope::decode_registered_economic_claim;
 use crate::economic::decode::decode_admission_manifest;
 use crate::economic::lineage::{
-    activate, advance_validated, AcceptedSubstrate, EconomicActivationSnapshot,
-    ValidatedEconomicRoot,
+    AdmittedEconomicPosition, activate, advance_validated, AcceptedSubstrate,
+    EconomicActivationSnapshot, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
     FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
@@ -326,11 +326,18 @@ fn walk_positions(
     // The trusted start: this verifier's own earlier conclusion, or the
     // canonical empty activation root — NEVER anything read from a network.
     let (mut validated, first_position) = match start {
+        // A memo is this verifier's own earlier conclusion about a peer, so it
+        // is a settled single-root coordinate by construction: the walk can
+        // only conclude at a position that produced a validated root, and it
+        // refuses a conditional one (`Unresolved`) before ever getting there.
         Some(s) if s.economic_position < target_position => (
             ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                s.economic_position,
-                s.economic_root,
-            ),
+                AdmittedEconomicPosition::SingleRoot {
+                    economic_position: s.economic_position,
+                    economic_root: s.economic_root,
+                },
+            )
+            .map_err(|e| invalid(format!("memoized start: {e}")))?,
             s.economic_position + 1,
         ),
         _ => (

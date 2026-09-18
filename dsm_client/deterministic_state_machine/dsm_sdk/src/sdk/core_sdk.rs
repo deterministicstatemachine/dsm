@@ -564,7 +564,27 @@ impl CoreSDK {
                             )
                         })?;
                 let (expect_pos, expect_root) = match admitted {
-                    Some((p, r)) => (p + 1, r),
+                    Some(a) => {
+                        // THE FENCE, on the commit that makes acceptance
+                        // durable. It decides more than the equality below:
+                        // for a resolved conditional predecessor it requires
+                        // this descendant to be built on the root the route
+                        // actually selected, and for an unresolved one it
+                        // refuses outright.
+                        dsm::sofi::lineage::descendant_fence(
+                            a.predecessor_claim(),
+                            &pending.pre_economic_root,
+                        )
+                        .map_err(|e| {
+                            DsmError::invalid_operation(format!("admission commit: {e}"))
+                        })?;
+                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                            rehydrate_from_admitted_store(a)
+                            .map_err(|e| {
+                                DsmError::invalid_operation(format!("admission commit: {e}"))
+                            })?;
+                        (v.economic_position() + 1, v.economic_root())
+                    }
                     None => (1, dsm::economic::tree::empty_economic_root()),
                 };
                 if pending.economic_position != expect_pos
@@ -2068,7 +2088,18 @@ impl CoreSDK {
                         )
                     })?;
                 let (expected_position, expected_root) = match admitted {
-                    Some((p, r)) => (p + 1, r),
+                    Some(a) => {
+                        // Same fence, on the advance that stages the plan.
+                        dsm::sofi::lineage::descendant_fence(
+                            a.predecessor_claim(),
+                            &plan.prepared.pre_economic_root,
+                        )
+                        .map_err(|e| DsmError::invalid_operation(format!("advance: {e}")))?;
+                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                            rehydrate_from_admitted_store(a)
+                            .map_err(|e| DsmError::invalid_operation(format!("advance: {e}")))?;
+                        (v.economic_position() + 1, v.economic_root())
+                    }
                     None => (1, dsm::economic::tree::empty_economic_root()),
                 };
                 if plan.prepared.economic_position != expected_position

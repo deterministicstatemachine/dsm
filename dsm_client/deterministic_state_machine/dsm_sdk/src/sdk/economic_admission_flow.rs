@@ -122,12 +122,17 @@ pub(crate) fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
 pub(crate) fn validated_root_or_activate(
     core: &CoreSDK,
 ) -> Result<ValidatedEconomicRoot, DsmError> {
-    if let Some((position, root)) =
+    if let Some(admitted) =
         economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))?
     {
-        return Ok(ValidatedEconomicRoot::rehydrate_from_admitted_store(
-            position, root,
-        ));
+        // THE LOCAL FENCE, AT THE ONE PLACE EVERY LOCAL PRODUCER READS ITS
+        // PREDECESSOR. `stage_admission`, the recipient prevalidation and the
+        // resume path all reach their predecessor through here, so a
+        // conditional position that has selected no root stops all of them at
+        // once — and stops them with a reason, rather than by handing back
+        // whichever of its two roots happened to be stored.
+        return ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
+            .map_err(|e| DsmError::invalid_operation(e.to_string()));
     }
     let head = core
         .device_head()
@@ -1285,14 +1290,21 @@ pub(crate) fn vault_reserve_proof_at_admitted_head(
 ) -> Result<AdmittedReserveProof, DsmError> {
     use dsm::economic::proof_artifact::{EconomicProofArtifact, EconomicProofLeaf};
     use dsm::economic::state::EconomicLeafState;
-    let (position, root) = economic_lineage::get_admitted()
+    let admitted = economic_lineage::get_admitted()
         .map_err(|e| storage_err("load admitted", e))?
         .ok_or_else(|| {
             DsmError::invalid_operation(
                 "reserve proof: this device has no admitted economic position",
             )
         })?;
-    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(position, root);
+    // A reserve proof names a (position, root) pair for a foreign verifier to
+    // check. An unresolved position has no root to name, and publishing one of
+    // its two candidates would be asserting a branch the lineage has not
+    // taken.
+    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
+        .map_err(|e| DsmError::invalid_operation(format!("reserve proof: {e}")))?;
+    let position = validated.economic_position();
+    let root = validated.economic_root();
     let (tree, pre) = producer_tree_and_pre_state(&validated)?;
     let mut legs: Vec<dsm::economic::state::EconomicVaultReserveState> = pre
         .vault_reserves
@@ -1405,9 +1417,14 @@ fn admission_already_finished(
         .accepted_coords()
         .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
     match economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))? {
-        Some((position, root))
-            if position == pending.economic_position && root == coords.post_economic_root =>
-        {
+        // A single-root admission at this position with this exact root is
+        // the one shape that means "already finished". A conditional
+        // admission does not match — not because it is wrong, but because a
+        // position that has selected no root has not finished anything.
+        Some(dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+            economic_position: position,
+            economic_root: root,
+        }) if position == pending.economic_position && root == coords.post_economic_root => {
             let proof_prefix = format!(
                 "immutable::{}::",
                 String::from_utf8_lossy(
@@ -1769,16 +1786,23 @@ pub(crate) async fn resume_pending_admission(
     // for a first admission. Its root must equal the pending pre-root — a
     // mismatch means the local store is incoherent, which is a stop, not a
     // guess.
-    let validated =
+    let admitted =
         match economic_lineage::get_admitted().map_err(|e| storage_err("load admitted", e))? {
-            Some((position, root)) => {
-                ValidatedEconomicRoot::rehydrate_from_admitted_store(position, root)
-            }
-            None => ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                pending.economic_position - 1,
-                pending.pre_economic_root,
-            ),
+            Some(admitted) => admitted,
+            // No admitted row: this is a first admission, whose predecessor is
+            // the pending pre-root by definition and is therefore ordinary.
+            None => dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: pending.economic_position - 1,
+                economic_root: pending.pre_economic_root,
+            },
         };
+    // RESUMING PAST AN UNDECIDED PREDECESSOR IS THE CRASH CASE THIS FENCES.
+    // A device that crashed between a fulfillment's registration and its
+    // route's resolution comes back with exactly this shape, and the resume
+    // would otherwise rebuild a predecessor from whichever root the store
+    // held and carry on.
+    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
+        .map_err(|e| DsmError::invalid_operation(format!("resume: {e}")))?;
     if validated.economic_root() != pending.pre_economic_root
         || validated.economic_position() + 1 != pending.economic_position
     {

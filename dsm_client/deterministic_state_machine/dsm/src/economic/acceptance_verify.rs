@@ -364,7 +364,13 @@ mod tests {
         Fixture {
             acceptance: TraderAcceptance::new(G, 3, leaf, path).expect("well formed"),
             terms,
-            validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(3, root),
+            validated: ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: 3,
+                    economic_root: root,
+                },
+            )
+            .expect("an ordinary admitted position"),
             ak: pk,
         }
     }
@@ -477,7 +483,13 @@ mod tests {
         let eoid = dsm_economic_operation_id(&G, &DEV, &c_dsm_plus);
         let (leaf, path, root) = leaf_and_root(eoid, B);
         let acceptance = TraderAcceptance::new(G, 3, leaf, path).expect("well formed");
-        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(3, root);
+        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: 3,
+                economic_root: root,
+            },
+        )
+        .expect("an ordinary admitted position");
         verify_trader_acceptance(&acceptance, &terms, B, &correspondence(), &validated, &pk)
             .expect("a route settle's acceptance verifies under its settler");
     }
@@ -579,7 +591,13 @@ mod tests {
                 .expect("value"),
         );
         let acceptance = TraderAcceptance::new(G, 3, leaf, path).expect("well formed");
-        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(3, tree.root());
+        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: 3,
+                economic_root: tree.root(),
+            },
+        )
+        .expect("an ordinary admitted position");
         assert_eq!(
             verify_trader_acceptance(&acceptance, &terms, B, &correspondence(), &validated, &pk),
             Err(AcceptanceInvalid::OperationIdentityDisagrees {
@@ -595,7 +613,13 @@ mod tests {
     #[test]
     fn a_path_that_folds_elsewhere_is_refused() {
         let f = fixture(DEV, DEV);
-        let elsewhere = ValidatedEconomicRoot::rehydrate_from_admitted_store(3, [0x77; 32]);
+        let elsewhere = ValidatedEconomicRoot::rehydrate_from_admitted_store(
+            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_position: 3,
+                economic_root: [0x77; 32],
+            },
+        )
+        .expect("an ordinary admitted position");
         assert!(matches!(
             verify_trader_acceptance(
                 &f.acceptance,
