@@ -28,6 +28,7 @@ import { useBottomNav } from './hooks/useBottomNav';
 import { WalletProvider } from './contexts/WalletContext';
 import { ContactsProvider } from './contexts/ContactsContext';
 import { BridgeProvider } from './bridge/BridgeProvider';
+import { FxLayer, FxProvider } from './components/fx/FxProvider';
 import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
 import './styles/screen.css';
 
@@ -137,6 +138,7 @@ export default function App() {
             <BridgeProvider bridge={(globalThis as any)?.window?.DsmBridge as AndroidBridgeV3 | undefined}>
               <ErrorBoundary>
                 <StateBoyInputProvider intents={intents}>
+                  <FxProvider appState={runtime.appState} soundEnabled={runtime.soundEnabled}>
                   <ScreenContainer theme={runtime.theme}>
                     <AppContent
                       appState={runtime.appState}
@@ -163,7 +165,9 @@ export default function App() {
                     <GlobalToast />
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog />
+                    <FxLayer />
                   </ScreenContainer>
+                  </FxProvider>
                 </StateBoyInputProvider>
               </ErrorBoundary>
             </BridgeProvider>

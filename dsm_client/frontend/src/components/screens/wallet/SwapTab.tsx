@@ -15,7 +15,7 @@
 // rejects (exact-output re-simulation) and the trader simply re-quotes
 // and re-signs against fresh state.
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   findAndBindBestPath,
   signRouteCommit,
@@ -27,6 +27,8 @@ import {
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
 import { InfoTip } from '../../common/InfoTip';
+import { useFx } from '../../fx/FxProvider';
+import { fxAmountLabel } from '../../fx/fxEngine';
 import type { Balance } from './helpers';
 
 type Phase =
@@ -134,6 +136,9 @@ function SwapTabInner({
   const [inputToken, setInputToken] = useState('');
   const [outputToken, setOutputToken] = useState('');
   const [amount, setAmount] = useState('');
+  const fx = useFx();
+  // nameFor is redefined on every render; the executor reads the latest through a ref.
+  const nameForRef = useRef<(anchor: string) => string>((a) => a);
   const [phase, setPhase] = useState<Phase>('idle');
   const [phaseDetail, setPhaseDetail] = useState<string>('');
   const [quoted, setQuoted] = useState<QuotedRoute | null>(null);
@@ -299,6 +304,8 @@ function SwapTabInner({
       }
 
       setPhase('settled');
+      const got = `${quoted.expectedOut.toString()} ${nameForRef.current(outputToken)}`;
+      fx.play({ anim: 'confirm', title: 'Swapped', caption: `You received ${got}`, amount: fxAmountLabel(got, '+') });
       await loadWalletData();
       onSwapComplete();
     } catch (e) {
@@ -306,8 +313,9 @@ function SwapTabInner({
       setError(msg);
       setPhase('error');
       setPhaseDetail(msg);
+      fx.play({ anim: 'fail', title: 'Swap refused', caption: msg, tone: 'bad', okLabel: 'Back' });
     }
-  }, [quoted, deviceB32, loadWalletData, onSwapComplete, setError]);
+  }, [quoted, deviceB32, outputToken, loadWalletData, onSwapComplete, setError, fx]);
 
   /** A held token's ticker for an anchor, or the anchor's first characters. Display only. */
   const nameFor = (anchor: string): string => {
@@ -316,6 +324,8 @@ function SwapTabInner({
     const a = anchor.trim();
     return a.length > 12 ? `${a.slice(0, 8)}\u2026` : a || '?';
   };
+  // The executor reads the current naming without taking it as a dependency.
+  nameForRef.current = nameFor;
 
   return (
     <div className="swap-tab">

@@ -4,7 +4,7 @@
 // room; whoever wants the why taps the i, reads, and closes it (tap outside,
 // the ×, OK, or the shell's B button).
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { useBackButton } from '../../hooks/useBackButton';
+import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 
 type Props = {
   /** Popup heading. */
@@ -24,6 +24,8 @@ export function InfoTip({ title, label, className, children }: Props): JSX.Eleme
 
   const close = useCallback(() => setOpen(false), []);
   useBackButton(open, close);
+  // A confirms the popup away instead of falling through to the screen behind.
+  useConfirmButton(open, close);
 
   // Focus follows the popup in, and returns to the i on the way out.
   useEffect(() => {

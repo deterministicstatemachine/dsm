@@ -7,6 +7,8 @@ import ConfirmModal from '../../ConfirmModal';
 import { TokenCoin } from '../../TokenCoin';
 import { Notice } from '../../common/ScreenFrame';
 import { InfoTip } from '../../common/InfoTip';
+import { useFx } from '../../fx/FxProvider';
+import { fxAmountLabel } from '../../fx/fxEngine';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
@@ -31,6 +33,7 @@ function SendTabInner({
   loadWalletData,
   setError,
 }: Props): JSX.Element {
+  const fx = useFx();
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     // No default recipient. A money form that pre-selects whoever happens to
     // be first sends to the wrong person the moment the list reorders — and it
@@ -158,14 +161,23 @@ function SendTabInner({
         }
       }
 
+      const sent = `${sendForm.amount.trim()} ${tokenId}`;
+      fx.play({
+        anim: txMode === 'offline' ? 'seal' : 'confirm',
+        title: txMode === 'offline' ? 'Signed and sealed' : 'Sent',
+        caption: `${sent} to ${contact.alias}`,
+        amount: fxAmountLabel(sent, '-'),
+      });
       onSendComplete();
       await loadWalletData();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Transaction failed');
+      const msg = e instanceof Error ? e.message : 'Transaction failed';
+      setError(msg);
+      fx.play({ anim: 'fail', title: 'Not sent', caption: msg, tone: 'bad', okLabel: 'Back' });
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, selectedContact, txMode, loadWalletData, setError, onSendComplete]);
+  }, [sendForm, selectedContact, txMode, loadWalletData, setError, onSendComplete, fx]);
 
   const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

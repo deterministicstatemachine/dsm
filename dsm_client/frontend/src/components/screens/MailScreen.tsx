@@ -23,6 +23,7 @@ import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { useFx } from '../fx/FxProvider';
 import { useBackButton } from '../../hooks/useBackButton';
 
 type RowStatus = 'pending' | 'syncing' | 'mirrored' | 'claiming' | 'claimed' | 'error';
@@ -40,6 +41,7 @@ function bigIntFromString(s: string): bigint {
 }
 
 export default function MailScreen({ onNavigate }: Props): JSX.Element {
+  const fx = useFx();
   const [tab, setTab] = useState<Tab>('inbox');
 
   // Inbox state
@@ -134,13 +136,14 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       const r = await claimPostedDlv({ vaultId: vaultBytes });
       if (!r.success) throw new Error(r.error || 'claim failed');
       setRowState((prev) => ({ ...prev, [vaultIdBase32]: { status: 'claimed' } }));
+      fx.play({ anim: 'confirm', title: 'Claimed', caption: 'The mail is open and anything locked with it is yours' });
       setInboxStatus(`Claimed ${vaultIdBase32.slice(0, 12)}…`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'claim failed';
       setRowState((prev) => ({ ...prev, [vaultIdBase32]: { status: 'error', detail: msg } }));
       setInboxError(msg);
     }
-  }, []);
+  }, [fx]);
 
   const composeValid = useMemo(() => {
     return recipientPk.trim().length > 0 && policyAnchor.trim().length > 0 && content.trim().length > 0;
@@ -172,6 +175,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       });
       if (!r.success || !r.id) throw new Error(r.error || 'createPostedDlv failed');
       setSendPhase('sent');
+      fx.play({ anim: 'vault', title: 'Mail sealed', caption: 'Only your recipient can open it' });
       setSendStatus(`Sent. id=${r.id.slice(0, 12)}…`);
       // Reset compose state and switch to inbox so the user can see it land.
       setRecipientPk('');
@@ -185,7 +189,7 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       setSendError(msg);
       setSendPhase('error');
     }
-  }, [recipientPk, policyAnchor, content, tokenId, amount]);
+  }, [recipientPk, policyAnchor, content, tokenId, amount, fx]);
 
   return (
     <ScreenFrame

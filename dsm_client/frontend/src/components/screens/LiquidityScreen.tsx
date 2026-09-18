@@ -24,6 +24,7 @@ import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import { Disclosure, Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { useFx } from '../fx/FxProvider';
 import { useBackButton } from '../../hooks/useBackButton';
 
 type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'closing' | 'created' | 'error';
@@ -39,6 +40,7 @@ function bigIntFromString(s: string): bigint {
 }
 
 export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
+  const fx = useFx();
   const [phase, setPhase] = useState<Phase>('loading');
   const [vaults, setVaults] = useState<AmmVaultSummary[]>([]);
   const [error, setError] = useState<string>('');
@@ -307,6 +309,11 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       }
 
       setPhase('created');
+      fx.play({
+        anim: 'vault',
+        title: 'Pool created',
+        caption: `${tokenA.trim()} / ${tokenB.trim()} is funded and listed for traders`,
+      });
       setToast(`Vault created and published. id=${r.vaultIdBase32.slice(0, 12)}\u2026`);
       setShowCreate(false);
       setTokenA('');
@@ -319,7 +326,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       setError(msg);
       setPhase('error');
     }
-  }, [tokenA, tokenB, reserveA, reserveB, feeBps, refresh]);
+  }, [tokenA, tokenB, reserveA, reserveB, feeBps, refresh, fx]);
 
   const busy = phase === 'creating' || phase === 'publishing' || phase === 'republishing' || phase === 'closing';
 
