@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FxCanvas } from './FxCanvas';
-import type { FxAnim } from './fxEngine';
+import { isFxEngineReady, loadFxEngine, type FxAnim } from './fxEngine';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 
 export type FxTone = 'good' | 'bad' | 'neutral';
@@ -45,6 +45,10 @@ export function FxPopup({
 }: FxPopupProps) {
   const [seq, setSeq] = useState(0);
   const [ended, setEnded] = useState(false);
+  // null while the engine is still arriving: the element upgrades in place, so
+  // it is rendered meanwhile. false means it never arrived, and the popup drops
+  // to its words rather than showing an empty frame.
+  const [engineReady, setEngineReady] = useState<boolean | null>(isFxEngineReady() ? true : null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -56,6 +60,12 @@ export function FxPopup({
 
   useEffect(() => {
     dialogRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    void loadFxEngine().then((ok) => { if (alive) setEngineReady(ok); });
+    return () => { alive = false; };
   }, []);
 
   // Auto-close: a linger after the last frame, with a ceiling from open.
@@ -87,18 +97,22 @@ export function FxPopup({
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sb-fx-screen" onClick={replay} aria-hidden="true">
-          <FxCanvas anim={anim} seq={seq} muted={muted} amount={amount} fit="fill" onEnd={() => setEnded(true)} />
-          <span className="sb-fx-glass" />
-        </div>
+        {engineReady !== false && (
+          <div className="sb-fx-screen" onClick={replay} aria-hidden="true">
+            <FxCanvas anim={anim} seq={seq} muted={muted} amount={amount} fit="fill" onEnd={() => setEnded(true)} />
+            <span className="sb-fx-glass" />
+          </div>
+        )}
         <div className="sb-fx-foot">
           <div className="sb-fx-text">
             <div className="sb-fx-title">{title}</div>
             {caption ? <div className="sb-fx-caption">{caption}</div> : null}
           </div>
-          <button type="button" className="sb-btn sb-fx-replay" onClick={replay} aria-label="Play again">
-            {'\u21bb'}
-          </button>
+          {engineReady !== false && (
+            <button type="button" className="sb-btn sb-fx-replay" onClick={replay} aria-label="Play again">
+              {'\u21bb'}
+            </button>
+          )}
           <button type="button" className="sb-btn sb-btn--primary sb-fx-ok" onClick={close}>
             {okLabel}
           </button>
