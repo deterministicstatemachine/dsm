@@ -26,7 +26,7 @@ describe('FxPopup', () => {
   });
 
   it('stays inside the screen host rather than covering the whole page', () => {
-    const { container } = render(<FxPopup anim="vault" title="Pool created" onClose={() => undefined} />);
+    const { container } = render(<FxPopup anim="vault" title="Vault created" onClose={() => undefined} />);
     const backdrop = container.querySelector('.sb-fx-backdrop');
     expect(backdrop).toBeInTheDocument();
     // .sb-popover-backdrop is position:absolute within .stateboy-screen-host.

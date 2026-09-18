@@ -17,7 +17,7 @@ function Harness({ appState, soundEnabled }: { appState?: 'securing_device' | 'w
 function Trigger() {
   const fx = useFx();
   return (
-    <button type="button" onClick={() => fx.play({ anim: 'vault', title: 'Pool created', key: 'pool' })}>
+    <button type="button" onClick={() => fx.play({ anim: 'vault', title: 'Vault created', key: 'vault' })}>
       trigger
     </button>
   );
@@ -33,7 +33,7 @@ describe('FxProvider', () => {
     render(<Harness />);
     fireEvent.click(screen.getByText('trigger'));
     fireEvent.click(screen.getByText('trigger'));
-    expect(screen.getByRole('dialog', { name: 'Pool created' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Vault created' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
@@ -43,7 +43,7 @@ describe('FxProvider', () => {
     fireEvent.click(screen.getByText('trigger'));
     act(() => { bridgeEvents.emit('bilateral.transferComplete', undefined as never); });
 
-    expect(screen.getByRole('dialog', { name: 'Pool created' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Vault created' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: 'Transfer sealed' })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'OK' }));
@@ -100,7 +100,7 @@ describe('FxProvider', () => {
   it('says nothing about money over a locked wallet', () => {
     const { rerender } = render(<Harness appState="wallet_ready" />);
     fireEvent.click(screen.getByText('trigger'));
-    expect(screen.getByRole('dialog', { name: 'Pool created' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Vault created' })).toBeInTheDocument();
 
     rerender(<Harness appState="locked" />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();

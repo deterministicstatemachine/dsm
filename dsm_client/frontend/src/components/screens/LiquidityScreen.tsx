@@ -311,7 +311,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       setPhase('created');
       fx.play({
         anim: 'vault',
-        title: 'Pool created',
+        title: 'Vault created',
         caption: `${tokenA.trim()} / ${tokenB.trim()} is funded and listed for traders`,
       });
       setToast(`Vault created and published. id=${r.vaultIdBase32.slice(0, 12)}\u2026`);
@@ -336,9 +336,9 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       onBack={() => onNavigate?.('home')}
       info={(
         <InfoTip title="Liquidity">
-          <p>A pool holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee. You can take everything back at any time with <b>Withdraw all</b>; that retires the pool for good.</p>
-          <p><b>Open</b> means traders can find the pool. <b>Publishing</b> means its proofs are still reaching the storage set; that part finishes on its own. <b>Not listed</b> means the proofs are in but the pool is not advertised yet: press <b>Publish</b> to list it.</p>
-          <p>Traders settle against your pool while you are offline. When that has happened, the card says how many trades are waiting; <b>Reconcile</b> writes them into the pool&apos;s balances. Nothing is lost while you wait.</p>
+          <p>A vault holds two of your tokens and trades between them for a fee. Every trade against it earns you that fee. You can take everything back at any time with <b>Withdraw all</b>; that retires the vault for good.</p>
+          <p><b>Open</b> means traders can find the vault. <b>Publishing</b> means its proofs are still reaching the storage set; that part finishes on its own. <b>Not listed</b> means the proofs are in but the vault is not advertised yet: press <b>Publish</b> to list it.</p>
+          <p>Traders settle against your vault while you are offline. When that has happened, the card says how many trades are waiting; <b>Reconcile</b> writes them into the vault&apos;s balances. Nothing is lost while you wait.</p>
         </InfoTip>
       )}
       actions={
@@ -390,7 +390,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               <span className={`sb-tag${status.cls}`}>{status.label}</span>
             </div>
             <div className="sb-kv" style={{ marginTop: 6 }}>
-              <span className="sb-kv__k">In the pool</span>
+              <span className="sb-kv__k">In the vault</span>
               <span className="sb-kv__v">{v.reserveA.toString()} {v.tokenATicker} {'\u00B7'} {v.reserveB.toString()} {v.tokenBTicker}</span>
             </div>
 
@@ -422,7 +422,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
               <p className="sb-hint sb-hint--tight">Proofs still landing. Nothing to do yet; Publish appears when they are in.</p>
             )}
             {!v.closed && v.publicationState === 'published' && !v.routingAdvertised && !canPublish && (
-              <p className="sb-hint sb-hint--tight">Cannot be advertised. Withdraw and create a new pool.</p>
+              <p className="sb-hint sb-hint--tight">Cannot be advertised. Withdraw and create a new vault.</p>
             )}
 
             {(!v.closed || canPublish) && (
@@ -484,12 +484,12 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
       {showCreate && (
         <div className="sb-card" style={{ marginTop: 4 }}>
           <div className="sb-card__title">
-            <span>New pool</span>
-            <InfoTip title="New pool" label="About new pools">
-              <p>Pick two tokens you hold and how much of each to put in. The ratio between the two amounts sets the pool&apos;s starting price.</p>
+            <span>New vault</span>
+            <InfoTip title="New vault" label="About new vaults">
+              <p>Pick two tokens you hold and how much of each to put in. The ratio between the two amounts sets the vault&apos;s starting price.</p>
               <p><b>Reserve A</b> and <b>Reserve B</b> are entered in the token&apos;s base units, exactly as the wallet stores them.</p>
               <p><b>Fee</b> is your cut of every trade, in basis points: 30 bps is 0.30%.</p>
-              <p>The pool is created and advertised in one step. If the advertisement cannot go out yet, the card shows Publish once it can.</p>
+              <p>The vault is created and advertised in one step. If the advertisement cannot go out yet, the card shows Publish once it can.</p>
             </InfoTip>
           </div>
           {/* The pair is SELECTED, never typed. The option's value is the

@@ -29,7 +29,7 @@ const BRICKS: Brick[] = [
     label: 'LIQUIDITY',
     target: 'liquidity',
     glyph: '◎',
-    description: 'Provide a pool, earn the fees',
+    description: 'Fund a vault, earn the fees',
   },
   {
     label: 'MAIL',
@@ -51,9 +51,9 @@ export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
       onBack={() => onNavigate?.('home')}
       info={(
         <InfoTip title="SoFi">
-          <p>Sovereign finance: pools, trades and mail that settle directly between devices, with no exchange in the middle.</p>
-          <p><b>Swap</b> trades one token for another at a pool&apos;s price. You see the exact amount you will get before you confirm; if the pool moves first, the trade is refused and you can quote again.</p>
-          <p><b>Liquidity</b> puts two of your tokens into a pool. Every trade against it pays you the pool&apos;s fee, and you can take everything back at any time.</p>
+          <p>Sovereign finance: vaults, trades and mail that settle directly between devices, with no exchange in the middle.</p>
+          <p><b>Swap</b> trades one token for another at a vault&apos;s price. You see the exact amount you will get before you confirm; if the vault moves first, the trade is refused and you can quote again.</p>
+          <p><b>Liquidity</b> puts two of your tokens into a vault. Every trade against it pays you the vault&apos;s fee, and you can take everything back at any time.</p>
           <p><b>Mail</b> sends a note to someone&apos;s key. They do not need to be online: it waits for them on the storage nodes until they claim it.</p>
         </InfoTip>
       )}

@@ -1,8 +1,49 @@
-# DSM environment config — Alibaba Cloud storage nodes (3-node, us-west-1)
-# Push to device with: scripts/push_env_override.sh --alibaba
+# DSM environment config — GCP beta storage fleet (5-node, us-central1)
+# Push to device with: scripts/push_env_override.sh --gcp-beta
 #
-# Nodes (ECS, VPC vpc-rj9oepiel1c2517avaboj, sg dsm-storage-sg):
-#   us-west-1a: 47.251.246.93, 47.251.250.159, 47.251.88.58
+# NOT the same fleet as dsm_env_config.gcp.toml. That file is the RETIRED
+# 6-node, 3-region fleet from 2026-03-31 and points at dead hosts; it is kept
+# only as history. This file is the live beta fleet provisioned 2026-09-12.
+#
+# Every transport fact below was verified against the running nodes on
+# 2026-09-12, not copied from the retired Alibaba config:
+#   * TLS on :8080 — each node serves a cert CN=dsm-node-N issued by
+#     CN=DSM-Storage-CA, and /api/v2/health returns 200 on all five.
+#   * The CA is dsm_storage_node/deploy/nodes/ca/ca.crt (sha256 38:21:20:7B:
+#     …:DA:CD) — the ONLY CA in the tree. A second one used to sit at
+#     scripts/ca.crt with the same subject (CN=DSM-Storage-CA) and a different
+#     key; it verified nothing here (curl returned HTTP 000) and was deleted
+#     2026-09-12 along with the rest of the Alibaba fleet. push_env_override.sh
+#     copies the CA to the device as files/ca.crt, which is why
+#     custom_ca_certs is "ca.crt" here.
+#   * Terraform opens exactly tcp/8080 (api), tcp/9090 (metrics), tcp/22 (ssh).
+#   * Node-side [network] port = 8080, [tls] cert_path = /certs/node.crt.
+#
+# NAME↔ENDPOINT PAIRING IS VERIFIED, NOT ASSUMED. The public IPs come out of
+# terraform state as an unordered set, and the obvious ordering is WRONG:
+# node-2, node-3 and node-5 are not on the addresses a sorted list suggests.
+# Each pairing below was read off that host's TLS CN and its x-dsm-node-id
+# response header. Re-verify after any reprovision with:
+#   openssl s_client -connect <ip>:8080 </dev/null | openssl x509 -noout -subject
+#
+# `name` IS THE MEMBER ID OF THE CANONICAL STORAGE SET, not a label. It is
+# hashed (sorted, length-prefixed) into the storage_set_id a vault is born
+# under, and a member only counts toward quorum when the node echoes this exact
+# string back as x-dsm-node-id. A name paired with the wrong endpoint still
+# derives the correct set id — and then silently never reaches quorum, because
+# every acceptance comes back attributed to a different member.
+#
+# `register_incarnation` is the register history that node is serving, as its
+# own database minted it at first boot and logged it. The set id is derived from
+# the (name, register_incarnation) pairs, and the network's root-register
+# profile PINS that id in core (dsm::economic::register::BETA_ROOT_REGISTER_MEMBERS,
+# cross-checked by dsm_sdk/src/sdk/storage_set.rs).
+#
+# Quorum is 3 of 5 (SOFI_BETA_QUORUM), fixed for exactly this cardinality —
+# sofi_beta_quorum_for REFUSES every other set size rather than interpolating.
+#
+# Expected committed set id:
+#   DN61X37SS8ZVV96E98Q4MSFGG8JGR7438ADNY38C7X8WNBZR5S90
 
 protocol = "https"
 lan_ip = "0.0.0.0"
@@ -14,27 +55,32 @@ bitcoin_network = "signet"
 dbtc_min_confirmations = 1
 mempool_api_url = "https://mempool.space"
 
-# Self-signed CA for Alibaba storage node TLS certs
-# Path is relative to this config file's directory (resolved by SDK).
+# Self-signed CA for the GCP beta fleet's TLS certs.
+# Path is relative to this config file's directory (resolved by SDK); on device
+# push_env_override.sh places it next to the config as files/ca.crt.
 custom_ca_certs = ["ca.crt"]
 
-# `name` IS THE MEMBER ID OF THE CANONICAL STORAGE SET, not a label. It is
-# hashed (sorted, length-prefixed) into the storage_set_id a vault is born
-# under, and it is what an acceptance is counted against: a member only counts
-# toward quorum when the node echoes this exact string back as x-dsm-node-id.
-#
-# So each name MUST equal that node's own `[node] id`, which is also the CN of
-# the TLS certificate it serves. A name that merely describes the node
-# ("us-west-1a-1") makes the client compute a set id no node belongs to: every
-# settlement-slot claim is refused as a foreign set.
 [[nodes]]
 name = "dsm-node-1"
-endpoint = "https://47.251.246.93:8080"
+endpoint = "https://34.58.75.224:8080"
+register_incarnation = "5VVWG3GB04F8NG43VVKA9E8CRPZXHBCG04GSWSRC5ZR3ZH28T3M0"
 
 [[nodes]]
 name = "dsm-node-2"
-endpoint = "https://47.251.250.159:8080"
+endpoint = "https://35.254.209.202:8080"
+register_incarnation = "M0WKNKC31F50D0GZW6JYM9YZTDS38W3AD7GYZNN40NQV8KPQ3F50"
 
 [[nodes]]
 name = "dsm-node-3"
-endpoint = "https://47.251.88.58:8080"
+endpoint = "https://146.148.99.141:8080"
+register_incarnation = "KCAGAY7R518SNJ0EN9C290FBWF592VB77MWKAH8STMGVBCFTBW2G"
+
+[[nodes]]
+name = "dsm-node-4"
+endpoint = "https://104.197.96.66:8080"
+register_incarnation = "A4MGZZ51J20NKYNC5F260GYPPSHH4VV8EWH8Y355FS8DFG8TEW80"
+
+[[nodes]]
+name = "dsm-node-5"
+endpoint = "https://35.184.46.44:8080"
+register_incarnation = "QNRVKTMK8HPY9DYNS6NFZR7QHC93Y8FSBG1105R8ND5P7B379RH0"

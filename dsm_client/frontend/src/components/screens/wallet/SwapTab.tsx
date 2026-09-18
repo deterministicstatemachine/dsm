@@ -338,7 +338,7 @@ function SwapTabInner({
       <div className="sb-titlebar">
         <h3 className="sb-section-title">Swap</h3>
         <InfoTip title="Swap" label="About swapping">
-          <p>Trades one token for another through a liquidity pool. Quote first: you see the exact amount you will get before you confirm. If the pool moves before the trade lands, it is refused and you simply quote again.</p>
+          <p>Trades one token for another through an AMM vault. Quote first: you see the exact amount you will get before you confirm. If the vault moves before the trade lands, it is refused and you simply quote again.</p>
           <p>Tokens are named by their <b>anchor</b>, not their ticker, because two tokens can share a ticker. Pick one you hold from the suggestions, or paste the anchor from the token&apos;s card under Tokens.</p>
         </InfoTip>
       </div>
