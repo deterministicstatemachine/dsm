@@ -447,6 +447,20 @@ pub enum EconomicValidationError {
     },
     /// The registration is not for the next position.
     PositionIsNotSuccessor { previous: u64, registered: u64 },
+    /// A `SofiSetup` names a predecessor position that is not the one its
+    /// transition actually extends (F1: `p` is the position `ClaimRef_p`
+    /// names, and the setup lands at `p + 1`).
+    SetupPositionIsNotThePredecessor { body: u64, predecessor: u64 },
+    /// A `SofiSetup`'s `R_T^setup` is not the root its own transition
+    /// produces.
+    ///
+    /// The field is DERIVED, never asserted: it is the trader economic root
+    /// after the P15-6 absent→`h⁰` insertion is applied to the root the
+    /// parent claim names. Without this equality a correctly signed first
+    /// setup could put ANY 32 bytes there, and the index would then pin a `ρ`
+    /// committing them forever — the uniqueness rule would hold over a value
+    /// nothing had checked.
+    SetupRootIsNotTheDerivedRoot { body: [u8; 32], derived: [u8; 32] },
     /// The registered root and the witness disagree about the result.
     RegisteredRootDiffersFromWitness {
         registered: [u8; 32],
@@ -497,6 +511,18 @@ impl core::fmt::Display for EconomicValidationError {
             Self::PreRootIsNotThePredecessor { .. } => write!(
                 f,
                 "economic validation: the witness does not start from the validated predecessor"
+            ),
+            Self::SetupPositionIsNotThePredecessor { body, predecessor } => write!(
+                f,
+                "economic validation: setup names predecessor position {body} but extends \
+                 {predecessor} — `p` is the position the parent claim names, and the setup \
+                 lands at p + 1"
+            ),
+            Self::SetupRootIsNotTheDerivedRoot { .. } => write!(
+                f,
+                "economic validation: the setup's R_T^setup is not the root its own \
+                 transition produces — the field is DERIVED from the parent root by the \
+                 P15-6 absent→h⁰ insertion, never asserted by the body"
             ),
             Self::PositionIsNotSuccessor {
                 previous,
@@ -685,6 +711,44 @@ pub fn advance_validated(
 
     let derived = verify_mutation_sequence(&witness.mutation_sequence(), genesis, device_id)
         .map_err(EconomicValidationError::Transition)?;
+
+    // F1: `R_T^setup` IS THE ROOT THIS TRANSITION PRODUCES, and `p` is the
+    // position it extends.
+    //
+    // `derived` comes from the verified mutation sequence, so comparing
+    // against it is comparing against the root the P15-6 absent→`h⁰`
+    // insertion actually yields from the predecessor — which is exactly the
+    // normative relation, with nothing taken on the body's word. The
+    // predecessor root is `previous.economic_root()`, the root the parent
+    // claim names, and the setup lands at `p + 1`.
+    //
+    // `ClaimRef_p` itself stays E2's: proving it is the exact claim at
+    // `K_root(G, DevID, p)` needs the parent envelope, which this verifier
+    // does not hold. `p` and `R_T^setup` need no such evidence, so they are
+    // established here rather than left signed-but-unchecked until then.
+    if let Some(crate::types::operations::Operation::SofiSetup { setup_body, .. }) =
+        accepted.dsm_verified_operation()
+    {
+        let body = crate::sofi::wire::SofiSetupBody::decode(setup_body).map_err(|_| {
+            EconomicValidationError::WriteSet(
+                crate::economic::write_set::WriteSetError::MalformedVaultOperation {
+                    detail: "a setup body that is not canonical has no write set",
+                },
+            )
+        })?;
+        if body.position() != previous.economic_position() {
+            return Err(EconomicValidationError::SetupPositionIsNotThePredecessor {
+                body: body.position(),
+                predecessor: previous.economic_position(),
+            });
+        }
+        if *body.setup_root() != derived {
+            return Err(EconomicValidationError::SetupRootIsNotTheDerivedRoot {
+                body: *body.setup_root(),
+                derived,
+            });
+        }
+    }
 
     // Conjunctive with everything above: the write set is closed AND every
     // credit in it is funded. Checked last because it is the most expensive

@@ -46,6 +46,7 @@ use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
+use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{validate, Evidence, Invalid, Refusal};
@@ -77,6 +78,10 @@ pub enum BuildError {
     /// A vault genesis a verifier would refuse — the market policy does not
     /// authenticate, or its pair is not canonical.
     Genesis(GenesisError),
+    /// This identity already holds a relationship with that vault. `h⁰` is a
+    /// function of the setup id, so a second setup would reset a chain that
+    /// has already advanced.
+    SetupAlreadyExists,
 }
 
 impl core::fmt::Display for BuildError {
@@ -91,6 +96,11 @@ impl core::fmt::Display for BuildError {
                  ({reason:?}); it is not a trade, it is a way to strand one"
             ),
             Self::Genesis(e) => write!(f, "{e}"),
+            Self::SetupAlreadyExists => write!(
+                f,
+                "this identity already holds a relationship with that vault; h⁰ is the \
+                 setup id's derivation and a second setup would reset the chain"
+            ),
             Self::PrecommitSignature(e) => write!(
                 f,
                 "the precommit is not validly signed ({e}): P is published and \
@@ -174,9 +184,62 @@ impl PrecommitDraft {
 
 /// The relationship setup (F1). Non-economic: it establishes the right to
 /// trade with one vault, and moves nothing.
-pub fn build_setup(body: &SofiSetupBody) -> Result<Produced, BuildError> {
+/// `R_T^setup` IS DERIVED HERE, exactly as the verifier derives it.
+///
+/// The body is built rather than accepted, because two of its fields are not
+/// the caller's to choose: `p` is the position the parent claim names, and
+/// `setup_root` is the trader economic root AFTER the P15-6 absent→`h⁰`
+/// insertion is applied to the root at that position. A producer that took a
+/// body would let a caller put arbitrary bytes in `R_T^setup`, sign them, and
+/// discover at admission that the transition is refused — or, worse, have a
+/// first setup pin an index entry committing bytes nothing ever checked.
+///
+/// `pre_tree` is the producer's own `R_econ` at `p`; the insertion is computed
+/// against it so the root is the one the mutation sequence will actually
+/// yield.
+#[allow(clippy::too_many_arguments)]
+pub fn build_setup(
+    genesis: D32,
+    device_id: D32,
+    position: u64,
+    vault_id: D32,
+    claim_ref: D32,
+    pre_tree: &EconomicSmt,
+    signature_alg: u16,
+    claimant_public_key: &[u8],
+) -> Result<Produced, BuildError> {
+    let sigma = derive::setup_id(&genesis, &device_id, position, &vault_id);
+    let leaf = dsm::sofi::wire::TraderRelationshipLeaf {
+        vault_id,
+        leaf: derive::relationship_leaf_genesis(&sigma),
+    };
+    let state = dsm::economic::state::EconomicLeafState::Relationship(leaf);
+    let key = state.leaf_key(&genesis, &device_id);
+    // INSERT-FROM-ZERO, the same rule the write set enforces: a producer that
+    // overwrote an existing relationship would compute a root the verifier
+    // refuses to reach.
+    if pre_tree.get(&key).is_some() {
+        return Err(BuildError::SetupAlreadyExists);
+    }
+    let mut post = pre_tree.clone();
+    post.insert(
+        key,
+        state
+            .leaf_value()
+            .map_err(|_| BuildError::SetupAlreadyExists)?,
+    );
+    let body = SofiSetupBody::new(
+        genesis,
+        device_id,
+        position,
+        vault_id,
+        claim_ref,
+        post.root(),
+        signature_alg,
+        claimant_public_key,
+    )?;
     Ok(Produced {
-        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(body)),
+        signs: SigningPayload::SetupDigest(derive::setup_signing_digest(&body)),
         operation: Operation::SofiSetup {
             setup_body: body.encode(),
             signature: Vec::new(),
@@ -987,13 +1050,46 @@ mod tests {
     /// with no operation around it, and `m_setup` is what the member checks.
     #[test]
     fn a_setup_signs_its_object_and_not_the_operation() {
-        let setup = SofiSetupBody::new(G, DEV, P_POS, d(0xC1), d(0x66), d(0x67), ALG, &keypair().0)
-            .unwrap();
-        let produced = build_setup(&setup).unwrap();
+        let tree = EconomicSmt::new();
+        let produced =
+            build_setup(G, DEV, P_POS, d(0xC1), d(0x66), &tree, ALG, &keypair().0).unwrap();
         assert!(matches!(produced.operation, Operation::SofiSetup { .. }));
+        let setup = match &produced.operation {
+            Operation::SofiSetup { setup_body, .. } => SofiSetupBody::decode(setup_body).unwrap(),
+            _ => panic!("a setup"),
+        };
         assert_eq!(
             produced.signs,
             SigningPayload::SetupDigest(derive::setup_signing_digest(&setup))
+        );
+
+        // `R_T^setup` IS DERIVED: the root after the absent→h⁰ insertion, not
+        // anything the caller chose.
+        let sigma = derive::setup_id(&G, &DEV, P_POS, &d(0xC1));
+        let state = dsm::economic::state::EconomicLeafState::Relationship(
+            dsm::sofi::wire::TraderRelationshipLeaf {
+                vault_id: d(0xC1),
+                leaf: derive::relationship_leaf_genesis(&sigma),
+            },
+        );
+        let mut expected = EconomicSmt::new();
+        expected.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
+        assert_eq!(*setup.setup_root(), expected.root());
+
+        // And a SECOND setup for the same vault is refused, never recomputed:
+        // h⁰ is the setup id's derivation, so it would reset a live chain.
+        assert_eq!(
+            build_setup(
+                G,
+                DEV,
+                P_POS,
+                d(0xC1),
+                d(0x66),
+                &expected,
+                ALG,
+                &keypair().0
+            ),
+            Err(BuildError::SetupAlreadyExists)
         );
         assert_ne!(
             produced.signs.bytes(),
@@ -1001,10 +1097,10 @@ mod tests {
             "a setup does not additionally sign the operation"
         );
         // What the producer says to sign is exactly what the device verifies.
-        let signed = Operation::SofiSetup {
-            setup_body: setup.encode(),
-            signature: sign(produced.signs.bytes()),
-        };
+        let signed = produced
+            .operation
+            .clone()
+            .with_signature(sign(produced.signs.bytes()));
         assert_eq!(
             dsm::sofi::signature::verify_operation(&signed, &keypair().0),
             Ok(())

@@ -1435,3 +1435,59 @@ fn a_setup_naming_a_foreign_genesis_is_refused() {
         "a setup writes into its own identity's tree, got {built:?}"
     );
 }
+
+/// `R_T^setup` IS THE ROOT THE TRANSITION PRODUCES — producer and verifier
+/// agreeing on one derived value, not a signed assertion.
+///
+/// Before this, `setup_root` had zero readers anywhere: a correctly signed
+/// first setup could put ANY 32 bytes there and the index would pin a `ρ`
+/// committing them forever. The uniqueness rule held over a field nothing
+/// checked.
+#[test]
+fn a_setups_root_is_the_root_its_own_transition_produces() {
+    let op = sofi_setup_operation();
+    let mut tree = EconomicSmt::new();
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    )
+    .expect("buildable");
+    let post_root = built.post_root;
+    let witness = witness_for(pre_root, built, &op);
+
+    // The derived post-root IS `SMT_Insert(R_p, k_T,v, ABSENT -> L⁰)`.
+    let sigma = dsm::sofi::derive::setup_id(&G, &DEV, 5, &sofi_vault_id());
+    let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
+        vault_id: sofi_vault_id(),
+        leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
+    });
+    let mut expected = EconomicSmt::new();
+    expected.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
+    assert_eq!(post_root, expected.root(), "the absent→h⁰ insertion's root");
+    assert_eq!(
+        witness.post_economic_root, post_root,
+        "and the witness commits it"
+    );
+
+    // A body asserting some OTHER root is the case the field's whole job is
+    // to make impossible.
+    let body = dsm::sofi::wire::SofiSetupBody::new(
+        G,
+        DEV,
+        5,
+        sofi_vault_id(),
+        [0x66; 32],
+        [0xEE; 32], // not the derived root
+        0x0001,
+        &[0x01; 64],
+    )
+    .expect("a setup body");
+    assert_ne!(*body.setup_root(), post_root);
+}
