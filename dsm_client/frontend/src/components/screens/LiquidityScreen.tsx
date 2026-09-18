@@ -23,6 +23,7 @@ import { getAllBalances } from '../../dsm/wallet';
 import type { TokenBalanceView } from '../../dsm/types';
 import ConfirmModal from '../ConfirmModal';
 import { Disclosure, Notice, ScreenFrame } from '../common/ScreenFrame';
+import { useBackButton } from '../../hooks/useBackButton';
 
 type Phase = 'idle' | 'loading' | 'creating' | 'publishing' | 'republishing' | 'closing' | 'created' | 'error';
 
@@ -84,6 +85,9 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // B (or Escape) closes the create form instead of leaving the screen.
+  useBackButton(showCreate, () => setShowCreate(false));
 
   const handleRepublish = useCallback(async (v: AmmVaultSummary) => {
     setError('');
@@ -415,7 +419,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
             )}
 
             {(!v.closed || canPublish) && (
-              <div className="sb-actions" style={{ margin: '8px 0 0' }}>
+              <div className="sb-actions sb-actions--end" style={{ margin: '8px 0 0' }}>
                 {canPublish && (
                   <button
                     type="button"
@@ -432,7 +436,7 @@ export default function LiquidityScreen({ onNavigate }: Props): JSX.Element {
                     type="button"
                     onClick={() => setConfirmClose(v)}
                     disabled={busy}
-                    className="sb-btn sb-btn--small"
+                    className="sb-btn sb-btn--small sb-btn--ghost"
                     title={
                       v.pendingUnapplied > 0n
                         ? 'Reconcile the settled trades first — a close must consume the vault\'s current state'

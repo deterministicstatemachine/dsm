@@ -218,7 +218,7 @@ export default function WithdrawView({
 
       {reviewResult && (
         <div className="sb-card">
-          <div className="sb-card__title"><span>Review</span><span className="sb-tag sb-tag--dim">{planClassLabel(reviewResult.planClass)}</span></div>
+          <div className="sb-card__title"><span>Review</span></div>
           <div className="sb-kv">
             <span className="sb-kv__k">Recipient gets</span>
             <span className="sb-kv__v"><b>{formatBtc(reviewResult.plannedNetSats)} BTC</b></span>
@@ -246,6 +246,7 @@ export default function WithdrawView({
 
           <Disclosure summary={`Route details (${reviewResult.legs.length} leg${reviewResult.legs.length === 1 ? '' : 's'})`} className="sb-details--plain">
             <p className="sb-hint">A withdrawal is paid out of the on-chain vaults behind your dBTC. Active vaults: {activeVaultCount}.</p>
+            <div className="sb-kv"><span className="sb-kv__k">Plan</span><span className="sb-kv__v">{planClassLabel(reviewResult.planClass)}</span></div>
             {reviewResult.legs.map((leg, index) => (
               <div key={`${leg.vaultId}-${index}`} className="sb-card" style={{ padding: '4px 8px' }}>
                 <div className="sb-kv"><span className="sb-kv__k">Leg {index + 1}</span><span className="sb-kv__v">{leg.kind === 'full' ? 'Full sweep' : 'Partial sweep'}</span></div>

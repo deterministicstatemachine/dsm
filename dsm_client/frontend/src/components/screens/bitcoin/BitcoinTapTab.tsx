@@ -15,6 +15,7 @@ import WalletAccountsPanel from './WalletAccountsPanel';
 import DepositCard from './DepositCard';
 import VaultCard from './VaultCard';
 import { Disclosure, Notice, scrollToTop } from '../../common/ScreenFrame';
+import { useBackButton } from '../../../hooks/useBackButton';
 import { isSettledDeposit } from './labels';
 
 export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif' }: { btcLogoSrc?: string }): JSX.Element {
@@ -28,6 +29,9 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
   useEffect(() => {
     scrollToTop(rootRef.current);
   }, [data.subView]);
+
+  // B (or Escape) inside Deposit / Withdraw returns to this tab, not to home.
+  useBackButton(data.subView !== 'main', () => data.setSubView('main'));
 
   const activeAccount = data.walletAccounts.find((a) => a.active || a.accountId === data.walletActiveId);
   const displayAddr = data.addressCache.get(data.selectedIndex) ?? data.address;
@@ -178,17 +182,17 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
             <span>Your Bitcoin address</span>
             <span className="sb-tag">{networkLabel}</span>
           </div>
-          <div className="sb-mono">{displayAddr ? displayAddr.address : '—'}</div>
+          <div className="btc-address">
+            <div className="sb-mono">{displayAddr ? displayAddr.address : '—'}</div>
+            <button type="button" className="sb-btn sb-btn--small" onClick={data.handleCopy} disabled={!displayAddr}>
+              {data.copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
           {isPendingIndexChange && (
             <p className="sb-hint sb-hint--tight">
               Previewing address #{data.selectedIndex}. Choose &ldquo;Use this&rdquo; under Advanced before withdrawing to it.
             </p>
           )}
-          <div className="sb-actions" style={{ margin: '8px 0 0' }}>
-            <button type="button" className="sb-btn sb-btn--small" onClick={data.handleCopy} disabled={!displayAddr}>
-              {data.copied ? 'Copied' : 'Copy address'}
-            </button>
-          </div>
         </section>
       )}
 

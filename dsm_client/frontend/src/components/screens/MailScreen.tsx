@@ -22,6 +22,7 @@ import { createPostedDlv } from '../../dsm/dlv';
 import { decodeBase32Crockford } from '../../utils/textId';
 import ConfirmModal from '../ConfirmModal';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
+import { useBackButton } from '../../hooks/useBackButton';
 
 type RowStatus = 'pending' | 'syncing' | 'mirrored' | 'claiming' | 'claimed' | 'error';
 type RowState = { status: RowStatus; detail?: string };
@@ -85,6 +86,9 @@ export default function MailScreen({ onNavigate }: Props): JSX.Element {
       void refreshInbox();
     }
   }, [tab, refreshInbox]);
+
+  // B (or Escape) while composing returns to the inbox, not to home.
+  useBackButton(tab === 'compose', () => setTab('inbox'));
 
   const handleSyncAll = useCallback(async () => {
     setInboxBusy(true);
