@@ -486,23 +486,22 @@ impl SettleResolver {
             Vec::new(),
         )
         .unwrap();
-        ValidatedPeerTransition {
-            peer_genesis: ow.g,
-            peer_devid: ow.devid,
-            validated_root:
-                dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
-                    dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                        economic_position: OWNER_POSITION,
-                        economic_root: self.owner_root,
-                    },
-                )
-                .expect("an ordinary admitted position"),
+        ValidatedPeerTransition::single_root_for_test(
+            ow.g,
+            ow.devid,
+            dsm::economic::lineage::ValidatedEconomicRoot::rehydrate_from_admitted_store(
+                dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                    economic_position: OWNER_POSITION,
+                    economic_root: self.owner_root,
+                },
+            )
+            .expect("an ordinary admitted position"),
             witness,
-            proven_ak: ow.ak_public.clone(),
-            c_dsm_plus: [0xC5; 32],
-            embedded_parent: [0xC1; 32],
-            verified_operation: Operation::Noop,
-        }
+            ow.ak_public.clone(),
+            [0xC5; 32],
+            [0xC1; 32],
+            Operation::Noop,
+        )
     }
 }
 
