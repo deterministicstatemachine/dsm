@@ -30,6 +30,7 @@
 //! finality — those are later phases. Storage members never evaluate
 //! economics; this layer gives them exact bytes and exact keys, nothing more.
 
+pub mod admission;
 pub mod arith;
 pub mod conformance;
 pub mod derive;

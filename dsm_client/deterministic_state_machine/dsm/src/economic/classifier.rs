@@ -119,6 +119,15 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // changed, `None` is impossible.
         DlvCreate { .. } => None,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
+
+        // SoFi v8. A setup writes ONE relationship leaf and no value — but it
+        // is still a closed write set, because "writes nothing" is what the
+        // tripwire would then enforce and a relationship leaf is a write.
+        SofiSetup { .. } => ClosedWriteSet,
+        // Creation debits the funding into a vault's reserves, and a
+        // fulfillment commits the trader's position: both move value under a
+        // write set fixed by the operation's own preimage.
+        SofiVaultCreate { .. } | SofiFulfill { .. } => ClosedWriteSet,
     }
 }
 
