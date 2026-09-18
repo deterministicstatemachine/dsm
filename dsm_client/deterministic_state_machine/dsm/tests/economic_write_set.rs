@@ -1065,3 +1065,373 @@ fn the_dlv_value_write_sets_demand_their_facts() {
         Err(WriteSetError::FactsDoNotMatchOperation)
     ));
 }
+
+// ── SoFi: the two inserts P15-6 and P15-12 specify ─────────────────────────
+
+const P_CREATE: u64 = 7;
+
+/// A tree that actually HOLDS the balances, and the matching pre-state map.
+/// Declaring a balance without seeding its leaf makes the mutation sequence
+/// unverifiable — the pre-state must be in the root the paths are against.
+fn sofi_funded(pairs: &[([u8; 32], u64)]) -> (EconomicSmt, BTreeMap<[u8; 32], u64>) {
+    let mut tree = EconomicSmt::new();
+    let mut balances = BTreeMap::new();
+    for (asset, amount) in pairs {
+        let state = EconomicLeafState::Balance(EconomicBalanceState::new(*asset, *amount).unwrap());
+        tree.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
+        balances.insert(*asset, *amount);
+    }
+    (tree, balances)
+}
+
+fn sofi_vault_id() -> [u8; 32] {
+    dsm::sofi::derive::vault_id(&G, &DEV, P_CREATE)
+}
+
+fn sofi_setup_operation() -> Operation {
+    let body = dsm::sofi::wire::SofiSetupBody::new(
+        G,
+        DEV,
+        5,
+        sofi_vault_id(),
+        [0x66; 32],
+        [0x67; 32],
+        0x0001,
+        &[0x01; 64],
+    )
+    .expect("a setup body");
+    Operation::SofiSetup {
+        setup_body: body.encode(),
+        signature: vec![0xA1; 8],
+    }
+}
+
+fn sofi_genesis_state() -> dsm::sofi::wire::VaultStateLeaf {
+    dsm::sofi::wire::VaultStateLeaf {
+        owner_genesis: G,
+        owner_device_id: DEV,
+        create_position: P_CREATE,
+        market_policy: [0x31; 32],
+        fee_policy: [0x32; 32],
+        release_policy: [0x33; 32],
+        storage_set_id: [0x77; 32],
+        generation: 0,
+        reserve_a: 1_000,
+        reserve_b: 2_000,
+        status: dsm::sofi::wire::VAULT_STATUS_ACTIVE,
+    }
+}
+
+fn sofi_create_operation(
+    funding_a: [u8; 32],
+    funding_b: [u8; 32],
+    amount_a: u64,
+    amount_b: u64,
+) -> Operation {
+    let state = sofi_genesis_state();
+    let preimage = dsm::sofi::wire::VaultGenesisPreimage {
+        owner_genesis: G,
+        owner_device_id: DEV,
+        create_position: P_CREATE,
+        state: state.clone(),
+    };
+    let vault_id = preimage.vault_id();
+    let creation = dsm::sofi::wire::VaultCreation {
+        vault_id,
+        genesis_root: dsm::sofi::lineage::genesis_root(&vault_id, &state).expect("R_0"),
+        amount_a,
+        amount_b,
+    };
+    Operation::SofiVaultCreate {
+        genesis_preimage: preimage.encode().expect("preimage encodes"),
+        creation: creation.encode(),
+        funding_a_policy_commit: funding_a,
+        funding_b_policy_commit: funding_b,
+        signature: vec![0xA1; 8],
+    }
+}
+
+/// P15-6: ONE relationship leaf, from zero, and no value movement — through
+/// the producer, the witness, and BOTH verifier halves.
+#[test]
+fn a_setup_inserts_exactly_one_relationship_leaf_from_zero() {
+    let witness = round_trip(
+        &sofi_setup_operation(),
+        EconomicSmt::new(),
+        BTreeMap::new(),
+        &CreditSourceFacts::None,
+    );
+    assert_eq!(witness.mutations.len(), 1, "exactly one leaf");
+    let m = &witness.mutations[0];
+    assert!(m.pre_state.is_none(), "inserted from zero");
+    match &m.post_state {
+        Some(dsm::economic::state::EconomicLeafState::Relationship(r)) => {
+            assert_eq!(r.vault_id, sofi_vault_id());
+            // `h⁰` is the setup id's derivation, not anything the operation
+            // chose.
+            let sigma = dsm::sofi::derive::setup_id(&G, &DEV, 5, &sofi_vault_id());
+            assert_eq!(r.leaf, dsm::sofi::derive::relationship_leaf_genesis(&sigma));
+        }
+        other => panic!("a relationship leaf, got {other:?}"),
+    }
+    assert!(
+        witness.credit_sources.is_empty(),
+        "a setup is non-economic: it funds nothing"
+    );
+}
+
+/// A SECOND setup for the same vault is refused, never applied. `h⁰` is a
+/// function of the setup id, so an overwrite would reset a chain that has
+/// already advanced.
+#[test]
+fn a_setup_refuses_to_replace_an_existing_relationship() {
+    let op = sofi_setup_operation();
+    let mut tree = EconomicSmt::new();
+    // The first one lands.
+    build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    )
+    .expect("the first setup builds");
+    // The second does not.
+    let again = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    );
+    assert!(
+        matches!(again, Err(WriteSetError::WrongWriteSet { .. })),
+        "a relationship leaf is inserted once, got {again:?}"
+    );
+}
+
+/// P15-12: two debits and the record, as ONE write set, through both halves.
+#[test]
+fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
+    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
+    let witness = round_trip(
+        &sofi_create_operation(a, b, 1_000, 2_000),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+    assert_eq!(
+        witness.mutations.len(),
+        3,
+        "two debits and one record, atomically"
+    );
+    let creations: Vec<_> = witness
+        .mutations
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.post_state,
+                Some(dsm::economic::state::EconomicLeafState::VaultCreation(_))
+            )
+        })
+        .collect();
+    assert_eq!(creations.len(), 1);
+    assert!(creations[0].pre_state.is_none(), "insert-only");
+    assert!(
+        witness.credit_sources.is_empty(),
+        "funded from the owner's own balances; no external source"
+    );
+}
+
+/// The creation's own conjuncts, each refusing on its own.
+#[test]
+fn a_creation_is_refused_on_each_missing_conjunct() {
+    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let balances = |x: u64, y: u64| {
+        let mut m = BTreeMap::new();
+        m.insert(a, x);
+        m.insert(b, y);
+        m
+    };
+    let build = |op: &Operation, bal: BTreeMap<[u8; 32], u64>| {
+        let (mut tree, _) = sofi_funded(&[(a, bal[&a]), (b, bal[&b])]);
+        build_write_set(
+            op,
+            &G,
+            &DEV,
+            &econ_op_id(),
+            &EconomicPreState::balances_only(&bal),
+            &mut tree,
+            &CreditSourceFacts::None,
+            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+        )
+        .map(|_| ())
+    };
+
+    // Amounts that are not the genesis reserves would mint reserves.
+    assert!(matches!(
+        build(
+            &sofi_create_operation(a, b, 999, 2_000),
+            balances(5_000, 9_000)
+        ),
+        Err(WriteSetError::MalformedVaultOperation { .. })
+    ));
+    // An unordered pair.
+    assert!(matches!(
+        build(
+            &sofi_create_operation(b, a, 1_000, 2_000),
+            balances(5_000, 9_000)
+        ),
+        Err(WriteSetError::MalformedVaultOperation { .. })
+    ));
+    // The same asset twice.
+    assert!(matches!(
+        build(
+            &sofi_create_operation(a, a, 1_000, 2_000),
+            balances(5_000, 9_000)
+        ),
+        Err(WriteSetError::MalformedVaultOperation { .. })
+    ));
+    // A balance that cannot cover the funding.
+    assert!(build(
+        &sofi_create_operation(a, b, 1_000, 2_000),
+        balances(10, 9_000)
+    )
+    .is_err());
+}
+
+/// EACH SOFI LEAF IS LEGAL FOR EXACTLY ONE OPERATION. The verifier's leaf
+/// classifier ends in a catch-all, so adding the enum variants forced nothing
+/// here: a setup carrying a creation record, or a creation carrying a
+/// relationship leaf, has to be refused BY CLASS.
+#[test]
+fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
+    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (mut tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
+
+    // The witness a CREATION produces, verified against a SETUP.
+    let create = sofi_create_operation(a, b, 1_000, 2_000);
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &create,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&balances),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    )
+    .expect("buildable");
+    let creation_witness = witness_for(pre_root, built, &create);
+    let setup = sofi_setup_operation();
+    assert!(
+        matches!(
+            verify_operation_write_set(&setup, &G, &DEV, &creation_witness),
+            Err(WriteSetError::UnexpectedLeafClass)
+        ),
+        "a setup may not carry a creation record"
+    );
+
+    // And the witness a SETUP produces, verified against a CREATION.
+    let mut tree = EconomicSmt::new();
+    let pre_root = tree.root();
+    let built = build_write_set(
+        &setup,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    )
+    .expect("buildable");
+    let setup_witness = witness_for(pre_root, built, &setup);
+    assert!(
+        matches!(
+            verify_operation_write_set(&create, &G, &DEV, &setup_witness),
+            Err(WriteSetError::UnexpectedLeafClass)
+        ),
+        "a creation may not carry a relationship leaf"
+    );
+}
+
+/// A VALID CREATION WHOSE KEY ORDER INVERTS ITS ASSET ORDER STILL VERIFIES.
+///
+/// The producer sorts planned leaves by SMT key (a hash), while `dlv_pair_legs`
+/// requires the assets in lexical order. Those two orders are unrelated, so a
+/// verifier that matched debits by vector position would reject perfectly
+/// valid write sets — and would do it for some asset pairs and not others,
+/// looking random.
+///
+/// The fixture is chosen to be adversarial and ASSERTS that it still is: if a
+/// key derivation ever changes and the inversion disappears, this test says so
+/// rather than quietly becoming a duplicate of the happy path.
+#[test]
+fn a_creation_verifies_when_key_order_opposes_asset_order() {
+    let (a, b) = ([0x00; 32], [0x01; 32]);
+    assert!(a < b, "the assets are in canonical order");
+    assert!(
+        dsm::economic::keys::balance_key(&G, &DEV, &a)
+            > dsm::economic::keys::balance_key(&G, &DEV, &b),
+        "this fixture must invert: their SMT keys sort opposite their commits"
+    );
+
+    let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
+    let witness = round_trip(
+        &sofi_create_operation(a, b, 1_000, 2_000),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+    assert_eq!(witness.mutations.len(), 3);
+}
+
+/// A SETUP BINDS BOTH ITS COORDINATES, not just the device.
+///
+/// The leaf's KEY is derived from the authenticated `(G, DevID)` while `h⁰`
+/// is derived from the BODY's, so a body naming a foreign genesis would place
+/// a leaf computed from that identity at this device's key — two disagreeing
+/// claims about whose relationship it is. The device half was checked; the
+/// genesis half was not.
+#[test]
+fn a_setup_naming_a_foreign_genesis_is_refused() {
+    let foreign = dsm::sofi::wire::SofiSetupBody::new(
+        [0x99; 32], // not G
+        DEV,
+        5,
+        sofi_vault_id(),
+        [0x66; 32],
+        [0x67; 32],
+        0x0001,
+        &[0x01; 64],
+    )
+    .expect("a setup body");
+    let op = Operation::SofiSetup {
+        setup_body: foreign.encode(),
+        signature: vec![0xA1; 8],
+    };
+    let mut tree = EconomicSmt::new();
+    let built = build_write_set(
+        &op,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &mut tree,
+        &CreditSourceFacts::None,
+        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
+    );
+    assert!(
+        matches!(built, Err(WriteSetError::MalformedVaultOperation { .. })),
+        "a setup writes into its own identity's tree, got {built:?}"
+    );
+}

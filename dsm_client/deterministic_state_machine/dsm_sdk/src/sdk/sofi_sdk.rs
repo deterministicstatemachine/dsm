@@ -46,6 +46,7 @@ use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
 use dsm::sofi::derive;
+use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{validate, Evidence, Invalid, Refusal};
 use dsm::sofi::wire::{
@@ -73,6 +74,9 @@ pub enum BuildError {
     /// `P` is not validly signed, so the fulfillment would name a precommit
     /// storage refuses.
     PrecommitSignature(SignatureError),
+    /// A vault genesis a verifier would refuse — the market policy does not
+    /// authenticate, or its pair is not canonical.
+    Genesis(GenesisError),
 }
 
 impl core::fmt::Display for BuildError {
@@ -86,6 +90,7 @@ impl core::fmt::Display for BuildError {
                 "a verifier refuses this operation with no evidence at all \
                  ({reason:?}); it is not a trade, it is a way to strand one"
             ),
+            Self::Genesis(e) => write!(f, "{e}"),
             Self::PrecommitSignature(e) => write!(
                 f,
                 "the precommit is not validly signed ({e}): P is published and \
@@ -187,21 +192,43 @@ pub fn build_setup(body: &SofiSetupBody) -> Result<Produced, BuildError> {
 /// derive or a root its own state does not produce.
 pub fn build_vault_create(
     preimage: &VaultGenesisPreimage,
-    amount_a: u64,
-    amount_b: u64,
+    market_policy_bytes: &[u8],
 ) -> Result<Produced, BuildError> {
     let vault_id = preimage.vault_id();
+    // THE FUNDING ASSETS ARE DERIVED, NOT TAKEN. A caller that could pass the
+    // two commits could pass the wrong ones, and `genesis_accepted` would
+    // refuse the result — after the owner had signed it. So the producer
+    // resolves them from the SAME authority the verifier uses: the policy the
+    // vault state commits, authenticated by re-addressing its bytes.
+    let derived = dsm::ccb::decode::policy_object_address(
+        dsm::ccb::class::MARKET_POLICY,
+        market_policy_bytes,
+    )
+    .ok_or(BuildError::Genesis(GenesisError::MarketPolicyDoesNotDecode))?;
+    if derived != preimage.state.market_policy {
+        return Err(BuildError::Genesis(
+            GenesisError::MarketPolicyIsNotTheCommittedOne,
+        ));
+    }
+    let market = dsm::ccb::decode::decode_market_policy(market_policy_bytes)
+        .map_err(|_| BuildError::Genesis(GenesisError::MarketPolicyDoesNotDecode))?;
+    let (token_a, token_b) = (*market.token_a(), *market.token_b());
+    if token_a >= token_b {
+        return Err(BuildError::Genesis(GenesisError::TokenPairNotOrdered));
+    }
+    // The amounts are the genesis reserves, not a second pair of arguments
+    // that could disagree with them (P15-12).
     let creation = VaultCreation {
         vault_id,
         genesis_root: dsm::sofi::lineage::genesis_root(&vault_id, &preimage.state)?,
-        amount_a,
-        amount_b,
+        amount_a: preimage.state.reserve_a,
+        amount_b: preimage.state.reserve_b,
     };
     let operation = Operation::SofiVaultCreate {
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
-        funding_a_policy_commit: [0x5C; 32],
-        funding_b_policy_commit: [0x5D; 32],
+        funding_a_policy_commit: token_a,
+        funding_b_policy_commit: token_b,
         signature: Vec::new(),
     };
     Ok(Produced {
@@ -485,6 +512,20 @@ mod tests {
 
     fn d(byte: u8) -> D32 {
         [byte; 32]
+    }
+
+    /// The vault's market policy, and the address it is committed by. Derived
+    /// from the bytes so a fixture cannot commit one market and present
+    /// another.
+    fn market_bytes() -> Vec<u8> {
+        dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41))
+            .unwrap()
+            .encode()
+    }
+
+    fn market_addr() -> D32 {
+        dsm::ccb::decode::policy_object_address(dsm::ccb::class::MARKET_POLICY, &market_bytes())
+            .unwrap()
     }
 
     fn path() -> Vec<D32> {
@@ -816,7 +857,7 @@ mod tests {
             owner_genesis: G,
             owner_device_id: DEV,
             create_position: P_POS,
-            market_policy: d(0x31),
+            market_policy: market_addr(),
             fee_policy: d(0x32),
             release_policy: d(0x33),
             storage_set_id: d(0x77),
@@ -831,7 +872,23 @@ mod tests {
             create_position: P_POS,
             state: state.clone(),
         };
-        let created = build_vault_create(&preimage, 1_000, 2_000).unwrap();
+        let created = build_vault_create(&preimage, &market_bytes()).unwrap();
+        // The funding assets are the authenticated pair, and the amounts are
+        // the genesis reserves — neither is a caller's argument.
+        match &created.operation {
+            Operation::SofiVaultCreate {
+                funding_a_policy_commit,
+                funding_b_policy_commit,
+                creation,
+                ..
+            } => {
+                assert_eq!(*funding_a_policy_commit, d(0x40));
+                assert_eq!(*funding_b_policy_commit, d(0x41));
+                let record = VaultCreation::decode(creation).unwrap();
+                assert_eq!((record.amount_a, record.amount_b), (1_000, 2_000));
+            }
+            _ => panic!("a creation"),
+        }
         // A creation has no protocol object digest of its own, so it signs the
         // operation — and it is the verifier's own rule, byte for byte.
         assert_eq!(
@@ -855,13 +912,13 @@ mod tests {
             "not a bare concatenation of the objects it carries"
         );
         // And the signature the device will check is over exactly those bytes.
-        let signed = Operation::SofiVaultCreate {
-            genesis_preimage: genesis_preimage.clone(),
-            creation: creation.clone(),
-            funding_a_policy_commit: [0x5C; 32],
-            funding_b_policy_commit: [0x5D; 32],
-            signature: sign(created.signs.bytes()),
-        };
+        // Signed by the payload the producer named, on the operation the
+        // producer built — reconstructing it here would be a second copy that
+        // could drift from the one the bytes cover.
+        let signed = created
+            .operation
+            .clone()
+            .with_signature(sign(created.signs.bytes()));
         assert_eq!(
             dsm::sofi::signature::verify_operation(&signed, &keypair().0),
             Ok(())
@@ -876,6 +933,53 @@ mod tests {
             derive::vault_state_leaf_value(&state).unwrap(),
         );
         assert_eq!(decoded.genesis_root, tree.root());
+    }
+
+    /// A PRODUCER CANNOT EMIT FUNDING THE VERIFIER WILL REFUSE, because it
+    /// does not choose it: the pair comes from the same authenticated policy
+    /// `genesis_accepted` resolves. Bytes that are not the committed policy
+    /// stop the build instead of producing an operation the owner would sign
+    /// and a verifier would then reject.
+    #[test]
+    fn a_producer_refuses_a_creation_whose_policy_does_not_authenticate() {
+        let state = VaultStateLeaf {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_POS,
+            market_policy: market_addr(),
+            fee_policy: d(0x32),
+            release_policy: d(0x33),
+            storage_set_id: d(0x77),
+            generation: 0,
+            reserve_a: 1_000,
+            reserve_b: 2_000,
+            status: VAULT_STATUS_ACTIVE,
+        };
+        let preimage = VaultGenesisPreimage {
+            owner_genesis: G,
+            owner_device_id: DEV,
+            create_position: P_POS,
+            state,
+        };
+        // A valid policy — for another market.
+        let other = dsm::ccb::state::MarketPolicy::beta_constant_product(d(0x50), d(0x51))
+            .unwrap()
+            .encode();
+        assert_eq!(
+            build_vault_create(&preimage, &other),
+            Err(BuildError::Genesis(
+                GenesisError::MarketPolicyIsNotTheCommittedOne
+            ))
+        );
+        // Bytes that are not a policy at all.
+        assert_eq!(
+            build_vault_create(&preimage, &[0xAB; 8]),
+            Err(BuildError::Genesis(
+                GenesisError::MarketPolicyIsNotTheCommittedOne
+            ))
+        );
+        // The committed one builds.
+        assert!(build_vault_create(&preimage, &market_bytes()).is_ok());
     }
 
     /// A setup signs `m_setup` — its own object's digest — and NOT the

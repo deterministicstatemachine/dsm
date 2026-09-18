@@ -430,6 +430,7 @@ enum FactsKind {
 /// witnessed. Role for `Transfer` derives from the authenticated local DevID.
 fn semantic_write_set(
     operation: &Operation,
+    local_genesis: &[u8; 32],
     local_devid: &[u8; 32],
 ) -> Result<SemanticWriteSet, WriteSetError> {
     match operation {
@@ -713,9 +714,15 @@ fn semantic_write_set(
                     detail: "a setup body that is not canonical has no write set",
                 }
             })?;
-            if body.device_id() != local_devid {
+            // BOTH coordinates, not just the device. The leaf's KEY is
+            // derived from the authenticated `(G, DevID)` while `h⁰` is
+            // derived from the BODY's — so a body naming a foreign genesis
+            // would place a leaf computed from that foreign identity at this
+            // device's key, and the two would disagree about whose
+            // relationship it is. Binding both is what makes them one claim.
+            if body.genesis() != local_genesis || body.device_id() != local_devid {
                 return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "a setup writes into its own device's tree",
+                    detail: "a setup writes into its own identity's tree",
                 });
             }
             let setup_id = crate::sofi::derive::setup_id(
@@ -749,7 +756,11 @@ fn semantic_write_set(
                     detail: "a creation record that is not canonical has no write set",
                 }
             })?;
-            if preimage.owner_device_id != *local_devid {
+            // Same binding for the creation: `vault_id` derives from the
+            // preimage's owner coordinates, and the debits land at keys
+            // derived from the authenticated ones.
+            if preimage.owner_genesis != *local_genesis || preimage.owner_device_id != *local_devid
+            {
                 return Err(WriteSetError::MalformedVaultOperation {
                     detail: "a creation debits its own owner's balances",
                 });
@@ -858,7 +869,7 @@ pub fn build_write_set(
     context: &EconomicWriteContext,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     let pre_balances = pre_state.balances;
-    let semantic = semantic_write_set(operation, device_id)?;
+    let semantic = semantic_write_set(operation, genesis, device_id)?;
 
     // OPERATION AND CONTEXT MUST AGREE, checked before anything is planned.
     // A settle without bundle context cannot produce the acceptance leaf its
@@ -1610,8 +1621,6 @@ pub fn verify_operation_write_set(
     device_id: &[u8; 32],
     witness: &EconomicTransitionWitness,
 ) -> Result<(), WriteSetError> {
-    let _ = genesis;
-
     // THE TRIPWIRE, ON THE REAL PATH AND BEFORE ANYTHING ELSE.
     //
     // It asks a different question from every check below: not "does this
@@ -1630,7 +1639,7 @@ pub fn verify_operation_write_set(
     )
     .map_err(WriteSetError::Tripwire)?;
 
-    let semantic = semantic_write_set(operation, device_id)?;
+    let semantic = semantic_write_set(operation, genesis, device_id)?;
 
     // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN:
     // vault-reserve leaves exist only in the DLV write sets, and settlement
@@ -2277,12 +2286,10 @@ pub fn verify_operation_write_set(
                     detail: "a creation is exactly two balance debits and one creation record",
                 });
             }
-            for (leg, observed) in [(leg_a, &balances[0]), (leg_b, &balances[1])] {
-                if observed.policy_commit != leg.0 {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "a creation debits the two assets the operation names, in order",
-                    });
-                }
+            // BY ASSET, not by position: a witness's mutations are ordered by
+            // derived key, which has nothing to do with which leg is which.
+            for leg in [leg_a, leg_b] {
+                let observed = expect_one_balance(&balances, leg.0)?;
                 let expected =
                     observed
                         .pre_amount
@@ -2528,7 +2535,7 @@ mod sofi_refusal_tests {
                 EconomicEffect::ClosedWriteSet,
                 "{name}: it does move value under a closed write set"
             );
-            match (&op, semantic_write_set(&op, &[0x22; 32])) {
+            match (&op, semantic_write_set(&op, &[0x11; 32], &[0x22; 32])) {
                 (Operation::SofiFulfill { .. }, Err(e)) => assert_eq!(
                     e,
                     WriteSetError::SofiWriteSetBelongsToTheResolvedPath,

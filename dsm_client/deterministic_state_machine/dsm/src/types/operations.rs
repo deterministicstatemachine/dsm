@@ -2933,6 +2933,34 @@ impl Operation {
                     ticket_index,
                 }
             }
+            // SOFI v8, TAGS 34-36. The SAME defect tag 31 records above, in
+            // the same function: `to_bytes` shipped without its inverse, so
+            // these operations could be encoded and committed and then not
+            // reconstructed. `economic/successor_evidence.rs` decodes the
+            // exact frozen bytes through here during foreign and replay
+            // verification, so a missing arm is not cosmetic — it is a
+            // committed operation no verifier can read back.
+            //
+            // Each arm mirrors its encoder field for field, in order.
+            34 => SofiSetup {
+                setup_body: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            35 => SofiVaultCreate {
+                genesis_preimage: get_bytes(&mut input)?,
+                creation: get_bytes(&mut input)?,
+                // Both funding commits, in the encoder's order. Dropping
+                // either would decode to an operation that debits different
+                // assets than the one whose signature was checked.
+                funding_a_policy_commit: get_arr32(&mut input)?,
+                funding_b_policy_commit: get_arr32(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
+            36 => SofiFulfill {
+                fulfillment_body: get_bytes(&mut input)?,
+                precommit_id: get_bytes(&mut input)?,
+                signature: get_bytes(&mut input)?,
+            },
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
         };
         // Canonical decode requires full byte exhaustion: a valid operation must
