@@ -288,6 +288,20 @@ pub mod class {
     pub const SOFI_VAULT_GENESIS_PREIMAGE: u16 = 0x005A;
     /// `VaultCreation` — the owner's insert-only creation record at `p_create`.
     pub const SOFI_VAULT_CREATION: u16 = 0x005B;
+    /// `SignedSofiObject` — the transport envelope that carries a canonical
+    /// SoFi body together with the trader's signature over it.
+    ///
+    /// The frozen body classes (`SOFI_TRADER_PRECOMMIT_BODY`,
+    /// `SOFI_TRADER_FULFILLMENT_BODY`) encode a body and nothing else, so a
+    /// signed `P` or `F` had no carrier: a member checks "signature + key
+    /// binding" at ingress and any relayer may publish, which means the
+    /// signature has to travel and be stored WITH the body.
+    ///
+    /// **The envelope authenticates a body; it never redefines one.** The
+    /// protocol identity of `P` and `F` stays `H(… ‖ CCB(body))` over the
+    /// canonical body, so a different valid signature encoding over the same
+    /// body is the same object, not a second one.
+    pub const SOFI_SIGNED_OBJECT: u16 = 0x005C;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

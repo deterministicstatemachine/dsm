@@ -261,11 +261,22 @@ pub enum SofiWireError {
     },
     /// An authentication path is not exactly `ECONOMIC_SMT_HEIGHT` deep.
     PathDepth { expected: usize, got: usize },
+    /// `SignedSofiObject` was asked to carry a body class it does not carry.
+    /// Only `P` and `F` are signed objects; `G` has no issuer signature, and a
+    /// setup signs `m_setup` through its own object.
+    UnsupportedSignedBodyClass { body_class: u16 },
 }
 
 impl core::fmt::Display for SofiWireError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::UnsupportedSignedBodyClass { body_class } => {
+                write!(
+                    f,
+                    "class {body_class:#06x} is not a signed SoFi body: only a trader \
+                     pre-commit and a trader fulfillment carry a trader signature"
+                )
+            }
             Self::UnknownSignatureAlg { alg } => {
                 write!(
                     f,

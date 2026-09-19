@@ -1151,6 +1151,79 @@ fn bounds_are_the_ruled_values() {
     );
 }
 
+/// The signed transport envelope, byte for byte, from the field table.
+///
+/// `0x005C` carries a canonical SoFi body and the trader's signature over it.
+/// The layout is fixed here independently of the production encoder:
+/// envelope(class, schema) ‖ body_class ‖ len(body) ‖ body ‖ alg ‖ len(sig) ‖ sig.
+///
+/// The vector also pins the property the envelope exists to NOT have: the
+/// object's identity is `precommit_id` over the BODY, so these envelope bytes
+/// appear nowhere in it.
+#[test]
+fn the_signed_envelope_matches_the_independent_encoder() {
+    use dsm::ccb::class;
+
+    // A stand-in body and signature: this test fixes the ENVELOPE's layout,
+    // and the inner body has its own vectors elsewhere.
+    let body = dsm::sofi::wire::TraderPrecommitBody::new(
+        G,
+        DEV,
+        5,
+        dsm::sofi::wire::ParentClaimRef::SingleRoot {
+            claim_ref: [0x66; 32],
+        },
+        [0x0E; 32],
+        vec![dsm::sofi::wire::PrecommitLeg {
+            vault_id: [0xC1; 32],
+            parent_root: [0x62; 32],
+            setup_ref: [0x55; 32],
+        }],
+        [0xA1; 32],
+        [0x61; 32],
+        [0x77; 32],
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+        &[0x33; 64],
+    )
+    .expect("a well-formed precommit body");
+    let body_bytes = body.encode();
+    let signature = vec![0x44u8; 49_856];
+
+    let produced = dsm::sofi::wire::SignedSofiObject::new(
+        class::SOFI_TRADER_PRECOMMIT_BODY,
+        &body_bytes,
+        dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F,
+        &signature,
+    )
+    .expect("a well-formed envelope")
+    .encode();
+
+    let expected = [
+        indep::env(class::SOFI_SIGNED_OBJECT),
+        indep::u16be(class::SOFI_TRADER_PRECOMMIT_BODY),
+        indep::u32be(body_bytes.len() as u32),
+        body_bytes.clone(),
+        indep::u16be(dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F),
+        indep::u32be(signature.len() as u32),
+        signature.clone(),
+    ]
+    .concat();
+    assert_eq!(produced, expected, "the envelope layout is frozen here");
+
+    // IDENTITY IS THE BODY. The envelope bytes are not in it.
+    let id = dsm::sofi::derive::precommit_id(&body);
+    assert_eq!(
+        id,
+        dsm::sofi::derive::precommit_id(
+            &dsm::sofi::wire::TraderPrecommitBody::decode(&body_bytes).unwrap()
+        )
+    );
+    assert!(
+        !produced.windows(32).any(|w| w == id),
+        "the identity is derived from the body, never carried in the envelope"
+    );
+}
+
 /// Registry collision guard: every `class::` discriminant is unique. A class
 /// allocated on main before this lands shows up here as a duplicate value.
 #[test]
