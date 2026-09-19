@@ -579,6 +579,16 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
         -- K_ful = H(tag || G || DevID || u64_be(q)). Registration is THE
         -- EXERCISE BOUNDARY, and it is established here together with C_q at
         -- K_root(q) in ONE transaction. Never UPDATEd, never DELETEd.
+        -- `FulfillmentRegistered(F)`: THE EXERCISE FACT, and a different
+        -- statement from "this member holds F". Holding is one member's row in
+        -- sofi_fulfillments; this record says an authenticated read of the
+        -- committed set showed a quorum of HOLDERS. Monotone and write-once:
+        -- once exercised, always exercised, so there is no UPDATE and no
+        -- DELETE and the row carries nothing that could be revised.
+        CREATE TABLE IF NOT EXISTS sofi_fulfillment_registrations (
+            fulfillment_id BLOB PRIMARY KEY,
+            holder_count   INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sofi_fulfillments (
             k_ful          BLOB PRIMARY KEY,
             fulfillment_id BLOB NOT NULL,
@@ -3200,6 +3210,43 @@ pub async fn get_sofi_fulfillment(pool: &DBPool, k_ful: &[u8]) -> Result<Option<
             )
             .optional()?;
         Ok(row)
+    })
+    .await
+}
+
+/// Record `FulfillmentRegistered(F)`. MONOTONE: the first write stands, and a
+/// later call with a larger holder count changes nothing — the fact is "a
+/// quorum was observed", not "how many answered most recently".
+pub async fn record_fulfillment_registered(
+    pool: &DBPool,
+    fulfillment_id: &[u8],
+    holder_count: i64,
+) -> Result<()> {
+    let id = fulfillment_id.to_vec();
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        conn.execute(
+            "INSERT OR IGNORE INTO sofi_fulfillment_registrations
+               (fulfillment_id, holder_count) VALUES (?1, ?2)",
+            params![id, holder_count],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Whether this member has recorded the exercise fact for `F`.
+pub async fn is_fulfillment_registered(pool: &DBPool, fulfillment_id: &[u8]) -> Result<bool> {
+    let id = fulfillment_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row: Option<i64> = conn
+            .query_row(
+                "SELECT holder_count FROM sofi_fulfillment_registrations WHERE fulfillment_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.is_some())
     })
     .await
 }
