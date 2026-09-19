@@ -574,6 +574,16 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
         -- over the same body is the SAME object and re-storing it is
         -- idempotent, not a contested cell. Neither occupies an economic
         -- position and neither installs anything at K_root.
+        -- The fulfillment register: the write-once cell ONE identity's
+        -- fulfillment occupies at ONE position, keyed by
+        -- K_ful = H(tag || G || DevID || u64_be(q)). Registration is THE
+        -- EXERCISE BOUNDARY, and it is established here together with C_q at
+        -- K_root(q) in ONE transaction. Never UPDATEd, never DELETEd.
+        CREATE TABLE IF NOT EXISTS sofi_fulfillments (
+            k_ful          BLOB PRIMARY KEY,
+            fulfillment_id BLOB NOT NULL,
+            envelope_bytes BLOB NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sofi_precommits (
             precommit_id   BLOB PRIMARY KEY,
             envelope_bytes BLOB NOT NULL
@@ -3047,6 +3057,145 @@ pub async fn get_sofi_policy_fulfillment(
             .query_row(
                 "SELECT body_bytes FROM sofi_policy_fulfillments WHERE policy_fulfillment_id = ?1",
                 params![id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// What registering a fulfillment decided.
+///
+/// `Registered` is THE EXERCISE BOUNDARY. `PositionTaken` means some other
+/// fulfillment already holds `q`, and `RootCellTaken` means the successor's
+/// root cell already holds something that is not this `C_q` — F2's mutual
+/// exclusion, refused rather than reconciled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FulfillmentRegistration {
+    Registered,
+    AlreadyRegistered,
+    PositionTaken { held_fulfillment_id: Vec<u8> },
+    RootCellTaken { held_digest: Vec<u8> },
+}
+
+/// Register `F` at `K_ful(q)` and install `C_q` at `K_root(q)` in ONE durable
+/// transaction.
+///
+/// **Not two sequential writes.** A crash between them would leave either an
+/// `F` registered with no `C_q` — so every descendant fence reads an empty
+/// cell for a position that IS exercised — or a `C_q` with no `F`, a
+/// conditional position nothing can ever resolve. Both are unrecoverable, and
+/// neither is representable here: every refusal below returns before the
+/// commit, so the first insert is rolled back with the second.
+///
+/// `conditional_digest` is the fulfillment id, because F3 references a
+/// conditional cell as `ConditionalClaimId(FulfillmentId)` — a conditional
+/// claim is identified by the fulfillment that installed it, not by a digest
+/// over its bytes.
+#[allow(clippy::too_many_arguments)]
+pub async fn register_fulfillment_with_claim(
+    pool: &DBPool,
+    k_ful: &[u8],
+    fulfillment_id: &[u8],
+    envelope_bytes: &[u8],
+    k_root: &[u8],
+    claim_bytes: &[u8],
+    storage_set_id: &[u8],
+) -> Result<FulfillmentRegistration> {
+    let (k_ful, fid, env) = (
+        k_ful.to_vec(),
+        fulfillment_id.to_vec(),
+        envelope_bytes.to_vec(),
+    );
+    let (k_root, claim, set) = (
+        k_root.to_vec(),
+        claim_bytes.to_vec(),
+        storage_set_id.to_vec(),
+    );
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+
+        let inserted_ful = tx.execute(
+            "INSERT OR IGNORE INTO sofi_fulfillments (k_ful, fulfillment_id, envelope_bytes)
+             VALUES (?1, ?2, ?3)",
+            params![k_ful, fid, env],
+        )?;
+        if inserted_ful == 0 {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT fulfillment_id FROM sofi_fulfillments WHERE k_ful = ?1",
+                params![k_ful],
+                |row| row.get(0),
+            )?;
+            // Roll back rather than commit a no-op: nothing here should leave
+            // a transaction open on a refusal path.
+            drop(tx);
+            return Ok(if held == fid {
+                FulfillmentRegistration::AlreadyRegistered
+            } else {
+                FulfillmentRegistration::PositionTaken {
+                    held_fulfillment_id: held,
+                }
+            });
+        }
+
+        // `C_q` at the SUCCESSOR position, in the same transaction. The
+        // claimant key column is empty on purpose: a conditional claim carries
+        // no key, which is exactly why it can never be posted by a caller.
+        let inserted_claim = tx.execute(
+            "INSERT OR IGNORE INTO economic_root_claims
+               (k_root, claim_bytes, claim_digest, claimant_public_key, storage_set_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![k_root, claim, fid, Vec::<u8>::new(), set],
+        )?;
+        if inserted_claim == 0 {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT claim_digest FROM economic_root_claims WHERE k_root = ?1",
+                params![k_root],
+                |row| row.get(0),
+            )?;
+            if held != fid {
+                // THE ATOMICITY THAT MATTERS: drop without commit, so the
+                // fulfillment row inserted above does not survive.
+                drop(tx);
+                return Ok(FulfillmentRegistration::RootCellTaken { held_digest: held });
+            }
+        }
+        tx.commit()?;
+        Ok(FulfillmentRegistration::Registered)
+    })
+    .await
+}
+
+/// Every `G` this member holds for one `P`, so the canonical set can be
+/// reconstructed from STORED witnesses rather than asserted.
+pub async fn list_sofi_policy_fulfillments(
+    pool: &DBPool,
+    precommit_id: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let pid = precommit_id.to_vec();
+    with_conn(pool, move |conn| {
+        let mut stmt = conn
+            .prepare("SELECT body_bytes FROM sofi_policy_fulfillments WHERE precommit_id = ?1")?;
+        let rows = stmt.query_map(params![pid], |r| r.get::<_, Vec<u8>>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// The registered `F` at a position, if this member holds one.
+pub async fn get_sofi_fulfillment(pool: &DBPool, k_ful: &[u8]) -> Result<Option<Vec<u8>>> {
+    let k = k_ful.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT envelope_bytes FROM sofi_fulfillments WHERE k_ful = ?1",
+                params![k],
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()?;
