@@ -2806,6 +2806,15 @@ pub async fn verify_bytecommit_chain_empty(
 /// cannot: the address is a function of the object, so everyone storing at it
 /// is storing the same object. An alternate valid signature envelope over the
 /// same body is that same object, and re-storing it acks.
+///
+/// **This type is only sound for a key that is a hash of the value, and it was
+/// once wrongly used for one that is not.** `sofi_successor_cells` is keyed by
+/// coordinates and borrowed this enum, which made contention unrepresentable
+/// and told the loser `already-held` while the cell held someone else's `E`.
+/// A coordinate-keyed register needs an outcome with a contested arm and a
+/// read-back comparison — see `SuccessorCellPutOutcome` — and must be enrolled
+/// in `write_once_properties`, which states that discipline once and would
+/// have caught it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectPutOutcome {
     Stored,
@@ -3046,13 +3055,32 @@ pub async fn get_sofi_fulfillment_by_id(
     Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
 }
 
-/// Write a successor cell. Write-once; an identical re-write acks.
+/// What writing a successor cell decided. See the SQLite twin for why this
+/// register cannot borrow `ObjectPutOutcome`: a successor cell is keyed by
+/// COORDINATES that omit everything distinguishing one operation from
+/// another, so one key can be reached with two different `E`, and equality is
+/// on `E` alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuccessorCellPutOutcome {
+    Stored,
+    /// The cell already holds exactly this `E`. The same fact, restated.
+    AlreadyHeld,
+    /// The cell holds a DIFFERENT `E`: another operation reached this leg
+    /// first, and this one did not land.
+    Contested {
+        held_e: Vec<u8>,
+    },
+}
+
+/// Write a successor cell. Write-once, and a conflict is COMPARED — see the
+/// SQLite twin for why this register cannot borrow the content-addressed
+/// outcome.
 pub async fn put_sofi_successor_cell(
     pool: &Pool,
     k_cell: &[u8],
     fulfillment_id: &[u8],
     e_bytes: &[u8],
-) -> Result<ObjectPutOutcome> {
+) -> Result<SuccessorCellPutOutcome> {
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     let n = tx
@@ -3062,12 +3090,25 @@ pub async fn put_sofi_successor_cell(
             &[&k_cell, &fulfillment_id, &e_bytes],
         )
         .await?;
-    tx.commit().await?;
-    Ok(if n == 1 {
-        ObjectPutOutcome::Stored
+    let outcome = if n == 1 {
+        SuccessorCellPutOutcome::Stored
     } else {
-        ObjectPutOutcome::AlreadyHeld
-    })
+        // READ WHAT IS ACTUALLY HELD, in the same transaction.
+        let row = tx
+            .query_one(
+                "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = $1",
+                &[&k_cell],
+            )
+            .await?;
+        let held: Vec<u8> = row.get(0);
+        if held == e_bytes {
+            SuccessorCellPutOutcome::AlreadyHeld
+        } else {
+            SuccessorCellPutOutcome::Contested { held_e: held }
+        }
+    };
+    tx.commit().await?;
+    Ok(outcome)
 }
 
 /// The value a successor cell holds, if any.

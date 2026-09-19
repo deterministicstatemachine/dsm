@@ -354,3 +354,160 @@ async fn a_cell_for_an_unheld_fulfillment_is_refused() {
     let (status, reason) = post(&n, &path, E.to_vec()).await;
     assert_eq!((status, reason.as_str()), (422, "fulfillment-not-held"));
 }
+
+// ── two traders, one DLV leg ────────────────────────────────────────────────
+//
+// SoFi is deliberately non-locking: a policy-fulfillment witness never
+// prevents another consumption of the same DLV parent. So two UNRELATED
+// traders can both target `(VAULT, PARENT_ROOT)` and both register their own
+// fulfillment at their OWN position — and their successor cells collide,
+// because `K^(a)` is derived from the leg and the attempt and from nothing
+// that distinguishes the two operations.
+
+const G2: [u8; 32] = [0x31; 32];
+const DEV2: [u8; 32] = [0x32; 32];
+/// A second trader's `E`. It differs because `E` commits the trader's own
+/// core, which is exactly the field `K^(a)` omits.
+const E2: [u8; 32] = [0x0F; 32];
+
+async fn seed_parent_claim_for(
+    node: &Node,
+    g: [u8; 32],
+    dev: [u8; 32],
+) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+    let (pk, sk) = generate_sphincs_keypair().expect("keys");
+    let body = EconomicRootClaimBody {
+        trader_genesis: g,
+        trader_devid: dev,
+        economic_position: POS,
+        post_economic_root: [0x77; 32],
+        admission_manifest_addr: [0x78; 32],
+        root_register_storage_set_id: node.set_id,
+        signature_alg: sigalg::SPHINCS_PLUS_SPX256F,
+        claimant_public_key: pk.clone(),
+    };
+    let envelope = sign_economic_root_claim(&body, &sk).expect("sign claim");
+    let digest = economic_root_claim_envelope_digest(&envelope);
+    let k_root = economic_root_register_key(&g, &dev, POS);
+    db::claim_economic_root(&node.pool, &k_root, &envelope, &digest, &pk, &node.set_id)
+        .await
+        .expect("seed the parent cell");
+    (digest, pk, sk)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn precommit_for(
+    g: [u8; 32],
+    dev: [u8; 32],
+    e: [u8; 32],
+    claim_ref: [u8; 32],
+    set_id: [u8; 32],
+    pk: &[u8],
+) -> TraderPrecommitBody {
+    TraderPrecommitBody::new(
+        g,
+        dev,
+        POS,
+        ParentClaimRef::SingleRoot { claim_ref },
+        e,
+        // THE SAME DLV LEG as the first trader's.
+        vec![PrecommitLeg {
+            vault_id: VAULT,
+            parent_root: PARENT_ROOT,
+            setup_ref: [0x55; 32],
+        }],
+        [0xA1; 32],
+        [0x61; 32],
+        set_id,
+        sigalg::SPHINCS_PLUS_SPX256F,
+        pk,
+    )
+    .expect("a well-formed precommit")
+}
+
+/// Accept and register a whole operation for one trader, returning its cell
+/// path and the `E` it commits.
+async fn operation_for(n: &Node, g: [u8; 32], dev: [u8; 32], e: [u8; 32]) -> (String, [u8; 32]) {
+    let (claim_ref, pk, sk) = seed_parent_claim_for(n, g, dev).await;
+    let p = precommit_for(g, dev, e, claim_ref, n.set_id, &pk);
+    assert_eq!(
+        post(n, "/api/v2/sofi/precommit", envelope_for(&p, &sk))
+            .await
+            .0,
+        200
+    );
+    let witness = DlvPolicyFulfillmentBody {
+        precommit_id: derive::precommit_id(&p),
+        external_commitment: e,
+        vault_id: VAULT,
+        parent_root: PARENT_ROOT,
+        shadow_core: SHADOW,
+    };
+    assert_eq!(
+        post(n, "/api/v2/sofi/policy-fulfillment", witness.encode())
+            .await
+            .0,
+        200
+    );
+    let f = fulfillment_for(&p, &pk, 0);
+    assert_eq!(
+        post(n, "/api/v2/sofi/fulfillment", f_envelope(&f, &sk))
+            .await
+            .1,
+        "registered"
+    );
+    let fid = derive::fulfillment_id(&f);
+    db::record_fulfillment_registered(&n.pool, &fid, 3)
+        .await
+        .expect("record the exercise fact");
+    (
+        format!("/api/v2/sofi/cell/{}/{}", b32(&fid), b32(&VAULT)),
+        e,
+    )
+}
+
+/// THE DEFECT THIS FIXES. Two registered fulfillments from DIFFERENT traders
+/// reach one `K^(a)` with different `E`. The first lands; the second is
+/// CONTENTION and must be told so. Before the fix the loser received
+/// HTTP 200 `already-held` — an affirmative claim that the cell holds the `E`
+/// it just posted — while the cell held the winner's.
+#[tokio::test]
+async fn two_operations_on_one_leg_contend_and_the_loser_is_told() {
+    let n = node().await;
+    let (path_a, e_a) = operation_for(&n, G, DEV, E).await;
+    let (path_b, e_b) = operation_for(&n, G2, DEV2, E2).await;
+    assert_ne!(e_a, e_b, "the two operations commit different E");
+
+    // Both derive the SAME cell key: the leg and attempt are identical.
+    let k_cell = derive::successor_attempt_key(&VAULT, &PARENT_ROOT, 0);
+
+    assert_eq!(
+        post(&n, &path_a, e_a.to_vec()).await,
+        (200, "stored".to_string())
+    );
+    let (status, reason) = post(&n, &path_b, e_b.to_vec()).await;
+    assert_eq!(
+        (status, reason.as_str()),
+        (409, "cell-taken"),
+        "the loser must learn it did not land"
+    );
+
+    assert_eq!(
+        db::get_sofi_successor_cell(&n.pool, &k_cell)
+            .await
+            .expect("read")
+            .expect("held"),
+        e_a.to_vec(),
+        "the cell still holds the FIRST writer's E"
+    );
+}
+
+/// The idempotent case is unaffected: re-posting the same `E` at the same cell
+/// still acks, so an honest relayer repeating a write is not told it lost.
+#[tokio::test]
+async fn re_posting_the_same_e_still_acks() {
+    let n = node().await;
+    let (path, e) = operation_for(&n, G, DEV, E).await;
+    assert_eq!(post(&n, &path, e.to_vec()).await.1, "stored");
+    assert_eq!(post(&n, &path, e.to_vec()).await.1, "already-held");
+}
