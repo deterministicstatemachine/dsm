@@ -46,6 +46,8 @@ use axum::{
 };
 use std::sync::Arc;
 
+pub mod registration;
+
 use crate::{db, AppState};
 use dsm::ccb::class;
 use dsm::economic::claim_envelope::{
@@ -78,6 +80,10 @@ pub fn create_read_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v2/sofi/precommit/{id}", get(get_precommit))
         .route("/api/v2/sofi/fulfillment/{k_ful}", get(get_fulfillment))
         .route(
+            "/api/v2/sofi/fulfillment/{k_ful}/registration",
+            get(get_registration),
+        )
+        .route(
             "/api/v2/sofi/policy-fulfillment/{id}",
             get(get_policy_fulfillment),
         )
@@ -88,6 +94,10 @@ pub fn create_write_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/sofi/precommit", post(post_precommit))
         .route("/api/v2/sofi/fulfillment", post(post_fulfillment))
+        .route(
+            "/api/v2/sofi/fulfillment/{k_ful}/registration",
+            post(post_registration),
+        )
         .route(
             "/api/v2/sofi/policy-fulfillment",
             post(post_policy_fulfillment),
@@ -432,6 +442,112 @@ pub async fn get_fulfillment(
     };
     match db::get_sofi_fulfillment(&state.db_pool, &k).await {
         Ok(found) => serve(found).await,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Ask this member to establish `FulfillmentRegistered(F)` by READING the
+/// committed set.
+///
+/// **It takes no account of who holds what from the caller.** A caller able to
+/// assert "three members hold this" could manufacture the exercise fact for a
+/// fulfillment nobody registered, and the record is monotone, so it could
+/// never be taken back. The member reads; the caller only asks it to look.
+///
+/// **Today it can only read itself,** so it declines at a quorum of three and
+/// reports the count it actually observed. The peer client arrives in E2-5 and
+/// supplies the other answers to this same decision; nothing about the rule
+/// changes when it does, which is why the rule is here rather than there.
+pub async fn post_registration(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(k_ful_b32): Path<String>,
+) -> Response {
+    let Some(k_ful) = text_id::decode_base32_crockford(&k_ful_b32).filter(|v| v.len() == 32) else {
+        return outcome(StatusCode::BAD_REQUEST, "malformed");
+    };
+    let Some(set) = state.storage_set.as_ref() else {
+        return outcome(StatusCode::SERVICE_UNAVAILABLE, "no-storage-set");
+    };
+    // This member's own holding, which is ONE answer and not a quorum.
+    let held = match db::get_sofi_fulfillment(&state.db_pool, &k_ful).await {
+        Ok(Some(envelope)) => envelope,
+        Ok(None) => return outcome(StatusCode::NOT_FOUND, "not-held-here"),
+        Err(_) => return outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    };
+    let Ok(env) = SignedSofiObject::decode(&held) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-fulfillment-does-not-decode",
+        );
+    };
+    let Ok(fulfillment) = TraderFulfillmentBody::decode(env.body_ccb()) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-fulfillment-does-not-decode",
+        );
+    };
+    let fid = derive::fulfillment_id(&fulfillment);
+
+    let mut answers = Vec::new();
+    // Identify OURSELVES in the committed set by the incarnation we serve —
+    // the same axis the echo rule counts on, and the one this node's database
+    // actually holds.
+    if let Some((id, inc)) = set
+        .members
+        .iter()
+        .find(|(_, inc)| *inc == set.own_incarnation)
+        .cloned()
+    {
+        answers.push(registration::HolderAnswer {
+            asked: dsm_sdk::sdk::storage_set::StorageMember {
+                member_id: id.clone(),
+                register_incarnation_id: inc,
+                endpoint: String::new(),
+            },
+            echoed: dsm_sdk::sdk::storage_node_sdk::MemberEcho {
+                node_id: Some(id),
+                register_incarnation: Some(inc),
+            },
+            holds: Some(fid),
+        });
+    }
+
+    if !registration::holders_establish_registration(&answers, &fid, registration::HOLDER_QUORUM) {
+        let mut resp = outcome(StatusCode::CONFLICT, "holders-below-quorum");
+        if let Ok(v) = HeaderValue::from_str(&answers.len().to_string()) {
+            resp.headers_mut().insert("x-dsm-holders", v);
+        }
+        return resp;
+    }
+    match db::record_fulfillment_registered(&state.db_pool, &fid, answers.len() as i64).await {
+        Ok(()) => outcome(StatusCode::OK, "registered"),
+        Err(_) => outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    }
+}
+
+/// Whether this member has recorded the exercise fact for the `F` at this
+/// position. A member that HOLDS `F` but has not established a quorum answers
+/// 404 here — which is the whole distinction.
+pub async fn get_registration(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(k_ful_b32): Path<String>,
+) -> Response {
+    let Some(k_ful) = text_id::decode_base32_crockford(&k_ful_b32).filter(|v| v.len() == 32) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Ok(Some(held)) = db::get_sofi_fulfillment(&state.db_pool, &k_ful).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (Ok(env),) = (SignedSofiObject::decode(&held),) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(fulfillment) = TraderFulfillmentBody::decode(env.body_ccb()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let fid = derive::fulfillment_id(&fulfillment);
+    match db::is_fulfillment_registered(&state.db_pool, &fid).await {
+        Ok(true) => (StatusCode::OK, fid.to_vec()).into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
