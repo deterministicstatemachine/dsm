@@ -168,10 +168,23 @@ pub enum PredecessorClaim {
     ConditionalUnresolved,
     /// A conditional claim that resolved and selected a root.
     ConditionalResolved { selected_root: D32 },
-    /// A conditional claim that resolved Invalid: no root was selected, and
-    /// none ever will be.
-    ConditionalTerminal,
 }
+
+// THERE IS NO TERMINAL ARM, AND ITS ABSENCE IS THE RULE.
+//
+// A SoFi resolution that ends Invalid selects NO economic root, so it is never
+// admitted: it produces no `AdmittedEconomicPosition`, and therefore no
+// `PredecessorClaim` describes it. A terminal arm here would model something
+// this type cannot mean — "an admitted economic predecessor that has no root"
+// — and `descendant_fence` would then be refusing a value nothing could ever
+// hand it.
+//
+// The boundary is proven, not asserted: see
+// `a_terminal_resolution_never_becomes_an_admitted_position`.
+//
+// If a terminal outcome ever needs to be persisted for recovery, diagnostics
+// or resolution history, it belongs in the RESOLUTION domain, not in the
+// admitted economic lineage.
 
 /// Why a descendant may not be built on this predecessor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,8 +192,6 @@ pub enum FenceError {
     /// The predecessor is conditional and undecided. A descendant built now
     /// would be built on a root the lineage has not chosen.
     PredecessorIsUnresolved,
-    /// The predecessor resolved Invalid: the lineage ends there.
-    PredecessorIsTerminal,
     /// The descendant is built on a root the predecessor did not select.
     PreRootIsNotTheSelectedRoot { selected: D32, descendant_pre: D32 },
 }
@@ -193,12 +204,6 @@ impl core::fmt::Display for FenceError {
                 "the claim at the predecessor position is conditional and has not \
                  resolved: it commits two roots and has selected neither"
             ),
-            Self::PredecessorIsTerminal => {
-                write!(
-                    f,
-                    "the predecessor resolved Invalid: the lineage ends there"
-                )
-            }
             Self::PreRootIsNotTheSelectedRoot { .. } => write!(
                 f,
                 "the descendant is built on a root the predecessor did not select"
@@ -219,13 +224,23 @@ impl std::error::Error for FenceError {}
 /// descendant admitted on that basis would be built on a root the lineage had
 /// not chosen, and half of the time it is the wrong one.
 ///
-/// **This is the predicate, not yet the fence.** It decides a claim correctly
-/// and refuses one it cannot, but no descendant admission path calls it: the
-/// registered-claim kind is still `SingleRoot`-only, so there is nothing that
-/// hands it a `PredecessorClaim::Conditional` in production. E1c introduces
-/// `RegisteredEconomicClaim::ConditionalSofi(C_q)` and wires this into every
-/// descendant admission path. Until then the rule is implemented and proven,
-/// and it is not enforced.
+/// **Wired, and deliberately inert.** Both paths that create the next local
+/// economic position cross it — the advance that stages an admission plan and
+/// the transaction that makes local acceptance durable — and
+/// `ci/admitted_predecessor_readers_fenced.sh` fails the build if a third
+/// descendant-producing path appears without it.
+///
+/// It nevertheless cannot fire today, and that is a property of the WRITER,
+/// not of this rule: `record_admitted_with_conn` records `claim_kind = 0`
+/// unconditionally because F ingress is dark, so `predecessor_claim()` can
+/// only ever answer `SingleRoot`. Deleting the calls therefore turns no test
+/// red, which is why the gate is static rather than a runtime mutation.
+///
+/// E2/E3 owns production of conditional admitted rows and makes this live when
+/// that lifecycle lands. The invariant is installed ahead of its producer on
+/// purpose: a descendant path added before then would be bypassing a fence
+/// nothing could yet catch, and would become a live hole the day the writer
+/// arrives.
 pub fn descendant_fence(
     predecessor: PredecessorClaim,
     descendant_pre_root: &D32,
@@ -233,7 +248,6 @@ pub fn descendant_fence(
     match predecessor {
         PredecessorClaim::SingleRoot => Ok(()),
         PredecessorClaim::ConditionalUnresolved => Err(FenceError::PredecessorIsUnresolved),
-        PredecessorClaim::ConditionalTerminal => Err(FenceError::PredecessorIsTerminal),
         PredecessorClaim::ConditionalResolved { selected_root } => {
             if selected_root == *descendant_pre_root {
                 Ok(())
@@ -1250,12 +1264,61 @@ mod tests {
         );
     }
 
+    /// TERMINAL IS NOT A PREDECESSOR STATE — the boundary that replaces the
+    /// old fabricated `ConditionalTerminal` assertion.
+    ///
+    /// That test built a value no production path could construct and checked
+    /// the fence refused it, which proved only that the arm existed. The real
+    /// rule is upstream: a resolution ending Invalid selects NO root, so
+    /// `advance_resolved` returns `LineageIsTerminal` and yields no
+    /// `ValidatedEconomicRoot`. With no root there is nothing to record — every
+    /// `AdmittedEconomicPosition` arm carries either a selected root or the two
+    /// a route committed — so no `PredecessorClaim` ever describes a terminal
+    /// position and the fence is never asked about one.
     #[test]
-    fn a_terminal_predecessor_ends_the_lineage_and_an_ordinary_one_does_not_fence() {
+    fn a_terminal_resolution_never_becomes_an_admitted_position() {
+        let pre = d(0x70);
+        let p = precommit(pre, d(0xA1));
+        let f = fulfillment(&p);
+        // 1. Terminal yields no validated root, so the chain stops here.
         assert_eq!(
-            descendant_fence(PredecessorClaim::ConditionalTerminal, &d(0xA0)),
-            Err(FenceError::PredecessorIsTerminal)
+            advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), Resolution::Invalid),
+            Err(AdvanceError::LineageIsTerminal)
         );
+
+        // 2. And no admitted shape could carry one if it did. Exhaustive on
+        //    purpose: a new `AdmittedEconomicPosition` arm fails to compile
+        //    HERE, forcing a ruling on whether it may be a predecessor.
+        use crate::economic::lineage::AdmittedEconomicPosition;
+        let shapes = [
+            AdmittedEconomicPosition::SingleRoot {
+                economic_position: 4,
+                economic_root: d(0xA0),
+            },
+            AdmittedEconomicPosition::ResolvedSofi {
+                economic_position: 4,
+                selected_root: d(0xA0),
+                fulfillment_id: d(0xF1),
+            },
+            AdmittedEconomicPosition::UnresolvedSofi {
+                economic_position: 4,
+                fulfillment_id: d(0xF1),
+                realize_root: d(0xA1),
+                void_root: d(0xA2),
+            },
+        ];
+        for shape in shapes {
+            match shape {
+                AdmittedEconomicPosition::SingleRoot { .. }
+                | AdmittedEconomicPosition::ResolvedSofi { .. }
+                | AdmittedEconomicPosition::UnresolvedSofi { .. } => {}
+            }
+            // Every shape maps to a claim the fence can decide — none is
+            // terminal, and none needs a terminal arm to be decided.
+            let _ = descendant_fence(shape.predecessor_claim(), &d(0xA0));
+        }
+
+        // 3. The ordinary predecessor still does not fence.
         assert_eq!(
             descendant_fence(PredecessorClaim::SingleRoot, &d(0xA0)),
             Ok(())
