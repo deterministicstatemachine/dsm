@@ -885,6 +885,16 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 -- over the same body is the SAME object and re-storing it is
                 -- idempotent, not a contested cell. Neither occupies an economic
                 -- position and neither installs anything at K_root.
+                -- The fulfillment register: the write-once cell ONE identity's
+                -- fulfillment occupies at ONE position, keyed by
+                -- K_ful = H(tag || G || DevID || u64_be(q)). Registration is THE
+                -- EXERCISE BOUNDARY, and it is established here together with C_q at
+                -- K_root(q) in ONE transaction. Never UPDATEd, never DELETEd.
+                CREATE TABLE IF NOT EXISTS sofi_fulfillments (
+                    k_ful          BYTEA PRIMARY KEY,
+                    fulfillment_id BYTEA NOT NULL,
+                    envelope_bytes BYTEA NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sofi_precommits (
                     precommit_id   BYTEA PRIMARY KEY,
                     envelope_bytes BYTEA NOT NULL
@@ -2854,6 +2864,118 @@ pub async fn get_sofi_policy_fulfillment(
         .query_opt(
             "SELECT body_bytes FROM sofi_policy_fulfillments WHERE policy_fulfillment_id = $1",
             &[&policy_fulfillment_id],
+        )
+        .await?;
+    Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
+}
+
+/// What registering a fulfillment decided.
+///
+/// `Registered` is THE EXERCISE BOUNDARY. `PositionTaken` means some other
+/// fulfillment already holds `q`, and `RootCellTaken` means the successor's
+/// root cell already holds something that is not this `C_q` — F2's mutual
+/// exclusion, refused rather than reconciled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FulfillmentRegistration {
+    Registered,
+    AlreadyRegistered,
+    PositionTaken { held_fulfillment_id: Vec<u8> },
+    RootCellTaken { held_digest: Vec<u8> },
+}
+
+/// Register `F` at `K_ful(q)` and install `C_q` at `K_root(q)` in ONE durable
+/// transaction. See the SQLite twin for why this is not two writes.
+#[allow(clippy::too_many_arguments)]
+pub async fn register_fulfillment_with_claim(
+    pool: &Pool,
+    k_ful: &[u8],
+    fulfillment_id: &[u8],
+    envelope_bytes: &[u8],
+    k_root: &[u8],
+    claim_bytes: &[u8],
+    storage_set_id: &[u8],
+) -> Result<FulfillmentRegistration> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+
+    let n = tx
+        .execute(
+            "INSERT INTO sofi_fulfillments (k_ful, fulfillment_id, envelope_bytes)
+             VALUES ($1, $2, $3) ON CONFLICT (k_ful) DO NOTHING",
+            &[&k_ful, &fulfillment_id, &envelope_bytes],
+        )
+        .await?;
+    if n == 0 {
+        let row = tx
+            .query_one(
+                "SELECT fulfillment_id FROM sofi_fulfillments WHERE k_ful = $1",
+                &[&k_ful],
+            )
+            .await?;
+        let held: Vec<u8> = row.get(0);
+        return Ok(if held == fulfillment_id {
+            FulfillmentRegistration::AlreadyRegistered
+        } else {
+            FulfillmentRegistration::PositionTaken {
+                held_fulfillment_id: held,
+            }
+        });
+    }
+
+    let empty: Vec<u8> = Vec::new();
+    let n = tx
+        .execute(
+            "INSERT INTO economic_root_claims
+               (k_root, claim_bytes, claim_digest, claimant_public_key, storage_set_id)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (k_root) DO NOTHING",
+            &[
+                &k_root,
+                &claim_bytes,
+                &fulfillment_id,
+                &empty,
+                &storage_set_id,
+            ],
+        )
+        .await?;
+    if n == 0 {
+        let row = tx
+            .query_one(
+                "SELECT claim_digest FROM economic_root_claims WHERE k_root = $1",
+                &[&k_root],
+            )
+            .await?;
+        let held: Vec<u8> = row.get(0);
+        if held != fulfillment_id {
+            // Dropped without commit: the fulfillment row above does not survive.
+            return Ok(FulfillmentRegistration::RootCellTaken { held_digest: held });
+        }
+    }
+    tx.commit().await?;
+    Ok(FulfillmentRegistration::Registered)
+}
+
+/// Every `G` this member holds for one `P`.
+pub async fn list_sofi_policy_fulfillments(
+    pool: &Pool,
+    precommit_id: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT body_bytes FROM sofi_policy_fulfillments WHERE precommit_id = $1",
+            &[&precommit_id],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|r| r.get::<_, Vec<u8>>(0)).collect())
+}
+
+/// The registered `F` at a position, if this member holds one.
+pub async fn get_sofi_fulfillment(pool: &Pool, k_ful: &[u8]) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT envelope_bytes FROM sofi_fulfillments WHERE k_ful = $1",
+            &[&k_ful],
         )
         .await?;
     Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
