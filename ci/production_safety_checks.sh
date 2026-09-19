@@ -60,6 +60,11 @@ bash ci/peer_debit_lineage_authoritative.sh
 # live hole the day that writer lands. Only a static check holds this.
 bash ci/admitted_predecessor_readers_fenced.sh
 
+# `C_q` is derived by the member that accepts `F`, never posted. The endpoint
+# refuses it today only because the single-root decoder cannot parse it, and
+# E2 is about to make that endpoint handle every claim kind.
+bash ci/root_register_refuses_posted_cq.sh
+
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
 cd tla

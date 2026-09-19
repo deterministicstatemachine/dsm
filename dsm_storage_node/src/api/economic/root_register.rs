@@ -69,6 +69,16 @@ fn outcome(status: StatusCode, outcome: &'static str) -> Response {
 }
 
 /// Write-once root registration.
+/// Whether these bytes are a conditional SoFi resolution claim `C_q`, by CLASS.
+///
+/// The class is the first two bytes of the canonical encoding, which is how
+/// `decode_registered_economic_claim` dispatches. Peeking here rather than
+/// decoding keeps the refusal ahead of every other step.
+fn is_conditional_claim_class(body: &[u8]) -> bool {
+    body.len() >= 2
+        && u16::from_be_bytes([body[0], body[1]]) == dsm::ccb::class::SOFI_RESOLUTION_CLAIM
+}
+
 pub async fn post_claim(
     Extension(state): Extension<Arc<AppState>>,
     Extension(caller): Extension<DeviceContext>,
@@ -76,6 +86,34 @@ pub async fn post_claim(
 ) -> Response {
     if body.is_empty() || body.len() > MAX_CLAIM_BYTES {
         return outcome(StatusCode::BAD_REQUEST, "malformed");
+    }
+    // `C_q` IS MEMBER-DERIVED AND NEVER POSTED. A conditional claim is written
+    // only by the transaction that accepts `F`, which derives it from (P, F);
+    // `F`'s own signature is the attribution.
+    //
+    // This refusal is stated rather than inherited. Today the single-root
+    // decoder below happens to reject these bytes as "malformed", which is the
+    // right outcome for the wrong reason — and E2's own task list says to make
+    // this endpoint handle "every claim kind". Swapping in
+    // `decode_registered_economic_claim` is the obvious way to do that, and it
+    // would open the door, because:
+    //
+    //   - `SofiResolutionClaim` carries SIX fields and neither a signature nor
+    //     a claimant public key, so `verify_claim_attribution` is not merely
+    //     absent for it, it is INAPPLICABLE — there is no key to compare with
+    //     the caller's;
+    //   - `K_root` is publicly derivable, which is exactly why the attribution
+    //     below is two-part (see the note there);
+    //   - the cell is write-once, so the victim can never place their real
+    //     claim at that position;
+    //   - the fabricated conditional names no real `F`, so it never resolves,
+    //     and the descendant fence then refuses every descendant forever.
+    //
+    // That is a permanent, unrecoverable denial of an arbitrary trader's
+    // economic position by any authenticated caller. `ci/root_register_refuses_posted_cq.sh`
+    // fails the build if this refusal disappears.
+    if is_conditional_claim_class(&body) {
+        return outcome(StatusCode::FORBIDDEN, "conditional-claim-is-member-derived");
     }
     let verified = match decode_and_verify_economic_root_claim(&body) {
         Ok(v) => v,
@@ -395,5 +433,45 @@ mod tests {
             expected.as_str()
         );
         assert!(r.headers().contains_key(CLAIM_DIGEST_HEADER));
+    }
+}
+
+#[cfg(test)]
+mod conditional_class_tests {
+    use super::is_conditional_claim_class;
+    use dsm::sofi::wire::SofiResolutionClaim;
+
+    fn c_q() -> SofiResolutionClaim {
+        SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id: [0x22; 32],
+            position: 7,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        }
+    }
+
+    /// The bytes a member derives when it accepts `F` are recognised BY CLASS,
+    /// so the refusal does not depend on a decoder failing.
+    #[test]
+    fn a_conditional_claim_is_recognised_by_class() {
+        assert!(is_conditional_claim_class(&c_q().encode()));
+    }
+
+    /// An ordinary single-root envelope is not refused by this rule — it goes
+    /// on to signature and attribution checks as before.
+    #[test]
+    fn an_ordinary_envelope_is_not_refused_by_class() {
+        // A protobuf envelope never starts with the SoFi resolution class.
+        let envelope = vec![0x0A, 0x04, 0x01, 0x02, 0x03, 0x04];
+        assert!(!is_conditional_claim_class(&envelope));
+    }
+
+    /// Short and empty bodies must not panic on the two-byte peek.
+    #[test]
+    fn a_short_body_is_not_a_conditional_claim() {
+        assert!(!is_conditional_claim_class(&[]));
+        assert!(!is_conditional_claim_class(&[0x00]));
     }
 }
