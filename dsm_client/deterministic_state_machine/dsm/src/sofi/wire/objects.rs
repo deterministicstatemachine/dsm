@@ -614,6 +614,142 @@ impl SofiResolutionClaim {
     }
 }
 
+// ── 0x005C SignedSofiObject ────────────────────────────────────────────────
+
+/// The largest signature any supported algorithm produces, with headroom.
+/// SPX256f is 49,856 bytes and dominates anything carrying one.
+const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
+
+/// The transport envelope for a canonical SoFi body plus the trader's
+/// signature over it.
+///
+/// **It authenticates a body; it never redefines one.** `P` is `P` because of
+/// its canonical `TraderPrecommitBody`, and `PrecommitId` is derived from that
+/// body — not from these bytes. Two valid signature encodings over one body
+/// are the same protocol object at the same identity, which is what lets an
+/// honest relayer republish without racing the trader into a conflict.
+///
+/// **`body_class` is not a dispatch hint.** It is checked against the class
+/// the inner canonical bytes actually carry, and the signing preimage is
+/// rederived from the DECODED object — see `signature::verify_signed_object`,
+/// which is where the class-specific rules live. The envelope is generic; the
+/// verification deliberately is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedSofiObject {
+    body_class: u16,
+    body_ccb: Vec<u8>,
+    signature_alg: u16,
+    signature: Vec<u8>,
+}
+
+impl SignedSofiObject {
+    /// The only constructor. It refuses a body class this envelope does not
+    /// carry, so no producer in this codebase can emit one — the matching
+    /// refusal on the consumer side is in `verify_signed_object`, and both
+    /// exist because a producer check and a verifier check answer different
+    /// questions.
+    pub fn new(
+        body_class: u16,
+        body_ccb: &[u8],
+        signature_alg: u16,
+        signature: &[u8],
+    ) -> Result<Self, SofiWireError> {
+        if !matches!(
+            body_class,
+            class::SOFI_TRADER_PRECOMMIT_BODY | class::SOFI_TRADER_FULFILLMENT_BODY
+        ) {
+            return Err(SofiWireError::UnsupportedSignedBodyClass { body_class });
+        }
+        if body_ccb.is_empty() || body_ccb.len() > MAX_SETTLEMENT_PREIMAGE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "body_ccb",
+                bytes: body_ccb.len(),
+                max: MAX_SETTLEMENT_PREIMAGE_BYTES,
+            });
+        }
+        if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "signature",
+                bytes: signature.len(),
+                max: MAX_SIGNATURE_BYTES,
+            });
+        }
+        // The algorithm must be one the registry declares. It is checked
+        // again against the BODY's own `signature_alg` at verification: the
+        // body is signed and this envelope is not, so a disagreement between
+        // them is resolved in favour of the body rather than left as a fork.
+        sigalg::public_key_len(signature_alg)
+            .ok_or(SofiWireError::UnknownSignatureAlg { alg: signature_alg })?;
+        Ok(Self {
+            body_class,
+            body_ccb: body_ccb.to_vec(),
+            signature_alg,
+            signature: signature.to_vec(),
+        })
+    }
+
+    pub fn body_class(&self) -> u16 {
+        self.body_class
+    }
+
+    pub fn body_ccb(&self) -> &[u8] {
+        &self.body_ccb
+    }
+
+    pub fn signature_alg(&self) -> u16 {
+        self.signature_alg
+    }
+
+    pub fn signature(&self) -> &[u8] {
+        &self.signature
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_SIGNED_OBJECT);
+        push_u16(&mut out, self.body_class);
+        // Lengths are validated by `new` and by `decode`, so neither can
+        // overflow the u32 prefix here.
+        let _ = push_bytes(&mut out, &self.body_ccb);
+        push_u16(&mut out, self.signature_alg);
+        let _ = push_bytes(&mut out, &self.signature);
+        out
+    }
+
+    /// Decode WITHOUT restricting the body class.
+    ///
+    /// A hostile envelope naming an unsupported class must decode so that it
+    /// can be refused by name at verification, rather than failing here as an
+    /// indistinguishable parse error. The producer-side restriction lives in
+    /// [`Self::new`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_SIGNED_OBJECT, SCHEMA_V1)?;
+        let body_class = c.u16()?;
+        let body_ccb = read_var_bytes(&mut c, MAX_SETTLEMENT_PREIMAGE_BYTES)?;
+        let signature_alg = c.u16()?;
+        let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
+        let v = Self {
+            body_class,
+            body_ccb,
+            signature_alg,
+            signature,
+        };
+        finish(&c, v)
+    }
+}
+
+/// A length-prefixed byte string, bounded before it is taken.
+fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError> {
+    let n = c.u32()? as usize;
+    if n == 0 || n > max {
+        return Err(DecodeError::Invalid(format!(
+            "length {n} is outside 1..={max}"
+        )));
+    }
+    Ok(c.take(n)?.to_vec())
+}
+
 // ── ValidationRef: 0x003D..=0x0040 ─────────────────────────────────────────
 
 /// One typed validation reference. Each variant has exactly one fetch and
@@ -735,6 +871,12 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     class::SOFI_RECORD_OUTCOME_ABORT,
     class::SOFI_OUTCOME_CELL_COMPLETE,
     class::SOFI_OUTCOME_CELL_ABORT,
+    // The signed envelope wraps P and F, both of which commit E. Without this
+    // entry the wrapper would be a back door into `𝒞_E^pre` for the two
+    // objects the acyclicity argument most depends on keeping out — the list
+    // is keyed by CLASS, so a new wrapper class is not covered by the entries
+    // for the bodies it carries.
+    class::SOFI_SIGNED_OBJECT,
 ];
 
 /// `𝒞_E^pre` — the exact finite set of E-independent validation references,

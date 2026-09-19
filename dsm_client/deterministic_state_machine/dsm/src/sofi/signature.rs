@@ -64,6 +64,14 @@ pub enum SignatureError {
     DoesNotVerify { what: &'static str },
     /// The verifier itself failed. Never "invalid" — nothing was decided.
     VerifierFailed { what: &'static str },
+    /// A `SignedSofiObject` names a body class that is not a signed SoFi body.
+    /// Refused by name rather than by a parse failure, so a hostile envelope
+    /// is distinguishable from a corrupt one.
+    UnsupportedSignedBodyClass { body_class: u16 },
+    /// The envelope's `signature_alg` disagrees with the one the BODY commits.
+    /// The body is signed and the envelope is not, so a disagreement is
+    /// refused rather than resolved in the envelope's favour.
+    EnvelopeAlgDisagreesWithBody { envelope: u16, body: u16 },
 }
 
 impl core::fmt::Display for SignatureError {
@@ -97,6 +105,20 @@ impl core::fmt::Display for SignatureError {
             }
             Self::VerifierFailed { what } => {
                 write!(f, "the {what} signature could not be checked")
+            }
+            Self::UnsupportedSignedBodyClass { body_class } => {
+                write!(
+                    f,
+                    "class {body_class:#06x} is not a signed SoFi body: only a trader \
+                     pre-commit and a trader fulfillment carry a trader signature"
+                )
+            }
+            Self::EnvelopeAlgDisagreesWithBody { envelope, body } => {
+                write!(
+                    f,
+                    "the envelope names signature_alg {envelope:#06x} and the signed body \
+                     commits {body:#06x}; the body is the authority"
+                )
             }
         }
     }
@@ -439,6 +461,176 @@ mod tests {
         );
     }
 
+    fn precommit_body(key: &[u8]) -> TraderPrecommitBody {
+        TraderPrecommitBody::new(
+            G,
+            DEV,
+            POS,
+            crate::sofi::wire::ParentClaimRef::SingleRoot { claim_ref: d(0x66) },
+            d(0x0E),
+            vec![PrecommitLeg {
+                vault_id: d(0xC1),
+                parent_root: d(0x62),
+                setup_ref: d(0x55),
+            }],
+            d(0xA1),
+            d(0x61),
+            d(0x77),
+            ALG,
+            key,
+        )
+        .unwrap()
+    }
+
+    fn signed_precommit(pk: &[u8], sk: &[u8]) -> crate::sofi::wire::SignedSofiObject {
+        let body = precommit_body(pk);
+        let sig = sphincs_sign(sk, &derive::precommit_signing_digest(&body)).unwrap();
+        crate::sofi::wire::SignedSofiObject::new(
+            crate::ccb::class::SOFI_TRADER_PRECOMMIT_BODY,
+            &body.encode(),
+            ALG,
+            &sig,
+        )
+        .unwrap()
+    }
+
+    /// A signed envelope round-trips and verifies, and the object's PROTOCOL
+    /// identity is the body's — not the envelope's.
+    #[test]
+    fn a_signed_precommit_verifies_and_is_identified_by_its_body() {
+        let (pk, sk) = keys();
+        let env = signed_precommit(&pk, &sk);
+        let reencoded =
+            crate::sofi::wire::SignedSofiObject::decode(&env.encode()).expect("round-trip");
+        assert_eq!(reencoded, env);
+        let verified = verify_signed_object(&env, &pk).expect("verifies under the proven key");
+        assert_eq!(
+            verified.object_id(),
+            derive::precommit_id(&precommit_body(&pk))
+        );
+    }
+
+    /// TWO VALID SIGNATURES, ONE OBJECT. The envelope authenticates a body; it
+    /// never redefines one. If identity came from the envelope, an honest
+    /// relayer republishing with its own valid encoding would collide with the
+    /// trader instead of being idempotent.
+    #[test]
+    fn a_second_valid_signature_over_one_body_is_the_same_object() {
+        let (pk, sk) = keys();
+        let a = signed_precommit(&pk, &sk);
+        let b = signed_precommit(&pk, &sk);
+        let ida = verify_signed_object(&a, &pk).unwrap().object_id();
+        let idb = verify_signed_object(&b, &pk).unwrap().object_id();
+        assert_eq!(
+            ida, idb,
+            "identity is the canonical body, not the signature"
+        );
+    }
+
+    /// `body_class` IS NOT A DISPATCH HINT. Bytes of another class do not
+    /// decode under it, because the inner CCB envelope carries its own class.
+    #[test]
+    fn a_class_that_disagrees_with_the_carried_bytes_is_refused() {
+        let (pk, sk) = keys();
+        let f = fulfillment_body(&pk);
+        let sig = sphincs_sign(&sk, &derive::fulfillment_signing_digest(&f)).unwrap();
+        // Claim "precommit" while carrying a fulfillment body.
+        let env = crate::sofi::wire::SignedSofiObject::new(
+            crate::ccb::class::SOFI_TRADER_PRECOMMIT_BODY,
+            &f.encode(),
+            ALG,
+            &sig,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_signed_object(&env, &pk),
+            Err(SignatureError::BodyDoesNotDecode {
+                class: "TraderPrecommit"
+            })
+        );
+    }
+
+    /// A body class this envelope does not carry is refused BY NAME, both at
+    /// construction and at verification. `G` has no issuer signature and a
+    /// setup signs through its own object, so neither belongs here.
+    #[test]
+    fn an_unsupported_body_class_is_refused_at_both_ends() {
+        let (pk, sk) = keys();
+        let setup = setup_body(&pk);
+        let sig = sphincs_sign(&sk, &derive::setup_signing_digest(&setup)).unwrap();
+        // The producer cannot build one.
+        assert!(matches!(
+            crate::sofi::wire::SignedSofiObject::new(
+                crate::ccb::class::SOFI_SETUP_BODY,
+                &setup.encode(),
+                ALG,
+                &sig,
+            ),
+            Err(crate::sofi::wire::SofiWireError::UnsupportedSignedBodyClass { .. })
+        ));
+        // And a hostile one that arrives on the wire still DECODES, so it can
+        // be refused by name rather than as an indistinguishable parse error.
+        let mut bytes = signed_precommit(&pk, &sk).encode();
+        bytes[4..6].copy_from_slice(&crate::ccb::class::SOFI_SETUP_BODY.to_be_bytes());
+        let hostile = crate::sofi::wire::SignedSofiObject::decode(&bytes)
+            .expect("a hostile envelope decodes so it can be named");
+        assert_eq!(
+            verify_signed_object(&hostile, &pk),
+            Err(SignatureError::UnsupportedSignedBodyClass {
+                body_class: crate::ccb::class::SOFI_SETUP_BODY
+            })
+        );
+    }
+
+    /// The envelope is not signed and the body is, so a disagreement about the
+    /// algorithm is refused rather than resolved in the envelope's favour.
+    ///
+    /// The beta profile declares exactly ONE algorithm, so `new` cannot build
+    /// a disagreeing envelope and no honest producer can emit one. The refusal
+    /// is reached here the way a hostile one would arrive — as bytes — which
+    /// is also the only way it can be reached until a second algorithm is
+    /// declared.
+    #[test]
+    fn an_envelope_alg_that_disagrees_with_the_body_is_refused() {
+        let (pk, sk) = keys();
+        let body = precommit_body(&pk);
+        let body_bytes = body.encode();
+        let mut bytes = signed_precommit(&pk, &sk).encode();
+        // class(2) schema(2) body_class(2) body_len(4) body(n) then alg(2).
+        let alg_at = 10 + body_bytes.len();
+        assert_eq!(
+            u16::from_be_bytes([bytes[alg_at], bytes[alg_at + 1]]),
+            ALG,
+            "the alg field is where the layout says it is"
+        );
+        bytes[alg_at..alg_at + 2].copy_from_slice(&0x0002u16.to_be_bytes());
+        let patched = crate::sofi::wire::SignedSofiObject::decode(&bytes)
+            .expect("an undeclared alg decodes so it can be named");
+        assert_eq!(
+            verify_signed_object(&patched, &pk),
+            Err(SignatureError::EnvelopeAlgDisagreesWithBody {
+                envelope: 0x0002,
+                body: ALG
+            })
+        );
+        let _ = sk;
+    }
+
+    /// The key binding is mandatory at an ingress: a body committing some
+    /// other key is refused even though its own signature is perfectly valid.
+    #[test]
+    fn a_body_committing_another_key_is_not_the_proven_signer() {
+        let (pk, sk) = keys();
+        let (other_pk, _) = keys();
+        let env = signed_precommit(&pk, &sk);
+        assert_eq!(
+            verify_signed_object(&env, &other_pk),
+            Err(SignatureError::NotTheExpectedSigner {
+                what: "TraderPrecommit"
+            })
+        );
+    }
+
     /// `m_P` verifies under the key `P` commits — that is the question a
     /// producer and an ingress ask before treating `P` as published.
     #[test]
@@ -477,4 +669,118 @@ mod tests {
     fn a_foreign_operation_has_no_rule_here() {
         assert!(verify_operation(&Operation::Noop, &[0x01; 64]).is_err());
     }
+}
+
+/// What a verified [`SignedSofiObject`] turned out to carry.
+///
+/// Holding one means the inner bytes decoded canonically AS the class the
+/// envelope named, and the trader's signature verified over the preimage that
+/// class defines. It is not "an envelope that parsed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedSofiBody {
+    Precommit(crate::sofi::wire::TraderPrecommitBody),
+    Fulfillment(crate::sofi::wire::TraderFulfillmentBody),
+}
+
+impl SignedSofiBody {
+    /// The PROTOCOL identity, derived from the canonical body.
+    ///
+    /// Never from the envelope. Two valid signature encodings over one body
+    /// answer the same id here, which is what makes an honest relayer's
+    /// republication idempotent instead of a conflict.
+    pub fn object_id(&self) -> [u8; 32] {
+        match self {
+            Self::Precommit(b) => derive::precommit_id(b),
+            Self::Fulfillment(b) => derive::fulfillment_id(b),
+        }
+    }
+}
+
+/// Verify a signed SoFi transport envelope, by the rule of the class it
+/// carries.
+///
+/// **The envelope is generic; this is not.** `body_class` is never a dispatch
+/// hint the caller controls:
+///
+/// 1. the class selects a STRICT decoder, and the inner bytes carry their own
+///    class in their CCB envelope, so bytes of another class do not decode;
+/// 2. the decoded body is re-encoded and required to equal the carried bytes,
+///    so a non-canonical encoding cannot ride along under a valid class;
+/// 3. the signing preimage is rederived from the DECODED object, never taken
+///    from the envelope;
+/// 4. the verifying key and algorithm come from the BODY, which is signed —
+///    the envelope's `signature_alg` must agree and is otherwise refused.
+///
+/// `G` is absent on purpose: a policy-fulfillment witness has no issuer
+/// signature, and a setup signs `m_setup` through its own object.
+pub fn verify_signed_object(
+    envelope: &crate::sofi::wire::SignedSofiObject,
+    expected_signer: &[u8],
+) -> Result<SignedSofiBody, SignatureError> {
+    use crate::ccb::class;
+    let body_class = envelope.body_class();
+    let carried = envelope.body_ccb();
+
+    let decoded = match body_class {
+        class::SOFI_TRADER_PRECOMMIT_BODY => {
+            let body = crate::sofi::wire::TraderPrecommitBody::decode(carried).map_err(|_| {
+                SignatureError::BodyDoesNotDecode {
+                    class: "TraderPrecommit",
+                }
+            })?;
+            if body.encode() != carried {
+                return Err(SignatureError::BodyDoesNotDecode {
+                    class: "TraderPrecommit",
+                });
+            }
+            SignedSofiBody::Precommit(body)
+        }
+        class::SOFI_TRADER_FULFILLMENT_BODY => {
+            let body = crate::sofi::wire::TraderFulfillmentBody::decode(carried).map_err(|_| {
+                SignatureError::BodyDoesNotDecode {
+                    class: "TraderFulfillment",
+                }
+            })?;
+            if body.encode() != carried {
+                return Err(SignatureError::BodyDoesNotDecode {
+                    class: "TraderFulfillment",
+                });
+            }
+            SignedSofiBody::Fulfillment(body)
+        }
+        other => return Err(SignatureError::UnsupportedSignedBodyClass { body_class: other }),
+    };
+
+    let body_alg = match &decoded {
+        SignedSofiBody::Precommit(b) => b.signature_alg(),
+        SignedSofiBody::Fulfillment(b) => b.signature_alg(),
+    };
+    if envelope.signature_alg() != body_alg {
+        return Err(SignatureError::EnvelopeAlgDisagreesWithBody {
+            envelope: envelope.signature_alg(),
+            body: body_alg,
+        });
+    }
+
+    // THE KEY BINDING IS NOT OPTIONAL HERE. `verify_precommit` checks that the
+    // holder of the key `P` was built for signed it, and says in its own doc
+    // that binding that key to the trader's identity is a different question
+    // "checked where that claim is in hand". At an ingress that claim IS in
+    // hand — a member reads it at `K_root(p)` — so this takes the proven key
+    // and refuses a body that commits any other. An `F` is likewise not
+    // self-verifying: its signer must be the key `P` committed.
+    match &decoded {
+        SignedSofiBody::Precommit(b) => {
+            if b.claimant_public_key() != expected_signer {
+                return Err(SignatureError::NotTheExpectedSigner {
+                    what: "TraderPrecommit",
+                });
+            }
+            verify_precommit(b, envelope.signature())?
+        }
+        SignedSofiBody::Fulfillment(b) => {
+            verify_fulfillment(b, envelope.signature(), expected_signer)?
+        }
+    }
+    Ok(decoded)
 }
