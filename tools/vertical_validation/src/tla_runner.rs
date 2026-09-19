@@ -70,8 +70,14 @@ pub struct TlcResult {
     pub distinct_states: u64,
     /// Depth of the complete state graph search
     pub depth_reached: u64,
-    /// Error messages (empty if passed)
+    /// Error messages (empty if passed). These are results ABOUT THE MODEL:
+    /// an invariant was violated, or TLC could not run the check.
     pub errors: Vec<String>,
+    /// Diagnostics about the TOOL that do not change the verdict — chiefly a
+    /// TLC exception thrown AFTER it printed "Model checking completed. No
+    /// error has been found". Never silent, never fatal.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Full TLC stdout (retained for debugging when verbose output is needed)
     #[serde(skip)]
     #[allow(dead_code)]
@@ -987,6 +993,40 @@ impl TlaRunner {
         for spec in specs {
             eprintln!("  Running TLC: {} ({}) ...", spec.label, spec.config_file);
             let mut result = self.run_spec(&spec).await?;
+
+            // A TOOL CRASH IS NOT EVIDENCE ABOUT THE MODEL, so measure again.
+            //
+            // TLC intermittently dies with `ArithmeticException: Division by
+            // zero` part way through the sweep. It is resource-dependent, not
+            // spec-dependent: it hit `SofiFulfillment` in CI and `DSM_small`
+            // locally on the same tree, and each spec runs clean standalone.
+            // Re-running the SAME check is not bypassing it — nothing about
+            // the verdict is relaxed, and the second reading stands on its own.
+            //
+            // Deliberately narrow: only when TLC crashed with NO finding about
+            // the model, and only once. An invariant violation is never
+            // retried, because that IS evidence and retrying it would be
+            // fishing for a green.
+            if crashed_without_a_finding(&result) {
+                eprintln!(
+                    "    TLC crashed without reaching a verdict ({}); re-running once",
+                    result
+                        .errors
+                        .iter()
+                        .find(|e| e.starts_with("TLC exception:"))
+                        .map(String::as_str)
+                        .unwrap_or("unknown")
+                );
+                let second = self.run_spec(&spec).await?;
+                let still_crashing = second
+                    .errors
+                    .iter()
+                    .any(|e| e.starts_with("TLC exception:"));
+                if still_crashing {
+                    eprintln!("    it crashed again — reporting it, not retrying further");
+                }
+                result = second;
+            }
             // A deliberate-falsification config INVERTS the verdict, and only
             // for the invariant it names. A config that fails for some other
             // reason is not evidence about the invariant it was written for.
@@ -1024,11 +1064,46 @@ impl TlaRunner {
                 result.distinct_states,
                 result.depth_reached
             );
+            // The reason belongs NEXT TO the verdict. Reconstructing it from a
+            // 400-line CI log is how a tool crash gets mistaken for a protocol
+            // regression.
+            if !result.passed {
+                for err in &result.errors {
+                    eprintln!("      reason: {err}");
+                }
+            }
+            for warn in &result.warnings {
+                eprintln!(
+                    "      warning: the model check COMPLETED and found no error; \
+                     TLC then crashed in its own post-run statistics: {warn}"
+                );
+            }
             results.push((spec, result));
         }
 
         Ok(results)
     }
+}
+
+/// Whether a result is a TOOL CRASH CARRYING NO FINDING — the only thing worth
+/// measuring again.
+///
+/// Every clause earns its place:
+/// - `!passed`: a completed check is never re-run.
+/// - a `TLC exception:` error: something crashed rather than concluded.
+/// - NO `Invariant violated:` error: an invariant violation IS evidence about
+///   the model. Re-running it would be fishing for a green, which is the exact
+///   difference between measuring again and bypassing a gate.
+fn crashed_without_a_finding(result: &TlcResult) -> bool {
+    !result.passed
+        && result
+            .errors
+            .iter()
+            .any(|e| e.starts_with("TLC exception:"))
+        && !result
+            .errors
+            .iter()
+            .any(|e| e.starts_with("Invariant violated:"))
 }
 
 /// A registry entry whose config must violate exactly `invariant`: a deliberate
@@ -1112,11 +1187,10 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
     } else {
         format!("{stdout}\n{stderr}")
     };
-    let mut passed = false;
+    let passed;
     let mut states_generated: u64 = 0;
     let mut distinct_states: u64 = 0;
     let mut depth_reached: u64 = 0;
-    let mut errors = Vec::new();
 
     // Parse state counts: "X states generated (Y s), Z distinct states found"
     // TLC may emit this in different formats; handle both
@@ -1155,55 +1229,93 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
         }
     }
 
-    // Check for errors
+    // "FAILED" used to mean three different things with no way to tell them
+    // apart: an invariant was violated, TLC could not run the check, or TLC
+    // finished the check and then crashed computing its own end-of-run
+    // statistics. Only the first two are results about the protocol.
+    //
+    // This is not hypothetical. On 2026-09-18 `DSM_SofiFulfillment` reported
+    // `FAILED (1639668 states, 31804 distinct, depth 19)` from a
+    // `java.lang.ArithmeticException: Division by zero` in the
+    // fingerprint-collision estimate, with byte-identical state counts to a
+    // local run that printed "No error has been found". It put `main` red with
+    // no TLA change at all, and the terse line carried none of that.
+    let completed_clean = combined.contains("Model checking completed. No error has been found");
+
     let error_re = Regex::new(r"(?m)^Error:\s*(.+)$").ok();
     let invariant_re = Regex::new(r"Invariant\s+(\S+)\s+is\s+violated").ok();
     let exception_re = Regex::new(r"(?m)^The exception was a\s+(.+)$").ok();
 
-    let mut push_error = |msg: String| {
-        if !errors.contains(&msg) {
-            errors.push(msg);
+    // About the MODEL.
+    let mut faults: Vec<String> = Vec::new();
+    // About the TOOL.
+    let mut crashes: Vec<String> = Vec::new();
+    let push = |bucket: &mut Vec<String>, msg: String| {
+        if !bucket.contains(&msg) {
+            bucket.push(msg);
         }
     };
 
     if let Some(ref re) = error_re {
         for caps in re.captures_iter(&combined) {
-            push_error(caps[1].trim().to_string());
-            passed = false;
+            push(&mut faults, caps[1].trim().to_string());
         }
     }
 
     if let Some(ref re) = invariant_re {
         for caps in re.captures_iter(&combined) {
-            push_error(format!("Invariant violated: {}", &caps[1]));
-            passed = false;
+            push(&mut faults, format!("Invariant violated: {}", &caps[1]));
         }
     }
 
     if let Some(ref re) = exception_re {
         for caps in re.captures_iter(&combined) {
-            push_error(format!("TLC exception: {}", caps[1].trim()));
-            passed = false;
+            push(&mut crashes, format!("TLC exception: {}", caps[1].trim()));
         }
     }
 
+    // TLC prints an exception's cause on a CONTINUATION line beginning with
+    // ':'. The old rule took ANY line starting with ':' anywhere in the output
+    // and reported it as a failure cause, so unrelated TLC text could fail a
+    // spec. Only a line directly following an exception marker counts.
+    let mut after_exception = false;
     for line in combined.lines() {
-        if let Some(cause) = line.strip_prefix(':') {
-            let cause = cause.trim();
-            if !cause.is_empty() {
-                push_error(format!("TLC cause: {cause}"));
-                passed = false;
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("The exception was a")
+            || trimmed.contains("TLC threw an unexpected exception")
+        {
+            after_exception = true;
+            continue;
+        }
+        if let Some(cause) = trimmed.strip_prefix(':') {
+            if after_exception {
+                let cause = cause.trim();
+                if !cause.is_empty() {
+                    push(&mut crashes, format!("TLC cause: {cause}"));
+                }
             }
+            continue;
+        }
+        if !trimmed.trim().is_empty() {
+            after_exception = false;
         }
     }
 
-    if errors.is_empty()
+    // A crash AFTER a clean completion does not change what TLC found: it
+    // already printed the verdict. A crash BEFORE one means the check never
+    // finished, which is not a pass — missing evidence never hardens into a
+    // result.
+    passed = faults.is_empty()
         && states_generated > 0
-        && (combined.contains("Model checking completed. No error has been found")
-            || combined.contains("Finished in"))
-    {
-        passed = true;
-    }
+        && (completed_clean || (crashes.is_empty() && combined.contains("Finished in")));
+
+    let (errors, warnings) = if completed_clean {
+        (faults, crashes)
+    } else {
+        let mut fatal = faults;
+        fatal.extend(crashes);
+        (fatal, Vec::new())
+    };
 
     TlcResult {
         passed,
@@ -1211,6 +1323,7 @@ fn parse_tlc_output(stdout: &str, stderr: &str) -> TlcResult {
         distinct_states,
         depth_reached,
         errors,
+        warnings,
         raw_stdout: stdout.to_string(),
         raw_stderr: stderr.to_string(),
     }
@@ -1294,5 +1407,147 @@ The exception was a java.util.concurrent.ExecutionException
             .errors
             .iter()
             .any(|err| err.contains("Listen failed on port: 0")));
+    }
+
+    /// A run that TLC finished cleanly is a pass, with nothing to report.
+    #[test]
+    fn a_clean_completion_passes_with_no_diagnostics() {
+        let out = "Model checking completed. No error has been found.\n\
+                   1639668 states generated, 31804 distinct states found, 0 states left on queue.\n\
+                   Finished in 12s at (2026-09-18 20:51:33)\n";
+        let r = parse_tlc_output(out, "");
+        assert!(r.passed, "errors: {:?}", r.errors);
+        assert!(r.errors.is_empty());
+        assert!(r.warnings.is_empty());
+        assert_eq!(r.distinct_states, 31804);
+    }
+
+    /// THE INCIDENT. TLC printed the verdict and THEN crashed computing its
+    /// own fingerprint statistics. The model check is a pass; the crash is
+    /// reported and never silent.
+    #[test]
+    fn a_crash_after_the_verdict_is_a_warning_not_a_failure() {
+        let out = "Model checking completed. No error has been found.\n\
+                     Estimates of the probability that TLC did not check all reachable states\n\
+                   1639668 states generated, 31804 distinct states found, 0 states left on queue.\n\
+                   Finished in 12s\n";
+        let err = "TLC threw an unexpected exception.\n\
+                   The exception was a java.lang.ArithmeticException\n\
+                   : Division by zero\n";
+        let r = parse_tlc_output(out, err);
+        assert!(
+            r.passed,
+            "a completed check is not undone by a post-run crash"
+        );
+        assert!(r.errors.is_empty(), "errors: {:?}", r.errors);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("ArithmeticException")),
+            "the crash must still be surfaced: {:?}",
+            r.warnings
+        );
+        assert!(r.warnings.iter().any(|w| w.contains("Division by zero")));
+    }
+
+    /// A violated invariant is a result ABOUT THE MODEL and still fails, named.
+    #[test]
+    fn a_violated_invariant_fails_and_is_named() {
+        let out = "Error: Invariant ResolutionPermanent is violated.\n\
+                   1000 states generated, 100 distinct states found\n\
+                   Finished in 3s\n";
+        let r = parse_tlc_output(out, "");
+        assert!(!r.passed);
+        assert!(
+            r.errors.iter().any(|e| e.contains("ResolutionPermanent")),
+            "errors: {:?}",
+            r.errors
+        );
+        assert!(r.warnings.is_empty());
+    }
+
+    /// A crash BEFORE any verdict means the check never finished. That is not
+    /// a pass: missing evidence never hardens into a result.
+    #[test]
+    fn a_crash_before_the_verdict_fails() {
+        let out = "500 states generated, 50 distinct states found\nFinished in 4s\n";
+        let err = "TLC threw an unexpected exception.\n\
+                   The exception was a java.lang.OutOfMemoryError\n\
+                   : Java heap space\n";
+        let r = parse_tlc_output(out, err);
+        assert!(!r.passed, "an unfinished check must not pass");
+        assert!(
+            r.errors.iter().any(|e| e.contains("OutOfMemoryError")),
+            "errors: {:?}",
+            r.errors
+        );
+        assert!(r.warnings.is_empty());
+    }
+
+    /// The old rule treated ANY line beginning with ':' as a failure cause, so
+    /// ordinary TLC output could fail a spec. A ':' line only means something
+    /// directly after an exception marker.
+    #[test]
+    fn a_colon_line_outside_an_exception_is_not_a_cause() {
+        let out = "Model checking completed. No error has been found.\n\
+                   : this is ordinary output, not a cause\n\
+                   1000 states generated, 100 distinct states found\n\
+                   Finished in 1s\n";
+        let r = parse_tlc_output(out, "");
+        assert!(r.passed, "errors: {:?}", r.errors);
+        assert!(r.errors.is_empty());
+        assert!(r.warnings.is_empty(), "warnings: {:?}", r.warnings);
+    }
+
+    fn result_with(passed: bool, errors: &[&str]) -> TlcResult {
+        TlcResult {
+            passed,
+            states_generated: 1,
+            distinct_states: 1,
+            depth_reached: 1,
+            errors: errors.iter().map(|e| (*e).to_string()).collect(),
+            warnings: Vec::new(),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+        }
+    }
+
+    /// A crash with nothing to say about the model is worth measuring again.
+    #[test]
+    fn a_bare_crash_is_retried() {
+        assert!(crashed_without_a_finding(&result_with(
+            false,
+            &[
+                "TLC exception: java.lang.ArithmeticException",
+                "TLC cause: Division by zero"
+            ]
+        )));
+    }
+
+    /// AN INVARIANT VIOLATION IS EVIDENCE. Retrying it would be fishing for a
+    /// green, which is the whole difference between measuring again and
+    /// bypassing a gate.
+    #[test]
+    fn a_violation_is_never_retried() {
+        assert!(!crashed_without_a_finding(&result_with(
+            false,
+            &["Invariant violated: ResolutionPermanent"]
+        )));
+        // Even alongside a crash: the finding stands.
+        assert!(!crashed_without_a_finding(&result_with(
+            false,
+            &[
+                "TLC exception: java.lang.ArithmeticException",
+                "Invariant violated: ResolutionPermanent"
+            ]
+        )));
+    }
+
+    /// A completed check is never re-run, whatever else is in the output.
+    #[test]
+    fn a_passing_result_is_never_retried() {
+        assert!(!crashed_without_a_finding(&result_with(true, &[])));
+        assert!(!crashed_without_a_finding(&result_with(
+            true,
+            &["TLC exception: java.lang.ArithmeticException"]
+        )));
     }
 }
