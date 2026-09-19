@@ -20,6 +20,7 @@ pub mod identity;
 pub mod infra;
 pub mod objects;
 pub mod registry;
+pub mod sofi;
 pub mod storage;
 pub mod transport;
 pub mod vault;
