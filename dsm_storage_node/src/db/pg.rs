@@ -890,6 +890,16 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 -- K_ful = H(tag || G || DevID || u64_be(q)). Registration is THE
                 -- EXERCISE BOUNDARY, and it is established here together with C_q at
                 -- K_root(q) in ONE transaction. Never UPDATEd, never DELETEd.
+                -- `FulfillmentRegistered(F)`: THE EXERCISE FACT, and a different
+                -- statement from "this member holds F". Holding is one member's row in
+                -- sofi_fulfillments; this record says an authenticated read of the
+                -- committed set showed a quorum of HOLDERS. Monotone and write-once:
+                -- once exercised, always exercised, so there is no UPDATE and no
+                -- DELETE and the row carries nothing that could be revised.
+                CREATE TABLE IF NOT EXISTS sofi_fulfillment_registrations (
+                    fulfillment_id BYTEA PRIMARY KEY,
+                    holder_count   INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sofi_fulfillments (
                     k_ful          BYTEA PRIMARY KEY,
                     fulfillment_id BYTEA NOT NULL,
@@ -2979,4 +2989,34 @@ pub async fn get_sofi_fulfillment(pool: &Pool, k_ful: &[u8]) -> Result<Option<Ve
         )
         .await?;
     Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
+}
+
+/// Record `FulfillmentRegistered(F)`. MONOTONE — see the SQLite twin.
+pub async fn record_fulfillment_registered(
+    pool: &Pool,
+    fulfillment_id: &[u8],
+    holder_count: i64,
+) -> Result<()> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    tx.execute(
+        "INSERT INTO sofi_fulfillment_registrations (fulfillment_id, holder_count)
+         VALUES ($1, $2) ON CONFLICT (fulfillment_id) DO NOTHING",
+        &[&fulfillment_id, &holder_count],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Whether this member has recorded the exercise fact for `F`.
+pub async fn is_fulfillment_registered(pool: &Pool, fulfillment_id: &[u8]) -> Result<bool> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT holder_count FROM sofi_fulfillment_registrations WHERE fulfillment_id = $1",
+            &[&fulfillment_id],
+        )
+        .await?;
+    Ok(row.is_some())
 }
