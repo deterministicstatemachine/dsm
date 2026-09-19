@@ -55,6 +55,11 @@ bash ci/sofi_genesis_acceptance_binding.sh
 # variant-field visibility changes no runtime behaviour.
 bash ci/peer_debit_lineage_authoritative.sh
 
+# The descendant fence cannot fire until E2/E3 writes conditional admitted
+# rows, so a descendant path added without it would be invisible today and a
+# live hole the day that writer lands. Only a static check holds this.
+bash ci/admitted_predecessor_readers_fenced.sh
+
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
 cd tla
