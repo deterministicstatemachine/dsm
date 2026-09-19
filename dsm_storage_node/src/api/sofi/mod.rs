@@ -655,8 +655,20 @@ pub async fn post_cell(
 
     let k_cell = derive::successor_attempt_key(&leg.vault_id, &leg.parent_root, entry.attempt);
     match db::put_sofi_successor_cell(&state.db_pool, &k_cell, &fid, &body).await {
-        Ok(db::ObjectPutOutcome::Stored) => outcome(StatusCode::OK, "stored"),
-        Ok(db::ObjectPutOutcome::AlreadyHeld) => outcome(StatusCode::OK, "already-held"),
+        Ok(db::SuccessorCellPutOutcome::Stored) => outcome(StatusCode::OK, "stored"),
+        Ok(db::SuccessorCellPutOutcome::AlreadyHeld) => outcome(StatusCode::OK, "already-held"),
+        // CONTENTION, NOT SUCCESS. Another operation reached this leg first
+        // and the cell holds its `E`, not the one just posted. Answering 200
+        // here told the loser its value was present, which is the opposite of
+        // what happened — and SoFi is deliberately non-locking, so two traders
+        // racing one DLV parent is expected rather than exceptional.
+        Ok(db::SuccessorCellPutOutcome::Contested { held_e }) => {
+            let mut resp = outcome(StatusCode::CONFLICT, "cell-taken");
+            if let Ok(v) = HeaderValue::from_str(&text_id::encode_base32_crockford(&held_e)) {
+                resp.headers_mut().insert("x-dsm-held-e", v);
+            }
+            resp
+        }
         Err(_) => outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
     }
 }

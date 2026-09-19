@@ -99,6 +99,30 @@ impl From<db::SlotClaimOutcome> for Outcome {
     }
 }
 
+/// The successor cell speaks the same three answers, with one adaptation at
+/// this boundary and nowhere else.
+///
+/// These properties are stated over "bytes, and the digest a refusal names".
+/// A successor cell has no separate digest: F5 gives it as `Dead | FinalE(E)`
+/// and F4 consumes it by asking `FinalE(E)` at the key, so `E` is both the
+/// value and the identity. Production therefore returns the held `E` itself —
+/// that is what a loser needs — and the adapter hashes it to speak the
+/// harness's vocabulary.
+///
+/// The property still bites: if the register named the POSTED value instead of
+/// the held one, this hash would be the poster's and the assertion would fail.
+impl From<db::SuccessorCellPutOutcome> for Outcome {
+    fn from(o: db::SuccessorCellPutOutcome) -> Self {
+        match o {
+            db::SuccessorCellPutOutcome::Stored => Outcome::Accepted,
+            db::SuccessorCellPutOutcome::AlreadyHeld => Outcome::Reack,
+            db::SuccessorCellPutOutcome::Contested { held_e } => {
+                Outcome::Refused(blake3::hash(&held_e).as_bytes().to_vec())
+            }
+        }
+    }
+}
+
 impl From<db::OneShotOutcome> for Outcome {
     fn from(o: db::OneShotOutcome) -> Self {
         match o {
@@ -292,4 +316,21 @@ write_once_register!(
         &[0x6B; 32]
     ),
     held = |pool, key| db::get_economic_root_claim(pool, key),
+);
+
+// The SoFi successor cell is the FOURTH one-shot register, and it was not here
+// when these properties were written — which is exactly how it shipped
+// returning "already held" for a contended cell. `bytes` is `E`; `digest` is
+// `E` as well, because a refusal must name the held `E`. The third argument is
+// the fulfillment id, provenance only: the cell fact is `K^(a) -> E`, so two
+// writers with different provenance and identical `E` are the same fact.
+write_once_register!(
+    sofi_successor_cell,
+    tag = 0x44,
+    claim = |pool, key, bytes, digest| db::put_sofi_successor_cell(pool, key, digest, bytes),
+    held = |pool, key| async move {
+        db::get_sofi_successor_cell(pool, key)
+            .await
+            .map(|o| o.map(|e| (e.clone(), blake3::hash(&e).as_bytes().to_vec())))
+    },
 );
