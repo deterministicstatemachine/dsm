@@ -29,6 +29,9 @@ use dsm::sofi::wire::{
     AttemptEntry, DlvPolicyFulfillmentBody, ParentClaimRef, PrecommitLeg, SignedSofiObject,
     TraderFulfillmentBody, TraderPrecommitBody,
 };
+use dsm::sofi::wire::{
+    CoreEntry, DlvCore, PreEClosureIndex, SettlementBody, SettlementPreimage, SwapHop, TraderCore,
+};
 use dsm_storage_node::replication::{ReplicationConfig, ReplicationManager};
 use dsm_storage_node::{db, AppState, NodeStorageSet};
 
@@ -37,7 +40,8 @@ const DEV: [u8; 32] = [0x22; 32];
 const POS: u64 = 5;
 const VAULT: [u8; 32] = [0xC1; 32];
 const PARENT_ROOT: [u8; 32] = [0x62; 32];
-const E: [u8; 32] = [0x0E; 32];
+const SETUP_REF: [u8; 32] = [0x55; 32];
+
 const MEMBER: &str = "dsm-node-1";
 
 fn member_incarnation(id: &str) -> [u8; 32] {
@@ -113,9 +117,103 @@ async fn post(node: &Node, path: &str, body: Vec<u8>) -> (u16, String) {
     (status, reason)
 }
 
+// ── `P(E)`, the authority for every shadow ──────────────────────────────────
+//
+// These fixtures no longer invent `E` or a shadow. A real settlement preimage
+// is built, `E` is recomputed from it, and the leg — parent root, setup ref
+// and shadow — is whatever `canonical_legs` says it is. That is the same
+// derivation the member now checks against, so a fixture cannot assert a leg
+// the protocol would not produce.
+
+fn preimage_for(trader_salt: u8) -> SettlementPreimage {
+    let core = DlvCore::new(
+        VAULT,
+        [0x62; 32],
+        G,
+        DEV,
+        [0x63; 32],
+        vec![CoreEntry::Mutation {
+            key: [0x71; 32],
+            pre: [0x41; 32],
+            post: [0x42; 32],
+            path: (0..256u32).map(|i| [(i % 251) as u8; 32]).collect(),
+        }],
+    )
+    .expect("a well-formed dlv core");
+    let swap = SettlementBody::Swap {
+        token_in: [0x51; 32],
+        amount_in: 100,
+        token_out: [0x52; 32],
+        exact_out: 90,
+        hops: vec![SwapHop {
+            vault_id: VAULT,
+            parent_root: PARENT_ROOT,
+            setup_ref: SETUP_REF,
+            token_in: [0x51; 32],
+            amount_in: 100,
+            token_out: [0x52; 32],
+            amount_out: 90,
+        }],
+        trader_core: [0xD1; 32],
+        dlv_cores: vec![VAULT],
+        closure: PreEClosureIndex::new(Vec::new()).expect("empty closure"),
+    };
+    let trader = TraderCore::new(
+        G,
+        DEV,
+        9,
+        [trader_salt; 32],
+        vec![CoreEntry::Mutation {
+            key: [0x71; 32],
+            pre: [0x41; 32],
+            post: [0x42; 32],
+            path: (0..256u32).map(|i| [(i % 251) as u8; 32]).collect(),
+        }],
+    )
+    .expect("a well-formed trader core");
+    SettlementPreimage::new(swap, trader, vec![core]).expect("a well-formed preimage")
+}
+
+fn preimage() -> SettlementPreimage {
+    preimage_for(0x61)
+}
+
+/// `E`, recomputed from the preimage — never a constant.
+fn external_commitment_of(p: &SettlementPreimage) -> [u8; 32] {
+    derive::recompute_e(p).expect("E recomputes")
+}
+
+fn external_commitment() -> [u8; 32] {
+    external_commitment_of(&preimage())
+}
+
+/// The one canonical leg `P(E)` implies, shadow included.
+fn canonical_leg_of(p: &SettlementPreimage) -> dsm::sofi::wire::RouteLegEntry {
+    derive::canonical_legs(p).expect("canonical legs")[0]
+}
+
+fn canonical_leg() -> dsm::sofi::wire::RouteLegEntry {
+    canonical_leg_of(&preimage())
+}
+
+/// Store `P(E)` on this member. Every later ingress needs it.
+async fn seed_preimage_of(n: &Node, p: &SettlementPreimage) {
+    let bytes = p.encode().expect("encode preimage");
+    assert_eq!(
+        post(n, "/api/v2/sofi/preimage", bytes).await,
+        (200, "stored".to_string()),
+        "the preimage must store before anything can bind to it"
+    );
+}
+
+async fn seed_preimage(n: &Node) {
+    seed_preimage_of(n, &preimage()).await
+}
+
 /// Seed the parent claim the key binding reads, and return (envelope digest,
 /// the keypair it proves).
 async fn seed_parent_claim(node: &Node) -> ([u8; 32], Vec<u8>, Vec<u8>) {
+    seed_preimage(node).await;
     let (pk, sk) = generate_sphincs_keypair().expect("keys");
     let body = EconomicRootClaimBody {
         trader_genesis: G,
@@ -142,11 +240,11 @@ fn precommit(claim_ref: [u8; 32], set_id: [u8; 32], pk: &[u8]) -> TraderPrecommi
         DEV,
         POS,
         ParentClaimRef::SingleRoot { claim_ref },
-        E,
+        external_commitment(),
         vec![PrecommitLeg {
-            vault_id: VAULT,
-            parent_root: PARENT_ROOT,
-            setup_ref: [0x55; 32],
+            vault_id: canonical_leg().vault_id,
+            parent_root: canonical_leg().parent_root,
+            setup_ref: canonical_leg().setup_ref,
         }],
         [0xA1; 32],
         [0x61; 32],
@@ -169,20 +267,18 @@ fn envelope_for(body: &TraderPrecommitBody, sk: &[u8]) -> Vec<u8> {
     .encode()
 }
 
-const SHADOW: [u8; 32] = [0x9A; 32];
-
 fn witness_for(p: &TraderPrecommitBody) -> DlvPolicyFulfillmentBody {
     DlvPolicyFulfillmentBody {
         precommit_id: derive::precommit_id(p),
-        external_commitment: E,
+        external_commitment: external_commitment(),
         vault_id: VAULT,
-        parent_root: PARENT_ROOT,
-        shadow_core: SHADOW,
+        parent_root: canonical_leg().parent_root,
+        shadow_core: canonical_leg().shadow_core,
     }
 }
 
 fn fulfillment_for(p: &TraderPrecommitBody, pk: &[u8], attempt: u64) -> TraderFulfillmentBody {
-    let mut set: Vec<[u8; 32]> = derive_policy_fulfillments(p, &[SHADOW])
+    let mut set: Vec<[u8; 32]> = derive_policy_fulfillments(p, &[canonical_leg().shadow_core])
         .expect("canonical set")
         .iter()
         .map(derive::policy_fulfillment_id)

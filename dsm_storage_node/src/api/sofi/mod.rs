@@ -58,8 +58,8 @@ use dsm::sofi::conformance::{check_fulfillment_against_precommit, FulfillmentCon
 use dsm::sofi::derive;
 use dsm::sofi::signature::{verify_signed_object, SignedSofiBody};
 use dsm::sofi::wire::{
-    DlvPolicyFulfillmentBody, ParentClaimRef, SignedSofiObject, TraderFulfillmentBody,
-    TraderPrecommitBody,
+    DlvPolicyFulfillmentBody, ParentClaimRef, SettlementPreimage, SignedSofiObject,
+    TraderFulfillmentBody, TraderPrecommitBody,
 };
 use dsm_sdk::util::text_id;
 
@@ -77,6 +77,7 @@ fn outcome(code: StatusCode, reason: &str) -> Response {
 
 pub fn create_read_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
+        .route("/api/v2/sofi/preimage/{e}", get(get_preimage))
         .route("/api/v2/sofi/precommit/{id}", get(get_precommit))
         .route("/api/v2/sofi/fulfillment/{k_ful}", get(get_fulfillment))
         .route(
@@ -93,6 +94,7 @@ pub fn create_read_router(state: Arc<AppState>) -> Router<()> {
 
 pub fn create_write_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
+        .route("/api/v2/sofi/preimage", post(post_preimage))
         .route("/api/v2/sofi/precommit", post(post_precommit))
         .route("/api/v2/sofi/fulfillment", post(post_fulfillment))
         .route(
@@ -238,22 +240,42 @@ pub async fn post_policy_fulfillment(
         );
     };
 
-    // BINDING TO A STORED LEG (§2). The witness must name this P's external
-    // commitment and one of its legs. The shadow it carries is NOT derivable
-    // here — it comes from E — so it is bound into the identity and checked by
-    // the consumer, not invented by the node.
+    // BINDING TO `P(E)` (§2). The witness must name this P's external
+    // commitment and carry the exact leg — shadow included — that the
+    // settlement preimage implies.
     if witness.external_commitment != *precommit.external_commitment() {
         return outcome(
             StatusCode::UNPROCESSABLE_ENTITY,
             "witness-names-another-commitment",
         );
     }
-    if !precommit
-        .legs()
-        .iter()
-        .any(|leg| leg.vault_id == witness.vault_id && leg.parent_root == witness.parent_root)
-    {
-        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "witness-matches-no-leg");
+    // THE SHADOW IS BOUND TO `P(E)`, not merely to a leg coordinate. §2: the
+    // witness must match a stored P leg AND `P(E)`.
+    //
+    // `policy_fulfillment_id` hashes the whole body, `shadow_core` included,
+    // so a witness differing only in its shadow lands at a DIFFERENT address
+    // and used to store successfully beside the honest one. F ingress then had
+    // several candidates for one leg and no basis for choosing, which let
+    // anyone able to relay make an honest `F` refusable — and, because the
+    // choice came from an unordered read, let two members answer differently
+    // about one identical `F`.
+    //
+    // `P(E)` is the authority: `c°_{V,j}` is `dlv_core_digest` over the `V°_j`
+    // the preimage carries, so for a given `E` there is exactly one admissible
+    // shadow per leg. A same-coordinate decoy is now not storable at all.
+    let canonical = match canonical_legs_for(&state, &precommit).await {
+        Ok(legs) => legs,
+        Err(resp) => return *resp,
+    };
+    if !canonical.iter().any(|leg| {
+        leg.vault_id == witness.vault_id
+            && leg.parent_root == witness.parent_root
+            && leg.shadow_core == witness.shadow_core
+    }) {
+        return outcome(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "witness-is-not-the-one-e-commits",
+        );
     }
 
     let id = derive::policy_fulfillment_id(&witness);
@@ -375,27 +397,67 @@ pub async fn post_fulfillment(Extension(state): Extension<Arc<AppState>>, body: 
         return outcome(StatusCode::BAD_REQUEST, "not-a-fulfillment");
     };
 
-    // Reconstruct the canonical set from STORED witnesses, in P's leg order.
-    let held = match db::list_sofi_policy_fulfillments(&state.db_pool, peek.precommit_id()).await {
-        Ok(rows) => rows,
-        Err(_) => return outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    // ── The canonical witness set is DERIVED, not dereferenced ─────────────
+    //
+    // §2's F conformance: `PolicyFulfillmentSet` "must equal
+    // `Canon[PolicyFulfillmentId_j(P, j)]` for every P leg, EACH DERIVED FROM
+    // P'S LEG AND STORED". The member computes the expected identities; it does
+    // not fetch whatever `F` named and check that back against itself.
+    //
+    // Fetching by the declared ids would have been CIRCULAR: the derivation
+    // rebuilds each body from (pid, E, leg, shadow), so sourcing the shadow
+    // from the body `F` named makes the comparison true by construction, and a
+    // mutation flipping one shadow byte would stay green. The conjunct §2
+    // places at ingress becomes a tautology, and a trader could register an `F`
+    // over shadows `E` never committed — turning a 422 into a permanently
+    // Invalid position at `q`.
+    //
+    // `P(E)` breaks the circle: the preimage, not the witness, says which
+    // shadow `E` commits. Extra stored witnesses are then irrelevant garbage
+    // rather than candidates in an unordered election.
+    let canonical = match canonical_legs_for(&state, &precommit).await {
+        Ok(legs) => legs,
+        Err(resp) => return *resp,
     };
-    let witnesses: Vec<DlvPolicyFulfillmentBody> = held
-        .iter()
-        .filter_map(|b| DlvPolicyFulfillmentBody::decode(b).ok())
-        .collect();
+    // P's legs must BE `P(E)`'s legs — §2's "legs = P(E)/Γ", cheap once the
+    // preimage is in hand.
     let mut shadows = Vec::with_capacity(precommit.legs().len());
     for leg in precommit.legs() {
-        let Some(w) = witnesses
-            .iter()
-            .find(|w| w.vault_id == leg.vault_id && w.parent_root == leg.parent_root)
-        else {
+        let Some(c) = canonical.iter().find(|c| c.vault_id == leg.vault_id) else {
             return outcome(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "policy-fulfillment-not-held",
+                "precommit-leg-is-not-in-the-preimage",
             );
         };
-        shadows.push(w.shadow_core);
+        if c.parent_root != leg.parent_root || c.setup_ref != leg.setup_ref {
+            return outcome(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "precommit-leg-disagrees-with-the-preimage",
+            );
+        }
+        shadows.push(c.shadow_core);
+    }
+    // Every witness the derivation names must be HELD here. A member missing
+    // one cannot conclude the set is complete, whatever `F` declares.
+    let Ok(derived) = dsm::sofi::conformance::derive_policy_fulfillments(&precommit, &shadows)
+    else {
+        return outcome(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "policy-fulfillment-set-does-not-derive",
+        );
+    };
+    for body in &derived {
+        let id = derive::policy_fulfillment_id(body);
+        match db::get_sofi_policy_fulfillment(&state.db_pool, &id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return outcome(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "policy-fulfillment-not-held",
+                )
+            }
+            Err(_) => return outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+        }
     }
 
     if let Err(e) = check_fulfillment_against_precommit(&precommit, &fulfillment, &shadows) {
@@ -684,4 +746,91 @@ pub async fn get_cell(
         Ok(found) => serve(found).await,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Store `P(E)`, the settlement preimage, at the `E` it RECOMPUTES to.
+///
+/// **The key is derived, never supplied.** The node decodes the preimage and
+/// recomputes `E` from it; a caller cannot name the address, so it cannot park
+/// a preimage under someone else's commitment.
+///
+/// This object is the AUTHORITY for `c°_{V,j}`. Without it a member cannot
+/// know which shadow `E` commits, and the checks below degrade to "some
+/// witness claims this leg" — which is exactly how a same-coordinate decoy
+/// became storable and F ingress became an unordered election over an
+/// attacker-populated set.
+pub async fn post_preimage(Extension(state): Extension<Arc<AppState>>, body: Bytes) -> Response {
+    if body.is_empty() || body.len() > MAX_SOFI_OBJECT_BYTES {
+        return outcome(StatusCode::BAD_REQUEST, "malformed");
+    }
+    let Ok(preimage) = SettlementPreimage::decode(&body) else {
+        return outcome(StatusCode::BAD_REQUEST, "malformed");
+    };
+    // Canonical or nothing: the address is over these bytes.
+    let Ok(reencoded) = preimage.encode() else {
+        return outcome(StatusCode::BAD_REQUEST, "malformed");
+    };
+    if reencoded != body {
+        return outcome(StatusCode::BAD_REQUEST, "not-canonical");
+    }
+    let Ok(e) = derive::recompute_e(&preimage) else {
+        return outcome(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "preimage-does-not-recompute",
+        );
+    };
+    match db::put_sofi_settlement_preimage(&state.db_pool, &e, &body).await {
+        Ok(db::ObjectPutOutcome::Stored) => outcome(StatusCode::OK, "stored"),
+        Ok(db::ObjectPutOutcome::AlreadyHeld) => outcome(StatusCode::OK, "already-held"),
+        Err(_) => outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    }
+}
+
+pub async fn get_preimage(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(e_b32): Path<String>,
+) -> Response {
+    let Some(e) = text_id::decode_base32_crockford(&e_b32).filter(|v| v.len() == 32) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match db::get_sofi_settlement_preimage(&state.db_pool, &e).await {
+        Ok(found) => serve(found).await,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The canonical legs `P(E)` implies for this pre-commit, or a named refusal.
+///
+/// One helper, used by BOTH G ingress and F ingress, so the two cannot drift
+/// about which shadow is canonical.
+async fn canonical_legs_for(
+    state: &AppState,
+    precommit: &TraderPrecommitBody,
+) -> Result<Vec<dsm::sofi::wire::RouteLegEntry>, Box<Response>> {
+    let refuse = |code: StatusCode, reason: &str| Box::new(outcome(code, reason));
+    let held =
+        match db::get_sofi_settlement_preimage(&state.db_pool, precommit.external_commitment())
+            .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return Err(refuse(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "settlement-preimage-not-held",
+                ))
+            }
+            Err(_) => return Err(refuse(StatusCode::INTERNAL_SERVER_ERROR, "storage")),
+        };
+    let Ok(preimage) = SettlementPreimage::decode(&held) else {
+        return Err(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-preimage-does-not-decode",
+        ));
+    };
+    derive::canonical_legs(&preimage).map_err(|_| {
+        refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-preimage-has-no-canonical-legs",
+        )
+    })
 }

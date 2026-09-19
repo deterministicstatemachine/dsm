@@ -915,6 +915,19 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     fulfillment_id BYTEA NOT NULL,
                     envelope_bytes BYTEA NOT NULL
                 );
+                -- `P(E)`: the settlement preimage, keyed by the `E` it RECOMPUTES to.
+                -- A genuine content address — the node derives the key from the bytes
+                -- and never takes one from a caller — so a conflict means identical
+                -- bytes, and anything else is corruption rather than contention.
+                --
+                -- This is the AUTHORITY for `c°_{V,j}`. Without it a member cannot know
+                -- which shadow `E` commits, and G ingress degrades to "some witness
+                -- claims this leg", which is how a same-coordinate decoy became
+                -- storable and F ingress became an unordered election.
+                CREATE TABLE IF NOT EXISTS sofi_settlement_preimages (
+                    external_commitment BYTEA PRIMARY KEY,
+                    preimage_bytes      BYTEA NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sofi_precommits (
                     precommit_id   BYTEA PRIMARY KEY,
                     envelope_bytes BYTEA NOT NULL
@@ -2983,21 +2996,6 @@ pub async fn register_fulfillment_with_claim(
     Ok(FulfillmentRegistration::Registered)
 }
 
-/// Every `G` this member holds for one `P`.
-pub async fn list_sofi_policy_fulfillments(
-    pool: &Pool,
-    precommit_id: &[u8],
-) -> Result<Vec<Vec<u8>>> {
-    let client = pool.get().await?;
-    let rows = client
-        .query(
-            "SELECT body_bytes FROM sofi_policy_fulfillments WHERE precommit_id = $1",
-            &[&precommit_id],
-        )
-        .await?;
-    Ok(rows.into_iter().map(|r| r.get::<_, Vec<u8>>(0)).collect())
-}
-
 /// The registered `F` at a position, if this member holds one.
 pub async fn get_sofi_fulfillment(pool: &Pool, k_ful: &[u8]) -> Result<Option<Vec<u8>>> {
     let client = pool.get().await?;
@@ -3118,6 +3116,56 @@ pub async fn get_sofi_successor_cell(pool: &Pool, k_cell: &[u8]) -> Result<Optio
         .query_opt(
             "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = $1",
             &[&k_cell],
+        )
+        .await?;
+    Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
+}
+
+/// Store `P(E)` at the `E` it recomputes to. See the SQLite twin: a
+/// byte-different row at one address is corruption, not contention.
+pub async fn put_sofi_settlement_preimage(
+    pool: &Pool,
+    external_commitment: &[u8],
+    preimage_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    let n = tx
+        .execute(
+            "INSERT INTO sofi_settlement_preimages (external_commitment, preimage_bytes)
+             VALUES ($1, $2) ON CONFLICT (external_commitment) DO NOTHING",
+            &[&external_commitment, &preimage_bytes],
+        )
+        .await?;
+    let outcome = if n == 1 {
+        ObjectPutOutcome::Stored
+    } else {
+        let row = tx
+            .query_one(
+                "SELECT preimage_bytes FROM sofi_settlement_preimages WHERE external_commitment = $1",
+                &[&external_commitment],
+            )
+            .await?;
+        let held: Vec<u8> = row.get(0);
+        if held != preimage_bytes {
+            anyhow::bail!("settlement preimage address holds different bytes");
+        }
+        ObjectPutOutcome::AlreadyHeld
+    };
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// The stored `P(E)` for this `E`, if this member holds it.
+pub async fn get_sofi_settlement_preimage(
+    pool: &Pool,
+    external_commitment: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT preimage_bytes FROM sofi_settlement_preimages WHERE external_commitment = $1",
+            &[&external_commitment],
         )
         .await?;
     Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
