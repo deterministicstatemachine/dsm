@@ -896,6 +896,16 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                 -- committed set showed a quorum of HOLDERS. Monotone and write-once:
                 -- once exercised, always exercised, so there is no UPDATE and no
                 -- DELETE and the row carries nothing that could be revised.
+                -- Successor cells: the write-once cell one DLV leg's successor
+                -- occupies, keyed by K^(a) which the MEMBER derives from a REGISTERED
+                -- fulfillment's leg and attempt — never from a caller-supplied key.
+                -- The value is exactly E, and a cell before `Registered(F)` is not
+                -- admissible anywhere (F2).
+                CREATE TABLE IF NOT EXISTS sofi_successor_cells (
+                    k_cell         BYTEA PRIMARY KEY,
+                    fulfillment_id BYTEA NOT NULL,
+                    e_bytes        BYTEA NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sofi_fulfillment_registrations (
                     fulfillment_id BYTEA PRIMARY KEY,
                     holder_count   INTEGER NOT NULL
@@ -3019,4 +3029,55 @@ pub async fn is_fulfillment_registered(pool: &Pool, fulfillment_id: &[u8]) -> Re
         )
         .await?;
     Ok(row.is_some())
+}
+
+/// The registered fulfillment envelope with this identity, if held.
+pub async fn get_sofi_fulfillment_by_id(
+    pool: &Pool,
+    fulfillment_id: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT envelope_bytes FROM sofi_fulfillments WHERE fulfillment_id = $1",
+            &[&fulfillment_id],
+        )
+        .await?;
+    Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
+}
+
+/// Write a successor cell. Write-once; an identical re-write acks.
+pub async fn put_sofi_successor_cell(
+    pool: &Pool,
+    k_cell: &[u8],
+    fulfillment_id: &[u8],
+    e_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let mut client = pool.get().await?;
+    let tx = begin_durable_write(&mut client).await?;
+    let n = tx
+        .execute(
+            "INSERT INTO sofi_successor_cells (k_cell, fulfillment_id, e_bytes)
+             VALUES ($1, $2, $3) ON CONFLICT (k_cell) DO NOTHING",
+            &[&k_cell, &fulfillment_id, &e_bytes],
+        )
+        .await?;
+    tx.commit().await?;
+    Ok(if n == 1 {
+        ObjectPutOutcome::Stored
+    } else {
+        ObjectPutOutcome::AlreadyHeld
+    })
+}
+
+/// The value a successor cell holds, if any.
+pub async fn get_sofi_successor_cell(pool: &Pool, k_cell: &[u8]) -> Result<Option<Vec<u8>>> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = $1",
+            &[&k_cell],
+        )
+        .await?;
+    Ok(row.map(|r| r.get::<_, Vec<u8>>(0)))
 }

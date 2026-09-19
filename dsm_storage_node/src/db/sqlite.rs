@@ -585,6 +585,16 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
         -- committed set showed a quorum of HOLDERS. Monotone and write-once:
         -- once exercised, always exercised, so there is no UPDATE and no
         -- DELETE and the row carries nothing that could be revised.
+        -- Successor cells: the write-once cell one DLV leg's successor
+        -- occupies, keyed by K^(a) which the MEMBER derives from a REGISTERED
+        -- fulfillment's leg and attempt — never from a caller-supplied key.
+        -- The value is exactly E, and a cell before `Registered(F)` is not
+        -- admissible anywhere (F2).
+        CREATE TABLE IF NOT EXISTS sofi_successor_cells (
+            k_cell         BLOB PRIMARY KEY,
+            fulfillment_id BLOB NOT NULL,
+            e_bytes        BLOB NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sofi_fulfillment_registrations (
             fulfillment_id BLOB PRIMARY KEY,
             holder_count   INTEGER NOT NULL
@@ -3247,6 +3257,65 @@ pub async fn is_fulfillment_registered(pool: &DBPool, fulfillment_id: &[u8]) -> 
             )
             .optional()?;
         Ok(row.is_some())
+    })
+    .await
+}
+
+/// The registered fulfillment envelope with this identity, if held.
+pub async fn get_sofi_fulfillment_by_id(
+    pool: &DBPool,
+    fulfillment_id: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let id = fulfillment_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT envelope_bytes FROM sofi_fulfillments WHERE fulfillment_id = ?1",
+                params![id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Write a successor cell. Write-once; an identical re-write acks.
+pub async fn put_sofi_successor_cell(
+    pool: &DBPool,
+    k_cell: &[u8],
+    fulfillment_id: &[u8],
+    e_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let (k, id, e) = (k_cell.to_vec(), fulfillment_id.to_vec(), e_bytes.to_vec());
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO sofi_successor_cells (k_cell, fulfillment_id, e_bytes)
+             VALUES (?1, ?2, ?3)",
+            params![k, id, e],
+        )?;
+        Ok(if n == 1 {
+            ObjectPutOutcome::Stored
+        } else {
+            ObjectPutOutcome::AlreadyHeld
+        })
+    })
+    .await
+}
+
+/// The value a successor cell holds, if any.
+pub async fn get_sofi_successor_cell(pool: &DBPool, k_cell: &[u8]) -> Result<Option<Vec<u8>>> {
+    let k = k_cell.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = ?1",
+                params![k],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
     })
     .await
 }

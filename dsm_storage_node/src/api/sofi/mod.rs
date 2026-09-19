@@ -83,6 +83,7 @@ pub fn create_read_router(state: Arc<AppState>) -> Router<()> {
             "/api/v2/sofi/fulfillment/{k_ful}/registration",
             get(get_registration),
         )
+        .route("/api/v2/sofi/cell/{k_cell}", get(get_cell))
         .route(
             "/api/v2/sofi/policy-fulfillment/{id}",
             get(get_policy_fulfillment),
@@ -98,6 +99,7 @@ pub fn create_write_router(state: Arc<AppState>) -> Router<()> {
             "/api/v2/sofi/fulfillment/{k_ful}/registration",
             post(post_registration),
         )
+        .route("/api/v2/sofi/cell/{fulfillment}/{vault}", post(post_cell))
         .route(
             "/api/v2/sofi/policy-fulfillment",
             post(post_policy_fulfillment),
@@ -548,6 +550,126 @@ pub async fn get_registration(
     match db::is_fulfillment_registered(&state.db_pool, &fid).await {
         Ok(true) => (StatusCode::OK, fid.to_vec()).into_response(),
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Write the successor cell for one leg of a REGISTERED fulfillment.
+///
+/// **Before `Registered(F)` no successor cell for `E` is admissible anywhere**
+/// (F2). That is the gate, and it is the reason a cell cannot be used to
+/// bootstrap an exercise that never happened.
+///
+/// **The member derives the key; the caller never supplies one.** The caller
+/// names a fulfillment and a vault, and the key comes from the `P` leg and the
+/// attempt that `F` itself fixed — the same discipline as the root register
+/// ("the cell, from the body — never from the caller") and the immutable store.
+/// A caller able to choose `K^(a)` could park a value at a key no fulfillment
+/// authorises.
+///
+/// Any caller may write: completion is not the trader's privilege, and after
+/// registration the trader has no remaining discretion.
+pub async fn post_cell(
+    Extension(state): Extension<Arc<AppState>>,
+    Path((fulfillment_b32, vault_b32)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let (Some(fid), Some(vault)) = (
+        text_id::decode_base32_crockford(&fulfillment_b32).filter(|v| v.len() == 32),
+        text_id::decode_base32_crockford(&vault_b32).filter(|v| v.len() == 32),
+    ) else {
+        return outcome(StatusCode::BAD_REQUEST, "malformed");
+    };
+    if body.len() != 32 {
+        return outcome(StatusCode::BAD_REQUEST, "value-is-not-a-digest");
+    }
+
+    // THE GATE, before anything is derived or written.
+    match db::is_fulfillment_registered(&state.db_pool, &fid).await {
+        Ok(true) => {}
+        Ok(false) => return outcome(StatusCode::CONFLICT, "fulfillment-not-registered"),
+        Err(_) => return outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    }
+    let Ok(Some(f_envelope)) = db::get_sofi_fulfillment_by_id(&state.db_pool, &fid).await else {
+        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "fulfillment-not-held");
+    };
+    let Ok(f_env) = SignedSofiObject::decode(&f_envelope) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-fulfillment-does-not-decode",
+        );
+    };
+    let Ok(fulfillment) = TraderFulfillmentBody::decode(f_env.body_ccb()) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-fulfillment-does-not-decode",
+        );
+    };
+    let Ok(Some(p_envelope)) =
+        db::get_sofi_precommit(&state.db_pool, fulfillment.precommit_id()).await
+    else {
+        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "precommit-not-held");
+    };
+    let Ok(p_env) = SignedSofiObject::decode(&p_envelope) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-precommit-does-not-decode",
+        );
+    };
+    let Ok(precommit) = TraderPrecommitBody::decode(p_env.body_ccb()) else {
+        return outcome(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "held-precommit-does-not-decode",
+        );
+    };
+
+    let vault: [u8; 32] = match vault.as_slice().try_into() {
+        Ok(v) => v,
+        Err(_) => return outcome(StatusCode::BAD_REQUEST, "malformed"),
+    };
+    let Some(leg) = precommit.legs().iter().find(|l| l.vault_id == vault) else {
+        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "vault-is-not-a-leg");
+    };
+    let Some(entry) = fulfillment.attempts().iter().find(|a| a.vault_id == vault) else {
+        return outcome(StatusCode::UNPROCESSABLE_ENTITY, "vault-has-no-attempt");
+    };
+    // THE PROJECTION IS NOT YET CHECKABLE. F7 requires `a > 0` to carry
+    // `SuccessorResolution(K^(a-1))`, and typed resolution records arrive in
+    // E2-5. Refused by name rather than admitted unprojected: a later attempt
+    // admitted without its predecessor resolved is a cell nobody can order.
+    if entry.attempt > 0 {
+        return outcome(
+            StatusCode::NOT_IMPLEMENTED,
+            "later-attempts-need-the-resolution-records",
+        );
+    }
+
+    // The value is EXACTLY E, which `P` commits. A cell holding anything else
+    // is not this operation's successor.
+    if body.as_ref() != precommit.external_commitment().as_slice() {
+        return outcome(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "value-is-not-this-operations-e",
+        );
+    }
+
+    let k_cell = derive::successor_attempt_key(&leg.vault_id, &leg.parent_root, entry.attempt);
+    match db::put_sofi_successor_cell(&state.db_pool, &k_cell, &fid, &body).await {
+        Ok(db::ObjectPutOutcome::Stored) => outcome(StatusCode::OK, "stored"),
+        Ok(db::ObjectPutOutcome::AlreadyHeld) => outcome(StatusCode::OK, "already-held"),
+        Err(_) => outcome(StatusCode::INTERNAL_SERVER_ERROR, "storage"),
+    }
+}
+
+pub async fn get_cell(
+    Extension(state): Extension<Arc<AppState>>,
+    Path(k_cell_b32): Path<String>,
+) -> Response {
+    let Some(k) = text_id::decode_base32_crockford(&k_cell_b32).filter(|v| v.len() == 32) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match db::get_sofi_successor_cell(&state.db_pool, &k).await {
+        Ok(found) => serve(found).await,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
