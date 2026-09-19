@@ -568,6 +568,22 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
             storage_set_id       BLOB NOT NULL
         );
 
+        -- SoFi P and G: CONTENT-ADDRESSED, write-once, and holding one is
+        -- never exercise. Keyed by the object's own identity, which is derived
+        -- from the canonical BODY — so an alternate valid signature envelope
+        -- over the same body is the SAME object and re-storing it is
+        -- idempotent, not a contested cell. Neither occupies an economic
+        -- position and neither installs anything at K_root.
+        CREATE TABLE IF NOT EXISTS sofi_precommits (
+            precommit_id   BLOB PRIMARY KEY,
+            envelope_bytes BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sofi_policy_fulfillments (
+            policy_fulfillment_id BLOB PRIMARY KEY,
+            precommit_id          BLOB NOT NULL,
+            body_bytes            BLOB NOT NULL
+        );
+
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
                 -- layer 1). One row per (device, head_number); a new head is
                 -- accepted only if it links the current tip (parent_head_hash ==
@@ -2938,4 +2954,103 @@ mod tests {
             .expect("read payload");
         assert!(p.is_none());
     }
+}
+
+/// Whether a content-addressed object was newly stored or was already held.
+///
+/// There is no `Refused` arm on purpose. A register cell can be CONTESTED —
+/// two identities racing for one position — but a content-addressed object
+/// cannot: the address is a function of the object, so everyone storing at it
+/// is storing the same object. An alternate valid signature envelope over the
+/// same body is that same object, and re-storing it acks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectPutOutcome {
+    Stored,
+    AlreadyHeld,
+}
+
+/// Store a signed `P` at its own identity. Write-once, idempotent.
+pub async fn put_sofi_precommit(
+    pool: &DBPool,
+    precommit_id: &[u8],
+    envelope_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let id = precommit_id.to_vec();
+    let bytes = envelope_bytes.to_vec();
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO sofi_precommits (precommit_id, envelope_bytes)
+             VALUES (?1, ?2)",
+            params![id, bytes],
+        )?;
+        Ok(if n == 1 {
+            ObjectPutOutcome::Stored
+        } else {
+            ObjectPutOutcome::AlreadyHeld
+        })
+    })
+    .await
+}
+
+/// The stored signed `P`, if this member holds it.
+pub async fn get_sofi_precommit(pool: &DBPool, precommit_id: &[u8]) -> Result<Option<Vec<u8>>> {
+    let id = precommit_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT envelope_bytes FROM sofi_precommits WHERE precommit_id = ?1",
+                params![id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Store a `G` at its own identity, alongside the `P` it binds to.
+pub async fn put_sofi_policy_fulfillment(
+    pool: &DBPool,
+    policy_fulfillment_id: &[u8],
+    precommit_id: &[u8],
+    body_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let id = policy_fulfillment_id.to_vec();
+    let pid = precommit_id.to_vec();
+    let bytes = body_bytes.to_vec();
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO sofi_policy_fulfillments
+               (policy_fulfillment_id, precommit_id, body_bytes)
+             VALUES (?1, ?2, ?3)",
+            params![id, pid, bytes],
+        )?;
+        Ok(if n == 1 {
+            ObjectPutOutcome::Stored
+        } else {
+            ObjectPutOutcome::AlreadyHeld
+        })
+    })
+    .await
+}
+
+/// The stored `G`, if this member holds it.
+pub async fn get_sofi_policy_fulfillment(
+    pool: &DBPool,
+    policy_fulfillment_id: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let id = policy_fulfillment_id.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT body_bytes FROM sofi_policy_fulfillments WHERE policy_fulfillment_id = ?1",
+                params![id],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
 }
