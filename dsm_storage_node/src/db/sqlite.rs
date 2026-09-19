@@ -2993,6 +2993,15 @@ mod tests {
 /// cannot: the address is a function of the object, so everyone storing at it
 /// is storing the same object. An alternate valid signature envelope over the
 /// same body is that same object, and re-storing it acks.
+///
+/// **This type is only sound for a key that is a hash of the value, and it was
+/// once wrongly used for one that is not.** `sofi_successor_cells` is keyed by
+/// coordinates and borrowed this enum, which made contention unrepresentable
+/// and told the loser `already-held` while the cell held someone else's `E`.
+/// A coordinate-keyed register needs an outcome with a contested arm and a
+/// read-back comparison — see `SuccessorCellPutOutcome` — and must be enrolled
+/// in `write_once_properties`, which states that discipline once and would
+/// have caught it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectPutOutcome {
     Stored,
@@ -3280,26 +3289,77 @@ pub async fn get_sofi_fulfillment_by_id(
     .await
 }
 
-/// Write a successor cell. Write-once; an identical re-write acks.
+/// What writing a successor cell decided.
+///
+/// **This is NOT `ObjectPutOutcome`, and the difference is the bug that type
+/// caused.** `ObjectPutOutcome` has no `Contested` arm, and its doc comment
+/// gives the reason: a content address is a function of the object, so
+/// everyone writing at it is writing the same object. A successor cell is a
+/// COORDINATE-keyed register — `K^(a) = H(vault_id, parent_root, attempt)` —
+/// and its value `E` additionally commits the trader's core, which the key
+/// omits entirely. Two traders may target one DLV parent, because SoFi is
+/// deliberately non-locking, so one key can be reached with two different `E`.
+///
+/// Reusing the content-addressed outcome here made that contention
+/// unrepresentable, and the loser was told `already-held` — an affirmative
+/// claim that the cell holds the `E` it just posted, when it holds the
+/// winner's.
+///
+/// Equality is on `E` ALONE. F5 gives the cell as `Dead | FinalE(E)`, F7 says
+/// "the value is exactly E", and F4 consumes it by asking `FinalE(E)` at the
+/// key — never which fulfillment wrote it. `fulfillment_id` is provenance.
+/// Comparing the pair would be wrong as well as over-strict: two fulfillments
+/// over ONE `P` share one `E`, so on a multi-leg route two `F` differing only
+/// in another leg's attempt reach this key with identical `E`, and that is the
+/// same cell fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuccessorCellPutOutcome {
+    Stored,
+    /// The cell already holds exactly this `E`. The same fact, restated.
+    AlreadyHeld,
+    /// The cell holds a DIFFERENT `E`: another operation reached this leg
+    /// first, and this one did not land.
+    Contested {
+        held_e: Vec<u8>,
+    },
+}
+
+/// Write a successor cell. Write-once, and a conflict is COMPARED, never
+/// assumed idempotent.
 pub async fn put_sofi_successor_cell(
     pool: &DBPool,
     k_cell: &[u8],
     fulfillment_id: &[u8],
     e_bytes: &[u8],
-) -> Result<ObjectPutOutcome> {
+) -> Result<SuccessorCellPutOutcome> {
     let (k, id, e) = (k_cell.to_vec(), fulfillment_id.to_vec(), e_bytes.to_vec());
     with_conn(pool, move |conn| {
         conn.execute_batch("PRAGMA synchronous=FULL;")?;
-        let n = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
             "INSERT OR IGNORE INTO sofi_successor_cells (k_cell, fulfillment_id, e_bytes)
              VALUES (?1, ?2, ?3)",
             params![k, id, e],
         )?;
-        Ok(if n == 1 {
-            ObjectPutOutcome::Stored
+        let outcome = if n == 1 {
+            SuccessorCellPutOutcome::Stored
         } else {
-            ObjectPutOutcome::AlreadyHeld
-        })
+            // READ WHAT IS ACTUALLY HELD, in the same transaction that failed
+            // to insert. Without this the loser of a contention is told its
+            // own value is present.
+            let held: Vec<u8> = tx.query_row(
+                "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = ?1",
+                params![k],
+                |row| row.get(0),
+            )?;
+            if held == e {
+                SuccessorCellPutOutcome::AlreadyHeld
+            } else {
+                SuccessorCellPutOutcome::Contested { held_e: held }
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
     })
     .await
 }
