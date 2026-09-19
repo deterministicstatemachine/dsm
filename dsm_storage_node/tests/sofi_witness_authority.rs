@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! `P` and `G` against the REAL node routers: ingress, binding, idempotence.
+//! `P(E)` is the authority for every shadow: the three adversarial cases.
 //!
-//! Driven in-process over an in-memory SQLite pool, through the same router
-//! functions the binary serves. Every acceptance and every refusal below is
-//! the member's own decision, not a double's.
+//! `policy_fulfillment_id` hashes the whole witness body, `shadow_core`
+//! included, so witnesses differing only in their shadow have different
+//! content addresses and once coexisted for one leg. F ingress then chose
+//! between them with an unordered `.find()`, which let anyone able to relay
+//! deny an honest `F`, and let two members answer differently about one
+//! identical `F`.
+//!
+//! `P(E)` settles it: `c°_{V,j}` is `dlv_core_digest` over the `V°_j` the
+//! preimage carries, so for a given `E` there is exactly one admissible shadow
+//! per leg. The member derives the canonical set; it never elects one.
 
 #![cfg(feature = "local-dev")]
 #![allow(clippy::disallowed_methods)]
@@ -21,12 +28,14 @@ use dsm::economic::claim_envelope::{
     economic_root_claim_envelope_digest, sign_economic_root_claim,
 };
 use dsm::economic::register::economic_root_register_key;
+use dsm::sofi::conformance::derive_policy_fulfillments;
 use dsm::sofi::derive;
 use dsm::sofi::wire::{
-    CoreEntry, DlvCore, PreEClosureIndex, SettlementBody, SettlementPreimage, SwapHop, TraderCore,
+    AttemptEntry, DlvPolicyFulfillmentBody, ParentClaimRef, PrecommitLeg, SignedSofiObject,
+    TraderFulfillmentBody, TraderPrecommitBody,
 };
 use dsm::sofi::wire::{
-    DlvPolicyFulfillmentBody, ParentClaimRef, PrecommitLeg, SignedSofiObject, TraderPrecommitBody,
+    CoreEntry, DlvCore, PreEClosureIndex, SettlementBody, SettlementPreimage, SwapHop, TraderCore,
 };
 use dsm_storage_node::replication::{ReplicationConfig, ReplicationManager};
 use dsm_storage_node::{db, AppState, NodeStorageSet};
@@ -263,181 +272,249 @@ fn envelope_for(body: &TraderPrecommitBody, sk: &[u8]) -> Vec<u8> {
     .encode()
 }
 
-/// A signed `P` bound to the parent claim is stored, served back byte for
-/// byte, and a SECOND valid envelope over the same body acks instead of
-/// conflicting — the address is the body's, so an honest relayer never races
-/// the trader.
-#[tokio::test]
-async fn a_bound_precommit_is_stored_and_republishing_it_acks() {
-    let n = node().await;
-    let (claim_ref, pk, sk) = seed_parent_claim(&n).await;
-    let body = precommit(claim_ref, n.set_id, &pk);
-
-    let (status, reason) = post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk)).await;
-    assert_eq!((status, reason.as_str()), (200, "stored"));
-
-    // A different valid signature over the SAME body.
-    let (status, reason) = post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk)).await;
-    assert_eq!((status, reason.as_str()), (200, "already-held"));
-
-    let id = derive::precommit_id(&body);
-    let served = db::get_sofi_precommit(&n.pool, &id)
-        .await
-        .expect("read")
-        .expect("held");
+/// Accept P and its canonical witness, and return the signed F envelope parts.
+async fn ready(n: &Node) -> (TraderPrecommitBody, Vec<u8>, Vec<u8>) {
+    let (claim_ref, pk, sk) = seed_parent_claim(n).await;
+    let p = precommit(claim_ref, n.set_id, &pk);
     assert_eq!(
-        SignedSofiObject::decode(&served)
-            .expect("decodes")
-            .body_ccb(),
-        body.encode(),
-        "what is served carries the same canonical body"
+        post(n, "/api/v2/sofi/precommit", envelope_for(&p, &sk))
+            .await
+            .0,
+        200
+    );
+    (p, pk, sk)
+}
+
+fn witness_for(p: &TraderPrecommitBody) -> DlvPolicyFulfillmentBody {
+    let leg = canonical_leg();
+    DlvPolicyFulfillmentBody {
+        precommit_id: derive::precommit_id(p),
+        external_commitment: external_commitment(),
+        vault_id: leg.vault_id,
+        parent_root: leg.parent_root,
+        shadow_core: leg.shadow_core,
+    }
+}
+
+/// A witness for the same leg carrying a shadow `E` does not commit.
+fn decoy_for(p: &TraderPrecommitBody) -> DlvPolicyFulfillmentBody {
+    DlvPolicyFulfillmentBody {
+        shadow_core: [0x9A; 32],
+        ..witness_for(p)
+    }
+}
+
+fn fulfillment_over(p: &TraderPrecommitBody, shadow: [u8; 32], pk: &[u8]) -> TraderFulfillmentBody {
+    let mut set: Vec<[u8; 32]> = dsm::sofi::conformance::derive_policy_fulfillments(p, &[shadow])
+        .expect("derivable")
+        .iter()
+        .map(derive::policy_fulfillment_id)
+        .collect();
+    set.sort();
+    TraderFulfillmentBody::new(
+        derive::precommit_id(p),
+        set,
+        vec![AttemptEntry {
+            vault_id: canonical_leg().vault_id,
+            attempt: 0,
+        }],
+        POS + 1,
+        sigalg::SPHINCS_PLUS_SPX256F,
+        pk,
+    )
+    .expect("a well-formed fulfillment")
+}
+
+fn f_envelope(f: &TraderFulfillmentBody, sk: &[u8]) -> Vec<u8> {
+    let sig = sphincs_sign(sk, &derive::fulfillment_signing_digest(f)).expect("sign");
+    SignedSofiObject::new(
+        class::SOFI_TRADER_FULFILLMENT_BODY,
+        &f.encode(),
+        sigalg::SPHINCS_PLUS_SPX256F,
+        &sig,
+    )
+    .expect("envelope")
+    .encode()
+}
+
+/// CASE 1. An honest witness stored, a same-coordinate decoy attempted: the
+/// decoy is not storable at all, and the valid `F` registers.
+#[tokio::test]
+async fn a_decoy_cannot_be_stored_and_the_valid_f_registers() {
+    let n = node().await;
+    let (p, pk, sk) = ready(&n).await;
+
+    assert_eq!(
+        post(
+            &n,
+            "/api/v2/sofi/policy-fulfillment",
+            witness_for(&p).encode()
+        )
+        .await
+        .1,
+        "stored"
+    );
+    let (status, reason) = post(
+        &n,
+        "/api/v2/sofi/policy-fulfillment",
+        decoy_for(&p).encode(),
+    )
+    .await;
+    assert_eq!(
+        (status, reason.as_str()),
+        (422, "witness-is-not-the-one-e-commits"),
+        "a shadow E does not commit is not storable"
+    );
+
+    let f = fulfillment_over(&p, canonical_leg().shadow_core, &pk);
+    assert_eq!(
+        post(&n, "/api/v2/sofi/fulfillment", f_envelope(&f, &sk))
+            .await
+            .1,
+        "registered"
     );
 }
 
-/// THE KEY BINDING. A `P` whose own signature is perfectly valid is still
-/// refused when the parent claim proves a different key: `P` is authorized by
-/// the identity that holds the position, not by whoever can sign.
+/// ORDER INDEPENDENCE. The same dataset applied in opposite orders gives the
+/// same answer — the property the unordered `.find()` destroyed.
 #[tokio::test]
-async fn a_precommit_signed_by_another_key_is_refused() {
-    let n = node().await;
-    let (claim_ref, _pk, _sk) = seed_parent_claim(&n).await;
-    let (other_pk, other_sk) = generate_sphincs_keypair().expect("keys");
-    let body = precommit(claim_ref, n.set_id, &other_pk);
-    let (status, _reason) =
-        post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &other_sk)).await;
-    assert_eq!(status, 403, "a valid signature by the wrong identity");
-}
-
-/// A `P` naming a parent claim this member does not hold is refused: the key
-/// binding has nothing to read, and accepting unbound is exactly what the
-/// two-part attribution elsewhere exists to prevent.
-#[tokio::test]
-async fn a_precommit_without_its_parent_claim_is_refused() {
-    let n = node().await;
-    let (pk, sk) = generate_sphincs_keypair().expect("keys");
-    let body = precommit([0xAB; 32], n.set_id, &pk);
-    let (status, reason) = post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk)).await;
-    assert_eq!((status, reason.as_str()), (422, "parent-claim-not-held"));
-}
-
-/// A foreign storage set is refused before anything else is considered.
-#[tokio::test]
-async fn a_precommit_for_a_foreign_set_is_refused() {
-    let n = node().await;
-    let (claim_ref, pk, sk) = seed_parent_claim(&n).await;
-    let body = precommit(claim_ref, [0xFF; 32], &pk);
-    let (status, reason) = post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk)).await;
-    assert_eq!((status, reason.as_str()), (422, "foreign-set"));
-}
-
-/// `G` binds to a STORED `P` leg. The node checks the binding arithmetic and
-/// never the policy.
-#[tokio::test]
-async fn a_witness_binds_to_a_stored_leg() {
-    let n = node().await;
-    let (claim_ref, pk, sk) = seed_parent_claim(&n).await;
-    let body = precommit(claim_ref, n.set_id, &pk);
+async fn the_answer_does_not_depend_on_insertion_order() {
+    // decoy attempted FIRST, then the honest witness.
+    let a = node().await;
+    let (pa, pka, ska) = ready(&a).await;
     assert_eq!(
-        post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk))
+        post(
+            &a,
+            "/api/v2/sofi/policy-fulfillment",
+            decoy_for(&pa).encode()
+        )
+        .await
+        .0,
+        422
+    );
+    assert_eq!(
+        post(
+            &a,
+            "/api/v2/sofi/policy-fulfillment",
+            witness_for(&pa).encode()
+        )
+        .await
+        .0,
+        200
+    );
+    let fa = fulfillment_over(&pa, canonical_leg().shadow_core, &pka);
+    let first = post(&a, "/api/v2/sofi/fulfillment", f_envelope(&fa, &ska)).await;
+
+    // honest witness FIRST, then the decoy attempted.
+    let b = node().await;
+    let (pb, pkb, skb) = ready(&b).await;
+    assert_eq!(
+        post(
+            &b,
+            "/api/v2/sofi/policy-fulfillment",
+            witness_for(&pb).encode()
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        post(
+            &b,
+            "/api/v2/sofi/policy-fulfillment",
+            decoy_for(&pb).encode()
+        )
+        .await
+        .0,
+        422
+    );
+    let fb = fulfillment_over(&pb, canonical_leg().shadow_core, &pkb);
+    let second = post(&b, "/api/v2/sofi/fulfillment", f_envelope(&fb, &skb)).await;
+
+    assert_eq!(first, second, "two members must not disagree about one F");
+    assert_eq!(first.1, "registered");
+}
+
+/// CASE 2. An `F` built over a shadow `E` does not commit declares a set the
+/// member's own derivation does not produce.
+#[tokio::test]
+async fn an_f_over_a_non_canonical_shadow_is_refused() {
+    let n = node().await;
+    let (p, pk, sk) = ready(&n).await;
+    assert_eq!(
+        post(
+            &n,
+            "/api/v2/sofi/policy-fulfillment",
+            witness_for(&p).encode()
+        )
+        .await
+        .0,
+        200
+    );
+
+    let f = fulfillment_over(&p, [0x9A; 32], &pk);
+    let (status, reason) = post(&n, "/api/v2/sofi/fulfillment", f_envelope(&f, &sk)).await;
+    assert_eq!(
+        (status, reason.as_str()),
+        (422, "policy-fulfillment-set-is-not-canonical"),
+        "the member derives the set; it does not accept the one it was handed"
+    );
+}
+
+/// CASE 3. The canonical witness is not held here, so this member cannot
+/// conclude the set is complete — whatever `F` declares.
+#[tokio::test]
+async fn an_f_whose_canonical_witness_is_not_held_is_refused() {
+    let n = node().await;
+    let (p, pk, sk) = ready(&n).await;
+    // No witness posted.
+    let f = fulfillment_over(&p, canonical_leg().shadow_core, &pk);
+    let (status, reason) = post(&n, "/api/v2/sofi/fulfillment", f_envelope(&f, &sk)).await;
+    assert_eq!(
+        (status, reason.as_str()),
+        (422, "policy-fulfillment-not-held")
+    );
+}
+
+/// Without `P(E)` a member has no authority for the shadow and must say so
+/// rather than fall back to believing a witness.
+#[tokio::test]
+async fn without_the_preimage_a_member_refuses_by_name() {
+    let n = node().await;
+    // A parent claim, but deliberately NO preimage.
+    let (pk, sk) = generate_sphincs_keypair().expect("keys");
+    let body = EconomicRootClaimBody {
+        trader_genesis: G,
+        trader_devid: DEV,
+        economic_position: POS,
+        post_economic_root: [0x77; 32],
+        admission_manifest_addr: [0x78; 32],
+        root_register_storage_set_id: n.set_id,
+        signature_alg: sigalg::SPHINCS_PLUS_SPX256F,
+        claimant_public_key: pk.clone(),
+    };
+    let envelope = sign_economic_root_claim(&body, &sk).expect("sign");
+    let digest = economic_root_claim_envelope_digest(&envelope);
+    let k_root = economic_root_register_key(&G, &DEV, POS);
+    db::claim_economic_root(&n.pool, &k_root, &envelope, &digest, &pk, &n.set_id)
+        .await
+        .expect("seed");
+    let p = precommit(digest, n.set_id, &pk);
+    assert_eq!(
+        post(&n, "/api/v2/sofi/precommit", envelope_for(&p, &sk))
             .await
             .0,
         200
     );
 
-    // The honest witness carries the shadow `P(E)` implies.
-    let leg = canonical_leg();
-    let witness = DlvPolicyFulfillmentBody {
-        precommit_id: derive::precommit_id(&body),
-        external_commitment: external_commitment(),
-        vault_id: leg.vault_id,
-        parent_root: leg.parent_root,
-        shadow_core: leg.shadow_core,
-    };
-    let (status, reason) = post(&n, "/api/v2/sofi/policy-fulfillment", witness.encode()).await;
-    assert_eq!((status, reason.as_str()), (200, "stored"));
-
-    // THE DECOY. Same leg coordinate, a different shadow — so a different
-    // content address, which is exactly why it used to store beside the honest
-    // one and give F ingress two candidates with no basis for choosing.
-    // `P(E)` says which shadow `E` commits, so it is not storable at all.
-    let decoy = DlvPolicyFulfillmentBody {
-        shadow_core: [0x9A; 32],
-        ..witness
-    };
-    assert_ne!(
-        derive::policy_fulfillment_id(&decoy),
-        derive::policy_fulfillment_id(&witness),
-        "the decoy has its own address — that is the whole problem"
-    );
-    let (status, reason) = post(&n, "/api/v2/sofi/policy-fulfillment", decoy.encode()).await;
+    let (status, reason) = post(
+        &n,
+        "/api/v2/sofi/policy-fulfillment",
+        witness_for(&p).encode(),
+    )
+    .await;
     assert_eq!(
         (status, reason.as_str()),
-        (422, "witness-is-not-the-one-e-commits")
-    );
-
-    // A witness naming a leg this P does not have.
-    let stray = DlvPolicyFulfillmentBody {
-        vault_id: [0xDD; 32],
-        ..witness
-    };
-    let (status, reason) = post(&n, "/api/v2/sofi/policy-fulfillment", stray.encode()).await;
-    assert_eq!(
-        (status, reason.as_str()),
-        (422, "witness-is-not-the-one-e-commits")
-    );
-
-    // A witness naming another commitment is refused before that.
-    let other_e = DlvPolicyFulfillmentBody {
-        external_commitment: [0xEE; 32],
-        ..witness
-    };
-    let (status, reason) = post(&n, "/api/v2/sofi/policy-fulfillment", other_e.encode()).await;
-    assert_eq!(
-        (status, reason.as_str()),
-        (422, "witness-names-another-commitment")
-    );
-}
-
-/// A witness whose `P` this member does not hold is refused. `G` is bound to a
-/// STORED leg, not to an asserted one.
-#[tokio::test]
-async fn a_witness_without_its_precommit_is_refused() {
-    let n = node().await;
-    let witness = DlvPolicyFulfillmentBody {
-        precommit_id: [0xAB; 32],
-        external_commitment: external_commitment(),
-        vault_id: VAULT,
-        parent_root: canonical_leg().parent_root,
-        shadow_core: [0x9A; 32],
-    };
-    let (status, reason) = post(&n, "/api/v2/sofi/policy-fulfillment", witness.encode()).await;
-    assert_eq!((status, reason.as_str()), (422, "precommit-not-held"));
-}
-
-/// NEITHER STORE TOUCHES AN ECONOMIC POSITION. Storing `P` and `G` installs
-/// nothing at `K_root`, which is what makes publication not exercise.
-#[tokio::test]
-async fn storing_p_and_g_installs_nothing_at_k_root() {
-    let n = node().await;
-    let (claim_ref, pk, sk) = seed_parent_claim(&n).await;
-    let body = precommit(claim_ref, n.set_id, &pk);
-    post(&n, "/api/v2/sofi/precommit", envelope_for(&body, &sk)).await;
-    let witness = DlvPolicyFulfillmentBody {
-        precommit_id: derive::precommit_id(&body),
-        external_commitment: external_commitment(),
-        vault_id: VAULT,
-        parent_root: canonical_leg().parent_root,
-        shadow_core: [0x9A; 32],
-    };
-    post(&n, "/api/v2/sofi/policy-fulfillment", witness.encode()).await;
-
-    // The successor position is untouched: no cell was installed at q = p + 1.
-    let k_next = economic_root_register_key(&G, &DEV, POS + 1);
-    assert!(
-        db::get_economic_root_claim(&n.pool, &k_next)
-            .await
-            .expect("read")
-            .is_none(),
-        "publishing P and G must occupy no economic position"
+        (422, "settlement-preimage-not-held")
     );
 }

@@ -604,6 +604,19 @@ pub async fn init_db(pool: &DBPool) -> Result<()> {
             fulfillment_id BLOB NOT NULL,
             envelope_bytes BLOB NOT NULL
         );
+        -- `P(E)`: the settlement preimage, keyed by the `E` it RECOMPUTES to.
+        -- A genuine content address — the node derives the key from the bytes
+        -- and never takes one from a caller — so a conflict means identical
+        -- bytes, and anything else is corruption rather than contention.
+        --
+        -- This is the AUTHORITY for `c°_{V,j}`. Without it a member cannot know
+        -- which shadow `E` commits, and G ingress degrades to "some witness
+        -- claims this leg", which is how a same-coordinate decoy became
+        -- storable and F ingress became an unordered election.
+        CREATE TABLE IF NOT EXISTS sofi_settlement_preimages (
+            external_commitment BLOB PRIMARY KEY,
+            preimage_bytes      BLOB NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sofi_precommits (
             precommit_id   BLOB PRIMARY KEY,
             envelope_bytes BLOB NOT NULL
@@ -3197,26 +3210,6 @@ pub async fn register_fulfillment_with_claim(
     .await
 }
 
-/// Every `G` this member holds for one `P`, so the canonical set can be
-/// reconstructed from STORED witnesses rather than asserted.
-pub async fn list_sofi_policy_fulfillments(
-    pool: &DBPool,
-    precommit_id: &[u8],
-) -> Result<Vec<Vec<u8>>> {
-    let pid = precommit_id.to_vec();
-    with_conn(pool, move |conn| {
-        let mut stmt = conn
-            .prepare("SELECT body_bytes FROM sofi_policy_fulfillments WHERE precommit_id = ?1")?;
-        let rows = stmt.query_map(params![pid], |r| r.get::<_, Vec<u8>>(0))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
-    })
-    .await
-}
-
 /// The registered `F` at a position, if this member holds one.
 pub async fn get_sofi_fulfillment(pool: &DBPool, k_ful: &[u8]) -> Result<Option<Vec<u8>>> {
     let k = k_ful.to_vec();
@@ -3372,6 +3365,64 @@ pub async fn get_sofi_successor_cell(pool: &DBPool, k_cell: &[u8]) -> Result<Opt
             .query_row(
                 "SELECT e_bytes FROM sofi_successor_cells WHERE k_cell = ?1",
                 params![k],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    })
+    .await
+}
+
+/// Store `P(E)` at the `E` it recomputes to. Write-once.
+///
+/// A byte-different row at one address is CORRUPTION, not contention: the key
+/// is derived from the bytes, so reaching it with other bytes needs a hash
+/// collision or a damaged store. It is surfaced as an error rather than acked,
+/// which is the same discipline the immutable object store keeps.
+pub async fn put_sofi_settlement_preimage(
+    pool: &DBPool,
+    external_commitment: &[u8],
+    preimage_bytes: &[u8],
+) -> Result<ObjectPutOutcome> {
+    let (e, bytes) = (external_commitment.to_vec(), preimage_bytes.to_vec());
+    with_conn(pool, move |conn| {
+        conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "INSERT OR IGNORE INTO sofi_settlement_preimages
+               (external_commitment, preimage_bytes) VALUES (?1, ?2)",
+            params![e, bytes],
+        )?;
+        let outcome = if n == 1 {
+            ObjectPutOutcome::Stored
+        } else {
+            let held: Vec<u8> = tx.query_row(
+                "SELECT preimage_bytes FROM sofi_settlement_preimages WHERE external_commitment = ?1",
+                params![e],
+                |row| row.get(0),
+            )?;
+            if held != bytes {
+                anyhow::bail!("settlement preimage address holds different bytes");
+            }
+            ObjectPutOutcome::AlreadyHeld
+        };
+        tx.commit()?;
+        Ok(outcome)
+    })
+    .await
+}
+
+/// The stored `P(E)` for this `E`, if this member holds it.
+pub async fn get_sofi_settlement_preimage(
+    pool: &DBPool,
+    external_commitment: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let e = external_commitment.to_vec();
+    with_conn(pool, move |conn| {
+        let row = conn
+            .query_row(
+                "SELECT preimage_bytes FROM sofi_settlement_preimages WHERE external_commitment = ?1",
+                params![e],
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()?;

@@ -306,17 +306,24 @@ pub fn external_commitment_route(
 /// or close, is the single-vault form; two or more legs is the multivault
 /// form. `X_route`'s variant comes from the same branch, so a close digest can
 /// never be folded as a swap one [R17-4].
-pub fn recompute_e(preimage: &SettlementPreimage) -> Result<D32, SofiWireError> {
-    // No bound check here, and none is missing: an oversized `P(E)` cannot
-    // reach this function because it cannot exist. `SettlementPreimage` has
-    // private fields and exactly two entry points — `new` and `decode` — and
-    // both refuse anything over `MAX_SETTLEMENT_PREIMAGE_BYTES`. Re-checking
-    // it here would be a branch no test could reach, which is the kind of
-    // decoration a mutation gate rightly finds hollow.
+/// The canonical leg set `P(E)` implies: for every DLV parent the settlement
+/// references, the `(vault_id, parent_root, setup_ref, shadow_core)` that
+/// exactly one valid preimage can produce.
+///
+/// **This is the authority for `c°_{V,j}`.** A shadow is not something a
+/// witness asserts and a reader accepts — it is `dlv_core_digest` over the
+/// `V°_j` the preimage carries, so for a given `E` there is exactly one
+/// admissible shadow per leg. A member holding `P(E)` can therefore decide
+/// whether a policy-fulfillment witness carries the right one, which is what
+/// §2 asks of G ingress: `(v_j, R_j, c°_{V,j})` must match a stored P leg
+/// AND `P(E)`.
+///
+/// [`recompute_e`] is built on this, so the value a member checks against and
+/// the value that goes into `E` are the same derivation and cannot drift.
+/// Both E forms are covered: a one-leg settlement yields one entry, and a
+/// route yields `ROUTE_MIN_LEGS..=CANONICAL_MAX_LEGS`.
+pub fn canonical_legs(preimage: &SettlementPreimage) -> Result<Vec<RouteLegEntry>, SofiWireError> {
     let settlement = preimage.settlement();
-    let b_core = settlement_core_digest(&settlement.encode()?);
-    let trader_core = trader_core_digest(&preimage.trader_core().encode()?);
-    let route = route_digest(&settlement.route_digest_preimage())?;
     if settlement.leg_count() < ROUTE_MIN_LEGS {
         let core = preimage
             .dlv_cores()
@@ -339,54 +346,77 @@ pub fn recompute_e(preimage: &SettlementPreimage) -> Result<D32, SofiWireError> 
                 ..
             } => (*vault_id, *parent_root, *setup_ref),
         };
+        return Ok(vec![RouteLegEntry {
+            vault_id,
+            parent_root,
+            setup_ref,
+            shadow_core: dlv_core_digest(&core.encode()?),
+        }]);
+    }
+    preimage
+        .dlv_cores()
+        .iter()
+        .map(|core| {
+            let hop = match settlement {
+                SettlementBody::Swap { hops, .. } => hops
+                    .iter()
+                    .find(|h| h.vault_id == *core.vault_id())
+                    .ok_or(SofiWireError::Cardinality {
+                        field: "dlv cores",
+                        min: 1,
+                        max: CANONICAL_MAX_LEGS,
+                        got: 0,
+                    })?,
+                SettlementBody::Close { .. } => {
+                    return Err(SofiWireError::Cardinality {
+                        field: "close legs",
+                        min: 1,
+                        max: 1,
+                        got: preimage.dlv_cores().len(),
+                    })
+                }
+            };
+            Ok(RouteLegEntry {
+                vault_id: hop.vault_id,
+                parent_root: hop.parent_root,
+                setup_ref: hop.setup_ref,
+                shadow_core: dlv_core_digest(&core.encode()?),
+            })
+        })
+        .collect()
+}
+
+pub fn recompute_e(preimage: &SettlementPreimage) -> Result<D32, SofiWireError> {
+    // No bound check here, and none is missing: an oversized `P(E)` cannot
+    // reach this function because it cannot exist. `SettlementPreimage` has
+    // private fields and exactly two entry points — `new` and `decode` — and
+    // both refuse anything over `MAX_SETTLEMENT_PREIMAGE_BYTES`. Re-checking
+    // it here would be a branch no test could reach, which is the kind of
+    // decoration a mutation gate rightly finds hollow.
+    let settlement = preimage.settlement();
+    let b_core = settlement_core_digest(&settlement.encode()?);
+    let trader_core = trader_core_digest(&preimage.trader_core().encode()?);
+    let route = route_digest(&settlement.route_digest_preimage())?;
+    // ONE derivation of the leg set, shared with every reader that needs to
+    // know which shadow `E` commits.
+    let legs = canonical_legs(preimage)?;
+    if settlement.leg_count() < ROUTE_MIN_LEGS {
+        let leg = &legs[0];
         return Ok(external_commitment_single(
-            &vault_id,
-            &parent_root,
-            &setup_ref,
+            &leg.vault_id,
+            &leg.parent_root,
+            &leg.setup_ref,
             &trader_core,
-            &dlv_core_digest(&core.encode()?),
+            &leg.shadow_core,
             &b_core,
             &route,
         ));
     }
-    let legs = RouteLegSet::new(
-        preimage
-            .dlv_cores()
-            .iter()
-            .map(|core| {
-                let hop = match settlement {
-                    SettlementBody::Swap { hops, .. } => hops
-                        .iter()
-                        .find(|h| h.vault_id == *core.vault_id())
-                        .ok_or(SofiWireError::Cardinality {
-                            field: "dlv cores",
-                            min: 1,
-                            max: CANONICAL_MAX_LEGS,
-                            got: 0,
-                        })?,
-                    SettlementBody::Close { .. } => {
-                        return Err(SofiWireError::Cardinality {
-                            field: "close legs",
-                            min: 1,
-                            max: 1,
-                            got: preimage.dlv_cores().len(),
-                        })
-                    }
-                };
-                Ok(RouteLegEntry {
-                    vault_id: hop.vault_id,
-                    parent_root: hop.parent_root,
-                    setup_ref: hop.setup_ref,
-                    shadow_core: dlv_core_digest(&core.encode()?),
-                })
-            })
-            .collect::<Result<Vec<_>, SofiWireError>>()?,
-    )?;
     Ok(external_commitment_route(
         &trader_core,
         &b_core,
         &route,
-        &legs,
+        &RouteLegSet::new(legs)?,
     ))
 }
 
