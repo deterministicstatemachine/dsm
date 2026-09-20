@@ -505,7 +505,9 @@ impl BilateralBleHandler {
     // State.
     //
     // Note: the BLE bilateral path advances the relationship chain via
-    // `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+    // `BilateralTransactionManager::prepare_bilateral_advance` (§6.1
+    // tripwire) followed by the canonical Core advance in
+    // `AppRouter::execute_on_relationship_for_bilateral`.
     /// Reject an incoming prepare (or any active session) identified by the origin commitment hash.
     pub async fn reject_incoming_prepare(
         &self,
@@ -3497,21 +3499,11 @@ impl BilateralBleHandler {
             ));
         }
 
-        // 3. Pre-generate finalize entropy
-        let pre_entropy = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.derive_transition_entropy(&session.counterparty_device_id, &session.operation)?
-        };
-
-        // Store entropy in session for finalize reuse
-        {
-            let mut sessions = self.sessions.sessions.lock().await;
-            if let Some(s) = sessions.get_mut(&commitment_hash) {
-                s.pre_finalize_entropy = Some(pre_entropy);
-            }
-        }
-
-        // 4. Get shared chain tip h_n and compute successor h_{n+1}
+        // 3. Get shared chain tip h_n. The transition's entropy and the
+        //    successor h_{n+1} are computed AFTER the canonical prepare
+        //    simulation below: the entropy is Core's derivation inside
+        //    `advance` (Part VII step 3), read off the simulated outcome —
+        //    nothing here chooses it.
         // Re-sync from SQLite in case an online transaction advanced the tip.
         {
             let mut mgr = self.bilateral_tx_manager.write().await;
@@ -3534,20 +3526,8 @@ impl BilateralBleHandler {
                 .ok_or_else(|| DsmError::invalid_operation("No chain tip for confirm"))?
         };
         let op_bytes = session.operation.to_bytes();
-        // Canonical C_pre is symmetric over h_n, operation bytes, and entropy.
-        let receipt_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
-            &h_n,
-            &op_bytes,
-            &pre_entropy,
-        );
-        let h_n_plus_1 = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &h_n,
-            &op_bytes,
-            &pre_entropy,
-            &receipt_digest,
-        );
 
-        // 5. Build sender SMT proofs via a prepare-only simulation of the
+        // 4. Build sender SMT proofs via a prepare-only simulation of the
         // canonical advance (§2.2). No canonical state mutation yet — that
         // happens after the receiver ACKs, inside
         // `mark_sender_committed_with_post_state_hash`. Identical inputs
@@ -3715,6 +3695,31 @@ impl BilateralBleHandler {
         // seeding changes the root.
         let pre_root = sim_outcome.smt_proofs.pre_root;
         let sender_smt_root = sim_outcome.child_r_a;
+
+        // The one entropy of this transition (§39.2–39.3): Core derived it
+        // inside the simulated `advance`; the canonical commit at finalize
+        // re-derives the identical value from the identical inputs and the
+        // finalize path refuses to commit if it does not. It goes into the
+        // relationship tip (already, inside the outcome) and into BOTH receipt
+        // hashes here; the receiver recomputes h_{n+1} from the carried value.
+        let pre_entropy: [u8; 32] = sim_outcome.transition_entropy();
+        {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                s.pre_finalize_entropy = Some(pre_entropy);
+            }
+        }
+        let receipt_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &h_n,
+            &op_bytes,
+            &pre_entropy,
+        );
+        let h_n_plus_1 = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &h_n,
+            &op_bytes,
+            &pre_entropy,
+            &receipt_digest,
+        );
         // v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
         // FINALIZE with the REAL device roots the simulation just produced, and attach Π_i/Π_{i+1}
         // (the anchor-state inclusion proofs from the same simulation) to the release package. The
@@ -3865,6 +3870,7 @@ impl BilateralBleHandler {
             rel_proof_parent_bytes.clone(),
             rel_proof_child_bytes.clone(),
             Some(local_device_tree_commitment),
+            pre_entropy,
         )
         .ok_or_else(|| {
             DsmError::invalid_operation(
@@ -5059,6 +5065,7 @@ impl BilateralBleHandler {
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
                 Some(local_commitment),
+                outcome.transition_entropy(),
             )
         };
 
@@ -5556,7 +5563,6 @@ impl BilateralBleHandler {
                     &counterparty_device_id,
                     commitment_hash,
                     &counterparty_sig,
-                    pre_entropy,
                     Vec::new(),
                     session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
                     session_offline_spend, // bearer→allocation: the SAME allocation debit the confirm-build sim used
@@ -5610,17 +5616,40 @@ impl BilateralBleHandler {
             }
         };
 
-        // Both-or-neither guard (bearer transfers only). Re-simulate the advance the canonical
-        // commit is about to perform — same rel_key/operation/deltas/parent_tip and the SAME driven
-        // `anchor_leaf` — and require its post-root to equal the sim root already sent to the
-        // receiver on the confirm. `simulate_advance_for_confirm` is prepare-only (it does NOT
-        // re-drive the appliance), so this re-applies the stashed successor leaf without advancing
-        // the fused anchor. A divergence (device head / relationship tip drifted between confirm and
-        // commit) means the receiver verified proofs against a root we would NOT commit; abort BEFORE
-        // the canonical mutation and fail closed to online recovery. Structurally this should never
-        // fire — it guards against regressions that break the determinism the invariant rests on.
-        if let Some(sent_sim_root) = session_anchor_sim_root {
-            let projected_root = match router.simulate_advance_for_confirm(
+        // Both-or-neither guard. Re-simulate the advance the canonical commit is about to perform
+        // — same rel_key/operation/deltas/parent_tip and the SAME driven `anchor_leaf` — and
+        // require (every transfer) its transition entropy to equal the value the confirm carried,
+        // and (bearer transfers) its post-root to equal the sim root already sent to the receiver.
+        // `simulate_advance_for_confirm` is prepare-only (it does NOT re-drive the appliance), so
+        // this re-applies the stashed successor leaf without advancing the fused anchor. A
+        // divergence (device head / relationship tip drifted between confirm and commit) means the
+        // receiver verified against values we would NOT commit; abort BEFORE the canonical
+        // mutation and fail closed to online recovery. Structurally this should never fire — it
+        // guards against regressions that break the determinism the invariant rests on.
+        // The confirm the receiver accepted carried `pre_entropy` — Core's
+        // derivation from the confirm-time simulation — and the receiver
+        // recomputed h_{n+1} from it. The canonical commit below derives its
+        // own value from its own inputs. Before committing, re-simulate and
+        // refuse unless the two are byte-identical (§39.3: ONE value in the tip
+        // and in both receipt hashes). A session with no stashed entropy never
+        // built a confirm and cannot commit.
+        let Some(pre_entropy) = pre_entropy else {
+            error!(
+                "[BILATERAL] commit refused: session carries no confirm-time transition entropy"
+            );
+            return self
+                .finalize_sender_recovery(
+                    commitment_hash,
+                    &counterparty_device_id,
+                    post_state_hash,
+                    &op_bytes,
+                    event_amount_opt,
+                    event_token_id_opt,
+                )
+                .await;
+        };
+        {
+            let resim = match router.simulate_advance_for_confirm(
                 prepared.rel_key,
                 prepared.counterparty_devid,
                 prepared.operation.clone(),
@@ -5632,10 +5661,10 @@ impl BilateralBleHandler {
                 // is Copy, so this and the commit read the identical value.
                 prepared.offline_spend,
             ) {
-                Ok(o) => o.child_r_a,
+                Ok(o) => o,
                 Err(e) => {
                     warn!(
-                        "[BILATERAL] bearer both-or-neither re-simulation failed: {e} — fail closed to recovery"
+                        "[BILATERAL] commit-time re-simulation failed: {e} — fail closed to recovery"
                     );
                     return self
                         .finalize_sender_recovery(
@@ -5649,11 +5678,11 @@ impl BilateralBleHandler {
                         .await;
                 }
             };
-            if projected_root != sent_sim_root {
+            if resim.transition_entropy() != pre_entropy {
                 error!(
-                    "[BILATERAL] both-or-neither VIOLATION: commit-time sim root {} != sent sim root {} — aborting before canonical commit, fail closed",
-                    bytes_to_base32(&projected_root[..8]),
-                    bytes_to_base32(&sent_sim_root[..8]),
+                    "[BILATERAL] one-entropy VIOLATION: commit-time derivation {} != confirm-time value {} the receiver accepted — aborting before canonical commit, fail closed",
+                    bytes_to_base32(&resim.transition_entropy()[..8]),
+                    bytes_to_base32(&pre_entropy[..8]),
                 );
                 return self
                     .finalize_sender_recovery(
@@ -5666,8 +5695,27 @@ impl BilateralBleHandler {
                     )
                     .await;
             }
+            if let Some(sent_sim_root) = session_anchor_sim_root {
+                let projected_root = resim.child_r_a;
+                if projected_root != sent_sim_root {
+                    error!(
+                        "[BILATERAL] both-or-neither VIOLATION: commit-time sim root {} != sent sim root {} — aborting before canonical commit, fail closed",
+                        bytes_to_base32(&projected_root[..8]),
+                        bytes_to_base32(&sent_sim_root[..8]),
+                    );
+                    return self
+                        .finalize_sender_recovery(
+                            commitment_hash,
+                            &counterparty_device_id,
+                            post_state_hash,
+                            &op_bytes,
+                            event_amount_opt,
+                            event_token_id_opt,
+                        )
+                        .await;
+                }
+            }
         }
-
         let outcome = match router.execute_on_relationship_for_bilateral(
             prepared.rel_key,
             prepared.counterparty_devid,
@@ -5714,12 +5762,16 @@ impl BilateralBleHandler {
         }
 
         // h_{n+1} symmetric (§16.6) — shared pair tip for contacts.chain_tip
-        // + tripwire precommit + b0x addressing. Derivable by both parties.
-        let receipt_sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &prepared.entropy);
+        // + tripwire precommit + b0x addressing. Both parties compute it from
+        // the ONE transition entropy: Core's derivation inside the committed
+        // advance, which the re-simulation above proved equal to the value the
+        // receiver accepted in the confirm.
+        let transition_entropy = outcome.transition_entropy();
+        let receipt_sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &transition_entropy);
         let h_next_symmetric = compute_successor_tip(
             &prepared.parent_tip,
             &op_bytes,
-            &prepared.entropy,
+            &transition_entropy,
             &receipt_sigma,
         );
         // h_{n+1} asymmetric (A-side) — what T_A now stores at k_{A↔B}.
@@ -5796,6 +5848,7 @@ impl BilateralBleHandler {
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
                 Some(local_device_tree_commitment(&self.device_id)),
+                transition_entropy,
             )
         };
 
@@ -6346,7 +6399,7 @@ impl BilateralBleHandler {
                 }
             }
 
-            // Create a canonical precommitment inside the manager so that finalize_offline_transfer
+            // Create a canonical precommitment inside the manager so that prepare_bilateral_advance
             // can find it later. Use the provided validity_ticks. If the manager computes a different
             // commitment hash than the one supplied, we'll keep the manager's canonical one and
             // create an alias mapping so incoming responses can be resolved.

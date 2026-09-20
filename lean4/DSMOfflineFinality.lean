@@ -12,12 +12,15 @@
       always distinct from the parent tip, so the Tripwire guard
       (chainTip[sender] = tipAtCreation) prevents re-use.
 
-  Code correspondence:
-    - compute_successor_tip(): bilateral_transaction_manager.rs:165-177
-    - finalize_offline_transfer(): bilateral_transaction_manager.rs:1066
-      (core logic in finalize_offline_transfer_with_entropy:1089)
-    - Tripwire enforcement: bilateral_transaction_manager.rs:1131 (finalize),
-      :1285 (prepare)
+  Code correspondence (conceptual, not line-pinned):
+    - compute_successor_tip(): bilateral_transaction_manager.rs
+    - the commit: prepare_bilateral_advance() (§6.1 tripwire, no SMT
+      mutation, no entropy) handed to the canonical Core advance —
+      DeviceState::advance() derives the transition's one entropy and
+      installs the successor — via
+      AppRouter::execute_on_relationship_for_bilateral()
+    - Tripwire enforcement: prepare_bilateral_advance() in
+      bilateral_transaction_manager.rs
 
   Discharges OMITTED obligations in DSM_OfflineFinality.tla:
     - IrreversibilityInductive: chain-tip arithmetic
@@ -100,7 +103,8 @@ structure BilateralState where
 
 /-- Atomic commit: transfer `amount` from sender to receiver, advance
     both chain tips. Models the Commit action in DSM_OfflineFinality.tla
-    and finalize_offline_transfer() in the Rust implementation.
+    and, in the Rust implementation, the canonical Core advance that
+    `prepare_bilateral_advance` hands off to.
 
     Both balance updates happen atomically — no intermediate state. -/
 def commitTransfer (s : BilateralState) (amount : Nat)

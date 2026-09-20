@@ -2040,6 +2040,12 @@ message ReceiptCommit {
   //   pi_inv == invalidation_proof_commitment(C_pre^j for j != selected)
   // before parent-consumption Tripwire admits the successor.
   ForkAwareWitness fork_witness = 20;
+  // The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
+  // value Core derived inside DeviceState::advance for this step. CANONICAL —
+  // part of the commit preimage, so sig_a binds it. The recipient cannot
+  // derive it (e_n is the sender's own tip entropy); it feeds it into C_pre
+  // and the symmetric tip and recomputes child_tip from it. Required.
+  bytes transition_entropy = 21 [(dsm_fixed_len)=32];
 }
 
 // Fork-aware finalization witness (whitepaper §4.1.1 + §4.3).

@@ -320,7 +320,7 @@ mod tests {
             dsm::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64);
         for ticket in 0..claims {
             head = head
-                .admitted_faucet_claim(ticket, 0x8C ^ (ticket as u8))
+                .admitted_faucet_claim(ticket)
                 .expect("an admitted faucet claim on the self-loop");
         }
         (devid, head)

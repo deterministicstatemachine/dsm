@@ -1739,17 +1739,25 @@ impl AppRouterImpl {
                             .to_string());
                     }
                     // Everything derives from the VERIFIED transfer, exactly as
-                    // the legacy path derives it from the verified entry.
+                    // the legacy path derives it from the verified entry. The
+                    // transition entropy is the receipt's canonical field 21 —
+                    // the one value Core derived inside the sender's advance
+                    // (Part VII step 3) — and it is what BOTH receipt hashes
+                    // take here (§39.3); the transfer nonce stays inside the
+                    // operation bytes (§39.4).
                     let signed_parent = v.receipt.parent_tip;
                     let signed_child = v.receipt.child_tip;
-                    let nonce: Vec<u8> = match &v.signed_op {
-                        dsm::types::operations::Operation::Transfer { nonce, .. } => nonce.clone(),
-                        _ => return Err("split transfer is not a Transfer op".to_string()),
-                    };
+                    let transition_entropy = v.receipt.transition_entropy;
+                    if !matches!(
+                        &v.signed_op,
+                        dsm::types::operations::Operation::Transfer { .. }
+                    ) {
+                        return Err("split transfer is not a Transfer op".to_string());
+                    }
                     let signed_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
                         &signed_parent,
                         &v.canonical_operation_bytes,
-                        &nonce,
+                        &transition_entropy,
                     );
                     let projection_parent: [u8; 32] =
                         match crate::storage::client_db::get_contact_chain_tip_raw(&sender_device) {
@@ -1763,12 +1771,12 @@ impl AppRouterImpl {
                         let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
                             &projection_parent,
                             &v.canonical_operation_bytes,
-                            &nonce,
+                            &transition_entropy,
                         );
                         dsm::core::bilateral_transaction_manager::compute_successor_tip(
                             &projection_parent,
                             &v.canonical_operation_bytes,
-                            &nonce,
+                            &transition_entropy,
                             &sigma_sym,
                         )
                     };
@@ -1789,6 +1797,7 @@ impl AppRouterImpl {
                             &v.canonical_operation_bytes,
                             signed_parent,
                             signed_child,
+                            transition_entropy,
                             |outcome, b_pair| {
                                 let b_art = rr::generate_b_artifacts_from_inbound(
                                     receipt,

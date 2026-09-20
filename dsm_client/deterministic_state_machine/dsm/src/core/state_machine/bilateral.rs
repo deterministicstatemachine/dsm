@@ -14,13 +14,15 @@
 //! `ensure_relationship_initialized` aliases) all had zero external callers
 //! after the §2.2/§4.3 transition. `set_local_chain_tip` was an explicit §4.3
 //! violation. The retained surface is the `*_bytes` API actually consumed by
-//! `BilateralTransactionManager` plus `generate_entropy()`.
+//! `BilateralTransactionManager`.
+//!
+//! This manager holds NO entropy source. The one entropy of a transition is
+//! derived by Core inside `DeviceState::advance` (Part VII step 3); the
+//! bootstrap states of a relationship pair are seeded deterministically from
+//! the two device ids and nothing here is random.
 
-use crate::core::state_machine::relationship::{
-    KeyDerivationStrategy, RelationshipManager, RelationshipStatePair,
-};
+use crate::core::state_machine::relationship::{KeyDerivationStrategy, RelationshipManager};
 use crate::types::error::DsmError;
-use crate::types::operations::Operation;
 use crate::types::state_types::{DeviceInfo, State};
 use crate::common::domain_tags::TAG_ENTITY_ID;
 use crate::crypto::blake3::domain_hash;
@@ -69,39 +71,6 @@ impl BilateralStateManager {
         format!("{}-{}-{}-{}", a, b, c, d)
     }
 
-    /// Derive deterministic transition entropy from the current relationship state and operation.
-    ///
-    /// Mirrors the canonical `DSM/state-entropy` evolution used by state transitions:
-    /// `H(prev_entropy || op_bytes || prev_hash)`.
-    pub fn derive_transition_entropy_bytes(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        operation: &Operation,
-    ) -> Result<[u8; 32], DsmError> {
-        let eid = Self::id_from_32(entity_id);
-        let cid = Self::id_from_32(counterparty_id);
-        let op_bytes = operation.to_bytes();
-
-        let mut hasher =
-            crate::crypto::blake3::dsm_domain_hasher(crate::tagged_domain!(b"DSM/state-entropy"));
-        match self.relationship_manager.get_relationship_state(&eid, &cid) {
-            Ok(state) => {
-                hasher.update(&state.entropy);
-                hasher.update(&op_bytes);
-                hasher.update(&state.hash()?);
-            }
-            Err(_) => {
-                // Deterministic fallback for callers before relationship bootstrap.
-                hasher.update(entity_id);
-                hasher.update(counterparty_id);
-                hasher.update(&op_bytes);
-            }
-        }
-
-        Ok(*hasher.finalize().as_bytes())
-    }
-
     /// Ensure a relationship exists; if not, initialize with genesis states (bytes-only IDs)
     pub fn ensure_relationship_initialized_bytes(
         &mut self,
@@ -123,9 +92,11 @@ impl BilateralStateManager {
             return Ok(());
         }
 
-        // Initialize with genesis states
-        let entropy_a = self.generate_entropy()?;
-        let entropy_b = self.generate_entropy()?;
+        // Initialize with genesis states. The bootstrap entropy of each side
+        // is a deterministic function of the pair — the same on every device
+        // and on every run. Nothing about this manager is random.
+        let entropy_a = Self::bootstrap_entropy(0, entity_id, counterparty_id);
+        let entropy_b = Self::bootstrap_entropy(1, entity_id, counterparty_id);
 
         let entity_state = State::new_genesis(
             entropy_a,
@@ -150,6 +121,20 @@ impl BilateralStateManager {
         )
     }
 
+    /// `H(DSM/genesis-entropy; role ‖ entity_id ‖ counterparty_id)`: the
+    /// bootstrap entropy of one side of a relationship pair. Deterministic by
+    /// construction; this is the ONLY entropy this manager ever produces, and
+    /// it is a bootstrap value, never a transition's.
+    fn bootstrap_entropy(role: u8, entity_id: &[u8; 32], counterparty_id: &[u8; 32]) -> [u8; 32] {
+        let mut h = crate::crypto::blake3::dsm_domain_hasher(
+            crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY,
+        );
+        h.update(&[role]);
+        h.update(entity_id);
+        h.update(counterparty_id);
+        *h.finalize().as_bytes()
+    }
+
     /// Get a relationship's current entity-side state (bytes-only IDs)
     pub fn get_relationship_state_bytes(
         &self,
@@ -159,48 +144,6 @@ impl BilateralStateManager {
         let eid = Self::id_from_32(entity_id);
         let cid = Self::id_from_32(counterparty_id);
         self.relationship_manager.get_relationship_state(&eid, &cid)
-    }
-
-    /// Execute a bilateral state transition (bytes-only IDs)
-    pub fn execute_transition_bytes(
-        &mut self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        operation: Operation,
-        entropy: [u8; 32],
-    ) -> Result<RelationshipStatePair, DsmError> {
-        let eid = Self::id_from_32(entity_id);
-        let cid = Self::id_from_32(counterparty_id);
-        self.relationship_manager.execute_relationship_transition(
-            &domain_hash(TAG_ENTITY_ID, eid.as_bytes()).into(),
-            &domain_hash(TAG_ENTITY_ID, cid.as_bytes()).into(),
-            operation,
-            entropy,
-        )
-    }
-
-    /// Generate entropy for state transitions (no wall-clock)
-    pub fn generate_entropy(&self) -> Result<[u8; 32], DsmError> {
-        let mut entropy = Vec::with_capacity(16 + 32);
-
-        // Deterministic seed component from RNG (named `seed` to avoid time semantics)
-        use rand::RngCore;
-        let mut rng = crate::crypto::rng::SecureRng;
-        let seed = rng.next_u64();
-        entropy.extend_from_slice(&seed.to_le_bytes());
-
-        // Add random bytes
-        let mut random_bytes = [0u8; 32];
-        rng.fill_bytes(&mut random_bytes);
-        entropy.extend_from_slice(&random_bytes);
-
-        // Hash the combined entropy for consistency (binary out)
-        let hash = *crate::crypto::blake3::domain_hash(
-            crate::common::domain_tags::TAG_DSM_BILATERAL_ENTROPY,
-            &entropy,
-        )
-        .as_bytes();
-        Ok(hash)
     }
 }
 
@@ -306,23 +249,6 @@ mod tests {
         );
     }
 
-    // ── generate_entropy ────────────────────────────────────────────────
-
-    #[test]
-    fn generate_entropy_returns_32_bytes() {
-        let mgr = make_manager();
-        let entropy = mgr.generate_entropy().unwrap();
-        assert_eq!(entropy.len(), 32);
-    }
-
-    #[test]
-    fn generate_entropy_two_calls_differ() {
-        let mgr = make_manager();
-        let a = mgr.generate_entropy().unwrap();
-        let b = mgr.generate_entropy().unwrap();
-        assert_ne!(a, b);
-    }
-
     // ── ensure_relationship_initialized_bytes ───────────────────────────
 
     #[test]
@@ -337,6 +263,24 @@ mod tests {
             dummy_key(),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn bootstrap_entropy_is_deterministic_and_role_separated() {
+        let e = [0x11u8; 32];
+        let c = [0x22u8; 32];
+        assert_eq!(
+            BilateralStateManager::bootstrap_entropy(0, &e, &c),
+            BilateralStateManager::bootstrap_entropy(0, &e, &c)
+        );
+        assert_ne!(
+            BilateralStateManager::bootstrap_entropy(0, &e, &c),
+            BilateralStateManager::bootstrap_entropy(1, &e, &c)
+        );
+        assert_ne!(
+            BilateralStateManager::bootstrap_entropy(0, &e, &c),
+            BilateralStateManager::bootstrap_entropy(0, &c, &e)
+        );
     }
 
     #[test]
