@@ -5037,3 +5037,21 @@ message BleConnectionFailed {
   string address = 1;
   string error = 2;
 }
+
+// ── keyed cells and indexes (storage contract Part II) ──────────────────────
+// Everything a member holds at a key, in arrival order. An empty list is an
+// asserted absence. The member decodes none of the values.
+message CellValuesV1 {
+  repeated bytes values = 1 [(dsm_max_len)=262144];
+}
+
+message IndexEntryV1 {
+  int64 seq  = 1;
+  bytes addr = 2 [(dsm_fixed_len)=32];
+}
+
+// One page of the content addresses appended under a locator, in append
+// order. Page from the last `seq`.
+message IndexPageV1 {
+  repeated IndexEntryV1 entries = 1;
+}

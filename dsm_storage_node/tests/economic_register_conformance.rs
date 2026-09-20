@@ -43,15 +43,11 @@ use tower::ServiceExt;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use dsm::economic::cell_observation::MemberCellRead;
-use dsm::economic::claim::EconomicRootClaimBody;
-use dsm::economic::claim_envelope::{
-    economic_root_claim_envelope_digest, sign_economic_root_claim,
-};
 use dsm::economic::faucet::{
     era_faucet_id, faucet_claim_evidence_addr, sign_faucet_ticket_claim, FaucetTicketClaimBody,
     ERA_FAUCET_TICKET_COUNT,
 };
-use dsm::economic::register::{economic_root_register_key, AuthenticatedCaller, MAX_CLAIM_BYTES};
+use dsm::economic::register::{AuthenticatedCaller, MAX_CLAIM_BYTES};
 use dsm_sdk::sdk::storage_io::fake_registers::{self, RegisterKind};
 use dsm_sdk::sdk::storage_node_sdk::{
     classify_one_shot_response, one_shot_claim_headers, ClaimFanout, MemberClaimOutcome,
@@ -215,38 +211,32 @@ async fn device(tag: u8, members: &[RealMember]) -> Device {
 #[derive(Clone, Copy)]
 enum Register {
     Faucet,
-    Root,
 }
 
 impl Register {
     fn kind(self) -> RegisterKind {
         match self {
             Register::Faucet => RegisterKind::FaucetTicket,
-            Register::Root => RegisterKind::EconomicRoot,
         }
     }
     fn path(self) -> &'static str {
         match self {
             Register::Faucet => "/api/v2/faucet-ticket/claim",
-            Register::Root => "/api/v2/economic-root/claim",
         }
     }
     fn prefix(self) -> &'static str {
         match self {
             Register::Faucet => "x-dsm-faucet-ticket",
-            Register::Root => "x-dsm-economic-root",
         }
     }
     fn digest(self, envelope: &[u8]) -> [u8; 32] {
         match self {
             Register::Faucet => faucet_claim_evidence_addr(envelope),
-            Register::Root => economic_root_claim_envelope_digest(envelope),
         }
     }
     fn network(self) -> Option<&'static [u8]> {
         match self {
             Register::Faucet => Some(NETWORK),
-            Register::Root => None,
         }
     }
 }
@@ -386,32 +376,6 @@ fn faucet_envelope(d: &Device, body: &FaucetTicketClaimBody) -> Vec<u8> {
     sign_faucet_ticket_claim(body, &d.sk).expect("sign ticket claim")
 }
 
-fn root_envelope(d: &Device, set_id: [u8; 32], position: u64, salt: u8) -> Vec<u8> {
-    root_envelope_for(d, d.genesis, d.devid, set_id, position, salt)
-}
-
-fn root_envelope_for(
-    signer: &Device,
-    genesis: [u8; 32],
-    devid: [u8; 32],
-    set_id: [u8; 32],
-    position: u64,
-    salt: u8,
-) -> Vec<u8> {
-    let body = EconomicRootClaimBody::new(
-        genesis,
-        devid,
-        position,
-        [salt; 32],
-        [salt ^ 0xFF; 32],
-        set_id,
-        dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-        &signer.pk,
-    )
-    .expect("root claim body");
-    sign_economic_root_claim(&body, &signer.sk).expect("sign root claim")
-}
-
 /// Two envelopes for the SAME cell with DIFFERENT bytes.
 fn conflicting_pair(register: Register, d: &Device, set_id: [u8; 32]) -> (Vec<u8>, Vec<u8>) {
     match register {
@@ -419,22 +383,13 @@ fn conflicting_pair(register: Register, d: &Device, set_id: [u8; 32]) -> (Vec<u8
             faucet_envelope(d, &faucet_body(d, set_id, 7, 0x11)),
             faucet_envelope(d, &faucet_body(d, set_id, 7, 0x22)),
         ),
-        Register::Root => (
-            root_envelope(d, set_id, 1, 0x11),
-            root_envelope(d, set_id, 1, 0x22),
-        ),
     }
 }
 
 fn fresh(register: Register, d: &Device, set_id: [u8; 32], salt: u8) -> Vec<u8> {
     match register {
         Register::Faucet => faucet_envelope(d, &faucet_body(d, set_id, 100 + salt as u64, salt)),
-        Register::Root => root_envelope(d, set_id, 10 + position_of(salt), salt),
     }
-}
-
-fn position_of(salt: u8) -> u64 {
-    salt as u64
 }
 
 // ── (1) (2) (3): first claim, identical replay, conflicting digest ───────────
@@ -442,7 +397,7 @@ fn position_of(salt: u8) -> u64 {
 #[tokio::test]
 #[serial_test::serial]
 async fn first_claim_replay_and_conflict_answer_identically() {
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -490,7 +445,7 @@ async fn first_claim_replay_and_conflict_answer_identically() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_member_that_answers_nothing_is_unattributed_on_both_sides() {
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -545,22 +500,6 @@ async fn a_member_that_answers_nothing_is_unattributed_on_both_sides() {
                         v.body.ticket_index
                     ),
                     fake_registers::ticket_key(&v.body.faucet_id, v.body.ticket_index),
-                )
-            }
-            Register::Root => {
-                let v = dsm::economic::claim_envelope::decode_and_verify_economic_root_claim(&env)
-                    .expect("vector decodes");
-                let k = economic_root_register_key(
-                    &v.body().trader_genesis,
-                    &v.body().trader_devid,
-                    v.body().economic_position,
-                );
-                (
-                    format!(
-                        "/api/v2/economic-root/{}",
-                        text_id::encode_base32_crockford(&k)
-                    ),
-                    fake_registers::root_key(&k),
                 )
             }
         };
@@ -637,7 +576,7 @@ async fn a_member_that_answers_nothing_is_unattributed_on_both_sides() {
 #[tokio::test]
 #[serial_test::serial]
 async fn malformed_requests_are_refused_identically_not_panicked_on() {
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -696,7 +635,7 @@ async fn malformed_requests_are_refused_identically_not_panicked_on() {
 #[tokio::test]
 #[serial_test::serial]
 async fn a_claim_in_someone_elses_name_is_refused_identically() {
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -723,9 +662,6 @@ async fn a_claim_in_someone_elses_name_is_refused_identically() {
                 let mut body = faucet_body(&victim, set.id(), 500, 0x42);
                 body.claimant_devid = foreign_devid;
                 faucet_envelope(&victim, &body)
-            }
-            Register::Root => {
-                root_envelope_for(&victim, victim.genesis, foreign_devid, set.id(), 500, 0x42)
             }
         };
         let real = real_fanout(&set, &members, register, &wrong_device, Some(&victim.auth)).await;
@@ -768,7 +704,7 @@ async fn a_claim_in_someone_elses_name_is_refused_identically() {
 #[serial_test::serial]
 async fn a_claim_for_another_set_or_network_is_refused_identically() {
     // A foreign storage set, on both registers.
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -776,7 +712,6 @@ async fn a_claim_for_another_set_or_network_is_refused_identically() {
         let foreign_set = [0x77u8; 32];
         let env = match register {
             Register::Faucet => faucet_envelope(&d, &faucet_body(&d, foreign_set, 600, 0x51)),
-            Register::Root => root_envelope(&d, foreign_set, 600, 0x51),
         };
         let real = real_fanout(&set, &members, register, &env, Some(&d.auth)).await;
         let fake = fake_fanout(&set, register, &env, Some(&d.caller()));
@@ -866,12 +801,6 @@ async fn a_claim_for_another_set_or_network_is_refused_identically() {
         o.result,
         MemberClaimResult::Unavailable("status 503 outcome \"no-storage-set\"".into())
     );
-    let env = root_envelope(&d2, set.id(), 603, 0x55);
-    let o = post_to(&unset, Register::Root, &env, Some(&d2.auth)).await;
-    assert_eq!(
-        o.result,
-        MemberClaimResult::Unavailable("status 503 outcome \"no-storage-set\"".into())
-    );
 }
 
 // ── (8): concurrent conflicting claims ───────────────────────────────────────
@@ -880,7 +809,7 @@ async fn a_claim_for_another_set_or_network_is_refused_identically() {
 #[serial_test::serial]
 async fn concurrent_conflicting_claims_have_exactly_one_winner_per_member() {
     const RACERS: usize = 8;
-    for register in [Register::Faucet, Register::Root] {
+    for register in [Register::Faucet] {
         fake_registers::reset();
         let members = fleet().await;
         let set = client_set(&members);
@@ -889,7 +818,6 @@ async fn concurrent_conflicting_claims_have_exactly_one_winner_per_member() {
         let envelopes: Vec<Vec<u8>> = (0..RACERS as u8)
             .map(|i| match register {
                 Register::Faucet => faucet_envelope(&d, &faucet_body(&d, set.id(), 900, 0x60 + i)),
-                Register::Root => root_envelope(&d, set.id(), 900, 0x60 + i),
             })
             .collect();
         let digests: Vec<[u8; 32]> = envelopes.iter().map(|e| register.digest(e)).collect();

@@ -89,16 +89,6 @@ pub(crate) enum Outcome {
     Refused(Vec<u8>),
 }
 
-impl From<db::SlotClaimOutcome> for Outcome {
-    fn from(o: db::SlotClaimOutcome) -> Self {
-        match o {
-            db::SlotClaimOutcome::Accepted => Outcome::Accepted,
-            db::SlotClaimOutcome::AlreadyHeldIdentical => Outcome::Reack,
-            db::SlotClaimOutcome::Refused { held_digest } => Outcome::Refused(held_digest),
-        }
-    }
-}
-
 impl From<db::OneShotOutcome> for Outcome {
     fn from(o: db::OneShotOutcome) -> Self {
         match o {
@@ -251,21 +241,6 @@ macro_rules! write_once_register {
 }
 
 write_once_register!(
-    settlement_slot,
-    tag = 0x11,
-    claim = |pool, key, bytes, digest| db::claim_settlement_slot(
-        pool,
-        key,
-        7,
-        bytes,
-        digest,
-        b"pk",
-        &[0x6B; 32]
-    ),
-    held = |pool, key| db::get_settlement_slot_claim(pool, key, 7),
-);
-
-write_once_register!(
     faucet_ticket,
     tag = 0x22,
     claim = |pool, key, bytes, digest| db::claim_faucet_ticket(
@@ -278,18 +253,4 @@ write_once_register!(
         &[0x6B; 32]
     ),
     held = |pool, key| db::get_faucet_ticket_claim(pool, key, 3),
-);
-
-write_once_register!(
-    economic_root,
-    tag = 0x33,
-    claim = |pool, key, bytes, digest| db::claim_economic_root(
-        pool,
-        key,
-        bytes,
-        digest,
-        b"pk",
-        &[0x6B; 32]
-    ),
-    held = |pool, key| db::get_economic_root_claim(pool, key),
 );

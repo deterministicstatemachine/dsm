@@ -60,11 +60,6 @@ bash ci/peer_debit_lineage_authoritative.sh
 # live hole the day that writer lands. Only a static check holds this.
 bash ci/admitted_predecessor_readers_fenced.sh
 
-# The root register accepts only single root claims signed by the caller. A
-# conditional claim carries no caller signature, so the endpoint must never
-# decode that kind.
-bash ci/root_register_accepts_signed_claims_only.sh
-
 # The storage node holds bytes and knows nothing about SoFi.
 bash ci/storage_is_dumb.sh
 
