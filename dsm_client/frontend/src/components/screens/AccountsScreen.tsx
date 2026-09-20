@@ -375,7 +375,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
       </div>
 
       {/* Tab navigation */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+      <div data-tour="tokens-tabs" style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <button
           className={`wallet-style-button${fc(0)}`}
           onClick={() => setActiveTab('tokens')}
@@ -450,6 +450,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               <button
                 type="button"
                 className={`wallet-style-button${fc(2)}`}
+                data-tour="create-token"
                 onClick={() => setCreating(true)}
                 style={{
                   width: '100%',
@@ -901,6 +902,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
               <div>
                 <button
                   className={`wallet-style-button${fc(2)}`}
+                  data-tour="faucet-claim"
                   onClick={() => void claimFromFaucet(balances[0]?.tokenId || 'era', 'ERA')}
                   disabled={claimingId !== null}
                   style={{

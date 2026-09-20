@@ -11,6 +11,7 @@ import {
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
+import { tourStore } from '../tour/tourStore';
 import './SettingsScreen.css';
 
 type PrefValue = string | null;
@@ -258,6 +259,34 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
       </button>
 
       {/* Backup & Restore Section */}
+      {/* Guided tour — replay at any time */}
+      <section
+        aria-labelledby="tour-section-title"
+        className="settings-shell__panel"
+      >
+        <div
+          id="tour-section-title"
+          style={{
+            fontSize: '10px',
+            fontWeight: 'bold',
+            marginBottom: '6px',
+            letterSpacing: '1px',
+          }}
+        >
+          GUIDED TOUR
+        </div>
+        <div className="settings-shell__button-row">
+          <button
+            type="button"
+            className="settings-shell__button"
+            data-tour="tutorial-button"
+            onClick={() => tourStore.start()}
+          >
+            Replay tutorial
+          </button>
+        </div>
+      </section>
+
       <section
         aria-labelledby="backup-section-title"
         className="settings-shell__panel"
