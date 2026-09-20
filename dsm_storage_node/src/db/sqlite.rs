@@ -2136,6 +2136,72 @@ pub async fn verify_bytecommit_chain_empty(
     .await
 }
 
+// ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
+
+/// Keep `value` for `(namespace, key)`, after anything already held there.
+/// Nothing is compared and nothing is refused.
+pub async fn put_cell(pool: &DBPool, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+    let (namespace, key, value) = (namespace.to_vec(), key.to_vec(), value.to_vec());
+    with_conn(pool, move |conn| {
+        conn.execute(
+            "INSERT INTO cells (namespace, cell_key, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![namespace, key, value],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Everything held for `(namespace, key)`, in the order it arrived.
+pub async fn get_cell_values(pool: &DBPool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let (namespace, key) = (namespace.to_vec(), key.to_vec());
+    with_conn(pool, move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT value FROM cells WHERE namespace = ?1 AND cell_key = ?2 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![namespace, key], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    })
+    .await
+}
+
+/// Append a content address under `locator`. Never removed.
+pub async fn append_index(pool: &DBPool, locator: &[u8], addr: &[u8]) -> Result<()> {
+    let (locator, addr) = (locator.to_vec(), addr.to_vec());
+    with_conn(pool, move |conn| {
+        conn.execute(
+            "INSERT INTO index_entries (locator, addr) VALUES (?1, ?2)",
+            rusqlite::params![locator, addr],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+/// Addresses under `locator` with `seq > after`, in append order, at most
+/// `limit`. Returns `(seq, addr)` so a reader can page from the last `seq`.
+pub async fn read_index(
+    pool: &DBPool,
+    locator: &[u8],
+    after: i64,
+    limit: i64,
+) -> Result<Vec<(i64, Vec<u8>)>> {
+    let locator = locator.to_vec();
+    with_conn(pool, move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT seq, addr FROM index_entries WHERE locator = ?1 AND seq > ?2 \
+             ORDER BY seq ASC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![locator, after, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2646,70 +2712,4 @@ mod tests {
             .expect("read payload");
         assert!(p.is_none());
     }
-}
-
-// ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
-
-/// Keep `value` for `(namespace, key)`, after anything already held there.
-/// Nothing is compared and nothing is refused.
-pub async fn put_cell(pool: &DBPool, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
-    let (namespace, key, value) = (namespace.to_vec(), key.to_vec(), value.to_vec());
-    with_conn(pool, move |conn| {
-        conn.execute(
-            "INSERT INTO cells (namespace, cell_key, value) VALUES (?1, ?2, ?3)",
-            rusqlite::params![namespace, key, value],
-        )?;
-        Ok(())
-    })
-    .await
-}
-
-/// Everything held for `(namespace, key)`, in the order it arrived.
-pub async fn get_cell_values(pool: &DBPool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let (namespace, key) = (namespace.to_vec(), key.to_vec());
-    with_conn(pool, move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT value FROM cells WHERE namespace = ?1 AND cell_key = ?2 ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![namespace, key], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    })
-    .await
-}
-
-/// Append a content address under `locator`. Never removed.
-pub async fn append_index(pool: &DBPool, locator: &[u8], addr: &[u8]) -> Result<()> {
-    let (locator, addr) = (locator.to_vec(), addr.to_vec());
-    with_conn(pool, move |conn| {
-        conn.execute(
-            "INSERT INTO index_entries (locator, addr) VALUES (?1, ?2)",
-            rusqlite::params![locator, addr],
-        )?;
-        Ok(())
-    })
-    .await
-}
-
-/// Addresses under `locator` with `seq > after`, in append order, at most
-/// `limit`. Returns `(seq, addr)` so a reader can page from the last `seq`.
-pub async fn read_index(
-    pool: &DBPool,
-    locator: &[u8],
-    after: i64,
-    limit: i64,
-) -> Result<Vec<(i64, Vec<u8>)>> {
-    let locator = locator.to_vec();
-    with_conn(pool, move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT seq, addr FROM index_entries WHERE locator = ?1 AND seq > ?2 \
-             ORDER BY seq ASC LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![locator, after, limit], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    })
-    .await
 }
