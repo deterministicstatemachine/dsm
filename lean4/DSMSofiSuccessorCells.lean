@@ -62,6 +62,10 @@
   Mutation controls, executed rather than asserted. Each gate was removed and the
   named theorem went red — its proof rejected by the kernel:
      1. a put replaces instead of appending     -> `put_keeps_prefix`
+     1b. a put refuses (leaves the store as it   -> `put_holds_what_it_was_given` (R2);
+         was)                                       `put_keeps_prefix` also reddens, on its
+                                                    proof's `split` over the `if` — the
+                                                    prefix statement itself survives refusal
      2. finality at one copy                    -> `one_copy_is_not_final`
      3. the leader counted as its own copy      -> `one_copy_is_not_final`
      4. the leader's LAST object instead of     -> `a_later_value_at_the_leader_never_becomes_final`
@@ -124,6 +128,13 @@ theorem reach_keeps_prefix {s s' : Store} (h : Reach s s') (j : Nat) : s j <+: s
   induction h with
   | refl => exact prefix_refl _
   | put i v _ ih => exact prefix_trans ih (put_keeps_prefix i v _ j)
+
+/-- NEVER REFUSES (R2, Part II §12): after a put, the member holds the value it
+was given — it is the last thing in its list. With `put_keeps_prefix`, what a
+member holds is exactly everything it was given, in arrival order. -/
+theorem put_holds_what_it_was_given (i : Nat) (v : Val) (s : Store) :
+    (putAt i v s i).getLast? = some v := by
+  simp [putAt]
 
 theorem first_stable {l l' : Held} {v : Val} (hp : l <+: l') (hv : l.head? = some v) :
     l'.head? = some v := by
@@ -830,6 +841,7 @@ theorem storage_reachable_does_not_imply_canonical :
 #print axioms prefix_refl
 #print axioms prefix_trans
 #print axioms put_keeps_prefix
+#print axioms put_holds_what_it_was_given
 #print axioms reach_keeps_prefix
 #print axioms first_stable
 #print axioms mem_of_prefix

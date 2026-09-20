@@ -894,10 +894,13 @@ impl StorageNodeClient {
 
     /// Keyed PUT that also returns the node's ECHOED identity
     /// (`x-dsm-node-id` response header), so a fan-out can count an
-    /// PUT one immutable object (Area 4). The node computes the address from
-    /// `(namespace, payload)`; `expected_addr_b32` is sent so a disagreeing
-    /// encoder is refused server-side as a storage error (Req 15.2). Returns
-    /// the node's address string on 200/201.
+    /// PUT one immutable object (Part II §12, put object). The node computes
+    /// the address from `(namespace, payload)`; `expected_addr_b32` is sent so
+    /// a disagreeing encoder is refused server-side as a storage error (Req
+    /// 15.2). Returns the node's address string on 200/201.
+    ///
+    /// No authorization travels with it (R2): the object carries its own
+    /// authority, and the member never asks who carries the bytes.
     pub async fn put_immutable(
         &self,
         namespace: &str,
@@ -905,28 +908,13 @@ impl StorageNodeClient {
         expected_addr_b32: &str,
     ) -> Result<(String, Option<String>), StorageNodeError> {
         let url = format!("{base}/api/v2/immutable/put", base = self.node_info.url);
-        let mut req = self
+        let resp = self
             .client
             .post(&url)
             .header("x-namespace", namespace)
             .header("x-expected-addr", expected_addr_b32)
             .header("Content-Type", "application/octet-stream")
-            .body(payload.to_vec());
-        if let Some(auth) = &self.auth {
-            // The device-auth middleware requires the replay-protection
-            // message id beside the token — same contract as every other
-            // authenticated write. A FRESH nonce per attempt, deliberately:
-            // the server enforces unique(device_id, message_id), and the
-            // tuple's idempotence lives in the write-once store, not here.
-            let msg_id = Self::generate_message_id(expected_addr_b32);
-            req = req
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-        let resp = req
+            .body(payload.to_vec())
             .send()
             .await
             .map_err(|e| StorageNodeError::network(format!("immutable put: {e}")))?;
@@ -1009,22 +997,13 @@ impl StorageNodeClient {
         );
         let ns =
             core::str::from_utf8(namespace).map_err(|_| "namespace is not UTF-8".to_string())?;
-        let mut req = self
+        // No authorization (R2): an append is a public operation of the contract.
+        let response = self
             .client
             .post(&url)
             .header("x-namespace", ns)
             .header("Content-Type", "application/octet-stream")
-            .body(addr.to_vec());
-        if let Some(auth) = &self.auth {
-            let msg_id = Self::generate_message_id(locator_b32);
-            req = req
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
-        }
-        let response = req
+            .body(addr.to_vec())
             .send()
             .await
             .map_err(|e| format!("index append transport: {e}"))?;
