@@ -82,10 +82,10 @@ describe('E2E: Online transaction full cycle', () => {
     let tokenA: string | null = null;
     try {
       const r = await fetch('http://127.0.0.1:8080/api/v2/device/register', { method: 'POST', headers: { 'Content-Type': 'application/protobuf' }, body: Buffer.from(regA.toBinary()) });
-      if (r.ok) tokenA = pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await r.arrayBuffer())).token;
+      if (r.ok) tokenA = base32RFCEncode(pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await r.arrayBuffer())).token);
       else if (r.status === 409) {
         const rr = await fetch('http://127.0.0.1:8080/api/v2/device/token', { method: 'POST', headers: { 'Content-Type': 'application/protobuf' }, body: Buffer.from(regA.toBinary()) });
-        if (rr.ok) tokenA = pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await rr.arrayBuffer())).token;
+        if (rr.ok) tokenA = base32RFCEncode(pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await rr.arrayBuffer())).token);
       }
     } catch (e) { console.warn('register/send fail', e); }
     expect(tokenA).toBeTruthy();
@@ -94,10 +94,10 @@ describe('E2E: Online transaction full cycle', () => {
     let tokenB: string | null = null;
     try {
       const r = await fetch('http://127.0.0.1:8080/api/v2/device/register', { method: 'POST', headers: { 'Content-Type': 'application/protobuf' }, body: Buffer.from(regB.toBinary()) });
-      if (r.ok) tokenB = pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await r.arrayBuffer())).token;
+      if (r.ok) tokenB = base32RFCEncode(pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await r.arrayBuffer())).token);
       else if (r.status === 409) {
         const rr = await fetch('http://127.0.0.1:8080/api/v2/device/token', { method: 'POST', headers: { 'Content-Type': 'application/protobuf' }, body: Buffer.from(regB.toBinary()) });
-        if (rr.ok) tokenB = pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await rr.arrayBuffer())).token;
+        if (rr.ok) tokenB = base32RFCEncode(pb.RegisterDeviceResponse.fromBinary(new Uint8Array(await rr.arrayBuffer())).token);
       }
     } catch (e) { console.warn('register/recv fail', e); }
     expect(tokenB).toBeTruthy();

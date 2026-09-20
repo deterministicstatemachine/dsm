@@ -26,7 +26,7 @@ interface FaucetClaimResult {
   };
 }
 
-export default function EraFaucetScreen(): JSX.Element {
+export default function EraFaucetScreen(): React.JSX.Element {
   const { refreshBalances } = useWallet();
   const [claiming, setClaiming] = useState<boolean>(false);
   const [lastResult, setLastResult] = useState<FaucetClaimResult | null>(null);

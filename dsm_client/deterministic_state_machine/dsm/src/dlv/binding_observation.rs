@@ -389,8 +389,9 @@ mod tests {
     use super::*;
     use crate::dlv::quorum_bind::BINDING_STATUS_PROMISED;
 
-    /// The strict majority of the three-member beta profile, as the observer
-    /// demands it: validated, never a bare number.
+    /// The strict majority of a three-member set — this helper's own fixture,
+    /// not the deployed beta profile — as the observer demands it: validated,
+    /// never a bare number.
     fn q3() -> CanonicalQuorum {
         CanonicalQuorum::of_committed(3, 2).expect("2 of 3 is canonical")
     }

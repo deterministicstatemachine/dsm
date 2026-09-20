@@ -17,7 +17,7 @@ import {
 } from "../../proto/dsm_app_pb";
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  const br = new BridgeRpcResponse({ result: { case: "success", value: { data } } });
+  const br = new BridgeRpcResponse({ result: { case: "success", value: { data: new Uint8Array(data) } } });
   return br.toBinary();
 }
 
@@ -69,8 +69,10 @@ describe("protobuf-only bridge payloads", () => {
 
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0].method).toBe("createGenesisV2");
-    expect(seenRequests[0].payload.case).toBe("bytes");
-    const decoded = WalletCreateGenesisV2Request.fromBinary(seenRequests[0].payload.value.data);
+    const payload = seenRequests[0].payload;
+    expect(payload.case).toBe("bytes");
+    if (payload.case !== "bytes") throw new Error("expected a bytes payload");
+    const decoded = WalletCreateGenesisV2Request.fromBinary(payload.value.data);
     expect(decoded.mnemonic).toBe(mnemonic);
     expect(decoded.locale).toBe("en-US");
     expect(decoded.networkId).toBe("testnet");

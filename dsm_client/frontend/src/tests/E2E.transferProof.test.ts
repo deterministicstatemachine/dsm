@@ -247,7 +247,7 @@ function installBridge(opts?: { contactBleAddress?: string }) {
               result: {
                 case: 'okBytes',
                 value: new pb.BleTransportSendChunksResult({
-                  responseEnvelope,
+                  responseEnvelope: new Uint8Array(responseEnvelope),
                 }).toBinary(),
               },
             }).toBinary(),

@@ -106,7 +106,7 @@ describe('resolveBleAddressForContact', () => {
         const method = req.method || '';
         const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
         if (method === 'resolveBleAddressForDeviceId') {
-          if (payload.length === devId.length && payload.every((b, i) => b === devId[i])) {
+          if (payload.length === devId.length && payload.every((b: number, i: number) => b === devId[i])) {
             return createDsmBridgeSuccessResponse(new Uint8Array(enc.encode(address)));
           }
         }

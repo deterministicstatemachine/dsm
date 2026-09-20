@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Bilateral Transfer Accept/Reject Dialog and Status Display
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { on as eventBridgeOn } from '../dsm/EventBridge';
 import { acceptIncomingTransfer, BilateralEventType, BilateralTransferEvent, decodeBilateralEvent, rejectIncomingTransfer } from '../services/bilateral/bilateralEventService';
 import { useWallet } from '../contexts/WalletContext';
@@ -10,6 +10,7 @@ import '../styles/BilateralTransfer.css';
 import { emitWalletRefresh } from '../dsm/events';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { presentDisplayAmount } from '../utils/tokenMeta';
+import { useFx } from './fx/FxProvider';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
@@ -22,6 +23,10 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
   const [processing, setProcessing] = useState(false);
   const { refreshAll } = useWallet();
   const { hideComplexity, notifyToast } = useUX();
+  const fx = useFx();
+  // The bilateral subscription is installed once; it reads the live fx actions.
+  const fxRef = useRef(fx);
+  fxRef.current = fx;
   const [inboxOpen, setInboxOpen] = useState(false);
 
   // Resolve a friendly name for a counterparty device id (base32) from the contacts store,
@@ -102,6 +107,13 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
               `Security: the trusted offline identity for ${aliasFor(event.counterpartyDeviceId)} changed — transfer refused.`,
               { persistent: true }
             );
+            fxRef.current.play({
+              anim: 'tamper',
+              title: 'Clone refused',
+              caption: `The offline identity for ${aliasFor(event.counterpartyDeviceId)} changed, so the transfer was refused.`,
+              tone: 'bad',
+              okLabel: 'Dismiss',
+            });
             setIncomingTransfer(null);
             setOutgoingTransfer(null);
             break;

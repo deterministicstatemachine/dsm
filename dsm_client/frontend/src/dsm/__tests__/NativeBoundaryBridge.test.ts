@@ -31,8 +31,10 @@ describe('NativeBoundaryBridge', () => {
     const result = await routerQueryBin('wallet.balance', new Uint8Array([1, 2, 3]));
 
     expect(result).toEqual(new Uint8Array([9, 8, 7]));
-    expect(seenRequest?.operation.case).toBe('routerQuery');
-    expect(seenRequest?.operation.value.method).toBe('wallet.balance');
-    expect(seenRequest?.operation.value.args).toEqual(new Uint8Array([1, 2, 3]));
+    const op = seenRequest?.operation;
+    expect(op?.case).toBe('routerQuery');
+    if (op?.case !== 'routerQuery') throw new Error('expected a routerQuery operation');
+    expect(op.value.method).toBe('wallet.balance');
+    expect(op.value.args).toEqual(new Uint8Array([1, 2, 3]));
   });
 });

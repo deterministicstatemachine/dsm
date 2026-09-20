@@ -2,6 +2,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { refundDeposit, formatBtc, mempoolExplorerUrl } from '../../../services/bitcoinTap';
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
+import ExplorerLink from './ExplorerLink';
+import { depositStatusLabel, directionLabel, isRefundableDeposit } from './labels';
+import { middleTruncate } from '../../common/ScreenFrame';
 import type { DepositEntry } from '../../../services/bitcoinTap';
 
 type Props = {
@@ -10,16 +13,7 @@ type Props = {
   network: number;
 };
 
-const statusLabel: Record<string, string> = {
-  initiated: 'Initiated',
-  awaiting_confirmation: 'Confirming',
-  claimable: 'Claimable',
-  completed: 'Complete',
-  expired: 'Expired',
-  refunded: 'Refunded',
-};
-
-export default function DepositCard({ deposit, onRefresh, network }: Props): JSX.Element {
+export default function DepositCard({ deposit, onRefresh, network }: Props): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [completing, setCompleting] = useState(false);
@@ -61,14 +55,14 @@ export default function DepositCard({ deposit, onRefresh, network }: Props): JSX
         if (info.ready && !completingRef.current && !completedOnceRef.current) {
           completingRef.current = true;
           setCompleting(true);
-          setStatusMessage(isExitDeposit ? 'Finalizing exit...' : 'Completing deposit...');
+          setStatusMessage(isExitDeposit ? 'Finalizing withdrawal…' : 'Completing deposit…');
           try {
             const result = isExitDeposit
               ? await completeExitDeposit(deposit.vaultOpId)
               : await awaitAndComplete(deposit.vaultOpId);
             if (cancelled) return;
             completedOnceRef.current = true;
-            setStatusMessage(isExitDeposit ? `Exit completed: ${result}` : `Deposit completed: ${result}`);
+            setStatusMessage(isExitDeposit ? `Withdrawal completed: ${result}` : `Deposit completed: ${result}`);
             bridgeEvents.emit('deposit.completed', { depositId: deposit.vaultOpId, amount: formatBtc(deposit.btcAmountSats) });
             bridgeEvents.emit('wallet.creditReceived', {
               source: isExitDeposit ? 'bitcoin.exit_completed' : 'bitcoin.deposit_completed',
@@ -105,11 +99,11 @@ export default function DepositCard({ deposit, onRefresh, network }: Props): JSX
     let cancelled = false;
     const autoFund = async () => {
       try {
-        setStatusMessage('Auto-funding deposit...');
+        setStatusMessage('Funding deposit…');
         const { fundAndBroadcast } = await import('../../../services/bitcoinTap');
         const txid = await fundAndBroadcast(deposit.vaultOpId);
         if (cancelled) return;
-        setStatusMessage(`Broadcast! txid: ${txid.slice(0, 16)}...`);
+        setStatusMessage(`Broadcast. txid: ${txid.slice(0, 16)}…`);
         await onRefresh();
       } catch (e) {
         if (cancelled) return;
@@ -127,7 +121,7 @@ export default function DepositCard({ deposit, onRefresh, network }: Props): JSX
     setRefundResult(null);
     try {
       await refundDeposit(deposit.vaultOpId);
-      setRefundResult('Deposit refunded successfully');
+      setRefundResult('Deposit refunded.');
       await onRefresh();
     } catch (e) {
       setRefundResult(`Error: ${e instanceof Error ? e.message : 'Refund failed'}`);
@@ -136,122 +130,111 @@ export default function DepositCard({ deposit, onRefresh, network }: Props): JSX
     }
   }, [refunding, deposit.vaultOpId, onRefresh]);
 
-  const displayStatus = statusLabel[deposit.status] || deposit.status;
-  const directionLabel = deposit.direction === 'btc_to_dbtc' ? 'BTC \u2192 dBTC' : 'dBTC \u2192 BTC';
-  const statusColor = deposit.status === 'completed'
-    ? 'var(--text-dark)'
-    : deposit.status === 'expired'
-      ? 'var(--text-disabled)'
-      : 'var(--text-dark)';
-  const isRefundable = deposit.status === 'expired' || deposit.status === 'timed_out' || deposit.status === 'timeout';
+  const isDone = deposit.status === 'completed';
+  const isRefundable = isRefundableDeposit(deposit.status);
+  const isWaiting = !isDone && (fundingTxid || deposit.status === 'awaiting_confirmation' || (isExitDeposit && deposit.status === 'initiated'));
+  const hasProgress = confirmations !== null && confirmRequired !== null && confirmRequired > 0;
+  const progressPct = hasProgress ? Math.min(100, Math.round((confirmations! / confirmRequired!) * 100)) : 0;
+
+  const statusText = completing
+    ? (isExitDeposit ? 'Finalizing' : 'Completing')
+    : hasProgress && !isDone && !isRefundable
+      ? (confirmReady ? 'Confirmed' : `${confirmations}/${confirmRequired} confirmed`)
+      : depositStatusLabel(deposit.status);
 
   return (
     <div
-      className={`transaction-item ${expanded ? 'expanded' : ''}`}
-      style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch' }}
+      className="sb-card btc-deposit"
+      style={{ cursor: 'pointer', padding: '8px 10px' }}
       onClick={() => setExpanded(!expanded)}
       role="button"
       tabIndex={0}
+      aria-expanded={expanded}
       onKeyDown={(e) => e.key === 'Enter' && setExpanded(!expanded)}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-        <div className="transaction-type" style={{ fontSize: 11 }}>{directionLabel}</div>
-        <div style={{ flex: 1, textAlign: 'right', fontSize: 12, fontWeight: 500 }}>{formatBtc(deposit.btcAmountSats)} BTC</div>
-        <div style={{ fontSize: 10, color: statusColor, fontWeight: 500, whiteSpace: 'nowrap' }}>{displayStatus}</div>
+      <div className="sb-row" style={{ padding: 0, borderBottom: 0 }}>
+        <div className="sb-row__main">
+          <div className="sb-row__title">{isExitDeposit ? 'Withdrawal' : 'Deposit'}</div>
+          <div className="sb-row__sub">{directionLabel(deposit.direction)}</div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div className="sb-row__amount">{formatBtc(deposit.btcAmountSats)} BTC</div>
+          <span className={`sb-tag${isDone ? ' sb-tag--solid' : isRefundable ? ' sb-tag--dim' : ''}`}>{statusText}</span>
+        </div>
       </div>
+      {isWaiting && hasProgress && !confirmReady && (
+        <div className="sb-progress" style={{ marginTop: 6 }} aria-label="Confirmation progress">
+          <div className="sb-progress__fill" style={{ width: `${progressPct}%` }} />
+        </div>
+      )}
 
       {expanded && (
-        <div className="transaction-expanded-details" onClick={(e) => e.stopPropagation()}>
-          <div className="detail-row">
-            <span className="detail-label">Deposit ID</span>
-            <span className="detail-value tx-id">{deposit.vaultOpId.length > 16 ? `${deposit.vaultOpId.slice(0, 8)}...${deposit.vaultOpId.slice(-8)}` : deposit.vaultOpId}</span>
+        <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px dashed var(--border)' }} onClick={(e) => e.stopPropagation()}>
+          {isWaiting && (
+            <p className="sb-hint">
+              {completing
+                ? (isExitDeposit ? 'Finalizing withdrawal…' : 'Completing deposit…')
+                : hasProgress
+                  ? (confirmReady
+                    ? `Confirmed (${confirmations}/${confirmRequired}). Completing…`
+                    : `Waiting for the Bitcoin network: ${confirmations} of ${confirmRequired} confirmations.`)
+                  : isExitDeposit && !fundingTxid
+                    ? 'Waiting for the withdrawal transaction to broadcast…'
+                    : 'Checking confirmation status…'}
+            </p>
+          )}
+          <div className="sb-kv">
+            <span className="sb-kv__k">Deposit ID</span>
+            <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(deposit.vaultOpId, 8, 8)}</span>
           </div>
           {deposit.htlcAddress && (
-            <div className="detail-row">
-              <span className="detail-label">HTLC Address</span>
-              <span className="detail-value tx-id">{deposit.htlcAddress.length > 20 ? `${deposit.htlcAddress.slice(0, 10)}...${deposit.htlcAddress.slice(-10)}` : deposit.htlcAddress}</span>
+            <div className="sb-kv">
+              <span className="sb-kv__k">HTLC address</span>
+              <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(deposit.htlcAddress, 10, 10)}</span>
             </div>
           )}
           {deposit.vaultId && (
-            <div className="detail-row">
-              <span className="detail-label">Vault ID</span>
-              <span className="detail-value tx-id">{deposit.vaultId.length > 16 ? `${deposit.vaultId.slice(0, 8)}...${deposit.vaultId.slice(-8)}` : deposit.vaultId}</span>
+            <div className="sb-kv">
+              <span className="sb-kv__k">Vault</span>
+              <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(deposit.vaultId, 8, 8)}</span>
             </div>
           )}
-          <div className="detail-row">
-            <span className="detail-label">Direction</span>
-            <span className="detail-value">{deposit.direction}</span>
+          <div className="sb-kv">
+            <span className="sb-kv__k">Status</span>
+            <span className="sb-kv__v">{deposit.status}</span>
           </div>
-
           {fundingTxid && (
-            <div style={{ marginTop: 4 }}>
-              <div className="detail-row">
-                <span className="detail-label">{isExitDeposit ? 'Withdrawal TX' : 'Funding TX'}</span>
-                <span className="detail-value tx-id" style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 10 }}>
-                  {fundingTxid.length > 20 ? `${fundingTxid.slice(0, 10)}\u2026${fundingTxid.slice(-10)}` : fundingTxid}
-                </span>
+            <>
+              <div className="sb-kv">
+                <span className="sb-kv__k">{isExitDeposit ? 'Withdrawal tx' : 'Funding tx'}</span>
+                <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(fundingTxid, 10, 10)}</span>
               </div>
-              {(() => {
-                const url = mempoolExplorerUrl(fundingTxid, network);
-                return (
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigator.clipboard.writeText(url).then(
-                        () => setStatusMessage('Explorer link copied to clipboard'),
-                        () => setStatusMessage(`URL: ${url}`),
-                      );
-                    }}
-                    onKeyDown={(e) => e.key === 'Enter' && (e.stopPropagation(), navigator.clipboard.writeText(url).then(
-                      () => setStatusMessage('Explorer link copied to clipboard'),
-                      () => setStatusMessage(`URL: ${url}`),
-                    ))}
-                    style={{ marginTop: 4, fontSize: 10, color: 'var(--text-dark)', textDecoration: 'underline', wordBreak: 'break-all', cursor: 'copy', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', padding: '2px 0' }}
-                    title="Click to copy explorer link"
-                  >
-                    {url}
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-
-          {(fundingTxid || deposit.status === 'awaiting_confirmation' || (isExitDeposit && deposit.status === 'initiated')) && deposit.status !== 'completed' && (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 6, fontSize: 10, color: 'var(--text-dark)', background: 'var(--bg)', textAlign: 'center' }}>
-                {completing
-                  ? 'Completing deposit...'
-                  : confirmations !== null && confirmRequired !== null
-                    ? confirmReady
-                      ? `Confirmed (${confirmations}/${confirmRequired}) \u2014 completing...`
-                      : `Waiting for confirmations: ${confirmations}/${confirmRequired}`
-                    : isExitDeposit && !fundingTxid
-                      ? 'Waiting for withdrawal transaction broadcast...'
-                      : 'Checking confirmation status...'}
-              </div>
-            </div>
+              <ExplorerLink
+                url={mempoolExplorerUrl(fundingTxid, network)}
+                onCopied={() => setStatusMessage('Explorer link copied to clipboard')}
+                onCopyFailed={(url) => setStatusMessage(`URL: ${url}`)}
+              />
+            </>
           )}
 
           {statusMessage && (
-            <div style={{ marginTop: 8, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 10, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-dark)', background: statusMessage.startsWith('Error') ? 'var(--bg-secondary)' : 'var(--bg)', borderStyle: statusMessage.startsWith('Error') ? 'dashed' : 'solid' }}>
-              {statusMessage}
+            <div className={`sb-notice${statusMessage.startsWith('Error') || statusMessage.includes('failed') ? ' sb-notice--error' : ''}`} style={{ marginTop: 8 }}>
+              <span className="sb-mono" style={{ whiteSpace: 'pre-wrap' }}>{statusMessage}</span>
             </div>
           )}
 
           {isRefundable && (
             <div style={{ marginTop: 8 }}>
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); void handleRefund(); }}
-                className="button-brick"
+                className="sb-btn sb-btn--block"
                 disabled={refunding}
-                style={{ width: '100%', padding: '8px 12px', fontSize: 11, borderRadius: 8, cursor: refunding ? 'not-allowed' : 'pointer', background: 'var(--bg)', border: '2px dashed var(--border)', color: 'var(--text-dark)' }}
               >
-                {refunding ? 'Refunding...' : 'Refund Expired Deposit'}
+                {refunding ? 'Refunding…' : 'Refund expired deposit'}
               </button>
               {refundResult && (
-                <div style={{ marginTop: 6, padding: '4px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 10, color: 'var(--text-dark)', background: refundResult.startsWith('Error') ? 'var(--bg-secondary)' : 'var(--bg)', borderStyle: refundResult.startsWith('Error') ? 'dashed' : 'solid' }}>
+                <div className={`sb-notice${refundResult.startsWith('Error') ? ' sb-notice--error' : ''}`} style={{ marginTop: 6 }}>
                   {refundResult}
                 </div>
               )}

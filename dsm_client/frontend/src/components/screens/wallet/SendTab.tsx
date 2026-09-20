@@ -4,15 +4,18 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import ConfirmModal from '../../ConfirmModal';
-import { TokenCoin } from '../../TokenCoin';
+import { TokenMark } from '../../TokenMark';
+import { TokenSelect } from '../../common/TokenSelect';
+import { Notice } from '../../common/ScreenFrame';
+import { InfoTip } from '../../common/InfoTip';
+import { useFx } from '../../fx/FxProvider';
+import { fxAmountLabel } from '../../fx/fxEngine';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
 type Props = {
   contacts: DomainContact[];
   balances: Balance[];
-  eraGif: string;
-  btcGif: string;
   onCancel: () => void;
   onSendComplete: () => void;
   loadWalletData: () => Promise<void>;
@@ -22,13 +25,12 @@ type Props = {
 function SendTabInner({
   contacts,
   balances,
-  eraGif,
-  btcGif,
   onCancel,
   onSendComplete,
   loadWalletData,
   setError,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
+  const fx = useFx();
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     // No default recipient. A money form that pre-selects whoever happens to
     // be first sends to the wrong person the moment the list reorders — and it
@@ -59,6 +61,11 @@ function SendTabInner({
   // here. A hardcoded table used to answer this and knew only dBTC, which made
   // every custom token look like it took whole units only.
   const selectedDecimals = selectedSendBalance?.decimals ?? 0;
+
+  // The coin, the balance and the unit all read from the selected token, so
+  // picking another one in the Amount row changes all three together.
+  const selectedTicker = selectedSendBalance?.symbol || selectedSendBalance?.tokenId || sendForm.token || 'ERA';
+  const coin = <TokenMark ticker={selectedTicker} iconUrl={selectedSendBalance?.iconUrl} className="sb-coin sb-coin--lg" />;
 
   const selectedContact = useMemo(
     () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
@@ -156,71 +163,75 @@ function SendTabInner({
         }
       }
 
+      const sent = `${sendForm.amount.trim()} ${tokenId}`;
+      fx.play({
+        anim: txMode === 'offline' ? 'seal' : 'confirm',
+        title: txMode === 'offline' ? 'Signed and sealed' : 'Sent',
+        caption: `${sent} to ${contact.alias}`,
+        amount: fxAmountLabel(sent, '-'),
+        coin: { ticker: selectedTicker, iconUrl: selectedSendBalance?.iconUrl },
+      });
       onSendComplete();
       await loadWalletData();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Transaction failed');
+      const msg = e instanceof Error ? e.message : 'Transaction failed';
+      setError(msg);
+      fx.play({ anim: 'fail', title: 'Not sent', caption: msg, tone: 'bad', okLabel: 'Back' });
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, selectedContact, txMode, loadWalletData, setError, onSendComplete]);
+  }, [sendForm, selectedContact, txMode, selectedTicker, selectedSendBalance, loadWalletData, setError, onSendComplete, fx]);
 
   const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setShowSendConfirm(true);
   }, []);
 
+
   return (
     <div className="send-tab">
-      <h3>Send Transaction</h3>
-      <div className="balance-section" style={{ marginBottom: 16 }}>
-        <h4 style={{ fontSize: 12, marginBottom: 8 }}>Available Balance</h4>
-        {!selectedSendBalance ? (
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-                <img src={eraGif} alt="ERA" className="era-gif small"/>
-                ERA
-              </span>
-              <span className="balance-amount">0</span>
-            </div>
-          </div>
-        ) : (
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol" style={{ display: 'flex', alignItems: 'center' }}>
-                {(() => {
-                  const sym = (selectedSendBalance.symbol || selectedSendBalance.tokenId || '').toLowerCase();
-                  const isBtc = sym.includes('btc') || sym.includes('dbtc');
-                  if (isBtc || sym === 'era') {
-                    return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
-                  }
-                  return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
-                })()}
-                {selectedSendBalance.symbol || selectedSendBalance.tokenId}
-              </span>
-              <span className="balance-amount">{String(selectedSendBalance.balance ?? '0')}</span>
-            </div>
-            {selectedSendBalance.usdValue && <div className="balance-usd">{selectedSendBalance.usdValue}</div>}
-          </div>
+      <h3 className="sb-section-title">Send Transaction</h3>
+
+      {/* The coin and its ticker are pinned to the left edge so they hold still
+          while the number beside them changes length. */}
+      <div className="sb-card" style={{ padding: '6px 10px' }}>
+        <div className="sb-kv" style={{ alignItems: 'center' }}>
+          <span className="sb-kv__k" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, textTransform: 'none', letterSpacing: 0 }}>
+            {coin}
+            {selectedTicker}
+          </span>
+          <span className="sb-kv__v" style={{ fontSize: 15, fontWeight: 700 }}>
+            {selectedSendBalance ? String(selectedSendBalance.balance ?? '0') : '0'}
+          </span>
+        </div>
+      </div>
+
+      <div className="sb-field">
+        <span className="sb-label">
+          How to send
+          <InfoTip title="How to send" label="About sending modes">
+            <p><b>Online</b> goes through the storage nodes. The recipient does not need to be nearby or awake; it lands in their inbox.</p>
+            <p><b>Offline</b> goes phone to phone over Bluetooth. Both phones must be next to each other with Bluetooth on, and both must be on the wallet screen.</p>
+          </InfoTip>
+        </span>
+        <div className="sb-seg sb-seg--block" role="group" aria-label="Transaction mode">
+          <button type="button" className={`sb-seg__opt${txMode === 'online' ? ' active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
+          <button type="button" className={`sb-seg__opt${txMode === 'offline' ? ' active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
+        </div>
+        {txMode === 'offline' && (
+          <Notice>
+            <strong>Offline needs Bluetooth.</strong> Both phones next to each other, Bluetooth on.
+          </Notice>
         )}
       </div>
-      <div className="mode-toggle" role="group" aria-label="Transaction mode">
-        <button type="button" className={`mode-button ${txMode === 'online' ? 'active' : ''}`} onClick={() => setTxMode('online')}>Online</button>
-        <button type="button" className={`mode-button ${txMode === 'offline' ? 'active' : ''}`} onClick={() => setTxMode('offline')}>Offline</button>
-      </div>
-      {txMode === 'offline' && (
-        <div className="bluetooth-warning" style={{ padding: '8px 12px', marginBottom: 12, fontSize: 10, border: '2px solid var(--border)' }}>
-          <strong>OFFLINE MODE REQUIRES BLUETOOTH</strong><br/>Both devices must be present and have Bluetooth enabled.
-        </div>
-      )}
+
       <form onSubmit={handleSubmit}>
-        <div className="form-group">
+        <div className="sb-field">
           <label htmlFor="recipient">Recipient Contact</label>
           {contacts.length === 0 ? (
-            <div className="empty-state"><p>No contacts found.</p><p>Add a contact on the Contacts screen to enable sending.</p></div>
+            <div className="sb-empty">No contacts yet. Add one on the Contacts screen to send.</div>
           ) : (
-            <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="form-input" required>
+            <select id="recipient" value={sendForm.selectedContactKey} onChange={(e) => setSendForm((p) => ({ ...p, selectedContactKey: e.target.value }))} className="sb-input" required>
               {/* An explicit empty option. Without it the select DISPLAYS the
                   first contact while the form holds no selection at all, which
                   on a send form reads as "this person is selected" when nobody
@@ -232,39 +243,51 @@ function SendTabInner({
             </select>
           )}
         </div>
-        <div className="form-group">
-          <label htmlFor="amount">{(() => {
-            const sym = (sendForm.token || '').toLowerCase();
-            const isBtc = sym.includes('btc') || sym.includes('dbtc');
-            if (isBtc || sym === 'era' || !selectedSendBalance) {
-              return <img src={isBtc ? btcGif : eraGif} alt={isBtc ? 'BTC' : 'ERA'} className={isBtc ? 'btc-gif small' : 'era-gif small'}/>;
-            }
-            return <TokenCoin iconUrl={selectedSendBalance.iconUrl} ticker={selectedSendBalance.symbol || selectedSendBalance.tokenId} className="era-gif small" fallbackSrc={eraGif}/>;
-          })()} Amount</label>
-          <div className="amount-input-group">
-            <input id="amount" type="number" step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'} min="0" value={sendForm.amount} onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))} placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'} className="form-input" required />
-            <select value={sendForm.token} onChange={(e) => setSendForm((p) => ({ ...p, token: e.target.value }))} className="token-selector">
-              {tokenOptions.map((b) => (
-                <option key={b.tokenId} value={b.tokenId}>{b.symbol || b.tokenId}</option>
-              ))}
-            </select>
+
+        <div className="sb-field">
+          <label htmlFor="amount">Amount</label>
+          <div className="sb-input-row">
+            <input
+              id="amount"
+              type="number"
+              step={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals - 1)}1` : '1'}
+              min="0"
+              value={sendForm.amount}
+              onChange={(e) => setSendForm((p) => ({ ...p, amount: e.target.value }))}
+              placeholder={selectedDecimals > 0 ? `0.${'0'.repeat(selectedDecimals)}` : '0'}
+              className="sb-input sb-input--mono"
+              required
+            />
+            <TokenSelect
+              label="Token"
+              className="sb-tokensel--inline"
+              value={sendForm.token}
+              options={tokenOptions.map((b) => ({ value: b.tokenId, ticker: b.symbol || b.tokenId, iconUrl: b.iconUrl }))}
+              onChange={(next) => setSendForm((p) => ({ ...p, token: next }))}
+            />
           </div>
         </div>
-        <div className="form-group"><label htmlFor="note">Note (Optional)</label><input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="Transaction note" className="form-input" /></div>
-        <div className="form-actions">
-          <button type="button" onClick={onCancel} className="cancel-button">Cancel</button>
-          {/* The recipient, spelled out immediately above the action that
-              commits it. A device id is the only unambiguous name for who is
-              about to receive this, and it belongs where the decision is made
-              rather than several fields further up. */}
-          <div className="send-recipient-confirm" data-testid="send-recipient-confirm">
-            {selectedContact
-              ? `To: ${selectedContact.deviceId.slice(0, 8)}`
-              : 'Select a recipient'}
-          </div>
+
+        <div className="sb-field">
+          <label htmlFor="note">Note (optional)</label>
+          <input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="What is this for?" className="sb-input" />
+        </div>
+
+        {/* The recipient, spelled out immediately above the action that
+            commits it. A device id is the only unambiguous name for who is
+            about to receive this, and it belongs where the decision is made
+            rather than several fields further up. */}
+        <div className="send-recipient-confirm sb-hint sb-hint--tight sb-mono" data-testid="send-recipient-confirm">
+          {selectedContact
+            ? `To: ${selectedContact.deviceId.slice(0, 8)}`
+            : 'Select a recipient'}
+        </div>
+
+        <div className="sb-actions">
+          <button type="button" onClick={onCancel} className="sb-btn">Cancel</button>
           <button
             type="submit"
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={!sendForm.selectedContactKey || contacts.length === 0 || sendingTx}
           >
             {sendingTx ? 'Sending…' : 'Send'}

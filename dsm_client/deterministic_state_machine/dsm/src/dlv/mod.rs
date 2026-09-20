@@ -5,7 +5,7 @@
 //! flow.  This module deliberately holds no proto / I/O / runtime
 //! state; each submodule is a self-contained crypto primitive.
 
-pub mod beta_storage_profile; // the deployed three-member beta profile Ã¢ÂÂ fixed, not a formula
+pub mod beta_storage_profile; // the deployed five-member beta profile Ã¢ÂÂ fixed, not a formula
 pub mod binding_observation; // what a set of binding reads establishes about ONE resource key
 pub mod close_authorization; // the owner signature over the exact DLV release successor
 pub mod composed_history; // the SoFi composed-state rule as DLV reserve provenance

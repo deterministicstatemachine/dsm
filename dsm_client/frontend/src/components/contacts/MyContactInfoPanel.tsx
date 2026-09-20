@@ -10,7 +10,7 @@ import { AudioManager } from '../../utils/audio';
 import logger from '../../utils/logger';
 import { fetchPairingContactUri } from '../../services/qr/pairingQrService';
 
-export default function MyContactInfoPanel(): JSX.Element {
+export default function MyContactInfoPanel(): React.JSX.Element {
   const [contactUri, setContactUri] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

@@ -174,7 +174,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
               result: {
                 case: 'okBytes',
                 value: new pb.BleTransportSendChunksResult({
-                    responseEnvelope: frameEnvelope(env),
+                    responseEnvelope: new Uint8Array(frameEnvelope(env)),
                   }).toBinary(),
                 },
               }).toBinary(),

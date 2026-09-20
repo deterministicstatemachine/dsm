@@ -17,7 +17,7 @@ import * as pb from '../../proto/dsm_app_pb';
 export type AdmissionResult = { ok: boolean; message?: string };
 
 function argpack(body: Uint8Array): Uint8Array {
-  return new pb.ArgPack({ codec: pb.Codec.PROTO, body }).toBinary();
+  return new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(body) }).toBinary();
 }
 
 function readValue(resBytes: Uint8Array): { ok: boolean; value?: string; error?: string } {

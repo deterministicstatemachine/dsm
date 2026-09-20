@@ -13,6 +13,8 @@ export type Balance = {
   usdValue?: string;
   /** The token policy's icon field, carried from Rust. */
   iconUrl?: string;
+  /** CPTA policy anchor, Base32 Crockford, rendered by Rust. Carried, never derived. */
+  policyAnchorB32?: string;
 };
 
 // Transaction type enum helpers (matches proto TransactionType)

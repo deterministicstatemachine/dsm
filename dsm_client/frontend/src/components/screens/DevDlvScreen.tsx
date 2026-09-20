@@ -6,7 +6,7 @@ import { computeB0xAddressFromBase32 } from '../../services/dlv/b0xService';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import './SettingsScreen.css';
 
-export default function DevDlvScreen(): JSX.Element {
+export default function DevDlvScreen(): React.JSX.Element {
   const [lock, setLock] = useState('');
   const [condition, setCondition] = useState('');
   const [status, setStatus] = useState<string>('');

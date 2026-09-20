@@ -178,7 +178,7 @@ describe('HeaderService', () => {
 
       const pbH = headerService.createPbHeaders(h);
       expect(pbH).toBeDefined();
-      expect((pbH as Record<string, unknown>).seq).toBe(99n);
+      expect((pbH as unknown as Record<string, unknown>).seq).toBe(99n);
     });
 
     it('omits genesisHash when null', () => {
@@ -190,7 +190,7 @@ describe('HeaderService', () => {
       };
 
       const pbH = headerService.createPbHeaders(h);
-      expect((pbH as Record<string, unknown>).genesisHash).toBeUndefined();
+      expect((pbH as unknown as Record<string, unknown>).genesisHash).toBeUndefined();
     });
   });
 });

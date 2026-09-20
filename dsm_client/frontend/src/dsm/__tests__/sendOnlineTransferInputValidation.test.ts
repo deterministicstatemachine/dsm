@@ -52,7 +52,6 @@ describe('sendOnlineTransfer input validation', () => {
 
   test('rejects toDeviceId when not Uint8Array', async () => {
     const res = await sendOnlineTransfer({
-      // @ts-expect-error intentional
       to: 'BASE32_OR_HEX_STRING',
       amount: 1n,
       tokenId: 'ERA',

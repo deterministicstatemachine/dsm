@@ -15,7 +15,7 @@
 // rejects (exact-output re-simulation) and the trader simply re-quotes
 // and re-signs against fresh state.
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   findAndBindBestPath,
   signRouteCommit,
@@ -26,6 +26,10 @@ import {
 } from '../../../dsm/route_commit';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../../utils/textId';
 import ConfirmModal from '../../ConfirmModal';
+import { InfoTip } from '../../common/InfoTip';
+import { TokenMark } from '../../TokenMark';
+import { useFx } from '../../fx/FxProvider';
+import { fxAmountLabel } from '../../fx/fxEngine';
 import type { Balance } from './helpers';
 
 type Phase =
@@ -129,10 +133,13 @@ function SwapTabInner({
   onSwapComplete,
   loadWalletData,
   setError,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
   const [inputToken, setInputToken] = useState('');
   const [outputToken, setOutputToken] = useState('');
   const [amount, setAmount] = useState('');
+  const fx = useFx();
+  // nameFor is redefined on every render; the executor reads the latest through a ref.
+  const nameForRef = useRef<(anchor: string) => string>((a) => a);
   const [phase, setPhase] = useState<Phase>('idle');
   const [phaseDetail, setPhaseDetail] = useState<string>('');
   const [quoted, setQuoted] = useState<QuotedRoute | null>(null);
@@ -146,12 +153,13 @@ function SwapTabInner({
    *  pasted — you do not hold what you are buying. */
   const tokenSuggestions = useMemo(() => {
     if (!Array.isArray(balances)) return [];
-    const seen = new Map<string, string>();
+    // The icon rides along so a leg can wear its token's coin.
+    const seen = new Map<string, { ticker: string; iconUrl?: string }>();
     for (const b of balances) {
       const anchor = b.policyAnchorB32 ?? '';
-      if (anchor.length > 0 && !seen.has(anchor)) seen.set(anchor, b.tokenId ?? '');
+      if (anchor.length > 0 && !seen.has(anchor)) seen.set(anchor, { ticker: b.tokenId ?? '', iconUrl: b.iconUrl });
     }
-    return Array.from(seen, ([anchor, ticker]) => ({ anchor, ticker }));
+    return Array.from(seen, ([anchor, meta]) => ({ anchor, ticker: meta.ticker, iconUrl: meta.iconUrl }));
   }, [balances]);
 
   const canQuote =
@@ -298,6 +306,8 @@ function SwapTabInner({
       }
 
       setPhase('settled');
+      const got = `${quoted.expectedOut.toString()} ${nameForRef.current(outputToken)}`;
+      fx.play({ anim: 'confirm', title: 'Swapped', caption: `You received ${got}`, amount: fxAmountLabel(got, '+') });
       await loadWalletData();
       onSwapComplete();
     } catch (e) {
@@ -305,126 +315,146 @@ function SwapTabInner({
       setError(msg);
       setPhase('error');
       setPhaseDetail(msg);
+      fx.play({ anim: 'fail', title: 'Swap refused', caption: msg, tone: 'bad', okLabel: 'Back' });
     }
-  }, [quoted, deviceB32, loadWalletData, onSwapComplete, setError]);
+  }, [quoted, deviceB32, outputToken, loadWalletData, onSwapComplete, setError, fx]);
+
+  /** A held token's ticker for an anchor, or the anchor's first characters. Display only. */
+  const nameFor = (anchor: string): string => {
+    const hit = tokenSuggestions.find((t) => t.anchor === anchor.trim());
+    if (hit && hit.ticker) return hit.ticker;
+    const a = anchor.trim();
+    return a.length > 12 ? `${a.slice(0, 8)}\u2026` : a || '?';
+  };
+
+  /** The coin for an anchor the wallet holds; nothing for one it has never seen. */
+  const coinFor = (anchor: string, className?: string): React.JSX.Element | null => {
+    const hit = tokenSuggestions.find((t) => t.anchor === anchor.trim());
+    if (!hit || !hit.ticker) return null;
+    return <TokenMark ticker={hit.ticker} iconUrl={hit.iconUrl} className={className ?? 'sb-coin'} />;
+  };
+  // The executor reads the current naming without taking it as a dependency.
+  nameForRef.current = nameFor;
 
   return (
-    <div>
+    <div className="swap-tab">
       <datalist id="swap-token-suggestions">
         {tokenSuggestions.map((t) => (
           <option key={t.anchor} value={t.anchor} label={t.ticker} />
         ))}
       </datalist>
 
-      <div className="form-group">
-        <label htmlFor="swap-from">From</label>
-        <div className="amount-input-group">
-          <input
-            id="swap-amount"
-            type="number"
-            min="0"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="0"
-            className="form-input"
-            aria-label="Input amount"
-          />
-          <input
-            id="swap-from"
-            type="text"
-            value={inputToken}
-            onChange={(e) => setInputToken(e.target.value)}
-            placeholder="From token"
-            list="swap-token-suggestions"
-            autoCapitalize="characters"
-            autoComplete="off"
-            className="form-input"
-            style={{ flex: 1, marginLeft: 8 }}
-            aria-label="Input token id"
-          />
-        </div>
+      <div className="sb-titlebar">
+        <h3 className="sb-section-title">Swap</h3>
+        <InfoTip title="Swap" label="About swapping">
+          <p>Trades one token for another through an AMM vault. Quote first: you see the exact amount you will get before you confirm. If the vault moves before the trade lands, it is refused and you simply quote again.</p>
+          <p>Tokens are named by their <b>anchor</b>, not their ticker, because two tokens can share a ticker. Pick one you hold from the suggestions, or paste the anchor from the token&apos;s card under Tokens.</p>
+        </InfoTip>
       </div>
 
-      <div className="form-group">
-        <label htmlFor="swap-to">To</label>
+      <div className="sb-field">
+        <label htmlFor="swap-amount">
+          You pay
+          {coinFor(inputToken, 'sb-coin sb-coin--sm')}
+        </label>
+        <input
+          id="swap-amount"
+          type="number"
+          min="0"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="0"
+          className="sb-input sb-input--mono"
+          aria-label="Input amount"
+        />
+        <input
+          id="swap-from"
+          type="text"
+          value={inputToken}
+          onChange={(e) => setInputToken(e.target.value)}
+          placeholder="Token anchor — pick one you hold"
+          list="swap-token-suggestions"
+          autoCapitalize="characters"
+          autoComplete="off"
+          className="sb-input sb-input--mono"
+          style={{ marginTop: 6 }}
+          aria-label="Input token id"
+        />
+      </div>
+
+      <div className="sb-field">
+        <label htmlFor="swap-to">
+          You get
+          {coinFor(outputToken, 'sb-coin sb-coin--sm')}
+        </label>
         <input
           id="swap-to"
           type="text"
           value={outputToken}
           onChange={(e) => setOutputToken(e.target.value)}
-          placeholder="To token"
+          placeholder="Token anchor"
           list="swap-token-suggestions"
           autoCapitalize="characters"
           autoComplete="off"
-          className="form-input"
+          className="sb-input sb-input--mono"
           aria-label="Output token id"
         />
       </div>
 
       {quoted && (
-        <div className="balance-section" style={{ marginBottom: 12 }}>
-          <h4 style={{ fontSize: 12, marginBottom: 8 }}>Route</h4>
-          <div className="balance-card" style={{ padding: '8px 12px' }}>
-            <div className="balance-info">
-              <span className="token-symbol">
-                {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} bound
-              </span>
-              <span className="balance-amount">
-                {quoted.expectedOut.toString()} {outputToken.trim()}
-              </span>
-            </div>
-            <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
-              exact output — bound to current vault state
-            </div>
-            <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
-              {quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} ·{' '}
-              {quoted.hops.map((h) => `vault ${h.vaultIdBase32.slice(0, 12)}…`).join(' → ')}
-            </div>
+        <div className="sb-card sb-card--hero">
+          <div className="sb-hero__label">You get exactly</div>
+          <div className="sb-hero__value" style={{ fontSize: 15, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {coinFor(outputToken, 'sb-coin sb-coin--lg')}
+            {quoted.expectedOut.toString()} {outputToken.trim()}
+          </div>
+          <div className="sb-hero__sub">
+            {nameFor(inputToken)} {'\u2192'} {nameFor(outputToken)} {'\u00B7'} exact output {'\u2014'} bound to current vault state
+          </div>
+          <div className="sb-hero__row">
+            <span>{quoted.hops.length} hop{quoted.hops.length === 1 ? '' : 's'} bound</span>
+            <b className="sb-mono" style={{ fontSize: 9 }}>
+              {quoted.hops.map((h) => `${h.vaultIdBase32.slice(0, 10)}\u2026`).join(' \u2192 ')}
+            </b>
           </div>
         </div>
       )}
 
       {phase !== 'idle' && phase !== 'quoted' && (
         <div
-          className="warning-banner"
-          style={{
-            padding: '8px 12px',
-            marginBottom: 12,
-            fontSize: 11,
-            border: '1px solid var(--border)',
-            background: phase === 'error' ? 'rgba(var(--text-rgb),0.12)' : 'rgba(var(--text-rgb),0.08)',
-            borderStyle: phase === 'error' ? 'dashed' : 'solid',
-          }}
+          className={`sb-notice${phase === 'error' ? ' sb-notice--error' : ''}`}
           role="status"
           aria-live="polite"
         >
-          <strong>{phaseLabel(phase)}</strong>
-          {phaseDetail && <div style={{ marginTop: 4, opacity: 0.85 }}>{phaseDetail}</div>}
+          <span>
+            <strong>{phaseLabel(phase)}</strong>
+            {phaseDetail && <div style={{ marginTop: 4, opacity: 0.85 }}>{phaseDetail}</div>}
+          </span>
         </div>
       )}
 
-      <div className="form-actions">
-        <button type="button" onClick={onCancel} className="cancel-button" disabled={busy}>
+      <div className="sb-actions">
+        <button type="button" onClick={onCancel} className="sb-btn" disabled={busy}>
           Cancel
         </button>
         {!quoted && (
           <button
             type="button"
             onClick={() => void handleQuote()}
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={!canQuote || busy}
           >
-            {phase === 'discovering' ? 'Quoting…' : 'Quote'}
+            {phase === 'discovering' ? 'Quoting\u2026' : 'Quote'}
           </button>
         )}
         {quoted && (
           <button
             type="button"
             onClick={() => setShowConfirm(true)}
-            className="send-button button-brick"
+            className="sb-btn sb-btn--primary"
             disabled={busy}
           >
-            {busy ? 'Settling…' : 'Swap'}
+            {busy ? 'Settling\u2026' : 'Swap'}
           </button>
         )}
       </div>
@@ -432,7 +462,7 @@ function SwapTabInner({
       <ConfirmModal
         visible={showConfirm}
         title="Confirm swap"
-        message={`Swap ${amount} ${inputToken.trim()} for exactly ${quoted?.expectedOut.toString() ?? 0} ${outputToken.trim()} via ${quoted?.hops.length ?? 0} hop${(quoted?.hops.length ?? 0) === 1 ? '' : 's'}?`}
+        message={`Swap ${amount} ${nameFor(inputToken)} for exactly ${quoted?.expectedOut.toString() ?? 0} ${nameFor(outputToken)} via ${quoted?.hops.length ?? 0} hop${(quoted?.hops.length ?? 0) === 1 ? '' : 's'}?`}
         onConfirm={() => { setShowConfirm(false); void handleExecute(); }}
         onCancel={() => setShowConfirm(false)}
       />

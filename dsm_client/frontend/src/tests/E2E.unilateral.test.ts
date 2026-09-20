@@ -54,7 +54,6 @@ describe('E2E: Unilateral Transaction Flow', () => {
         genesisHash: new Uint8Array(32).fill(1),
         deviceId,
         signingPublicKey: signingKey,
-        storageNodes,
       })
     ).rejects.toThrow();
 
@@ -65,7 +64,6 @@ describe('E2E: Unilateral Transaction Flow', () => {
         genesisHash: new Uint8Array(16), // Wrong length
         deviceId,
         signingPublicKey: signingKey,
-        storageNodes,
       })
     ).rejects.toThrow();
   });

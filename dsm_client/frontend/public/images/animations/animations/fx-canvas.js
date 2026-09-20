@@ -5,9 +5,25 @@
    bottom, pixels always integer-scaled.
    Attributes: anim, seq (bump to replay), fps, muted ("1"/"0").
    window.StateBoyFX = { play(name), list(), mute(bool) }.
-   window.STATEBOY_MUTED === true silences all SFX. */
+   window.STATEBOY_MUTED === true silences all SFX.
+   fit="fill" stretches to the host width (fractional scale, snapped to whole
+   device pixels when that still covers the host) instead of integer CSS scale.
+   The element dispatches "fx-end" once the last frame of a scene is drawn.
+   Dialog text is drawn with a built-in 5x7 pixel font, so no web font is
+   needed. sci-guy.png is loaded from the directory this script came from
+   (override with window.STATEBOY_FX_BASE). */
 (function () {
   if (customElements.get('fx-canvas')) return;
+
+  // Directory of this script: sprites live next to it, wherever it is served from.
+  const FX_BASE = (function () {
+    try {
+      if (window.STATEBOY_FX_BASE) return String(window.STATEBOY_FX_BASE);
+      const cs = document.currentScript;
+      if (cs && cs.src) return cs.src.replace(/[^/]*$/, '');
+    } catch (e) {}
+    return '';
+  })();
 
   // 3x5 pixel font for digits & symbols
   const TINY = {
@@ -25,6 +41,77 @@
     '+': ['000', '010', '111', '010', '000'],
     '?': ['111', '001', '010', '000', '010'],
     '!': ['010', '010', '010', '000', '010']
+  };
+
+  // 5x7 pixel font for dialog text (uppercase, digits, punctuation): 8px advance.
+  const PIX = {
+    'A': ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+    'B': ['####.', '#...#', '#...#', '####.', '#...#', '#...#', '####.'],
+    'C': ['.####', '#....', '#....', '#....', '#....', '#....', '.####'],
+    'D': ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'],
+    'E': ['#####', '#....', '#....', '####.', '#....', '#....', '#####'],
+    'F': ['#####', '#....', '#....', '####.', '#....', '#....', '#....'],
+    'G': ['.####', '#....', '#....', '#.###', '#...#', '#...#', '.####'],
+    'H': ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+    'I': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '#####'],
+    'J': ['..###', '...#.', '...#.', '...#.', '...#.', '#..#.', '.##..'],
+    'K': ['#...#', '#..#.', '#.#..', '##...', '#.#..', '#..#.', '#...#'],
+    'L': ['#....', '#....', '#....', '#....', '#....', '#....', '#####'],
+    'M': ['#...#', '##.##', '#.#.#', '#.#.#', '#...#', '#...#', '#...#'],
+    'N': ['#...#', '##..#', '#.#.#', '#..##', '#...#', '#...#', '#...#'],
+    'O': ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+    'P': ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'],
+    'Q': ['.###.', '#...#', '#...#', '#...#', '#.#.#', '#..#.', '.##.#'],
+    'R': ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
+    'S': ['.####', '#....', '#....', '.###.', '....#', '....#', '####.'],
+    'T': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
+    'U': ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+    'V': ['#...#', '#...#', '#...#', '#...#', '.#.#.', '.#.#.', '..#..'],
+    'W': ['#...#', '#...#', '#...#', '#.#.#', '#.#.#', '##.##', '#...#'],
+    'X': ['#...#', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '#...#'],
+    'Y': ['#...#', '#...#', '.#.#.', '..#..', '..#..', '..#..', '..#..'],
+    'Z': ['#####', '....#', '...#.', '..#..', '.#...', '#....', '#####'],
+    '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+    '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+    '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+    '3': ['#####', '...#.', '..#..', '...#.', '....#', '#...#', '.###.'],
+    '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
+    '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+    '6': ['..##.', '.#...', '#....', '####.', '#...#', '#...#', '.###.'],
+    '7': ['#####', '....#', '...#.', '..#..', '.#...', '.#...', '.#...'],
+    '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+    '9': ['.###.', '#...#', '#...#', '.####', '....#', '...#.', '.##..'],
+    '!': ['..#..', '..#..', '..#..', '..#..', '..#..', '.....', '..#..'],
+    '?': ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'],
+    '.': ['.....', '.....', '.....', '.....', '.....', '.##..', '.##..'],
+    ',': ['.....', '.....', '.....', '.....', '.##..', '..#..', '.#...'],
+    ':': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.....'],
+    ';': ['.....', '.##..', '.##..', '.....', '.##..', '..#..', '.#...'],
+    '+': ['.....', '..#..', '..#..', '#####', '..#..', '..#..', '.....'],
+    '-': ['.....', '.....', '.....', '#####', '.....', '.....', '.....'],
+    '=': ['.....', '.....', '#####', '.....', '#####', '.....', '.....'],
+    '/': ['....#', '...#.', '...#.', '..#..', '.#...', '.#...', '#....'],
+    '\\': ['#....', '.#...', '.#...', '..#..', '...#.', '...#.', '....#'],
+    "'": ['..#..', '..#..', '.#...', '.....', '.....', '.....', '.....'],
+    '"': ['.#.#.', '.#.#.', '.....', '.....', '.....', '.....', '.....'],
+    '(': ['...#.', '..#..', '.#...', '.#...', '.#...', '..#..', '...#.'],
+    ')': ['.#...', '..#..', '...#.', '...#.', '...#.', '..#..', '.#...'],
+    '[': ['.###.', '.#...', '.#...', '.#...', '.#...', '.#...', '.###.'],
+    ']': ['.###.', '...#.', '...#.', '...#.', '...#.', '...#.', '.###.'],
+    '<': ['...#.', '..#..', '.#...', '#....', '.#...', '..#..', '...#.'],
+    '>': ['.#...', '..#..', '...#.', '....#', '...#.', '..#..', '.#...'],
+    '*': ['.....', '#.#.#', '.###.', '#####', '.###.', '#.#.#', '.....'],
+    '#': ['.#.#.', '.#.#.', '#####', '.#.#.', '#####', '.#.#.', '.#.#.'],
+    '%': ['##..#', '##..#', '...#.', '..#..', '.#...', '#..##', '#..##'],
+    '&': ['.##..', '#..#.', '#..#.', '.##..', '#.#.#', '#..#.', '.##.#'],
+    '_': ['.....', '.....', '.....', '.....', '.....', '.....', '#####'],
+    '·': ['.....', '.....', '.....', '..#..', '.....', '.....', '.....'],
+    '✓': ['.....', '....#', '....#', '...#.', '#..#.', '.##..', '.#...'],
+    '×': ['.....', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '.....'],
+    '→': ['.....', '..#..', '...#.', '#####', '...#.', '..#..', '.....'],
+    '←': ['.....', '..#..', '.#...', '#####', '.#...', '..#..', '.....'],
+    '…': ['.....', '.....', '.....', '.....', '.....', '.....', '#.#.#'],
+    '₿': ['..#..', '####.', '#..##', '####.', '#..##', '####.', '..#..']
   };
 
   const SPR = {
@@ -145,7 +232,7 @@
   };
 
   class FxCanvas extends HTMLElement {
-    static get observedAttributes() { return ['anim', 'seq', 'fps', 'muted']; }
+    static get observedAttributes() { return ['anim', 'seq', 'fps', 'muted', 'fit']; }
 
     connectedCallback() {
       if (!this._cv) {
@@ -229,7 +316,7 @@
             if (mxX > mnX && mxY > mnY) this._sciImg = { cv: oc, x: mnX, y: mnY, w: mxX - mnX + 1, h: mxY - mnY + 1 };
           } catch (e) {}
         };
-        im.src = 'sci-guy.png';
+        im.src = FX_BASE + 'sci-guy.png';
       }
       window.StateBoyFX = {
         play: (n, o) => { if (o && o.amount != null) this.setAttribute('amount', String(o.amount)); this.play(n); },
@@ -237,7 +324,9 @@
         mute: (v) => { this._muteOverride = !!v; }
       };
       this.readPalette();
-      const start = () => { if (this._connected) this.play(this.getAttribute('anim') || 'intro'); };
+      // An `anim` attribute set while the fonts were loading has already
+      // started a scene; do not restart it behind the user's back.
+      const start = () => { if (this._connected && !this._cur) this.play(this.getAttribute('anim') || 'intro'); };
       try {
         if (document.fonts && document.fonts.load) {
           Promise.race([document.fonts.load('8px "Press Start 2P"'), new Promise(r => setTimeout(r, 1500))]).then(start, start);
@@ -254,7 +343,17 @@
     fitScale() {
       if (!this._cv) return;
       const w = this.clientWidth || 320;
-      const s = Math.max(1, Math.floor(w / 160));
+      let s;
+      if (this.getAttribute('fit') === 'fill') {
+        // Stretch to the host. Prefer a whole number of device pixels per
+        // logical pixel (even pixels) when that still covers ~94% of the
+        // width; the host's background hides the sliver either side.
+        const dpr = window.devicePixelRatio || 1;
+        const kDev = Math.floor(w * dpr / 160);
+        s = (kDev >= 1 && kDev * 160 / dpr >= w * 0.94) ? kDev / dpr : w / 160;
+      } else {
+        s = Math.max(1, Math.floor(w / 160));
+      }
       const hostH = Math.max(this.clientHeight || 0, this.parentElement ? (this.parentElement.clientHeight || 0) : 0);
       let H = 144;
       // Only grow when the host is explicitly taller than the classic canvas
@@ -270,6 +369,7 @@
       if (!this._connected || oldV === newV) return;
       if (name === 'anim' && newV) this.play(newV);
       else if (name === 'seq') this.play(this.getAttribute('anim') || this._cur || 'intro');
+      else if (name === 'fit') this.fitScale();
     }
 
     isMuted() {
@@ -289,6 +389,7 @@
       } catch (e) {
         this.pal = ['#9bbc0f', '#8bac0f', '#306230', '#0f380f'];
       }
+      if (this._cv) this._cv.style.background = this.pal[0];
     }
 
     // ---------- audio ----------
@@ -406,9 +507,24 @@
           }
         },
         text(s, x, y, i, center) {
-          ctx.font = '8px "Press Start 2P"'; ctx.textBaseline = 'top';
-          ctx.fillStyle = C(i == null ? 3 : i);
-          ctx.fillText(s, center ? Math.round(x - s.length * 4) : x, y);
+          // Built-in 5x7 pixel font on an 8px advance (same metrics the old
+          // web-font path assumed), so captions stay crisp at any scale.
+          const str = String(s == null ? '' : s).toUpperCase();
+          const col = i == null ? 3 : i;
+          let cx = center ? Math.round(x - str.length * 4) : Math.round(x);
+          const yy = Math.round(y);
+          for (const ch of str) {
+            const g = PIX[ch];
+            if (g) {
+              for (let r = 0; r < 7; r++) {
+                const row = g[r];
+                for (let c = 0; c < 5; c++) if (row.charCodeAt(c) === 35) S.px(cx + c, yy + r, 1, 1, col);
+              }
+            } else if (ch !== ' ') {
+              S.px(cx, yy + 6, 5, 1, col);
+            }
+            cx += 8;
+          }
         },
         tiny(s, x, y, i, sc) {
           sc = sc || 1;
@@ -884,8 +1000,10 @@
               }
             }
           }
-          let l2 = ok ? (AMT ? '+' + AMT : 'BALANCE UPDATED') : (AMT ? AMT + ' DENIED' : 'PRESS B: RETRY');
-          if (l2.length > 17) l2 = AMT;
+          // The caller may sign the amount ("-12.5 ERA" for a send); unsigned means incoming.
+          const signed = /^[+\-]/.test(AMT) ? AMT : '+' + AMT;
+          let l2 = ok ? (AMT ? signed : 'BALANCE UPDATED') : (AMT ? AMT.replace(/^[+\-]/, '') + ' DENIED' : 'PRESS B: RETRY');
+          if (l2.length > 17) l2 = (ok ? signed : AMT).slice(0, 17);
           S.textBox(ok ? 'TX CONFIRMED' : 'TX FAILED', l2, f, 33);
         }
       });
@@ -1316,6 +1434,7 @@
       this._cur = name;
       this._t0 = performance.now();
       this._lastF = -1;
+      this._ended = false;
       if (!this._raf) this._raf = requestAnimationFrame(this._step);
     }
 
@@ -1338,6 +1457,10 @@
         ctx.translate(0, S.dy);
         try { a.draw(S, df); } catch (e) {}
         ctx.restore();
+        if (df >= last && !this._ended) {
+          this._ended = true;
+          try { this.dispatchEvent(new CustomEvent('fx-end', { detail: { name: this._cur, frames: a.frames } })); } catch (e) {}
+        }
       }
       if (f < last || a.holdBlink) this._raf = requestAnimationFrame(this._step);
     };

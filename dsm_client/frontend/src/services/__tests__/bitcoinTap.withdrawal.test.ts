@@ -55,11 +55,15 @@ describe('bitcoinTap withdrawal planner service', () => {
     expect(capturedReqBytes).not.toBeNull();
     const bridgeReq = BridgeRpcRequest.fromBinary(capturedReqBytes!);
     expect(bridgeReq.method).toBe('nativeBoundaryIngress');
+    // Both are oneofs: narrow on the case rather than reaching through the union.
+    if (bridgeReq.payload.case !== 'bytes') throw new Error('expected a bytes payload');
     const ingressRequest = IngressRequest.fromBinary(bridgeReq.payload.value.data);
-    expect(ingressRequest.operation.case).toBe('routerQuery');
-    expect(ingressRequest.operation.value.method).toBe('bitcoin.withdraw.plan');
+    const op = ingressRequest.operation;
+    expect(op.case).toBe('routerQuery');
+    if (op.case !== 'routerQuery') throw new Error('expected a routerQuery operation');
+    expect(op.value.method).toBe('bitcoin.withdraw.plan');
 
-    const argPack = ArgPack.fromBinary(ingressRequest.operation.value.args);
+    const argPack = ArgPack.fromBinary(op.value.args);
     const req = BitcoinWithdrawalPlanRequest.fromBinary(argPack.body as Uint8Array);
     expect(req.requestedNetSats).toBe(250_000n);
     expect(req.destinationAddress).toBe('tb1qreviewdest');
@@ -112,11 +116,15 @@ describe('bitcoinTap withdrawal planner service', () => {
     expect(capturedReqBytes).not.toBeNull();
     const bridgeReq = BridgeRpcRequest.fromBinary(capturedReqBytes!);
     expect(bridgeReq.method).toBe('nativeBoundaryIngress');
+    // Both are oneofs: narrow on the case rather than reaching through the union.
+    if (bridgeReq.payload.case !== 'bytes') throw new Error('expected a bytes payload');
     const ingressRequest = IngressRequest.fromBinary(bridgeReq.payload.value.data);
-    expect(ingressRequest.operation.case).toBe('routerInvoke');
-    expect(ingressRequest.operation.value.method).toBe('bitcoin.withdraw.execute');
+    const op = ingressRequest.operation;
+    expect(op.case).toBe('routerInvoke');
+    if (op.case !== 'routerInvoke') throw new Error('expected a routerInvoke operation');
+    expect(op.value.method).toBe('bitcoin.withdraw.execute');
 
-    const argPack = ArgPack.fromBinary(ingressRequest.operation.value.args);
+    const argPack = ArgPack.fromBinary(op.value.args);
     const req = BitcoinWithdrawalExecuteRequest.fromBinary(argPack.body as Uint8Array);
     expect(req.planId).toBe('withdraw-1');
     expect(req.destinationAddress).toBe('tb1qexecutedest');

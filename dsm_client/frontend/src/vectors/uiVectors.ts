@@ -67,7 +67,6 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
         alias: 'Bad Token',
         decimals: 255,
         maxSupplyU128: new Uint8Array(16),
-        policyAnchor: new Uint8Array(32),
       });
 
       const env = await invokeAndDecode('token.create', req.toBinary());
@@ -147,14 +146,6 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
     results.push(
       await runCase('token.create happy path', async () => {
         const tc = cfg.tokenCreate;
-        if (!tc?.policyAnchorB32 || typeof tc.policyAnchorB32 !== 'string') {
-          throw new Error('token.create happy path missing policyAnchorB32');
-        }
-        const anchorBytes = new Uint8Array(decodeBase32Crockford(tc.policyAnchorB32));
-        if (anchorBytes.length !== 32) {
-          throw new Error('token.create happy path policyAnchorB32 must be 32 bytes');
-        }
-
         const maxSupplyHex = typeof tc.maxSupplyU128Hex === 'string' ? tc.maxSupplyU128Hex : '01';
         const hex = maxSupplyHex.startsWith('0x') ? maxSupplyHex.slice(2) : maxSupplyHex;
         const padded = hex.padStart(32, '0');
@@ -171,7 +162,6 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
           alias: String(tc.alias || 'Test Token'),
           decimals: Number(tc.decimals ?? 0),
           maxSupplyU128: maxSupply,
-          policyAnchor: anchorBytes,
         });
 
         const env = await invokeAndDecode('token.create', req.toBinary());
@@ -230,14 +220,6 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
     results.push(
       await runCase('token.create + balance verify', async () => {
         const tc = cfg.tokenCreateVerify;
-        if (!tc?.policyAnchorB32 || typeof tc.policyAnchorB32 !== 'string') {
-          throw new Error('tokenCreateVerify missing policyAnchorB32');
-        }
-        const anchorBytes = new Uint8Array(decodeBase32Crockford(tc.policyAnchorB32));
-        if (anchorBytes.length !== 32) {
-          throw new Error('tokenCreateVerify policyAnchorB32 must be 32 bytes');
-        }
-
         const maxSupplyHex = typeof tc.maxSupplyU128Hex === 'string' ? tc.maxSupplyU128Hex : '01';
         const hex = maxSupplyHex.startsWith('0x') ? maxSupplyHex.slice(2) : maxSupplyHex;
         const padded = hex.padStart(32, '0');
@@ -251,7 +233,6 @@ export async function runUiVectors(): Promise<UiVectorRunReport> {
           alias: String(tc.alias || 'UI Vector Token'),
           decimals: Number(tc.decimals ?? 0),
           maxSupplyU128: maxSupply,
-          policyAnchor: anchorBytes,
         });
 
         // Step 1: Create token

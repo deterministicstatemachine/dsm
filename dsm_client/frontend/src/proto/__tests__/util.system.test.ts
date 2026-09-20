@@ -9,7 +9,7 @@ describe('extractSystemGenesisResponse', () => {
 
   test('extracts from batch envelope wrapping universalRx', () => {
     const sys = new pb.SystemGenesisResponse({ genesisHash: mkHash32(), publicKey: new Uint8Array([1,2,3]) });
-    const pack = new pb.ResultPack({ schemaHash: mkHash32(), codec: pb.Codec.PROTO, body: sys.toBinary() });
+    const pack = new pb.ResultPack({ schemaHash: mkHash32(), codec: pb.Codec.PROTO, body: new Uint8Array(sys.toBinary()) });
     const urx = new pb.UniversalRx({ results: [ new pb.OpResult({ accepted: true, result: pack }) ] });
     const inner = new pb.Envelope({ version: 3, payload: { case: 'universalRx', value: urx } as any });
     const batch = new pb.BatchEnvelope({ envelopes: [ inner ] });

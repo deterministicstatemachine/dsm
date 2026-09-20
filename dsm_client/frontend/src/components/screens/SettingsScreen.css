@@ -1,5 +1,5 @@
 .settings-shell {
-  --settings-bleed: 20px;
+  --settings-bleed: 0px;
   --settings-shell-bg: var(--bg, #9bbc0f);
   --settings-shell-text: var(--text-dark, #071f07);
   --settings-shell-border: var(--border, #306230);

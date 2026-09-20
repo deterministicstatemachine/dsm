@@ -4,6 +4,7 @@ import React from 'react';
 import { txTypeLabel, txTypeDetail, txTypeNumber, formatTxAmount, b32, resolveAlias } from './helpers';
 import { formatTimeAgo, formatDateTime } from '../../../utils/time';
 import ArrowIcon from '../../icons/ArrowIcon';
+import { TokenMark } from '../../TokenMark';
 import StitchedReceiptDetails from '../../receipts/StitchedReceiptDetails';
 import type { DomainTransaction } from '../../../domain/types';
 
@@ -16,7 +17,7 @@ type Props = {
   showRecoveredBadge?: boolean;
 };
 
-function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, showRecoveredBadge = false }: Props): JSX.Element {
+function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, showRecoveredBadge = false }: Props): React.JSX.Element {
   const amtBI = tx.amountSigned ?? tx.amount ?? 0n;
   const isOutgoing = amtBI < 0n;
   const token = (tx.tokenId?.length ?? 0) > 0 ? tx.tokenId! : 'ERA';
@@ -64,6 +65,7 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
         </div>
       </div>
       <div className={`transaction-amount-line ${isOutgoing ? 'outgoing' : 'incoming'}`}>
+        <TokenMark ticker={token} className="sb-coin sb-coin--sm" />
         <span className="transaction-amount-value">
           {isOutgoing ? '-' : '+'}{magnitude}
         </span>

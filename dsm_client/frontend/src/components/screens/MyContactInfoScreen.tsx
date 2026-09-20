@@ -5,6 +5,6 @@
 import React from 'react';
 import MyContactInfoPanel from '../contacts/MyContactInfoPanel';
 
-export default function MyContactInfoScreen(): JSX.Element {
+export default function MyContactInfoScreen(): React.JSX.Element {
   return <MyContactInfoPanel />;
 }

@@ -21,7 +21,7 @@ const EXAMPLE_BLOBS = [
   },
 ];
 
-export default function DevSoFiLaunchScreen(): JSX.Element {
+export default function DevSoFiLaunchScreen(): React.JSX.Element {
   const [blobBase32, setBlobBase32] = useState('');
   const [status, setStatus] = useState<string>('');
   const [exampleIdx, setExampleIdx] = useState(0);

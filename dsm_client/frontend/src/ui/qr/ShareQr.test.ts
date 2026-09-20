@@ -21,7 +21,6 @@ describe('ShareQr ContactQrV3 encoding', () => {
     genesisHash: mockGenesisHash,
     deviceId: mockDeviceId,
     network: 'dsm-test',
-    storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
   };
 
   test('should encode ContactQrV3 with all required fields', async () => {
@@ -110,7 +109,6 @@ describe('ContactQrV3 vs Headers comparison', () => {
     genesisHash: mockGenesisHash,
     deviceId: mockDeviceId,
     network: 'dsm-test',
-    storageNodes: ['http://test.example.com:9090', 'http://test.example.com:9091', 'http://test.example.com:9092'],
   };
 
   test('ContactQrV3 should contain network and storage hint', async () => {

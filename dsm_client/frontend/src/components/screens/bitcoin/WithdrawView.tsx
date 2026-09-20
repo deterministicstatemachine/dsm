@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   executeWithdrawalPlan,
   formatBtc,
@@ -10,6 +10,9 @@ import {
 import { bridgeEvents } from '../../../bridge/bridgeEvents';
 import logger from '../../../utils/logger';
 import ConfirmModal from '../../ConfirmModal';
+import ExplorerLink from './ExplorerLink';
+import { Disclosure } from '../../common/ScreenFrame';
+import { InfoTip } from '../../common/InfoTip';
 import type {
   DbtcBalance,
   VaultSummary,
@@ -39,6 +42,14 @@ function planClassLabel(planClass: string): string {
   return PLAN_CLASS_LABELS[planClass] || planClass;
 }
 
+function executionHeadline(status: string): string {
+  switch (status) {
+    case 'committed': return 'Withdrawal sent';
+    case 'failed': return 'Withdrawal failed';
+    default: return `Withdrawal ${status.replace(/_/g, ' ')}`;
+  }
+}
+
 export default function WithdrawView({
   balance,
   nativeBalance = null,
@@ -46,7 +57,7 @@ export default function WithdrawView({
   network,
   onBack,
   onRefresh,
-}: Props): JSX.Element {
+}: Props): React.JSX.Element {
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [withdrawDest, setWithdrawDest] = useState('');
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -56,10 +67,7 @@ export default function WithdrawView({
   const [message, setMessage] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  const activeVaultCount = useMemo(
-    () => vaults.filter((vault) => vault.state === 'active').length,
-    [vaults],
-  );
+  const activeVaultCount = vaults.filter((vault) => vault.state === 'active').length;
 
   const resetReviewedState = useCallback(() => {
     setReviewResult(null);
@@ -100,17 +108,14 @@ export default function WithdrawView({
     setExecuteLoading(true);
     setMessage(null);
     try {
-      const result = await executeWithdrawalPlan(
-        reviewResult.planId,
-        withdrawDest.trim(),
-      );
+      const result = await executeWithdrawalPlan(reviewResult.planId, withdrawDest.trim());
       setExecutionResult(result);
       await onRefresh();
       bridgeEvents.emit('wallet.refresh', { source: 'bitcoin.tap' });
       if (result.status === 'committed') {
         setWithdrawAmount('');
         setWithdrawDest('');
-        setMessage('Withdrawal broadcast. Keep refreshing until the burn is finalized.');
+        setMessage('Withdrawal broadcast. It finalizes once the Bitcoin network confirms it; refresh to follow along.');
       }
     } catch (e) {
       setExecutionResult(null);
@@ -121,69 +126,56 @@ export default function WithdrawView({
   }, [reviewResult, executeLoading, reviewLoading, withdrawDest, onRefresh]);
 
   const confirmMessage = reviewResult
-    ? `Withdraw ${formatBtc(reviewResult.totalGrossExitSats)} BTC to ${
-      withdrawDest.slice(0, 12)
-    }…?\nBitcoin network fee: ${formatBtc(reviewResult.totalFeeSats)} BTC (deducted from amount)\nYou receive: ${
-      formatBtc(reviewResult.plannedNetSats)
-    } BTC`
+    ? `Withdraw ${formatBtc(reviewResult.totalGrossExitSats)} BTC to ${withdrawDest.slice(0, 12)}…?\nBitcoin network fee: ${formatBtc(reviewResult.totalFeeSats)} BTC (deducted from amount)\nYou receive: ${formatBtc(reviewResult.plannedNetSats)} BTC`
     : 'Execute withdrawal?';
 
+  const canExecute = Boolean(
+    reviewResult
+    && reviewResult.planId
+    && reviewResult.legs.length > 0
+    && reviewResult.planClass !== 'insufficient_dbtc'
+    && !executeLoading
+    && !reviewLoading,
+  );
+
   return (
-    <div className="bitcoin-tap-tab" style={{ padding: '0 4px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-        <button
-          onClick={onBack}
-          className="button-brick"
-          style={{ padding: '4px 8px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-dark)', fontSize: 11, cursor: 'pointer' }}
-        >
-          Back
-        </button>
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 500 }}>Withdraw dBTC</h3>
+    <div className="bitcoin-tap-tab">
+      <div className="sb-subhead">
+        <button type="button" className="sb-icon-btn" onClick={onBack} aria-label="Back" title="Back">{'‹'}</button>
+        <h3>Withdraw to Bitcoin</h3>
+        <InfoTip title="Withdraw to Bitcoin" label="About withdrawals">
+          <p>Sends dBTC out of this wallet to any Bitcoin address, as BTC.</p>
+          <p>Enter how much dBTC to spend. The Bitcoin network fee comes out of that amount, so the recipient gets less than you type. <b>Review</b> shows exactly what leaves your balance and what arrives, and nothing moves until you confirm.</p>
+          <p>The withdrawal is paid out of the on-chain vaults behind your dBTC. It finalizes once the Bitcoin network confirms it. Until then the amount is held aside and is not part of your spendable balance.</p>
+        </InfoTip>
       </div>
 
-      <div style={{ fontSize: 11, marginBottom: 12, color: 'var(--text-disabled)' }}>
-        Enter the BTC amount the recipient should receive. The SDK will plan the route across active vaults and show the fee impact before anything executes.
-      </div>
-
-      <div className="balance-card btc-tap-summary-card">
-        <div className="balance-info btc-tap-summary-col">
-          <span className="token-symbol">Available dBTC</span>
-          <span className="balance-amount btc-tap-summary-amount">
-            {balance ? formatBtc(balance.available) : '0.00000000'}
-          </span>
+      <div className="sb-card">
+        <div className="sb-kv">
+          <span className="sb-kv__k">Available dBTC</span>
+          <span className="sb-kv__v">{balance ? formatBtc(balance.available) : '0.00000000'} dBTC</span>
         </div>
-        <div className="balance-info btc-tap-summary-col btc-tap-summary-col-right">
-          <span className="token-symbol">Native BTC</span>
-          <span className="balance-amount btc-tap-summary-amount-sm">
-            {nativeBalance ? formatBtc(nativeBalance.available) : '0.00000000'}
-          </span>
+        <div className="sb-kv">
+          <span className="sb-kv__k">On-chain BTC</span>
+          <span className="sb-kv__v">{nativeBalance ? formatBtc(nativeBalance.available) : '0.00000000'} BTC</span>
         </div>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', fontSize: 10, color: 'var(--text-disabled)', marginTop: -8, marginBottom: 8 }}>
-        Active vaults: {activeVaultCount}
-      </div>
 
-      <div className="form-group">
-        <label htmlFor="withdraw-amount" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-dark)', display: 'block', marginBottom: 6 }}>
-          Amount to Deliver (BTC)
-        </label>
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+      <div className="sb-field">
+        <label htmlFor="withdraw-amount">Amount to spend (BTC)</label>
+        <div className="sb-input-row">
           <input
             id="withdraw-amount"
             type="text"
             inputMode="decimal"
             value={withdrawAmount}
-            onChange={(e) => {
-              setWithdrawAmount(e.target.value);
-              resetReviewedState();
-            }}
+            onChange={(e) => { setWithdrawAmount(e.target.value); resetReviewedState(); }}
             placeholder="0.00100000"
-            className="form-input"
-            style={{ flex: 1, boxSizing: 'border-box' }}
+            className="sb-input sb-input--mono"
           />
           <button
             type="button"
-            className="button-brick"
+            className="sb-btn sb-btn--small"
             disabled={!balance || balance.available <= 0n}
             onClick={() => {
               if (balance && balance.available > 0n) {
@@ -191,154 +183,130 @@ export default function WithdrawView({
                 resetReviewedState();
               }
             }}
-            style={{ fontSize: 10, padding: '6px 10px', borderRadius: 8, whiteSpace: 'nowrap' }}
           >
             Max
           </button>
         </div>
       </div>
 
-      <div className="form-group">
-        <label htmlFor="withdraw-dest" style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-dark)', display: 'block', marginBottom: 6 }}>
-          Destination Bitcoin Address
-        </label>
+      <div className="sb-field">
+        <label htmlFor="withdraw-dest">Destination Bitcoin address</label>
         <input
           id="withdraw-dest"
           type="text"
           value={withdrawDest}
-          onChange={(e) => {
-            setWithdrawDest(e.target.value);
-            resetReviewedState();
-          }}
-          placeholder="bc1q..."
-          className="form-input"
-          style={{ width: '100%', boxSizing: 'border-box' }}
+          onChange={(e) => { setWithdrawDest(e.target.value); resetReviewedState(); }}
+          placeholder="bc1q…"
+          className="sb-input sb-input--mono"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
         />
       </div>
 
-      <div className="form-actions" style={{ marginTop: 16 }}>
-        <button type="button" onClick={onBack} className="cancel-button" style={{ flex: 1 }}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          onClick={handleReview}
-          className="send-button button-brick"
-          disabled={!withdrawAmount || !withdrawDest || reviewLoading || executeLoading}
-          style={{ flex: 1 }}
-        >
-          {reviewLoading ? 'Reviewing...' : 'Review Withdrawal'}
-        </button>
-      </div>
+      {!reviewResult && (
+        <div className="sb-actions">
+          <button type="button" onClick={onBack} className="sb-btn">Cancel</button>
+          <button
+            type="button"
+            onClick={handleReview}
+            className="sb-btn sb-btn--primary"
+            disabled={!withdrawAmount || !withdrawDest || reviewLoading || executeLoading}
+          >
+            {reviewLoading ? 'Reviewing…' : 'Review withdrawal'}
+          </button>
+        </div>
+      )}
 
       {reviewResult && (
-        <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-dark)' }}>
-              {planClassLabel(reviewResult.planClass)}
-            </div>
-            <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-              {reviewResult.legs.length} leg{reviewResult.legs.length === 1 ? '' : 's'}
-            </div>
+        <div className="sb-card">
+          <div className="sb-card__title"><span>Review</span></div>
+          <div className="sb-kv">
+            <span className="sb-kv__k">Recipient gets</span>
+            <span className="sb-kv__v"><b>{formatBtc(reviewResult.plannedNetSats)} BTC</b></span>
           </div>
-
-          <div style={{ fontSize: 11, color: 'var(--text-dark)', display: 'grid', gap: 4 }}>
-            <div>Withdrawal amount: <strong>{formatBtc(reviewResult.totalGrossExitSats)} BTC</strong></div>
-            <div>Est. Bitcoin network fee: <strong>{formatBtc(reviewResult.totalFeeSats)} BTC</strong></div>
-            <div>Estimated delivery: <strong>{formatBtc(reviewResult.plannedNetSats)} BTC</strong></div>
-            {reviewResult.shortfallSats > 0n && (
-              <div style={{ color: 'var(--text-disabled)' }}>
-                Shortfall from request: <strong>{formatBtc(reviewResult.shortfallSats)} BTC</strong>
-              </div>
-            )}
+          <div className="sb-kv">
+            <span className="sb-kv__k">Network fee</span>
+            <span className="sb-kv__v">{formatBtc(reviewResult.totalFeeSats)} BTC</span>
           </div>
-
-          <div style={{ marginTop: 10, display: 'grid', gap: 6 }}>
-            {reviewResult.legs.map((leg, index) => (
-              <div key={`${leg.vaultId}-${index}`} style={{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(0,0,0,0.03)', fontSize: 10, color: 'var(--text-dark)' }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  Leg {index + 1}: {leg.kind === 'full' ? 'Full sweep' : 'Partial sweep'}
-                </div>
-                <div>Vault: {leg.vaultId.slice(0, 12)}…</div>
-                <div>Source amount: {formatBtc(leg.sourceAmountSats)} BTC</div>
-                <div>Estimated delivered: {formatBtc(leg.estimatedNetSats)} BTC</div>
-                <div>Est. BTC network fee: {formatBtc(leg.estimatedFeeSats)} BTC</div>
-                {leg.kind === 'partial' && (
-                  <div>Successor remainder: {formatBtc(leg.remainderSats)} BTC</div>
-                )}
-              </div>
-            ))}
+          <div className="sb-kv">
+            <span className="sb-kv__k">Taken from your dBTC</span>
+            <span className="sb-kv__v">{formatBtc(reviewResult.totalGrossExitSats)} dBTC</span>
           </div>
-
-
-          {reviewResult.planClass === 'insufficient_dbtc' && (
-            <div style={{ marginTop: 10, padding: '8px 10px', border: '1px solid var(--warning-border, #e0a800)', borderRadius: 6, fontSize: 11, background: 'var(--warning-bg, #fff3cd)', color: 'var(--warning-text, #856404)' }}>
-              You need <strong>{formatBtc(reviewResult.totalGrossExitSats)} dBTC</strong> to cover this withdrawal (includes est. Bitcoin network fees).
-              You have <strong>{formatBtc(reviewResult.availableDbtcSats)} dBTC</strong> available.
+          {reviewResult.shortfallSats > 0n && (
+            <div className="sb-kv">
+              <span className="sb-kv__k">Shortfall from request</span>
+              <span className="sb-kv__v">{formatBtc(reviewResult.shortfallSats)} BTC</span>
             </div>
           )}
 
-          <div style={{ marginTop: 12 }}>
+          {reviewResult.planClass === 'insufficient_dbtc' && (
+            <p className="sb-notice sb-notice--error" style={{ marginTop: 8 }}>
+              This needs {formatBtc(reviewResult.totalGrossExitSats)} dBTC including the network fee. You have {formatBtc(reviewResult.availableDbtcSats)} dBTC.
+            </p>
+          )}
+
+          <Disclosure summary={`Route details (${reviewResult.legs.length} leg${reviewResult.legs.length === 1 ? '' : 's'})`} className="sb-details--plain">
+            <p className="sb-hint">Active vaults: {activeVaultCount}.</p>
+            <div className="sb-kv"><span className="sb-kv__k">Plan</span><span className="sb-kv__v">{planClassLabel(reviewResult.planClass)}</span></div>
+            {reviewResult.legs.map((leg, index) => (
+              <div key={`${leg.vaultId}-${index}`} className="sb-card" style={{ padding: '4px 8px' }}>
+                <div className="sb-kv"><span className="sb-kv__k">Leg {index + 1}</span><span className="sb-kv__v">{leg.kind === 'full' ? 'Full sweep' : 'Partial sweep'}</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Vault</span><span className="sb-kv__v sb-kv__v--mono">{leg.vaultId.slice(0, 12)}…</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Source</span><span className="sb-kv__v">{formatBtc(leg.sourceAmountSats)} BTC</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Delivered</span><span className="sb-kv__v">{formatBtc(leg.estimatedNetSats)} BTC</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Fee</span><span className="sb-kv__v">{formatBtc(leg.estimatedFeeSats)} BTC</span></div>
+                {leg.kind === 'partial' && (
+                  <div className="sb-kv"><span className="sb-kv__k">Remainder</span><span className="sb-kv__v">{formatBtc(leg.remainderSats)} BTC</span></div>
+                )}
+              </div>
+            ))}
+          </Disclosure>
+
+          <div className="sb-actions" style={{ marginBottom: 0 }}>
+            <button type="button" onClick={resetReviewedState} className="sb-btn" disabled={executeLoading}>Edit</button>
             <button
               type="button"
               onClick={() => setShowConfirm(true)}
-              className="send-button button-brick"
-              disabled={!reviewResult.planId || reviewResult.legs.length === 0 || reviewResult.planClass === 'insufficient_dbtc' || executeLoading || reviewLoading}
-              style={{ width: '100%' }}
+              className="sb-btn sb-btn--primary"
+              disabled={!canExecute}
             >
-              {executeLoading ? 'Executing...' : 'Confirm Withdrawal'}
+              {executeLoading ? 'Sending…' : 'Confirm withdrawal'}
             </button>
           </div>
         </div>
       )}
 
       {message && (
-        <div style={{ marginTop: 12, padding: '8px 10px', border: '1px dashed var(--border)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', color: 'var(--text-dark)', background: 'var(--bg-secondary)' }}>
-          {message}
+        <div className={`sb-notice${message.startsWith('Error') ? ' sb-notice--error' : ''}`} role="status">
+          <span style={{ whiteSpace: 'pre-wrap' }}>{message}</span>
         </div>
       )}
 
       {executionResult && (
-        <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: executionResult.status === 'committed' ? 'var(--bg)' : 'var(--bg-secondary)', color: 'var(--text-dark)' }}>
-          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
-            Execution: {executionResult.status}
-          </div>
-          <div style={{ fontSize: 11, marginBottom: 8 }}>{executionResult.message}</div>
-          <div style={{ display: 'grid', gap: 6 }}>
+        <div className="sb-card">
+          <div className="sb-card__title"><span>{executionHeadline(executionResult.status)}</span></div>
+          <div style={{ fontSize: 10, marginBottom: 6 }}>{executionResult.message}</div>
+          <div className="sb-hint sb-hint--tight">Execution: {executionResult.status}</div>
+          <Disclosure summary={`Legs (${executionResult.executedLegs.length})`} className="sb-details--plain">
             {executionResult.executedLegs.map((leg, index) => (
-              <div key={`${leg.vaultId}-${leg.sweepTxid || index}`} style={{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(0,0,0,0.03)', fontSize: 10 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                  Leg {index + 1}: {leg.kind === 'full' ? 'Full sweep' : 'Partial sweep'} ({leg.status})
-                </div>
-                <div>Vault: {leg.vaultId.slice(0, 12)}…</div>
-                <div>Estimated delivered: {formatBtc(leg.estimatedNetSats)} BTC</div>
+              <div key={`${leg.vaultId}-${leg.sweepTxid || index}`} className="sb-card" style={{ padding: '4px 8px' }}>
+                <div className="sb-kv"><span className="sb-kv__k">Leg {index + 1}</span><span className="sb-kv__v">{leg.kind === 'full' ? 'Full sweep' : 'Partial sweep'} ({leg.status})</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Vault</span><span className="sb-kv__v sb-kv__v--mono">{leg.vaultId.slice(0, 12)}…</span></div>
+                <div className="sb-kv"><span className="sb-kv__k">Delivered</span><span className="sb-kv__v">{formatBtc(leg.estimatedNetSats)} BTC</span></div>
                 {leg.actualRemainderSats > 0n && (
-                  <div>Remainder: {formatBtc(leg.actualRemainderSats)} BTC</div>
+                  <div className="sb-kv"><span className="sb-kv__k">Remainder</span><span className="sb-kv__v">{formatBtc(leg.actualRemainderSats)} BTC</span></div>
                 )}
-                {leg.sweepTxid && (() => {
-                  const url = mempoolExplorerUrl(leg.sweepTxid, network);
-                  return (
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => navigator.clipboard.writeText(url).then(
-                        () => setMessage(`Explorer link copied for leg ${index + 1}`),
-                        () => setMessage(`URL: ${url}`),
-                      )}
-                      onKeyDown={(e) => e.key === 'Enter' && navigator.clipboard.writeText(url).then(
-                        () => setMessage(`Explorer link copied for leg ${index + 1}`),
-                        () => setMessage(`URL: ${url}`),
-                      )}
-                      style={{ marginTop: 6, fontSize: 10, color: 'var(--text-dark)', textDecoration: 'underline', wordBreak: 'break-all', cursor: 'copy', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', padding: '2px 0' }}
-                      title="Click to copy explorer link"
-                    >
-                      {url}
-                    </div>
-                  );
-                })()}
+                {leg.sweepTxid && (
+                  <ExplorerLink
+                    url={mempoolExplorerUrl(leg.sweepTxid, network)}
+                    onCopied={() => setMessage(`Explorer link copied for leg ${index + 1}`)}
+                    onCopyFailed={(url) => setMessage(`URL: ${url}`)}
+                  />
+                )}
               </div>
             ))}
-          </div>
+          </Disclosure>
         </div>
       )}
 
@@ -346,10 +314,7 @@ export default function WithdrawView({
         visible={showConfirm}
         title="Confirm Withdrawal"
         message={confirmMessage}
-        onConfirm={() => {
-          setShowConfirm(false);
-          void handleExecute();
-        }}
+        onConfirm={() => { setShowConfirm(false); void handleExecute(); }}
         onCancel={() => setShowConfirm(false)}
       />
     </div>
