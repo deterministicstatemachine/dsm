@@ -2,9 +2,9 @@
 
 //! Write-once register properties, ON WHICHEVER BACKEND IS COMPILED.
 //!
-//! This node serves three one-shot registers — the settlement slot, the
-//! faucet ticket, and the economic root — and every economic argument built
-//! on them assumes the same four things of each cell:
+//! This node serves one one-shot register — the ERA faucet ticket, which is
+//! native emission, not market settlement — and the faucet's
+//! argument assumes four things of its cell:
 //!
 //! 1. the first bytes accepted are the bytes the cell holds;
 //! 2. re-submitting those exact bytes re-acks rather than refusing;
@@ -77,11 +77,8 @@ pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
     id
 }
 
-/// The one outcome vocabulary these properties are stated in. The settlement
-/// register keeps its own historical enum and the other two share
-/// `OneShotOutcome`; both collapse to the same three answers, and stating the
-/// properties once over this enum is what keeps the three registers honest
-/// against each other.
+/// The one outcome vocabulary these properties are stated in; the register's
+/// `OneShotOutcome` collapses to the same three answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Accepted,
