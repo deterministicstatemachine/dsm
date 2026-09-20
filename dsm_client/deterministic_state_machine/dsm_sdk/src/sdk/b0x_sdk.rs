@@ -4813,6 +4813,9 @@ mod tests {
             child_tip: vec![0x05; 32],
             parent_root: vec![0x06; 32],
             child_root: vec![0x07; 32],
+            // Canonical field 21 (Part VII step 3): the sender's transition
+            // entropy, required at the wire since #934.
+            transition_entropy: vec![0x0C; 32],
             rel_proof_parent: vec![0x08; REL_PROOF_LEN],
             rel_proof_child: vec![0x09; REL_PROOF_LEN],
             dev_proof: vec![0x0A; DEV_PROOF_LEN],
@@ -5281,8 +5284,9 @@ mod tests {
     }
 
     /// The FULL countersigned receipt as the recipient stores it: the
-    /// production-shaped A side plus production-shaped B fields. 218,541 bytes
-    /// — the exact size observed on 5GN, and 170% of the node cap.
+    /// production-shaped A side plus production-shaped B fields. 218,576 bytes
+    /// — the 218,541 observed on 5GN plus canonical field 21 (#934), and 170%
+    /// of the node cap.
     fn production_sized_full_countersigned_receipt() -> Vec<u8> {
         let sig = sphincs_sig_len();
         let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
@@ -5298,7 +5302,9 @@ mod tests {
             })
             .expect("overlay");
         let bytes = full.to_full_protobuf().expect("encode");
-        assert_eq!(bytes.len(), 218_541, "the 5GN specimen size");
+        // The 5GN specimen was 218,541 bytes; canonical field 21 (a two-byte
+        // key varint, one length byte, 32 bytes of value) adds 35.
+        assert_eq!(bytes.len(), 218_576, "the 5GN specimen size plus field 21");
         bytes
     }
 
