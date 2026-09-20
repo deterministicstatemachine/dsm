@@ -50,7 +50,6 @@ export * from './identity';
 export * from './contacts';
 export * from './wallet';
 export * from './policies';
-export * from './dlv';
 export * from './storage';
 export * from './transactions';
 export * from './diagnostics';
@@ -71,7 +70,6 @@ import * as Identity from './identity';
 import * as Contacts from './contacts';
 import * as Wallet from './wallet';
 import * as Policies from './policies';
-import * as Dlv from './dlv';
 import * as Storage from './storage';
 import * as Transactions from './transactions';
 import * as Diagnostics from './diagnostics';
@@ -84,7 +82,6 @@ export const dsmClient = {
   ...Contacts,
   ...Wallet,
   ...Policies,
-  ...Dlv,
   ...Storage,
   ...Transactions,
   ...Diagnostics,

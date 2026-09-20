@@ -4,7 +4,6 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useWalletScreenData } from './wallet/hooks/useWalletScreenData';
 import OverviewTab from './wallet/OverviewTab';
 import SendTab from './wallet/SendTab';
-import SwapTab from './wallet/SwapTab';
 import HistoryTab from './wallet/HistoryTab';
 import InboxOverlay from './wallet/InboxOverlay';
 import BitcoinTapTab from './bitcoin/BitcoinTapTab';
@@ -14,12 +13,11 @@ import { bridgeEvents } from '../../bridge/bridgeEvents';
 import { Notice, ScreenFrame, ScreenTabs } from '../common/ScreenFrame';
 import '../../styles/EnhancedWallet.css';
 
-type WalletTab = 'overview' | 'send' | 'swap' | 'history' | 'bitcoin';
+type WalletTab = 'overview' | 'send' | 'history' | 'bitcoin';
 
 const TABS: ReadonlyArray<{ id: WalletTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'send', label: 'Send' },
-  { id: 'swap', label: 'Swap' },
   { id: 'history', label: 'History' },
   { id: 'bitcoin', label: 'Bitcoin' },
 ];
@@ -94,11 +92,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
   }, [data.touchFeedback]);
 
   const handleSendComplete = useCallback(() => {
-    data.setTouchFeedback('transaction_sent');
-    setActiveTab('overview');
-  }, [data]);
-
-  const handleSwapComplete = useCallback(() => {
     data.setTouchFeedback('transaction_sent');
     setActiveTab('overview');
   }, [data]);
@@ -183,17 +176,6 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ btcLogoSrc,
           balances={data.balances}
           onCancel={switchToOverview}
           onSendComplete={handleSendComplete}
-          loadWalletData={data.loadWalletData}
-          setError={data.setError}
-        />
-      )}
-
-      {activeTab === 'swap' && (
-        <SwapTab
-          balances={data.balances}
-          deviceB32={data.deviceB32}
-          onCancel={switchToOverview}
-          onSwapComplete={handleSwapComplete}
           loadWalletData={data.loadWalletData}
           setError={data.setError}
         />
