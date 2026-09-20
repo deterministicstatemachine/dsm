@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Generic conditional-binding interface — SoFi Rev 15 §15.5, the node half
-//! of `QuorumBind`.
+//! Generic conditional-binding interface: the node half of a client-driven
+//! compare-and-exchange over opaque records.
 //!
 //! This node is APPLICATION-BLIND here, by construction and by rule (§22
 //! #12). It holds opaque generic binding records under opaque resource keys

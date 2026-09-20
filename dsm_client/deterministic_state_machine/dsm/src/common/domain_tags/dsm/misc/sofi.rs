@@ -75,9 +75,6 @@ pub const TAG_DSM_SOFI_SUCC_CELL_V2: TaggedHashDomain<'static> =
 /// `K^(a) = H(tag ‖ K^(0) ‖ u64be(a))` for `a ≥ 1`. O(1), not a chain.
 pub const TAG_DSM_SOFI_SUCC_ATTEMPT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/succ-attempt/v1");
-/// `K_out(F) = H(tag ‖ FulfillmentId)`.
-pub const TAG_DSM_SOFI_ROUTE_OUTCOME_V2: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/sofi/route-outcome/v2");
 /// `s_{v,n} = H(tag ‖ v ‖ R_n)` — the Fisher-Yates seed.
 pub const TAG_DSM_SOFI_STORAGE_SEED_V4: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/storage-seed/v4");
@@ -162,7 +159,6 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_FULFILLMENT_SIGN,
     TAG_DSM_SOFI_SUCC_CELL_V2,
     TAG_DSM_SOFI_SUCC_ATTEMPT,
-    TAG_DSM_SOFI_ROUTE_OUTCOME_V2,
     TAG_DSM_SOFI_STORAGE_SEED_V4,
     TAG_DSM_SOFI_FY_PRF,
     TAG_DSM_SOFI_TRADER_CORE_V3,
