@@ -30,7 +30,6 @@ pub mod bitcoin_helpers;
 pub mod bitcoin_invoke_routes;
 pub mod bitcoin_query_routes;
 pub mod contacts_routes;
-pub mod dlv_routes;
 #[cfg(test)]
 pub(crate) mod faucet_flow_tests;
 #[cfg(test)]
@@ -43,7 +42,6 @@ pub mod message_routes;
 pub mod misc_routes;
 pub mod offline_cash_routes;
 pub mod online_finalize;
-pub mod posted_dlv_routes;
 pub mod prefs_routes;
 #[cfg(test)]
 mod recipient_admission_tests;
@@ -53,11 +51,9 @@ pub mod recovery_routes;
 pub mod relationship_finalized;
 pub mod relationship_status;
 pub mod response_helpers;
-pub mod route_routes;
 #[cfg(test)]
 mod sender_admission_tests;
 pub mod session_routes;
-pub mod sofi_routes;
 pub mod storage_routes;
 pub mod system_routes;
 pub mod token_routes;

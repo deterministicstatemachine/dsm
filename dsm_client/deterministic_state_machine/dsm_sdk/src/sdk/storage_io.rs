@@ -294,31 +294,86 @@ pub(crate) async fn submit_faucet_ticket_claim(
     }
 }
 
-pub(crate) async fn submit_economic_root_claim(
+/// Outcome of a leader-first cell write (Part II §8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CellWrite {
+    /// The leader holds the bytes.
+    pub leader_reached: bool,
+    /// Other members that hold the bytes.
+    pub copies: u32,
+}
+
+/// The member that leads a cell, as an index into `set.members()`: the
+/// first position of the Fisher-Yates shuffle of the committed set under
+/// `seed` (Part II §7). Computed here and by Core; never by a node.
+pub(crate) fn leader_index(
     set: &crate::sdk::storage_set::StorageSet,
-    envelope: &[u8],
-) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
+    seed: &[u8; 32],
+) -> Result<usize, DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
+    let leader = dsm::economic::register::position_leader(seed, &members)
+        .map_err(|e| DsmError::storage(format!("leader shuffle: {e:?}"), None::<std::io::Error>))?;
+    set.members()
+        .iter()
+        .position(|m| m.member_id.as_bytes() == leader.as_slice())
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the shuffled leader is not a member of the set".to_string(),
+                None::<std::io::Error>,
+            )
+        })
+}
+
+/// Part II §8: write `value` at `key` under `namespace`, the leader of `seed`
+/// first and the other members after. Nothing is checked or compared on the
+/// way; the winner at the key is whatever object reached the leader first,
+/// and Core reads that.
+pub(crate) async fn write_cell_leader_first(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &[u8],
+    key: &[u8; 32],
+    seed: &[u8; 32],
+    value: &[u8],
+) -> Result<CellWrite, DsmError> {
+    let leader = leader_index(set, seed)?;
     #[cfg(any(test, feature = "test-utils"))]
     {
-        Ok(fake_registers::claim(
-            set,
-            fake_registers::RegisterKind::EconomicRoot,
-            envelope,
-            fake_registers::process_caller().as_ref(),
-            None,
-        ))
+        Ok(fake_registers::put_cell(set, leader, namespace, key, value))
     }
     #[cfg(not(any(test, feature = "test-utils")))]
     {
         let sdk = member_sdk_with_auth(set).await?;
-        Ok(sdk
-            .submit_one_shot_claim(
-                set,
-                "/api/v2/economic-root/claim",
-                "x-dsm-economic-root",
-                envelope,
-            )
-            .await)
+        let key_b32 = crate::util::text_id::encode_base32_crockford(key);
+        let fanout = sdk
+            .put_cell_leader_first(set, leader, namespace, &key_b32, value)
+            .await;
+        for (member, error) in &fanout.errors {
+            log::warn!("cell write: member {member} did not take the bytes: {error}");
+        }
+        Ok(CellWrite {
+            leader_reached: fanout.leader_reached,
+            copies: fanout.copies,
+        })
+    }
+}
+
+/// Part II §13, the raw reads: everything each member holds at the key, in
+/// set order, `None` where a member could not answer. Core derives
+/// `LeaderHeld` and `Final` from these; nothing is counted here.
+pub(crate) async fn read_cell_raw(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &[u8],
+    key: &[u8; 32],
+) -> Result<Vec<Option<Vec<Vec<u8>>>>, DsmError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        Ok(fake_registers::get_cells(set, namespace, key))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let key_b32 = crate::util::text_id::encode_base32_crockford(key);
+        Ok(sdk.get_cell_all(set, namespace, &key_b32).await)
     }
 }
 
@@ -339,26 +394,6 @@ pub(crate) async fn read_faucet_ticket_cell(
     {
         let sdk = member_sdk_with_auth(set).await?;
         let path = crate::sdk::economic_registers::faucet_ticket_path(faucet_id, ticket_index);
-        Ok(sdk.read_register_cell(set, &path).await)
-    }
-}
-
-pub(crate) async fn read_economic_root_cell_rows(
-    set: &crate::sdk::storage_set::StorageSet,
-    k_root: &[u8; 32],
-) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        Ok(fake_registers::read(
-            set,
-            fake_registers::RegisterKind::EconomicRoot,
-            &fake_registers::root_key(k_root),
-        ))
-    }
-    #[cfg(not(any(test, feature = "test-utils")))]
-    {
-        let sdk = member_sdk_with_auth(set).await?;
-        let path = crate::sdk::economic_registers::economic_root_path(k_root);
         Ok(sdk.read_register_cell(set, &path).await)
     }
 }
@@ -413,13 +448,16 @@ pub mod fake_registers {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum RegisterKind {
         FaucetTicket,
-        EconomicRoot,
     }
 
     #[derive(Default)]
     struct State {
         /// (member_id, register) -> (cell key -> (bytes, digest))
         cells: HashMap<(String, RegisterKind), HashMap<Vec<u8>, (Vec<u8>, [u8; 32])>>,
+        /// Part II §12 cells: everything each member was given at a
+        /// `(namespace, key)`, in arrival order. Nothing is refused, replaced
+        /// or compared.
+        keyed: HashMap<String, HashMap<(Vec<u8>, [u8; 32]), Vec<Vec<u8>>>>,
         failing: HashSet<String>,
         echo_override: HashMap<String, Option<String>>,
         /// What a member echoes as its REGISTER INCARNATION, when it is not
@@ -480,10 +518,6 @@ pub mod fake_registers {
         k
     }
 
-    pub fn root_key(k_root: &[u8; 32]) -> Vec<u8> {
-        k_root.to_vec()
-    }
-
     /// The identity a live member would have authenticated for THIS process:
     /// the device id and signing key the process registered with its storage
     /// nodes — the same `AppState` fields `resolve_storage_auth` reads. `None`
@@ -503,9 +537,6 @@ pub mod fake_registers {
         match kind {
             RegisterKind::FaucetTicket => {
                 dsm::economic::faucet::faucet_claim_evidence_addr(envelope)
-            }
-            RegisterKind::EconomicRoot => {
-                dsm::economic::claim_envelope::economic_root_claim_envelope_digest(envelope)
             }
         }
     }
@@ -573,38 +604,6 @@ pub mod fake_registers {
                     &verified.body.faucet_id,
                     verified.body.ticket_index,
                 ))
-            }
-            RegisterKind::EconomicRoot => {
-                use dsm::economic::claim_envelope::{
-                    decode_and_verify_economic_root_claim, verify_claim_attribution,
-                    ClaimEnvelopeError,
-                };
-                use dsm::economic::register::AttributionError;
-                let verified = match decode_and_verify_economic_root_claim(envelope) {
-                    Ok(v) => v,
-                    Err(ClaimEnvelopeError::SignatureInvalid) => {
-                        return Err((403, "signature-invalid"))
-                    }
-                    Err(_) => return Err((400, "malformed")),
-                };
-                match verify_claim_attribution(&verified, caller, configured_set_id) {
-                    Ok(()) => {}
-                    Err(AttributionError::ClaimantIsNotCaller) => {
-                        return Err((403, "claimant-not-caller"))
-                    }
-                    Err(AttributionError::DeviceIsNotCaller) => {
-                        return Err((403, "device-not-caller"))
-                    }
-                    Err(AttributionError::WrongStorageSet { .. }) => {
-                        return Err((422, "foreign-set"))
-                    }
-                }
-                Ok(dsm::economic::register::economic_root_register_key(
-                    &verified.body().trader_genesis,
-                    &verified.body().trader_devid,
-                    verified.body().economic_position,
-                )
-                .to_vec())
             }
         }
     }
@@ -678,6 +677,65 @@ pub mod fake_registers {
     /// winner bytes)` per member. A down member yields `(id, None, None)` —
     /// the live client's row for a transport failure — so silence can never
     /// count as an attributed empty.
+    /// Part II §8 at a fake member: append at the leader first, then at the
+    /// others. A failing member simply does not hold the bytes.
+    pub fn put_cell(
+        set: &StorageSet,
+        leader: usize,
+        namespace: &[u8],
+        key: &[u8; 32],
+        value: &[u8],
+    ) -> super::CellWrite {
+        let mut order: Vec<usize> = (0..set.len()).filter(|i| *i != leader).collect();
+        order.insert(0, leader);
+        let mut write = super::CellWrite::default();
+        with_state(|s| {
+            for i in order {
+                let member = &set.members()[i];
+                if s.failing.contains(&member.member_id) {
+                    continue;
+                }
+                s.keyed
+                    .entry(member.member_id.clone())
+                    .or_default()
+                    .entry((namespace.to_vec(), *key))
+                    .or_default()
+                    .push(value.to_vec());
+                if i == leader {
+                    write.leader_reached = true;
+                } else {
+                    write.copies += 1;
+                }
+            }
+        });
+        write
+    }
+
+    /// Part II §12 get at every fake member, in set order.
+    pub fn get_cells(
+        set: &StorageSet,
+        namespace: &[u8],
+        key: &[u8; 32],
+    ) -> Vec<Option<Vec<Vec<u8>>>> {
+        with_state(|s| {
+            set.members()
+                .iter()
+                .map(|member| {
+                    if s.failing.contains(&member.member_id) {
+                        return None;
+                    }
+                    Some(
+                        s.keyed
+                            .get(&member.member_id)
+                            .and_then(|cells| cells.get(&(namespace.to_vec(), *key)))
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+    }
+
     pub fn read(
         set: &StorageSet,
         kind: RegisterKind,
@@ -729,41 +787,6 @@ pub mod fake_registers {
     }
 }
 
-/// Member-attributed read of one settlement-slot cell — rows of
-/// `(member_id, echoed_node_id, winner_bytes)` for the quorum counter.
-pub(crate) async fn read_settlement_slot_cell(
-    set: &crate::sdk::storage_set::StorageSet,
-    vault_id: &[u8; 32],
-    parent_sequence: u64,
-) -> Result<Vec<dsm::economic::cell_observation::MemberCellRead>, DsmError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        Ok(fake_fleet::read_slot(set, vault_id, parent_sequence))
-    }
-    #[cfg(not(any(test, feature = "test-utils")))]
-    {
-        let sdk = member_sdk_with_auth(set).await?;
-        let path = crate::sdk::economic_registers::settlement_slot_path(vault_id, parent_sequence);
-        Ok(sdk.read_register_cell(set, &path).await)
-    }
-}
-
-pub(crate) async fn submit_settlement_slot_claim(
-    set: &crate::sdk::storage_set::StorageSet,
-    envelope: &[u8],
-) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    // Exactly one of these blocks survives cfg expansion, and it is the
-    // function's tail expression.
-    #[cfg(any(test, feature = "test-utils"))]
-    {
-        Ok(fake_fleet::claim(set, envelope))
-    }
-    #[cfg(not(any(test, feature = "test-utils")))]
-    {
-        submit_settlement_slot_claim_live(set, envelope).await
-    }
-}
-
 /// TEST-ONLY in-process member fleet: one object store per MEMBER ID (not per
 /// URL), an injectable per-member failure, and an injectable echoed node id —
 /// so a test can drive the real per-member replay/quorum logic through
@@ -783,27 +806,14 @@ pub(crate) mod fake_fleet {
     struct FleetState {
         /// member_id -> (key -> bytes)
         stores: HashMap<String, HashMap<String, Vec<u8>>>,
-        /// member_id -> ((vault_id, parent_sequence) -> (envelope, digest)):
-        /// the write-once settlement-slot register, per member.
-        registers: HashMap<String, HashMap<([u8; 32], u64), (Vec<u8>, [u8; 32])>>,
         /// members whose next PUTs fail (persistent until cleared)
         failing: HashSet<String>,
         /// key prefixes whose PUTs fail on EVERY member — one object class
         /// withheld while the rest of the fleet works (a settlement receipt
         /// below quorum while its bundle and acceptance publish).
         failing_prefixes: Vec<String>,
-        /// members that SERVE READS but refuse register writes — a node that
-        /// is reachable and answering while unable to accept new state (a
-        /// read-only mount, a full disk). Distinct from `failing`, because a
-        /// composer can still count such a member's cell answer while a claim
-        /// cannot reach quorum through it.
-        claim_refusing: HashSet<String>,
         /// member_id -> the node id it echoes (default: its own member id)
         echo_override: HashMap<String, Option<String>>,
-        /// members that phrase a re-ack as `Refused { held_digest: <ours> }`
-        /// instead of `HeldIdentical` — a shape the current node never emits,
-        /// which is exactly why the claim path must not take it on trust.
-        refuse_phrasing: HashSet<String>,
         /// every (member_id, key, digest-of-bytes) PUT that was attempted, in order
         put_log: Vec<(String, String, [u8; 32])>,
     }
@@ -813,46 +823,6 @@ pub(crate) mod fake_fleet {
 
     fn state() -> std::sync::MutexGuard<'static, FleetState> {
         STATE.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// Member-attributed read of one slot cell, mirroring the register-read
-    /// row shape: `(member_id, echoed_node_id, winner_bytes)`.
-    pub(crate) fn read_slot(
-        set: &StorageSet,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
-    ) -> Vec<dsm::economic::cell_observation::MemberCellRead> {
-        let s = state();
-        use dsm::economic::cell_observation::MemberCellRead;
-        set.members()
-            .iter()
-            .map(|member| {
-                // A FAILING MEMBER DOES NOT ANSWER — and it does not answer
-                // "empty". An attributed absence is a POSITIVE claim that the
-                // cell holds nothing; modelling an outage as one would let a
-                // fixture manufacture frontiers out of silence, the exact
-                // defect this observation exists to remove.
-                if s.failing.contains(&member.member_id) {
-                    return MemberCellRead::Unavailable;
-                }
-                let echoed = s
-                    .echo_override
-                    .get(&member.member_id)
-                    .cloned()
-                    .unwrap_or_else(|| Some(member.member_id.clone()));
-                if echoed.as_deref() != Some(member.member_id.as_str()) {
-                    return MemberCellRead::Unavailable;
-                }
-                match s
-                    .registers
-                    .get(&member.member_id)
-                    .and_then(|cells| cells.get(&(*vault_id, parent_sequence)))
-                {
-                    Some((b, _)) => MemberCellRead::Value(b.clone()),
-                    None => MemberCellRead::Absent,
-                }
-            })
-            .collect()
     }
 
     pub(crate) fn reset() {
@@ -874,20 +844,6 @@ pub(crate) mod fake_fleet {
 
     pub(crate) fn heal_keys_with_prefix(prefix: &str) {
         state().failing_prefixes.retain(|p| p != prefix);
-    }
-
-    /// `member_id` answers reads but refuses register writes.
-    pub(crate) fn refuse_claims(member_id: &str) {
-        state().claim_refusing.insert(member_id.to_string());
-    }
-
-    pub(crate) fn accept_claims(member_id: &str) {
-        state().claim_refusing.remove(member_id);
-    }
-
-    /// Make `member_id` answer a re-ack as `Refused` carrying our own digest.
-    pub(crate) fn set_refuse_phrasing(member_id: &str) {
-        state().refuse_phrasing.insert(member_id.to_string());
     }
 
     /// Make `member_id` echo `echoes` (e.g. another member's id, or `None`).
@@ -913,106 +869,6 @@ pub(crate) mod fake_fleet {
     /// Every attempted PUT as (member_id, key, blake3(bytes)).
     pub(crate) fn put_log() -> Vec<(String, String, [u8; 32])> {
         state().put_log.clone()
-    }
-
-    /// The digest a member holds for a slot, if any (minority losing rows are
-    /// legal and permanent — this is how a test proves they stay).
-    pub(crate) fn slot_held_digest(
-        member_id: &str,
-        vault_id: &[u8; 32],
-        parent_sequence: u64,
-    ) -> Option<[u8; 32]> {
-        state()
-            .registers
-            .get(member_id)
-            .and_then(|r| r.get(&(*vault_id, parent_sequence)))
-            .map(|(_, d)| *d)
-    }
-
-    /// Write-once conditional acceptance per member, exactly as the storage
-    /// node does it: first bytes win, identical re-ack, different refused with
-    /// the held digest. Attribution/set checks are the node's; the fake fleet
-    /// models the register only.
-    pub(crate) fn claim(
-        set: &StorageSet,
-        envelope: &[u8],
-    ) -> crate::sdk::storage_node_sdk::ClaimFanout {
-        use crate::sdk::storage_node_sdk::{ClaimFanout, MemberClaimOutcome, MemberClaimResult};
-        let verified =
-            dsm::dlv::settlement_slot_claim::decode_and_verify_settlement_slot_claim(envelope);
-        let mut st = state();
-        let mut outcomes = Vec::with_capacity(set.len());
-        for m in set.members() {
-            let key = format!(
-                "slot:{}/{}",
-                verified
-                    .as_ref()
-                    .map(|v| crate::util::text_id::encode_base32_crockford(&v.body.vault_id))
-                    .unwrap_or_else(|_| "?".into()),
-                verified
-                    .as_ref()
-                    .map(|v| v.body.parent_sequence)
-                    .unwrap_or(0)
-            );
-            st.put_log
-                .push((m.member_id.clone(), key, *blake3::hash(envelope).as_bytes()));
-            if st.failing.contains(&m.member_id) || st.claim_refusing.contains(&m.member_id) {
-                outcomes.push(MemberClaimOutcome {
-                    member_id: m.member_id.clone(),
-                    endpoint: m.endpoint.clone(),
-                    result: MemberClaimResult::Unavailable("injected failure".into()),
-                    echoed_node_id: None,
-                });
-                continue;
-            }
-            let echoed = match st.echo_override.get(&m.member_id) {
-                Some(o) => o.clone(),
-                None => Some(m.member_id.clone()),
-            };
-            let Ok(v) = verified.as_ref() else {
-                outcomes.push(MemberClaimOutcome {
-                    member_id: m.member_id.clone(),
-                    endpoint: m.endpoint.clone(),
-                    result: MemberClaimResult::Unavailable("malformed".into()),
-                    echoed_node_id: echoed,
-                });
-                continue;
-            };
-            let slot = (v.body.vault_id, v.body.parent_sequence);
-            let st_refuse_phrasing = st.refuse_phrasing.contains(&m.member_id);
-            let reg = st.registers.entry(m.member_id.clone()).or_default();
-            // Read the held digest OUT before deciding, so the write-once insert
-            // does not overlap the read borrow.
-            let held: Option<[u8; 32]> = reg.get(&slot).map(|(_, d)| *d);
-            let result = match held {
-                None => {
-                    reg.insert(slot, (envelope.to_vec(), v.envelope_digest));
-                    MemberClaimResult::Accepted
-                }
-                Some(d) if d == v.envelope_digest => {
-                    if st_refuse_phrasing {
-                        MemberClaimResult::Refused {
-                            held_digest: Some(d.to_vec()),
-                        }
-                    } else {
-                        MemberClaimResult::HeldIdentical
-                    }
-                }
-                Some(d) => MemberClaimResult::Refused {
-                    held_digest: Some(d.to_vec()),
-                },
-            };
-            outcomes.push(MemberClaimOutcome {
-                member_id: m.member_id.clone(),
-                endpoint: m.endpoint.clone(),
-                result,
-                echoed_node_id: echoed,
-            });
-        }
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
     }
 
     pub(crate) fn put(set: &StorageSet, key: &str, payload: &[u8]) -> KeyedPutFanout {
@@ -1070,15 +926,6 @@ pub(crate) mod fake_fleet {
             total: set.len() as u32,
         }
     }
-}
-
-#[cfg(not(test))]
-async fn submit_settlement_slot_claim_live(
-    set: &crate::sdk::storage_set::StorageSet,
-    envelope: &[u8],
-) -> Result<crate::sdk::storage_node_sdk::ClaimFanout, DsmError> {
-    let sdk = member_sdk_with_auth(set).await?;
-    Ok(sdk.submit_settlement_slot_claim(set, envelope).await)
 }
 
 /// A `StorageNodeSDK` whose clients are exactly `set`'s member endpoints, each

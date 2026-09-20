@@ -227,7 +227,6 @@ pub fn wipe_all_vault_data() -> Result<u64> {
     total += conn.execute("DELETE FROM in_flight_withdrawals", [])? as u64;
     total += conn.execute("DELETE FROM in_flight_withdrawal_legs", [])? as u64;
     // Delete DLV receipts (vault completion proofs from old policy)
-    total += conn.execute("DELETE FROM dlv_receipts", [])? as u64;
     log::info!("[wipe] deleted {total} total rows from vault/dBTC tables");
     Ok(total)
 }

@@ -85,19 +85,9 @@ fn head_byte_budget() {
 
     let extra = head.extra_leaves_snapshot();
     let allocs = head.offline_allocations_snapshot();
-    let reserves = head.vault_reserves_snapshot();
-    accounted += 4 + extra.len() * 64 + 4 + allocs.len() * 48 + 4 + reserves.len() * 48;
+    accounted += 4 + extra.len() * 64 + 4 + allocs.len() * 48;
     println!("\n-- extra_leaves       : {} entries", extra.len());
     println!("-- offline_allocations: {} entries", allocs.len());
-    println!("-- vault_reserves     : {} entries", reserves.len());
-    for (k, r) in &reserves {
-        println!(
-            "     {} amount={} seq={}",
-            hex(&k[..6]),
-            r.amount,
-            r.sequence
-        );
-    }
 
     println!("\n=== ATTRIBUTION ===");
     println!("  TIP bytes (all relationships)  : {tip_bytes_total}");
