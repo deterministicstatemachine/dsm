@@ -7,6 +7,8 @@ import AppContent from './components/AppContent';
 import { UXProvider } from './contexts/UXContext';
 import GlobalToast from './components/GlobalToast';
 import BilateralTransferDialog from './components/BilateralTransferDialog';
+import GuidedTour from './components/tour/GuidedTour';
+import TourOffer from './components/tour/TourOffer';
 import { BleProvider } from './contexts/BleContext';
 import ScreenContainer from './components/ScreenContainer';
 import { useLockState } from './hooks/useLockState';
@@ -166,6 +168,8 @@ export default function App() {
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog />
                     <FxLayer />
+                    <GuidedTour appState={runtime.appState} guideSrc={chameleonSrc} />
+                    <TourOffer appState={runtime.appState} showIntro={showIntro} guideSrc={chameleonSrc} />
                   </ScreenContainer>
                   </FxProvider>
                 </StateBoyInputProvider>
