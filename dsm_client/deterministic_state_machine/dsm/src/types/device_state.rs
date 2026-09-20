@@ -668,6 +668,20 @@ pub struct AdvanceOutcome {
 }
 
 impl AdvanceOutcome {
+    /// The one entropy of this transition, exactly as Core derived it inside
+    /// `advance` (Part VII step 3). This is the value that sits in the
+    /// relationship tip and that the SDK carries — unchanged — into both
+    /// receipt hashes, `C_pre` and the symmetric tip (§39.3). It is 32 bytes
+    /// by construction of `advance`.
+    pub fn transition_entropy(&self) -> [u8; 32] {
+        let mut e = [0u8; 32];
+        let src = &self.new_chain_state.entropy;
+        if src.len() == 32 {
+            e.copy_from_slice(src);
+        }
+        e
+    }
+
     /// This device's canonical relationship pair for the advanced step: the
     /// lineage head it consumed (`embedded_parent` — the prior SMT leaf, or the
     /// shared initial tip on a first-ever advance) and the head it produced
@@ -1172,11 +1186,7 @@ impl DeviceState {
     /// needs more claims more tickets — there is no amount to ask for,
     /// because the faucet has none.
     #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_faucet_claim(
-        &self,
-        ticket_index: u64,
-        entropy_seed: u8,
-    ) -> Result<Self, DsmError> {
+    pub fn admitted_faucet_claim(&self, ticket_index: u64) -> Result<Self, DsmError> {
         let (rel_key, initial_tip) = self.self_loop_coordinates();
         self.advance_admitted(
             rel_key,
@@ -1185,8 +1195,6 @@ impl DeviceState {
                 faucet_id: crate::economic::faucet::era_faucet_id(b"dsm-testnet"),
                 ticket_index,
             },
-            vec![entropy_seed; 32],
-            None,
             &[BalanceDelta {
                 policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
                 direction: BalanceDirection::Credit,
@@ -1206,7 +1214,7 @@ impl DeviceState {
     /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
     /// transition behind ADD TOKEN, as a no-delta self-loop advance. Idempotent.
     #[cfg(any(test, feature = "testing"))]
-    pub fn adopt_token(&self, policy_commit: [u8; 32], entropy_seed: u8) -> Result<Self, DsmError> {
+    pub fn adopt_token(&self, policy_commit: [u8; 32]) -> Result<Self, DsmError> {
         let (rel_key, initial_tip) = self.self_loop_coordinates();
         self.clone()
             .advance(
@@ -1216,8 +1224,6 @@ impl DeviceState {
                     policy_commit,
                     signature: vec![0xAD; 64],
                 },
-                vec![entropy_seed; 32],
-                None,
                 &[],
                 Some(initial_tip),
                 None,
@@ -1227,12 +1233,7 @@ impl DeviceState {
     }
 
     #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_mint(
-        &self,
-        policy_commit: [u8; 32],
-        amount: u64,
-        entropy_seed: u8,
-    ) -> Result<Self, DsmError> {
+    pub fn admitted_mint(&self, policy_commit: [u8; 32], amount: u64) -> Result<Self, DsmError> {
         // A minter is the token's issuer, and production issuers adopt in the
         // creation advance (`CreateToken` writes the leaf). The fixture has no
         // creation step, so adopt here: an un-adopted device cannot be
@@ -1240,7 +1241,7 @@ impl DeviceState {
         let head = if self.has_adopted(&policy_commit) {
             self.clone()
         } else {
-            self.adopt_token(policy_commit, entropy_seed ^ 0x80)?
+            self.adopt_token(policy_commit)?
         };
         let (rel_key, initial_tip) = head.self_loop_coordinates();
         head.advance_admitted(
@@ -1252,8 +1253,6 @@ impl DeviceState {
                 policy_commit,
                 message: String::new(),
             },
-            vec![entropy_seed; 32],
-            None,
             &[BalanceDelta {
                 policy_commit,
                 direction: BalanceDirection::Credit,
@@ -1323,7 +1322,9 @@ impl DeviceState {
     ) -> Result<AdvanceOutcome, DsmError> {
         // The one entropy of this transition, derived from the tip before
         // anything else reads the relationship (Part VII step 3).
-        let entropy: Vec<u8> = self.derive_transition_entropy(&rel_key, &operation).to_vec();
+        let entropy: Vec<u8> = self
+            .derive_transition_entropy(&rel_key, &operation)
+            .to_vec();
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
         // we additionally seed the SMT leaf to that initial tip BEFORE the
@@ -2165,8 +2166,6 @@ mod tests {
                 rk,
                 dev.devid,
                 mint_op_for(u64::MAX, pc),
-                entropy(7),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc,
                     direction: BalanceDirection::Credit,
@@ -2236,8 +2235,6 @@ mod tests {
                 rk,
                 dev.devid,
                 mint_op_for(1_000, pc),
-                entropy(8),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc,
                     direction: BalanceDirection::Credit,
@@ -2288,7 +2285,7 @@ mod tests {
         // ERA from the faucet: one admitted claim, the protocol payout — enough
         // for the creation fee, which is all this refusal needs to get past.
         let dev = DeviceState::new(devid(0xA4), devid(0xA4), vec![0x04; 32], 64)
-            .admitted_faucet_claim(0, 0xA4)
+            .admitted_faucet_claim(0)
             .expect("faucet claim");
         let rk =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
@@ -2312,8 +2309,6 @@ mod tests {
                 rk,
                 dev.devid,
                 op,
-                entropy(11),
-                None,
                 &[
                     BalanceDelta {
                         policy_commit: era,
@@ -2348,7 +2343,7 @@ mod tests {
         let era = crate::core::token::token_state_manager::era_policy_commit();
         // ERA from the faucet: one admitted claim, exactly the creation fee.
         let dev = DeviceState::new(devid(0xA5), devid(0xA5), vec![0x05; 32], 64)
-            .admitted_faucet_claim(0, 0xA5)
+            .admitted_faucet_claim(0)
             .expect("faucet claim");
         let rk =
             crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &dev.devid);
@@ -2371,8 +2366,6 @@ mod tests {
                 rk,
                 dev.devid,
                 op,
-                entropy(12),
-                None,
                 &[BalanceDelta {
                     policy_commit: era,
                     direction: BalanceDirection::Debit,
@@ -2406,8 +2399,6 @@ mod tests {
             rk,
             dev.devid,
             mint_op_for(0, pc),
-            entropy(9),
-            None,
             &[BalanceDelta {
                 policy_commit: pc,
                 direction: BalanceDirection::Credit,
@@ -2663,14 +2654,6 @@ mod tests {
         );
     }
 
-    fn entropy(seed: u8) -> Vec<u8> {
-        let mut h = crate::crypto::blake3::dsm_domain_hasher(
-            crate::common::domain_tags::TAG_DSM_TEST_ENTROPY,
-        );
-        h.update(&[seed]);
-        h.finalize().as_bytes().to_vec()
-    }
-
     /// I5.0 gate (plan Part J): `advance` MUST materialise a new `policy_commit`
     /// entry on Credit when the device has zero prior exposure to that
     /// commit — the "Bob claims Alice's custom-token vault on his own chain"
@@ -2735,8 +2718,6 @@ mod tests {
                 rk_self,
                 bob.devid,
                 credit_op,
-                entropy(42),
-                None,
                 &[BalanceDelta {
                     policy_commit: custom_token,
                     direction: BalanceDirection::Credit,
@@ -2762,7 +2743,7 @@ mod tests {
     fn adoption_precedes_receipt_and_is_committed() {
         let bob = fresh_device(0xBB);
         let custom_token = pc(0xF1);
-        let bob = bob.adopt_token(custom_token, 7).expect("adopt");
+        let bob = bob.adopt_token(custom_token).expect("adopt");
         assert!(bob.has_adopted(&custom_token));
         assert_eq!(
             bob.extra_leaves
@@ -2784,8 +2765,6 @@ mod tests {
                 rk_self,
                 bob.devid,
                 credit_op,
-                entropy(43),
-                None,
                 &[BalanceDelta {
                     policy_commit: custom_token,
                     direction: BalanceDirection::Credit,
@@ -2807,7 +2786,7 @@ mod tests {
         // Re-adopting is idempotent: same leaf, same value, no refusal.
         let again = outcome
             .new_device_state
-            .adopt_token(custom_token, 8)
+            .adopt_token(custom_token)
             .expect("adopt");
         assert!(again.has_adopted(&custom_token));
     }
@@ -2836,17 +2815,7 @@ mod tests {
             signature: vec![0xC7; 64],
         };
         let outcome = bob
-            .advance(
-                rk_self,
-                bob.devid,
-                create,
-                entropy(9),
-                None,
-                &[],
-                Some(init_tip),
-                None,
-                None,
-            )
+            .advance(rk_self, bob.devid, create, &[], Some(init_tip), None, None)
             .expect("a zero-fee, zero-supply creation advances");
         assert!(outcome.new_device_state.has_adopted(&new_token));
     }
@@ -2857,7 +2826,7 @@ mod tests {
         let custom_token = pc(0xF1);
         // Adoption is the precondition of receipt (see the tests above); this
         // test is about the balance entry, so adopt first.
-        let bob = bob.adopt_token(custom_token, 1).expect("adopt");
+        let bob = bob.adopt_token(custom_token).expect("adopt");
 
         // Bob starts with zero exposure to this policy_commit.
         assert!(
@@ -2902,8 +2871,6 @@ mod tests {
                 rk_self,
                 bob.devid,
                 credit_op,
-                entropy(42),
-                None,
                 &[BalanceDelta {
                     policy_commit: custom_token,
                     direction: BalanceDirection::Credit,
@@ -2940,7 +2907,7 @@ mod tests {
 
         // 100 of the token from an admitted issuance; the subject is what
         // happens to the funds afterwards.
-        let funded = dev.admitted_mint(token, 100, 0xC1).expect("admitted mint");
+        let funded = dev.admitted_mint(token, 100).expect("admitted mint");
 
         let key = offline_allocation_key(&funded.genesis, &funded.devid, &bundle, &token);
         let online = |s: &DeviceState| s.balances.get(&token).copied().unwrap_or(0);
@@ -3063,11 +3030,11 @@ mod tests {
         // Three admitted issuances to burn from: a burn is value-bearing without
         // being issuance, so it exercises the same advance path this test is about.
         let dev = fresh_device(0xAB)
-            .admitted_mint(pc(0xF1), 1_000, 0xF1)
+            .admitted_mint(pc(0xF1), 1_000)
             .expect("admitted mint")
-            .admitted_mint(pc(0xF2), 1_000, 0xF2)
+            .admitted_mint(pc(0xF2), 1_000)
             .expect("admitted mint")
-            .admitted_mint(pc(0xF3), 1_000, 0xF3)
+            .admitted_mint(pc(0xF3), 1_000)
             .expect("admitted mint");
         let dev = dev
             .with_anchor_state_leaf(&key, &commit0)
@@ -3083,8 +3050,6 @@ mod tests {
                 rk,
                 cp,
                 burn_op_for(10, pc(0xF1)),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
                     direction: BalanceDirection::Debit,
@@ -3149,8 +3114,6 @@ mod tests {
                 rk2,
                 cp2,
                 burn_op_for(5, pc(0xF2)),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF2),
                     direction: BalanceDirection::Debit,
@@ -3172,8 +3135,6 @@ mod tests {
                 rk3,
                 cp3,
                 burn_op_for(7, pc(0xF3)),
-                entropy(3),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF3),
                     direction: BalanceDirection::Debit,
@@ -3213,7 +3174,7 @@ mod tests {
         let dev = fresh_device(0xD5)
             .with_anchor_state_leaf(&key, &[0xC0u8; 32])
             .expect("bootstrap");
-        let funded = dev.admitted_mint(token, 100, 0xD5).expect("admitted mint");
+        let funded = dev.admitted_mint(token, 100).expect("admitted mint");
         let loaded = funded
             .load_offline_cash(&b, &token, 40)
             .expect("load 40")
@@ -3263,8 +3224,6 @@ mod tests {
                 rk,
                 cp,
                 bearer_op(25),
-                entropy(2),
-                None,
                 &[], // no online delta — value comes from the allocation
                 Some(init),
                 Some(anchor_leaf.clone()),
@@ -3293,8 +3252,6 @@ mod tests {
                 rk,
                 cp,
                 bearer_op(25),
-                entropy(2),
-                None,
                 &[],
                 Some(init),
                 Some(anchor_leaf.clone()),
@@ -3315,8 +3272,6 @@ mod tests {
                     rk,
                     cp,
                     bearer_op(25),
-                    entropy(3),
-                    None,
                     &[BalanceDelta {
                         policy_commit: token,
                         direction: BalanceDirection::Debit,
@@ -3337,8 +3292,6 @@ mod tests {
                     rk,
                     cp,
                     bearer_op(100),
-                    entropy(4),
-                    None,
                     &[],
                     Some(init),
                     Some(anchor_leaf.clone()),
@@ -3351,17 +3304,7 @@ mod tests {
         // Fail-closed: a allocation spend without the anchor-state advance (anchor_leaf None) is rejected.
         assert!(
             loaded
-                .advance(
-                    rk,
-                    cp,
-                    bearer_op(10),
-                    entropy(5),
-                    None,
-                    &[],
-                    Some(init),
-                    None,
-                    spend(10),
-                )
+                .advance(rk, cp, bearer_op(10), &[], Some(init), None, spend(10),)
                 .is_err(),
             "offline-bearer spend requires the anchor-state advance"
         );
@@ -3381,8 +3324,7 @@ mod tests {
         // Sender device: bootstrap the anchor-state leaf at leaf_0.
         let dev = (0u8..8)
             .fold(fresh_device(0xAB), |d, u| {
-                d.admitted_mint(pc(0xF0 + u), 1_000, 0xF0 + u)
-                    .expect("admitted mint")
+                d.admitted_mint(pc(0xF0 + u), 1_000).expect("admitted mint")
             })
             .with_anchor_state_leaf(&key, &leaf0)
             .expect("bootstrap");
@@ -3396,8 +3338,6 @@ mod tests {
                 rk,
                 cp,
                 burn_op_for(1, pc(0xF0 + u as u8)),
-                entropy(u as u8 + 1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF0 + u as u8),
                     direction: BalanceDirection::Debit,
@@ -3459,11 +3399,11 @@ mod tests {
         // Three admitted issuances to burn from: a burn is value-bearing exactly
         // as a mint is, and a debit needs no credit source of its own.
         let dev = fresh_device(0xAB)
-            .admitted_mint(pc(0xF1), 1_000, 0xF1)
+            .admitted_mint(pc(0xF1), 1_000)
             .expect("admitted mint")
-            .admitted_mint(pc(0xF2), 1_000, 0xF2)
+            .admitted_mint(pc(0xF2), 1_000)
             .expect("admitted mint")
-            .admitted_mint(pc(0xF3), 1_000, 0xF3)
+            .admitted_mint(pc(0xF3), 1_000)
             .expect("admitted mint");
 
         // Relationship whose FIRST op is value-bearing → Yes.
@@ -3475,8 +3415,6 @@ mod tests {
                 rk,
                 cp,
                 burn_op_for(10, pc(0xF1)),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: pc(0xF1),
                     direction: BalanceDirection::Debit,
@@ -3499,7 +3437,7 @@ mod tests {
         // keep it `Yes` — the Gemini fatal case, end-to-end through advance().
         let o2 = o1
             .new_device_state
-            .advance(rk, cp, op(), entropy(2), None, &[], None, None, None)
+            .advance(rk, cp, op(), &[], None, None, None)
             .expect("non-value advance");
         assert_eq!(
             o2.new_device_state
@@ -3514,17 +3452,7 @@ mod tests {
         let rk2 = compute_smt_key(&dev.devid, &cp2);
         let init2 = initial_chain_tip_from_device_ids(&dev.devid, &cp2);
         let o3 = dev
-            .advance(
-                rk2,
-                cp2,
-                op(),
-                entropy(3),
-                None,
-                &[],
-                Some(init2),
-                None,
-                None,
-            )
+            .advance(rk2, cp2, op(), &[], Some(init2), None, None)
             .expect("first non-value advance");
         assert_eq!(
             o3.new_device_state
@@ -3550,7 +3478,7 @@ mod tests {
         let tip_with_balances = |seed: u64| {
             // differing balance state, each reached through an admitted issuance
             let dev = fresh_device(0xAA)
-                .admitted_mint(token, 100 + seed, 0xA0 + seed as u8)
+                .admitted_mint(token, 100 + seed)
                 .expect("admitted issuance")
                 .with_pending_economic_admission(None);
             let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
@@ -3558,37 +3486,66 @@ mod tests {
                 crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
                     &dev.devid, &bob,
                 );
-            let out = dev
-                .advance(
-                    rk,
-                    bob,
-                    burn_op_for(30, token),
-                    entropy(1),
-                    None,
-                    &[BalanceDelta {
-                        policy_commit: token,
-                        direction: BalanceDirection::Debit,
-                        amount: 30,
-                    }],
-                    Some(init),
-                    None,
-                    None,
-                )
-                .expect("advance");
-            out.new_chain_state.compute_chain_tip()
+            dev.advance(
+                rk,
+                bob,
+                burn_op_for(30, token),
+                &[BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Debit,
+                    amount: 30,
+                }],
+                Some(init),
+                None,
+                None,
+            )
+            .expect("advance")
         };
 
+        // Two devices with different balance portfolios, the same succession
+        // facts. The balance map is NOT an input to the tip: the only way the
+        // portfolio reaches it is through the transition entropy, which for a
+        // fresh relationship is seeded from the device root (Part VII step 3:
+        // `e_n = H(DSM/genesis-entropy; root)`, `h_n = root`). So the two tips
+        // differ, and swapping ONLY the entropy reproduces the other device's
+        // tip from this device's facts — nothing else about the portfolio is
+        // in the preimage.
+        let out0 = tip_with_balances(0);
+        let out7 = tip_with_balances(7);
+        let facts = |o: &AdvanceOutcome| {
+            let cs = &o.new_chain_state;
+            (
+                cs.rel_key,
+                cs.embedded_parent,
+                cs.counterparty_devid,
+                cs.operation.to_bytes(),
+            )
+        };
         assert_eq!(
-            tip_with_balances(0),
-            tip_with_balances(7),
-            "identical succession facts must derive identical tips regardless of the \
-             device balance state — a difference means balances leaked back into the \
-             commitment"
+            facts(&out0),
+            facts(&out7),
+            "the succession facts are identical"
+        );
+        assert_ne!(out0.transition_entropy(), out7.transition_entropy());
+        let (rk, parent, cp, op_bytes) = facts(&out0);
+        assert_eq!(
+            relationship_chain_tip_v2(
+                &rk,
+                &parent,
+                &cp,
+                &op_bytes,
+                &out7.transition_entropy(),
+                None
+            ),
+            out7.new_chain_state.compute_chain_tip(),
+            "with the other device's entropy and THIS device's facts the tip is the other \
+             device's tip — the balance portfolio enters through the entropy alone, never \
+             through the commitment"
         );
 
         // And the helper IS the commitment — one preimage, two entry points.
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA8)
+            .admitted_mint(token, 100)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
         let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
@@ -3600,8 +3557,6 @@ mod tests {
                 rk,
                 bob,
                 burn_op_for(30, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
@@ -3635,7 +3590,7 @@ mod tests {
     fn concurrent_advances_from_same_root_produce_different_children() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA0)
+            .admitted_mint(token, 100)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
 
@@ -3661,8 +3616,6 @@ mod tests {
                 rk_bob,
                 bob,
                 burn_op_for(10, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
@@ -3678,8 +3631,6 @@ mod tests {
                 rk_chrl,
                 charlie,
                 burn_op_for(20, token),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
@@ -3717,7 +3668,7 @@ mod tests {
     fn tripwire_same_relationship_same_parent_different_children() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 100, 0xA0)
+            .admitted_mint(token, 100)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
 
@@ -3732,8 +3683,6 @@ mod tests {
                 rk,
                 bob,
                 burn_op_for(10, token),
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
@@ -3749,8 +3698,6 @@ mod tests {
                 rk,
                 bob,
                 burn_op_for(20, token),
-                entropy(2),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Debit,
@@ -3783,7 +3730,7 @@ mod tests {
     fn advance_rejects_balance_underflow() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, 5, 0xA0)
+            .admitted_mint(token, 5)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
 
@@ -3797,8 +3744,6 @@ mod tests {
             rk,
             bob,
             burn_op_for(10, token),
-            entropy(1),
-            None,
             &[BalanceDelta {
                 policy_commit: token,
                 direction: BalanceDirection::Debit,
@@ -3826,7 +3771,7 @@ mod tests {
     fn advance_rejects_balance_overflow() {
         let token = pc(0xCC);
         let dev = fresh_device(0xAA)
-            .admitted_mint(token, u64::MAX, 0xA0)
+            .admitted_mint(token, u64::MAX)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
 
@@ -3844,8 +3789,6 @@ mod tests {
                 rk,
                 bob,
                 credit_op,
-                entropy(1),
-                None,
                 &[BalanceDelta {
                     policy_commit: token,
                     direction: BalanceDirection::Credit,
@@ -3871,7 +3814,7 @@ mod tests {
         let _ = TransactionMode::Bilateral; // import keep-alive
         let token = pc(0xCC);
         let mut dev = fresh_device(0xAA)
-            .admitted_mint(token, 1000, 0xA0)
+            .admitted_mint(token, 1000)
             .expect("admitted issuance")
             .with_pending_economic_admission(None);
 
@@ -3911,8 +3854,6 @@ mod tests {
                     rk,
                     *party,
                     op,
-                    entropy(i as u8),
-                    None,
                     &[BalanceDelta {
                         policy_commit: token,
                         direction: dir,
@@ -4017,8 +3958,6 @@ mod tests {
                 [0x3A; 32],
                 devid,
                 operation.clone(),
-                entropy(11),
-                None,
                 &[],
                 Some([0x11; 32]),
                 None,
@@ -4133,8 +4072,6 @@ mod tests {
                 [0x3C; 32],
                 devid,
                 operation.clone(),
-                entropy(12),
-                None,
                 &[],
                 Some([0x11; 32]),
                 None,
@@ -4185,8 +4122,6 @@ mod tests {
                     setup_body: body.encode(),
                     signature,
                 },
-                entropy(9),
-                None,
                 &[],
                 Some([0x11u8; 32]),
                 None,
@@ -4237,9 +4172,7 @@ mod tests {
         let head = DeviceState::new([0xA7; 32], devid, vec![0xC7; 32], 64);
         // Receipt presupposes adoption (owner ruling 2026-09-13): the head must
         // already commit this token's policy before any credit under it.
-        let head = head
-            .adopt_token(era, 0x11)
-            .expect("adopt the incoming token");
+        let head = head.adopt_token(era).expect("adopt the incoming token");
         let sender = [0x99u8; 32];
         let rk = [0x33u8; 32];
         let tip = [0x11u8; 32];
@@ -4249,19 +4182,8 @@ mod tests {
             direction: BalanceDirection::Credit,
             amount: 10,
         }];
-        let run = |h: &DeviceState| {
-            h.advance(
-                rk,
-                sender,
-                op.clone(),
-                entropy(4),
-                None,
-                &credit,
-                Some(tip),
-                None,
-                None,
-            )
-        };
+        let run =
+            |h: &DeviceState| h.advance(rk, sender, op.clone(), &credit, Some(tip), None, None);
 
         // 1. No admission at all.
         let msg = run(&head)
@@ -4370,8 +4292,6 @@ mod tests {
                 [0x34u8; 32],
                 [0x9Au8; 32],
                 op,
-                entropy(5),
-                None,
                 &[BalanceDelta {
                     policy_commit: era,
                     direction: BalanceDirection::Credit,
@@ -4387,5 +4307,137 @@ mod tests {
             msg.contains("online credit-direction transfer"),
             "the refusal names the gated shape, got: {msg}"
         );
+    }
+
+    // ── Part VII / §39: the one entropy of a transition ────────────────────
+    //
+    // MUTATION CONTROL (executed, not asserted): replace the derivation at the
+    // top of `advance` with any caller-independent constant (e.g. `vec![0u8; 32]`)
+    // and `advance_derives_the_one_entropy_and_nothing_else_supplies_it` goes
+    // red on its `derive_transition_entropy` equality; leave the derivation but
+    // stop hashing the operation bytes and
+    // `changing_a_carried_byte_changes_the_derived_value_and_the_tip` goes red.
+
+    fn seam_fixture() -> (DeviceState, [u8; 32], [u8; 32], [u8; 32]) {
+        let dev = fresh_device(0xE1);
+        let cp = devid(0xE2);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev.devid, &cp,
+        );
+        (dev, cp, rk, init)
+    }
+
+    /// §39.1–39.2: applying one operation twice from one state gives byte-identical
+    /// results, and the entropy inside the outcome is exactly Core's own derivation
+    /// from the relationship tip — there is no argument through which anything
+    /// else could have supplied it.
+    #[test]
+    fn advance_derives_the_one_entropy_and_nothing_else_supplies_it() {
+        let (dev, cp, rk, init) = seam_fixture();
+        let a = dev
+            .advance(rk, cp, op(), &[], Some(init), None, None)
+            .expect("first advance");
+        let b = dev
+            .advance(rk, cp, op(), &[], Some(init), None, None)
+            .expect("second advance from the same state");
+        assert_eq!(a.transition_entropy(), b.transition_entropy());
+        assert_eq!(
+            a.new_chain_state.compute_chain_tip(),
+            b.new_chain_state.compute_chain_tip()
+        );
+        assert_eq!(a.child_r_a, b.child_r_a);
+        assert_eq!(a.new_chain_state.entropy.len(), 32);
+        assert_eq!(
+            a.transition_entropy(),
+            dev.derive_transition_entropy(&rk, &op()),
+            "the outcome's entropy must be Core's derivation from the tip, nothing else"
+        );
+        // The derivation is the hash-adjacency formula itself, not merely stable.
+        let explicit = {
+            let root = dev.root();
+            let mut g = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
+            g.update(&root);
+            let prior_entropy = g.finalize();
+            let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
+            h.update(prior_entropy.as_bytes());
+            h.update(&op().to_bytes());
+            h.update(&root);
+            *h.finalize().as_bytes()
+        };
+        assert_eq!(a.transition_entropy(), explicit);
+    }
+
+    /// §39 gate: changing any carried byte changes the derived value and the tip,
+    /// and consuming the tip changes the next derivation (hash adjacency).
+    #[test]
+    fn changing_a_carried_byte_changes_the_derived_value_and_the_tip() {
+        let (dev, cp, rk, init) = seam_fixture();
+        let base = dev
+            .advance(rk, cp, op(), &[], Some(init), None, None)
+            .expect("advance");
+        let flipped = Operation::Generic {
+            operation_type: b"test".to_vec(),
+            data: vec![1],
+            message: "t".to_string(),
+            signature: vec![],
+        };
+        let other = dev
+            .advance(rk, cp, flipped, &[], Some(init), None, None)
+            .expect("advance with one more carried byte");
+        assert_ne!(base.transition_entropy(), other.transition_entropy());
+        assert_ne!(
+            base.new_chain_state.compute_chain_tip(),
+            other.new_chain_state.compute_chain_tip()
+        );
+        // Same operation again, one step later: e_n and h_n moved, so e_{n+1} moves.
+        let next = base
+            .new_device_state
+            .advance(rk, cp, op(), &[], None, None, None)
+            .expect("second step");
+        assert_ne!(base.transition_entropy(), next.transition_entropy());
+        assert_eq!(
+            next.new_chain_state.embedded_parent,
+            base.new_chain_state.compute_chain_tip()
+        );
+    }
+
+    /// §39.3: the relationship tip and BOTH receipt hashes — `C_pre` and the
+    /// symmetric tip — contain the one derived value. The tip is recomputed from
+    /// the outcome's fields with that value and matches; each receipt hash moves
+    /// when that value moves and when nothing else does.
+    #[test]
+    fn tip_and_both_receipt_hashes_contain_the_one_derived_value() {
+        use crate::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
+        let (dev, cp, rk, init) = seam_fixture();
+        let out = dev
+            .advance(rk, cp, op(), &[], Some(init), None, None)
+            .expect("advance");
+        let e = out.transition_entropy();
+        let op_bytes = out.new_chain_state.operation.to_bytes();
+        let parent = out.new_chain_state.embedded_parent;
+        assert_eq!(parent, init);
+        // The relationship tip: exactly the v2 preimage over the derived value.
+        assert_eq!(
+            out.new_chain_state.compute_chain_tip(),
+            relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e, None)
+        );
+        let mut e_other = e;
+        e_other[0] ^= 0x01;
+        assert_ne!(
+            out.new_chain_state.compute_chain_tip(),
+            relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e_other, None)
+        );
+        // C_pre and the symmetric tip take the same value and nothing else.
+        let c_pre = compute_precommit(&parent, &op_bytes, &e);
+        let sym = compute_successor_tip(&parent, &op_bytes, &e, &c_pre);
+        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+        assert_ne!(c_pre, c_pre_other);
+        assert_ne!(
+            sym,
+            compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other)
+        );
+        assert_eq!(c_pre, compute_precommit(&parent, &op_bytes, &e));
+        assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
     }
 }

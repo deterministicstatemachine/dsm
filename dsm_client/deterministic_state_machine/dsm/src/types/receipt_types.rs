@@ -56,6 +56,17 @@ pub struct StitchedReceiptV2 {
     /// Child Per-Device SMT root (r_A', 32 bytes)
     pub child_root: [u8; 32],
 
+    /// The sender's transition entropy `e_{n+1}` (32 bytes): the one value
+    /// Core derived inside `DeviceState::advance` for this step (Part VII,
+    /// §39.3). It is part of the CANONICAL commit form, so `sig_a` binds it,
+    /// and it is what the recipient feeds into `C_pre` and the symmetric
+    /// tip — the recipient cannot derive it, because `e_n` is the sender's
+    /// own tip entropy. With it the recipient can also recompute
+    /// `child_tip = relationship_chain_tip_v2(k, parent_tip, DevID_B, op, e)`
+    /// and refuse a receipt whose child is not the successor its own fields
+    /// name. Wire field 21, exactly 32 bytes, required.
+    pub transition_entropy: [u8; 32],
+
     /// Inclusion proof for parent_tip in parent_root (variable length)
     pub rel_proof_parent: Vec<u8>,
 
@@ -157,6 +168,7 @@ fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
         8..=11 => Some(FieldLimit::Max(128 * 1024)),
         12..=17 => Some(FieldLimit::Max(65_535)),
         18..=19 => Some(FieldLimit::Max(2_048)),
+        21 => Some(FieldLimit::Fixed(32)),
         _ => None,
     }
 }
@@ -323,9 +335,9 @@ fn validate_receipt_commit_wire(bytes: &[u8]) -> Result<(), DsmError> {
     validate_length_delimited_wire(
         bytes,
         "receipt wire",
-        19,
+        21,
         receipt_commit_field_limit,
-        |tag| (1..=7).contains(&tag),
+        |tag| (1..=7).contains(&tag) || tag == 21,
     )
 }
 
@@ -509,6 +521,7 @@ impl StitchedReceiptV2 {
             child_tip,
             parent_root,
             child_root,
+            transition_entropy: [0u8; 32],
             rel_proof_parent,
             rel_proof_child,
             dev_proof,
@@ -552,6 +565,7 @@ impl StitchedReceiptV2 {
             child_tip: self.child_tip.to_vec(),
             parent_root: self.parent_root.to_vec(),
             child_root: self.child_root.to_vec(),
+            transition_entropy: self.transition_entropy.to_vec(),
             rel_proof_parent: self.rel_proof_parent.clone(),
             rel_proof_child: self.rel_proof_child.clone(),
             dev_proof: self.dev_proof.clone(),
@@ -610,6 +624,7 @@ impl StitchedReceiptV2 {
             rc.dev_proof,
         );
         receipt.set_rel_replace_witness(rc.rel_replace_witness);
+        receipt.set_transition_entropy(copy32(&rc.transition_entropy, "transition_entropy")?);
         if !rc.sig_a.is_empty() {
             receipt.add_sig_a(rc.sig_a);
         }
@@ -690,6 +705,13 @@ impl StitchedReceiptV2 {
         // Domain-separated BLAKE3-256: BLAKE3("DSM/receipt-commit\0" || canonical_protobuf_bytes)
         let hash = crate::crypto::blake3::domain_hash(TAG_RECEIPT_COMMIT, &protobuf_bytes);
         Ok(*hash.as_bytes())
+    }
+
+    /// Set the sender's transition entropy (canonical field 21). The producer
+    /// takes it from `AdvanceOutcome::transition_entropy()`; a receipt without
+    /// it does not pass wire validation.
+    pub fn set_transition_entropy(&mut self, entropy: [u8; 32]) {
+        self.transition_entropy = entropy;
     }
 
     /// Add signature from party A
@@ -1712,8 +1734,10 @@ mod tests {
             .with_countersign_b(production_shaped_countersign_b())
             .unwrap();
         let full_bytes = full.to_full_protobuf().unwrap();
-        // The observed 5GN specimen was 218,541 bytes with these exact shapes.
-        assert_eq!(full_bytes.len(), 218_541, "full countersigned receipt size");
+        // The observed 5GN specimen was 218,541 bytes with these exact shapes;
+        // canonical field 21 (`transition_entropy`: a two-byte key varint, one
+        // length byte and 32 bytes of value) adds 35.
+        assert_eq!(full_bytes.len(), 218_576, "full countersigned receipt size");
 
         // Recipient at reply time: decode its stored bytes and split.
         let decoded = StitchedReceiptV2::from_canonical_protobuf(&full_bytes).unwrap();

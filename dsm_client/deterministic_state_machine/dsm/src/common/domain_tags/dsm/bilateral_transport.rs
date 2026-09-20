@@ -10,8 +10,6 @@ pub const TAG_DSM_B0X_UNILATERAL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/B0X/UNILATERAL");
 pub const TAG_DSM_BILATERAL_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/bilateral-commit");
-pub const TAG_DSM_BILATERAL_ENTROPY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/bilateral-entropy");
 pub const TAG_DSM_BILATERAL_OP_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/bilateral-op-commit");
 pub const TAG_DSM_BILATERAL_PARAMS_HASH: TaggedHashDomain<'static> =
@@ -67,7 +65,6 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_B0X_MSGID,
     TAG_DSM_B0X_UNILATERAL,
     TAG_DSM_BILATERAL_COMMIT,
-    TAG_DSM_BILATERAL_ENTROPY,
     TAG_DSM_BILATERAL_OP_COMMIT,
     TAG_DSM_BILATERAL_PARAMS_HASH,
     TAG_DSM_BILATERAL_STATE,

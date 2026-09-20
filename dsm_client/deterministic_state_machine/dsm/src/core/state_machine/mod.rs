@@ -21,7 +21,6 @@ pub mod relationship;
 pub mod transition;
 pub mod utils;
 
-use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::State;
@@ -348,11 +347,11 @@ mod state_machine_tests {
         // a balance is not incidental: a restored, invented balance would make
         // this test pass against a head no device could ever have.
         let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64)
-            .admitted_faucet_claim(0, 0x42)
+            .admitted_faucet_claim(0)
             .expect("faucet claim")
-            .admitted_faucet_claim(1, 0x43)
+            .admitted_faucet_claim(1)
             .expect("faucet claim")
-            .admitted_faucet_claim(2, 0x44)
+            .admitted_faucet_claim(2)
             .expect("faucet claim");
 
         let mut sm = StateMachine::new();

@@ -1267,20 +1267,15 @@ impl AppRouterImpl {
         // Returns the display State view plus the AdvanceOutcome whose smt_proofs
         // / parent_r_a / child_r_a drive the canonical ReceiptCommit build below.
 
-        // Canonical C_pre is symmetric over h_n, payload bytes, and nonce.
-        // Both sender and receiver derive identical h_{n+1} from the same envelope fields.
+        // Canonical C_pre and the symmetric h_{n+1} take the ONE transition
+        // entropy — Core's derivation inside the prepared advance (Part VII
+        // step 3, §39.3) — over h_n and the payload bytes. They are therefore
+        // computed inside `build_online_send_artifacts`, from the outcome, not
+        // here: nothing exists to hash before Core has prepared the step. The
+        // transfer nonce stays in the operation bytes (§39.4). The receiver
+        // reads the entropy off the signed receipt (canonical field 21) and
+        // recomputes both hashes.
         let op_bytes = op_bytes_for_tip;
-        let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
-            &chain_tip_arr,
-            &op_bytes,
-            &nonce,
-        );
-        let new_chain_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &chain_tip_arr,
-            &op_bytes,
-            &nonce,
-            &receipt_sigma,
-        );
 
         // ReceiptCommit built directly from the AdvanceOutcome produced by the
         // canonical §2.2 Per-Device SMT advance (no shadow SMT replace).
@@ -1315,6 +1310,18 @@ impl AppRouterImpl {
         // =====================================================================
         let build_online_send_artifacts = |advance_outcome: &dsm::types::device_state::AdvanceOutcome|
          -> Result<OnlineSendArtifacts, dsm::types::error::DsmError> {
+            let transition_entropy = advance_outcome.transition_entropy();
+            let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+                &chain_tip_arr,
+                &op_bytes,
+                &transition_entropy,
+            );
+            let new_chain_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                &chain_tip_arr,
+                &op_bytes,
+                &transition_entropy,
+                &receipt_sigma,
+            );
             // The economic admission is built FIRST, from the exact prepared
             // successor — the wire locators below are OUTPUTS of this build
             // (correction C), never predictions beside it.
@@ -1364,6 +1371,7 @@ impl AppRouterImpl {
                     pre_proof_bytes,
                     post_proof_bytes,
                     local_device_tree_commitment,
+                    advance_outcome.transition_entropy(),
                 ) {
                     Some(bytes) => bytes,
                     None => {
@@ -2202,7 +2210,8 @@ impl AppRouterImpl {
             // The returned storage message id is GC metadata ONLY. Finalization
             // keys on the receipt commitment, so a missing or unbindable id
             // costs nothing but a later spool cleanup.
-            let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&new_chain_tip);
+            let new_tip_b32 =
+                crate::util::text_id::encode_base32_crockford(&outbox_record.projection_target);
             match b0x_message_id {
                 Some(ref msg_id) => {
                     if let Err(e) = crate::storage::client_db::bind_sender_outbox_message_ids(

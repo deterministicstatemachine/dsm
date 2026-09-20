@@ -3415,6 +3415,7 @@ impl CoreSDK {
     /// a device — the harness faucet — and the core apply regression suite).
     /// Production always passes the recipient's builder/writer pair.
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_incoming_transfer_full_state(
         &self,
         op: dsm::types::operations::Operation,
@@ -3423,6 +3424,7 @@ impl CoreSDK {
         canonical_operation_bytes: &[u8],
         signed_parent_tip: [u8; 32],
         signed_child_tip: [u8; 32],
+        sender_transition_entropy: [u8; 32],
     ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
         self.apply_incoming_transfer_staged(
             op,
@@ -3431,6 +3433,7 @@ impl CoreSDK {
             canonical_operation_bytes,
             signed_parent_tip,
             signed_child_tip,
+            sender_transition_entropy,
             |_outcome, _pair| Ok(()),
             |_tx, _outcome, _artifacts: &()| Ok(()),
             None,
@@ -3455,6 +3458,13 @@ impl CoreSDK {
     /// the writer runs inside the same transaction, so a failed apply leaves no
     /// journal, no inert row and no re-sign question. `Duplicate` returns
     /// before the builder is invoked; `Conflict` never builds.
+    ///
+    /// `sender_transition_entropy` is the receipt's canonical field 21: the one
+    /// value Core derived inside the sender's `advance` (Part VII step 3). It is
+    /// what `C_pre` is computed over here (§39.3), and it lets this side
+    /// recompute the sender's `child_tip` from `parent_tip`, the signed
+    /// operation and that value — a receipt whose child is not that successor
+    /// is refused before anything is built.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_incoming_transfer_staged<A>(
         &self,
@@ -3464,6 +3474,7 @@ impl CoreSDK {
         canonical_operation_bytes: &[u8],
         signed_parent_tip: [u8; 32],
         signed_child_tip: [u8; 32],
+        sender_transition_entropy: [u8; 32],
         build_acceptance: impl FnOnce(
             &dsm::types::device_state::AdvanceOutcome,
             ([u8; 32], [u8; 32]),
@@ -3548,13 +3559,16 @@ impl CoreSDK {
         // embedded relationship lineage this apply advances. The SYMMETRIC
         // (`compute_successor_tip`) lineage is a projection/routing space and is
         // NEVER derived or compared here (cross-space comparison was the
-        // AWYPCNK8 false-conflict bug). C_pre is bound to the signed parent.
+        // AWYPCNK8 false-conflict bug). C_pre is bound to the signed parent
+        // and takes the sender's transition entropy — the one value of the
+        // transition (§39.3) — never the transfer nonce, which stays in the
+        // operation bytes where it is already hashed (§39.4).
         let parent_tip = signed_parent_tip;
         let child_tip = signed_child_tip;
         let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
             &parent_tip,
             canonical_operation_bytes,
-            &nonce,
+            &sender_transition_entropy,
         );
         let operation_digest = {
             let mut h = dsm::crypto::blake3::dsm_domain_hasher(
@@ -3635,6 +3649,31 @@ impl CoreSDK {
                      stale, replayed, or forked sender lineage",
                     crate::util::text_id::encode_base32_crockford(&parent_tip[..4]),
                     crate::util::text_id::encode_base32_crockford(&pinned_a_head[..4]),
+                ),
+            });
+        }
+        // §39.3: the signed child IS the v2 successor of the signed parent under
+        // the signed operation and the carried transition entropy. The sender's
+        // chain state hashes ITS counterparty devid (this device), the signed
+        // operation bytes (signature included — `op` is byte-identical to what
+        // the sender advanced, `decode_and_bind_signed` guarantees it) and the
+        // entropy Core derived for that step. A receipt whose child is anything
+        // else names a successor no honest advance produced.
+        let expected_child = dsm::types::device_state::relationship_chain_tip_v2(
+            &rel_key,
+            &parent_tip,
+            &local_arr,
+            &op.to_bytes(),
+            &sender_transition_entropy,
+            None,
+        );
+        if child_tip != expected_child {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed child ({}..) is not the successor of the signed parent under the \
+                     signed operation and the carried transition entropy ({}..)",
+                    crate::util::text_id::encode_base32_crockford(&child_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&expected_child[..4]),
                 ),
             });
         }
@@ -3815,23 +3854,28 @@ impl CoreSDK {
     /// computed_child) THIS device would derive for an incoming transfer —
     /// pure prepare, no persistence, no head mutation. Fixtures use it to
     /// present the signed pair an honest sender's canonical advance carries.
-    /// §16.6 TEST HELPER — the A-space pair a REMOTE sender would sign.
+    /// §16.6 TEST HELPER — the A-space pair a REMOTE sender would sign, plus
+    /// the transition entropy its receipt carries.
     ///
     /// The recipient's pin is the spec-canonical genesis seed for the first
-    /// transition and the previously applied signed child thereafter. The CHILD
-    /// is deliberately a value this device can never compute: a real sender's
-    /// chain tip hashes ITS own counterparty devid, its own hash-chained
-    /// entropy, and its own balance witness. Deriving the "signed" child from
-    /// the recipient's own `prepare` (as the retired probe did) makes every
-    /// cross-lineage bug invisible — that is exactly how the unsatisfiable
-    /// child-equality check reached production.
+    /// transition and the previously applied signed child thereafter. The
+    /// entropy is the REMOTE lineage's: a value this device cannot derive (it
+    /// hashes the sender's own prior tip entropy), modelled here as a fixed
+    /// function of the step. The child is then exactly what the sender's
+    /// `advance` would produce — `relationship_chain_tip_v2` over the parent,
+    /// this device as the sender's counterparty, the signed operation and that
+    /// entropy — which is what the apply recomputes from the receipt. Deriving
+    /// the child from the recipient's own `prepare` (as the retired probe did)
+    /// makes every cross-lineage bug invisible — that is exactly how the
+    /// unsatisfiable child-equality check reached production.
     #[cfg(test)]
     pub(crate) fn remote_signed_pair(
         &self,
         sender_device_id: &str,
         parent: Option<[u8; 32]>,
         remote_step: u8,
-    ) -> Result<([u8; 32], [u8; 32]), DsmError> {
+        op: &dsm::types::operations::Operation,
+    ) -> Result<([u8; 32], [u8; 32], [u8; 32]), DsmError> {
         let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
             .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
         let mut local_arr = [0u8; 32];
@@ -3846,13 +3890,28 @@ impl CoreSDK {
                 &sender_arr,
             )
         });
-        // Opaque remote-lineage child; unreachable by any local computation.
-        let mut signed_child = [0u8; 32];
-        signed_child[0] = 0xE0;
-        signed_child[1] = remote_step;
-        signed_child[2..].copy_from_slice(&signed_parent[2..]);
-        signed_child[31] ^= 0x5A;
-        Ok((signed_parent, signed_child))
+        // The remote lineage's transition entropy for this step: unreachable by
+        // any local derivation, carried by the receipt.
+        let remote_entropy: [u8; 32] = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::common::domain_tags::TAG_DSM_TEST_ENTROPY,
+            );
+            h.update(b"remote-lineage");
+            h.update(&sender_arr);
+            h.update(&[remote_step]);
+            *h.finalize().as_bytes()
+        };
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        let signed_child = dsm::types::device_state::relationship_chain_tip_v2(
+            &rel_key,
+            &signed_parent,
+            &local_arr,
+            &op.to_bytes(),
+            &remote_entropy,
+            None,
+        );
+        Ok((signed_parent, signed_child, remote_entropy))
     }
 }
 
@@ -3946,8 +4005,8 @@ mod tests {
         let op = incoming_transfer_op(&local, 50, nonce.clone());
         attach_credit_admission(&sdk, &op);
         let op_bytes = b"canonical-op-bytes-1".to_vec();
-        let (parent, child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (parent, child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-1");
 
@@ -3959,6 +4018,7 @@ mod tests {
                 &op_bytes,
                 parent,
                 child,
+                entropy,
             )
             .expect("fresh apply");
         let record = match out {
@@ -3974,8 +4034,9 @@ mod tests {
         assert_eq!(stored, record);
         // Identity binds the SIGNED canonical pair + the precommit over the
         // signed parent (§16.6 authority sourcing).
-        let precommit =
-            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
+        let precommit = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &parent, &op_bytes, &entropy,
+        );
         assert_eq!(record.parent_tip, parent);
         assert_eq!(record.child_tip, child);
         assert_eq!(record.precommit_digest, precommit);
@@ -3983,7 +4044,15 @@ mod tests {
         // DUPLICATE: exact replay → loaded original record, no re-execution.
         let root_before = device_root(&sdk);
         let dup = sdk
-            .apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent, child)
+            .apply_incoming_transfer_full_state(
+                op,
+                &tx_id,
+                &sender_b32,
+                &op_bytes,
+                parent,
+                child,
+                entropy,
+            )
             .expect("duplicate apply");
         match dup {
             crate::sdk::apply_outcome::ApplyOutcome::AlreadyAppliedSameOperation { record: r2 } => {
@@ -4011,12 +4080,20 @@ mod tests {
         let op = incoming_transfer_op(&local, 10, nonce.clone());
         attach_credit_admission(&sdk, &op);
         let op_bytes = b"canonical-op-bytes-2".to_vec();
-        let (parent, child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (parent, child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-2");
-        sdk.apply_incoming_transfer_full_state(op, &tx_id, &sender_b32, &op_bytes, parent, child)
-            .expect("fresh apply");
+        sdk.apply_incoming_transfer_full_state(
+            op,
+            &tx_id,
+            &sender_b32,
+            &op_bytes,
+            parent,
+            child,
+            entropy,
+        )
+        .expect("fresh apply");
 
         // Different op (different canonical bytes ⇒ different identity) reusing
         // the SAME consumed parent → Conflict, nothing mutated.
@@ -4030,6 +4107,7 @@ mod tests {
                 b"different-op-bytes",
                 parent,
                 child,
+                entropy,
             )
             .expect("conflict classification");
         assert!(
@@ -4052,6 +4130,7 @@ mod tests {
                 b"op-bytes-stale",
                 stale_parent,
                 [0x32u8; 32],
+                [0x33u8; 32],
             )
             .expect("stale classification");
         match out3 {
@@ -4086,8 +4165,8 @@ mod tests {
         // Honest REMOTE sender: parent is the pinned A-side head (genesis seed
         // on a fresh relationship); the child is the sender's own lineage value,
         // which this device cannot and must not recompute.
-        let (signed_parent, signed_child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (signed_parent, signed_child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
 
         // The projection space holds a COMPLETELY different lineage (as on the
@@ -4112,6 +4191,7 @@ mod tests {
                 &op_bytes,
                 signed_parent,
                 signed_child,
+                entropy,
             )
             .expect("apply must not consult the projection");
         assert!(
@@ -4140,8 +4220,8 @@ mod tests {
         let nonce = vec![0xD2u8; 32];
         let op = incoming_transfer_op(&local, 20, nonce.clone());
         attach_credit_admission(&sdk, &op);
-        let (_pinned, signed_child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (_pinned, signed_child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
 
         let root_before = device_root(&sdk);
@@ -4153,6 +4233,7 @@ mod tests {
                 b"badparent-op-bytes",
                 [0x5Au8; 32], // NOT the pinned A-side head
                 signed_child,
+                entropy,
             )
             .expect("classification, not error");
         match out {
@@ -4190,8 +4271,8 @@ mod tests {
         let nonce1 = vec![0xE1u8; 32];
         let op1 = incoming_transfer_op(&local, 11, nonce1.clone());
         attach_credit_admission(&sdk, &op1);
-        let (parent1, child1) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (parent1, child1, entropy1) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op1)
             .expect("remote pair 1");
         let out1 = sdk
             .apply_incoming_transfer_full_state(
@@ -4201,6 +4282,7 @@ mod tests {
                 b"seq-op-bytes-1",
                 parent1,
                 child1,
+                entropy1,
             )
             .expect("apply 1");
         assert!(
@@ -4215,8 +4297,8 @@ mod tests {
         let nonce2 = vec![0xE2u8; 32];
         let op2 = incoming_transfer_op(&local, 13, nonce2.clone());
         attach_credit_admission(&sdk, &op2);
-        let (parent2, child2) = sdk
-            .remote_signed_pair(&sender_b32, Some(child1), 2)
+        let (parent2, child2, entropy2) = sdk
+            .remote_signed_pair(&sender_b32, Some(child1), 2, &op2)
             .expect("remote pair 2");
         assert_eq!(parent2, child1, "fixture must chain onto the signed child");
         let out2 = sdk
@@ -4227,6 +4309,7 @@ mod tests {
                 b"seq-op-bytes-2",
                 parent2,
                 child2,
+                entropy2,
             )
             .expect("apply 2");
         assert!(
@@ -4254,8 +4337,8 @@ mod tests {
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
         let op = incoming_transfer_op(&local, 25, nonce.clone());
         attach_credit_admission(&sdk, &op);
-        let (parent, child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (parent, child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
         let tx_id = crate::types::identifiers::TransactionId::new("tx-apply-3");
         let out = sdk
@@ -4266,6 +4349,7 @@ mod tests {
                 b"op-bytes-3",
                 parent,
                 child,
+                entropy,
             )
             .expect("race classification");
         assert!(
@@ -4363,12 +4447,13 @@ mod tests {
             &sym_sigma,
         );
         // ASYMMETRIC authority pair (what the signed receipt carries).
-        let (parent, child) = sdk
-            .remote_signed_pair(&sender_b32, None, 1)
+        let (parent, child, entropy) = sdk
+            .remote_signed_pair(&sender_b32, None, 1, &op)
             .expect("remote signed pair");
         let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&local, &sender);
-        let precommit =
-            dsm::core::bilateral_transaction_manager::compute_precommit(&parent, &op_bytes, &nonce);
+        let precommit = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &parent, &op_bytes, &entropy,
+        );
         let wrap = [0x42u8; 32];
         let tx_id = crate::types::identifiers::TransactionId::new("tx-A");
         let gen_calls = std::sync::atomic::AtomicUsize::new(0);
@@ -4382,6 +4467,7 @@ mod tests {
             &op_bytes,
             parent,
             child,
+            entropy,
             |_o, b_pair| {
                 gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(staged_b_artifacts(b_pair, child, sender, precommit, &wrap))
@@ -4418,6 +4504,7 @@ mod tests {
                 &op_bytes,
                 parent,
                 child,
+                entropy,
                 |_o, b_pair| {
                     gen_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok(staged_b_artifacts(b_pair, child, sender, precommit, &wrap))
@@ -4475,6 +4562,7 @@ mod tests {
                     &op_bytes,
                     parent,
                     child,
+                    entropy,
                     |_o,
                      _p|
                      -> Result<
@@ -5667,8 +5755,6 @@ mod tests {
                     rk,
                     cp,
                     DsmOperation::Noop,
-                    vec![cp_tag; 32],
-                    None,
                     &[],
                     Some(init),
                     Some(AnchorLeafUpdate {

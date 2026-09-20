@@ -240,8 +240,9 @@ UserReject(sid) ==
                    vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
 
 \* ---------- Phase 3: Commit ----------
-\* Maps to finalize_offline_transfer() in bilateral_transaction_manager.rs:952
-\* Includes TRIPWIRE ENFORCEMENT (lines 983-1006):
+\* Maps to prepare_bilateral_advance() in bilateral_transaction_manager.rs
+\* followed by the canonical Core advance (DeviceState::advance).
+\* Includes TRIPWIRE ENFORCEMENT (prepare_bilateral_advance):
 \*   chainTip[sender] MUST equal tipAtCreation (parent not consumed)
 Commit(sid) ==
     /\ sessions[sid] /= NULL

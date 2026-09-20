@@ -169,7 +169,9 @@ UserAccept(sid) ==
     /\ UNCHANGED <<chainTip, balance, relationshipTip, bleConnected>>
 
 \* ---------- Phase 3: Commit ----------
-\* Maps to finalize_offline_transfer() in bilateral_transaction_manager.rs:952
+\* Maps to prepare_bilateral_advance() in bilateral_transaction_manager.rs
+\* (the §6.1 tripwire) followed by the canonical Core advance
+\* (DeviceState::advance), which derives the transition's one entropy.
 \*
 \* PAPER THEOREM 4.2 (Atomic Interlock Tripwire):
 \*   chainTip[sender] MUST equal tipAtCreation. If the tip has advanced
@@ -363,9 +365,10 @@ FullSettlement ==
 \* and it updates BOTH sender and receiver in a single TLA+ step.
 \* BLE disconnect during any in-flight phase → SessionFail → no change.
 \*
-\* Implementation note: in the Rust code, finalize_offline_transfer()
-\* at bilateral_transaction_manager.rs:952 updates both balances
-\* atomically in a single state transition.
+\* Implementation note: in the Rust code the canonical Core advance
+\* (DeviceState::advance, reached through prepare_bilateral_advance and
+\* AppRouter::execute_on_relationship_for_bilateral) installs the successor
+\* and its balance deltas in a single state transition.
 \* ------------------------------------------------------------------
 NoHalfCommit ==
     \A sid \in SessionId :
