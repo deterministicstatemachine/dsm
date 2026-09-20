@@ -950,6 +950,34 @@ impl DeviceState {
             .filter(|e| !e.is_empty())
     }
 
+    /// The one entropy of a transition (Part VII, order inside the transition,
+    /// step 3): `e_{n+1} = H(DSM/state-entropy; e_n ‖ op ‖ h_n)` from this
+    /// relationship's tip. With no tip, `e_n = H(DSM/genesis-entropy; root)`
+    /// and `h_n = root`.
+    ///
+    /// Core derives it here and nowhere else. No caller supplies entropy to
+    /// an advance; the SDK has no parameter to put one through. The transfer
+    /// nonce, where an operation has one, stays in the operation bytes, which
+    /// are hashed here.
+    pub fn derive_transition_entropy(&self, rel_key: &[u8; 32], operation: &Operation) -> [u8; 32] {
+        let (prior_entropy, prior_hash): (Vec<u8>, [u8; 32]) =
+            match (self.tip_entropy(rel_key), self.chain_tip(rel_key)) {
+                (Some(entropy), Some(tip)) => (entropy.to_vec(), tip),
+                _ => {
+                    let root = self.root();
+                    let mut h =
+                        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
+                    h.update(&root);
+                    (h.finalize().as_bytes().to_vec(), root)
+                }
+            };
+        let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
+        hasher.update(&prior_entropy);
+        hasher.update(&operation.to_bytes());
+        hasher.update(&prior_hash);
+        *hasher.finalize().as_bytes()
+    }
+
     /// Retrieve the cached tip metadata for a relationship, if present.
     pub fn rel_chain_tip(&self, rel_key: &[u8; 32]) -> Option<&RelChainTip> {
         self.tips.get(rel_key)
@@ -1113,8 +1141,6 @@ impl DeviceState {
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: Operation,
-        entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
@@ -1133,8 +1159,6 @@ impl DeviceState {
             rel_key,
             counterparty_devid,
             operation,
-            entropy,
-            encapsulated_entropy,
             deltas,
             initial_chain_tip,
             anchor_leaf,
@@ -1292,13 +1316,14 @@ impl DeviceState {
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: Operation,
-        entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
         deltas: &[BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<AnchorLeafUpdate>,
         offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
+        // The one entropy of this transition, derived from the tip before
+        // anything else reads the relationship (Part VII step 3).
+        let entropy: Vec<u8> = self.derive_transition_entropy(&rel_key, &operation).to_vec();
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
         // first-ever advances on this relationship. For first-ever advances
         // we additionally seed the SMT leaf to that initial tip BEFORE the
@@ -1638,7 +1663,7 @@ impl DeviceState {
             counterparty_devid,
             operation,
             entropy,
-            encapsulated_entropy,
+            encapsulated_entropy: None,
             entity_sig: None,
             counterparty_sig: None,
         };
