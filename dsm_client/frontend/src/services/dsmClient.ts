@@ -421,17 +421,6 @@ export class DsmClient {
   // what made the creation UI read `res.result?.tokenId` against a flat
   // object and render nothing. Callers use `dsm/policies.ts::createToken`.
 
-  async createCustomDlv(params: {
-    lock: string;
-    condition?: string;
-  }): Promise<{ success: boolean; id?: string; error?: string }> {
-    if (!(await this.isReady())) return { success: false, error: 'Identity not initialized' };
-    try {
-      return await dsm.createCustomDlv(params);
-    } catch (e: any) {
-      return { success: false, error: e?.message || 'createCustomDlv failed' };
-    }
-  }
 
   async listPolicies(): Promise<unknown> {
 

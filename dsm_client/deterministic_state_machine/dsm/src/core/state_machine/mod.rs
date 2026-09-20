@@ -196,9 +196,6 @@ impl StateMachine {
         initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
-        // Assets to encumber into a vault as part of this transition. `Some` only
-        // for `DlvCreate`, so the encumbrance and the transition share one root.
-        reserve_funding: Option<crate::types::device_state::VaultReserveMutation>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
             DsmError::state_machine(
@@ -246,7 +243,6 @@ impl StateMachine {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
-            reserve_funding,
         )
     }
 
@@ -296,7 +292,6 @@ impl StateMachine {
             initial_chain_tip,
             None, // anchor_leaf — this convenience path is for ordinary transitions
             None, // offline_spend — ordinary (online) transition, no allocation draw
-            None,
         )?;
         self.commit_advance(&outcome);
         Ok(outcome)

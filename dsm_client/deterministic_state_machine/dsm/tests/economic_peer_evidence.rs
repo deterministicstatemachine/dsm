@@ -381,19 +381,6 @@ impl ProvenanceResolver for OnePeer {
         None
     }
 
-    fn parent_binding_observation(
-        &self,
-        _resource_key: &[u8; 32],
-        _storage_set: &dsm::ccb::StorageSetMembers,
-        _quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // This fixture roots no bindings: it cannot observe the key, which is
-        // not the same as observing it free.
-        dsm::dlv::binding_observation::BindingObservation::Unavailable {
-            attributed: 0,
-            required: 2,
-        }
-    }
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -614,19 +601,6 @@ fn the_addr_checked_acceptance_bytes_must_hash_to_the_descriptor_address() {
             None
         }
 
-        fn parent_binding_observation(
-            &self,
-            _resource_key: &[u8; 32],
-            _storage_set: &dsm::ccb::StorageSetMembers,
-            _quorum: u32,
-        ) -> dsm::dlv::binding_observation::BindingObservation {
-            // This fixture roots no bindings: it cannot observe the key, which
-            // is not the same as observing it free.
-            dsm::dlv::binding_observation::BindingObservation::Unavailable {
-                attributed: 0,
-                required: 2,
-            }
-        }
         fn immutable_evidence(
             &self,
             _n: dsm::crypto::domain::TaggedHashDomain<'static>,

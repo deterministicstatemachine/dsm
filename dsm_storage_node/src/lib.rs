@@ -163,9 +163,9 @@ impl AppState {
     }
 }
 
-/// The device-authenticated WRITE half of the two economic write-once
-/// registers (faucet tickets, economic roots), behind `auth::device_auth` so
-/// attribution runs against the authenticated key AND device.
+/// The device-authenticated WRITE half of the ERA faucet-ticket register,
+/// behind `auth::device_auth` so attribution runs against the authenticated
+/// key AND device. Native emission, outside the cell contract.
 ///
 /// ONE assembly, used by the binary's router and by the register conformance
 /// suite, so what the suite drives is what the binary serves.
@@ -174,7 +174,6 @@ pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> 
         db_pool: state.db_pool.clone(),
     });
     api::economic::faucet_ticket::create_write_router()
-        .merge(api::economic::root_register::create_write_router())
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::device_auth,
@@ -182,32 +181,17 @@ pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> 
         .layer(Extension(state))
 }
 
-/// The write half of the generic conditional-binding interface (Rev 15
-/// §15.5): `CompareExchangeMany` behind device auth. The node relates the
-/// caller to nothing — there is no claimant in a generic record — device
-/// auth only says a registered device is writing.
-pub fn generic_binding_write_router(state: Arc<AppState>) -> axum::Router<()> {
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    api::storage::binding::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state))
-}
-
-/// The public read half of the same interface: `ReadBinding`.
-pub fn generic_binding_read_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::storage::binding::create_read_router(state)
-}
-
-/// The public READ half of the same two registers. The binary rate-limits it;
-/// the conformance suite mounts it bare.
+/// The public READ half of the faucet-ticket register. The binary rate-limits
+/// it; the conformance suite mounts it bare.
 pub fn economic_register_read_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::economic::faucet_ticket::create_read_router(state.clone())
-        .merge(api::economic::root_register::create_read_router(state))
+    api::economic::faucet_ticket::create_read_router(state)
+}
+
+/// Keyed cells and indexes: no write authorization, nothing refused, nothing
+/// decided. Every object carries its own authority; whoever carries the bytes
+/// does not matter.
+pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
+    api::cells::create_router(state)
 }
 
 /// Echo this node's configured protocol identity on EVERY response.

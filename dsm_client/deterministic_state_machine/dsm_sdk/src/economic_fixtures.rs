@@ -224,7 +224,6 @@ pub fn empty_router_with(
     // (member_id, incarnation) echo — make a later vault's binding key answer
     // for the wrong fleet, and `ensure_registered` will not correct an entry
     // that already exists.
-    crate::sdk::binding_fleet_double::reset_all();
     let (keypair, devid, genesis) = install_testnet_identity_with_keypair(seed);
     let router = AppRouterImpl::new(SdkConfig {
         node_id: "econ-fixture".to_string(),

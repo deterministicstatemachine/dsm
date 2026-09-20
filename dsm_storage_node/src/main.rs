@@ -302,31 +302,16 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     // DLV slot + Recovery Capsule
     let dlv_slot_router =
         api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
-    // Settlement-slot claim register: writes behind device auth (attribution is
-    // checked against the authenticated key), reads public.
-    let slot_claim_auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    let slot_claim_write_router = api::vault::settlement_slot::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            slot_claim_auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    let slot_claim_read_router = api::vault::settlement_slot::create_read_router(state.clone())
-        .layer(public_rate_layer.clone());
-    // Economic write-once registers (faucet tickets + economic roots): same
-    // split — writes behind device auth (attribution against the
-    // authenticated key AND device), reads public. The x-dsm-node-id echo on
-    // every response is NORMATIVE for these registers: quorum reads count a
-    // response only when the echo equals the member queried. Assembled by
-    // the library so the conformance suite drives exactly what is served.
-    // Generic conditional binding (Rev 15 §15.5): application-blind
-    // CompareExchangeMany behind device auth, ReadBinding public.
-    let generic_binding_write_router =
-        dsm_storage_node::generic_binding_write_router(state.clone());
-    let generic_binding_read_router = dsm_storage_node::generic_binding_read_router(state.clone())
-        .layer(public_rate_layer.clone());
+    // Keyed cells and indexes: bytes in, bytes out. No write authorization;
+    // a member keeps everything it is given and refuses nothing.
+    let cells_router =
+        dsm_storage_node::cells_router(state.clone()).layer(public_rate_layer.clone());
+    // ERA faucet-ticket register (native emission, its own contract): writes behind
+    // device auth (attribution against the authenticated key AND device),
+    // reads public. The x-dsm-node-id echo is NORMATIVE for this register:
+    // quorum reads count a response only when the echo equals the member
+    // queried. Assembled by the library so the conformance suite drives
+    // exactly what is served.
     let economic_register_write_router =
         dsm_storage_node::economic_register_write_router(state.clone());
     let economic_register_read_router =
@@ -377,11 +362,8 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(tips_router)
         .merge(genesis_router)
         .merge(dlv_slot_router)
-        .merge(slot_claim_write_router)
+        .merge(cells_router)
         .merge(economic_register_write_router)
-        .merge(generic_binding_write_router)
-        .merge(generic_binding_read_router)
-        .merge(slot_claim_read_router)
         .merge(economic_register_read_router)
         .merge(recovery_capsule_router)
         .merge(device_router) // exposes /api/v2/device/register

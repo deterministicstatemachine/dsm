@@ -355,7 +355,6 @@ impl CoreSDK {
             None,
             in_tx_extra,
             None,
-            None,
             Some(plan),
         )?;
         let accepted = accepted_out.ok_or_else(|| {
@@ -864,12 +863,7 @@ impl CoreSDK {
             | DsmOperation::DlvCreate { signature, .. }
             | DsmOperation::DlvUnlock { signature, .. }
             | DsmOperation::DlvClaim { signature, .. }
-            | DsmOperation::DlvInvalidate { signature, .. }
-            | DsmOperation::DlvSettle { signature, .. }
-            | DsmOperation::DlvRouteSettle { signature, .. }
-            | DsmOperation::DlvClose { signature, .. }
-            | DsmOperation::DlvCreateFundedV2 { signature, .. }
-            | DsmOperation::DlvOwnerApplyV2 { signature, .. } => {
+            | DsmOperation::DlvInvalidate { signature, .. } => {
                 *signature = sig;
             }
             // FAIL, never return unsigned. This arm used to `log::warn!` and hand back
@@ -1464,49 +1458,6 @@ impl CoreSDK {
         Some(u64::try_from(circulating).unwrap_or(u64::MAX))
     }
 
-    /// Refuse a DLV value operation whose non-builtin legs are not locally
-    /// rooted, do not re-hash to their commits, do not parse, or whose
-    /// committed policy refuses the asset as a market leg (SoFi Def 4.1 /
-    /// Req 4.4 / Req 4.6 — the "applicable token policy" conjunct). ERA and
-    /// dBTC are pre-rooted on every device and skip. Non-DLV operations pass
-    /// vacuously; their policy conjuncts run in `enforce_policy_for_operation`.
-    fn enforce_market_leg_policies_local(
-        operation: &dsm::types::operations::Operation,
-    ) -> Result<(), DsmError> {
-        for pc in dsm::economic::provenance::market_leg_commits(operation) {
-            if dsm::core::token::token_state_manager::builtin_token_id_for_policy_commit(&pc)
-                .is_some()
-            {
-                continue;
-            }
-            let Ok(Some(bytes)) =
-                crate::storage::client_db::token_registry::load_policy_verified(&pc)
-            else {
-                return Err(DsmError::policy_violation(
-                    crate::util::text_id::encode_base32_crockford(&pc),
-                    "market leg is not rooted on this device — root to the token's public \
-                     anchor, then retry",
-                    None::<std::convert::Infallible>,
-                ));
-            };
-            let policy = dsm::economic::issuance::parse_issuance_policy(&bytes).map_err(|e| {
-                DsmError::policy_violation(
-                    crate::util::text_id::encode_base32_crockford(&pc),
-                    format!("market leg policy: {e}"),
-                    None::<std::convert::Infallible>,
-                )
-            })?;
-            dsm::economic::issuance::check_market_leg_permitted(&policy).map_err(|e| {
-                DsmError::policy_violation(
-                    crate::util::text_id::encode_base32_crockford(&pc),
-                    e.to_string(),
-                    None::<std::convert::Infallible>,
-                )
-            })?;
-        }
-        Ok(())
-    }
-
     fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
@@ -1630,57 +1581,6 @@ impl CoreSDK {
         )
     }
 
-    /// Advance the relationship, optionally committing an offline-bearer fused-anchor-state leaf
-    /// (`anchor_leaf`) ATOMICALLY with the relationship leaf. The bilateral confirm path passes the
-    /// same `anchor_leaf` its `simulate_advance_for_confirm` used, so the committed device root
-    /// matches the on-wire proofs (both-or-neither); ordinary advances pass `None`.
-    #[allow(clippy::too_many_arguments)]
-    /// Advance a relationship AND encumber vault reserves in the same batch.
-    ///
-    /// The only entry point that funds a vault. `DlvCreate` uses it so the
-    /// debit, the reserve leaves and the transition share one device root and one
-    /// prepare/write/commit: either all of it lands or none of it does. Funding
-    /// through a second advance would leave a window in which the vault exists,
-    /// is discoverable and holds nothing, and would give the reserve proof and
-    /// the vault-state proof two different roots — which `compose_vault_state`
-    /// requires to be equal, so the vault could never be quoted.
-    ///
-    /// `in_tx_extra` runs INSIDE the same SQLite transaction as the head write,
-    /// which is where the vault's persistence record belongs: a record written
-    /// afterwards could be lost to a crash, leaving reserves encumbered under no
-    /// record — and rehydration correctly refuses a record-less vault, so the
-    /// value would be stranded with no route to withdraw it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_on_relationship_with_reserve_mutation(
-        &self,
-        rel_key: [u8; 32],
-        counterparty_devid: [u8; 32],
-        operation: dsm::types::operations::Operation,
-        deltas: &[dsm::types::device_state::BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
-        reserve_funding: Option<dsm::types::device_state::VaultReserveMutation>,
-        in_tx_extra: Option<
-            &dyn Fn(
-                &rusqlite::Transaction<'_>,
-                &dsm::types::device_state::AdvanceOutcome,
-            ) -> Result<(), DsmError>,
-        >,
-    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
-        self.execute_on_relationship_inner(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            initial_chain_tip,
-            None,
-            None,
-            in_tx_extra,
-            None,
-            reserve_funding,
-            None,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn execute_on_relationship_with_anchor_leaf(
         &self,
@@ -1700,7 +1600,6 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
-            None,
             None,
             None,
             None,
@@ -1794,67 +1693,26 @@ impl CoreSDK {
         ) -> Result<(), DsmError>,
         admission: Option<AdmissionPlan<'_>>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
-        self.execute_on_relationship_staged_with_reserve_mutation_and_admission(
+        self.execute_on_relationship_staged_inner(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
             initial_chain_tip,
-            None,
             build_artifacts,
             write_extra,
             admission,
         )
     }
 
-    /// [`Self::execute_on_relationship_staged`] with a [`VaultReserveMutation`]
-    /// riding the SAME advance — the vault chokepoints' shape: the reserve
-    /// leaves and the derived vault-state leaf land in one device root with the
-    /// transition, `build_artifacts` signs proofs off `outcome.new_device_state`
-    /// (that exact root, before anything is persisted), and `write_extra` freezes
-    /// them inside the advance transaction. Construction failure ⇒ no commit.
-    ///
-    /// Constraints inside `build_artifacts` (it runs under the state-machine
-    /// lock): read ONLY the outcome — never `device_head()` / `get_current_state()`
-    /// (re-lock ⇒ deadlock); signing is synchronous and lock-free; no `.await`.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn execute_on_relationship_staged_with_reserve_mutation<A>(
+    pub(crate) fn execute_on_relationship_staged_inner<A>(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
         initial_chain_tip: Option<[u8; 32]>,
-        reserve_mutation: Option<dsm::types::device_state::VaultReserveMutation>,
-        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-        write_extra: impl Fn(
-            &rusqlite::Transaction<'_>,
-            &dsm::types::device_state::AdvanceOutcome,
-            &A,
-        ) -> Result<(), DsmError>,
-    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome, A), DsmError> {
-        self.execute_on_relationship_staged_with_reserve_mutation_and_admission(
-            rel_key,
-            counterparty_devid,
-            operation,
-            deltas,
-            initial_chain_tip,
-            reserve_mutation,
-            build_artifacts,
-            write_extra,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn execute_on_relationship_staged_with_reserve_mutation_and_admission<A>(
-        &self,
-        rel_key: [u8; 32],
-        counterparty_devid: [u8; 32],
-        operation: dsm::types::operations::Operation,
-        deltas: &[dsm::types::device_state::BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
-        reserve_mutation: Option<dsm::types::device_state::VaultReserveMutation>,
         build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
         write_extra: impl Fn(
             &rusqlite::Transaction<'_>,
@@ -1904,7 +1762,6 @@ impl CoreSDK {
             None,
             Some(&write),
             Some(&pre),
-            reserve_mutation,
             admission,
         )?;
 
@@ -1943,7 +1800,6 @@ impl CoreSDK {
             None,
             in_tx_extra,
             None,
-            None,
             admission,
         )
     }
@@ -1953,10 +1809,10 @@ impl CoreSDK {
     ///
     /// The projection IS the head's cache (`client_db::tokens`), so it must be
     /// brought level with the head at the commit chokepoint, not at the next
-    /// startup sweep. Reserve-mutating operations (funded vault creation,
-    /// close, withdraw) carry their debits inside the operation and never in a
-    /// caller-supplied delta list, which is how a funded creation left the
-    /// owner's wallet showing its pre-vault balances on hardware (2026-09-13).
+    /// startup sweep. Operations that carry their debits inside the operation
+    /// rather than in a caller-supplied delta list are exactly why: a funded
+    /// vault creation once left the owner's wallet showing its pre-vault
+    /// balances on hardware (2026-09-13).
     /// Best-effort by design: the head is already durable when this runs, so a
     /// failure here is a stale cache the startup reconcile repairs, never a
     /// lost transition.
@@ -1997,10 +1853,6 @@ impl CoreSDK {
         pre_write: Option<
             &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
         >,
-        // Assets to encumber into a vault as part of this transition. `Some` only
-        // for `DlvCreate`; the encumbrance rides the SAME prepare/write/commit as
-        // the transition, so either both land or neither does.
-        reserve_funding: Option<dsm::types::device_state::VaultReserveMutation>,
         // The economic admission riding this advance, if the operation is an
         // admitted economic write. See [`AdmissionPlan`].
         admission: Option<AdmissionPlan<'_>>,
@@ -2053,15 +1905,6 @@ impl CoreSDK {
         // execution path skipped policy checks.
         let current_state_hash = sm.device_head().map(|ds| ds.root()).unwrap_or([0u8; 32]);
         self.enforce_policy_for_operation(&operation, current_state_hash)?;
-        // The market-leg token-policy gate for DLV value operations — the
-        // funnel-level twin of the core verifier's conjunct, so EVERY caller
-        // is covered, not just the routes that pre-flight. Local rooting
-        // only: an owner or trader legitimately moving an asset is already
-        // rooted to its anchor (the routes fetch-and-root on first contact);
-        // an unrooted leg fails closed here rather than advancing state the
-        // economic verifier will refuse.
-        Self::enforce_market_leg_policies_local(&operation)?;
-
         // ── Admission serialization, UNDER the state-machine lock ──────────
         // A new admission atomically refuses an existing pending one and
         // CAS-checks the admitted predecessor it extends. A route-level
@@ -2146,7 +1989,6 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
-            reserve_funding, // Some(..) encumbers vault reserves in the same batch (DlvCreate only)
         )?;
         // The sender's signed A-side pair is deliberately NOT compared against
         // this device's own lineage here — see the doc comment on
@@ -2388,7 +2230,6 @@ impl CoreSDK {
             initial_chain_tip,
             anchor_leaf,
             offline_spend,
-            None,
         )
     }
 
@@ -5360,286 +5201,6 @@ mod tests {
         );
     }
 
-    /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
-    /// transfers, v2 shape. The SENDER stages, commits the staged successor leaf into a REAL
-    /// per-device SMT advance (real roots + real Π inclusion proofs), then releases with those
-    /// roots; the RECEIVER runs the full v2 predicate (`accept_offline_release`: σ^chip + σ^host
-    /// verified against the pin, Π verified against the device roots, frontier pin) with NO
-    /// counter read on the path. Proves: (a) a real release is accepted, (b) the receiver adopts
-    /// the successor frontier, (c) replaying transfer 1 after adoption is rejected, (d) transfer 2
-    /// chains from the adopted frontier, (e) cert roots that differ from the verified device roots
-    /// are rejected.
-    #[test]
-    #[serial]
-    fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
-        use crate::bluetooth::anchor_accept::{accept_offline_release, OfflineRecover, PinnedAnchor};
-        use dsm::core::bilateral_transaction_manager::{
-            compute_smt_key, initial_chain_tip_from_device_ids,
-        };
-        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
-
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-        let policy_hash = [3u8; 32];
-
-        let pin_from = |p: &crate::anchor::AnchorPin| PinnedAnchor {
-            bundle: p.bundle,
-            anchor_id: p.anchor_id,
-            enrolled_counter: p.enrolled_counter,
-            partition_pk: p.partition_pk.clone(),
-            pk_chip: p.pk_chip.clone(),
-            uncompromised: true,
-        };
-
-        // One real bearer transfer from `head`: stage, advance the REAL per-device SMT with the
-        // staged successor leaf (producing real roots + Π), then release with those roots.
-        let drive = |head: &DeviceState, cp_tag: u8, r_r: [u8; 32]| {
-            let staged = sdk
-                .stage_offline_bearer_transition(
-                    [1u8; 32],
-                    recipient,
-                    [2u8; 32],
-                    [9u8; 32],
-                    policy_hash,
-                    0,
-                    vec![0xAB],
-                    r_r,
-                )
-                .expect("stage");
-            let cp = {
-                let mut c = [0u8; 32];
-                c[0] = cp_tag;
-                c
-            };
-            let rk = compute_smt_key(&head.devid(), &cp);
-            let init = initial_chain_tip_from_device_ids(&head.devid(), &cp);
-            let out = head
-                .advance(
-                    rk,
-                    cp,
-                    DsmOperation::Noop,
-                    vec![cp_tag; 32],
-                    None,
-                    &[],
-                    Some(init),
-                    Some(AnchorLeafUpdate {
-                        key: staged.anchor_leaf.key,
-                        new_value: staged.anchor_leaf.new_value,
-                    }),
-                    None,
-                    None,
-                )
-                .expect("bearer advance");
-            let proofs = out
-                .anchor_proofs
-                .clone()
-                .expect("bearer advance emits anchor proofs");
-            let art = sdk
-                .release_offline_bearer(
-                    &staged,
-                    r_r,
-                    out.smt_proofs.pre_root,
-                    out.child_r_a,
-                    proofs.parent,
-                    proofs.child,
-                )
-                .expect("release");
-            (art, out)
-        };
-
-        // Transfer 1 runs from the head the stage-time reconcile bootstrapped (it writes the
-        // current anchor-state leaf into the device head on first attach).
-        let (art1, out1) = {
-            // Prime the bootstrap: stage once so the reconciled head exists, then drive from it.
-            sdk.stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                policy_hash,
-                0,
-                vec![0xAB],
-                [0x55u8; 32],
-            )
-            .expect("prime bootstrap");
-            let head = sdk
-                .state_machine
-                .lock()
-                .device_head()
-                .expect("bootstrapped head")
-                .clone();
-            drive(&head, 0xC0, [0x55u8; 32])
-        };
-        let pin1 = pin_from(&art1.pin);
-        let before1 = out1.smt_proofs.pre_root;
-        let after1 = out1.child_r_a;
-
-        // (a) The receiver accepts the real release: three signatures + Π against the REAL device
-        // roots + frontier pin (genesis: accepted_frontier=None adopts prev_root TOFU).
-        let adopted = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            None,
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        )
-        .expect("transfer 1 must be accepted by the v2 predicate");
-        assert_eq!(adopted.next_root, art1.appliance_next_root);
-        assert_eq!(adopted.next_anchor_counter, 1);
-
-        // (a') Pinning the frontier explicitly also accepts.
-        accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        )
-        .expect("accept with the pinned frontier");
-
-        // (e) Cert roots that are NOT the verified device roots are rejected (parallel-tree cert).
-        let wrong = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &[0xEEu8; 32],
-            &after1,
-        );
-        assert!(
-            matches!(wrong, Err(OfflineRecover::Predicate(_))),
-            "cert/device root mismatch must be rejected, got {wrong:?}"
-        );
-
-        // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `next_root` is
-        // rejected — the consumed frontier is no longer the accepted one.
-        let replay = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&adopted.next_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        );
-        assert!(
-            matches!(replay, Err(OfflineRecover::Predicate(_))),
-            "replay of the consumed frontier must be rejected, got {replay:?}"
-        );
-
-        // (d) Transfer 2 chains from the adopted frontier.
-        let (art2, out2) = drive(&out1.new_device_state, 0xC1, [0x66u8; 32]);
-        assert_eq!(
-            art2.appliance_prev_root, art1.appliance_next_root,
-            "transfer 2 must consume transfer 1's successor frontier"
-        );
-        let pin2 = pin_from(&art2.pin);
-        accept_offline_release(
-            &art2.offline_release,
-            Some(&pin2),
-            Some(&adopted.next_root),
-            &recipient,
-            &[0x66u8; 32],
-            &policy_hash,
-            &out2.smt_proofs.pre_root,
-            &out2.child_r_a,
-        )
-        .expect("transfer 2 must be accepted from the adopted frontier");
-    }
-
-    /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
-    /// sender puts on the confirm proofs MUST equal the CANONICAL committed post-root — so long as
-    /// BOTH advances carry the same `anchor_leaf`. If either side omits it, the roots diverge (the
-    /// sender's own §4.3 history would go Invalid). Both paths route through the deterministic
-    /// `StateMachine::prepare_advance_relationship`, which already takes `anchor_leaf`, so this is
-    /// provable before the higher commit layers are threaded.
-    #[test]
-    #[serial]
-    fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
-        use dsm::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
-        };
-        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
-
-        let sdk = test_sdk();
-        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-        sdk.state_machine.lock().set_device_head(ds);
-
-        let cp = [0x33u8; 32];
-        let rel_key = compute_smt_key(&sdk.device_info.device_id, &cp);
-        let init = initial_chain_tip_from_device_ids(&sdk.device_info.device_id, &cp);
-        let op = DsmOperation::Noop;
-        let deltas: &[dsm::types::device_state::BalanceDelta] = &[];
-        let b = [0xB7u8; 32];
-        let leaf = AnchorLeafUpdate {
-            key: anchor_state_leaf_key(&b),
-            new_value: anchor_core::root_advance::anchor_state_leaf(&b, &[0xA1u8; 32], 1),
-        };
-
-        // `simulate_advance_for_confirm` is PURE (no head mutation), so we can call it twice.
-        let sim_with = sdk
-            .simulate_advance_for_confirm(
-                rel_key,
-                cp,
-                op.clone(),
-                deltas,
-                Some(init),
-                Some(leaf.clone()),
-                None,
-            )
-            .expect("sim with anchor_leaf")
-            .child_r_a;
-        let sim_without = sdk
-            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None, None)
-            .expect("sim without anchor_leaf")
-            .child_r_a;
-
-        // The hazard is real: the anchor_leaf changes the device root. Omitting it on EITHER side
-        // (sim carried it, a commit that dropped it) diverges -> §4.3 Invalid.
-        assert_ne!(
-            sim_with, sim_without,
-            "anchor_leaf must change the committed device root"
-        );
-
-        // Canonical commit WITH the same anchor_leaf, via the deterministic prepare + install.
-        let committed_root = {
-            let mut sm = sdk.state_machine.lock();
-            let outcome = sm
-                .prepare_advance_relationship(
-                    rel_key,
-                    cp,
-                    op.clone(),
-                    deltas,
-                    Some(init),
-                    Some(leaf.clone()),
-                    None,
-                    None,
-                )
-                .expect("canonical prepare with anchor_leaf");
-            sm.commit_advance(&outcome);
-            outcome.new_device_state.root()
-        };
-
-        // Both-or-neither: sim post-root == canonical committed post-root when both carry the leaf.
-        assert_eq!(
-            sim_with, committed_root,
-            "simulated post-root must equal the canonical committed post-root for the same anchor_leaf"
-        );
-    }
-
     #[test]
     fn sign_operation_matches_raw_signature_preimage_hash() {
         let sdk = test_sdk();
@@ -6041,6 +5602,284 @@ mod tests {
             "the canonical advance MUST roll back with the failed bundle write — \
              a debit with no durable lifecycle record is exactly the hazard this \
              seam exists to prevent"
+        );
+    }
+
+    /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
+    /// transfers, v2 shape. The SENDER stages, commits the staged successor leaf into a REAL
+    /// per-device SMT advance (real roots + real Π inclusion proofs), then releases with those
+    /// roots; the RECEIVER runs the full v2 predicate (`accept_offline_release`: σ^chip + σ^host
+    /// verified against the pin, Π verified against the device roots, frontier pin) with NO
+    /// counter read on the path. Proves: (a) a real release is accepted, (b) the receiver adopts
+    /// the successor frontier, (c) replaying transfer 1 after adoption is rejected, (d) transfer 2
+    /// chains from the adopted frontier, (e) cert roots that differ from the verified device roots
+    /// are rejected.
+    #[test]
+    #[serial]
+    fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
+        use crate::bluetooth::anchor_accept::{accept_offline_release, OfflineRecover, PinnedAnchor};
+        use dsm::core::bilateral_transaction_manager::{
+            compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
+
+        let sdk = test_sdk();
+        {
+            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+            sdk.state_machine.lock().set_device_head(ds);
+        }
+        let recipient = [4u8; 32];
+        let policy_hash = [3u8; 32];
+
+        let pin_from = |p: &crate::anchor::AnchorPin| PinnedAnchor {
+            bundle: p.bundle,
+            anchor_id: p.anchor_id,
+            enrolled_counter: p.enrolled_counter,
+            partition_pk: p.partition_pk.clone(),
+            pk_chip: p.pk_chip.clone(),
+            uncompromised: true,
+        };
+
+        // One real bearer transfer from `head`: stage, advance the REAL per-device SMT with the
+        // staged successor leaf (producing real roots + Π), then release with those roots.
+        let drive = |head: &DeviceState, cp_tag: u8, r_r: [u8; 32]| {
+            let staged = sdk
+                .stage_offline_bearer_transition(
+                    [1u8; 32],
+                    recipient,
+                    [2u8; 32],
+                    [9u8; 32],
+                    policy_hash,
+                    0,
+                    vec![0xAB],
+                    r_r,
+                )
+                .expect("stage");
+            let cp = {
+                let mut c = [0u8; 32];
+                c[0] = cp_tag;
+                c
+            };
+            let rk = compute_smt_key(&head.devid(), &cp);
+            let init = initial_chain_tip_from_device_ids(&head.devid(), &cp);
+            let out = head
+                .advance(
+                    rk,
+                    cp,
+                    DsmOperation::Noop,
+                    vec![cp_tag; 32],
+                    None,
+                    &[],
+                    Some(init),
+                    Some(AnchorLeafUpdate {
+                        key: staged.anchor_leaf.key,
+                        new_value: staged.anchor_leaf.new_value,
+                    }),
+                    None,
+                )
+                .expect("bearer advance");
+            let proofs = out
+                .anchor_proofs
+                .clone()
+                .expect("bearer advance emits anchor proofs");
+            let art = sdk
+                .release_offline_bearer(
+                    &staged,
+                    r_r,
+                    out.smt_proofs.pre_root,
+                    out.child_r_a,
+                    proofs.parent,
+                    proofs.child,
+                )
+                .expect("release");
+            (art, out)
+        };
+
+        // Transfer 1 runs from the head the stage-time reconcile bootstrapped (it writes the
+        // current anchor-state leaf into the device head on first attach).
+        let (art1, out1) = {
+            // Prime the bootstrap: stage once so the reconciled head exists, then drive from it.
+            sdk.stage_offline_bearer_transition(
+                [1u8; 32],
+                recipient,
+                [2u8; 32],
+                [9u8; 32],
+                policy_hash,
+                0,
+                vec![0xAB],
+                [0x55u8; 32],
+            )
+            .expect("prime bootstrap");
+            let head = sdk
+                .state_machine
+                .lock()
+                .device_head()
+                .expect("bootstrapped head")
+                .clone();
+            drive(&head, 0xC0, [0x55u8; 32])
+        };
+        let pin1 = pin_from(&art1.pin);
+        let before1 = out1.smt_proofs.pre_root;
+        let after1 = out1.child_r_a;
+
+        // (a) The receiver accepts the real release: three signatures + Π against the REAL device
+        // roots + frontier pin (genesis: accepted_frontier=None adopts prev_root TOFU).
+        let adopted = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            None,
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
+        )
+        .expect("transfer 1 must be accepted by the v2 predicate");
+        assert_eq!(adopted.next_root, art1.appliance_next_root);
+        assert_eq!(adopted.next_anchor_counter, 1);
+
+        // (a') Pinning the frontier explicitly also accepts.
+        accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
+        )
+        .expect("accept with the pinned frontier");
+
+        // (e) Cert roots that are NOT the verified device roots are rejected (parallel-tree cert).
+        let wrong = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&art1.appliance_prev_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &[0xEEu8; 32],
+            &after1,
+        );
+        assert!(
+            matches!(wrong, Err(OfflineRecover::Predicate(_))),
+            "cert/device root mismatch must be rejected, got {wrong:?}"
+        );
+
+        // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `next_root` is
+        // rejected — the consumed frontier is no longer the accepted one.
+        let replay = accept_offline_release(
+            &art1.offline_release,
+            Some(&pin1),
+            Some(&adopted.next_root),
+            &recipient,
+            &[0x55u8; 32],
+            &policy_hash,
+            &before1,
+            &after1,
+        );
+        assert!(
+            matches!(replay, Err(OfflineRecover::Predicate(_))),
+            "replay of the consumed frontier must be rejected, got {replay:?}"
+        );
+
+        // (d) Transfer 2 chains from the adopted frontier.
+        let (art2, out2) = drive(&out1.new_device_state, 0xC1, [0x66u8; 32]);
+        assert_eq!(
+            art2.appliance_prev_root, art1.appliance_next_root,
+            "transfer 2 must consume transfer 1's successor frontier"
+        );
+        let pin2 = pin_from(&art2.pin);
+        accept_offline_release(
+            &art2.offline_release,
+            Some(&pin2),
+            Some(&adopted.next_root),
+            &recipient,
+            &[0x66u8; 32],
+            &policy_hash,
+            &out2.smt_proofs.pre_root,
+            &out2.child_r_a,
+        )
+        .expect("transfer 2 must be accepted from the adopted frontier");
+    }
+
+    /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
+    /// sender puts on the confirm proofs MUST equal the CANONICAL committed post-root — so long as
+    /// BOTH advances carry the same `anchor_leaf`. If either side omits it, the roots diverge (the
+    /// sender's own §4.3 history would go Invalid). Both paths route through the deterministic
+    /// `StateMachine::prepare_advance_relationship`, which already takes `anchor_leaf`, so this is
+    /// provable before the higher commit layers are threaded.
+    #[test]
+    #[serial]
+    fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
+        use dsm::core::bilateral_transaction_manager::{
+            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
+        };
+        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
+
+        let sdk = test_sdk();
+        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
+        sdk.state_machine.lock().set_device_head(ds);
+
+        let cp = [0x33u8; 32];
+        let rel_key = compute_smt_key(&sdk.device_info.device_id, &cp);
+        let init = initial_chain_tip_from_device_ids(&sdk.device_info.device_id, &cp);
+        let op = DsmOperation::Noop;
+        let deltas: &[dsm::types::device_state::BalanceDelta] = &[];
+        let b = [0xB7u8; 32];
+        let leaf = AnchorLeafUpdate {
+            key: anchor_state_leaf_key(&b),
+            new_value: anchor_core::root_advance::anchor_state_leaf(&b, &[0xA1u8; 32], 1),
+        };
+
+        // `simulate_advance_for_confirm` is PURE (no head mutation), so we can call it twice.
+        let sim_with = sdk
+            .simulate_advance_for_confirm(
+                rel_key,
+                cp,
+                op.clone(),
+                deltas,
+                Some(init),
+                Some(leaf.clone()),
+                None,
+            )
+            .expect("sim with anchor_leaf")
+            .child_r_a;
+        let sim_without = sdk
+            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None, None)
+            .expect("sim without anchor_leaf")
+            .child_r_a;
+
+        // The hazard is real: the anchor_leaf changes the device root. Omitting it on EITHER side
+        // (sim carried it, a commit that dropped it) diverges -> §4.3 Invalid.
+        assert_ne!(
+            sim_with, sim_without,
+            "anchor_leaf must change the committed device root"
+        );
+
+        // Canonical commit WITH the same anchor_leaf, via the deterministic prepare + install.
+        let committed_root = {
+            let mut sm = sdk.state_machine.lock();
+            let outcome = sm
+                .prepare_advance_relationship(
+                    rel_key,
+                    cp,
+                    op.clone(),
+                    deltas,
+                    Some(init),
+                    Some(leaf.clone()),
+                    None,
+                )
+                .expect("canonical prepare with anchor_leaf");
+            sm.commit_advance(&outcome);
+            outcome.new_device_state.root()
+        };
+
+        // Both-or-neither: sim post-root == canonical committed post-root when both carry the leaf.
+        assert_eq!(
+            sim_with, committed_root,
+            "simulated post-root must equal the canonical committed post-root for the same anchor_leaf"
         );
     }
 }

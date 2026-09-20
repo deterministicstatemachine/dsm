@@ -2804,7 +2804,7 @@ impl BitcoinTapSdk {
     /// Deletes every vault advertisement and proto under the current AND any known
     /// stale manifold prefixes (from prior policy commits), then wipes local
     /// vault_store, vault_records, in_flight_withdrawals, in_flight_withdrawal_legs,
-    /// dBTC token_balances, and dlv_receipts.
+    /// dBTC token_balances.
     /// Also clears in-memory pending_ops.
     ///
     /// Use after policy commit migration or to reset dBTC state to zero.

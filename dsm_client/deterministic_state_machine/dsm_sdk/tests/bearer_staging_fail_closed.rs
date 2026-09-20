@@ -26,17 +26,16 @@
 
 #![allow(clippy::disallowed_methods)]
 
+use dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids;
+use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use std::sync::Arc;
 
 use serial_test::serial;
 use tokio::sync::RwLock;
 
-use dsm::core::bilateral_transaction_manager::{
-    initial_chain_tip_from_device_ids, BilateralTransactionManager,
-};
+use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{canonical_offline_bearer_policy, Operation, TransactionMode};
 use dsm::types::token_types::Balance;
@@ -389,7 +388,6 @@ async fn the_durable_probes_detect_a_real_commit() {
                 &sender_devid,
                 &sender_devid,
             )),
-            None,
             None,
             None,
         )

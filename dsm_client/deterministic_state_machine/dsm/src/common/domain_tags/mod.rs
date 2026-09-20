@@ -145,7 +145,7 @@ mod tests {
     /// here only to make an accidental edit to the registry loud.
     // 389 since E1c-2a froze `DSM/sofi/vault-creation-key/v1`, the R_econ key
     // the owner's creation record occupies (P15-12).
-    const EXPECTED_TAG_COUNT: usize = 388;
+    const EXPECTED_TAG_COUNT: usize = 376;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
@@ -299,10 +299,10 @@ mod tests {
             .collect();
 
         let required: &[&[u8]] = &[
-            // The eight economic-SMT domains frozen by amendment 2c-C2.
+            // The economic-SMT domains frozen by amendment 2c-C2 that survive
+            // the node cut (the vault-reserve and settlement-receipt keys went
+            // with the old market's leaf classes).
             b"DSM/economic-balance-key/v1",
-            b"DSM/economic-vault-reserve-key/v1",
-            b"DSM/economic-settlement-receipt-key/v1",
             b"DSM/economic-consumed-source-key/v1",
             b"DSM/economic-smt-leaf/v1",
             b"DSM/economic-smt-node/v1",

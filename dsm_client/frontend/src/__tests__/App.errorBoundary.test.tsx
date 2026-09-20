@@ -134,11 +134,6 @@ jest.mock('../components/lock/LockPromptModal', () => ({
   default: () => null,
 }));
 
-jest.mock('../components/screens/DevDlvScreen', () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
 jest.mock('../components/screens/DevPolicyScreen', () => ({
   __esModule: true,
   default: () => null,

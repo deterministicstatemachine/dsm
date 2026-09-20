@@ -118,10 +118,9 @@ fn round_trip(
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         facts,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let witness = witness_for(pre_root, built, operation);
@@ -226,10 +225,9 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect_err("initial supply cannot be funded");
     assert_eq!(
@@ -248,10 +246,9 @@ fn create_token_with_initial_supply_gets_the_exact_named_refusal() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::balances_only(&b),
+            &EconomicPreState::new(&b),
             &mut t,
             &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .unwrap();
         witness_for(pre, built, &burn(500, era()))
@@ -277,10 +274,9 @@ fn a_debit_with_an_extra_mutation_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .unwrap();
     let mut mutations = built.mutations;
@@ -344,10 +340,9 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &facts,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .unwrap();
     // Strip the consumed-source mutation; keep only the balance credit and
@@ -410,10 +405,9 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::balances_only(&balances),
+            &EconomicPreState::new(&balances),
             &mut tree.clone(),
             &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect_err("a credit with no source is not fundable"),
         WriteSetError::FactsDoNotMatchOperation
@@ -424,12 +418,11 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: [0xA9; 32],
         },
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("issuance facts make the mint buildable");
     assert_eq!(built.mutations.len(), 1, "one balance credit, nothing else");
@@ -451,12 +444,11 @@ fn a_mint_builds_a_credit_but_demands_its_issuance_facts() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::balances_only(&balances),
+            &EconomicPreState::new(&balances),
             &mut tree,
             &CreditSourceFacts::AuthorizedIssuance {
                 issuance_authorization_addr: [0xA9; 32],
             },
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .expect_err("zero units is not issuance"),
         WriteSetError::NoEconomicWriteSet
@@ -472,10 +464,9 @@ fn insufficient_balance_refuses_the_exact_debit() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::balances_only(&balances),
+            &EconomicPreState::new(&balances),
             &mut tree,
             &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         ),
         Err(WriteSetError::InsufficientBalance {
             have: 10,
@@ -604,468 +595,6 @@ fn the_manifest_decoder_round_trips_and_refuses_non_canonical_bytes() {
 
 // ── 3.6: the DLV pair write sets (funded create, close) ────────────────────
 
-const VAULT: [u8; 32] = [0x60; 32];
-
-/// Two distinct assets in canonical (lex-ascending) order.
-fn pair_assets() -> ([u8; 32], [u8; 32]) {
-    ([0x0A; 32], [0x0B; 32])
-}
-
-fn dlv_create_funded(vault: [u8; 32], a: ([u8; 32], u64), b: ([u8; 32], u64)) -> Operation {
-    Operation::DlvCreateFundedV2 {
-        vault_id: vault.to_vec(),
-        creator_public_key: vec![0xAB; 64],
-        parameters_hash: vec![0u8; 32],
-        fulfillment_condition: Vec::new(),
-        leg_a_policy_commit: a.0,
-        leg_a_amount: a.1,
-        leg_b_policy_commit: b.0,
-        leg_b_amount: b.1,
-        fee_bps: 30,
-        signature: Vec::new(),
-        mode: TransactionMode::Unilateral,
-    }
-}
-
-fn dlv_close(
-    vault: [u8; 32],
-    a: ([u8; 32], u64),
-    b: ([u8; 32], u64),
-    parent: u64,
-    new: u64,
-) -> Operation {
-    Operation::DlvClose {
-        vault_id: vault.to_vec(),
-        leg_a_policy_commit: a.0,
-        leg_a_amount: a.1,
-        leg_b_policy_commit: b.0,
-        leg_b_amount: b.1,
-        parent_sequence: parent,
-        new_sequence: new,
-        fee_bps: 30,
-        signature: Vec::new(),
-        mode: TransactionMode::Unilateral,
-    }
-}
-
-/// A tree funded with two balances, and (optionally) both reserve legs of
-/// VAULT at `seq` — plus the matching pre-state maps.
-#[allow(clippy::type_complexity)]
-fn dlv_pre_state(
-    balances_in: &[([u8; 32], u64)],
-    reserves_in: &[([u8; 32], u64, u64)],
-) -> (
-    EconomicSmt,
-    BTreeMap<[u8; 32], u64>,
-    BTreeMap<([u8; 32], [u8; 32]), dsm::economic::state::EconomicVaultReserveState>,
-) {
-    let mut tree = EconomicSmt::new();
-    let mut balances = BTreeMap::new();
-    for (asset, amount) in balances_in {
-        let state = EconomicLeafState::Balance(EconomicBalanceState::new(*asset, *amount).unwrap());
-        tree.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
-        balances.insert(*asset, *amount);
-    }
-    let mut reserves = BTreeMap::new();
-    for (asset, amount, seq) in reserves_in {
-        let r = dsm::economic::state::EconomicVaultReserveState {
-            vault_id: VAULT,
-            policy_commit: *asset,
-            amount: *amount,
-            vault_sequence: *seq,
-        };
-        let state = EconomicLeafState::VaultReserve(r.clone());
-        tree.insert(state.leaf_key(&G, &DEV), state.leaf_value().unwrap());
-        reserves.insert((VAULT, *asset), r);
-    }
-    (tree, balances, reserves)
-}
-
-fn dlv_round_trip(
-    operation: &Operation,
-    mut tree: EconomicSmt,
-    balances: BTreeMap<[u8; 32], u64>,
-    reserves: BTreeMap<([u8; 32], [u8; 32]), dsm::economic::state::EconomicVaultReserveState>,
-) -> EconomicTransitionWitness {
-    let pre_root = tree.root();
-    let built = build_write_set(
-        operation,
-        &G,
-        &DEV,
-        &econ_op_id(),
-        &EconomicPreState {
-            balances: &balances,
-            vault_reserves: &reserves,
-        },
-        &mut tree,
-        &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-    )
-    .expect("buildable");
-    let witness = witness_for(pre_root, built, operation);
-    verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV).expect("sequence verifies");
-    verify_operation_write_set(operation, &G, &DEV, &witness).expect("exact effect verifies");
-    witness
-}
-
-#[test]
-fn a_funded_create_round_trips_two_debits_and_two_reserve_births() {
-    let (a, b) = pair_assets();
-    let (tree, balances, reserves) = dlv_pre_state(&[(a, 500), (b, 200)], &[]);
-    let op = dlv_create_funded(VAULT, (a, 300), (b, 150));
-    let witness = dlv_round_trip(&op, tree, balances, reserves);
-    assert_eq!(witness.mutations.len(), 4);
-    assert_eq!(witness.credit_sources.len(), 2);
-    assert!(witness.credit_sources.iter().all(|s| matches!(
-        s,
-        dsm::economic::credit::CreditSource::SameTransitionMove(_)
-    )));
-    // Both reserve births at generation 0 with the exact leg amounts.
-    let births: Vec<_> = witness
-        .mutations
-        .iter()
-        .filter_map(|m| match (&m.pre_state, &m.post_state) {
-            (None, Some(EconomicLeafState::VaultReserve(r))) => Some(r.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(births.len(), 2);
-    assert!(births
-        .iter()
-        .all(|r| r.vault_id == VAULT && r.vault_sequence == 0));
-}
-
-#[test]
-fn a_close_round_trips_and_leaves_terminal_zero_reserves_present() {
-    let (a, b) = pair_assets();
-    let (tree, balances, reserves) = dlv_pre_state(&[(a, 7)], &[(a, 300, 4), (b, 150, 4)]);
-    let op = dlv_close(VAULT, (a, 300), (b, 150), 4, 5);
-    let witness = dlv_round_trip(&op, tree, balances, reserves);
-    assert_eq!(witness.mutations.len(), 4);
-    // Terminal zero reserves stay PRESENT at parent + 1 — never removed.
-    let terminals: Vec<_> = witness
-        .mutations
-        .iter()
-        .filter_map(|m| match &m.post_state {
-            Some(EconomicLeafState::VaultReserve(r)) => Some(r.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(terminals.len(), 2);
-    assert!(terminals
-        .iter()
-        .all(|r| r.amount == 0 && r.vault_sequence == 5));
-}
-
-/// MC-CREATE: one honest witness, verified against one-bit-off operations —
-/// every near-miss an adversarial producer could pair with it is refused.
-#[test]
-fn a_funded_create_near_miss_is_refused() {
-    let (a, b) = pair_assets();
-    let (tree, balances, reserves) = dlv_pre_state(&[(a, 500), (b, 200)], &[]);
-    let op = dlv_create_funded(VAULT, (a, 300), (b, 150));
-    let witness = dlv_round_trip(&op, tree, balances, reserves);
-    // Wrong amount on a leg (MC-CREATE-1).
-    assert!(verify_operation_write_set(
-        &dlv_create_funded(VAULT, (a, 301), (b, 150)),
-        &G,
-        &DEV,
-        &witness
-    )
-    .is_err());
-    // Wrong vault id.
-    assert!(verify_operation_write_set(
-        &dlv_create_funded([0x61; 32], (a, 300), (b, 150)),
-        &G,
-        &DEV,
-        &witness
-    )
-    .is_err());
-    // Non-canonical legs are refused at derivation (MC-CREATE-4).
-    assert!(matches!(
-        verify_operation_write_set(
-            &dlv_create_funded(VAULT, (b, 150), (a, 300)),
-            &G,
-            &DEV,
-            &witness
-        ),
-        Err(WriteSetError::MalformedVaultOperation { .. })
-    ));
-    // A zero leg is refused at derivation.
-    assert!(matches!(
-        verify_operation_write_set(
-            &dlv_create_funded(VAULT, (a, 300), (b, 0)),
-            &G,
-            &DEV,
-            &witness
-        ),
-        Err(WriteSetError::MalformedVaultOperation { .. })
-    ));
-    // And a close claiming the same witness (wrong shape entirely).
-    assert!(verify_operation_write_set(
-        &dlv_close(VAULT, (a, 300), (b, 150), 0, 1),
-        &G,
-        &DEV,
-        &witness
-    )
-    .is_err());
-}
-
-/// MC-CREATE-6: the same-move sources must pair each reserve credit with ITS
-/// OWN leg's balance debit — cross-pairing the legs is refused even though
-/// every index individually points at a real mutation.
-#[test]
-fn cross_paired_same_move_sources_are_refused() {
-    let (a, b) = pair_assets();
-    let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 500), (b, 200)], &[]);
-    let op = dlv_create_funded(VAULT, (a, 300), (b, 150));
-    let pre_root = tree.root();
-    let built = build_write_set(
-        &op,
-        &G,
-        &DEV,
-        &econ_op_id(),
-        &EconomicPreState {
-            balances: &balances,
-            vault_reserves: &reserves,
-        },
-        &mut tree,
-        &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-    )
-    .unwrap();
-    // Swap the two debit indices between the sources.
-    let mut sources = built.credit_sources.clone();
-    let (d0, d1) = match (&sources[0], &sources[1]) {
-        (
-            dsm::economic::credit::CreditSource::SameTransitionMove(x),
-            dsm::economic::credit::CreditSource::SameTransitionMove(y),
-        ) => (x.debit_mutation_index, y.debit_mutation_index),
-        _ => panic!("both sources are same-moves"),
-    };
-    for (i, new_debit) in [(0, d1), (1, d0)] {
-        if let dsm::economic::credit::CreditSource::SameTransitionMove(m) = &mut sources[i] {
-            m.debit_mutation_index = new_debit;
-        }
-    }
-    let forged = EconomicTransitionWitness::new(
-        pre_root,
-        built.post_root,
-        econ_op_id(),
-        dsm::economic::faucet::dsm_operation_digest(&op.to_bytes()),
-        built.mutations,
-        sources,
-    )
-    .expect("structurally well-formed");
-    assert!(matches!(
-        verify_operation_write_set(&op, &G, &DEV, &forged),
-        Err(WriteSetError::WrongWriteSet { .. })
-    ));
-}
-
-#[test]
-fn a_funded_create_builder_refuses_bad_pre_state() {
-    let (a, b) = pair_assets();
-    // Insufficient balance on one leg (MC-CREATE-7 at build).
-    let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 100), (b, 200)], &[]);
-    assert!(matches!(
-        build_write_set(
-            &dlv_create_funded(VAULT, (a, 300), (b, 150)),
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-        ),
-        Err(WriteSetError::InsufficientBalance { .. })
-    ));
-    // An existing reserve leaf — any generation, a closed vault's terminal
-    // zero included — makes the vault id unusable (MC-CREATE-3).
-    let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 500), (b, 200)], &[(a, 0, 9)]);
-    assert!(matches!(
-        build_write_set(
-            &dlv_create_funded(VAULT, (a, 300), (b, 150)),
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-        ),
-        Err(WriteSetError::WrongWriteSet { .. })
-    ));
-}
-
-#[test]
-fn a_close_near_miss_is_refused() {
-    let (a, b) = pair_assets();
-    let (tree, balances, reserves) = dlv_pre_state(&[], &[(a, 300, 4), (b, 150, 4)]);
-    let op = dlv_close(VAULT, (a, 300), (b, 150), 4, 5);
-    let witness = dlv_round_trip(&op, tree, balances, reserves);
-    // Partial drain claim (MC-CLOSE-1/3): a close naming less than the full
-    // reserve does not match the witness.
-    assert!(verify_operation_write_set(
-        &dlv_close(VAULT, (a, 299), (b, 150), 4, 5),
-        &G,
-        &DEV,
-        &witness
-    )
-    .is_err());
-    // Not a unit generation step (MC-CLOSE-2) — refused at derivation.
-    assert!(matches!(
-        verify_operation_write_set(
-            &dlv_close(VAULT, (a, 300), (b, 150), 4, 6),
-            &G,
-            &DEV,
-            &witness
-        ),
-        Err(WriteSetError::MalformedVaultOperation { .. })
-    ));
-    // Wrong parent generation.
-    assert!(verify_operation_write_set(
-        &dlv_close(VAULT, (a, 300), (b, 150), 3, 4),
-        &G,
-        &DEV,
-        &witness
-    )
-    .is_err());
-}
-
-#[test]
-fn a_close_builder_requires_the_exact_reserve_pre_state() {
-    let (a, b) = pair_assets();
-    // Missing leg (MC-CLOSE-4 at build).
-    let (mut tree, balances, reserves) = dlv_pre_state(&[], &[(a, 300, 4)]);
-    assert!(matches!(
-        build_write_set(
-            &dlv_close(VAULT, (a, 300), (b, 150), 4, 5),
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-        ),
-        Err(WriteSetError::WrongWriteSet { .. })
-    ));
-    // Amount mismatch: the op must drain EXACTLY what the leaf holds.
-    let (mut tree, balances, reserves) = dlv_pre_state(&[], &[(a, 300, 4), (b, 149, 4)]);
-    assert!(matches!(
-        build_write_set(
-            &dlv_close(VAULT, (a, 300), (b, 150), 4, 5),
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-        ),
-        Err(WriteSetError::WrongWriteSet { .. })
-    ));
-}
-
-#[test]
-fn the_dlv_value_write_sets_demand_their_facts() {
-    let (a, b) = pair_assets();
-    let (mut tree, balances, reserves) = dlv_pre_state(&[(a, 500)], &[]);
-    let settle = Operation::DlvSettle {
-        vault_id: VAULT.to_vec(),
-        owner_public_key: vec![0xAB; 64],
-        owner_devid: [0x71; 32],
-        owner_genesis: [0x72; 32],
-        input_policy_commit: a,
-        output_policy_commit: b,
-        parent_sequence: 4,
-        parent_binding: [0x73; 32],
-        route_commit_bytes: vec![1, 2, 3],
-        external_commitment_x: [0x74; 32],
-        input_amount: 10,
-        output_amount: 9,
-        fee_bps: 30,
-        sigma: [0x75; 32],
-        settler_public_key: vec![0xAC; 64],
-        settler_devid: DEV,
-        settlement_receipt_id: dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
-            &VAULT,
-            &[0x74; 32],
-        ),
-        signature: Vec::new(),
-        mode: TransactionMode::Unilateral,
-    };
-    let apply = Operation::DlvOwnerApplyV2 {
-        vault_id: VAULT.to_vec(),
-        settlement_receipt_id: [0x76; 32],
-        pending_pointer_x: [0x74; 32],
-        parent_sequence: 4,
-        new_sequence: 5,
-        parent_binding: [0x73; 32],
-        input_policy_commit: a,
-        output_policy_commit: b,
-        input_amount: 10,
-        output_amount: 9,
-        fee_bps: 30,
-        signature: Vec::new(),
-        mode: TransactionMode::Unilateral,
-    };
-    // PR3: the settle write set EXISTS — but it demands its reserve
-    // consumption facts; bare facts are a producer error, not a deferral.
-    assert!(matches!(
-        build_write_set(
-            &settle,
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            // Bundle context SUPPLIED, so the refusal below is about the facts
-            // and not about the context this settle is missing.
-            &dsm::economic::write_set::EconomicWriteContext::DlvSettle {
-                bundle_id: [0xBB; 32]
-            },
-        ),
-        Err(WriteSetError::FactsDoNotMatchOperation)
-    ));
-    // PR4: the v2 owner apply's write set EXISTS — bare facts are the
-    // producer error now, not a deferral.
-    assert!(matches!(
-        build_write_set(
-            &apply,
-            &G,
-            &DEV,
-            &econ_op_id(),
-            &EconomicPreState {
-                balances: &balances,
-                vault_reserves: &reserves
-            },
-            &mut tree,
-            &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-        ),
-        Err(WriteSetError::FactsDoNotMatchOperation)
-    ));
-}
-
 // ── SoFi: the two inserts P15-6 and P15-12 specify ─────────────────────────
 
 const P_CREATE: u64 = 7;
@@ -1193,10 +722,9 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("the first setup builds");
     // The second does not.
@@ -1205,10 +733,9 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     );
     assert!(
         matches!(again, Err(WriteSetError::WrongWriteSet { .. })),
@@ -1267,10 +794,9 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
             &G,
             &DEV,
             &econ_op_id(),
-            &EconomicPreState::balances_only(&bal),
+            &EconomicPreState::new(&bal),
             &mut tree,
             &CreditSourceFacts::None,
-            &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
         )
         .map(|_| ())
     };
@@ -1324,10 +850,9 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let creation_witness = witness_for(pre_root, built, &create);
@@ -1348,10 +873,9 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let setup_witness = witness_for(pre_root, built, &setup);
@@ -1425,10 +949,9 @@ fn a_setup_naming_a_foreign_genesis_is_refused() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     );
     assert!(
         matches!(built, Err(WriteSetError::MalformedVaultOperation { .. })),
@@ -1453,10 +976,9 @@ fn a_setups_root_is_the_root_its_own_transition_produces() {
         &G,
         &DEV,
         &econ_op_id(),
-        &EconomicPreState::balances_only(&BTreeMap::new()),
+        &EconomicPreState::new(&BTreeMap::new()),
         &mut tree,
         &CreditSourceFacts::None,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("buildable");
     let post_root = built.post_root;

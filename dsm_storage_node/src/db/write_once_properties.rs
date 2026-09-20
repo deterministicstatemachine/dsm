@@ -2,9 +2,9 @@
 
 //! Write-once register properties, ON WHICHEVER BACKEND IS COMPILED.
 //!
-//! This node serves three one-shot registers — the settlement slot, the
-//! faucet ticket, and the economic root — and every economic argument built
-//! on them assumes the same four things of each cell:
+//! This node serves one one-shot register — the ERA faucet ticket, which is
+//! native emission, not market settlement — and the faucet's
+//! argument assumes four things of its cell:
 //!
 //! 1. the first bytes accepted are the bytes the cell holds;
 //! 2. re-submitting those exact bytes re-acks rather than refusing;
@@ -77,26 +77,13 @@ pub(crate) fn unique_key(tag: u8) -> [u8; 32] {
     id
 }
 
-/// The one outcome vocabulary these properties are stated in. The settlement
-/// register keeps its own historical enum and the other two share
-/// `OneShotOutcome`; both collapse to the same three answers, and stating the
-/// properties once over this enum is what keeps the three registers honest
-/// against each other.
+/// The one outcome vocabulary these properties are stated in; the register's
+/// `OneShotOutcome` collapses to the same three answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Accepted,
     Reack,
     Refused(Vec<u8>),
-}
-
-impl From<db::SlotClaimOutcome> for Outcome {
-    fn from(o: db::SlotClaimOutcome) -> Self {
-        match o {
-            db::SlotClaimOutcome::Accepted => Outcome::Accepted,
-            db::SlotClaimOutcome::AlreadyHeldIdentical => Outcome::Reack,
-            db::SlotClaimOutcome::Refused { held_digest } => Outcome::Refused(held_digest),
-        }
-    }
 }
 
 impl From<db::OneShotOutcome> for Outcome {
@@ -251,21 +238,6 @@ macro_rules! write_once_register {
 }
 
 write_once_register!(
-    settlement_slot,
-    tag = 0x11,
-    claim = |pool, key, bytes, digest| db::claim_settlement_slot(
-        pool,
-        key,
-        7,
-        bytes,
-        digest,
-        b"pk",
-        &[0x6B; 32]
-    ),
-    held = |pool, key| db::get_settlement_slot_claim(pool, key, 7),
-);
-
-write_once_register!(
     faucet_ticket,
     tag = 0x22,
     claim = |pool, key, bytes, digest| db::claim_faucet_ticket(
@@ -278,18 +250,4 @@ write_once_register!(
         &[0x6B; 32]
     ),
     held = |pool, key| db::get_faucet_ticket_claim(pool, key, 3),
-);
-
-write_once_register!(
-    economic_root,
-    tag = 0x33,
-    claim = |pool, key, bytes, digest| db::claim_economic_root(
-        pool,
-        key,
-        bytes,
-        digest,
-        b"pk",
-        &[0x6B; 32]
-    ),
-    held = |pool, key| db::get_economic_root_claim(pool, key),
 );

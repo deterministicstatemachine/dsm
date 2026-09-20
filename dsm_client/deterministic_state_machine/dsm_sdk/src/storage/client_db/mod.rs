@@ -15,7 +15,6 @@ pub use crate::storage::codecs::{
 
 // --- Submodules (domain-specific) ---
 
-pub mod amm_vault_records;
 pub mod anchor_enrollments;
 mod auth_tokens;
 pub(crate) mod bcr;
@@ -29,9 +28,6 @@ pub mod cert_chain;
 mod cert_resync;
 mod contacts;
 pub mod counterparty_canonical_heads;
-pub mod dlv_close_intent; // durable pre-claim intent for dlv.close (namespaced)
-pub mod dlv_lineage_quarantine; // 2c-C3.1 durable lineage quarantine + finality record (namespaced)
-mod dlv_receipts;
 pub mod economic_admission;
 pub mod economic_faucet;
 pub mod economic_lineage;
@@ -49,15 +45,12 @@ pub mod recipient_staging;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
-pub mod settlement_slot_claim_local; // this device's frozen slot-claim envelopes (namespaced)
 pub mod sofi_smt_nodes; // SoFi v8 persistent DLV tree nodes and root pins (dark; namespaced)
 mod system_peers;
 pub mod token_registry;
 mod tokens;
-pub mod trader_parent_fence; // Req 6.23 durable initiating-trader parent fence (namespaced)
 mod transactions;
 pub mod types;
-pub mod vault_generation_consumption;
 mod vault_records;
 mod vaults;
 mod wallet_init;
@@ -82,8 +75,6 @@ pub use sender_outbox::*;
 pub use sender_proposal::*;
 pub use contacts::*;
 pub use counterparty_canonical_heads::*;
-pub use dlv_receipts::*;
-pub use vault_generation_consumption::*;
 pub use export::*;
 pub use genesis::*;
 pub use manifold_seeds::*;
@@ -436,7 +427,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// DAG only); `recipient_outbound_reply` gains `held` (the B→A release is
 /// frozen at accept and promoted to deliverable in the terminal admission
 /// transaction — ECON_ADMITTED releases it atomically).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 13;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 14;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -575,31 +566,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (object_key, member_id)
         );
 
-        -- THIS DEVICE'S frozen settlement-slot claim envelopes, keyed by the slot
-        -- they claim. Signed + canonically encoded ONCE and replayed byte-for-
-        -- byte on every retry/recovery (register members compare exact bytes).
-        -- Never updated.
-        -- DURABLE PRE-CLAIM INTENT for `dlv.close`: the exact bytes this device
-        -- will publish, claim and advance, written BEFORE anything external
-        -- happens so a crash resumes rather than re-signs (the register compares
-        -- exact bytes). Recovery orchestration ONLY — never authority: the
-        -- canonical state decides whether a vault is closed, and terminal
-        -- publication is derived from the frozen artifacts, not stored here.
-        CREATE TABLE IF NOT EXISTS dlv_close_intent(
-            insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
-            vault_id          BLOB NOT NULL,
-            parent_sequence   INTEGER NOT NULL,
-            state             TEXT NOT NULL CHECK (state IN
-                                ('prepared_close','claim_published',
-                                 'canonical_close_committed','abandoned')),
-            op_bytes          BLOB NOT NULL,
-            close_commitment  BLOB NOT NULL,
-            pointer_key       TEXT NOT NULL,
-            pointer_bytes     BLOB NOT NULL,
-            storage_set_id    BLOB NOT NULL,
-            UNIQUE (vault_id, parent_sequence)
-        );
-
         -- SoFi v8: the persistent DLV tree. A node is stored under its Merkle
         -- value and never rewritten; a root lives while it holds a pin. Nodes
         -- and a pin are committed in one transaction, and a commit is refused
@@ -618,71 +584,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             root BLOB PRIMARY KEY CHECK (length(root) = 32),
             pins INTEGER NOT NULL CHECK (pins > 0)
         ) WITHOUT ROWID;
-
-        -- Req 6.23: the initiating-trader parent fence. Written BEFORE the
-        -- first mutating QuorumBind op; restored before post-restart bilateral
-        -- advancement. One row per (trader parent, attempt); at most one is
-        -- unresolved for a parent at a time.
-        CREATE TABLE IF NOT EXISTS trader_parent_fence(
-            insertion_ordinal              INTEGER PRIMARY KEY AUTOINCREMENT,
-            trader_chain_id                BLOB NOT NULL,
-            trader_parent_state_commitment BLOB NOT NULL,
-            tx_id                          BLOB NOT NULL,
-            ballot                         INTEGER NOT NULL,
-            storage_set_id                 BLOB NOT NULL,
-            value_addr                     BLOB NOT NULL,
-            state                          TEXT NOT NULL CHECK (state IN
-                                             ('fenced','committed_awaiting_acceptance',
-                                              'released','released_no_advance')),
-            permitted_successor            BLOB,
-            UNIQUE (trader_chain_id, trader_parent_state_commitment, tx_id)
-        );
-
-        -- 2c-C3.1: every qualifying binding finality this verifier established
-        -- at a key, with the read (or the commit) that established it.
-        -- Write-once per (vault, c_n). The duplicate-finality trigger compares
-        -- a NEW finality against this row on VALUE, never on round — one read
-        -- at the canonical quorum cannot show two chosen values, so the
-        -- contradiction Req 6.3 names is only ever seen across reads.
-        CREATE TABLE IF NOT EXISTS dlv_binding_finality_observed(
-            vault_id         BLOB NOT NULL,
-            c_n              BLOB NOT NULL,
-            generation       INTEGER NOT NULL,
-            tx_id            BLOB NOT NULL,
-            value_digest     BLOB NOT NULL,
-            value_addr       BLOB NOT NULL,
-            round_counter    INTEGER NOT NULL,
-            round_proposer   BLOB NOT NULL,
-            holders          INTEGER NOT NULL,
-            storage_set_id   BLOB NOT NULL,
-            quorum           INTEGER NOT NULL,
-            evidence         BLOB NOT NULL,
-            PRIMARY KEY (vault_id, c_n)
-        );
-
-        -- 2c-C3.1: lineage quarantine roots. One row per (vault, root c_n)
-        -- holding BOTH evidence objects. Never updated, never deleted: ruling E
-        -- defines no clearing path, so the module exposes none. Descendants
-        -- are refused by the generation bound, not enumerated.
-        CREATE TABLE IF NOT EXISTS dlv_lineage_quarantine(
-            insertion_ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
-            vault_id          BLOB NOT NULL,
-            root_c_n          BLOB NOT NULL,
-            root_generation   INTEGER NOT NULL,
-            storage_set_id    BLOB NOT NULL,
-            quorum            INTEGER NOT NULL,
-            first_evidence    BLOB NOT NULL,
-            second_evidence   BLOB NOT NULL,
-            UNIQUE (vault_id, root_c_n)
-        );
-
-        CREATE TABLE IF NOT EXISTS settlement_slot_claim_local(
-            vault_id        BLOB NOT NULL,
-            parent_sequence INTEGER NOT NULL,
-            x               BLOB NOT NULL,
-            envelope        BLOB NOT NULL,
-            PRIMARY KEY (vault_id, parent_sequence, x)
-        );
 
         -- v8: this device's frozen ERA faucet-ticket claim envelopes. Exact
         -- bytes, written before the first register write, replayed verbatim
@@ -1440,63 +1341,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at       INTEGER NOT NULL
         );
 
-        -- Canonical AMM vault record: the reconstruction inputs a restart
-        -- cannot re-derive. Reserves and sequence are deliberately ABSENT —
-        -- they live in the reserve leaves, authenticated by the device root,
-        -- and a second copy here would eventually disagree with them.
-        CREATE TABLE IF NOT EXISTS amm_vault_records(
-            vault_id            BLOB PRIMARY KEY,
-            owner_genesis       BLOB NOT NULL,
-            owner_devid         BLOB NOT NULL,
-            policy_commit_a     BLOB NOT NULL,
-            policy_commit_b     BLOB NOT NULL,
-            fee_bps             INTEGER NOT NULL,
-            -- DEPRECATION RESIDUE, scheduled for removal. Written with the
-            -- canonical ANCHOR_ENFORCEMENT_REQUIRED and read by no decision:
-            -- anchor binding is unconditional in the code that enforces it, so
-            -- this column could only ever have described a weaker posture than
-            -- the one in force. Do not add a reader.
-            anchor_enforcement  INTEGER NOT NULL,
-            policy_digest       BLOB NOT NULL,
-            -- The canonical storage set this vault was born under: a LOCAL COPY of
-            -- the value the vault's signed birth anchor binds. Consumers resolve
-            -- the anchor's set; this cache must equal it (fail closed on mismatch).
-            storage_set_id      BLOB NOT NULL,
-            -- The owner's CURRENT published baseline: `CCB(V_n)` (schema-3
-            -- vault state) and its `AnchorPresentationV3` proto bytes, exactly
-            -- as published — the birth state at creation, the terminal state
-            -- after close. Every owner-side composition starts from these;
-            -- c_n recomputes from the blob, so no digest is cached beside it.
-            baseline_state_ccb     BLOB NOT NULL DEFAULT X'',
-            baseline_presentation  BLOB NOT NULL DEFAULT X'',
-            -- The vault's frozen `VaultPostProto` bytes, produced once at
-            -- `dlv.create` after the vault is finalized and stamped. The
-            -- routing advertisement's full proto mirror replays these exact
-            -- bytes, so publishing survives a restart without consulting the
-            -- in-memory DLVManager. Empty means the producer never ran: the
-            -- ad publisher fails closed rather than re-deriving.
-            vault_post_proto       BLOB NOT NULL DEFAULT X'',
-            -- WHERE THE OWNER'S ECONOMIC RESERVE PROOF LIVES. The admitted
-            -- funded create publishes an `EconomicProofArtifactV1` proving the
-            -- vault's reserve leaves under the owner's registered economic
-            -- root; these two carry its content address and the position that
-            -- root sits at, so the routing advertisement can hand a trader a
-            -- LOCATOR. Untrusted on the way out and on the way back: a reader
-            -- resolves the position's root from the register itself and
-            -- re-derives every path, so a wrong value here can only fail.
-            -- Empty address means the create predates the artifact or its
-            -- publication never ran; consumers fail closed rather than guess.
-            economic_proof_addr     BLOB NOT NULL DEFAULT X'',
-            economic_proof_position INTEGER NOT NULL DEFAULT 0,
-            -- The inner digest of the vault's BIRTH AnchorPresentationV3,
-            -- written once at `dlv.create` and never moved (amendment 2c-G, G3
-            -- blocker ruling). The baseline columns above move forward; this
-            -- is what the routing advertisement names as the immutable
-            -- historical fallback anchor. Derived at birth, never supplied.
-            birth_presentation_digest BLOB NOT NULL DEFAULT X'',
-            created_at          INTEGER NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS vault_records(
             vault_op_id         TEXT PRIMARY KEY,
             direction           TEXT NOT NULL,
@@ -1561,20 +1405,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             ON ble_reassembly_state(frame_commitment);
         CREATE INDEX IF NOT EXISTS idx_ble_reassembly_counterparty
             ON ble_reassembly_state(counterparty_id) WHERE counterparty_id IS NOT NULL;
-
-        CREATE TABLE IF NOT EXISTS dlv_receipts(
-            sigma           BLOB PRIMARY KEY,
-            vault_id        TEXT NOT NULL,
-            genesis         BLOB NOT NULL,
-            devid_a         BLOB NOT NULL,
-            devid_b         BLOB NOT NULL,
-            receipt_cbor    BLOB NOT NULL,
-            sig_a           BLOB NOT NULL,
-            sig_b           BLOB,
-            created_at      INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_dlv_receipts_vault ON dlv_receipts(vault_id);
-        CREATE INDEX IF NOT EXISTS idx_dlv_receipts_genesis ON dlv_receipts(genesis);
 
         CREATE TABLE IF NOT EXISTS in_flight_withdrawals(
             withdrawal_id    TEXT PRIMARY KEY,
@@ -1657,26 +1487,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             prev_tip               BLOB NOT NULL,
             source_commitment      BLOB NOT NULL,
             updated_at             INTEGER NOT NULL
-        );
-
-        -- The durable "consume-once" claim for a vault generation. The core
-        -- `advance` already refuses a settlement that does not consume the
-        -- CURRENT generation (device_state.rs ApplySettlement), which closes the
-        -- value double-spend; this table adds the dimension the device root does
-        -- not carry — WHICH settlement consumed each generation — so the reconcile
-        -- route distinguishes an idempotent replay of the winner from a DIFFERENT
-        -- settlement racing the same parent, and the loser can never be reported
-        -- as a successful fold. UNIQUE(vault_id, parent_sequence) is the authority
-        -- (checked AT insert, never INSERT OR IGNORE); source_commitment is the
-        -- settlement receipt id that names the consuming step. Written inside the
-        -- fold's advance transaction, so it and the reserve move are atomic.
-        CREATE TABLE IF NOT EXISTS vault_generation_consumption(
-            vault_id           BLOB NOT NULL,
-            parent_sequence    INTEGER NOT NULL,
-            child_sequence     INTEGER NOT NULL,
-            source_commitment  BLOB NOT NULL,
-            created_at         INTEGER NOT NULL,
-            UNIQUE (vault_id, parent_sequence)
         );
 
         -- §11.1 sender-side DEFERRED Local chain-head advance. The new

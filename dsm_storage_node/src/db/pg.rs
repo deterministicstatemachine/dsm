@@ -398,160 +398,35 @@ pub async fn register_incarnation(pool: &Pool) -> Result<[u8; 32]> {
 
 // ===================== Generic conditional binding (Rev 15 §15.5) =====================
 
-use super::binding::{decide_compare_exchange, CasOutcome, Replacement, StoredBinding};
-
-fn row_to_binding(row: &tokio_postgres::Row) -> Result<StoredBinding> {
-    let key: Vec<u8> = row.get(0);
-    let record_bytes: Vec<u8> = row.get(1);
-    let record_digest: Vec<u8> = row.get(2);
-    let round_counter: i64 = row.get(3);
-    let proposer_id: Vec<u8> = row.get(4);
-    Ok(StoredBinding {
-        key: key
-            .try_into()
-            .map_err(|_| anyhow!("stored binding key is not 32 bytes"))?,
-        record_bytes,
-        record_digest: record_digest
-            .try_into()
-            .map_err(|_| anyhow!("stored binding digest is not 32 bytes"))?,
-        round: dsm::storage::binding_record::Round {
-            counter: u64::try_from(round_counter)
-                .map_err(|_| anyhow!("stored round counter is negative"))?,
-            proposer_id: proposer_id
-                .try_into()
-                .map_err(|_| anyhow!("stored proposer id is not 32 bytes"))?,
-        },
-    })
-}
-
-/// `CompareExchangeMany` at ONE member (Req 15.6): every named key changes to
-/// the replacement record or none does, decided by [`decide_compare_exchange`]
-/// inside one durable transaction. This member knows nothing of `q`, contacts
-/// no peer, and decides nothing about what the record means.
-///
-/// Concurrency: a transaction-scoped advisory lock is taken per key, in the
-/// caller-supplied strictly ascending key order, so two exchanges over
-/// overlapping key sets serialise instead of deadlocking or interleaving.
-/// Absent keys cannot be row-locked, which is why the lock is advisory.
-#[allow(clippy::too_many_arguments)]
-pub async fn compare_exchange_many(
-    pool: &Pool,
-    keys: &[[u8; 32]],
-    expected_digest: &[u8; 32],
-    replacement_bytes: &[u8],
-    replacement_digest: &[u8; 32],
-    replacement_round: dsm::storage::binding_record::Round,
-) -> Result<CasOutcome> {
-    dsm::storage::binding_record::validate_key_set(keys)
-        .map_err(|e| anyhow!("compare_exchange_many: {e}"))?;
-    let mut client = pool.get().await?;
-    let tx = begin_durable_write(&mut client).await?;
-    // The lock id is the key's leading eight bytes as a signed 64-bit
-    // integer. Keys are 32-byte digests, so those bytes are uniformly
-    // distributed and a collision between distinct keys is negligible; and a
-    // collision would only serialise two exchanges that did not need it,
-    // never let two interleave. Computed here rather than in SQL so no text
-    // cast is involved.
-    for k in keys {
-        let lock_id = i64::from_be_bytes([k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7]]);
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&lock_id])
-            .await?;
-    }
-    let key_vecs: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
-    let rows = tx
-        .query(
-            "SELECT key, record_bytes, record_digest, round_counter, proposer_id
-               FROM binding_records WHERE key = ANY($1)",
-            &[&key_vecs],
-        )
-        .await?;
-    let mut held = std::collections::BTreeMap::new();
-    for r in &rows {
-        let b = row_to_binding(r)?;
-        held.insert(b.key, b);
-    }
-    let outcome = decide_compare_exchange(
-        keys,
-        &held,
-        expected_digest,
-        &Replacement {
-            bytes: replacement_bytes,
-            digest: *replacement_digest,
-            round: replacement_round,
-        },
-    );
-    if let CasOutcome::Applied { .. } = &outcome {
-        let counter_i64 = i64::try_from(replacement_round.counter)
-            .map_err(|_| anyhow!("round counter does not fit in i64"))?;
-        let stmt = tx
-            .prepare_cached(
-                "INSERT INTO binding_records
-                   (key, record_bytes, record_digest, round_counter, proposer_id)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (key) DO UPDATE SET
-                   record_bytes = EXCLUDED.record_bytes,
-                   record_digest = EXCLUDED.record_digest,
-                   round_counter = EXCLUDED.round_counter,
-                   proposer_id = EXCLUDED.proposer_id",
-            )
-            .await?;
-        for k in keys {
-            tx.execute(
-                &stmt,
-                &[
-                    &k.as_slice(),
-                    &replacement_bytes,
-                    &replacement_digest.as_slice(),
-                    &counter_i64,
-                    &replacement_round.proposer_id.as_slice(),
-                ],
-            )
-            .await?;
-        }
-    }
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// `ReadBinding` at one member: what it holds for each key, in key order,
-/// `None` where it holds nothing. Absence is this member's assertion.
-pub async fn read_bindings(pool: &Pool, keys: &[[u8; 32]]) -> Result<Vec<Option<StoredBinding>>> {
-    dsm::storage::binding_record::validate_key_set(keys)
-        .map_err(|e| anyhow!("read_bindings: {e}"))?;
-    let client = pool.get().await?;
-    let key_vecs: Vec<Vec<u8>> = keys.iter().map(|k| k.to_vec()).collect();
-    let rows = client
-        .query(
-            "SELECT key, record_bytes, record_digest, round_counter, proposer_id
-               FROM binding_records WHERE key = ANY($1)",
-            &[&key_vecs],
-        )
-        .await?;
-    let mut held = std::collections::BTreeMap::new();
-    for r in &rows {
-        let b = row_to_binding(r)?;
-        held.insert(b.key, b);
-    }
-    Ok(keys.iter().map(|k| held.remove(k)).collect())
-}
-
 /// Initialize database schema for storage node.
 pub async fn init_db(pool: &Pool) -> Result<()> {
     let client = pool.get().await?;
     client
         .batch_execute(
-            r#"CREATE TABLE IF NOT EXISTS binding_records (
-                    key           BYTEA PRIMARY KEY,
-                    record_bytes  BYTEA NOT NULL,
-                    record_digest BYTEA NOT NULL,
-                    round_counter BIGINT NOT NULL,
-                    proposer_id   BYTEA NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS register_incarnation (
+            r#"CREATE TABLE IF NOT EXISTS register_incarnation (
                     only_row    SMALLINT PRIMARY KEY CHECK (only_row = 1),
                     incarnation BYTEA NOT NULL
                 );
+
+                -- Keyed cells: the member keeps EVERY value it is given for a
+                -- key, in arrival order, and never refuses, replaces or
+                -- compares. Which value counts is the reader's question.
+                CREATE TABLE IF NOT EXISTS cells (
+                    seq       BIGSERIAL PRIMARY KEY,
+                    namespace BYTEA NOT NULL,
+                    cell_key  BYTEA NOT NULL,
+                    value     BYTEA NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS cells_by_key ON cells (namespace, cell_key, seq);
+
+                -- Indexes: content addresses appended under a locator, never
+                -- removed, read back in append order.
+                CREATE TABLE IF NOT EXISTS index_entries (
+                    seq     BIGSERIAL PRIMARY KEY,
+                    locator BYTEA NOT NULL,
+                    addr    BYTEA NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS index_entries_by_locator ON index_entries (locator, seq);
 
                 CREATE TABLE IF NOT EXISTS dlv_slots (
                     dlv_id         BYTEA PRIMARY KEY,
@@ -826,28 +701,6 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     first_written_tick BIGINT NOT NULL
                 );
 
-                -- SETTLEMENT-SLOT CLAIM REGISTER: a distributed, crash-fault-
-                -- tolerant, ONE-SHOT quorum register keyed (vault_id,
-                -- parent_sequence). This node holds AT MOST ONE value per slot,
-                -- forever: the first claim bytes win, identical bytes re-ack,
-                -- different bytes are refused. There is no update and no delete.
-                -- Its non-equivocation (a member never acknowledges two values
-                -- for one slot, and that survives restart) is part of DLV's
-                -- no-double-consumption safety argument — restoring this table
-                -- from a stale snapshot is a SAFETY violation, not an
-                -- availability event. This is not DSM consensus: the node never
-                -- judges whether the settlement/close is valid, only who wrote
-                -- first.
-                CREATE TABLE IF NOT EXISTS settlement_slot_claims (
-                    vault_id            BYTEA NOT NULL,
-                    parent_sequence     BIGINT NOT NULL,
-                    claim_bytes         BYTEA NOT NULL,
-                    claim_digest        BYTEA NOT NULL,
-                    claimant_public_key BYTEA NOT NULL,
-                    storage_set_id      BYTEA NOT NULL,
-                    PRIMARY KEY (vault_id, parent_sequence)
-                );
-
                 -- ERA faucet ticket register: one row per CONSUMED ticket of
                 -- the network's finite bootstrap allocation (800M x 100 ERA).
                 -- Unused tickets are implicit. First-write-wins per
@@ -863,20 +716,6 @@ pub async fn init_db(pool: &Pool) -> Result<()> {
                     claimant_public_key BYTEA NOT NULL,
                     storage_set_id      BYTEA NOT NULL,
                     PRIMARY KEY (faucet_id, ticket_index)
-                );
-
-                -- Economic root register: the write-once cell one identity's
-                -- economic root occupies at one position. K_root is RECOMPUTED
-                -- by the handler from the decoded claim body, never
-                -- caller-supplied. Registered establishes NON-EQUIVOCATION
-                -- only; nodes never judge validity. Never UPDATEd, never
-                -- DELETEd: a burned cell stays burned.
-                CREATE TABLE IF NOT EXISTS economic_root_claims (
-                    k_root              BYTEA PRIMARY KEY,
-                    claim_bytes         BYTEA NOT NULL,
-                    claim_digest        BYTEA NOT NULL,
-                    claimant_public_key BYTEA NOT NULL,
-                    storage_set_id      BYTEA NOT NULL
                 );
 
                 -- Append-only Per-Device SMT head chain (spec §0.5 gap 13, R4
@@ -1154,17 +993,6 @@ pub async fn get_device_tree_state_version(pool: &Pool, genesis_b32: &str) -> Re
 // Recovery-authority anchor — single-assignment (spec §0.5 bind-once)
 // ============================================================
 
-/// Outcome of one write-once attempt on the settlement-slot register.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SlotClaimOutcome {
-    /// No prior claim for this slot; these bytes now hold it, durably.
-    Accepted,
-    /// The slot already holds exactly these bytes — idempotent re-ack.
-    AlreadyHeldIdentical,
-    /// The slot holds DIFFERENT bytes; refused. `held_digest` names them.
-    Refused { held_digest: Vec<u8> },
-}
-
 /// Begin a write transaction whose commit is durable BEFORE it is
 /// acknowledged.
 ///
@@ -1186,67 +1014,6 @@ async fn begin_durable_write(
     tx.batch_execute("SET LOCAL synchronous_commit = on")
         .await?;
     Ok(tx)
-}
-
-/// Write-once conditional acceptance for `(vault_id, parent_sequence)` in ONE
-/// atomic write transaction over the unique key: `INSERT … ON CONFLICT DO
-/// NOTHING`, then read the held row inside the same transaction. First bytes
-/// win; identical bytes re-ack; different bytes refuse. Never check-then-insert
-/// outside the transaction. Commits durably — see [`begin_durable_write`].
-pub async fn claim_settlement_slot(
-    pool: &Pool,
-    vault_id: &[u8],
-    parent_sequence: u64,
-    claim_bytes: &[u8],
-    claim_digest: &[u8],
-    claimant_public_key: &[u8],
-    storage_set_id: &[u8],
-) -> Result<SlotClaimOutcome> {
-    let seq_i64 = i64::try_from(parent_sequence)
-        .map_err(|_| anyhow::anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
-    let mut client = pool.get().await?;
-    let tx = begin_durable_write(&mut client).await?;
-    let stmt = tx
-        .prepare_cached(
-            "INSERT INTO settlement_slot_claims
-               (vault_id, parent_sequence, claim_bytes, claim_digest, claimant_public_key,
-                storage_set_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (vault_id, parent_sequence) DO NOTHING",
-        )
-        .await?;
-    let inserted = tx
-        .execute(
-            &stmt,
-            &[
-                &vault_id,
-                &seq_i64,
-                &claim_bytes,
-                &claim_digest,
-                &claimant_public_key,
-                &storage_set_id,
-            ],
-        )
-        .await?;
-    let outcome = if inserted == 1 {
-        SlotClaimOutcome::Accepted
-    } else {
-        let row = tx
-            .query_one(
-                "SELECT claim_digest FROM settlement_slot_claims
-                  WHERE vault_id = $1 AND parent_sequence = $2",
-                &[&vault_id, &seq_i64],
-            )
-            .await?;
-        let held: Vec<u8> = row.get(0);
-        if held == claim_digest {
-            SlotClaimOutcome::AlreadyHeldIdentical
-        } else {
-            SlotClaimOutcome::Refused { held_digest: held }
-        }
-    };
-    tx.commit().await?;
-    Ok(outcome)
 }
 
 /// Outcome of one write-once attempt on a one-shot register cell. Shared by
@@ -1331,93 +1098,6 @@ pub async fn get_faucet_ticket_claim(
             "SELECT claim_bytes, claim_digest FROM faucet_ticket_claims
               WHERE faucet_id = $1 AND ticket_index = $2",
             &[&faucet_id, &idx_i64],
-        )
-        .await?;
-    Ok(row.map(|r| (r.get(0), r.get(1))))
-}
-
-/// Write-once acceptance for one economic-root cell — insert-if-absent,
-/// same-tx read-back. Commits durably — see [`begin_durable_write`].
-pub async fn claim_economic_root(
-    pool: &Pool,
-    k_root: &[u8],
-    claim_bytes: &[u8],
-    claim_digest: &[u8],
-    claimant_public_key: &[u8],
-    storage_set_id: &[u8],
-) -> Result<OneShotOutcome> {
-    let mut client = pool.get().await?;
-    let tx = begin_durable_write(&mut client).await?;
-    let stmt = tx
-        .prepare_cached(
-            "INSERT INTO economic_root_claims
-               (k_root, claim_bytes, claim_digest, claimant_public_key, storage_set_id)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (k_root) DO NOTHING",
-        )
-        .await?;
-    let inserted = tx
-        .execute(
-            &stmt,
-            &[
-                &k_root,
-                &claim_bytes,
-                &claim_digest,
-                &claimant_public_key,
-                &storage_set_id,
-            ],
-        )
-        .await?;
-    let outcome = if inserted == 1 {
-        OneShotOutcome::Accepted
-    } else {
-        let row = tx
-            .query_one(
-                "SELECT claim_digest FROM economic_root_claims WHERE k_root = $1",
-                &[&k_root],
-            )
-            .await?;
-        let held: Vec<u8> = row.get(0);
-        if held == claim_digest {
-            OneShotOutcome::AlreadyHeldIdentical
-        } else {
-            OneShotOutcome::Refused { held_digest: held }
-        }
-    };
-    tx.commit().await?;
-    Ok(outcome)
-}
-
-/// The claim this node holds for one economic-root cell.
-pub async fn get_economic_root_claim(
-    pool: &Pool,
-    k_root: &[u8],
-) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT claim_bytes, claim_digest FROM economic_root_claims WHERE k_root = $1",
-            &[&k_root],
-        )
-        .await?;
-    Ok(row.map(|r| (r.get(0), r.get(1))))
-}
-
-/// The claim this node holds for `(vault_id, parent_sequence)`, as
-/// `(claim_bytes, claim_digest)`, or `None`.
-pub async fn get_settlement_slot_claim(
-    pool: &Pool,
-    vault_id: &[u8],
-    parent_sequence: u64,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-    let seq_i64 = i64::try_from(parent_sequence)
-        .map_err(|_| anyhow::anyhow!("parent_sequence {parent_sequence} does not fit in i64"))?;
-    let client = pool.get().await?;
-    let row = client
-        .query_opt(
-            "SELECT claim_bytes, claim_digest FROM settlement_slot_claims
-              WHERE vault_id = $1 AND parent_sequence = $2",
-            &[&vault_id, &seq_i64],
         )
         .await?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
@@ -2751,4 +2431,65 @@ pub async fn verify_bytecommit_chain_empty(
         .await?;
     let count: i64 = row.get(0);
     Ok(count >= required_d)
+}
+
+// ── keyed cells and indexes: bytes in, bytes out ───────────────────────────
+
+/// Keep `value` for `(namespace, key)`, after anything already held there.
+/// Nothing is compared and nothing is refused.
+pub async fn put_cell(pool: &Pool, namespace: &[u8], key: &[u8], value: &[u8]) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO cells (namespace, cell_key, value) VALUES ($1, $2, $3)",
+            &[&namespace, &key, &value],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Everything held for `(namespace, key)`, in the order it arrived.
+pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT value FROM cells WHERE namespace = $1 AND cell_key = $2 ORDER BY seq ASC",
+            &[&namespace, &key],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<_, Vec<u8>>(0)).collect())
+}
+
+/// Append a content address under `locator`. Never removed.
+pub async fn append_index(pool: &Pool, locator: &[u8], addr: &[u8]) -> Result<()> {
+    let client = pool.get().await?;
+    client
+        .execute(
+            "INSERT INTO index_entries (locator, addr) VALUES ($1, $2)",
+            &[&locator, &addr],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Addresses under `locator` with `seq > after`, in append order, at most
+/// `limit`. Returns `(seq, addr)` so a reader can page from the last `seq`.
+pub async fn read_index(
+    pool: &Pool,
+    locator: &[u8],
+    after: i64,
+    limit: i64,
+) -> Result<Vec<(i64, Vec<u8>)>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT seq, addr FROM index_entries WHERE locator = $1 AND seq > $2 \
+             ORDER BY seq ASC LIMIT $3",
+            &[&locator, &after, &limit],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get::<_, i64>(0), r.get::<_, Vec<u8>>(1)))
+        .collect())
 }

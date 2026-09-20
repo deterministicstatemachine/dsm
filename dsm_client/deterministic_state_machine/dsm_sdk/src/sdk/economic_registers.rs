@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Client-side quorum operations on the economic write-once registers, plus
-//! ticket selection and the live provenance resolver.
+//! The client side of the economic registers, plus ticket selection and the
+//! live provenance resolver.
 //!
-//! ## Counting (Req 15.8, with the owner's tightened write rule)
+//! ## The root register is a cell (Part II §8, §13)
 //!
-//! A member's answer counts toward quorum ONLY when the echoed `x-dsm-node-id`
-//! equals the member id queried. On writes: `accepted` and `held-identical`
-//! count (attributed); a `refused` whose held digest equals OUR digest is an
-//! acceptance in different words (attributed, and not taken on trust
-//! otherwise); a generic `refused` NEVER counts. Unattributed refusals still
-//! count toward "contested" — an unattributed refusal can only fail the claim
-//! closed, never open.
+//! `K_root(q)` is a keyed cell that keeps every value it is given. The writer
+//! computes the leader from `s(q)` over the committed set and writes there
+//! first; Core derives `LeaderHeld` and `Final` from the raw reads. Nothing
+//! is counted and no node decides.
+//!
+//! ## Counting, faucet tickets only
+//!
+//! The native ERA emission register is left as it is: a member's answer
+//! counts toward quorum ONLY when the echoed `x-dsm-node-id` equals the
+//! member id queried. On writes: `accepted` and `held-identical` count
+//! (attributed); a `refused` whose held digest equals OUR digest is an
+//! acceptance in different words; a generic `refused` NEVER counts.
 //!
 //! ## Frozen envelopes
 //!
@@ -184,31 +189,65 @@ pub async fn claim_faucet_ticket(
     count_claim(&fanout, &digest, set.quorum())
 }
 
-/// Register the economic root with the FROZEN claim envelope bytes.
+/// The namespace of the economic root cells: the key domain's own bytes.
+fn economic_root_namespace() -> &'static [u8] {
+    dsm::common::domain_tags::TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY.source_bytes()
+}
+
+/// An object naming `K_root(q)`: a registered economic claim whose own
+/// coordinates derive that key. Bytes that are not one count as nothing
+/// (Part II §8): they are neither a rival nor a winner.
+fn names_root_key(value: &[u8], k_root: &[u8; 32]) -> bool {
+    dsm::economic::claim_envelope::decode_registered_economic_claim(value)
+        .map(|claim| {
+            let (genesis, devid) = claim.trader();
+            dsm::economic::register::economic_root_register_key(
+                &genesis,
+                &devid,
+                claim.economic_position(),
+            ) == *k_root
+        })
+        .unwrap_or(false)
+}
+
+/// Register this device's frozen root claim at `K_root(q)` (Part II §8): the
+/// leader of `s(q)` gets the bytes first, the other members after. Succeeds
+/// once the leader holds the write — the race at the key is then settled
+/// for these bytes unless another object got there first, which Core reads
+/// back as `LeaderHeld` of that object. Copies not reached now may be
+/// carried by anyone later; finality is never decided here.
 pub async fn register_economic_root(
     set: &StorageSet,
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    economic_position: u64,
+    parent_root: &[u8; 32],
     frozen_envelope: &[u8],
 ) -> Result<ClaimedCell, RegisterError> {
-    let digest =
-        dsm::economic::claim_envelope::economic_root_claim_envelope_digest(frozen_envelope);
-    let fanout = crate::sdk::storage_io::submit_economic_root_claim(set, frozen_envelope)
-        .await
-        .map_err(|_| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: set.len() as u32,
-        })?;
-    match count_claim(&fanout, &digest, set.quorum()) {
-        // A root cell is written ONLY by its owner with frozen bytes, so a
-        // contest is not a race lost — it is a cell this device owns holding
-        // bytes this device never sent from this store. Quarantine.
-        Err(RegisterError::Contested { refused_by }) => Err(RegisterError::Conflict {
-            detail: format!(
-                "{refused_by} member(s) hold a DIFFERENT record for this device's own \
-                 economic position"
-            ),
-        }),
-        other => other,
+    let k_root =
+        dsm::economic::register::economic_root_register_key(genesis, devid, economic_position);
+    let seed =
+        dsm::economic::register::position_seed(genesis, devid, economic_position, parent_root);
+    let total = set.len() as u32;
+    let write = crate::sdk::storage_io::write_cell_leader_first(
+        set,
+        economic_root_namespace(),
+        &k_root,
+        &seed,
+        frozen_envelope,
+    )
+    .await
+    .map_err(|_| RegisterError::StorageUnavailable { accepted: 0, total })?;
+    if !write.leader_reached {
+        return Err(RegisterError::StorageUnavailable {
+            accepted: write.copies,
+            total,
+        });
     }
+    Ok(ClaimedCell {
+        accepted: write.copies + 1,
+        total,
+    })
 }
 
 /// The quorum-agreed winner for one cell, or `None` when no winner is
@@ -248,61 +287,56 @@ pub async fn read_winning_faucet_ticket(
     read_cell_quorum(set, rows).await
 }
 
-/// Resolve the set a vault COMMITTED, fail-closed.
-///
-/// The id is re-derived from the committed member ids and the catalog entry
-/// must reproduce it, so configuration only says WHERE to reach a member — it
-/// can never substitute a different set. A verifier's own default fleet is its
-/// opinion; the vault's signed state is the rule.
-fn resolve_committed_set(
-    storage_set: &dsm::ccb::StorageSetMembers,
-) -> Result<crate::sdk::storage_set::StorageSet, RegisterError> {
-    let unavailable = || RegisterError::StorageUnavailable {
-        accepted: 0,
-        total: storage_set.len() as u32,
-    };
-    let id = dsm::ccb::storage_set_id(storage_set).map_err(|_| unavailable())?;
-    let catalog =
-        crate::sdk::storage_set::StorageSetCatalog::from_env_config().map_err(|_| unavailable())?;
-    catalog.resolve(&id).cloned().ok_or_else(unavailable)
-}
-
-/// OBSERVE one settlement-slot cell at the quorum the vault's owner committed.
-///
-/// This is the frontier walk's edge source. A write-once cell is the only
-/// answer in this system whose omission is not expressible: a set listing can
-/// silently omit a key and no signature repairs that, but a cell either holds
-/// a value or does not, and q attributed members saying "nothing here" is a
-/// fact rather than an absence of one.
-pub async fn observe_settlement_slot_cell(
-    set: &StorageSet,
-    vault_id: &[u8; 32],
-    parent_sequence: u64,
-    quorum: u32,
-) -> Result<dsm::economic::cell_observation::CellObservation, RegisterError> {
-    let rows = crate::sdk::storage_io::read_settlement_slot_cell(set, vault_id, parent_sequence)
-        .await
-        .map_err(|_| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: set.len() as u32,
-        })?;
-    Ok(dsm::economic::cell_observation::observe_cell(&rows, quorum))
-}
-
-/// The quorum winner for one economic-root cell, if established. Used for
-/// lost-response recovery: a crash after a register write is resolved by
-/// READING the register, never by re-signing.
+/// The FINAL value at `K_root(q)` (Part II §13), derived by Core from raw
+/// member reads: the leader's first object naming the key, held by two other
+/// members. `seed` is `s(q)` from a root the caller validated itself. `None`
+/// while the cell is open, or held at the leader but not yet copied; no key
+/// is ever dead, so there is no conflict to report.
 pub async fn read_economic_root_cell(
     set: &StorageSet,
     k_root: &[u8; 32],
+    seed: &[u8; 32],
 ) -> Result<Option<Vec<u8>>, RegisterError> {
-    let rows = crate::sdk::storage_io::read_economic_root_cell_rows(set, k_root)
+    use dsm::sofi::arith::{resolve, CellObservation, CellResolution};
+    use dsm::sofi::wire::STORAGE_MEMBER_COUNT;
+    let total = set.len() as u32;
+    let unavailable = || RegisterError::StorageUnavailable { accepted: 0, total };
+    let leader = crate::sdk::storage_io::leader_index(set, seed).map_err(|_| unavailable())?;
+    let reads = crate::sdk::storage_io::read_cell_raw(set, economic_root_namespace(), k_root)
         .await
-        .map_err(|_| RegisterError::StorageUnavailable {
-            accepted: 0,
-            total: set.len() as u32,
-        })?;
-    read_cell_quorum(set, rows).await
+        .map_err(|_| unavailable())?;
+    // Only objects naming the key are observed; everything else is nothing.
+    let naming: Vec<Option<Vec<&Vec<u8>>>> = reads
+        .iter()
+        .map(|r| {
+            r.as_ref().map(|values| {
+                values
+                    .iter()
+                    .filter(|v| names_root_key(v, k_root))
+                    .collect()
+            })
+        })
+        .collect();
+    let observations: [CellObservation; STORAGE_MEMBER_COUNT] = naming
+        .iter()
+        .map(|r| match r {
+            Some(values) => {
+                CellObservation::Holds(values.iter().map(|v| *blake3::hash(v).as_bytes()).collect())
+            }
+            None => CellObservation::Unknown,
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| unavailable())?;
+    match resolve(&observations, leader) {
+        CellResolution::Final(digest) => Ok(naming[leader].as_ref().and_then(|values| {
+            values
+                .iter()
+                .find(|v| *blake3::hash(v).as_bytes() == digest)
+                .map(|v| (*v).clone())
+        })),
+        CellResolution::LeaderHeld(_) | CellResolution::Unresolved => Ok(None),
+    }
 }
 
 /// The LIVE provenance resolver: register cells at quorum, immutable objects
@@ -341,54 +375,7 @@ impl LiveRegisterResolver<'_> {
     }
 }
 
-/// The vault's composed history for reserve provenance, through the SAME walk
-/// the route and the owner run (2c-D §14). A walk that cannot compose is
-/// `Incomplete`; an invalid successor or a safety violation says so, and is
-/// never read as an absence.
-fn composed_history_via_walk(
-    runtime: &tokio::runtime::Handle,
-    vault_id: &[u8; 32],
-    target_c_n: &[u8; 32],
-    parent: &dsm::ccb::VaultStateV2,
-    from_generation: u64,
-) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-    use crate::sdk::vault_state_composition::{compose_vault_history_until, CompositionError};
-    let (token_a, token_b) = (
-        *parent.market_policy.token_a(),
-        *parent.market_policy.token_b(),
-    );
-    let fee_bps = parent.fee_policy.fee_bps();
-    tokio::task::block_in_place(|| {
-        runtime.block_on(compose_vault_history_until(
-            vault_id,
-            &token_a,
-            &token_b,
-            fee_bps,
-            *target_c_n,
-            from_generation,
-        ))
-    })
-    .map_err(|e| {
-        let why = e.to_string();
-        match e {
-            CompositionError::SafetyViolation { .. } => PeerLineageFailure::Quarantined(why),
-            CompositionError::SuccessorInvalid { .. } => PeerLineageFailure::Invalid(why),
-            _ => PeerLineageFailure::Incomplete(why),
-        }
-    })
-}
-
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'_> {
-    fn composed_vault_history(
-        &self,
-        vault_id: &[u8; 32],
-        target_c_n: &[u8; 32],
-        parent: &dsm::ccb::VaultStateV2,
-        from_generation: u64,
-    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent, from_generation)
-    }
-
     /// The network's root-register set as THIS device's catalog resolves it.
     ///
     /// Candidates, not authority: the caller re-derives the id from these
@@ -422,13 +409,17 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         Ok(candidate)
     }
 
-    fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        let k = *k_root;
-        tokio::task::block_in_place(|| self.runtime.block_on(read_economic_root_cell(self.set, &k)))
-            .map_err(|e| match e {
-                RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
-                other => PeerLineageFailure::Incomplete(other.to_string()),
-            })
+    fn register_cell(
+        &self,
+        k_root: &[u8; 32],
+        seed: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let (k, s) = (*k_root, *seed);
+        tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_economic_root_cell(self.set, &k, &s))
+        })
+        .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))
     }
 
     fn faucet_ticket_cell(
@@ -444,31 +435,6 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         .map_err(|e| match e {
             RegisterError::Conflict { detail } => PeerLineageFailure::Quarantined(detail),
             other => PeerLineageFailure::Incomplete(other.to_string()),
-        })
-    }
-
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &dsm::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        use dsm::dlv::binding_observation::BindingObservation;
-        let k = *resource_key;
-        // A set this verifier cannot resolve is an INABILITY TO OBSERVE, not an
-        // observation. Same for a transport failure below. Neither is ever
-        // allowed to become "this parent is free".
-        let Ok(set) = resolve_committed_set(storage_set) else {
-            return BindingObservation::Unavailable {
-                attributed: 0,
-                required: quorum,
-            };
-        };
-        tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(crate::sdk::binding_occupancy::observe_key_at_set(
-                    &set, &k, quorum,
-                ))
         })
     }
 
@@ -626,22 +592,6 @@ impl<'a> RecordingResolver<'a> {
 }
 
 impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> {
-    fn composed_vault_history(
-        &self,
-        vault_id: &[u8; 32],
-        target_c_n: &[u8; 32],
-        parent: &dsm::ccb::VaultStateV2,
-        from_generation: u64,
-    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::composed_vault_history(
-            self.inner,
-            vault_id,
-            target_c_n,
-            parent,
-            from_generation,
-        )
-    }
-
     fn root_register_candidate_set(
         &self,
         network_id: &[u8],
@@ -651,8 +601,12 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         )
     }
 
-    fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, k_root)
+    fn register_cell(
+        &self,
+        k_root: &[u8; 32],
+        seed: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        dsm::economic::peer_lineage::PeerEvidenceFetcher::register_cell(self.inner, k_root, seed)
     }
 
     fn faucet_ticket_cell(
@@ -664,27 +618,6 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
             self.inner,
             faucet_id,
             ticket_index,
-        )
-    }
-
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &dsm::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // A register read, not an immutable object — nothing to record here;
-        // the q-durable closure covers content-addressed evidence only.
-        //
-        // The BUNDLE the record names is a different matter: the verifier
-        // fetches it through `immutable`, so it DOES enter the recorded
-        // closure. That is an improvement over the old slot claim, whose bytes
-        // travelled inline in the register read and were never recorded.
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::parent_binding_observation(
-            self.inner,
-            resource_key,
-            storage_set,
-            quorum,
         )
     }
 
@@ -717,16 +650,6 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
 }
 
 impl ProvenanceResolver for LiveRegisterResolver<'_> {
-    fn composed_vault_history(
-        &self,
-        vault_id: &[u8; 32],
-        target_c_n: &[u8; 32],
-        parent: &dsm::ccb::VaultStateV2,
-        from_generation: u64,
-    ) -> Result<dsm::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        composed_history_via_walk(&self.runtime, vault_id, target_c_n, parent, from_generation)
-    }
-
     /// The network's root-register set as THIS device's catalog resolves it.
     ///
     /// Candidates, not authority: the caller re-derives the id from these
@@ -793,20 +716,6 @@ impl ProvenanceResolver for LiveRegisterResolver<'_> {
         })
     }
 
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &dsm::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::parent_binding_observation(
-            self,
-            resource_key,
-            storage_set,
-            quorum,
-        )
-    }
-
     fn immutable_evidence(
         &self,
         namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -871,117 +780,6 @@ pub(crate) fn faucet_ticket_path(faucet_id: &[u8; 32], ticket_index: u64) -> Str
         text_id::encode_base32_crockford(faucet_id),
         ticket_index
     )
-}
-
-pub(crate) fn settlement_slot_path(vault_id: &[u8; 32], parent_sequence: u64) -> String {
-    format!(
-        "/api/v2/settlement-slot/{}/{}",
-        text_id::encode_base32_crockford(vault_id),
-        parent_sequence
-    )
-}
-
-pub(crate) fn economic_root_path(k_root: &[u8; 32]) -> String {
-    format!(
-        "/api/v2/economic-root/{}",
-        text_id::encode_base32_crockford(k_root)
-    )
-}
-
-/// The republish-sweep object key for an immutable blob:
-/// `immutable::{namespace}::{addr_b32}`. Same shape `dlv_routes` uses, so the
-/// one generic sweep carries faucet evidence too.
-/// THE TRADER'S READ of a vault owner's reserve proof, from an untrusted
-/// locator to verified leaves.
-///
-/// The advertisement is unsigned and carries only `(addr, position)`. Neither
-/// is believed. The position's root is resolved from the OWNER's own
-/// write-once register cell by the same lineage walk a foreign verifier runs,
-/// the artifact is fetched by content address and re-hashed to it, and every
-/// leaf key, commitment and inclusion path is recomputed against that root. A
-/// locator naming the wrong position or a different artifact therefore fails;
-/// it can never yield leaves under a root the owner did not register.
-///
-/// Returns the vault-reserve leaves for `vault_id` only. A caller still has to
-/// decide whether the amounts are the ones it expects — this answers "what did
-/// the owner's registered root commit", never "is that the right state".
-pub(crate) fn verified_owner_reserve_leaves(
-    set: &StorageSet,
-    expected_network_id: &[u8],
-    owner_genesis: &[u8; 32],
-    owner_devid: &[u8; 32],
-    vault_id: &[u8; 32],
-    proof_addr: &[u8; 32],
-    economic_position: u64,
-) -> Result<Vec<dsm::economic::state::EconomicVaultReserveState>, DsmError> {
-    let resolver = LiveRegisterResolver {
-        set,
-        runtime: tokio::runtime::Handle::current(),
-        expected_network_id: expected_network_id.to_vec(),
-    };
-    let owner = resolver
-        .validated_peer_transition(owner_genesis, owner_devid, economic_position)
-        .map_err(|e| {
-            DsmError::verification(format!(
-                "owner reserve proof: the owner's economic lineage at position \
-                 {economic_position} does not validate: {e:?}"
-            ))
-        })?;
-    let root = owner.validated_root().economic_root();
-    let artifact = tokio::task::block_in_place(|| {
-        resolver.runtime.block_on(fetch_verified_economic_proof(
-            proof_addr,
-            owner_genesis,
-            owner_devid,
-            economic_position,
-            &root,
-        ))
-    })?;
-    Ok(artifact
-        .states()
-        .filter_map(|s| match s {
-            dsm::economic::state::EconomicLeafState::VaultReserve(v) if v.vault_id == *vault_id => {
-                Some(v.clone())
-            }
-            _ => None,
-        })
-        .collect())
-}
-
-/// Fetch an economic proof artifact by content address and verify it against
-/// coordinates the caller established INDEPENDENTLY — the publisher's
-/// write-once register cell at that position, read at quorum.
-///
-/// The address is a locator and nothing more. Wherever it came from (a
-/// routing advertisement, an evidence descriptor, a peer message) has no
-/// bearing on what the artifact proves: the bytes are re-hashed to the
-/// requested identity by the fetch, and then every leaf key, leaf commitment
-/// and inclusion path is recomputed against the root the CALLER named. An
-/// artifact naming any other publisher, position or root is refused.
-pub(crate) async fn fetch_verified_economic_proof(
-    inner_addr: &[u8; 32],
-    publisher_genesis: &[u8; 32],
-    publisher_devid: &[u8; 32],
-    position: u64,
-    root: &[u8; 32],
-) -> Result<dsm::economic::proof_artifact::EconomicProofArtifact, DsmError> {
-    let payload = crate::sdk::storage_io::fetch_immutable_payload(
-        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-        inner_addr,
-    )
-    .await?
-    .ok_or_else(|| {
-        DsmError::storage(
-            "economic proof artifact is not published".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-    let artifact = dsm::economic::proof_artifact::decode_economic_proof_artifact(&payload)
-        .map_err(|e| DsmError::verification(format!("economic proof artifact: {e}")))?;
-    artifact
-        .verify_against(publisher_genesis, publisher_devid, position, root)
-        .map_err(|e| DsmError::verification(format!("economic proof artifact: {e}")))?;
-    Ok(artifact)
 }
 
 pub(crate) fn immutable_object_key(
@@ -1150,47 +948,6 @@ mod tests {
         }
     }
 
-    /// CONFIGURATION LOCATES A MEMBER; IT NEVER SUBSTITUTES A SET.
-    ///
-    /// The committed set is resolved by RE-DERIVING its id from the member ids
-    /// a catalog entry lists and requiring that to reproduce the id the vault
-    /// signed. A catalog holding some other fleet therefore cannot answer for
-    /// this vault's register — it fails closed instead of quietly reading a
-    /// different one.
-    ///
-    /// In beta the configured fleet and every vault's birth set are the same
-    /// three members, so this is the property that is decidable today; the
-    /// behavioural difference only appears once a second set exists.
-    #[test]
-    fn a_committed_set_resolves_only_from_members_that_re_derive_its_id() {
-        let members = dsm::ccb::StorageSetMembers::new(&[
-            (b"dsm-node-1".as_slice(), [0xC0; 32]),
-            (b"dsm-node-2".as_slice(), [0xC1; 32]),
-            (b"dsm-node-3".as_slice(), [0xC2; 32]),
-        ])
-        .expect("members");
-        let committed_id = dsm::ccb::storage_set_id(&members).expect("id");
-
-        let foreign = dsm::ccb::StorageSetMembers::new(&[
-            (b"somebody-elses-node-1".as_slice(), [0xC0; 32]),
-            (b"somebody-elses-node-2".as_slice(), [0xC1; 32]),
-            (b"somebody-elses-node-3".as_slice(), [0xC2; 32]),
-        ])
-        .expect("members");
-        assert_ne!(
-            dsm::ccb::storage_set_id(&foreign).expect("id"),
-            committed_id,
-            "the two sets must differ for this to prove anything"
-        );
-
-        // A set whose members do not re-derive the committed id is refused,
-        // whatever the local catalog happens to contain.
-        assert!(
-            resolve_committed_set(&foreign).is_err(),
-            "a foreign set must not resolve"
-        );
-    }
-
     /// ATTRIBUTION IS FOLDED INTO THE READ, and it is load-bearing in the
     /// dangerous direction: an unattributed response must not be counted as an
     /// ABSENCE, because a quorum of absences is the one observation a forward
@@ -1215,7 +972,7 @@ mod tests {
         crate::sdk::storage_io::fake_registers::fail_member("dsm-node-3", true);
         let reads = crate::sdk::storage_io::fake_registers::read(
             &set,
-            crate::sdk::storage_io::fake_registers::RegisterKind::EconomicRoot,
+            crate::sdk::storage_io::fake_registers::RegisterKind::FaucetTicket,
             b"cell-key",
         );
         assert_eq!(

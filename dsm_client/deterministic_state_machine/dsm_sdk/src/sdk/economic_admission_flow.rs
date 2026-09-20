@@ -66,11 +66,6 @@ pub(crate) fn committed_network_id() -> Result<Vec<u8>, DsmError> {
 #[derive(Debug, Clone, Copy)]
 pub struct AdmittedOutcome {
     pub economic_position: u64,
-    /// Content address of the `EconomicProofArtifactV1` this admission
-    /// published, when its transition wrote a leaf a counterparty can be asked
-    /// to verify. `None` means the transition wrote none — not that publishing
-    /// failed, which is an error rather than an absence.
-    pub economic_proof_addr: Option<[u8; 32]>,
 }
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
@@ -139,8 +134,6 @@ pub(crate) fn validated_root_or_activate(
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
     let snapshot = EconomicActivationSnapshot {
         online_balances_empty: head.balances_snapshot().is_empty(),
-        vault_reserves_empty: head.vault_reserves_snapshot().is_empty(),
-        settlement_receipt_state_empty: true,
         outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
     };
     activate(snapshot).map_err(|e| DsmError::invalid_operation(e.to_string()))
@@ -170,17 +163,12 @@ pub(crate) fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<Economi
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AdmittedPreState {
     pub balances: BTreeMap<[u8; 32], u64>,
-    pub vault_reserves:
-        BTreeMap<([u8; 32], [u8; 32]), dsm::economic::state::EconomicVaultReserveState>,
 }
 
 impl AdmittedPreState {
     /// The borrowed view `build_write_set` takes.
     pub fn as_write_set_pre_state(&self) -> dsm::economic::write_set::EconomicPreState<'_> {
-        dsm::economic::write_set::EconomicPreState {
-            balances: &self.balances,
-            vault_reserves: &self.vault_reserves,
-        }
+        dsm::economic::write_set::EconomicPreState::new(&self.balances)
     }
 }
 
@@ -214,17 +202,12 @@ pub(crate) fn producer_tree_and_pre_state(
             dsm::economic::state::EconomicLeafState::Balance(b) => {
                 pre.balances.insert(b.policy_commit, b.amount);
             }
-            dsm::economic::state::EconomicLeafState::VaultReserve(r) => {
-                pre.vault_reserves.insert((r.vault_id, r.policy_commit), r);
-            }
             // Write-once records, inserted by a write set and never a
             // predecessor it reads. The bundle-acceptance leaf (2c-D) belongs
             // here for the same reason and one more: its `pre` is required to
             // be `None`, so a pre-state that carried it would contradict the
             // shape its own write-set arm enforces.
-            dsm::economic::state::EconomicLeafState::SettlementReceipt(_)
-            | dsm::economic::state::EconomicLeafState::ConsumedSource(_)
-            | dsm::economic::state::EconomicLeafState::BundleAcceptance(_) => {}
+            dsm::economic::state::EconomicLeafState::ConsumedSource(_) => {}
             // A SoFi relationship leaf IS a predecessor a write set reads —
             // its whole content is the base `hʲ` the next operation advances
             // from — but the reader is `sofi::validation`, which fetches it by
@@ -313,7 +296,6 @@ pub(crate) fn build_dsm_admission(
     facts: &CreditSourceFacts,
     authority: &AuthorityMaterial,
     extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
-    context: &dsm::economic::write_set::EconomicWriteContext,
 ) -> Result<DsmAdmissionParts, DsmError> {
     let pre_root = tree.root();
     let c_dsm_plus = chain_state.compute_chain_tip();
@@ -329,7 +311,6 @@ pub(crate) fn build_dsm_admission(
         &pre_state.as_write_set_pre_state(),
         tree,
         facts,
-        context,
     )
     .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
     // THE DEBIT LOCATOR IS A TRANSFER FACT, AND ONLY A TRANSFER FACT. Its one
@@ -612,7 +593,6 @@ pub(crate) async fn admitted_self_loop_operation(
                 &facts,
                 &authority,
                 extra_artifacts,
-                &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
             )?;
             let coords = parts.coords;
             let artifacts = parts.artifacts.clone();
@@ -638,7 +618,6 @@ pub(crate) async fn admitted_self_loop_operation(
         &network_id,
         &set,
         &validated,
-        tree,
         parts.witness,
         parts.manifest,
         operation,
@@ -647,753 +626,6 @@ pub(crate) async fn admitted_self_loop_operation(
     )
     .await?;
     Ok((outcome, admitted))
-}
-
-/// The funded-DLV facade: `DlvCreateFundedV2` admitted into `R_econ`.
-///
-/// Phase one and phase three are the shared pipeline — [`stage_admission`] and
-/// [`finish_admission`], identical to [`admitted_self_loop_operation`]. Only
-/// the ADVANCE differs, and it differs structurally:
-///
-/// ```text
-/// self-loop     one BalanceDelta, no reserve mutation, optional in-tx writer
-/// funded DLV    ZERO balance deltas, exactly one VaultReserveMutation::Fund,
-///               staged build/write (the vault's birth objects are signed off
-///               the exact root this advance produces, before anything persists)
-/// ```
-///
-/// Zero deltas is not an omission: conservation REFUSES deltas for this
-/// operation, because the value moves through reserve leaves
-/// (`device_state.rs`, the `DlvCreateFundedV2` arm of the delta classifier).
-///
-/// The facts are fixed at `CreditSourceFacts::None` and are not a parameter:
-/// a funded create consumes no external source and is funded by two
-/// `SameTransitionMove` (0x0024) credits the write-set builder derives itself.
-/// Making them settable would let a caller ask for a write set this operation
-/// can never have.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn admitted_dlv_create_funded<A>(
-    core: &CoreSDK,
-    operation: Operation,
-    rel_key: [u8; 32],
-    counterparty_devid: [u8; 32],
-    initial_chain_tip: [u8; 32],
-    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
-    // Display resolver for the shortfall message only. Never an identity —
-    // commit to name is one-to-one and safe; the reverse direction was
-    // removed deliberately.
-    name_for: impl Fn(&[u8; 32]) -> String,
-    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-    write_extra: impl Fn(
-        &rusqlite::Transaction<'_>,
-        &dsm::types::device_state::AdvanceOutcome,
-        &A,
-    ) -> Result<(), DsmError>,
-) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    let staged = stage_admission(core, &operation, |_| {
-        Ok((CreditSourceFacts::None, Vec::new()))
-    })
-    .await?;
-
-    // SUFFICIENCY, from the SAME snapshot the admission will CAS against.
-    //
-    // The structural check is `plan_balance_debit` inside the write-set
-    // builder, against these exact admitted balances. This loop exists only to
-    // name the shortfall, and it reads the staged predecessor rather than
-    // `device_head()` precisely so it cannot disagree with the transition
-    // being attempted: a second, independently-timed lookup would let the
-    // route report "sufficient" against position n while the admission builds
-    // against n+1.
-    if let Operation::DlvCreateFundedV2 {
-        leg_a_policy_commit,
-        leg_a_amount,
-        leg_b_policy_commit,
-        leg_b_amount,
-        ..
-    } = &operation
-    {
-        for (pc, need) in [
-            (leg_a_policy_commit, *leg_a_amount),
-            (leg_b_policy_commit, *leg_b_amount),
-        ] {
-            let have = staged.pre_state.balances.get(pc).copied().unwrap_or(0);
-            if have < need {
-                return Err(DsmError::invalid_operation(format!(
-                    "insufficient {} to encumber (need {need}, have {have} admitted)",
-                    name_for(pc)
-                )));
-            }
-        }
-    }
-
-    admit_reserve_mutation(
-        core,
-        staged,
-        operation,
-        rel_key,
-        counterparty_devid,
-        initial_chain_tip,
-        reserve_mutation,
-        "funded create",
-        build_artifacts,
-        write_extra,
-    )
-    .await
-}
-
-/// The owner's settlement apply, admitted into `R_econ` (amendment 2c-G,
-/// ruling G1+G2).
-///
-/// A SYNCHRONIZATION STEP, never an authority. The settlement was realized on
-/// the trader's chain and certified by the composition walk before this runs;
-/// the apply moves the owner's two reserve leaves one generation to match what
-/// already happened. It moves no value a second time — conservation refuses any
-/// balance delta for it — and it can apply only the exact certified fold: the
-/// credit arm is `0x0027 ValidatedDlvSettlementPayment`, which proves the
-/// trader's own receipt leaf into the trader's validated root and checks it
-/// field by field against this operation.
-///
-/// `payment_evidence_bytes` is the `SettlementPaymentEvidenceV1` the
-/// settlement-payment producer built from the certified fold. It is frozen in
-/// the SAME transaction as the advance, as every admission's evidence is, and
-/// published before the root registers.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn admitted_dlv_owner_apply<A>(
-    core: &CoreSDK,
-    operation: Operation,
-    rel_key: [u8; 32],
-    counterparty_devid: [u8; 32],
-    initial_chain_tip: [u8; 32],
-    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
-    trader_genesis: [u8; 32],
-    trader_devid: [u8; 32],
-    trader_economic_position: u64,
-    payment_evidence_bytes: Vec<u8>,
-    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-    write_extra: impl Fn(
-        &rusqlite::Transaction<'_>,
-        &dsm::types::device_state::AdvanceOutcome,
-        &A,
-    ) -> Result<(), DsmError>,
-) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    if !matches!(operation, Operation::DlvOwnerApplyV2 { .. }) {
-        return Err(DsmError::invalid_operation(
-            "admitted_dlv_owner_apply takes a DlvOwnerApplyV2",
-        ));
-    }
-    let payment_evidence_addr = dsm::storage_object::immutable_inner(
-        dsm::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
-        &payment_evidence_bytes,
-    );
-    let evidence_key = crate::sdk::economic_registers::immutable_object_key(
-        dsm::common::domain_tags::TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
-        &payment_evidence_bytes,
-    );
-    let staged = stage_admission(core, &operation, |_position| {
-        Ok((
-            CreditSourceFacts::DlvSettlementPayment {
-                trader_genesis,
-                trader_devid,
-                trader_economic_position,
-                payment_evidence_addr,
-            },
-            vec![(
-                evidence_key,
-                payment_evidence_bytes,
-                "dlv-settlement-payment-evidence",
-            )],
-        ))
-    })
-    .await?;
-    admit_reserve_mutation(
-        core,
-        staged,
-        operation,
-        rel_key,
-        counterparty_devid,
-        initial_chain_tip,
-        reserve_mutation,
-        "owner apply",
-        build_artifacts,
-        write_extra,
-    )
-    .await
-}
-
-/// The owner's terminal close, admitted into `R_econ` (amendment 2c-G, G4).
-///
-/// The close drains both vault reserve leaves into spendable balance. Its write
-/// set reads the ADMITTED reserve leaves at exactly the parent generation and
-/// funds each balance credit by the reserve it drains — two `0x0024`
-/// same-transition moves the builder derives itself — so the facts are fixed at
-/// `CreditSourceFacts::None` and are not a parameter. Admitting it is what makes
-/// the proceeds real in the owner's economic lineage, spendable by the next
-/// admitted operation, and what makes a close at a generation `R_econ` does not
-/// hold unbuildable.
-///
-/// Close authority stays the owner's and binding stays QuorumBind's: this runs
-/// only through the one canonical close commit, after the route or the resume
-/// pass has established both.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn admitted_dlv_close<A>(
-    core: &CoreSDK,
-    operation: Operation,
-    rel_key: [u8; 32],
-    counterparty_devid: [u8; 32],
-    initial_chain_tip: [u8; 32],
-    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
-    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-    write_extra: impl Fn(
-        &rusqlite::Transaction<'_>,
-        &dsm::types::device_state::AdvanceOutcome,
-        &A,
-    ) -> Result<(), DsmError>,
-) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    if !matches!(operation, Operation::DlvClose { .. }) {
-        return Err(DsmError::invalid_operation(
-            "admitted_dlv_close takes a DlvClose",
-        ));
-    }
-    let staged = stage_admission(core, &operation, |_| {
-        Ok((CreditSourceFacts::None, Vec::new()))
-    })
-    .await?;
-    admit_reserve_mutation(
-        core,
-        staged,
-        operation,
-        rel_key,
-        counterparty_devid,
-        initial_chain_tip,
-        reserve_mutation,
-        "close",
-        build_artifacts,
-        write_extra,
-    )
-    .await
-}
-
-/// The advance and admission shared by the three reserve-mutation facades — a
-/// funded create, an owner apply and a close. They differ only in their facts
-/// and their pre-checks; the ONE staged advance (the reserve mutation, the frozen
-/// evidence and the Prepared admission together) and the shared
-/// [`finish_admission`] are never duplicated per operation.
-#[allow(clippy::too_many_arguments)]
-async fn admit_reserve_mutation<A>(
-    core: &CoreSDK,
-    staged: StagedAdmission,
-    operation: Operation,
-    rel_key: [u8; 32],
-    counterparty_devid: [u8; 32],
-    initial_chain_tip: [u8; 32],
-    reserve_mutation: dsm::types::device_state::VaultReserveMutation,
-    what: &'static str,
-    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-    write_extra: impl Fn(
-        &rusqlite::Transaction<'_>,
-        &dsm::types::device_state::AdvanceOutcome,
-        &A,
-    ) -> Result<(), DsmError>,
-) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    let StagedAdmission {
-        network_id,
-        genesis,
-        devid,
-        set,
-        validated,
-        mut tree,
-        pre_state,
-        authority,
-        facts,
-        extra_artifacts,
-        prepared,
-        ..
-    } = staged;
-    let set_id = set.id();
-    let op_for_build = operation.clone();
-    let mut built: Option<DsmAdmissionParts> = None;
-    let mut accepted_out: Option<PendingEconomicAdmission> = None;
-
-    let outcome = {
-        let plan = crate::sdk::core_sdk::AdmissionPlan {
-            prepared,
-            storage_set_id: set_id,
-            build: Box::new(|o: &dsm::types::device_state::AdvanceOutcome| {
-                let parts = build_dsm_admission(
-                    &genesis,
-                    &devid,
-                    &o.new_chain_state,
-                    &op_for_build,
-                    &pre_state,
-                    &mut tree,
-                    &facts,
-                    &authority,
-                    extra_artifacts,
-                    &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
-                )?;
-                let coords = parts.coords;
-                let artifacts = parts.artifacts.clone();
-                built = Some(parts);
-                Ok((coords, artifacts))
-            }),
-            accepted_out: &mut accepted_out,
-        };
-        let (_state, outcome, _artifacts) = core
-            .execute_on_relationship_staged_with_reserve_mutation_and_admission(
-                rel_key,
-                counterparty_devid,
-                operation.clone(),
-                &[],
-                Some(initial_chain_tip),
-                Some(reserve_mutation),
-                build_artifacts,
-                write_extra,
-                Some(plan),
-            )?;
-        outcome
-    };
-
-    let pending = accepted_out.ok_or_else(|| {
-        DsmError::storage(
-            format!("{what} committed without an accepted admission"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let parts = built.ok_or_else(|| {
-        DsmError::storage(
-            "advance committed without building the witness".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-    let admitted = finish_admission(
-        core,
-        &network_id,
-        &set,
-        &validated,
-        tree,
-        parts.witness,
-        parts.manifest,
-        operation,
-        pending,
-        Vec::new(),
-    )
-    .await?;
-    Ok((outcome, admitted))
-}
-
-/// A trader's market settle, admitted (5c-2 Step 4, requirement 6).
-///
-/// The credit arm is `0x0026 DlvReserveConsumption`: a trader's settle OUTPUT is
-/// funded by consuming an owner vault reserve. It is NOT `0x0027`, which is the
-/// owner-apply arm — `build_write_set` refuses the pairing outright, and the
-/// 5c-2 plan named the wrong one until it was corrected.
-///
-/// `expected_successor` is the exact `B.trader_successor` the bundle was BOUND
-/// to. It is checked inside `build`, which runs after the pure prepare and
-/// before anything is written, so a device that would advance to a different
-/// successor than the one it published refuses instead — with nothing
-/// persisted, nothing credited and the fence untouched. Requirement 6's
-/// "commit ONLY the exact `B.trader_successor`" is that check and nothing
-/// looser.
-///
-/// WHAT THIS DOES NOT DO. It does not release the trader fence, publish a Def
-/// 14.2 receipt, advance the realized frontier, or construct a
-/// bundle-acceptance witness. A committed advance here means the trader's own
-/// chain accepted the successor; the settlement is realized only when the
-/// composition walk certifies it and the route completes (2c-D §14).
-#[allow(clippy::too_many_arguments)]
-/// `bundle_id` is `b` — the identity of the exact canonical bundle this settle
-/// is composed around. Required, never optional: without it the write set
-/// cannot emit the acceptance leaf realization needs (2c-D producer adoption),
-/// and a settle that silently omitted it would stay bound-unrealized forever.
-pub(crate) async fn admitted_market_settle<A>(
-    core: &CoreSDK,
-    operation: Operation,
-    bundle_id: [u8; 32],
-    rel_key: [u8; 32],
-    counterparty_devid: [u8; 32],
-    initial_chain_tip: [u8; 32],
-    deltas: &[dsm::types::device_state::BalanceDelta],
-    reserve_consumption_evidence: Vec<(Vec<u8>, u64)>,
-    expected_successor: [u8; 32],
-    build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
-    write_extra: impl Fn(
-        &rusqlite::Transaction<'_>,
-        &dsm::types::device_state::AdvanceOutcome,
-        &A,
-    ) -> Result<(), DsmError>,
-) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
-    // ONE RESERVE-CONSUMPTION EVIDENCE PER CONSUMED VAULT, each with the owner
-    // locator it cites, in the operation's own order: a DlvSettle consumes one
-    // vault (0x0026); a DlvRouteSettle consumes every leg's, and `E_R` is in
-    // route-leg order (0x0035, amendment 2c-H H9).
-    let route_wide = match &operation {
-        Operation::DlvSettle { .. } if reserve_consumption_evidence.len() == 1 => false,
-        Operation::DlvRouteSettle { legs, .. }
-            if legs.len() == reserve_consumption_evidence.len() =>
-        {
-            true
-        }
-        _ => return Err(DsmError::invalid_operation(
-            "admitted_market_settle takes a DlvSettle with one reserve-consumption evidence, or \
-                 a DlvRouteSettle with one per leg",
-        )),
-    };
-    let mut fact_legs = Vec::with_capacity(reserve_consumption_evidence.len());
-    let mut evidence_artifacts = Vec::with_capacity(reserve_consumption_evidence.len());
-    for (evidence_bytes, owner_economic_position) in reserve_consumption_evidence {
-        let reserve_consumption_evidence_addr = dsm::storage_object::immutable_inner(
-            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-            &evidence_bytes,
-        );
-        let evidence_key = crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
-            &evidence_bytes,
-        );
-        fact_legs.push(dsm::economic::write_set::RouteLegConsumptionFacts {
-            owner_economic_position,
-            reserve_consumption_evidence_addr,
-        });
-        evidence_artifacts.push((
-            evidence_key,
-            evidence_bytes,
-            "dlv-reserve-consumption-evidence",
-        ));
-    }
-    let settle_facts = if route_wide {
-        CreditSourceFacts::DlvRouteReserveConsumption { legs: fact_legs }
-    } else {
-        let Some(leg) = fact_legs.first() else {
-            return Err(DsmError::invalid_operation(
-                "a single-vault settle names one reserve-consumption evidence",
-            ));
-        };
-        CreditSourceFacts::DlvReserveConsumption {
-            owner_economic_position: leg.owner_economic_position,
-            reserve_consumption_evidence_addr: leg.reserve_consumption_evidence_addr,
-        }
-    };
-
-    let StagedAdmission {
-        network_id,
-        genesis,
-        devid,
-        set,
-        validated,
-        mut tree,
-        pre_state,
-        authority,
-        facts,
-        extra_artifacts,
-        prepared,
-        ..
-    } = stage_admission(core, &operation, |_position| {
-        Ok((settle_facts, evidence_artifacts))
-    })
-    .await?;
-
-    let set_id = set.id();
-    let op_for_build = operation.clone();
-    let mut built: Option<DsmAdmissionParts> = None;
-    let mut accepted_out: Option<PendingEconomicAdmission> = None;
-
-    let outcome = {
-        let plan = crate::sdk::core_sdk::AdmissionPlan {
-            prepared,
-            storage_set_id: set_id,
-            build: Box::new(|o: &dsm::types::device_state::AdvanceOutcome| {
-                // THE BOUND SUCCESSOR, AND ONLY IT. This runs after the pure
-                // prepare and before any write, so a mismatch costs nothing.
-                let actual = o.new_chain_state.compute_chain_tip();
-                if actual != expected_successor {
-                    return Err(DsmError::invalid_operation(
-                        "the advance would commit a successor other than the one the bundle was \
-                         bound to; refusing before anything is written",
-                    ));
-                }
-                let parts = build_dsm_admission(
-                    &genesis,
-                    &devid,
-                    &o.new_chain_state,
-                    &op_for_build,
-                    &pre_state,
-                    &mut tree,
-                    &facts,
-                    &authority,
-                    extra_artifacts,
-                    // THE SETTLE'S BUNDLE CONTEXT. `b` came from the
-                    // composition layer; the operation identity is derived
-                    // from the authenticated transition inside the builder.
-                    // Two facts, two origins — ruling D3's three-way binding
-                    // depends on that separation, so neither is derived from
-                    // the other here.
-                    &dsm::economic::write_set::EconomicWriteContext::DlvSettle { bundle_id },
-                )?;
-                let coords = parts.coords;
-                let artifacts = parts.artifacts.clone();
-                built = Some(parts);
-                Ok((coords, artifacts))
-            }),
-            accepted_out: &mut accepted_out,
-        };
-        let (_state, outcome, _artifacts) = core.execute_on_relationship_staged_with_admission(
-            rel_key,
-            counterparty_devid,
-            operation.clone(),
-            deltas,
-            Some(initial_chain_tip),
-            build_artifacts,
-            write_extra,
-            Some(plan),
-        )?;
-        outcome
-    };
-
-    let pending = accepted_out.ok_or_else(|| {
-        DsmError::storage(
-            "the settle committed without an accepted admission".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-    let parts = built.ok_or_else(|| {
-        DsmError::storage(
-            "the advance committed without building the witness".to_string(),
-            None::<std::io::Error>,
-        )
-    })?;
-    let admitted = finish_admission(
-        core,
-        &network_id,
-        &set,
-        &validated,
-        tree,
-        parts.witness,
-        parts.manifest,
-        operation,
-        pending,
-        Vec::new(),
-    )
-    .await?;
-    Ok((outcome, admitted))
-}
-
-/// Whether a counterparty can ever be asked to verify this leaf's inclusion.
-///
-/// Vault reserves fund a trader's settle (0x0026) and settlement receipts
-/// fund an owner's apply (0x0027), so both are cited BY ANOTHER DEVICE and
-/// need a portable path. A balance leaf is this device's own spendable state
-/// and a consumed-source leaf its own spend marker: no evidence type asks a
-/// stranger to prove either, and each path costs 8 KiB, so publishing them
-/// would grow every admission by that much to prove something nothing reads.
-///
-/// The bundle-acceptance leaf (2c-D, `0x0032`) is citable for the strongest
-/// version of that reason: `TA_B` **is** the evidence type that asks a third
-/// party to verify this exact leaf's inclusion under `R_T^+`, carrying it
-/// inline with its 256-sibling path. Marking it uncitable would mean the path
-/// is never published, and a `TA_B` that cannot be constructed is a market
-/// settlement that can never be realized — a failure that would surface only
-/// at 2c-D §7 step 5, far from this line.
-fn leaf_is_externally_citable(state: &dsm::economic::state::EconomicLeafState) -> bool {
-    use dsm::economic::state::EconomicLeafState as L;
-    match state {
-        // The creation record is citable BECAUSE of P15-12's binding: a foreign
-        // verifier accepts a vault's genesis only by proving this exact leaf
-        // into the owner's validated root, and it cannot build that path
-        // unless the artifact publishes the leaf. Withholding it would make
-        // the binding unprovable by anyone but the owner.
-        L::VaultReserve(_)
-        | L::SettlementReceipt(_)
-        | L::BundleAcceptance(_)
-        | L::VaultCreation(_) => true,
-        // A relationship leaf is cited by the DLV side through the core's own
-        // path, not through this artifact, and it names a trader — publishing
-        // it here would export who trades with whom for no verifier's benefit.
-        L::Balance(_) | L::ConsumedSource(_) | L::Relationship(_) => false,
-    }
-}
-
-/// The artifact proving every externally citable leaf this transition wrote,
-/// or `None` when it wrote none. See the call site for why it is built there.
-fn economic_proof_artifact_for(
-    tree: &EconomicSmt,
-    witness: &EconomicTransitionWitness,
-    genesis: &[u8; 32],
-    devid: &[u8; 32],
-    validated: &ValidatedEconomicRoot,
-) -> Result<Option<(String, Vec<u8>, &'static str)>, DsmError> {
-    use dsm::economic::proof_artifact::{EconomicProofArtifact, EconomicProofLeaf};
-    let root = validated.economic_root();
-    if tree.root() != root {
-        // Unreachable by construction — the same tree produced this root —
-        // and stated as a refusal rather than trusted, because a proof taken
-        // from a tree that is not the registered one is the exact defect
-        // this object exists to make impossible.
-        return Err(DsmError::invalid_operation(
-            "economic proof: the producer tree is not the tree whose root was registered",
-        ));
-    }
-    let mut leaves = Vec::new();
-    for m in &witness.mutations {
-        let Some(state) = &m.post_state else { continue };
-        if !leaf_is_externally_citable(state) {
-            continue;
-        }
-        let key = m
-            .leaf_key(genesis, devid)
-            .map_err(|e| storage_err("economic proof leaf key", e))?;
-        leaves.push(EconomicProofLeaf {
-            state: state.clone(),
-            siblings: Box::new(tree.siblings(&key)),
-        });
-    }
-    if leaves.is_empty() {
-        return Ok(None);
-    }
-    let artifact = EconomicProofArtifact::new(
-        *genesis,
-        *devid,
-        validated.economic_position(),
-        root,
-        leaves,
-    )
-    .map_err(|e| DsmError::invalid_operation(format!("economic proof: {e}")))?;
-    let bytes = artifact.encode();
-    Ok(Some((
-        crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-            &bytes,
-        ),
-        bytes,
-        "economic-proof-artifact",
-    )))
-}
-
-/// The owner's reserve proof for one vault, at its ADMITTED HEAD (amendment
-/// 2c-G, G3).
-///
-/// A fresh owner baseline and the advertisement's reserve-proof locator must
-/// name the SAME generation. A trader's provenance reads the owner's backing
-/// from this proof and requires the composed history to pass through its
-/// generation, so an anchor ahead of its proof would refuse every settle. The
-/// proof of the admission that produced the anchored generation is not always
-/// still in hand — a crash between the last apply and its anchor loses it — so
-/// this builds the proof from the admitted state itself: the vault's two
-/// reserve leaves, with their paths, under the validated root at the admitted
-/// position. The one-snapshot rule is an admission's own:
-/// [`producer_tree_and_pre_state`] refuses a tree whose root is not the
-/// validated one. The artifact states only what that registered root commits.
-pub(crate) struct AdmittedReserveProof {
-    /// The frozen-artifact key and exact bytes of the `EconomicProofArtifactV1`.
-    pub key: String,
-    pub bytes: Vec<u8>,
-    /// Its content address, and the economic position whose root it names.
-    pub addr: [u8; 32],
-    pub position: u64,
-    pub root: [u8; 32],
-    /// The generation both legs stand at.
-    pub generation: u64,
-    /// The two reserve legs, ordered by policy commit.
-    pub legs: Vec<dsm::economic::state::EconomicVaultReserveState>,
-}
-
-pub(crate) fn vault_reserve_proof_at_admitted_head(
-    genesis: &[u8; 32],
-    devid: &[u8; 32],
-    vault_id: &[u8; 32],
-) -> Result<AdmittedReserveProof, DsmError> {
-    use dsm::economic::proof_artifact::{EconomicProofArtifact, EconomicProofLeaf};
-    use dsm::economic::state::EconomicLeafState;
-    let admitted = economic_lineage::get_admitted()
-        .map_err(|e| storage_err("load admitted", e))?
-        .ok_or_else(|| {
-            DsmError::invalid_operation(
-                "reserve proof: this device has no admitted economic position",
-            )
-        })?;
-    // A reserve proof names a (position, root) pair for a foreign verifier to
-    // check. An unresolved position has no root to name, and publishing one of
-    // its two candidates would be asserting a branch the lineage has not
-    // taken.
-    let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(admitted)
-        .map_err(|e| DsmError::invalid_operation(format!("reserve proof: {e}")))?;
-    let position = validated.economic_position();
-    let root = validated.economic_root();
-    let (tree, pre) = producer_tree_and_pre_state(&validated)?;
-    let mut legs: Vec<dsm::economic::state::EconomicVaultReserveState> = pre
-        .vault_reserves
-        .values()
-        .filter(|r| r.vault_id == *vault_id)
-        .cloned()
-        .collect();
-    legs.sort_by_key(|r| r.policy_commit);
-    if legs.len() != 2 || legs[0].vault_sequence != legs[1].vault_sequence {
-        return Err(DsmError::invalid_operation(
-            "reserve proof: the admitted state does not hold this vault's two reserve legs at one \
-             generation",
-        ));
-    }
-    let leaves = legs
-        .iter()
-        .map(|r| {
-            let state = EconomicLeafState::VaultReserve(r.clone());
-            let key = state.leaf_key(genesis, devid);
-            EconomicProofLeaf {
-                state,
-                siblings: Box::new(tree.siblings(&key)),
-            }
-        })
-        .collect();
-    let artifact = EconomicProofArtifact::new(*genesis, *devid, position, root, leaves)
-        .map_err(|e| DsmError::invalid_operation(format!("reserve proof: {e}")))?;
-    let bytes = artifact.encode();
-    Ok(AdmittedReserveProof {
-        key: crate::sdk::economic_registers::immutable_object_key(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-            &bytes,
-        ),
-        addr: immutable_inner(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-            &bytes,
-        ),
-        bytes,
-        position,
-        root,
-        generation: legs[0].vault_sequence,
-        legs,
-    })
-}
-
-/// The canonical `TA_B` for a transition that accepted a settlement bundle, or
-/// `None` when it accepted none.
-///
-/// **Built here for the same reason the inclusion proof is.** `TA_B` carries
-/// the acceptance leaf's path under `R_T^+`, and a mutation's own captured
-/// siblings are not that path: they hold with the earlier mutations applied,
-/// and the acceptance leaf is not last in key order by any rule. So the path
-/// must come from `tree` — the finished post-transition tree whose root was
-/// just registered — in the same single snapshot, with no second read and no
-/// window in which the tree could move.
-///
-/// **What publishing it does not do.** A `TA_B` on the fleet is evidence a
-/// verifier can fetch. It realizes nothing: 2c-D §7 in the composition walk is
-/// what turns it into a `BundleAcceptanceWitness`, and only together with the
-/// other certification predicates (2c-D §14, C2-R1).
-fn trader_acceptance_for(
-    tree: &EconomicSmt,
-    witness: &EconomicTransitionWitness,
-    genesis: &[u8; 32],
-    devid: &[u8; 32],
-    validated: &ValidatedEconomicRoot,
-) -> Result<Option<dsm::economic::trader_acceptance::TraderAcceptance>, DsmError> {
-    dsm::economic::acceptance_produce::produce_trader_acceptance(
-        tree,
-        witness,
-        genesis,
-        devid,
-        validated.economic_root(),
-        validated.economic_position(),
-    )
-    .map_err(|e| DsmError::invalid_operation(format!("trader acceptance: {e}")))
 }
 
 /// ONE admission finish at a time on this device. The sync's crash recovery and
@@ -1438,26 +670,8 @@ fn admission_already_finished(
             economic_position: position,
             economic_root: root,
         }) if position == pending.economic_position && root == coords.post_economic_root => {
-            let proof_prefix = format!(
-                "immutable::{}::",
-                String::from_utf8_lossy(
-                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT.source_bytes()
-                )
-            );
-            let proof = crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_purpose_and_root(
-                &proof_prefix,
-                "economic-proof-artifact",
-                &root,
-            )
-            .map_err(|e| storage_err("load frozen economic proof", e))?;
             Ok(Some(AdmittedOutcome {
                 economic_position: position,
-                economic_proof_addr: proof.map(|bytes| {
-                    immutable_inner(
-                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                        &bytes,
-                    )
-                }),
             }))
         }
         _ => Err(DsmError::storage(
@@ -1478,14 +692,13 @@ pub(crate) async fn finish_admission(
     network_id: &[u8],
     set: &StorageSet,
     validated: &ValidatedEconomicRoot,
-    tree: EconomicSmt,
     witness: EconomicTransitionWitness,
     manifest: EconomicAdmissionManifest,
     operation: Operation,
     mut pending: PendingEconomicAdmission,
     // Frozen only in the ADMIT transaction (the RELEASE object): nothing
     // here may reach the network before ECON_ADMITTED.
-    mut post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
+    post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<AdmittedOutcome, DsmError> {
     // SERIALIZED COMPARE-AND-FINISH: one finish at a time, and only of the
     // admission the head still carries. A duplicate returns the admitted
@@ -1572,9 +785,19 @@ pub(crate) async fn finish_admission(
                 })?
         }
     };
-    register_economic_root(set, &frozen_root)
-        .await
-        .map_err(|e| storage_err("root register", e))?;
+    // Leader first (Part II §8): the seed of position `q` takes the root this
+    // device validated at `q - 1`, so nothing about where the race is decided
+    // is chosen here.
+    register_economic_root(
+        set,
+        &genesis,
+        &devid,
+        pending.economic_position,
+        &validated.economic_root(),
+        &frozen_root,
+    )
+    .await
+    .map_err(|e| storage_err("root register", e))?;
     pending.state = EconomicAdmissionState::Registered;
     core.update_pending_admission_state(&pending)?;
 
@@ -1602,7 +825,7 @@ pub(crate) async fn finish_admission(
         runtime: tokio::runtime::Handle::current(),
         expected_network_id: network_id.to_vec(),
     };
-    let (new_validated, _validity, _funded) = advance_validated(
+    let (new_validated, _funded) = advance_validated(
         validated,
         &registered,
         &manifest,
@@ -1669,84 +892,6 @@ pub(crate) async fn finish_admission(
     // taking the paths. The equality below states it rather than assuming
     // it, and `EconomicProofArtifact::new` re-derives every path against
     // that same root before the bytes exist.
-    let economic_proof_addr =
-        match economic_proof_artifact_for(&tree, &witness, &genesis, &devid, &new_validated)? {
-            Some((key, bytes, purpose)) => {
-                let addr = dsm::storage_object::immutable_inner(
-                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
-                    &bytes,
-                );
-                post_admit_artifacts.push((key, bytes, purpose));
-                Some(addr)
-            }
-            None => None,
-        };
-
-    // ── THE TRADER ACCEPTANCE for the bundle this transition accepted ────
-    //
-    // Same snapshot, same reason: `TA_B`'s path is the acceptance leaf's
-    // under the root just registered, and only `tree` holds it. Built after
-    // the inclusion proof so both come from one tree that has been shown to
-    // be the registered one.
-    //
-    // `None` here is the ordinary answer — every non-settlement accepts no
-    // bundle. A market settle always writes exactly one acceptance leaf
-    // (2c-D §8's producer-adoption cardinality, enforced by the write set),
-    // so a settle reaching `None` would mean the leaf was never emitted, and
-    // `build_write_set` refuses that long before this line.
-    //
-    // A CRASH-RESUMED admission reaches here too, and produces the SAME
-    // artifact: `resume_pending_admission` replays the frozen witness onto
-    // the validated pre-tree, so the tree, the witness and the root are the
-    // ones the first attempt had. The object is content-addressed, so the
-    // republish is idempotent — and if a replay ever diverged, the root guard
-    // inside the producer would refuse rather than publish a path that folds
-    // to a root nothing registered.
-    //
-    // AND ITS LOCATOR (2c-D §14, D-c). `B` was bound before `TA_B` existed, so
-    // `B` cannot name it, and nothing a composer holds lets it derive `ta_B`.
-    // The locator is keyed by `b` and names two content addresses: `TA_B`, and
-    // the inclusion proof built above, which carries both the acceptance leaf
-    // and the settlement-receipt leaf under `R_T^+` — Req 21.16's path. It is
-    // non-authoritative: what it names is fetched by content address and
-    // verified, never believed. (An earlier comment here said a Def 14.2
-    // receipt binds `ta_B` and would locate it; C2-R1 established that the
-    // receipt this code publishes does not, which is why the locator exists.)
-    if let Some(acceptance) =
-        trader_acceptance_for(&tree, &witness, &genesis, &devid, &new_validated)?
-    {
-        let bytes = acceptance
-            .encode()
-            .map_err(|e| storage_err("trader acceptance encode", e))?;
-        let ta_b = dsm::storage_object::immutable_inner(
-            dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
-            &bytes,
-        );
-        // The acceptance leaf is externally citable, so the proof artifact
-        // above MUST exist for a settle. Refused rather than published
-        // half-located: a locator that could never name Req 21.16's path would
-        // strand the settlement bound-but-unrealized for no protocol reason.
-        let proof_addr = economic_proof_addr.ok_or_else(|| {
-            DsmError::invalid_operation(
-                "trader acceptance: the settle wrote an acceptance leaf but no inclusion proof \
-                 exists to locate — refusing to publish an acceptance nothing can verify",
-            )
-        })?;
-        let b = acceptance.acceptance_leaf().bundle;
-        post_admit_artifacts.push((
-            crate::sdk::economic_registers::immutable_object_key(
-                dsm::common::domain_tags::TAG_DSM_TRADER_SETTLEMENT_ACCEPTANCE,
-                &bytes,
-            ),
-            bytes,
-            "trader-settlement-acceptance",
-        ));
-        post_admit_artifacts.push((
-            crate::sdk::trader_acceptance_locator::locator_key(&b),
-            crate::sdk::trader_acceptance_locator::encode_locator(&ta_b, &proof_addr),
-            "trader-acceptance-locator",
-        ));
-    }
 
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
@@ -1772,7 +917,6 @@ pub(crate) async fn finish_admission(
 
     Ok(AdmittedOutcome {
         economic_position: new_validated.economic_position(),
-        economic_proof_addr,
     })
 }
 
@@ -2018,7 +1162,7 @@ pub(crate) async fn resume_pending_admission(
         })
         .unwrap_or_default();
     finish_admission(
-        core, network_id, &set, &validated, tree, witness, manifest, operation, pending, post_admit,
+        core, network_id, &set, &validated, witness, manifest, operation, pending, post_admit,
     )
     .await
 }
@@ -2419,7 +1563,6 @@ pub(crate) fn build_recipient_admission(
         &facts,
         &prereqs.authority,
         extra_artifacts,
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )?;
 
     // ── The RELEASE: every field an output of THIS build, signed now,
@@ -2461,56 +1604,44 @@ pub(crate) enum ReleaseRegisterCheck {
     Mismatch(String),
 }
 
-/// The sender's INDEPENDENT half of release verification (3.5b PR4): quorum-
-/// read the recipient's register cell at the released position and require
-/// the registered claim to carry exactly the released post-root and manifest
-/// address. A hostile recipient's private "admitted" flag is never trusted —
-/// the network-registered root is the fact.
+/// The sender's INDEPENDENT half of release verification (3.5b PR4): walk
+/// the recipient's lineage to the released position and require the
+/// registered claim there to carry exactly the released post-root and
+/// manifest address. A hostile recipient's private "admitted" flag is never
+/// trusted — the root its network-registered lineage reaches is the fact.
 pub(crate) async fn verify_release_against_register(
     release: &dsm::economic::release::ReleaseFacts,
 ) -> Result<(), ReleaseRegisterCheck> {
+    use dsm::economic::provenance::PeerLineageFailure;
+    use dsm::economic::provenance::ProvenanceResolver;
     use ReleaseRegisterCheck::{Mismatch, Unavailable};
     let network = committed_network_id().map_err(|e| Unavailable(format!("network: {e}")))?;
     let set = canonical_set(&network).map_err(|e| Unavailable(format!("register set: {e}")))?;
-    let k_root = dsm::economic::register::economic_root_register_key(
-        &release.recipient_genesis,
-        &release.recipient_devid,
-        release.recipient_economic_position,
-    );
-    let cell = crate::sdk::economic_registers::read_economic_root_cell(&set, &k_root)
-        .await
-        .map_err(|e| match e {
-            crate::sdk::economic_registers::RegisterError::Conflict { detail } => Mismatch(
-                format!("QUARANTINED register cell at the released position: {detail}"),
-            ),
-            other => Unavailable(other.to_string()),
-        })?;
-    let Some(cell) = cell else {
-        return Err(Unavailable(
-            "no quorum winner at the released position yet".to_string(),
-        ));
+    let resolver = LiveRegisterResolver {
+        set: &set,
+        runtime: tokio::runtime::Handle::current(),
+        expected_network_id: network,
     };
-    let claim = dsm::economic::claim_envelope::decode_registered_economic_claim(&cell)
-        .map_err(|e| Mismatch(format!("registered claim: {e}")))?;
-    // A CONDITIONAL POSITION IS NOT A HOSTILE RECIPIENT. `Mismatch` is the
-    // terminal verdict here — it quarantines the counterparty — and a claim
-    // that has simply not selected a root yet has done nothing wrong. It is
-    // `Unavailable`, which is the retrying verdict, because the route's
-    // resolution is exactly what makes it answerable later.
-    let claim = claim
-        .single_root()
-        .map_err(|conditional| Unavailable(conditional.to_string()))?;
-    let body = claim.body().clone();
-    if body.trader_genesis != release.recipient_genesis
-        || body.trader_devid != release.recipient_devid
-        || body.economic_position != release.recipient_economic_position
-    {
-        return Err(Mismatch(
-            "registered claim names different coordinates than the release".to_string(),
-        ));
-    }
-    if body.post_economic_root != release.post_economic_root
-        || body.admission_manifest_addr != release.admission_manifest_addr
+    // The recipient's lineage is walked to the released position. Every cell
+    // on the way is read at a leader computed from a root THIS verifier
+    // validated (Part II §7.2) — never from anything the release carries — so
+    // the registered root at `q` is the one the recipient's own lineage
+    // reaches, not a value a recipient could point the verifier at.
+    let peer = tokio::task::block_in_place(|| {
+        resolver.validated_peer_transition(
+            &release.recipient_genesis,
+            &release.recipient_devid,
+            release.recipient_economic_position,
+        )
+    })
+    .map_err(|e| match e {
+        PeerLineageFailure::Incomplete(detail) => Unavailable(format!(
+            "recipient lineage at the released position: {detail}"
+        )),
+        other => Mismatch(format!("recipient lineage: {other}")),
+    })?;
+    if peer.validated_root().economic_root() != release.post_economic_root
+        || peer.admission_manifest_addr() != release.admission_manifest_addr
     {
         return Err(Mismatch(
             "the release names a root/manifest the register does not hold".to_string(),
@@ -2579,78 +1710,4 @@ pub(crate) fn record_ble_ek_steps_from_receipt(
     }
     tx.commit().map_err(|e| storage_err("ek step commit", e))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod citability_tests {
-    use super::leaf_is_externally_citable;
-    use dsm::economic::state::{
-        EconomicBalanceState, EconomicBundleAcceptanceState, EconomicConsumedSourceState,
-        EconomicLeafState, EconomicSettlementReceiptState, EconomicVaultReserveState,
-    };
-
-    /// Every leaf class states its citability explicitly, so flipping one is a
-    /// red test rather than a silent change in what an admission publishes.
-    ///
-    /// This exists because the classification has no other coverage until a
-    /// write set actually produces a bundle-acceptance leaf: getting it wrong
-    /// for `0x0032` would mean the 256-sibling path is never published, and
-    /// the failure would surface as an unconstructible `TA_B` at 2c-D §7 step
-    /// 5 — far from the line that caused it.
-    #[test]
-    fn every_leaf_class_pins_whether_a_stranger_can_be_asked_to_prove_it() {
-        let citable: [(&str, EconomicLeafState, bool); 5] = [
-            (
-                "balance — this device's own spendable state",
-                EconomicLeafState::Balance(
-                    EconomicBalanceState::new([0x10; 32], 1).expect("nonzero"),
-                ),
-                false,
-            ),
-            (
-                "vault reserve — cited by 0x0026 to fund a trader's settle",
-                EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                    vault_id: [0x03; 32],
-                    policy_commit: [0x10; 32],
-                    amount: 1,
-                    vault_sequence: 1,
-                }),
-                true,
-            ),
-            (
-                "settlement receipt — cited by 0x0027 to fund an owner's apply",
-                EconomicLeafState::SettlementReceipt(
-                    EconomicSettlementReceiptState::new(
-                        [0x03; 32], [0xA0; 32], 1, 2, [0x10; 32], 1, [0x20; 32], 1,
-                    )
-                    .expect("consistent legs"),
-                ),
-                true,
-            ),
-            (
-                "consumed source — this device's own spend marker",
-                EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
-                    source_id: [0x40; 32],
-                    consumer_economic_operation_id: [0x50; 32],
-                }),
-                false,
-            ),
-            (
-                "bundle acceptance — TA_B asks a third party to prove exactly this",
-                EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
-                    bundle: [0xB0; 32],
-                    economic_operation_id: [0x50; 32],
-                }),
-                true,
-            ),
-        ];
-
-        for (why, state, expected) in citable {
-            assert_eq!(
-                leaf_is_externally_citable(&state),
-                expected,
-                "citability changed for {why}"
-            );
-        }
-    }
 }
