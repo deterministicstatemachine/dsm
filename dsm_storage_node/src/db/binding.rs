@@ -2,7 +2,7 @@
 
 //! The generic conditional-binding DECISION, shared by both backends.
 //!
-//! `CompareExchangeMany` (SoFi Rev 15 §15.5, Req 15.6) is atomic within one
+//! `CompareExchangeMany` is atomic within one
 //! member and inspects only generic storage fields. The decision of whether
 //! a replacement may be applied is pure and lives here, once, so Postgres and
 //! SQLite cannot drift into two rules, and so it is testable without a

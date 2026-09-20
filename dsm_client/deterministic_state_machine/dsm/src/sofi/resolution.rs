@@ -6,7 +6,7 @@
 //! fetches nothing, trusts no caller's opinion, and evaluates no policy: a
 //! fact is either an objective storage observation ([`CellResolution`]), a
 //! static validity verdict ([`Validation`]), or a monotone register fact
-//! (registration, canonicality, orphaning, an outcome). Where those facts come
+//! (registration, canonicality, orphaning). Where those facts come
 //! from is E2's and E3's business.
 //!
 //! ## What it decides
@@ -27,12 +27,10 @@
 //!
 //! One `FinalE(E)` cell is not one executed swap. A route realizes only when
 //! every required leg consumes its exact parent under one registered
-//! fulfillment, which is why [`consumed_route`] quantifies over all legs and
-//! takes the multi-leg outcome into account.
+//! fulfillment, which is why [`consumed_route`] quantifies over all legs.
 
 use super::arith::CellResolution;
 use super::conformance::Validation;
-use super::wire::OutcomeCell;
 
 /// What a verifier has established about the predecessor position `p` that `P`
 /// names as its trader parent `T0`.
@@ -149,14 +147,11 @@ pub struct RouteFacts<'legs> {
     pub parent_pre_root: [u8; 32],
     /// `RouteValidation(P, G, E)`, static.
     pub validation: Validation,
-    /// `StorageResolved(q)`: registration, every successor key, and the
-    /// outcome for a multi-leg F.
+    /// `StorageResolved(q)`: registration and every successor key.
     pub storage_resolved: bool,
     /// One entry per leg of `P`, in P's leg order. A single-vault trade is the
     /// one-leg case.
     pub legs: &'legs [LegFacts],
-    /// The route outcome at `K_out(F)`, where one is required.
-    pub outcome: Option<OutcomeCell>,
 }
 
 impl RouteFacts<'_> {
@@ -222,7 +217,6 @@ pub fn consumed_route(facts: &RouteFacts<'_>) -> bool {
             .legs
             .iter()
             .all(|l| l.canonical_parent && l.attempt_live && l.final_on(&facts.external_commitment))
-        && (!facts.multi_leg() || facts.outcome == Some(OutcomeCell::Complete))
 }
 
 /// Which arm of `RouteImpossible(P, E)` holds, if any. The arms are stated
@@ -307,9 +301,7 @@ pub fn resolve_position(facts: &RouteFacts<'_>) -> Resolution {
     // Invalid when the evidence arrived (R14-1).
     if facts.validation == Validation::Valid
         && facts.storage_resolved
-        && (facts.a_reserved_key_is_lost()
-            || facts.a_parent_is_lost()
-            || facts.outcome == Some(OutcomeCell::Abort))
+        && (facts.a_reserved_key_is_lost() || facts.a_parent_is_lost())
     {
         return Resolution::Void;
     }
@@ -337,8 +329,6 @@ pub enum SkipReason {
     RejectedFinalSingleLeg,
     /// A final cell of an operation that can never realize.
     RejectedFinalRoute(ImpossibleArm),
-    /// A registered fulfillment whose route objectively aborted.
-    AbortFinalRoute,
 }
 
 /// Classify the attempt key of `leg` under the facts of the registered
@@ -367,12 +357,9 @@ pub fn classify_attempt(
             };
             return (AttemptClass::Skipped, Some(reason));
         }
-        if facts.registered && facts.outcome == Some(OutcomeCell::Abort) {
-            return (AttemptClass::Skipped, Some(SkipReason::AbortFinalRoute));
-        }
         // A final cell is a CONSUMPTION only when the whole operation consumed
         // — the same E across every required leg, validation Valid, the trader
-        // parent compatible, and, for a route, an objective Complete. A leg's
+        // parent compatible. A leg's
         // own facts are not enough: one FinalE(E) cell is not one executed
         // swap (F4), and treating it as one is what would let a multi-leg
         // route consume a parent it never realized on.
@@ -470,7 +457,6 @@ mod tests {
             validation: Valid,
             storage_resolved: true,
             legs,
-            outcome: None,
         }
     }
 
@@ -642,30 +628,9 @@ mod tests {
     #[test]
     fn a_route_with_one_leg_still_open_is_not_consumed() {
         let legs = [good_leg(), pending_leg()];
-        let facts = RouteFacts {
-            outcome: None,
-            ..realized(&legs)
-        };
+        let facts = RouteFacts { ..realized(&legs) };
         assert!(!consumed_route(&facts));
         assert_eq!(resolve_position(&facts), Resolution::Pending);
-    }
-
-    /// A multi-leg route needs the objective outcome, not just its cells.
-    #[test]
-    fn a_multi_leg_route_needs_complete_final() {
-        let legs = [good_leg(), good_leg()];
-        let without = RouteFacts {
-            outcome: None,
-            ..realized(&legs)
-        };
-        assert!(!consumed_route(&without));
-        assert_eq!(resolve_position(&without), Resolution::Pending);
-        let with = RouteFacts {
-            outcome: Some(OutcomeCell::Complete),
-            ..realized(&legs)
-        };
-        assert!(consumed_route(&with));
-        assert_eq!(resolve_position(&with), Resolution::Realized);
     }
 
     /// Lean `route_validation_excludes_parent_canonicality`: canonicality is a
@@ -741,13 +706,6 @@ mod tests {
             ..good_leg()
         }];
         assert_eq!(resolve_position(&realized(&dead)), Resolution::Void);
-
-        let legs = [good_leg(), pending_leg()];
-        let aborted = RouteFacts {
-            outcome: Some(OutcomeCell::Abort),
-            ..realized(&legs)
-        };
-        assert_eq!(resolve_position(&aborted), Resolution::Void);
     }
 
     /// Lean `resolution_is_permanent` and its counterexample
@@ -826,45 +784,41 @@ mod tests {
             for parent in parents {
                 for validation in [Valid, Invalid, Unavailable] {
                     for storage_resolved in [false, true] {
-                        for outcome in [None, Some(OutcomeCell::Complete), Some(OutcomeCell::Abort)]
-                        {
-                            let legs = [LegFacts { cell, ..good_leg() }];
-                            let facts = RouteFacts {
-                                external_commitment: E,
-                                registered: true,
-                                parent,
-                                parent_pre_root: PRE,
-                                validation,
-                                storage_resolved,
-                                legs: &legs,
-                                outcome,
-                            };
-                            let before = resolve_position(&facts);
-                            // Evidence arriving is the only monotone step that
-                            // can change an Unavailable verdict.
-                            if validation == Unavailable {
-                                for settled in [Valid, Invalid] {
-                                    let after = resolve_position(&RouteFacts {
-                                        validation: settled,
-                                        ..facts
-                                    });
-                                    assert!(
-                                        before == Resolution::Pending || before == after,
-                                        "{before:?} changed to {after:?} on evidence"
-                                    );
-                                }
-                            }
-                            // Storage resolving cannot flip a terminal answer.
-                            if !storage_resolved {
+                        let legs = [LegFacts { cell, ..good_leg() }];
+                        let facts = RouteFacts {
+                            external_commitment: E,
+                            registered: true,
+                            parent,
+                            parent_pre_root: PRE,
+                            validation,
+                            storage_resolved,
+                            legs: &legs,
+                        };
+                        let before = resolve_position(&facts);
+                        // Evidence arriving is the only monotone step that
+                        // can change an Unavailable verdict.
+                        if validation == Unavailable {
+                            for settled in [Valid, Invalid] {
                                 let after = resolve_position(&RouteFacts {
-                                    storage_resolved: true,
+                                    validation: settled,
                                     ..facts
                                 });
                                 assert!(
                                     before == Resolution::Pending || before == after,
-                                    "{before:?} changed to {after:?} on storage resolution"
+                                    "{before:?} changed to {after:?} on evidence"
                                 );
                             }
+                        }
+                        // Storage resolving cannot flip a terminal answer.
+                        if !storage_resolved {
+                            let after = resolve_position(&RouteFacts {
+                                storage_resolved: true,
+                                ..facts
+                            });
+                            assert!(
+                                before == Resolution::Pending || before == after,
+                                "{before:?} changed to {after:?} on storage resolution"
+                            );
                         }
                     }
                 }
@@ -985,21 +939,6 @@ mod tests {
         );
     }
 
-    /// An abort makes the key skippable; `K_ful` exclusivity is what makes
-    /// that safe.
-    #[test]
-    fn an_aborted_route_makes_its_final_key_skippable() {
-        let legs = [good_leg(), good_leg()];
-        let facts = RouteFacts {
-            outcome: Some(OutcomeCell::Abort),
-            ..realized(&legs)
-        };
-        assert_eq!(
-            classify_attempt(&facts, &legs[0]),
-            (AttemptClass::Skipped, Some(SkipReason::AbortFinalRoute))
-        );
-    }
-
     /// The walk passes skipped keys, stops on a consumption, and the answer is
     /// the same however the budget chunks it.
     #[test]
@@ -1027,7 +966,6 @@ mod tests {
                     validation: Valid,
                     storage_resolved: true,
                     legs,
-                    outcome: None,
                 },
                 leg,
             ))
@@ -1055,25 +993,19 @@ mod tests {
     }
 
     /// A final cell of a MULTI-LEG route is not a consumption on its own: the
-    /// route consumes only when every required leg did and the outcome says
-    /// Complete. One FinalE(E) cell is not one executed swap.
+    /// route consumes only when every required leg did. One FinalE(E) cell is
+    /// not one executed swap.
     #[test]
     fn a_final_leg_of_an_incomplete_route_is_not_consumed() {
         let legs = [good_leg(), pending_leg()];
-        let facts = RouteFacts {
-            outcome: None,
-            ..realized(&legs)
-        };
+        let facts = RouteFacts { ..realized(&legs) };
         assert_eq!(
             classify_attempt(&facts, &legs[0]),
             (AttemptClass::Unresolved, None)
         );
-        // With every leg final AND the objective Complete, it consumes.
+        // With every leg final, it consumes.
         let done = [good_leg(), good_leg()];
-        let complete = RouteFacts {
-            outcome: Some(OutcomeCell::Complete),
-            ..realized(&done)
-        };
+        let complete = RouteFacts { ..realized(&done) };
         assert_eq!(
             classify_attempt(&complete, &done[0]),
             (AttemptClass::Consumed, None)
@@ -1114,7 +1046,6 @@ mod tests {
                     validation: Valid,
                     storage_resolved: true,
                     legs: &legs,
-                    outcome: None,
                 },
                 dead,
             ))
@@ -1139,10 +1070,7 @@ mod tests {
                 ..good_leg()
             },
         ];
-        let facts = RouteFacts {
-            outcome: Some(OutcomeCell::Complete),
-            ..realized(&legs)
-        };
+        let facts = RouteFacts { ..realized(&legs) };
         assert_eq!(facts.external_commitment, E);
         assert!(
             !consumed_route(&facts),

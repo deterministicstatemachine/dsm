@@ -788,10 +788,13 @@ fn every_registry_number_is_in_exactly_one_namespace_set() {
         // 0x0035 is the route reserve-consumption credit source (amendment
         // 2c-H H9), allocated with its encoder.
         0x0035,
-        // 0x0036..=0x004A are the SoFi v8 wire objects (`crate::sofi::wire`),
-        // allocated with their field tables and encoders.
+        // 0x0036..=0x0042 and 0x004A are the SoFi v8 wire objects
+        // (`crate::sofi::wire`), allocated with their field tables and
+        // encoders. 0x0043..=0x0049 were the resolution-record and
+        // route-outcome family; the demolition burned them, so they belong to
+        // `burned_class` and nowhere else.
         0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F, 0x0040,
-        0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047, 0x0048, 0x0049, 0x004A,
+        0x0041, 0x0042, 0x004A,
     ];
     for n in 0x0001u16..=0x004A {
         let sets = [

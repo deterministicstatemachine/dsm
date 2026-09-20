@@ -1,4 +1,4 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Application-blind storage primitives (SoFi Rev 15 §15): the node half of
-//! the client-driven quorum transaction.
+//! Application-blind storage primitives: the node half of a client-driven
+//! multi-key transaction over opaque records.
 pub mod binding;

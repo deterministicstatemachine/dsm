@@ -70,14 +70,7 @@
 //! `0x0042 PolicyFulfillmentAuxRef`: 1 `policy_fulfillment_id` digest32 ·
 //! 2 `evidence_class` u16 · 3 `addr` digest32.
 //!
-//! Resolution records: `0x0043 RecordFulfillmentRegistered` (1
-//! `fulfillment_key` · 2 `fulfillment_id`) · `0x0044 RecordSuccessorDead` (1
-//! `successor_key`) · `0x0045 RecordSuccessorFinal` (1 `successor_key` · 2
-//! `external_commitment`) · `0x0046 RecordOutcomeComplete` (1 `outcome_key`) ·
-//! `0x0047 RecordOutcomeAbort` (1 `outcome_key`). All digest32.
 //!
-//! Route-outcome cell values: `0x0048 OutcomeCellComplete`, `0x0049
-//! OutcomeCellAbort` — envelope only, zero fields.
 //!
 //! `0x004A RouteLegSet` (`Γ`): 1 `legs` `seq<(vault_id, parent_root,
 //! setup_ref, shadow_core)>` all digest32, `ROUTE_MIN_LEGS..=CANONICAL_MAX_LEGS`,

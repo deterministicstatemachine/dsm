@@ -430,33 +430,6 @@ fn every_union_variant_round_trips() {
         PreEClosureIndex::decode(&idx.encode()).expect("decode"),
         idx
     );
-    for rec in [
-        ResolutionRecord::FulfillmentRegistered {
-            fulfillment_key: [7; 32],
-            fulfillment_id: [8; 32],
-        },
-        ResolutionRecord::SuccessorDead {
-            successor_key: [9; 32],
-        },
-        ResolutionRecord::SuccessorFinal {
-            successor_key: [10; 32],
-            external_commitment: [11; 32],
-        },
-        ResolutionRecord::OutcomeComplete {
-            outcome_key: [12; 32],
-        },
-        ResolutionRecord::OutcomeAbort {
-            outcome_key: [13; 32],
-        },
-    ] {
-        assert_eq!(
-            ResolutionRecord::decode(&rec.encode()).expect("decode"),
-            rec
-        );
-    }
-    for cell in [OutcomeCell::Complete, OutcomeCell::Abort] {
-        assert_eq!(OutcomeCell::decode(&cell.encode()).expect("decode"), cell);
-    }
     let aux = PolicyFulfillmentAuxRef {
         policy_fulfillment_id: [14; 32],
         evidence_class: 0x0042,
@@ -564,10 +537,6 @@ fn derivations_match_the_independent_hasher_and_the_frozen_golden_digests() {
     assert_eq!(
         d::fulfillment_signing_digest(&f),
         indep::h("DSM/sofi/fulfillment-sign/v1", &[&f.encode()])
-    );
-    assert_eq!(
-        d::route_outcome_key(&fid),
-        indep::h("DSM/sofi/route-outcome/v2", &[&fid])
     );
 
     let kful = d::fulfillment_register_key(&G, &DEV, 42);
@@ -1076,37 +1045,6 @@ fn closure_index_enforces_bounds_order_and_current_e_exclusion() {
 }
 
 #[test]
-fn typed_records_and_outcome_cells_never_cross_decode() {
-    let dead = ResolutionRecord::SuccessorDead {
-        successor_key: [1; 32],
-    }
-    .encode();
-    assert!(
-        matches!(
-            OutcomeCell::decode(&dead),
-            Err(DecodeError::WrongClass { .. })
-        ),
-        "no Dead state on K_out"
-    );
-    let complete = OutcomeCell::Complete.encode();
-    assert!(matches!(
-        ResolutionRecord::decode(&complete),
-        Err(DecodeError::WrongClass { .. })
-    ));
-    let outcome_record = ResolutionRecord::OutcomeComplete {
-        outcome_key: [2; 32],
-    }
-    .encode();
-    assert!(
-        !matches!(
-            ResolutionRecord::decode(&outcome_record),
-            Ok(ResolutionRecord::SuccessorFinal { .. })
-        ),
-        "an outcome record never decodes as FinalE"
-    );
-}
-
-#[test]
 fn successor_arithmetic_and_validation_composition() {
     use CellObservation::{Empty, Holds, Unknown};
     let a = [0xA; 32];
@@ -1224,31 +1162,57 @@ fn the_signed_envelope_matches_the_independent_encoder() {
     );
 }
 
-/// Registry collision guard: every `class::` discriminant is unique. A class
-/// allocated on main before this lands shows up here as a duplicate value.
+/// Registry collision guard: every `class::` discriminant is unique, and a
+/// number the registry burned is never live again. A class allocated on main
+/// before this lands shows up here as a duplicate value; a burned number
+/// reappearing as a live class shows up as a double allocation.
 #[test]
 fn class_discriminants_do_not_collide() {
     let src = include_str!("../src/ccb/mod.rs");
-    let start = src.find("pub mod class {").expect("class module");
-    let body = &src[start..];
-    let end = body.find("\n}\n").expect("class module end");
-    let mut seen = std::collections::BTreeMap::new();
-    for line in body[..end].lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("pub const ") {
-            let name = rest.split(':').next().expect("name").to_string();
-            if let Some(hex) = rest.split("= 0x").nth(1) {
-                let v = u16::from_str_radix(hex.trim_end_matches(';'), 16).expect("hex class");
-                if let Some(prev) = seen.insert(v, name.clone()) {
-                    panic!("class {v:#06x} allocated twice: {prev} and {name}");
+    fn consts(src: &str, module: &str) -> std::collections::BTreeMap<u16, String> {
+        let start = src.find(module).expect("module");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("module end");
+        let mut seen = std::collections::BTreeMap::new();
+        for line in body[..end].lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub const ") {
+                let name = rest.split(':').next().expect("name").to_string();
+                if let Some(hex) = rest.split("= 0x").nth(1) {
+                    let v = u16::from_str_radix(hex.trim_end_matches(';'), 16).expect("hex class");
+                    if let Some(prev) = seen.insert(v, name.clone()) {
+                        panic!("class {v:#06x} allocated twice: {prev} and {name}");
+                    }
                 }
             }
         }
+        seen
     }
+    let live = consts(src, "pub mod class {");
+    let burned = consts(src, "pub mod burned_class {");
+    for (v, name) in &burned {
+        assert!(
+            !live.contains_key(v),
+            "burned class {v:#06x} ({name}) is live again as {}",
+            live[v]
+        );
+        assert!(
+            dsm::ccb::burned_class::is_burned_class(*v),
+            "{name} is declared under burned_class but is not in burned_class::ALL"
+        );
+    }
+    // The SoFi v8 range is fully accounted for: every number is a live class
+    // or a burned one, and the demolition's seven are burned.
     for v in 0x0036u16..=0x004A {
         assert!(
-            seen.contains_key(&v),
-            "{v:#06x} must be allocated to a SoFi v8 class"
+            live.contains_key(&v) || burned.contains_key(&v),
+            "{v:#06x} is neither a live SoFi v8 class nor a burned one"
+        );
+    }
+    for v in 0x0043u16..=0x0049 {
+        assert!(
+            burned.contains_key(&v) && !live.contains_key(&v),
+            "{v:#06x} was the resolution-record / outcome-cell family and must stay burned"
         );
     }
 }
