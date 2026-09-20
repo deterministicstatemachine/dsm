@@ -1,243 +1,348 @@
 ---- MODULE DSM_SofiSuccessorCells ----
-EXTENDS Naturals, FiniteSets, TLC
+EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 \* =============================================================================
-\* SOFI V8 SUCCESSOR CELLS, AT THE MEMBERS.
+\* SOFI SUCCESSOR CELLS AND THE POSITION PAIR, AT THE MEMBERS: LEADER FIRST,
+\* BEHIND THE RECOGNITION BOUNDARY.
 \*
-\* SCOPE. One DLV parent's attempt chain (keys K^(0), K^(1)) and the two trader
-\* positions whose registered fulfillments may write into it, replicated across
-\* the frozen five-member set (plan revision 10.3, F0, F2's registers, F4, F5,
-\* F7). This module owns what happens at the MEMBERS while writers, verifiers
-\* and faults interleave: one member at a time accepts a write, a verifier reads
-\* some members and not others and may write a Dead record, relayers publish
-\* fulfillments, validation evidence arrives late, and the walk classifies each
-\* key and consumes the parent.
+\* SCOPE. One DLV parent's attempt keys K^(0), K^(1), and one trader position
+\* q with its pair K_ful(q), K_root(q), replicated across the frozen
+\* five-member set S (Part II of the specification: Sections 6 to 13). This
+\* module owns what happens at the MEMBERS while writers, hostile callers,
+\* Core readers and faults interleave. A member keeps whatever bytes it is
+\* given, in arrival order, and decides nothing: no ingress rule, no refusal,
+\* no comparison, no record. Every fact below is derived by the WRITER or by
+\* CORE from raw reads.
 \*
-\* A register is a vector of per-value holder COUNTS over the members. Under
-\* crash-omission a member that never answers is one that never wrote, so the
-\* counts are exact for every question asked here; member identity is not.
-\* A count stops at the finality threshold: a further holder of a value that is
-\* already final changes no property below, and the state space stays small
-\* enough for the gate.
-\* The universal quorum algebra -- 3 + 3 > 5, write-once, Dead soundness on a
-\* partial read -- is Lean's (lean4/DSMSofiSuccessorCells.lean) and is not
-\* re-derived. What the operation does with these facts -- routes, outcomes,
-\* resolution, the fence -- is DSM_SofiFulfillment.tla.
+\* TWO UNIVERSES. Raw member storage holds bytes from anyone. Between those
+\* bytes and every protocol fact stands one deterministic function, Core's
+\* recognition: it rebuilds a candidate from the bytes it reads and keeps it
+\* only if what it recomputes is an object whose own fields name the key
+\* (Section 8: "bytes that are not an object naming the key count as nothing
+\* anywhere, because only objects exist"; Section 17.5). The winner at a key
+\* is the FIRST RECOGNIZED OBJECT at the leader -- not the first bytes that
+\* arrived. Unrecognized bytes are never an occupant, never final and never
+\* consume, however early they arrived and however many members hold them.
+\*
+\*   raw bytes at a member  --recognition-->  protocol object  --> cell facts
+\*
+\* LEADER FIRST (Sections 7 and 8), over the recognized view:
+\*   LeaderHeld(K, x) == x is the first recognized object naming K at the leader
+\*   Final(K, x)      == LeaderHeld(K, x) /\ two other members hold x
+\* No member votes and nothing is counted against a quorum. No key is ever
+\* dead: a key is open until an object naming it reaches its leader.
 \*
 \* THE MODEL
-\*   one parent, attempts 0 and 1
-\*   T   signs FT0 (E1, attempt 0) only; FT1 would be a FORGED attempt vector
-\*   U   signs FU0 and FU1 (E2, attempts 0 and 1): two exercises of one position
-\*   W   signs FW0 (E3, attempt 0): a third writer, so votes can split Dead;
-\*       W's operation is Invalid, so its final is objectively skipped
-\*   a verifier observes any subset of the members and may record Dead
+\*   members     the leader of a key is a fixed position of S, never a node's
+\*               choice; the three members that are neither the leader nor
+\*               the alternate are interchangeable copies, so they are held as
+\*               a count per value, stopped at two (all Final needs)
+\*   attempt keys K0, K1 of one parent. Raw values: XT (the exercise of trader
+\*               T's F, an object naming attempt AttemptT), XU (a rival's
+\*               exercise, an object naming attempt 0), G (bytes any caller
+\*               may send that no recognition can rebuild into an object).
+\*               The leader keeps its raw arrival ORDER; copies are counts.
+\*   position q  of trader T: K_ful(q) holds F (T's fulfillment); K_root(q)
+\*               holds C (the conditional claim F installs) or S (an ordinary
+\*               claim at q). Both keys share one leader, and the pair is
+\*               written there together.
+\*   readers     Core reads any subset of the members; an unread member is
+\*               Unknown and counts as nothing
+\*   T           signs F, then anyone may write F, C and XT; the rival writes
+\*               XU; anyone writes G, anywhere, any time. F names attempt
+\*               AttemptT; the rival's own registration and evidence are taken
+\*               as settled facts
 \*
-\* FALSIFICATIONS. Each DSM_SofiSuccessorCells_<Name>.cfg flips one constant below
-\* (or states a claim that must be false) and lists exactly the invariant it
-\* must violate; tools/vertical_validation/src/tla_runner.rs gates the verdict
-\* and tla/README.md tabulates them.
+\* FALSIFICATIONS. Each DSM_SofiSuccessorCells_<Name>.cfg flips one constant
+\* below (or states a claim that must be false) and lists exactly the invariant
+\* it must violate; tools/vertical_validation/src/tla_runner.rs gates the
+\* verdict and tla/README.md tabulates them.
 \* =============================================================================
 
 CONSTANTS
-    N,                         \* members in the frozen set (5)
-    ValidE2,                   \* [TRUE] RouteValidation of U's operation
-    MaxStep,                   \* DFID depth budget (runner reads it)
-    OverwriteAllowed,          \* [FALSE] a member replaces its cell value
-    PermanentStoreLoss,        \* [FALSE] a member loses a stored cell
-    EquivocatingMember,        \* [FALSE] one member answers two values
-    QuorumTwo,                 \* [FALSE] finality at two cells
-    UnreadDroppedFromCount,    \* [FALSE] an unread member counts toward nothing
-    TimeoutRecordsDead,        \* [FALSE] a timed-out read is recorded Dead
-    NumericHole,               \* [FALSE] attempt 1 without attempt 0 resolved
-    AttemptLiveOmitted,        \* [FALSE] consumption without AttemptLive
-    CellsBeforeFulfillment,    \* [FALSE] cell ingress without a registered F
-    FulfillmentSpray,          \* [FALSE] a registered F writes another attempt's key
-    RelayWithoutKeyBinding,    \* [FALSE] F ingress without the precommit's key
-    UnavailableAsInvalid,      \* [FALSE] missing evidence rejects a final
-    InvalidFinalNotSkipped     \* [FALSE] an Invalid final is not skipped
+    N,                        \* members in the frozen set (5)
+    MaxStep,                  \* depth budget (the runner reads it; this model is finite)
+    ValidE1,                  \* [TRUE] RouteValidation of T's operation once evidence exists
+    ValidE2,                  \* [TRUE] RouteValidation of the rival's operation
+    ConformingF,              \* [TRUE] FulfillmentConformance(F)
+    AttemptT,                 \* [0] the attempt F names at this parent
+    RivalRegistered,          \* [TRUE] the rival's fulfillment is registered at its own position
+    RecognizeAnyBytes,        \* [FALSE] recognition promotes bytes it cannot rebuild into an object
+    ExerciseCountsAnywhere,   \* [FALSE] recognition reads an exercise as naming a key it does not name
+    CountWithoutLeader,       \* [FALSE] finality counted over any three holders
+    AvailabilityLeader,       \* [FALSE] the leader is whoever is reachable
+    UnreadCountedAsCopy,      \* [FALSE] an unread member counts as a holder
+    SplitPositionPair,        \* [FALSE] K_ful(q) and K_root(q) written in two steps
+    OccupancyIsConsumption,   \* [FALSE] a final value consumes with no Core predicate
+    RegistrationIsConformance,\* [FALSE] a registered F is taken as conforming
+    AttemptLiveOmitted,       \* [FALSE] consumption without AttemptLive
+    UnavailableAsInvalid,     \* [FALSE] missing evidence rejects a final
+    InvalidFinalNotSkipped    \* [FALSE] an Invalid final is not skipped
 
-ASSUME N = 5 /\ MaxStep \in Nat
+ASSUME N = 5 /\ MaxStep \in Nat /\ AttemptT \in {0, 1}
 
-Finality == IF QuorumTwo THEN 2 ELSE 3
-Capacity == IF EquivocatingMember THEN N + 1 ELSE N
+NONE == "none"
+FINALITY == 3
+\* Copies are counted up to what Final needs. Counting WITHOUT the leader needs
+\* a third holder of a value the leader never held first, so that mutation
+\* lets one more copy land.
+CopyCap == IF CountWithoutLeader THEN 3 ELSE 2
 
-T == "T"
-U == "U"
-W == "W"
-Traders == {T, U, W}
-E1 == "E1"
-E2 == "E2"
-E3 == "E3"
-Values == {E1, E2, E3}
-Attempts == {0, 1}
+\* ---- keys and values ----------------------------------------------------
+K0 == "K0"
+K1 == "K1"
+KF == "KF"
+KR == "KR"
+AttemptKeys == {K0, K1}
+Keys == {K0, K1, KF, KR}
+AttemptOf(k) == IF k = K0 THEN 0 ELSE 1
 
-\* A fulfillment: its trader, its E and its attempt at this parent.
-FT0 == <<T, 0>>
-FT1 == <<T, 1>>
-FU0 == <<U, 0>>
-FU1 == <<U, 1>>
-FW0 == <<W, 0>>
-Options(tr) == {<<tr, 0>>, <<tr, 1>>}
-Fulfillments == Options(T) \cup Options(U) \cup Options(W)
-TraderOf(f) == f[1]
-AttemptOf(f) == f[2]
-EOfTrader(tr) == CASE tr = T -> E1 [] tr = U -> E2 [] OTHER -> E3
-EOf(f) == EOfTrader(TraderOf(f))
-Signed == {FT0, FU0, FU1, FW0}
-TruthOf(e) == CASE e = E2 -> ValidE2 [] e = E3 -> FALSE [] OTHER -> TRUE
+XT == "XT"
+XU == "XU"
+G == "G"
+F == "F"
+C == "C"
+S == "S"
+RawAt(k) ==
+    CASE k = K0 -> {XT, XU, G}
+      [] k = K1 -> {XT, G}
+      [] k = KF -> {F}
+      [] OTHER -> {C, S}
+AllValues == {XT, XU, G, F, C, S}
+
+L == "L"
+A == "A"
+Slots == {L, A}
 
 VARIABLES
-    reg,        \* [Fulfillments -> holders at its trader's K_ful(q)]
-    cell,       \* [Attempts -> [Values -> holders]]
-    deadRec,    \* keys with a Dead resolution record
-    evid,       \* E values whose validation evidence is available
-    everFinal,  \* [Attempts -> values ever final at that key]
-    everReg,    \* [Traders -> fulfillments ever registered at the position]
+    raw,        \* [AttemptKeys -> [Slots -> Seq(bytes)]]: what the leader and the alternate hold, in arrival order
+    first,      \* [{KF, KR} -> [Slots -> value]]: the first object naming the position key at that member
+    copies,     \* [Keys -> [AllValues -> 0..3]]: the three copy members holding the value
+    leaderUp,   \* the seeded leader is reachable (changes only under AvailabilityLeader)
+    signedF,    \* T has signed F (nobody else can produce F, C or XT)
+    evid,       \* T's validation evidence is available
+    everFinal,  \* [Keys -> values ever Final there]
     consHist    \* E values ever observed consuming the parent
 
-vars == <<reg, cell, deadRec, evid, everFinal, everReg, consHist>>
+vars == <<raw, first, copies, leaderUp, signedF, evid, everFinal, consHist>>
 
-SumReg(tr) == reg[<<tr, 0>>] + reg[<<tr, 1>>]
-SumCell(a) == cell[a][E1] + cell[a][E2] + cell[a][E3]
+\* ---- the recognition boundary ------------------------------------------
+\* THE FACT: b is a canonical object whose own fields name attempt key k
+\* (Section 17.5: its F names (v, a) and its P names (v, R_n)). G names nothing:
+\* no recomputation rebuilds it into an object.
+TrueNamesKey(k, b) ==
+    \/ b = XT /\ AttemptT = AttemptOf(k)
+    \/ b = XU /\ k = K0
 
-Registered(f) == reg[f] >= Finality
-Final(a, v) == cell[a][v] >= Finality
-FinalValues(a) == {v \in Values : Final(a, v)}
-Resolved(a) == a \in deadRec \/ FinalValues(a) # {}
+\* Core's recognition of the bytes b read at attempt key k: the object, or
+\* nothing. The mutations promote bytes that name nothing, or an exercise
+\* read at a key it does not name.
+Recognized(k, b) ==
+    \/ TrueNamesKey(k, b)
+    \/ RecognizeAnyBytes /\ b = G
+    \/ ExerciseCountsAnywhere /\ b = XT
+
+\* An object Core can construct at all: XT exists only from T's signed F; the
+\* rival's exercise from the rival's; G from nothing.
+Constructible(b) ==
+    \/ b = XT /\ signedF
+    \/ b = XU
+
+\* The first RECOGNIZED object at a member, over its raw arrival order.
+RECURSIVE FirstRecognized(_, _)
+FirstRecognized(k, seq) ==
+    IF seq = <<>> THEN NONE
+    ELSE IF Recognized(k, Head(seq)) THEN Head(seq)
+    ELSE FirstRecognized(k, Tail(seq))
+
+\* ---- what Core derives from a read ----------------------------------------
+Lead == IF AvailabilityLeader /\ ~leaderUp THEN A ELSE L
+
+Occupant(k, sl) == IF k \in AttemptKeys THEN FirstRecognized(k, raw[k][sl]) ELSE first[k][sl]
+
+LeaderHeld(k, v) == Occupant(k, Lead) = v
+
+Holders(k, v) ==
+    copies[k][v]
+    + (IF Occupant(k, L) = v THEN 1 ELSE 0)
+    + (IF Occupant(k, A) = v THEN 1 ELSE 0)
+
+OthersHolding(k, v) == Holders(k, v) - 1
+
+Final(k, v) ==
+    IF CountWithoutLeader THEN Holders(k, v) >= FINALITY
+    ELSE LeaderHeld(k, v) /\ OthersHolding(k, v) >= FINALITY - 1
+
+FinalValues(k) == {v \in RawAt(k) : Final(k, v)}
+
+\* A partial read: `unread` copy members answered nothing. Core evaluates the
+\* rule over what it saw; an unread member counts as nothing.
+ReadFinal(k, v, unreadCopies) ==
+    LET answered == IF copies[k][v] > unreadCopies THEN copies[k][v] - unreadCopies ELSE 0
+        seen == IF UnreadCountedAsCopy THEN answered + unreadCopies ELSE answered
+        others == seen + (IF Lead = L /\ Occupant(k, A) = v THEN 1 ELSE 0)
+                       + (IF Lead = A /\ Occupant(k, L) = v THEN 1 ELSE 0)
+    IN LeaderHeld(k, v) /\ others >= FINALITY - 1
+
+\* ---- the SoFi facts Core derives (Section 13) ------------------------------
+FulfillmentRegistered == Final(KF, F) /\ Final(KR, C)
 
 Validation(e) ==
-    IF e \notin evid THEN "Unavailable"
-    ELSE IF TruthOf(e) THEN "Valid" ELSE "Invalid"
+    IF e = XT /\ ~evid THEN "Unavailable"
+    ELSE IF (e = XT /\ ValidE1) \/ (e = XU /\ ValidE2) THEN "Valid" ELSE "Invalid"
 
-\* =============================================================================
-\* THE WALK (verifier)
-\* =============================================================================
+Conformance ==
+    IF RegistrationIsConformance /\ FulfillmentRegistered THEN "Valid"
+    ELSE IF ConformingF THEN "Valid" ELSE "Invalid"
 
-RejectedFinal(a) ==
-    \E v \in FinalValues(a) :
-        IF UnavailableAsInvalid THEN Validation(v) # "Valid"
-        ELSE Validation(v) = "Invalid" /\ ~InvalidFinalNotSkipped
+Impossible(v) ==
+    \/ v = XT /\ (Validation(XT) = "Invalid" \/ Conformance = "Invalid")
+    \/ v = XU /\ Validation(XU) = "Invalid"
 
-Skipped(a) == a \in deadRec \/ RejectedFinal(a)
+RejectedFinal(k) ==
+    \E v \in FinalValues(k) :
+        /\ Recognized(k, v)
+        /\ IF UnavailableAsInvalid THEN ~(v = XT /\ Validation(XT) = "Valid" /\ Conformance = "Valid")
+                                          /\ ~(v = XU /\ Validation(XU) = "Valid")
+           ELSE Impossible(v) /\ ~InvalidFinalNotSkipped
 
-AttemptLive(a) == AttemptLiveOmitted \/ \A b \in Attempts : b < a => Skipped(b)
+Skipped(k) == RejectedFinal(k)
 
-\* E consumes the parent at attempt a through its trader's registered F there.
-ConsumesAt(e, a) ==
-    /\ \E f \in Fulfillments : EOf(f) = e /\ AttemptOf(f) = a /\ Registered(f)
-    /\ Final(a, e)
-    /\ Validation(e) = "Valid"
-    /\ AttemptLive(a)
+AttemptLive(k) == AttemptLiveOmitted \/ (k = K1 => Skipped(K0))
 
-Consumers == {e \in Values : \E a \in Attempts : ConsumesAt(e, a)}
+\* E consumes the parent at k: every Core predicate, never occupancy alone.
+ConsumesAt(e, k) ==
+    /\ Final(k, e)
+    /\ Recognized(k, e)
+    /\ AttemptLive(k)
+    /\ \/ OccupancyIsConsumption
+       \/ e = XT /\ FulfillmentRegistered /\ Conformance = "Valid" /\ Validation(XT) = "Valid"
+       \/ e = XU /\ RivalRegistered /\ Validation(XU) = "Valid"
 
-\* =============================================================================
-\* ACTIONS
-\* =============================================================================
+Consumers == {e \in AllValues : \E k \in AttemptKeys : ConsumesAt(e, k)}
 
-\* Every step records what was ever final, ever registered, ever consumed.
+\* ---- actions: members keep what they are given ---------------------------
 Hist ==
-    /\ everFinal' = [a \in Attempts |-> everFinal[a] \cup FinalValues(a)]
-    /\ everReg' = [tr \in Traders |-> everReg[tr] \cup {f \in Options(tr) : Registered(f)}]
+    /\ everFinal' = [k \in Keys |-> everFinal[k] \cup FinalValues(k)]
     /\ consHist' = consHist \cup Consumers
 
-PredecessorResolved(a) == IF a = 0 THEN TRUE ELSE NumericHole \/ Resolved(a - 1)
+\* Bytes may exist at all: F, C and XT once T signed F; the rival's exercise
+\* and an ordinary claim always; G always -- anyone can send anything.
+Producible(b) ==
+    CASE b \in {F, C, XT} -> signedF
+      [] OTHER -> TRUE
 
-\* A relayer delivers F to one member. Ingress: the precommit's key signed it,
-\* the attempt's predecessor is resolved, and the member's K_ful(q) is empty.
-Publish(f) ==
-    /\ f \in Signed \/ RelayWithoutKeyBinding
-    /\ PredecessorResolved(AttemptOf(f))
-    /\ SumReg(TraderOf(f)) < Capacity
-    /\ reg[f] < Finality
-    /\ reg' = [reg EXCEPT ![f] = @ + 1]
+Holds(seq, b) == \E i \in 1..Len(seq) : seq[i] = b
+
+\* Anyone sends any bytes to the leader of an attempt key. The member keeps
+\* them after whatever it already holds. Nothing is checked: recognition
+\* happens at READ time, in Core, never here.
+PutRaw(k, b) ==
+    /\ k \in AttemptKeys
+    /\ b \in RawAt(k)
+    /\ Producible(b)
+    /\ ~Holds(raw[k][Lead], b)
+    /\ raw' = [raw EXCEPT ![k][Lead] = Append(@, b)]
     /\ Hist
-    /\ UNCHANGED <<cell, deadRec, evid>>
+    /\ UNCHANGED <<first, copies, leaderUp, signedF, evid>>
 
-\* A member admits E into key a for a registered F naming exactly that key.
-WriteCell(a, v) ==
-    /\ \/ CellsBeforeFulfillment
-       \/ \E f \in Fulfillments :
-             /\ EOf(f) = v
-             /\ Registered(f)
-             /\ AttemptOf(f) = a \/ FulfillmentSpray
-    /\ PredecessorResolved(a)
-    /\ SumCell(a) < Capacity
-    /\ cell[a][v] < Finality
-    /\ cell' = [cell EXCEPT ![a][v] = @ + 1]
+\* A copy: any member other than the one that decides; any party carries any
+\* bytes. Copies of the leader's occupant are what finality counts; a loser's
+\* (or garbage's) copies are held too and count for nothing -- modelled where
+\* counting them is the mutation.
+PutCopy(k, b) ==
+    /\ b \in RawAt(k)
+    /\ b # S
+    /\ Producible(b)
+    /\ Occupant(k, Lead) = b \/ (CountWithoutLeader /\ Occupant(k, Lead) # NONE)
+    /\ copies[k][b] < CopyCap
+    /\ copies' = [copies EXCEPT ![k][b] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<reg, deadRec, evid>>
+    /\ UNCHANGED <<raw, first, leaderUp, signedF, evid>>
 
-\* A member that already holds v replaces it: the write-once rule removed.
-Overwrite(a, v, w) ==
-    /\ OverwriteAllowed
-    /\ v # w
-    /\ cell[a][v] > 0
-    /\ cell' = [cell EXCEPT ![a][v] = @ - 1, ![a][w] = @ + 1]
+\* Garbage copies land anywhere, any time: a hostile caller spraying members.
+PutGarbageCopy(k) ==
+    /\ k \in AttemptKeys
+    /\ copies[k][G] < CopyCap
+    /\ copies' = [copies EXCEPT ![k][G] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<reg, deadRec, evid>>
+    /\ UNCHANGED <<raw, first, leaderUp, signedF, evid>>
 
-\* A member loses a stored cell or K_ful entry: outside F0.
-LoseCell(a, v) ==
-    /\ PermanentStoreLoss
-    /\ cell[a][v] > 0
-    /\ cell' = [cell EXCEPT ![a][v] = @ - 1]
+\* The ordinary claim S races C at K_root(q)'s leader.
+PutOrdinaryClaim ==
+    /\ first[KR][Lead] = NONE
+    /\ first' = [first EXCEPT ![KR][Lead] = S]
     /\ Hist
-    /\ UNCHANGED <<reg, deadRec, evid>>
+    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
 
-LoseReg(f) ==
-    /\ PermanentStoreLoss
-    /\ reg[f] > 0
-    /\ reg' = [reg EXCEPT ![f] = @ - 1]
+\* The trader's position pair is written together at its one leader (Section 9).
+PutPair ==
+    /\ signedF
+    /\ ~SplitPositionPair
+    /\ first[KF][Lead] = NONE
+    /\ first' = [first EXCEPT ![KF][Lead] = F,
+                              ![KR][Lead] = IF first[KR][Lead] = NONE THEN C ELSE @]
     /\ Hist
-    /\ UNCHANGED <<cell, deadRec, evid>>
+    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
 
-\* A verifier reads seenV holders of each value, seenEmpty empty members, and
-\* leaves the rest unread (a timeout). ArithDead: max + #Empty + #Unknown < 3.
-Max2(x, y) == IF x >= y THEN x ELSE y
-
-DeadVerdict(seen1, seen2, seen3, seenEmpty) ==
-    LET unread == N - seen1 - seen2 - seen3 - seenEmpty
-        mx == Max2(seen1, Max2(seen2, seen3))
-        open == IF UnreadDroppedFromCount THEN seenEmpty ELSE seenEmpty + unread
-    IN  mx + open < Finality
-
-RecordDead(a) ==
-    /\ a \notin deadRec
-    /\ \E seen1 \in 0..cell[a][E1], seen2 \in 0..cell[a][E2], seen3 \in 0..cell[a][E3],
-          seenEmpty \in 0..(IF SumCell(a) <= N THEN N - SumCell(a) ELSE 0) :
-          /\ seen1 + seen2 + seen3 + seenEmpty <= N
-          /\ \/ DeadVerdict(seen1, seen2, seen3, seenEmpty)
-             \/ TimeoutRecordsDead /\ seen1 + seen2 + seen3 + seenEmpty < N
-    /\ deadRec' = deadRec \cup {a}
+PutHalf(k) ==
+    /\ SplitPositionPair
+    /\ signedF
+    /\ k \in {KF, KR}
+    /\ first[k][Lead] = NONE
+    /\ first' = [first EXCEPT ![k][Lead] = IF k = KF THEN F ELSE C]
     /\ Hist
-    /\ UNCHANGED <<reg, cell, evid>>
+    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
 
-PublishEvidence(e) ==
-    /\ e \notin evid
-    /\ evid' = evid \cup {e}
+SignF ==
+    /\ ~signedF
+    /\ signedF' = TRUE
     /\ Hist
-    /\ UNCHANGED <<reg, cell, deadRec>>
+    /\ UNCHANGED <<raw, first, copies, leaderUp, evid>>
+
+PublishEvidence ==
+    /\ ~evid
+    /\ evid' = TRUE
+    /\ Hist
+    /\ UNCHANGED <<raw, first, copies, leaderUp, signedF>>
+
+Crash ==
+    /\ AvailabilityLeader
+    /\ leaderUp
+    /\ leaderUp' = FALSE
+    /\ Hist
+    /\ UNCHANGED <<raw, first, copies, signedF, evid>>
+
+Recover ==
+    /\ AvailabilityLeader
+    /\ ~leaderUp
+    /\ leaderUp' = TRUE
+    /\ Hist
+    /\ UNCHANGED <<raw, first, copies, signedF, evid>>
 
 Idle == UNCHANGED vars
 
 Next ==
-    \/ \E f \in Fulfillments : Publish(f)
-    \/ \E a \in Attempts, v \in Values : WriteCell(a, v)
-    \/ \E a \in Attempts, v \in Values, w \in Values : Overwrite(a, v, w)
-    \/ \E a \in Attempts, v \in Values : LoseCell(a, v)
-    \/ \E f \in Fulfillments : LoseReg(f)
-    \/ \E a \in Attempts : RecordDead(a)
-    \/ \E e \in Values : PublishEvidence(e)
+    \/ \E k \in AttemptKeys, b \in AllValues : PutRaw(k, b)
+    \/ \E k \in Keys, b \in AllValues : PutCopy(k, b)
+    \/ \E k \in AttemptKeys : PutGarbageCopy(k)
+    \/ PutOrdinaryClaim
+    \/ PutPair
+    \/ \E k \in {KF, KR} : PutHalf(k)
+    \/ SignF
+    \/ PublishEvidence
+    \/ Crash
+    \/ Recover
     \/ Idle
 
 Init ==
-    /\ reg = [f \in Fulfillments |-> 0]
-    /\ cell = [a \in Attempts |-> [v \in Values |-> 0]]
-    /\ deadRec = {}
-    /\ evid = {}
-    /\ everFinal = [a \in Attempts |-> {}]
-    /\ everReg = [tr \in Traders |-> {}]
+    /\ raw = [k \in AttemptKeys |-> [s \in Slots |-> <<>>]]
+    /\ first = [k \in {KF, KR} |-> [s \in Slots |-> NONE]]
+    /\ copies = [k \in Keys |-> [v \in AllValues |-> 0]]
+    /\ leaderUp = TRUE
+    /\ signedF = FALSE
+    /\ evid = FALSE
+    /\ everFinal = [k \in Keys |-> {}]
     /\ consHist = {}
 
 Spec == Init /\ [][Next]_vars
@@ -247,67 +352,73 @@ Spec == Init /\ [][Next]_vars
 \* =============================================================================
 
 TypeOK ==
-    /\ reg \in [Fulfillments -> 0..(N + 1)]
-    /\ cell \in [Attempts -> [Values -> 0..(N + 1)]]
-    /\ deadRec \subseteq Attempts
-    /\ evid \subseteq Values
+    /\ \A k \in AttemptKeys, s \in Slots : Len(raw[k][s]) <= 3
+    /\ first \in [{KF, KR} -> [Slots -> AllValues \cup {NONE}]]
+    /\ copies \in [Keys -> [AllValues -> 0..3]]
+    /\ evid \in BOOLEAN
 
-\* One final value per key, in this state and across all of history.
-FinalUnique == \A a \in Attempts : Cardinality(everFinal[a] \cup FinalValues(a)) <= 1
+\* ---- the recognition boundary (P1 of Section 42.3, as invariants) ----------
+\* Whatever bytes arrived, and in whatever order, an occupant is a recognized
+\* object naming its key; nothing else is ever final or ever consumes.
+UnrecognizedBytesNeverOccupy ==
+    \A k \in AttemptKeys, sl \in Slots :
+        Occupant(k, sl) # NONE => TrueNamesKey(k, Occupant(k, sl))
+UnrecognizedBytesNeverFinalize == \A k \in AttemptKeys : ~Final(k, G)
+UnrecognizedBytesNeverConsume == G \notin Consumers /\ G \notin consHist
+RecognizedAttemptNamesItsKey ==
+    \A k \in AttemptKeys, sl \in Slots :
+        Occupant(k, sl) \in {XT, XU} => TrueNamesKey(k, Occupant(k, sl))
+FinalImpliesRecognized ==
+    \A k \in AttemptKeys : \A v \in FinalValues(k) : Recognized(k, v) /\ TrueNamesKey(k, v)
+\* If Core recognizes it, Core could have constructed it (Read this first).
+RecognizedImpliesConstructible ==
+    \A k \in AttemptKeys, sl \in Slots :
+        Occupant(k, sl) # NONE => Constructible(Occupant(k, sl))
 
-\* A value once final stays final: no overwrite, no loss.
-FinalityIsPermanent == \A a \in Attempts : everFinal[a] \subseteq FinalValues(a)
+\* ---- leader-first finality -------------------------------------------------
+FinalRequiresLeader == \A k \in Keys : \A v \in RawAt(k) : Final(k, v) => LeaderHeld(k, v)
+AtMostOneFinalPerCoordinate ==
+    \A k \in Keys : Cardinality(everFinal[k] \cup FinalValues(k)) <= 1
+LeaderFromCommittedSet == Lead = L
+FinalityIsPermanent == \A k \in Keys : everFinal[k] \subseteq FinalValues(k)
+PartialReadIsSound ==
+    \A k \in Keys : \A v \in RawAt(k), u \in 0..3 : ReadFinal(k, v, u) => Final(k, v)
 
-\* A Dead record never meets a final.
-RecordsNeverContradict == \A a \in deadRec : everFinal[a] \cup FinalValues(a) = {}
+\* ---- the position pair -----------------------------------------------------
+PositionPairAtomic == LeaderHeld(KF, F) => first[KR][Lead] # NONE
+PairMutualExclusion == FulfillmentRegistered => Final(KR, C) /\ ~LeaderHeld(KR, S)
 
-\* Storage projection: no cell at attempt a + 1 before attempt a is resolved.
-NoNumericHoles == \A a \in Attempts : a > 0 /\ SumCell(a) > 0 => Resolved(a - 1)
+\* ---- stored is not valid; registered is not valid --------------------------
+EarlyCellCannotCauseConsumption ==
+    \A k \in AttemptKeys : ConsumesAt(XT, k) => FulfillmentRegistered
+RegistrationIsNotConformance ==
+    FulfillmentRegistered /\ ~ConformingF => XT \notin Consumers
+InvalidStoredNeverAdmitted ==
+    \A k \in AttemptKeys : Final(k, XT) /\ Impossible(XT) => XT \notin Consumers
+ExerciseNamesItsKey ==
+    \A k \in AttemptKeys : ConsumesAt(XT, k) => AttemptT = AttemptOf(k)
 
-\* A cell holds E only for a registered F naming exactly that key.
-CellsOnlyAfterFulfillmentRegistered ==
-    \A a \in Attempts, v \in Values :
-        cell[a][v] > 0 => \E f \in Fulfillments : EOf(f) = v /\ AttemptOf(f) = a /\ Registered(f)
-
-\* A registered F was signed under its precommit's key.
-RelayNeverForges == \A f \in Fulfillments : Registered(f) => f \in Signed
-
-\* At most one F ever registers at a position, and registration is permanent.
-OneFulfillmentPerPosition == \A tr \in Traders : Cardinality(everReg[tr]) <= 1
-RegistrationIsPermanent == \A tr \in Traders : \A f \in everReg[tr] : Registered(f)
-
-\* A position split between two of its own F registers neither, so it writes
-\* nothing into the parent.
-SelfSplitCreatesNoCells ==
-    (\A f \in Options(U) : ~Registered(f)) => \A a \in Attempts : cell[a][E2] = 0
-
-\* One consumer per parent, ever.
+\* ---- the walk ---------------------------------------------------------------
 OneConsumerPerParent == Cardinality(consHist \cup Consumers) <= 1
-
-\* A consumer at attempt a had every earlier attempt objectively skipped.
-ObjectivelySkipped(b) ==
-    \/ b \in deadRec
-    \/ \E v \in FinalValues(b) : Validation(v) = "Invalid"
-
 ConsumedImpliesAttemptLive ==
-    \A e \in Values, a \in Attempts :
-        ConsumesAt(e, a) => \A b \in Attempts : b < a => ObjectivelySkipped(b)
-
-\* A final whose validation is known Invalid is skipped.
-ObjectiveRejectionImpliesSkipped ==
-    \A a \in Attempts : (\E v \in FinalValues(a) : Validation(v) = "Invalid") => Skipped(a)
-
-\* Only a Dead record or a known-Invalid final makes a key skippable.
-UnavailableNeverRejects == \A a \in Attempts : Skipped(a) => ObjectivelySkipped(a)
+    \A e \in {XT, XU}, k \in AttemptKeys : ConsumesAt(e, k) => (k = K1 => Skipped(K0))
+ObjectivelySkipped(k) == \E v \in FinalValues(k) : Recognized(k, v) /\ Impossible(v)
+ObjectiveRejectionImpliesSkipped == \A k \in AttemptKeys : ObjectivelySkipped(k) => Skipped(k)
+UnavailableNeverRejects == \A k \in AttemptKeys : Skipped(k) => ObjectivelySkipped(k)
 
 \* -----------------------------------------------------------------------------
 \* NON-VACUITY, NEGATED. Each is listed only in a config that must violate it.
 \* -----------------------------------------------------------------------------
 NeverConsumed == Consumers = {}
-NeverConsumedAtSecondAttempt == \A e \in Values : ~ConsumesAt(e, 1)
-NeverDeadRecorded == deadRec = {}
-NoSelfSplit ==
-    ~(/\ \A f \in Options(U) : ~Registered(f)
-      /\ \A f \in Options(U) : reg[f] >= 2)
+NeverConsumedAtSecondAttempt == ~ConsumesAt(XT, K1)
+NeverEarlyOccupied == ~(Final(K1, XT) /\ ~Skipped(K0))
+NeverRegistered == ~FulfillmentRegistered
+NeverLostAtLeader == ~(LeaderHeld(K0, XU) /\ FulfillmentRegistered /\ AttemptT = 0)
+\* Garbage physically arrives FIRST at the leader, garbage is held by every
+\* copy member, and the exercise behind it is still the occupant -- final.
+GarbageNeverArrivesFirst ==
+    ~(/\ Len(raw[K0][L]) >= 1 /\ raw[K0][L][1] = G
+      /\ copies[K0][G] = 2
+      /\ Final(K0, XT))
 
 ====
