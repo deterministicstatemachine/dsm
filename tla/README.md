@@ -292,6 +292,11 @@ construction constraints hold — and then it is exactly what Core built. Seven
 mutation controls remove one recomputation each (signature binding, ancestry
 binding, coordinate derivation, canonical encoding, proof verification,
 consumed-key exclusion, the bound) and the named theorems rest on `sorryAx`.
+The cryptography is the model of `DSMCertChain.lean`: an injective
+domain-separated hash and deterministic SPHINCS+ as `(keyGen, sign, verify)`
+with round-trip soundness, message binding and existential unforgeability
+stated as their protocol-level consequences; nothing is assumed about `sign`
+as a function of its key, and a public key tells nothing about its seed.
 Conservation, the tripwire, SoFi atomicity and leader finality are refinements
 of that boundary: none of them rescues DSM from an invalid state after the
 fact, because no invalid state is admissible.
