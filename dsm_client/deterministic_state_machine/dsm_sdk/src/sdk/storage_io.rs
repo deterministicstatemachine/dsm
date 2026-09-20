@@ -377,6 +377,132 @@ pub(crate) async fn read_cell_raw(
     }
 }
 
+/// Part II §10 `Stored(o)`: the exact bytes of the object at
+/// `immutable_addr(namespace, inner)` once three members of `set` return
+/// bytes that re-hash to that address; `Unavailable` otherwise. The fact is
+/// derived by Core (`dsm::sofi::storage::stored`) from the raw member
+/// answers; nothing here trusts a member.
+pub async fn read_stored_object(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    inner: &[u8; 32],
+) -> Result<dsm::sofi::storage::StoredFact, DsmError> {
+    let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
+    let reads = read_object_raw(set, &addr).await?;
+    Ok(dsm::sofi::storage::stored(&addr, &reads))
+}
+
+/// Part II §12, append to index: put `addr` under `locator` at every member
+/// of `set`. Returns how many members took it.
+pub async fn append_to_index(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &[u8],
+    locator: &[u8; 32],
+    addr: &[u8; 32],
+) -> Result<u32, DsmError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        Ok(fake_fleet::append_index(set, namespace, locator, addr))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let locator_b32 = crate::util::text_id::encode_base32_crockford(locator);
+        Ok(sdk
+            .append_index_all(set, namespace, &locator_b32, addr)
+            .await)
+    }
+}
+
+/// Part II §11: the candidates under `locator` — each member's appends in
+/// append order, members in set order, duplicates dropped — or `Unavailable`
+/// when no member answered. Reading stops at `budget` addresses per member;
+/// Core's scan applies the budget again over the merged order.
+pub async fn read_index_candidates(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+) -> Result<dsm::sofi::storage::IndexCandidates, DsmError> {
+    let reads = read_index_raw(set, namespace, locator, budget).await?;
+    Ok(dsm::sofi::storage::merge_index_reads(&reads))
+}
+
+/// Part II §11, the whole read: the one object under `locator` whose bytes
+/// are `Stored` and whose identity, recomputed by Core from the bytes with
+/// `recognize`, is `locator`. Every other candidate is nothing; a scan that
+/// would examine more than `budget` candidates is `Unavailable`, never
+/// `Invalid`. Objects are fetched under `object_namespace`.
+pub async fn resolve_locator<T>(
+    set: &crate::sdk::storage_set::StorageSet,
+    index_namespace: &[u8],
+    object_namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+    locator: &[u8; 32],
+    budget: usize,
+    recognize: impl Fn(&[u8]) -> Option<([u8; 32], T)>,
+) -> Result<dsm::sofi::storage::Resolved<T>, DsmError> {
+    use dsm::sofi::storage::{IndexCandidates, Resolved, StoredFact};
+    let candidates = match read_index_candidates(set, index_namespace, locator, budget).await? {
+        IndexCandidates::Unavailable => return Ok(Resolved::Unavailable),
+        IndexCandidates::Candidates(c) => c,
+    };
+    // Fetch only what the scan may examine: the budget bounds the work a
+    // flood of appends can cost, and nothing beyond it is read.
+    let mut fetched: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidates.len().min(budget + 1));
+    for addr in candidates.iter().take(budget + 1) {
+        let reads = read_object_raw(set, addr).await?;
+        fetched.push(match dsm::sofi::storage::stored(addr, &reads) {
+            StoredFact::Stored(bytes) => Some(bytes),
+            StoredFact::Unavailable => None,
+        });
+    }
+    // The object namespace binds the class: a candidate stored under another
+    // namespace has another address and is never fetched here at all.
+    let _ = object_namespace;
+    Ok(dsm::sofi::storage::keep_verifying(
+        locator, &fetched, budget, recognize,
+    ))
+}
+
+/// The raw object reads at `addr`, one per member of `set` in set order.
+async fn read_object_raw(
+    set: &crate::sdk::storage_set::StorageSet,
+    addr: &[u8; 32],
+) -> Result<Vec<dsm::sofi::storage::ObjectRead>, DsmError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        Ok(fake_fleet::get_objects(set, addr))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let addr_b32 = crate::util::text_id::encode_base32_crockford(addr);
+        Ok(sdk.get_immutable_all(set, &addr_b32).await)
+    }
+}
+
+/// The raw index reads under `locator`, one per member of `set` in set order.
+async fn read_index_raw(
+    set: &crate::sdk::storage_set::StorageSet,
+    namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+) -> Result<Vec<Option<Vec<[u8; 32]>>>, DsmError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        let _ = budget;
+        Ok(fake_fleet::read_indexes(set, namespace, locator))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let locator_b32 = crate::util::text_id::encode_base32_crockford(locator);
+        Ok(sdk
+            .read_index_all(set, namespace, &locator_b32, budget)
+            .await)
+    }
+}
+
 pub(crate) async fn read_faucet_ticket_cell(
     set: &crate::sdk::storage_set::StorageSet,
     faucet_id: &[u8; 32],
@@ -816,6 +942,13 @@ pub(crate) mod fake_fleet {
         echo_override: HashMap<String, Option<String>>,
         /// every (member_id, key, digest-of-bytes) PUT that was attempted, in order
         put_log: Vec<(String, String, [u8; 32])>,
+        /// Part II §10: member_id -> (address -> (namespace, payload)). What a
+        /// member answers for an address; `hold_bytes` lets a test make a
+        /// member answer with bytes that are not the object.
+        objects: HashMap<String, HashMap<[u8; 32], (Vec<u8>, Vec<u8>)>>,
+        /// Part II §11: member_id -> ((namespace, locator) -> addresses in
+        /// append order). Anyone may append anything; nothing is removed.
+        indexes: HashMap<String, HashMap<(Vec<u8>, [u8; 32]), Vec<[u8; 32]>>>,
     }
 
     static STATE: once_cell::sync::Lazy<Mutex<FleetState>> =
@@ -851,6 +984,112 @@ pub(crate) mod fake_fleet {
         state()
             .echo_override
             .insert(member_id.to_string(), echoes.map(|s| s.to_string()));
+    }
+
+    /// Part II §12, put object at every member of `set`: the bytes stored
+    /// under the address the member computes from `(namespace, payload)`.
+    /// A failing member does not hold them. Returns the address.
+    pub(crate) fn put_object(
+        set: &StorageSet,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'_>,
+        payload: &[u8],
+    ) -> [u8; 32] {
+        let addr = dsm::storage_object::immutable_addr(namespace, payload);
+        let mut st = state();
+        for m in set.members() {
+            if st.failing.contains(&m.member_id) {
+                continue;
+            }
+            st.objects
+                .entry(m.member_id.clone())
+                .or_default()
+                .insert(addr, (namespace.source_bytes().to_vec(), payload.to_vec()));
+        }
+        addr
+    }
+
+    /// A member that answers `addr` with these bytes — whatever they are.
+    /// The hostile-member seam.
+    pub(crate) fn hold_bytes(member_id: &str, addr: [u8; 32], namespace: &[u8], payload: &[u8]) {
+        state()
+            .objects
+            .entry(member_id.to_string())
+            .or_default()
+            .insert(addr, (namespace.to_vec(), payload.to_vec()));
+    }
+
+    /// Part II §12, get object at every member of `set`, in set order.
+    pub(crate) fn get_objects(
+        set: &StorageSet,
+        addr: &[u8; 32],
+    ) -> Vec<dsm::sofi::storage::ObjectRead> {
+        use dsm::sofi::storage::ObjectRead;
+        let st = state();
+        set.members()
+            .iter()
+            .map(|m| {
+                if st.failing.contains(&m.member_id) {
+                    return ObjectRead::Unavailable;
+                }
+                match st.objects.get(&m.member_id).and_then(|o| o.get(addr)) {
+                    Some((namespace, payload)) => ObjectRead::Bytes {
+                        namespace: namespace.clone(),
+                        payload: payload.clone(),
+                    },
+                    None => ObjectRead::Absent,
+                }
+            })
+            .collect()
+    }
+
+    /// Part II §12, append to index at every member of `set`; a failing
+    /// member does not take it. Returns how many did.
+    pub(crate) fn append_index(
+        set: &StorageSet,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> u32 {
+        let mut st = state();
+        let mut took = 0u32;
+        for m in set.members() {
+            if st.failing.contains(&m.member_id) {
+                continue;
+            }
+            st.indexes
+                .entry(m.member_id.clone())
+                .or_default()
+                .entry((namespace.to_vec(), *locator))
+                .or_default()
+                .push(*addr);
+            took += 1;
+        }
+        took
+    }
+
+    /// Part II §12, the index under `locator` at every member of `set`, in
+    /// set order; `None` for a failing member.
+    pub(crate) fn read_indexes(
+        set: &StorageSet,
+        namespace: &[u8],
+        locator: &[u8; 32],
+    ) -> Vec<Option<Vec<[u8; 32]>>> {
+        let st = state();
+        set.members()
+            .iter()
+            .map(|m| {
+                if st.failing.contains(&m.member_id) {
+                    return None;
+                }
+                Some(
+                    st.indexes
+                        .get(&m.member_id)
+                        .and_then(|i| i.get(&(namespace.to_vec(), *locator)))
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
     }
 
     /// The bytes ANY member holds under `key` (a reader fetches from any node).
@@ -1264,5 +1503,170 @@ mod pinned_listing_tests {
                 .is_err(),
             "with no member able to list in full, the listing is refused"
         );
+    }
+}
+
+/// R1 correspondence tests at the network layer: the SDK adapter over the
+/// fake fleet establishes exactly the facts `dsm::sofi::storage` derives.
+#[cfg(test)]
+mod sofi_storage_tests {
+    use super::fake_fleet;
+    use crate::sdk::storage_set::{StorageMember, StorageSet};
+    use dsm::common::domain_tags::TAG_DSM_VAULT_STATE;
+    use dsm::sofi::storage::{Resolved, StoredFact};
+    use serial_test::serial;
+
+    const INDEX_NS: &[u8] = b"DSM/sofi-index-test";
+
+    fn five() -> StorageSet {
+        StorageSet::new(
+            (1..=5u8)
+                .map(|i| StorageMember {
+                    member_id: format!("m{i}"),
+                    register_incarnation_id: [i; 32],
+                    endpoint: format!("http://m{i}"),
+                })
+                .collect(),
+        )
+        .expect("five distinct members")
+    }
+
+    fn recognize(b: &[u8]) -> Option<([u8; 32], Vec<u8>)> {
+        let rest = b.strip_prefix(b"ok:")?;
+        Some((*blake3::hash(rest).as_bytes(), rest.to_vec()))
+    }
+
+    fn block_on<T>(f: impl core::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(f)
+    }
+
+    /// §10: three members returning the exact bytes make the object Stored;
+    /// a member returning other bytes at the address has returned nothing.
+    #[test]
+    #[serial]
+    fn stored_needs_three_members_with_the_exact_bytes() {
+        fake_fleet::reset();
+        let set = five();
+        let object = b"ok:P".to_vec();
+        let addr = fake_fleet::put_object(&set, TAG_DSM_VAULT_STATE, &object);
+        let inner = dsm::storage_object::immutable_inner(TAG_DSM_VAULT_STATE, &object);
+        // Two hostile members answer with other bytes: three honest remain.
+        fake_fleet::hold_bytes("m1", addr, b"DSM/vault-state", b"ok:P!");
+        fake_fleet::hold_bytes("m2", addr, b"DSM/vault-state", b"ok:Q");
+        let fact =
+            block_on(super::read_stored_object(&set, TAG_DSM_VAULT_STATE, &inner)).expect("read");
+        assert_eq!(fact, StoredFact::Stored(object.clone()));
+        // A third hostile member: two honest answers are not Stored.
+        fake_fleet::hold_bytes("m3", addr, b"DSM/vault-state", b"ok:R");
+        let fact =
+            block_on(super::read_stored_object(&set, TAG_DSM_VAULT_STATE, &inner)).expect("read");
+        assert_eq!(fact, StoredFact::Unavailable);
+        // Silence is not bytes either: heal m3 but fail m4 and m5.
+        fake_fleet::hold_bytes("m3", addr, b"DSM/vault-state", &object);
+        fake_fleet::fail_member("m4");
+        fake_fleet::fail_member("m5");
+        let fact =
+            block_on(super::read_stored_object(&set, TAG_DSM_VAULT_STATE, &inner)).expect("read");
+        assert_eq!(fact, StoredFact::Unavailable);
+    }
+
+    /// §11: under a locator, garbage appended by anyone is nothing; the one
+    /// candidate whose bytes are Stored and whose identity recomputes to the
+    /// locator is kept, wherever it sits in the appends.
+    #[test]
+    #[serial]
+    fn only_the_verifying_candidate_is_kept_under_a_locator() {
+        fake_fleet::reset();
+        let set = five();
+        let locator = *blake3::hash(b"P").as_bytes();
+        // Garbage first: an address nobody stores, an address whose bytes
+        // decode to nothing, an object with another identity.
+        let nowhere = [0xEE; 32];
+        let noise = fake_fleet::put_object(&set, TAG_DSM_VAULT_STATE, b"noise");
+        let other = fake_fleet::put_object(&set, TAG_DSM_VAULT_STATE, b"ok:Q");
+        let real = fake_fleet::put_object(&set, TAG_DSM_VAULT_STATE, b"ok:P");
+        for a in [nowhere, noise, other, real] {
+            assert_eq!(
+                block_on(super::append_to_index(&set, INDEX_NS, &locator, &a)).expect("append"),
+                5
+            );
+        }
+        let kept = block_on(super::resolve_locator(
+            &set,
+            INDEX_NS,
+            TAG_DSM_VAULT_STATE,
+            &locator,
+            16,
+            recognize,
+        ))
+        .expect("resolve");
+        assert_eq!(kept, Resolved::Kept(b"P".to_vec()));
+        // The same scan with a budget that ends before the real candidate is
+        // Unavailable, never None — garbage costs work, not a refusal.
+        let short = block_on(super::resolve_locator(
+            &set,
+            INDEX_NS,
+            TAG_DSM_VAULT_STATE,
+            &locator,
+            3,
+            recognize,
+        ))
+        .expect("resolve");
+        assert_eq!(short, Resolved::Unavailable);
+        // Under a locator nothing verifies: None.
+        let empty = block_on(super::resolve_locator(
+            &set,
+            INDEX_NS,
+            TAG_DSM_VAULT_STATE,
+            &[0x77; 32],
+            16,
+            recognize,
+        ))
+        .expect("resolve");
+        assert_eq!(empty, Resolved::None);
+    }
+
+    /// §11: a candidate whose bytes are not Stored (two members hold them)
+    /// is nothing, even though it would verify; and an index nobody can read
+    /// is Unavailable.
+    #[test]
+    #[serial]
+    fn an_unstored_candidate_is_nothing_and_an_unreadable_index_is_unavailable() {
+        fake_fleet::reset();
+        let set = five();
+        let locator = *blake3::hash(b"P").as_bytes();
+        let real = fake_fleet::put_object(&set, TAG_DSM_VAULT_STATE, b"ok:P");
+        // Three members forget the bytes: not Stored.
+        for m in ["m1", "m2", "m3"] {
+            fake_fleet::hold_bytes(m, real, b"DSM/vault-state", b"gone");
+        }
+        block_on(super::append_to_index(&set, INDEX_NS, &locator, &real)).expect("append");
+        let kept = block_on(super::resolve_locator(
+            &set,
+            INDEX_NS,
+            TAG_DSM_VAULT_STATE,
+            &locator,
+            16,
+            recognize,
+        ))
+        .expect("resolve");
+        assert_eq!(kept, Resolved::None);
+        // Every member down: the index read has no answer.
+        for m in ["m1", "m2", "m3", "m4", "m5"] {
+            fake_fleet::fail_member(m);
+        }
+        let gone = block_on(super::resolve_locator(
+            &set,
+            INDEX_NS,
+            TAG_DSM_VAULT_STATE,
+            &locator,
+            16,
+            recognize,
+        ))
+        .expect("resolve");
+        assert_eq!(gone, Resolved::Unavailable);
     }
 }

@@ -45,6 +45,12 @@ echo ""
 # stay where the conjunctions that earn them are written.
 bash ci/sofi_validated_root_constructors.sh
 
+# Gate G1 (SoFi §37): every pub fn under CORE/sofi has a production caller.
+# The baseline lists what the rebuild (R1..R14) has not wired yet and only
+# ever shrinks; R14 deletes it.
+python3 ci/sofi_reachability.py
+echo ""
+
 # A vault genesis must not be consumable from a PRESENTED creation operation.
 # The funding pair is stated by a signed operation, never asserted, and F10
 # still owes the binding from that operation to the accepted owner transition.

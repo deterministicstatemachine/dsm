@@ -323,6 +323,13 @@ lean4/DSMSofiSuccessorCells.lean  the ALGEBRA of leader-first cells: members kee
 lean4/DSMSofiAtomicity.lean       identities, the hash order, the two Core predicates
                                   (RouteValidation with SetupValid inside;
                                   FulfillmentConformance), the ladder, the fence
+lean4/DSMSofiStorage.lean         the STORAGE FACTS for objects and indexes (R1):
+                                  Stored(o) iff three members return bytes that re-hash
+                                  to the address; wrong bytes, a wrong namespace and
+                                  silence never count; under a locator only the candidate
+                                  whose recomputed identity is the locator is kept; a scan
+                                  over budget is Unavailable, never None. Each theorem is a
+                                  Rust test of the same name in CORE/sofi/storage.rs
 
 tla/DSM_SofiSuccessorCells.tla    the MEMBERS, behind the recognition boundary: raw
                                   member storage takes any bytes from anyone in arrival

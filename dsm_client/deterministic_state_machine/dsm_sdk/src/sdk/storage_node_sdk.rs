@@ -994,6 +994,78 @@ impl StorageNodeClient {
         Ok(Some((namespace, payload.to_vec())))
     }
 
+    /// Part II §12, append to index: add a 32-byte content address under
+    /// `locator` at this member. The member adds it after whatever is there;
+    /// nothing is checked, compared or removed.
+    pub async fn append_index(
+        &self,
+        namespace: &[u8],
+        locator_b32: &str,
+        addr: &[u8; 32],
+    ) -> Result<(), String> {
+        let url = format!(
+            "{base}/api/v2/index/{locator_b32}",
+            base = self.node_info.url
+        );
+        let ns =
+            core::str::from_utf8(namespace).map_err(|_| "namespace is not UTF-8".to_string())?;
+        let mut req = self
+            .client
+            .post(&url)
+            .header("x-namespace", ns)
+            .header("Content-Type", "application/octet-stream")
+            .body(addr.to_vec());
+        if let Some(auth) = &self.auth {
+            let msg_id = Self::generate_message_id(locator_b32);
+            req = req
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
+                .header("x-dsm-message-id", msg_id);
+        }
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("index append transport: {e}"))?;
+        match response.status().as_u16() {
+            204 => Ok(()),
+            status => Err(format!("index append answered HTTP {status}")),
+        }
+    }
+
+    /// Part II §12, one page of the index: the addresses appended under
+    /// `locator` after `after`, in append order, at most `limit`. `None`
+    /// when the member could not answer; an empty page is an answer.
+    pub async fn read_index(
+        &self,
+        namespace: &[u8],
+        locator_b32: &str,
+        after: i64,
+        limit: i64,
+    ) -> Option<Vec<dsm::types::proto::IndexEntryV1>> {
+        use prost::Message;
+        let url = format!(
+            "{base}/api/v2/index/{locator_b32}?after={after}&limit={limit}",
+            base = self.node_info.url
+        );
+        let ns = core::str::from_utf8(namespace).ok()?;
+        let response = self
+            .client
+            .get(&url)
+            .header("x-namespace", ns)
+            .send()
+            .await
+            .ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let body = response.bytes().await.ok()?;
+        dsm::types::proto::IndexPageV1::decode(body.as_ref())
+            .ok()
+            .map(|page| page.entries)
+    }
+
     /// acceptance only when the node that answered is the member the catalog
     /// says lives at this endpoint. Same request shape as [`Self::put`].
     pub async fn put_echoing_node_id(
@@ -1739,6 +1811,109 @@ impl StorageNodeSDK {
             }
         }
         fanout
+    }
+
+    /// Part II §10, the raw object reads Core turns into `Stored`: what each
+    /// member of `set` answered for the address, in set order. Nothing is
+    /// re-hashed or counted here — `dsm::sofi::storage::stored` does that.
+    pub async fn get_immutable_all(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        addr_b32: &str,
+    ) -> Vec<dsm::sofi::storage::ObjectRead> {
+        use dsm::sofi::storage::ObjectRead;
+        let mut reads = Vec::with_capacity(set.len());
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            reads.push(match client {
+                None => ObjectRead::Unavailable,
+                Some(c) => match c.get_immutable(addr_b32).await {
+                    Ok(Some((namespace, payload))) => ObjectRead::Bytes { namespace, payload },
+                    Ok(None) => ObjectRead::Absent,
+                    Err(_) => ObjectRead::Unavailable,
+                },
+            });
+        }
+        reads
+    }
+
+    /// Part II §12, append to index at every member of `set`. Returns how
+    /// many members took the address; whether that is enough is nobody's
+    /// decision — an append that reached one member is discoverable there.
+    pub async fn append_index_all(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        namespace: &[u8],
+        locator_b32: &str,
+        addr: &[u8; 32],
+    ) -> u32 {
+        let mut took = 0u32;
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            match client {
+                None => log::warn!("index append: no client for member {}", member.member_id),
+                Some(c) => match c.append_index(namespace, locator_b32, addr).await {
+                    Ok(()) => took += 1,
+                    Err(e) => log::warn!(
+                        "index append: member {} did not take the address: {e}",
+                        member.member_id
+                    ),
+                },
+            }
+        }
+        took
+    }
+
+    /// Part II §11, the raw index reads Core merges into the candidate order:
+    /// every address under `locator` at each member of `set`, in append order,
+    /// paged until the member's index is exhausted or `max_per_member`
+    /// addresses were read; `None` where a member could not answer.
+    pub async fn read_index_all(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        namespace: &[u8],
+        locator_b32: &str,
+        max_per_member: usize,
+    ) -> Vec<Option<Vec<[u8; 32]>>> {
+        const PAGE: i64 = 256;
+        let mut reads = Vec::with_capacity(set.len());
+        for member in set.members() {
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let Some(c) = client else {
+                reads.push(None);
+                continue;
+            };
+            let mut addrs: Vec<[u8; 32]> = Vec::new();
+            let mut after = 0i64;
+            let mut answered = false;
+            loop {
+                let Some(page) = c.read_index(namespace, locator_b32, after, PAGE).await else {
+                    break;
+                };
+                answered = true;
+                let n = page.len();
+                for entry in page {
+                    if let Ok(a) = <[u8; 32]>::try_from(entry.addr.as_slice()) {
+                        addrs.push(a);
+                    }
+                    after = after.max(entry.seq);
+                }
+                if n < PAGE as usize || addrs.len() >= max_per_member {
+                    break;
+                }
+            }
+            reads.push(if answered { Some(addrs) } else { None });
+        }
+        reads
     }
 
     /// Part II §13, the raw reads Core turns into `LeaderHeld` and `Final`:
