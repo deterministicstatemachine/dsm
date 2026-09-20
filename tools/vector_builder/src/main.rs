@@ -239,6 +239,9 @@ fn build_receipt_commit(case_id: &str) -> Result<gp::ReceiptCommit> {
         child_tip: child_tip.to_vec(),
         parent_root: parent_root.to_vec(),
         child_root: child_root.to_vec(),
+        // Canonical field 21 (Part VII step 3): the sender's transition entropy.
+        // These fixtures carry zero roots and tips; a zero entropy matches.
+        transition_entropy: vec![0u8; 32],
         rel_proof_parent: rel_parent,
         rel_proof_child: rel_child,
         rel_replace_witness: Vec::new(),

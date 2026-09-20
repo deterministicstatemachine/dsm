@@ -738,7 +738,10 @@ pub fn verify_stitched_receipt(
 ///
 /// This is the single authoritative stitched-receipt constructor in the SDK.
 /// Callers must supply the actual SMT roots and serialized inclusion proofs
-/// produced by `SparseMerkleTree` after an `update_leaf()` call.
+/// produced by `SparseMerkleTree` after an `update_leaf()` call, and the
+/// transition entropy of the same advance (`AdvanceOutcome::transition_entropy`,
+/// Part VII step 3) — the receipt's canonical field 21, which the recipient
+/// feeds into `C_pre` and the symmetric tip and recomputes `child_tip` from.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bilateral_receipt_with_smt(
     devid_a: [u8; 32],
@@ -750,6 +753,7 @@ pub fn build_bilateral_receipt_with_smt(
     rel_proof_parent: Vec<u8>,
     rel_proof_child: Vec<u8>,
     device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
+    transition_entropy: [u8; 32],
 ) -> Option<Vec<u8>> {
     use dsm::common::device_tree;
 
@@ -817,6 +821,7 @@ pub fn build_bilateral_receipt_with_smt(
         dev_proof,
     );
     receipt.set_rel_replace_witness(witness);
+    receipt.set_transition_entropy(transition_entropy);
     receipt.to_canonical_protobuf().ok()
 }
 
@@ -825,8 +830,8 @@ pub fn build_bilateral_receipt_with_smt(
 /// Both counterparties share an **identical chain tip** h_n for C_{A↔B}.
 /// Implements the normative verification rules from §4.3:
 ///
-/// 1. Protobuf decodes the receipt
-/// 2. All 32-byte fixed fields (genesis, devids, tips, roots) must be non-zero
+/// 1. Protobuf decodes the receipt (which requires the transition entropy, field 21)
+/// 2. All 32-byte fixed fields (genesis, devids, tips, roots, entropy) must be non-zero
 /// 3. §4.3#2: π_rel proves h_n ∈ r_A and π'_rel proves h_{n+1} ∈ r'_A
 ///    (SmtInclusionProof deserialization + root reconstruction)
 /// 4. §4.3#4: Leaf-replace recomputation — replacing h_n with h_{n+1} using
@@ -850,7 +855,9 @@ pub fn verify_receipt_bytes(
         Err(_) => return false,
     };
 
-    // 2. Non-zero fixed fields.
+    // 2. Non-zero fixed fields. The transition entropy is Core's derivation
+    //    for this step (Part VII step 3); a receipt that names none is not a
+    //    receipt of any transition.
     let is_zero = |b: &[u8; 32]| b.iter().all(|&v| v == 0);
     if is_zero(&receipt.genesis)
         || is_zero(&receipt.devid_a)
@@ -859,6 +866,7 @@ pub fn verify_receipt_bytes(
         || is_zero(&receipt.child_tip)
         || is_zero(&receipt.parent_root)
         || is_zero(&receipt.child_root)
+        || is_zero(&receipt.transition_entropy)
     {
         return false;
     }
@@ -3273,8 +3281,6 @@ mod tests {
                 rel_key,
                 devid_b,
                 Operation::Noop,
-                vec![0x46; 32],
-                None,
                 &[],
                 Some(initial_tip),
                 None,
@@ -3306,6 +3312,7 @@ mod tests {
             parent_proof.clone(),
             child_proof.clone(),
             device_tree_commitment,
+            outcome.transition_entropy(),
         )
         .expect("receipt with Merkle pre_root");
         assert!(verify_receipt_bytes(
@@ -3323,6 +3330,7 @@ mod tests {
             parent_proof,
             child_proof,
             device_tree_commitment,
+            outcome.transition_entropy(),
         )
         .expect("receipt with CAS parent root");
         assert!(

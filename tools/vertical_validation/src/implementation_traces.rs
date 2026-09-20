@@ -370,6 +370,11 @@ fn trace_bilateral_precommit_tripwire(
             Ok(harness) => harness,
             Err(e) => return vec![e],
         };
+        let remote_kp = match trace_keypair(TRACE_PAIR1_REMOTE) {
+            Ok(kp) => kp,
+            Err(e) => return vec![e],
+        };
+        let local_head = trace_local_head(TRACE_PAIR1_LOCAL, &local_kp);
 
         let expected_initial_tip = manager
             .initial_relationship_tip_for(&remote_device_id)
@@ -385,6 +390,7 @@ fn trace_bilateral_precommit_tripwire(
             Err(e) => failures.push(format!("establish_relationship failed: {e}")),
         }
 
+        // Two sibling precommitments capture the same parent h_n.
         let first_op =
             build_signed_bilateral_transfer(&local_kp, remote_device_id, "trace-precommit-1", 0x01);
         let first_pre = match manager
@@ -419,54 +425,6 @@ fn trace_bilateral_precommit_tripwire(
             }
             Err(e) => return vec![format!("prepare_offline_transfer failed: {e}")],
         };
-
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let first_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &first_pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-            )
-            .await
-        {
-            Ok(result) => {
-                if !result.completed_offline {
-                    failures.push("offline finalize did not report completed_offline".into());
-                }
-                if result.relationship_anchor.chain_tip == expected_initial_tip {
-                    failures
-                        .push("offline finalize did not advance the relationship chain tip".into());
-                }
-                if manager.has_pending_commitment(&first_pre.bilateral_commitment_hash) {
-                    failures.push("finalized bilateral precommitment remained pending".into());
-                }
-                if manager
-                    .get_relationship(&remote_device_id)
-                    .map(|anchor| anchor.chain_tip)
-                    != Some(result.relationship_anchor.chain_tip)
-                {
-                    failures.push("manager relationship tip diverged from finalize result".into());
-                }
-                if manager
-                    .get_contact(&remote_device_id)
-                    .map(DsmVerifiedContact::has_verified_chain_tip)
-                    != Some(true)
-                {
-                    failures.push("contact SMT proof was not updated after finalize".into());
-                }
-                match manager.verify_relationship_integrity(&remote_device_id) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        failures.push("relationship integrity failed after finalize".into())
-                    }
-                    Err(e) => failures.push(format!("relationship integrity check errored: {e}")),
-                }
-                result.relationship_anchor.chain_tip
-            }
-            Err(e) => return vec![format!("finalize_offline_transfer failed: {e}")],
-        };
-
         let second_op =
             build_signed_bilateral_transfer(&local_kp, remote_device_id, "trace-precommit-2", 0x02);
         let second_pre = match manager
@@ -474,7 +432,7 @@ fn trace_bilateral_precommit_tripwire(
             .await
         {
             Ok(pre) => {
-                if pre.local_chain_tip_at_creation != Some(first_tip) {
+                if pre.local_chain_tip_at_creation != Some(expected_initial_tip) {
                     failures
                         .push("second precommitment captured the wrong parent chain tip".into());
                 }
@@ -483,62 +441,73 @@ fn trace_bilateral_precommit_tripwire(
             Err(e) => return vec![format!("second prepare_offline_transfer failed: {e}")],
         };
 
-        let mut consumed_tip = *domain_hash(
-            dsm::crypto::domain::TaggedHashDomain::from_static(
-                b"DSM/trace-bilateral-parent-consumed",
-            ),
+        // Sibling 1: the receiver accepts, the production prepare passes the
+        // tripwire, Core's derived value produces the successor, h_n is consumed.
+        let first_tip = match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
+            &first_pre.bilateral_commitment_hash,
+        )
+        .await
+        {
+            Ok(c) => {
+                if c.parent_tip != expected_initial_tip {
+                    failures.push("first commit did not consume the initial tip".into());
+                }
+                if c.new_tip == expected_initial_tip {
+                    failures.push("first commit did not advance the relationship chain tip".into());
+                }
+                if manager.has_pending_commitment(&first_pre.bilateral_commitment_hash) {
+                    failures.push("committed bilateral precommitment remained pending".into());
+                }
+                if manager
+                    .get_relationship(&remote_device_id)
+                    .map(|anchor| anchor.chain_tip)
+                    != Some(c.new_tip)
+                {
+                    failures.push("manager relationship tip diverged from the commit".into());
+                }
+                if manager
+                    .get_contact(&remote_device_id)
+                    .map(DsmVerifiedContact::has_verified_chain_tip)
+                    != Some(true)
+                {
+                    failures.push("contact SMT proof was not updated after the commit".into());
+                }
+                match manager.verify_relationship_integrity(&remote_device_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        failures.push("relationship integrity failed after the commit".into())
+                    }
+                    Err(e) => failures.push(format!("relationship integrity check errored: {e}")),
+                }
+                c.new_tip
+            }
+            Err(e) => return vec![format!("first commit failed: {e}")],
+        };
+
+        // Sibling 2: the receiver accepts it just as legitimately, but its
+        // parent is consumed. Cryptographic legitimacy does not resurrect it.
+        match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
             &second_pre.bilateral_commitment_hash,
         )
-        .as_bytes();
-        if consumed_tip == first_tip {
-            consumed_tip[0] ^= 0xFF;
-        }
-
-        match manager.get_relationship(&remote_device_id) {
-            Some(mut anchor) => {
-                let mut smt_anchor = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                match manager.commit_bilateral_smt_update(
-                    &mut smt_anchor,
-                    &remote_device_id,
-                    &consumed_tip,
-                ) {
-                    Ok(replace_result) => {
-                        if let Err(e) = manager.update_anchor_from_replace_public(
-                            &remote_device_id,
-                            &mut anchor,
-                            consumed_tip,
-                            &replace_result,
-                        ) {
-                            failures.push(format!(
-                                "failed to advance relationship tip before stale finalize: {e}"
-                            ));
-                        }
-                    }
-                    Err(e) => failures.push(format!("commit_bilateral_smt_update failed: {e}")),
-                }
-            }
-            None => failures.push("relationship disappeared before stale finalize check".into()),
-        }
-
-        match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &second_pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-            )
-            .await
+        .await
         {
             Ok(_) => failures
-                .push("stale bilateral precommitment finalized after parent consumption".into()),
-            Err(e) => {
-                let msg = format!("{e}");
+                .push("stale bilateral precommitment committed after parent consumption".into()),
+            Err(msg) => {
                 if !(msg.contains("Tripwire")
                     && (msg.contains("advanced since precommitment creation")
                         || msg.contains("parent hash already consumed")))
                 {
                     failures.push(format!(
-                        "stale finalize rejection message was unexpected: {msg}"
+                        "stale prepare rejection message was unexpected: {msg}"
                     ));
                 }
             }
@@ -548,8 +517,8 @@ fn trace_bilateral_precommit_tripwire(
             failures.push("rejected stale precommitment was removed from pending set".into());
         }
 
-        if manager.get_chain_tip_for(&remote_device_id) != Some(consumed_tip) {
-            failures.push("manager chain tip changed after stale finalize rejection".into());
+        if manager.get_chain_tip_for(&remote_device_id) != Some(first_tip) {
+            failures.push("manager chain tip changed after stale prepare rejection".into());
         }
 
         failures
@@ -569,6 +538,9 @@ fn trace_bilateral_precomputed_finalize_hash(
     _pk: &[u8],
     _sk: &[u8],
 ) -> ImplementationTraceResult {
+    use dsm::core::bilateral_transaction_manager::{
+        compute_precommit, compute_smt_key, compute_successor_tip,
+    };
     let start = Instant::now();
     let failures = run_async_trace(async move {
         let mut failures = Vec::new();
@@ -576,10 +548,16 @@ fn trace_bilateral_precomputed_finalize_hash(
             Ok(harness) => harness,
             Err(e) => return vec![e],
         };
+        let remote_kp = match trace_keypair(TRACE_PAIR1_REMOTE) {
+            Ok(kp) => kp,
+            Err(e) => return vec![e],
+        };
+        let local_head = trace_local_head(TRACE_PAIR1_LOCAL, &local_kp);
 
-        if let Err(e) = manager.establish_relationship(&remote_device_id).await {
-            return vec![format!("establish_relationship failed: {e}")];
-        }
+        let h_n = match manager.establish_relationship(&remote_device_id).await {
+            Ok(anchor) => anchor.chain_tip,
+            Err(e) => return vec![format!("establish_relationship failed: {e}")],
+        };
 
         let operation = build_signed_bilateral_transfer(
             &local_kp,
@@ -587,26 +565,26 @@ fn trace_bilateral_precomputed_finalize_hash(
             "trace-precomputed-finalize",
             0x11,
         );
-        let entropy = match manager.derive_transition_entropy(&remote_device_id, &operation) {
-            Ok(entropy) => entropy,
-            Err(e) => return vec![format!("derive_transition_entropy failed: {e}")],
-        };
-        let predicted_tip =
-            match manager.peek_post_finalize_hash(&remote_device_id, &operation, &entropy) {
-                Ok(tip) => tip,
-                Err(e) => return vec![format!("peek_post_finalize_hash failed: {e}")],
-            };
+        // §39: the ONE transition entropy is Core's derivation on the sender's
+        // head — the same function the canonical advance runs — so the sender
+        // can predict the committed tip at confirm time.
+        let rel_key = compute_smt_key(&TRACE_PAIR1_LOCAL.0, &remote_device_id);
+        let entropy = local_head.derive_transition_entropy(&rel_key, &operation);
+        if entropy != local_head.derive_transition_entropy(&rel_key, &operation) {
+            failures.push("Core's transition entropy derivation is not deterministic".into());
+        }
+        let op_bytes = operation.to_bytes();
+        let sigma = compute_precommit(&h_n, &op_bytes, &entropy);
+        let predicted_tip = compute_successor_tip(&h_n, &op_bytes, &entropy, &sigma);
 
         let mut alternate_entropy = entropy;
         alternate_entropy[0] ^= 0xFF;
-        match manager.peek_post_finalize_hash(&remote_device_id, &operation, &alternate_entropy) {
-            Ok(alternate_tip) => {
-                if alternate_tip == predicted_tip {
-                    failures
-                        .push("changing finalize entropy did not change the predicted tip".into());
-                }
-            }
-            Err(e) => failures.push(format!("alternate peek_post_finalize_hash failed: {e}")),
+        let alternate_sigma = compute_precommit(&h_n, &op_bytes, &alternate_entropy);
+        if compute_successor_tip(&h_n, &op_bytes, &alternate_entropy, &alternate_sigma)
+            == predicted_tip
+        {
+            failures
+                .push("changing the transition entropy did not change the predicted tip".into());
         }
 
         let pre = match manager
@@ -617,43 +595,37 @@ fn trace_bilateral_precomputed_finalize_hash(
             Err(e) => return vec![format!("prepare_offline_transfer failed: {e}")],
         };
 
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let result = match manager
-            .finalize_offline_transfer_with_entropy(
-                &remote_device_id,
-                &pre.bilateral_commitment_hash,
-                b"accept",
-                Some(entropy),
-                &mut smt,
-            )
-            .await
+        let committed = match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
+            &pre.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(result) => result,
-            Err(e) => {
-                return vec![format!(
-                    "finalize_offline_transfer_with_entropy failed: {e}"
-                )]
-            }
+            Ok(c) => c,
+            Err(e) => return vec![format!("commit failed: {e}")],
         };
 
-        if !result.completed_offline {
-            failures.push("precomputed finalize did not report completed_offline".into());
+        if committed.entropy != entropy {
+            failures.push("the committed transition entropy differs from the predicted one".into());
         }
-        if result.relationship_anchor.chain_tip != predicted_tip {
-            failures.push("predicted post-finalize tip did not match actual finalized tip".into());
+        if committed.new_tip != predicted_tip {
+            failures.push("predicted post-commit tip did not match the committed tip".into());
         }
         if manager.get_chain_tip_for(&remote_device_id) != Some(predicted_tip) {
-            failures.push("manager did not persist the predicted finalized tip".into());
+            failures.push("manager did not persist the predicted committed tip".into());
         }
         if manager.has_pending_commitment(&pre.bilateral_commitment_hash) {
-            failures.push("precomputed finalize left the commitment pending".into());
+            failures.push("commit left the precommitment pending".into());
         }
         if manager
             .get_contact(&remote_device_id)
             .map(DsmVerifiedContact::has_verified_chain_tip)
             != Some(true)
         {
-            failures.push("contact SMT proof was not updated after precomputed finalize".into());
+            failures.push("contact SMT proof was not updated after the commit".into());
         }
 
         failures
@@ -1506,6 +1478,11 @@ fn trace_bilateral_full_offline_finality(
             Ok(harness) => harness,
             Err(e) => return vec![e],
         };
+        let remote_kp = match trace_keypair(TRACE_PAIR1_REMOTE) {
+            Ok(kp) => kp,
+            Err(e) => return vec![e],
+        };
+        let local_head = trace_local_head(TRACE_PAIR1_LOCAL, &local_kp);
 
         // Step 1: Establish relationship
         let initial_tip = manager
@@ -1540,40 +1517,35 @@ fn trace_bilateral_full_offline_finality(
             Err(e) => return vec![format!("first prepare failed: {e}")],
         };
 
-        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let first_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre1.bilateral_commitment_hash,
-                b"accept-1",
-                &mut smt,
-            )
-            .await
+        let first_tip = match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
+            &pre1.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(result) => {
+            Ok(c) => {
                 // BilateralIrreversibility: tip advanced past precommitment
-                if result.relationship_anchor.chain_tip == initial_tip {
-                    failures.push("finalize did not advance chain tip (irreversibility)".into());
-                }
-                // FullSettlement: completed offline
-                if !result.completed_offline {
-                    failures.push("finalize did not report completed_offline".into());
+                if c.new_tip == initial_tip {
+                    failures.push("commit did not advance chain tip (irreversibility)".into());
                 }
                 // Pending cleared
                 if manager.has_pending_commitment(&pre1.bilateral_commitment_hash) {
-                    failures.push("first precommitment remained pending after finalize".into());
+                    failures.push("first precommitment remained pending after commit".into());
                 }
                 // Relationship integrity
                 match manager.verify_relationship_integrity(&remote_device_id) {
                     Ok(true) => {}
                     Ok(false) => {
-                        failures.push("relationship integrity failed after first finalize".into())
+                        failures.push("relationship integrity failed after first commit".into())
                     }
                     Err(e) => failures.push(format!("relationship integrity errored: {e}")),
                 }
-                result.relationship_anchor.chain_tip
+                c.new_tip
             }
-            Err(e) => return vec![format!("first finalize failed: {e}")],
+            Err(e) => return vec![format!("first commit failed: {e}")],
         };
 
         // Step 3: Second prepare + finalize (sequential commits, distinct tips)
@@ -1592,26 +1564,26 @@ fn trace_bilateral_full_offline_finality(
             Err(e) => return vec![format!("second prepare failed: {e}")],
         };
 
-        let second_tip = match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre2.bilateral_commitment_hash,
-                b"accept-2",
-                &mut smt,
-            )
-            .await
+        let second_tip = match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
+            &pre2.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(result) => {
+            Ok(c) => {
                 // TripwireGuaranteesUniqueness: second tip differs from first
-                if result.relationship_anchor.chain_tip == first_tip {
-                    failures.push("second finalize produced same tip as first (uniqueness)".into());
+                if c.new_tip == first_tip {
+                    failures.push("second commit produced same tip as first (uniqueness)".into());
                 }
-                if result.relationship_anchor.chain_tip == initial_tip {
-                    failures.push("second finalize reverted to initial tip".into());
+                if c.new_tip == initial_tip {
+                    failures.push("second commit reverted to initial tip".into());
                 }
-                result.relationship_anchor.chain_tip
+                c.new_tip
             }
-            Err(e) => return vec![format!("second finalize failed: {e}")],
+            Err(e) => return vec![format!("second commit failed: {e}")],
         };
 
         // Step 4: Tripwire test — prepare third, advance tip, attempt stale finalize
@@ -1661,19 +1633,18 @@ fn trace_bilateral_full_offline_finality(
             None => failures.push("relationship disappeared before tripwire test".into()),
         }
 
-        // Stale finalize MUST fail (TripwireGuaranteesUniqueness)
-        match manager
-            .finalize_offline_transfer(
-                &remote_device_id,
-                &pre3.bilateral_commitment_hash,
-                b"accept-3",
-                &mut smt,
-            )
-            .await
+        // Stale prepare MUST fail (TripwireGuaranteesUniqueness)
+        match trace_commit_prepared(
+            &mut manager,
+            &local_head,
+            &remote_kp,
+            &remote_device_id,
+            &pre3.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(_) => failures.push("stale precommitment finalized after parent consumption".into()),
-            Err(e) => {
-                let msg = format!("{e}");
+            Ok(_) => failures.push("stale precommitment committed after parent consumption".into()),
+            Err(msg) => {
                 if !(msg.contains("Tripwire")
                     && (msg.contains("advanced since precommitment creation")
                         || msg.contains("parent hash already consumed")))
@@ -1683,9 +1654,9 @@ fn trace_bilateral_full_offline_finality(
             }
         }
 
-        // Step 5: Conservation — tip didn't change after rejected stale finalize
+        // Step 5: Conservation — tip didn't change after the rejected stale prepare
         if manager.get_chain_tip_for(&remote_device_id) != Some(consumed_tip) {
-            failures.push("chain tip changed after stale finalize rejection".into());
+            failures.push("chain tip changed after stale prepare rejection".into());
         }
 
         failures
@@ -1727,6 +1698,15 @@ fn trace_bilateral_pair_non_interference(
             Ok(h) => h,
             Err(e) => return vec![format!("manager2 setup: {e}")],
         };
+        let (remote_kp1, remote_kp2) = match (
+            trace_keypair(TRACE_PAIR1_REMOTE),
+            trace_keypair(TRACE_PAIR2_REMOTE),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return vec![format!("remote keypair: {e}")],
+        };
+        let head1 = trace_local_head(TRACE_PAIR1_LOCAL, &kp1);
+        let head2 = trace_local_head(TRACE_PAIR2_LOCAL, &kp2);
 
         // Step 1: Establish both relationships
         let tip1_init = match manager1.establish_relationship(&remote1).await {
@@ -1753,23 +1733,22 @@ fn trace_bilateral_pair_non_interference(
             Ok(pre) => pre,
             Err(e) => return vec![format!("manager1 prepare failed: {e}")],
         };
-        let mut smt1 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let _tip1_after = match manager1
-            .finalize_offline_transfer(
-                &remote1,
-                &pre1.bilateral_commitment_hash,
-                b"accept-ni-1",
-                &mut smt1,
-            )
-            .await
+        let _tip1_after = match trace_commit_prepared(
+            &mut manager1,
+            &head1,
+            &remote_kp1,
+            &remote1,
+            &pre1.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(result) => {
-                if result.relationship_anchor.chain_tip == tip1_init {
-                    failures.push("manager1 finalize did not advance tip".into());
+            Ok(c) => {
+                if c.new_tip == tip1_init {
+                    failures.push("manager1 commit did not advance tip".into());
                 }
-                result.relationship_anchor.chain_tip
+                c.new_tip
             }
-            Err(e) => return vec![format!("manager1 finalize failed: {e}")],
+            Err(e) => return vec![format!("manager1 commit failed: {e}")],
         };
 
         // Step 3: NonInterference — verify manager2 state is UNCHANGED
@@ -1808,22 +1787,21 @@ fn trace_bilateral_pair_non_interference(
             Ok(pre) => pre,
             Err(e) => return vec![format!("manager2 prepare failed: {e}")],
         };
-        let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        match manager2
-            .finalize_offline_transfer(
-                &remote2,
-                &pre2.bilateral_commitment_hash,
-                b"accept-ni-2",
-                &mut smt2,
-            )
-            .await
+        match trace_commit_prepared(
+            &mut manager2,
+            &head2,
+            &remote_kp2,
+            &remote2,
+            &pre2.bilateral_commitment_hash,
+        )
+        .await
         {
-            Ok(result) => {
-                if result.relationship_anchor.chain_tip == tip2_init {
-                    failures.push("manager2 finalize did not advance tip".into());
+            Ok(c) => {
+                if c.new_tip == tip2_init {
+                    failures.push("manager2 commit did not advance tip".into());
                 }
             }
-            Err(e) => return vec![format!("manager2 finalize failed: {e}")],
+            Err(e) => return vec![format!("manager2 commit failed: {e}")],
         }
 
         // Step 5: ZeroRefreshForInactive — manager1 state unchanged after manager2 op
@@ -1983,22 +1961,105 @@ where
     .expect("implementation trace thread")
 }
 
+/// The two device pairs the bilateral traces run on: `(device_id, genesis)`
+/// for each side. Pair 1 is `[0x21..] <-> [0x31..]`, pair 2 `[0x41..] <-> [0x51..]`.
+const TRACE_PAIR1_LOCAL: ([u8; 32], [u8; 32]) = ([0x21; 32], [0x22; 32]);
+const TRACE_PAIR1_REMOTE: ([u8; 32], [u8; 32]) = ([0x31; 32], [0x32; 32]);
+const TRACE_PAIR2_LOCAL: ([u8; 32], [u8; 32]) = ([0x41; 32], [0x42; 32]);
+const TRACE_PAIR2_REMOTE: ([u8; 32], [u8; 32]) = ([0x51; 32], [0x52; 32]);
+
+/// A trace device's signing keypair, derived from its `(device_id, genesis)`.
+fn trace_keypair(side: ([u8; 32], [u8; 32])) -> Result<SignatureKeyPair, String> {
+    let entropy = [side.0.as_slice(), side.1.as_slice()].concat();
+    SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| format!("trace keypair: {e}"))
+}
+
+/// The sender's device head for a trace pair: the state Core derives the
+/// transition's one entropy from (Part VII step 3).
+fn trace_local_head(
+    side: ([u8; 32], [u8; 32]),
+    kp: &SignatureKeyPair,
+) -> dsm::types::device_state::DeviceState {
+    dsm::types::device_state::DeviceState::new(side.1, side.0, kp.public_key().to_vec(), 64)
+}
+
+/// The receiver's acceptance proof σ_B, exactly what
+/// `BilateralTransactionManager::verify_receiver_acceptance_proof` checks:
+/// a signature over `"DSM/bilateral-sign\0" || commitment_hash`.
+fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(22 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-sign\0");
+    msg.extend_from_slice(commitment_hash);
+    kp.sign(&msg).expect("receiver acceptance signature")
+}
+
+/// What one committed bilateral step produced on the trace harness.
+struct TraceCommit {
+    parent_tip: [u8; 32],
+    entropy: [u8; 32],
+    new_tip: [u8; 32],
+}
+
+/// The production commit of a bilateral precommitment, on the trace harness.
+///
+/// `prepare_bilateral_advance` runs the §6.1 tripwire against a real receiver
+/// acceptance σ_B and hands the advance off. The transition's one entropy is
+/// Core's derivation on the sender's head (`DeviceState::derive_transition_entropy`,
+/// Part VII step 3) — nothing here chooses it. The symmetric successor tip is
+/// `compute_successor_tip(h_n, op, e, C_pre)` over that value, exactly as the
+/// BLE finalize computes it after the canonical commit, and the manager's
+/// relationship tip is advanced to it through the same SMT-replace path.
+/// A tripwire refusal comes back as the manager's own error text.
+async fn trace_commit_prepared(
+    manager: &mut BilateralTransactionManager,
+    local_head: &dsm::types::device_state::DeviceState,
+    remote_kp: &SignatureKeyPair,
+    remote_device_id: &[u8; 32],
+    pre_commitment_hash: &[u8; 32],
+) -> Result<TraceCommit, String> {
+    use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
+    let prepared = manager
+        .prepare_bilateral_advance(
+            remote_device_id,
+            pre_commitment_hash,
+            &receiver_acceptance_sig(remote_kp, pre_commitment_hash),
+            Vec::new(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let entropy = local_head.derive_transition_entropy(&prepared.rel_key, &prepared.operation);
+    let op_bytes = prepared.operation.to_bytes();
+    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy);
+    let new_tip = compute_successor_tip(&prepared.parent_tip, &op_bytes, &entropy, &sigma);
+    let mut anchor = manager
+        .get_relationship(remote_device_id)
+        .ok_or_else(|| "relationship missing at commit".to_string())?;
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    let replace = manager
+        .commit_bilateral_smt_update(&mut smt, remote_device_id, &new_tip)
+        .map_err(|e| format!("commit_bilateral_smt_update failed: {e}"))?;
+    manager
+        .update_anchor_from_replace_public(remote_device_id, &mut anchor, new_tip, &replace)
+        .map_err(|e| format!("update_anchor_from_replace failed: {e}"))?;
+    manager.consume_pre_commitment(pre_commitment_hash);
+    Ok(TraceCommit {
+        parent_tip: prepared.parent_tip,
+        entropy,
+        new_tip,
+    })
+}
+
 fn build_bilateral_trace_manager(
 ) -> Result<(BilateralTransactionManager, SignatureKeyPair, [u8; 32]), String> {
     dsm::utils::deterministic_time::reset_for_tests();
 
-    let local_device_id = [0x21; 32];
-    let local_genesis_hash = [0x22; 32];
-    let remote_device_id = [0x31; 32];
-    let remote_genesis_hash = [0x32; 32];
+    let (local_device_id, local_genesis_hash) = TRACE_PAIR1_LOCAL;
+    let (remote_device_id, remote_genesis_hash) = TRACE_PAIR1_REMOTE;
 
-    let local_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-    let remote_entropy = [remote_device_id.as_slice(), remote_genesis_hash.as_slice()].concat();
-
-    let local_kp = SignatureKeyPair::generate_from_entropy(&local_entropy)
-        .map_err(|e| format!("local bilateral keypair: {e}"))?;
-    let remote_kp = SignatureKeyPair::generate_from_entropy(&remote_entropy)
-        .map_err(|e| format!("remote bilateral keypair: {e}"))?;
+    let local_kp = trace_keypair(TRACE_PAIR1_LOCAL)?;
+    let remote_kp = trace_keypair(TRACE_PAIR1_REMOTE)?;
 
     let mut manager = BilateralTransactionManager::new(
         DsmContactManager::new(local_device_id, vec![]),
@@ -2037,18 +2098,12 @@ fn build_bilateral_trace_manager_pair2(
 ) -> Result<(BilateralTransactionManager, SignatureKeyPair, [u8; 32]), String> {
     dsm::utils::deterministic_time::reset_for_tests();
 
-    let local_device_id = [0x41; 32];
-    let local_genesis_hash = [0x42; 32];
-    let remote_device_id = [0x51; 32];
-    let remote_genesis_hash = [0x52; 32];
+    let (local_device_id, local_genesis_hash) = TRACE_PAIR2_LOCAL;
+    let (remote_device_id, remote_genesis_hash) = TRACE_PAIR2_REMOTE;
 
-    let local_entropy = [local_device_id.as_slice(), local_genesis_hash.as_slice()].concat();
-    let remote_entropy = [remote_device_id.as_slice(), remote_genesis_hash.as_slice()].concat();
-
-    let local_kp = SignatureKeyPair::generate_from_entropy(&local_entropy)
-        .map_err(|e| format!("pair2 local keypair: {e}"))?;
-    let remote_kp = SignatureKeyPair::generate_from_entropy(&remote_entropy)
-        .map_err(|e| format!("pair2 remote keypair: {e}"))?;
+    let local_kp = trace_keypair(TRACE_PAIR2_LOCAL)?;
+    let remote_kp =
+        trace_keypair(TRACE_PAIR2_REMOTE).map_err(|e| format!("pair2 remote keypair: {e}"))?;
 
     let mut manager = BilateralTransactionManager::new(
         DsmContactManager::new(local_device_id, vec![]),

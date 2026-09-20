@@ -21,7 +21,6 @@ pub mod relationship;
 pub mod transition;
 pub mod utils;
 
-use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::State;
@@ -203,42 +202,12 @@ impl StateMachine {
             )
         })?;
 
-        // Generate entropy from hash-adjacency inputs (§11 eq. 14).
-        // Read prior entropy + hash from the DeviceState's tip for this
-        // relationship, or fall back to the SMT root for fresh chains.
-        // `prior_hash` is read straight from the committed tip digest. It used
-        // to be recomputed from a cached copy of the whole tip state, but the
-        // head codec already rejects any tip whose cached state does not hash
-        // to `chain_tip`, so the recomputation could only ever reproduce it —
-        // at the cost of retaining a ~50 KB SPHINCS+ preimage per relationship.
-        let (prior_entropy, prior_hash) = match (ds.tip_entropy(&rel_key), ds.chain_tip(&rel_key)) {
-            (Some(entropy), Some(tip)) => (entropy.to_vec(), tip),
-            _ => {
-                let root = ds.root();
-                let entropy = {
-                    let mut h =
-                        dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_GENESIS_ENTROPY);
-                    h.update(&root);
-                    h.finalize().as_bytes().to_vec()
-                };
-                (entropy, root)
-            }
-        };
-        let entropy = {
-            let op_data = operation.to_bytes();
-            let mut hasher = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_STATE_ENTROPY);
-            hasher.update(&prior_entropy);
-            hasher.update(&op_data);
-            hasher.update(&prior_hash);
-            *hasher.finalize().as_bytes()
-        };
-
+        // Core derives the transition's one entropy inside `advance`, from
+        // the relationship tip (Part VII step 3). Nothing is passed in.
         ds.advance(
             rel_key,
             counterparty_devid,
             operation,
-            entropy.to_vec(),
-            None, // encapsulated_entropy — caller can set if needed
             deltas,
             initial_chain_tip,
             anchor_leaf,
@@ -378,11 +347,11 @@ mod state_machine_tests {
         // a balance is not incidental: a restored, invented balance would make
         // this test pass against a head no device could ever have.
         let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32], 64)
-            .admitted_faucet_claim(0, 0x42)
+            .admitted_faucet_claim(0)
             .expect("faucet claim")
-            .admitted_faucet_claim(1, 0x43)
+            .admitted_faucet_claim(1)
             .expect("faucet claim")
-            .admitted_faucet_claim(2, 0x44)
+            .admitted_faucet_claim(2)
             .expect("faucet claim");
 
         let mut sm = StateMachine::new();

@@ -13,7 +13,8 @@ use dsm::types::token_types::Balance;
 use dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore;
 use dsm_sdk::storage::client_db::{
     self, get_contact_chain_tip, get_local_bilateral_chain_tip, get_pending_online_outbox,
-    record_pending_online_transition, restore_finalized_bilateral_chain_tip, ContactRecord,
+    record_pending_online_transition, restore_finalized_bilateral_chain_tip,
+    try_advance_finalized_bilateral_chain_tip, ContactRecord,
 };
 use dsm_sdk::util::text_id::encode_base32_crockford;
 use serial_test::serial;
@@ -73,8 +74,10 @@ fn store_online_capable_contact(
 }
 
 /// Test 1: Offline-vs-Offline Tripwire (same BilateralTransactionManager)
-/// Two sibling precommitments may capture the same parent, but once one finalize
-/// consumes that parent, the stale sibling must be rejected by Tripwire.
+/// Two sibling precommitments may capture the same parent, but once one
+/// committed advance consumes that parent, the stale sibling must be rejected
+/// by the §6.1 tripwire in `prepare_bilateral_advance` — the production
+/// handoff the BLE session engine commits through the canonical advance.
 #[tokio::test]
 #[serial]
 async fn test_offline_offline_tripwire() {
@@ -89,6 +92,7 @@ async fn test_offline_offline_tripwire() {
     client_db::init_database().unwrap();
 
     let alice_keypair = SignatureKeyPair::new().unwrap();
+    let bob_keypair = SignatureKeyPair::new().unwrap();
     let alice_device_id = [1u8; 32];
     let bob_device_id = [2u8; 32];
     let bob_genesis_hash = [3u8; 32];
@@ -103,12 +107,12 @@ async fn test_offline_offline_tripwire() {
         chain_tip_store,
     );
 
-    // Add Bob as contact
+    // Add Bob as contact, with the key his acceptance proofs verify under.
     let bob_contact = DsmVerifiedContact {
         alias: "Bob".into(),
         device_id: bob_device_id,
         genesis_hash: bob_genesis_hash,
-        public_key: vec![0u8; 32],
+        public_key: bob_keypair.public_key().to_vec(),
         genesis_material: vec![],
         chain_tip: None,
         chain_tip_smt_proof: None,
@@ -120,6 +124,13 @@ async fn test_offline_offline_tripwire() {
         ble_address: None,
     };
     alice_btm.add_verified_contact(bob_contact).unwrap();
+    // Bob's acceptance proof σ_B over a commitment hash, as the receiver signs it.
+    let bob_accepts = |commitment_hash: &[u8; 32]| -> Vec<u8> {
+        let mut msg = Vec::with_capacity(22 + 32);
+        msg.extend_from_slice(b"DSM/bilateral-sign\0");
+        msg.extend_from_slice(commitment_hash);
+        bob_keypair.sign(&msg).unwrap().to_vec()
+    };
     let anchor = alice_btm
         .establish_relationship(&bob_device_id)
         .await
@@ -156,44 +167,59 @@ async fn test_offline_offline_tripwire() {
         "second precommitment should remain pending until it is either finalized or explicitly removed"
     );
 
-    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    let result1 = alice_btm
-        .finalize_offline_transfer(
+    // First sibling: the production prepare passes the tripwire and hands off
+    // the advance on the shared parent.
+    let prepared1 = alice_btm
+        .prepare_bilateral_advance(
             &bob_device_id,
             &precommit1.bilateral_commitment_hash,
-            &[1u8; 32],
-            &mut smt,
+            &bob_accepts(&precommit1.bilateral_commitment_hash),
+            Vec::new(),
+            None,
+            None,
         )
-        .await;
+        .await
+        .expect("first prepare should pass the tripwire on the shared parent tip");
+    assert_eq!(prepared1.parent_tip, initial_tip);
 
-    let first_result = result1.expect("first finalize should consume the shared parent tip");
-    assert_ne!(
-        first_result.relationship_anchor.chain_tip, initial_tip,
-        "first finalize must advance the bilateral chain tip"
+    // The canonical advance commits and the relationship tip moves: persist
+    // the successor exactly as the settlement step does after the commit, and
+    // drop the consumed precommitment.
+    let committed_tip = [0x11u8; 32];
+    alice_btm.advance_chain_tip(&bob_device_id, committed_tip);
+    assert!(
+        try_advance_finalized_bilateral_chain_tip(&bob_device_id, &initial_tip, &committed_tip)
+            .unwrap(),
+        "the finalized tip CAS-advances from the consumed parent"
     );
+    alice_btm.consume_pre_commitment(&precommit1.bilateral_commitment_hash);
+    assert_ne!(committed_tip, initial_tip);
     assert_eq!(
         get_contact_chain_tip(&bob_device_id),
-        Some(first_result.relationship_anchor.chain_tip),
-        "successful finalize must persist the new canonical tip"
+        Some(committed_tip),
+        "the committed advance persists the new canonical tip"
     );
     assert!(
         !alice_btm.has_pending_commitment(&precommit1.bilateral_commitment_hash),
-        "finalized precommitment should be cleared from the pending set"
+        "committed precommitment should be cleared from the pending set"
     );
 
+    // Stale sibling: same parent, already consumed.
     let result2 = alice_btm
-        .finalize_offline_transfer(
+        .prepare_bilateral_advance(
             &bob_device_id,
             &precommit2.bilateral_commitment_hash,
-            &[2u8; 32],
-            &mut smt,
+            &bob_accepts(&precommit2.bilateral_commitment_hash),
+            Vec::new(),
+            None,
+            None,
         )
         .await;
 
     match result2 {
         Ok(_) => {
             panic!(
-                "INVARIANT VIOLATION: Second finalize succeeded but parent was already consumed!"
+                "INVARIANT VIOLATION: second prepare succeeded but the parent was already consumed!"
             );
         }
         Err(e) => {
@@ -203,7 +229,7 @@ async fn test_offline_offline_tripwire() {
                     && (err_str.contains("advanced since precommitment creation")
                         || err_str.contains("parent hash already consumed")
                         || err_str.contains(DeterministicSafetyClass::ParentConsumed.as_str())),
-                "stale finalize should fail with a Tripwire / ParentConsumed error, got: {}",
+                "stale prepare should fail with a Tripwire / ParentConsumed error, got: {}",
                 err_str
             );
             assert!(
@@ -212,8 +238,8 @@ async fn test_offline_offline_tripwire() {
             );
             assert_eq!(
                 alice_btm.get_chain_tip_for(&bob_device_id),
-                Some(first_result.relationship_anchor.chain_tip),
-                "rejecting a stale sibling finalize must not mutate the current relationship tip"
+                Some(committed_tip),
+                "rejecting a stale sibling prepare must not mutate the current relationship tip"
             );
         }
     }

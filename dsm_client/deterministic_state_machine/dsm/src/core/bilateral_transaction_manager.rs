@@ -393,8 +393,6 @@ pub struct PreparedBilateralAdvance {
     pub deltas: Vec<BalanceDelta>,
     /// Parent chain tip `h_n` used for CAS-style linkage during advance.
     pub parent_tip: [u8; 32],
-    /// Entropy `e` to be fed into the advance; matches the precommitted value.
-    pub entropy: [u8; 32],
     /// Bilateral precommitment hash, for post-commit cleanup via
     /// [`BilateralTransactionManager::consume_pre_commitment`].
     pub pre_commitment_hash: [u8; 32],
@@ -527,7 +525,7 @@ impl BilateralTransactionManager {
     /// BTM anchor AND contact_manager's contact-cache to a new authoritative tip
     /// (typically pulled from SQLite). Both in-memory caches MUST be updated
     /// atomically here so no caller can leave them asymmetric — otherwise the
-    /// intra-device consistency tripwire inside finalize_offline_transfer_with_entropy
+    /// intra-device consistency tripwire inside `prepare_bilateral_advance`
     /// fires as a self-inflicted wound.
     ///
     /// The SMT proof on the contact is cleared because this raw-tip sync carries
@@ -579,16 +577,6 @@ impl BilateralTransactionManager {
 
     pub fn get_current_ticks(&self) -> u64 {
         mono_commit_height()
-    }
-
-    /// Derive deterministic transition entropy for a bilateral operation.
-    pub fn derive_transition_entropy(
-        &self,
-        remote_device_id: &[u8; 32],
-        operation: &Operation,
-    ) -> Result<[u8; 32], DsmError> {
-        self.bilateral_state_manager
-            .derive_transition_entropy_bytes(&self.local_device_id, remote_device_id, operation)
     }
 
     /// Update anchor from a real SMT-Replace result (§4.2).
@@ -1159,168 +1147,9 @@ impl BilateralTransactionManager {
             .await
     }
 
-    pub async fn finalize_offline_transfer(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
-        smt: &mut SparseMerkleTree,
-    ) -> Result<BilateralTransactionResult, DsmError> {
-        self.finalize_offline_transfer_with_entropy(
-            remote_device_id,
-            pre_commitment_hash,
-            receiver_acceptance_proof,
-            None,
-            smt,
-        )
-        .await
-    }
-
-    /// Finalize an offline bilateral transfer, optionally using pre-generated entropy.
-    ///
-    /// When `pre_generated_entropy` is `Some`, it is used instead of generating fresh
-    /// entropy.  This is required when the sender pre-computed its post-finalize chain
-    /// tip during commit construction (sent as `sender_post_finalize_chain_tip` in the
-    /// BilateralCommitRequest) so the actual finalize result matches the pre-computed tip.
-    pub async fn finalize_offline_transfer_with_entropy(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
-        pre_generated_entropy: Option<[u8; 32]>,
-        smt: &mut SparseMerkleTree,
-    ) -> Result<BilateralTransactionResult, DsmError> {
-        info!("Phase 2: finalize offline");
-        let pre = self
-            .pending_commitments
-            .get(pre_commitment_hash)
-            .ok_or_else(|| {
-                DsmError::InvalidOperation("pre-commitment not found or expired".into())
-            })?;
-        if receiver_acceptance_proof.is_empty() {
-            return Err(DsmError::InvalidOperation(
-                "receiver acceptance proof required".into(),
-            ));
-        }
-        let mut anchor = self
-            .relationships
-            .get(remote_device_id)
-            .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?
-            .clone();
-
-        // Refresh shared chain tip from persistent store before finalization
-        if let Some(tip) = self.chain_tip_store.get_contact_chain_tip(remote_device_id) {
-            if let Some(anchor_mut) = self.relationships.get_mut(remote_device_id) {
-                anchor_mut.chain_tip = tip;
-            }
-            if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
-                contact_mut.chain_tip = Some(tip);
-                contact_mut.chain_tip_smt_proof = None;
-            }
-            anchor.chain_tip = tip;
-        }
-
-        // ===== TRIPWIRE ENFORCEMENT (DSM Whitepaper Section 6.1) =====
-        // The parent tip recorded at precommitment creation MUST match the current
-        // shared chain tip. If it differs, another transition has already consumed
-        // the parent hash, and finalizing would violate the Tripwire theorem.
-        if Some(anchor.chain_tip) != pre.local_chain_tip_at_creation {
-            let class = DeterministicSafetyClass::ParentConsumed;
-            log::warn!(
-                "[BTM][TRIPWIRE:precommit-parent-consumed] anchor={} precommit_tip={} class={}",
-                labeling::hash_to_short_id(&anchor.chain_tip),
-                pre.local_chain_tip_at_creation
-                    .map(|t| labeling::hash_to_short_id(&t))
-                    .unwrap_or_else(|| "None".to_string()),
-                class.as_str()
-            );
-            error!(
-                "[BTM] Deterministic safety rejection [{}]: chain_tip={} precommit_tip={}",
-                class.as_str(),
-                labeling::hash_to_short_id(&anchor.chain_tip),
-                pre.local_chain_tip_at_creation
-                    .map(|t| labeling::hash_to_short_id(&t))
-                    .unwrap_or_else(|| "None".to_string())
-            );
-            return Err(DsmError::deterministic_safety(
-                class,
-                "Tripwire: chain tip advanced since precommitment creation (parent hash already consumed)",
-            ));
-        }
-
-        // Tripwire: shared chain tip must match persisted contact tip
-        if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
-            if let Some(contact_tip) = contact.chain_tip {
-                if anchor.chain_tip != contact_tip {
-                    log::warn!(
-                        "[BTM][TRIPWIRE:finalize] anchor={} contact={} precommit_tip={} store={}",
-                        labeling::hash_to_short_id(&anchor.chain_tip),
-                        labeling::hash_to_short_id(&contact_tip),
-                        pre.local_chain_tip_at_creation
-                            .map(|t| labeling::hash_to_short_id(&t))
-                            .unwrap_or_else(|| "None".to_string()),
-                        self.chain_tip_store
-                            .get_contact_chain_tip(remote_device_id)
-                            .map(|t| labeling::hash_to_short_id(&t))
-                            .unwrap_or_else(|| "None".to_string()),
-                    );
-                    return Err(DsmError::deterministic_safety(
-                        DeterministicSafetyClass::ParentConsumed,
-                        "Tripwire: relationship chain tip diverged from persisted value",
-                    ));
-                }
-            }
-        } else {
-            return Err(DsmError::RelationshipNotFound(
-                "remote contact missing for finalize_offline_transfer".into(),
-            ));
-        }
-
-        let entropy = match pre_generated_entropy {
-            Some(e) => e,
-            None => self
-                .bilateral_state_manager
-                .derive_transition_entropy_bytes(
-                    &self.local_device_id,
-                    remote_device_id,
-                    &pre.operation,
-                )?,
-        };
-        let sp = self.bilateral_state_manager.execute_transition_bytes(
-            &self.local_device_id,
-            remote_device_id,
-            pre.operation.clone(),
-            entropy,
-        )?;
-        let current_tip = anchor.chain_tip;
-        // C_pre uses the canonical precommit v2 branch formula; both parties
-        // derive identical h_{n+1} from the same shared inputs.
-        let op_bytes = pre.operation.to_bytes();
-        let receipt_sigma = compute_precommit(&current_tip, &op_bytes, &entropy);
-
-        // Successor relationship tip: the symmetric §16.6 tip both parties recompute from the
-        // shared inputs. The fused-anchor state is NOT folded here (the tip is
-        // symmetric and cannot carry one party's device-private fused state); it is committed
-        // by a dedicated per-device fused-anchor SMT leaf (`anchor_state_leaf_key`).
-        let new_tip = compute_successor_tip(&current_tip, &op_bytes, &entropy, &receipt_sigma);
-        let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-
-        // §4.2: SMT-Replace FIRST, then anchor update from the result.
-        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
-        self.update_anchor_from_replace(remote_device_id, &mut anchor, new_tip, &replace_result)?;
-        self.pending_commitments.remove(pre_commitment_hash);
-        Ok(BilateralTransactionResult {
-            local_state: sp.entity_state,
-            remote_state: sp.counterparty_state,
-            relationship_anchor: anchor.clone(),
-            transaction_hash: tx_hash,
-            completed_offline: true,
-        })
-    }
-
     /// Prepare (but do not commit) a bilateral offline transfer.
     ///
-    /// Runs the §6.1 tripwire checks and resolves entropy, then returns a
+    /// Runs the §6.1 tripwire checks, then returns a
     /// [`PreparedBilateralAdvance`] handoff that the caller commits via
     /// `AppRouter::execute_on_relationship_for_bilateral` — which routes
     /// through the canonical `prepare_advance_relationship → commit_advance`
@@ -1330,8 +1159,12 @@ impl BilateralTransactionManager {
     ///   1. Refresh shared chain tip from persistent store.
     ///   2. §6.1 tripwire: anchor tip must equal `local_chain_tip_at_creation`.
     ///   3. Tripwire: anchor tip must equal persisted contact tip.
-    ///   4. Entropy resolve (pre-generated wins; fresh otherwise).
-    ///   5. Emit `PreparedBilateralAdvance`.
+    ///   4. Emit `PreparedBilateralAdvance`.
+    ///
+    /// No entropy is resolved here. The transition's one entropy is derived
+    /// by Core inside `DeviceState::advance` (Part VII step 3) when the
+    /// handoff is committed; the receipt hashes are computed from that
+    /// outcome, never from a value this manager chose.
     ///
     /// No SMT mutation. No anchor mutation. No `pending_commitments` removal
     /// — caller calls [`Self::consume_pre_commitment`] after advance commit.
@@ -1341,12 +1174,11 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
         receiver_acceptance_proof: &[u8],
-        pre_generated_entropy: Option<[u8; 32]>,
         sender_deltas: Vec<BalanceDelta>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<PreparedBilateralAdvance, DsmError> {
-        info!("prepare_bilateral_advance: tripwire + entropy (no SMT/anchor mutation)");
+        info!("prepare_bilateral_advance: tripwire (no SMT/anchor mutation)");
 
         let pre = self
             .pending_commitments
@@ -1434,16 +1266,6 @@ impl BilateralTransactionManager {
             ));
         }
 
-        let entropy = match pre_generated_entropy {
-            Some(e) => e,
-            None => self
-                .bilateral_state_manager
-                .derive_transition_entropy_bytes(
-                    &self.local_device_id,
-                    remote_device_id,
-                    &pre.operation,
-                )?,
-        };
         let rel_key = compute_smt_key(&self.local_device_id, remote_device_id);
 
         Ok(PreparedBilateralAdvance {
@@ -1452,7 +1274,6 @@ impl BilateralTransactionManager {
             operation: pre.operation,
             deltas: sender_deltas,
             parent_tip: anchor.chain_tip,
-            entropy,
             pre_commitment_hash: *pre_commitment_hash,
             anchor_leaf,
             offline_spend,
@@ -1464,34 +1285,6 @@ impl BilateralTransactionManager {
     /// `AppRouter::execute_on_relationship_for_bilateral` returns Ok.
     pub fn consume_pre_commitment(&mut self, pre_commitment_hash: &[u8; 32]) {
         self.pending_commitments.remove(pre_commitment_hash);
-    }
-
-    /// Non-mutating preview of the sender's post-finalize SHARED chain tip hash.
-    ///
-    /// Computes h_{n+1} from h_n, operation bytes, entropy, and canonical C_pre.
-    /// Both parties compute the same h_{n+1} from these shared inputs (§16.6).
-    /// Used by the BLE handler to pre-compute the sender's post-finalize tip
-    /// for inclusion in the BilateralCommitRequest.
-    pub fn peek_post_finalize_hash(
-        &self,
-        remote_device_id: &[u8; 32],
-        operation: &Operation,
-        entropy: &[u8; 32],
-    ) -> Result<[u8; 32], DsmError> {
-        let current_tip = self
-            .relationships
-            .get(remote_device_id)
-            .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?
-            .chain_tip;
-        let op_bytes = operation.to_bytes();
-        // §16.6: σ = Cpre derived from shared inputs — symmetric on both sides.
-        let receipt_sigma = compute_precommit(&current_tip, &op_bytes, entropy);
-        Ok(compute_successor_tip(
-            &current_tip,
-            &op_bytes,
-            entropy,
-            &receipt_sigma,
-        ))
     }
 }
 
@@ -1782,37 +1575,6 @@ mod tests {
         assert!(pre
             .verify_local_signature(manager.signature_keypair.public_key())
             .unwrap());
-    }
-
-    #[tokio::test]
-    async fn finalize_offline_transfer_removes_pending() {
-        let (mut manager, _kp) = make_manager();
-        let contact = make_verified_contact("Eve", true, true);
-        let remote_id = contact.device_id;
-        manager.add_verified_contact(contact).expect("add");
-        manager
-            .establish_relationship(&remote_id)
-            .await
-            .expect("establish");
-        let op = signed_transfer_op(&manager.signature_keypair, "m", 4);
-        let pre = manager
-            .prepare_offline_transfer(&remote_id, op, 500)
-            .await
-            .expect("prepare");
-        assert!(manager.has_pending_commitment(&pre.bilateral_commitment_hash));
-
-        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let result = manager
-            .finalize_offline_transfer(
-                &remote_id,
-                &pre.bilateral_commitment_hash,
-                b"accept",
-                &mut smt,
-            )
-            .await
-            .expect("finalize");
-        assert!(result.completed_offline);
-        assert!(!manager.has_pending_commitment(&pre.bilateral_commitment_hash));
     }
 
     #[tokio::test]

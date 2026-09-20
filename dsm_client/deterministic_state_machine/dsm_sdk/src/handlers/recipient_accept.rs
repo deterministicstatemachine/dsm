@@ -378,8 +378,6 @@ pub(crate) mod tests {
             compute_smt_key(&me, &me),
             me,
             dsm::types::operations::Operation::Noop,
-            vec![0x33; 32],
-            None,
             &[],
             Some(initial_chain_tip_from_device_ids(&me, &me)),
             None,

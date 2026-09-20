@@ -13671,6 +13671,17 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    */
   forkWitness?: ForkAwareWitness;
 
+  /**
+   * The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
+   * value Core derived inside DeviceState::advance for this step. CANONICAL —
+   * part of the commit preimage, so sig_a binds it. The recipient cannot
+   * derive it (e_n is the sender's own tip entropy); it feeds it into C_pre
+   * and the symmetric tip and recomputes child_tip from it. Required.
+   *
+   * @generated from field: bytes transition_entropy = 21;
+   */
+  transitionEntropy = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ReceiptCommit>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13699,6 +13710,7 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 20, name: "fork_witness", kind: "message", T: ForkAwareWitness },
+    { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptCommit {

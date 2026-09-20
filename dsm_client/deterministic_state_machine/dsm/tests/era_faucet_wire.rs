@@ -442,8 +442,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             rel,
             devid,
             op.clone(),
-            vec![0x11; 32],
-            None,
             std::slice::from_ref(&delta),
             Some(tip),
             None,
@@ -466,8 +464,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             rel,
             devid,
             op.clone(),
-            vec![0x11; 32],
-            None,
             std::slice::from_ref(&delta),
             Some(tip),
             None,
@@ -486,8 +482,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             rel,
             devid,
             other,
-            vec![0x11; 32],
-            None,
             std::slice::from_ref(&delta),
             Some(tip),
             None,
@@ -499,17 +493,7 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
     // 4. Out-of-range ticket: refused before anything else.
     let oob = claim_op(era_faucet_id(NETWORK), ERA_FAUCET_TICKET_COUNT);
     assert!(head
-        .advance(
-            rel,
-            devid,
-            oob,
-            vec![0x11; 32],
-            None,
-            &[delta],
-            Some(tip),
-            None,
-            None,
-        )
+        .advance(rel, devid, oob, &[delta], Some(tip), None, None,)
         .is_err());
 }
 
@@ -546,8 +530,6 @@ fn conservation_refuses_anything_but_the_derived_payout() {
                 rel,
                 devid,
                 op.clone(),
-                vec![0x11; 32],
-                None,
                 std::slice::from_ref(&delta),
                 Some(tip),
                 None,

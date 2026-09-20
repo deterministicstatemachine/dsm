@@ -139,8 +139,10 @@ pub fn rebuild_head_from_checkpoint(
         let (state, stored_tip) = candidates[0];
 
         // Re-derive the transition through the canonical advance. This is the
-        // validity check: conservation is enforced inside `advance`, and the
-        // resulting tip must reproduce the stored one exactly.
+        // validity check: conservation is enforced inside `advance`, the
+        // transition entropy is Core's own derivation from the tip (the stored
+        // one is never passed in — Part VII step 3), and the resulting tip
+        // must reproduce the stored one exactly, entropy included.
         let deltas = deltas_for_transition(state, &head.devid());
 
         // REPLAY of an already-committed recipient credit (3.5b PR4): the
@@ -179,8 +181,6 @@ pub fn rebuild_head_from_checkpoint(
             state.rel_key,
             state.counterparty_devid,
             state.operation.clone(),
-            state.entropy.clone(),
-            state.encapsulated_entropy.clone(),
             &deltas,
             Some(state.embedded_parent),
             None,
@@ -442,8 +442,6 @@ mod tests {
                 message: String::new(),
                 signature: Vec::new(),
             },
-            vec![0x22u8; 32],
-            None,
             &[],
             Some([0x33u8; 32]),
             None,

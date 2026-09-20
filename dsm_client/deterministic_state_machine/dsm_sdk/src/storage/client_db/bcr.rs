@@ -881,8 +881,6 @@ mod tests {
                     policy_commit,
                     signature: vec![0xAD; 64],
                 },
-                vec![0xAE; 32],
-                None,
                 &[],
                 Some(self_tip),
                 None,
@@ -914,8 +912,6 @@ mod tests {
                 rel_key,
                 counterparty,
                 op,
-                vec![0x33; 32],
-                Some(vec![0x44; 48]),
                 &[BalanceDelta {
                     policy_commit,
                     direction: BalanceDirection::Credit,
@@ -992,8 +988,6 @@ mod tests {
                 rel_key,
                 counterparty,
                 op2,
-                vec![0x45; 32],
-                None,
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,
@@ -1045,8 +1039,6 @@ mod tests {
                 rel_key,
                 rel0.counterparty_devid,
                 op3,
-                vec![0x56; 32],
-                None,
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,

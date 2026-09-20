@@ -190,9 +190,10 @@ pub trait AppRouter: Send + Sync {
     /// only the [`AdvanceOutcome`] — settlement and BLE paths do not need the
     /// compat `State` view. Callers feed in the tripwire-verified operation
     /// and balance deltas produced by
-    /// `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
-    /// (which no longer mutates any SMT itself), along with the parent chain
-    /// tip for CAS-style linkage.
+    /// `BilateralTransactionManager::prepare_bilateral_advance` (which mutates
+    /// no SMT and resolves no entropy — Core derives the transition's one
+    /// entropy inside `advance`), along with the parent chain tip for
+    /// CAS-style linkage.
     ///
     /// Returns `Err` if the router is not yet attached to an identity, or if
     /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8

@@ -377,8 +377,6 @@ async fn the_durable_probes_detect_a_real_commit() {
                 signature: vec![],
                 authority_policy: None,
             },
-            vec![0x22; 32],
-            None,
             &[BalanceDelta {
                 policy_commit: era_policy(),
                 direction: BalanceDirection::Debit,

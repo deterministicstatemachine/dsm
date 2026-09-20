@@ -797,7 +797,7 @@ mod tests {
         // The issuance lands on the device's SELF-LOOP — a value relationship
         // of its own, exactly as a real device's faucet claim is.
         let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024)
-            .admitted_mint([0xF1; 32], 1_000, 0xF1)
+            .admitted_mint([0xF1; 32], 1_000)
             .expect("admitted mint");
         let rk_self = compute_smt_key(&owner, &owner);
 
@@ -817,8 +817,6 @@ mod tests {
                     proof_of_ownership: vec![],
                     message: String::new(),
                 },
-                vec![1; 32],
-                None,
                 &[BalanceDelta {
                     policy_commit: [0xF1; 32],
                     direction: BalanceDirection::Debit,
@@ -844,8 +842,6 @@ mod tests {
                     message: "t".into(),
                     signature: vec![],
                 },
-                vec![2; 32],
-                None,
                 &[],
                 Some(initial_chain_tip_from_device_ids(&owner, &c_no)),
                 None,
