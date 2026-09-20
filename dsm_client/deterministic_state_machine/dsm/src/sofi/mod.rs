@@ -19,8 +19,9 @@
 //! The byte-exact wire registry and the pure derivations: field tables and
 //! strict codecs ([`wire`]), domain-separated keys and identities
 //! ([`derive`]), the routing permutation ([`fisher_yates`]), successor-cell
-//! arithmetic ([`arith`]), three-valued validation composition and the
-//! mechanical fulfillment-against-precommit checks ([`conformance`]), and the
+//! arithmetic ([`arith`]), the storage facts for objects and indexes
+//! ([`storage`]), three-valued validation composition and the mechanical
+//! fulfillment-against-precommit checks ([`conformance`]), and the
 //! persistent DLV tree with structurally shared shadows ([`smt`]).
 //!
 //! ## What it is not
@@ -39,5 +40,6 @@ pub mod lineage;
 pub mod resolution;
 pub mod signature;
 pub mod smt;
+pub mod storage;
 pub mod validation;
 pub mod wire;
