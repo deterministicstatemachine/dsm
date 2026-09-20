@@ -96,8 +96,8 @@ const dsmLogoMap: Record<ThemeName, string> = {
 
 const themeChameleon = (t: ThemeName) => chameleonMap[t] || 'images/vaulthunters/chameleon.gif';
 const themeIntroGif = (t: ThemeName) => introGifMap[t] || 'images/cutscenes/stateboy.gif';
-const themeEraToken = (t: ThemeName) => eraTokenMap[t] || 'images/logos/era_token_gb.gif';
-const themeBtcLogo = (t: ThemeName) => btcLogoMap[t] || 'images/logos/btc-logo.gif';
+export const themeEraToken = (t: ThemeName) => eraTokenMap[t] || 'images/logos/era_token_gb.gif';
+export const themeBtcLogo = (t: ThemeName) => btcLogoMap[t] || 'images/logos/btc-logo.gif';
 const themeBricks = (t: ThemeName) => bricksMap[t] || 'images/vaulthunters/bricks2.svg';
 const themeDsmLogo = (t: ThemeName) => dsmLogoMap[t] || 'images/logos/dsm-stateboy-on-screen-logo.svg';
 

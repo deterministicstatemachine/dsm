@@ -1388,10 +1388,6 @@
     font-size: 11px;
   }
   
-  .form-actions {
-    flex-direction: column;
-  }
-  
   .address-display {
     flex-direction: column;
     gap: 8px;

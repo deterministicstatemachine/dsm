@@ -9,7 +9,7 @@ interface Props {
   onNavigate?: (to: string) => void;
 }
 
-export default function PendingBilateralScreen({ onNavigate }: Props): JSX.Element {
+export default function PendingBilateralScreen({ onNavigate }: Props): React.JSX.Element {
   return <PendingBilateralPanel onNavigate={onNavigate} />;
 }
 

@@ -4,7 +4,7 @@ import { processEnvelopeV3Bin } from '../WebViewBridge';
 import { BridgeRpcRequest, BridgeRpcResponse, EnvelopeOp, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  const br = new BridgeRpcResponse({ result: { case: 'success', value: { data } } });
+  const br = new BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(data) } } });
   return br.toBinary();
 }
 

@@ -175,8 +175,7 @@ export async function createAmmVault(input: {
 // Re-export for screens that prefer importing both AMM helpers from one place.
 export { encodeBase32Crockford } from '../utils/textId';
 
-import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
-import { decodeFramedEnvelopeV3 } from './decoding';
+import { decodeBase32Crockford } from '../utils/textId';
 import { routerQueryBin } from './WebViewBridge';
 
 /**
@@ -370,7 +369,7 @@ export async function reconcileVaultSettlement(input: {
     const argPack = new pb.ArgPack({
       schemaHash: new pb.Hash32({ v: new Uint8Array(32) }),
       codec: pb.Codec.PROTO as any,
-      body: req.toBinary(),
+      body: new Uint8Array(req.toBinary()),
     });
     const resBytes = await routerInvokeBin(
       'dlv.reconcile',
@@ -408,7 +407,7 @@ export async function closeAmmVault(input: {
     const argPack = new pb.ArgPack({
       schemaHash: new pb.Hash32({ v: new Uint8Array(32) }),
       codec: pb.Codec.PROTO as any,
-      body: req.toBinary(),
+      body: new Uint8Array(req.toBinary()),
     });
     const resBytes = await routerInvokeBin('dlv.close', new Uint8Array(argPack.toBinary()));
     const env = decodeFramedEnvelopeV3(resBytes);

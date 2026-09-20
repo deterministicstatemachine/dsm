@@ -1,5 +1,5 @@
 .storage-screen-shell {
-  --storage-bleed: 20px;
+  --storage-bleed: 0px;
   --storage-shell-bg: var(--bg, #9bbc0f);
   --storage-shell-text: var(--text, #0f380f);
   --storage-shell-text-dark: var(--text-dark, #071f07);
@@ -25,6 +25,8 @@
   font-family: "Martian Mono", monospace;
   font-size: 12px;
   line-height: 1.5;
+  /* The React root no longer centres text; this screen was designed centred. */
+  text-align: center;
   background:
     linear-gradient(0deg, rgba(var(--text-rgb), 0.08), rgba(var(--text-rgb), 0.02)),
     repeating-linear-gradient(

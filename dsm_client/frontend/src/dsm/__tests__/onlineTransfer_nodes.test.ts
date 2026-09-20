@@ -42,7 +42,7 @@ function makeFramedEnvelope(envelope: pb.Envelope): Uint8Array {
 function wrapSuccessRaw(data: Uint8Array): Uint8Array {
   // Return BridgeRpcResponse with raw data (for direct bridge methods)
   const br = new pb.BridgeRpcResponse({ 
-    result: { case: 'success', value: { data } } 
+    result: { case: 'success', value: { data: new Uint8Array(data) } } 
   });
   return br.toBinary();
 }
@@ -88,6 +88,7 @@ describe('online send node fan-out', () => {
           return wrapSuccessRaw(headers.toBinary());
         }
         if (method === 'nativeBoundaryIngress') {
+          const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
           const ingressRequest = pb.IngressRequest.fromBinary(p);
           if (ingressRequest.operation.case !== 'routerInvoke') {
             return wrapIngressOk(new Uint8Array(0));

@@ -9,6 +9,6 @@ interface Props {
   onNavigate?: (to: string) => void;
 }
 
-export default function BilateralRelationshipsScreen({ onNavigate }: Props): JSX.Element {
+export default function BilateralRelationshipsScreen({ onNavigate }: Props): React.JSX.Element {
   return <BilateralRelationshipsPanel onNavigate={onNavigate} />;
 }

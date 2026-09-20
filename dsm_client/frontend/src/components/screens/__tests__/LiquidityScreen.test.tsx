@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import LiquidityScreen from '../LiquidityScreen';
 import * as amm from '../../../dsm/amm';
 import * as route_commit from '../../../dsm/route_commit';
@@ -50,6 +50,15 @@ const mockedPublishAd = jest.mocked(route_commit.publishRoutingAdvertisement);
 
 // 32 zero bytes Base32-Crockford-encoded — 52 chars per ceil(256/5).
 const ZERO_VAULT_ID_B32 = '0'.repeat(52);
+
+/** Drive the token picker: open it, then take the row with this fingerprint.
+ *  Both rows read "RIGB", so the fingerprint is the only thing telling the two
+ *  identities apart — which is the point of the tests below. */
+function pickToken(label: RegExp, anchor: string): void {
+  fireEvent.click(screen.getByRole('button', { name: label }));
+  const list = screen.getByRole('listbox', { name: label });
+  fireEvent.click(within(list).getByRole('option', { name: new RegExp(anchor.slice(0, 8)) }));
+}
 
 describe('LiquidityScreen', () => {
   beforeEach(() => {
@@ -174,7 +183,12 @@ describe('LiquidityScreen', () => {
     // green test coexisted with mojibake on real data, where `tokenA` is a 32-byte
     // digest. The fixture now carries a real commit, so only the ticker field can
     // produce this text.
-    await waitFor(() => expect(screen.getByText(/AAA \/ BBB/)).toBeInTheDocument());
+    // The pair's two tickers each carry their own coin, so the title is built
+    // from several elements; assert on the title's text rather than one node.
+    await waitFor(() => {
+      const titles = Array.from(document.querySelectorAll('.sb-row__title')).map((el) => el.textContent ?? '');
+      expect(titles.some((t) => /AAA\s*\/\s*BBB/.test(t))).toBe(true);
+    });
     // And the commit bytes must never reach the DOM as text.
     expect(screen.queryByText(/\uFFFD/)).toBeNull();
     expect(screen.getByText(/fee 30 bps/)).toBeInTheDocument();
@@ -191,8 +205,8 @@ describe('LiquidityScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: /\+ Create vault/ }));
 
     // Both options read "RIGB"; they differ only by anchor.
-    fireEvent.change(screen.getByLabelText(/Token A/), { target: { value: ANCHOR_A } });
-    fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_B } });
+    pickToken(/Token A/, ANCHOR_A);
+    pickToken(/Token B/, ANCHOR_B);
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '2000' } });
     fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
@@ -224,8 +238,8 @@ describe('LiquidityScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: /\+ Create vault/ }));
 
     // Deliberately backwards: the higher anchor selected as A.
-    fireEvent.change(screen.getByLabelText(/Token A/), { target: { value: ANCHOR_B } });
-    fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_A } });
+    pickToken(/Token A/, ANCHOR_B);
+    pickToken(/Token B/, ANCHOR_A);
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '2000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '1000' } });
     fireEvent.click(screen.getByRole('button', { name: /^Create$/ }));
@@ -275,8 +289,8 @@ describe('LiquidityScreen', () => {
     await waitFor(() => expect(screen.getByText(/My vaults \(0\)/)).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole('button', { name: /\+ Create vault/ }));
-    fireEvent.change(screen.getByLabelText(/Token A/), { target: { value: ANCHOR_A } });
-    fireEvent.change(screen.getByLabelText(/Token B/), { target: { value: ANCHOR_B } });
+    pickToken(/Token A/, ANCHOR_A);
+    pickToken(/Token B/, ANCHOR_B);
     fireEvent.change(screen.getByLabelText(/^Reserve A$/), { target: { value: '1000' } });
     fireEvent.change(screen.getByLabelText(/^Reserve B$/), { target: { value: '2000' } });
     // 32 zero bytes Base32 Crockford = '0000000000000000000000000000000000000000000000000000'

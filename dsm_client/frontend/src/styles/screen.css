@@ -1,0 +1,840 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Screen frame — the one layout every non-home screen shares inside the
+   StateBoy screen. The screen is ~280×420 CSS px on a phone, so the frame is
+   edge to edge, left-aligned, with a compact header, an optional tab strip and
+   a single scrolling body. Everything below is prefixed `sb-` (StateBoy). */
+
+/* The React root host fills the screen and is the scroll container for the
+   legacy centred screens (home, loading). Framed screens are 100% tall and
+   scroll their own body instead. */
+.stateboy-screen-host {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sb-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  text-align: left;
+  color: var(--text-dark);
+  font-family: 'Martian Mono', monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.sb-screen__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 2px solid var(--border);
+  box-sizing: border-box;
+}
+
+.sb-screen__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sb-screen__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sb-screen__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px 10px 18px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Icon buttons in the header (back, refresh, inbox). */
+.sb-icon-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: rgba(var(--text-rgb), 0.06);
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sb-icon-btn:active { transform: translateY(1px); }
+.sb-icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.sb-icon-btn img { width: 16px; height: 16px; image-rendering: pixelated; }
+.sb-icon-btn.spinning img { animation: sb-spin 1s linear infinite; }
+@keyframes sb-spin { to { transform: rotate(360deg); } }
+
+/* Segmented tab strip: every tab gets the same width, the active one is
+   inverted, and the labels are short enough to fit five across. */
+.sb-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  margin: 8px 10px 0;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(var(--text-rgb), 0.06);
+}
+.sb-tabs__tab {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 2px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-disabled);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.sb-tabs__tab:last-child { border-right: 0; }
+.sb-tabs__tab.active {
+  background: var(--text-dark);
+  color: var(--bg);
+}
+
+/* Small inline segmented toggle (Online / Offline, New / Import). */
+.sb-seg {
+  display: inline-flex;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.sb-seg__opt {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 0;
+  padding: 6px 12px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-disabled);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+}
+.sb-seg__opt:last-child { border-right: 0; }
+.sb-seg__opt.active { background: var(--text-dark); color: var(--bg); }
+.sb-seg--block { display: flex; width: 100%; }
+
+/* Cards and rows. */
+.sb-card {
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: rgba(var(--text-rgb), 0.06);
+  box-sizing: border-box;
+}
+.sb-card--hero { text-align: center; padding: 12px 10px 10px; }
+.sb-card__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+.sb-hero__label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: none; /* token names keep their case: dBTC, not DBTC */
+  color: var(--text-disabled);
+}
+.sb-hero__label img { width: 18px; height: 18px; image-rendering: pixelated; border-radius: 50%; }
+.sb-hero__value {
+  margin-top: 4px;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.sb-hero__unit { font-size: 11px; font-weight: 700; margin-left: 4px; letter-spacing: 0; }
+.sb-hero__sub { margin-top: 4px; font-size: 9px; color: var(--text-disabled); }
+.sb-hero__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dotted rgba(var(--text-rgb), 0.35);
+  font-size: 10px;
+}
+.sb-hero__row b { font-variant-numeric: tabular-nums; }
+
+.sb-section-title {
+  margin: 12px 0 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+.sb-section-title:first-child { margin-top: 0; }
+/* Beats the old wallet stylesheet's `.send-tab h3` / `.recent-transactions h3` sizes. */
+.sb-screen h3.sb-section-title,
+.sb-screen .recent-transactions h3.sb-section-title {
+  margin: 12px 0 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+.sb-screen h3.sb-section-title:first-child { margin-top: 0; }
+
+.sb-kv {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 10px;
+  border-bottom: 1px dotted rgba(var(--text-rgb), 0.25);
+}
+.sb-kv:last-child { border-bottom: 0; }
+.sb-kv__k {
+  flex: 0 0 auto;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-disabled);
+}
+.sb-kv__v {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.sb-kv__v--mono { font-size: 9px; }
+
+.sb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px dotted rgba(var(--text-rgb), 0.3);
+}
+.sb-row:last-child { border-bottom: 0; }
+.sb-row__main { flex: 1 1 auto; min-width: 0; }
+.sb-row__title { font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+.sb-row__sub { font-size: 9px; color: var(--text-disabled); overflow-wrap: anywhere; }
+.sb-row__amount { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.sb-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-dark);
+  vertical-align: middle;
+}
+.sb-tag--solid { background: var(--text-dark); color: var(--bg); border-color: var(--text-dark); }
+.sb-tag--dim { color: var(--text-disabled); border-style: dashed; }
+
+.sb-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, 'Martian Mono', monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.sb-hint {
+  margin: 0 0 8px;
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--text-disabled);
+}
+.sb-hint--tight { margin: 4px 0 0; }
+
+.sb-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(var(--text-rgb), 0.08);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sb-notice--error { border: 2px dashed var(--border); background: rgba(var(--text-rgb), 0.14); }
+.sb-notice--success { background: var(--text-dark); color: var(--bg); border-color: var(--text-dark); }
+.sb-notice--banner { margin: 8px 10px 0; }
+.sb-notice__close {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sb-empty {
+  padding: 18px 8px;
+  text-align: center;
+  color: var(--text-disabled);
+  font-size: 10px;
+  line-height: 1.5;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+/* Buttons. `--primary` is the one action on the screen; the rest are bricks. */
+.sb-actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 8px;
+}
+.sb-actions > * { flex: 1 1 0; min-width: 0; }
+.sb-actions--end { justify-content: flex-end; }
+.sb-actions--end > * { flex: 0 0 auto; }
+.sb-btn {
+  position: relative;
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background:
+    linear-gradient(0deg, rgba(var(--text-rgb), 0.12), rgba(var(--bg-rgb), 0.06)),
+    repeating-linear-gradient(45deg, rgba(var(--text-rgb), 0.14) 0px, rgba(var(--text-rgb), 0.14) 2px, transparent 2px, transparent 4px);
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  box-shadow: inset 0 -2px 0 rgba(var(--text-rgb), 0.18), inset 0 2px 0 rgba(var(--bg-rgb), 0.08);
+  image-rendering: pixelated;
+  cursor: pointer;
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+.sb-notice > .sb-btn { flex: 0 0 auto; }
+.sb-btn:active { transform: translateY(1px); box-shadow: inset 0 2px 0 rgba(var(--text-rgb), 0.18); }
+.sb-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.sb-btn--primary {
+  background: var(--text-dark);
+  color: var(--bg);
+  border-color: var(--text-dark);
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.35);
+}
+.sb-btn--ghost { background: transparent; box-shadow: none; }
+.sb-btn--small { min-height: 28px; padding: 4px 8px; font-size: 9px; border-radius: 8px; }
+.sb-btn--block { width: 100%; }
+
+/* Forms. Labels sit above their field, left-aligned, in small caps. */
+.sb-field { margin-bottom: 10px; }
+.sb-field > label,
+.sb-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-dark);
+}
+.sb-input,
+.sb-screen select.sb-input,
+.sb-screen textarea.sb-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 10px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: rgba(var(--bg-rgb), 0.55);
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+}
+.sb-input:focus { outline: none; border-color: var(--text-dark); }
+.sb-input::placeholder { color: var(--text-dark); opacity: 0.45; }
+.sb-input--mono { font-family: ui-monospace, SFMono-Regular, Menlo, 'Martian Mono', monospace; font-size: 11px; }
+.sb-input--small { padding: 6px 8px; font-size: 11px; }
+.sb-screen select.sb-input {
+  padding-right: 24px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dark) 50%), linear-gradient(135deg, var(--text-dark) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.sb-screen textarea.sb-input { min-height: 64px; resize: vertical; }
+.sb-input-row { display: flex; gap: 6px; align-items: stretch; }
+.sb-input-row > .sb-input { flex: 1 1 auto; min-width: 0; }
+.sb-input-row > .sb-btn { flex: 0 0 auto; }
+.sb-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sb-presets .sb-btn { flex: 1 1 0; min-height: 26px; padding: 3px 6px; font-size: 9px; letter-spacing: 0; text-transform: none; }
+
+/* Disclosure: what a first-time user does not need stays folded. */
+.sb-details {
+  margin-bottom: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(var(--text-rgb), 0.04);
+}
+.sb-details > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dark);
+  cursor: pointer;
+  user-select: none;
+}
+.sb-details > summary::-webkit-details-marker { display: none; }
+.sb-details > summary::after { content: '+'; font-size: 13px; line-height: 1; }
+.sb-details[open] > summary::after { content: '\2013'; }
+.sb-details[open] > summary { border-bottom: 1px dashed var(--border); }
+.sb-details__body { padding: 8px 10px 10px; }
+.sb-details--plain { border-style: solid; background: transparent; }
+
+/* Menu of choices (SoFi hub): a brick per destination with one plain line. */
+.sb-menu { display: flex; flex-direction: column; gap: 8px; }
+.sb-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  background:
+    linear-gradient(0deg, rgba(var(--text-rgb), 0.12), rgba(var(--bg-rgb), 0.06)),
+    repeating-linear-gradient(45deg, rgba(var(--text-rgb), 0.14) 0px, rgba(var(--text-rgb), 0.14) 2px, transparent 2px, transparent 4px);
+  box-shadow: inset 0 -2px 0 rgba(var(--text-rgb), 0.18), inset 0 2px 0 rgba(var(--bg-rgb), 0.08);
+  image-rendering: pixelated;
+  cursor: pointer;
+  outline: none;
+}
+.sb-menu__item:focus-visible, .sb-menu__item.focused { border-color: var(--text-dark); box-shadow: 0 0 0 2px rgba(var(--text-rgb), 0.35); }
+.sb-menu__item:active { transform: translateY(1px); }
+.sb-menu__glyph {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: var(--text-dark);
+  color: var(--bg);
+  font-size: 15px;
+  font-weight: 700;
+}
+.sb-menu__text { flex: 1 1 auto; min-width: 0; }
+.sb-menu__label { display: block; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.sb-menu__desc { display: block; margin-top: 2px; font-size: 9px; line-height: 1.4; color: var(--text-disabled); }
+.sb-menu__chev { flex: 0 0 auto; font-size: 16px; color: var(--text-disabled); }
+
+/* Progress (confirmations). */
+.sb-progress { height: 6px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: rgba(var(--bg-rgb), 0.4); }
+.sb-progress__fill { height: 100%; background: var(--text-dark); transition: width 200ms ease-out; }
+
+/* Transaction rows (shared TransactionItem) take the card look inside a frame. */
+.sb-screen .transaction-item {
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: rgba(var(--text-rgb), 0.06);
+}
+.sb-screen .transaction-item.expanded { border-color: var(--text-dark); }
+
+/* Receive address with its copy button beside it. */
+.btc-address { display: flex; align-items: flex-start; gap: 8px; }
+.btc-address .sb-mono { flex: 1 1 auto; min-width: 0; padding-top: 6px; }
+
+/* The i button, and the popup it opens. The popup covers the frame (not the
+   whole shell): absolute against .sb-screen, so it is not clipped by the
+   scrolling body it was opened from. */
+.sb-info {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background: rgba(var(--text-rgb), 0.08);
+  color: var(--text-dark);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+  /* The glyph is a lowercase i, whatever the label around it does. */
+  text-transform: none;
+}
+.sb-info:active { transform: translateY(1px); }
+.sb-info--static { background: var(--bg); color: var(--text-dark); border-color: var(--bg); cursor: default; }
+.sb-screen__head > .sb-info { margin-right: 2px; }
+
+.sb-titlebar { display: flex; align-items: center; gap: 6px; margin: 12px 0 6px; }
+.sb-titlebar:first-child { margin-top: 0; }
+.sb-titlebar > .sb-section-title,
+.sb-titlebar > h3.sb-section-title { flex: 1 1 auto; margin: 0; }
+.sb-subhead > .sb-info { margin-left: 2px; }
+.sb-card__title .sb-info { width: 16px; height: 16px; font-size: 10px; }
+.sb-field > label .sb-info,
+.sb-label .sb-info { width: 15px; height: 15px; font-size: 9px; margin-left: 4px; }
+
+.sb-popover-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  background: rgba(var(--text-rgb), 0.62);
+  /* A popup is a DOM child of whatever opened it, which may be a card title or
+     a field label. An explanation is prose, so it starts from prose typography
+     instead of inheriting UPPERCASE, tracking and bold from its opener. */
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  font-style: normal;
+  text-align: left;
+}
+.sb-popover {
+  width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  box-sizing: border-box;
+  border: 2px solid var(--bg);
+  border-radius: 12px;
+  background: var(--text-dark);
+  color: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  outline: none;
+  text-align: left;
+}
+.sb-popover__head { display: flex; align-items: center; gap: 8px; }
+.sb-popover__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--bg);
+}
+.sb-popover__close {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid var(--bg);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--bg);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sb-popover__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--bg);
+}
+.sb-popover__body p { margin: 0 0 8px; }
+.sb-popover__body p:last-child { margin-bottom: 0; }
+.sb-popover__body b { font-weight: 700; }
+.sb-popover__body ul { margin: 0 0 8px; padding-left: 16px; }
+.sb-popover__body li { margin-bottom: 4px; }
+.sb-popover .sb-popover__ok {
+  background: var(--bg);
+  color: var(--text-dark);
+  border-color: var(--bg);
+  box-shadow: none;
+}
+
+/* Sub-view header (Deposit / Withdraw) inside a tab. */
+.sb-subhead { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.sb-subhead h3 { flex: 1 1 auto; margin: 0; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+
+/* ------------------------------------------------------------------ */
+/* FX scenes: a rounded screen-within-the-screen for the StateBoy FX  */
+/* engine, and an edge-to-edge host for the intro.                    */
+/* ------------------------------------------------------------------ */
+@keyframes sbFxFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sbFxPop {
+  from { transform: translateY(12px) scale(0.94); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.sb-fx-backdrop {
+  z-index: 120; /* above the lock screen (100) so a lock cue can play over it */
+  padding: 12px;
+  background: rgba(var(--text-rgb), 0.72);
+  animation: sbFxFade 160ms ease-out;
+}
+.sb-fx-window {
+  width: 100%;
+  max-width: 276px;
+  box-sizing: border-box;
+  padding: 6px 6px 8px;
+  border: 2px solid var(--bg);
+  border-radius: 22px;
+  background: var(--text-dark);
+  color: var(--bg);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(var(--bg-rgb), 0.18);
+  outline: none;
+  text-align: left;
+  animation: sbFxPop 240ms cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+.sb-fx-screen {
+  position: relative;
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  border: 2px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg);
+  line-height: 0;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(var(--text-rgb), 0.2), inset 0 6px 14px rgba(var(--text-rgb), 0.22);
+}
+.sb-fx-screen fx-canvas { display: block; width: 100%; min-height: 144px; background: var(--bg); }
+.sb-fx-screen canvas { display: block; margin: 0 auto; }
+.sb-fx-glass {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(165deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 38%),
+    repeating-linear-gradient(0deg, rgba(var(--text-rgb), 0.08) 0 1px, transparent 1px 3px);
+}
+.sb-fx-foot { display: flex; align-items: center; gap: 8px; padding: 8px 4px 0; }
+.sb-fx-text { flex: 1 1 auto; min-width: 0; }
+.sb-fx-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--bg);
+}
+.sb-fx-caption {
+  margin-top: 3px;
+  font-size: 9px;
+  line-height: 1.4;
+  color: var(--bg);
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+.sb-fx-window .sb-fx-ok {
+  flex: 0 0 auto;
+  min-width: 58px;
+  background: var(--bg);
+  color: var(--text-dark);
+  border-color: var(--bg);
+  box-shadow: none;
+}
+.sb-fx-window .sb-fx-replay {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 30px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  color: var(--bg);
+  border-color: var(--bg);
+  box-shadow: none;
+}
+.sb-fx-window--bad { border-color: var(--bg-secondary); }
+.sb-fx-window--bad .sb-fx-screen { border-style: dashed; }
+
+/* Edge-to-edge scene (the intro): fills the screen host, no distortion. */
+.sb-fx-full {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sb-fx-full fx-canvas { width: 100%; height: 100%; }
+.sb-fx-full canvas { margin: auto; }
+.sb-fx-full img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: pixelated; display: block; }
+
+/* A token's coin, beside whatever names that token. */
+.sb-coin {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  vertical-align: middle;
+}
+.sb-coin--lg { width: 26px; height: 26px; }
+.sb-coin--sm { width: 14px; height: 14px; }
+
+/* A coin leads the amount line, so the row centres on it rather than on a
+   text baseline the image does not share. */
+.sb-screen .transaction-amount-line { align-items: center; }
+
+/* Token picker: a listbox, because a native option cannot carry a coin. */
+.sb-tokensel { position: relative; display: inline-block; }
+.sb-tokensel__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.sb-tokensel__button:disabled { opacity: 0.45; cursor: not-allowed; }
+.sb-tokensel__ticker { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-tokensel__ticker--empty { opacity: 0.55; }
+.sb-tokensel__caret { flex: 0 0 auto; font-size: 9px; opacity: 0.7; }
+.sb-tokensel__list {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 168px;
+  margin: 0;
+  padding: 2px;
+  overflow-y: auto;
+  list-style: none;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 6px 18px rgba(var(--text-rgb), 0.35);
+}
+.sb-tokensel__opt {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dark);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.sb-tokensel__opt:hover,
+.sb-tokensel__opt:focus-visible { background: rgba(var(--text-rgb), 0.12); outline: none; }
+.sb-tokensel__opt.is-selected { background: rgba(var(--text-rgb), 0.18); font-weight: 700; }
+.sb-tokensel__note { flex: 0 0 auto; font-size: 9px; opacity: 0.6; }
+.sb-tokensel__empty { padding: 8px; font-size: 10px; opacity: 0.6; }
+/* Beside an amount field the picker is a fixed-width column, not a full row. */
+.sb-input-row .sb-tokensel--inline { flex: 0 0 auto; width: 104px; }

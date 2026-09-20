@@ -40,7 +40,7 @@ describe('useTransactions', () => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         if (method === 'getTransportHeadersV3Bin') {
-          return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: headers.toBinary() } } }).toBinary();
+          return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(headers.toBinary()) } } }).toBinary();
         }
         if (method === 'nativeBoundaryIngress') {
           const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
@@ -49,13 +49,13 @@ describe('useTransactions', () => {
             const data = new pb.IngressResponse({
               result: { case: 'okBytes', value: headers.toBinary() },
             }).toBinary();
-            return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data } } }).toBinary();
+            return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(data) } } }).toBinary();
           }
         }
         const emptyIngress = new pb.IngressResponse({
           result: { case: 'okBytes', value: new Uint8Array(0) },
         }).toBinary();
-        return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: emptyIngress } } }).toBinary();
+        return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(emptyIngress) } } }).toBinary();
       },
     };
   }

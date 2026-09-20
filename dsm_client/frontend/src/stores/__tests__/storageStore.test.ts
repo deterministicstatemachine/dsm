@@ -13,7 +13,8 @@ const mockStorageNodeService = {
   exportDiagnostics: jest.fn().mockReturnValue(new Uint8Array(0)),
 };
 
-const mockDsmClient = {
+// Both are deleted in places, to stand for a client that is missing them.
+const mockDsmClient: { getStorageStatus?: jest.Mock; createBackup?: jest.Mock } = {
   getStorageStatus: jest.fn(),
   createBackup: jest.fn(),
 };
@@ -125,7 +126,7 @@ describe('StorageStore', () => {
     it('stores status when getStorageStatus returns data', async () => {
       const { storageStore } = freshModule();
       const status = { totalNodes: 3, connectedNodes: 2, lastSync: 123, dataSize: '1GB', backupStatus: 'ok' };
-      mockDsmClient.getStorageStatus.mockResolvedValue(status);
+      mockDsmClient.getStorageStatus!.mockResolvedValue(status);
 
       await storageStore.refreshOverview();
       const s = storageStore.getSnapshot();
@@ -150,7 +151,7 @@ describe('StorageStore', () => {
 
     it('sets error when getStorageStatus returns null', async () => {
       const { storageStore } = freshModule();
-      mockDsmClient.getStorageStatus.mockResolvedValue(null);
+      mockDsmClient.getStorageStatus!.mockResolvedValue(null);
 
       await storageStore.refreshOverview();
       expect(storageStore.getSnapshot().overviewError).toBe('No storage data returned from backend.');
@@ -158,7 +159,7 @@ describe('StorageStore', () => {
 
     it('sets error on exception', async () => {
       const { storageStore } = freshModule();
-      mockDsmClient.getStorageStatus.mockRejectedValue(new Error('network'));
+      mockDsmClient.getStorageStatus!.mockRejectedValue(new Error('network'));
 
       await storageStore.refreshOverview();
       expect(storageStore.getSnapshot().overviewError).toBe('Failed to load storage info.');

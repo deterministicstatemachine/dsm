@@ -30,7 +30,6 @@ describe('QRCodeScannerScreen decoding', () => {
       deviceId: mockDeviceId,
       genesisHash: mockGenesisHash,
       network: 'dsm-test',
-      storageNodes: ['http://test.example.com:8080', 'http://test.example.com:8081', 'http://test.example.com:8082'],
     });
     
     // Convert to Base32 Crockford string (simulating QR scan)
@@ -43,7 +42,9 @@ describe('QRCodeScannerScreen decoding', () => {
     
     // Verify we can decode the result
     expect(decoded.contact.network).toBe('dsm-test');
-    expect(decoded.contact.storageNodes).toBeUndefined();
+    // A contact QR never carries storage nodes; the decoded type has no such
+    // field, so read it off the object to prove the encoder writes none.
+    expect((decoded.contact as Record<string, unknown>).storageNodes).toBeUndefined();
   });
 
   // QR codes must carry ContactQrV3 protobuf only.
@@ -53,7 +54,6 @@ describe('QRCodeScannerScreen decoding', () => {
       deviceId: mockDeviceId,
       genesisHash: mockGenesisHash,
       network: 'dsm-test',
-      storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
     });
     const qrDataString = base32CrockfordEncode(payload);
 
@@ -67,7 +67,6 @@ describe('QRCodeScannerScreen decoding', () => {
         deviceId: mockDeviceId,
         genesisHash: mockGenesisHash,
         network: 'production-net',
-        storageNodes: ['http://storage.example.com:9090', 'http://storage.example.com:9091', 'http://storage.example.com:9092'],
       });
     const qrDataString = base32CrockfordEncode(payload);
 
@@ -83,7 +82,6 @@ describe('QRCodeScannerScreen decoding', () => {
       deviceId: mockDeviceId,
       genesisHash: mockGenesisHash,
       network: 'dsm-test',
-      storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
     });
     const qrDataString = base32CrockfordEncode(payload);
     
@@ -110,7 +108,6 @@ describe('QR scanner UX flow expectations', () => {
       deviceId: mockDeviceId,
       genesisHash: mockGenesisHash,
       network: 'dsm-test',
-      storageNodes: ['http://localhost:8080'],
     });
     const qrDataString = base32CrockfordEncode(payload);
     
@@ -137,7 +134,6 @@ describe('QR scanner UX flow expectations', () => {
       deviceId: mockDeviceId,
       genesisHash: mockGenesisHash,
       network: 'dsm-test',
-      storageNodes: ['http://localhost:8080'],
     });
     const qrDataString = base32CrockfordEncode(payload);
     

@@ -217,7 +217,7 @@ export default function AppContent({
             src={chameleonSrc}
             onError={() => setChameleonSrc('images/vaulthunters/chameleon-green(default).GIF')}
             alt="Chameleon"
-            style={{ width: '260px', height: 'auto', position: 'absolute', top: '-43px', left: '-23px', zIndex: 1000 }}
+            style={{ width: '260px', height: 'auto', position: 'absolute', top: '-23px', left: '-3px', zIndex: 1000 }}
           />
           <div className="dsm-logo-placeholder" style={{ marginTop: '80px', marginBottom: '10px' }}>
             <img src={eraTokenSrc} alt="Setup..." style={{ width: '60px', height: '60px', objectFit: 'contain' }} />
@@ -308,7 +308,7 @@ export default function AppContent({
               src={chameleonSrc}
               onError={() => setChameleonSrc('images/vaulthunters/chameleon.gif')}
               alt="Chameleon"
-              style={{ width: '260px', height: 'auto', position: 'absolute', top: '-43px', left: '-23px', zIndex: 1000 }}
+              style={{ width: '260px', height: 'auto', position: 'absolute', top: '-23px', left: '-3px', zIndex: 1000 }}
             />
             <div className="dsm-logo-placeholder" style={{ marginTop: '80px', marginBottom: '10px' }}>
               <img src={dsmLogoSrc} alt="DSM StateBoy Logo" style={{ width: '140%', height: '140%', objectFit: 'contain' }} />

@@ -6,7 +6,7 @@ import { TokenCreationDialog } from '../TokenCreationDialog';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import './SettingsScreen.css';
 
-export default function DevPolicyScreen(): JSX.Element {
+export default function DevPolicyScreen(): React.JSX.Element {
   const [policyBase32, setPolicyBase32] = useState('');
   const [status, setStatus] = useState<string>('');
   const [isCreationDialogOpen, setIsCreationDialogOpen] = useState(false);

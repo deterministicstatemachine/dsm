@@ -167,7 +167,9 @@ export interface NetworkStatusDTO {
 /** UI-level transaction shape used by sendOnlineTransfer/offlineSend. */
 export type GenericTransaction = {
   tokenId: string;
-  to: string; // Base32 Crockford device id
+  /** Base32 Crockford device id, or the raw 32 bytes. Both paths are
+   *  implemented in offlineSend/sendOnlineTransfer; the type said string only. */
+  to: Uint8Array | string;
   amount: string | number | bigint;
   memo?: string;
   bleAddress?: string;

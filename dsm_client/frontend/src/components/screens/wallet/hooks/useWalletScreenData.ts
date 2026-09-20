@@ -100,6 +100,13 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
             // units: 100000 where the protocol held 1,000.00.
             balance: presentDisplayAmount(b.displayAmount, BigInt(b.baseUnits ?? b.balance ?? 0)),
             decimals: b.decimals,
+            // Both are carried, never derived. The icon is the artwork the
+            // token was created with, which is how a screen draws its coin;
+            // the anchor is the token's identity, which is what Swap trades
+            // against. Dropping them here left Swap with an empty token list
+            // and every custom token wearing a generic coin.
+            iconUrl: b.iconUrl,
+            policyAnchorB32: b.policyAnchorB32,
           }));
         setBalances(eraTokens);
       } catch (e) {

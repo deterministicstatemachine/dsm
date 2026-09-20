@@ -9,7 +9,7 @@ type Props = {
   aliasLookup: Map<string, string>;
 };
 
-function HistoryTabInner({ transactions, aliasLookup }: Props): JSX.Element {
+function HistoryTabInner({ transactions, aliasLookup }: Props): React.JSX.Element {
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 
   const handleToggleTx = useCallback((txId: string) => {
@@ -18,9 +18,9 @@ function HistoryTabInner({ transactions, aliasLookup }: Props): JSX.Element {
 
   return (
     <div className="history-tab">
-      <h3>Transaction History</h3>
+      <h3 className="sb-section-title">Transaction History</h3>
       {transactions.length === 0 ? (
-        <div className="empty-state"><p>No transactions</p></div>
+        <div className="sb-empty">No transactions yet.</div>
       ) : (
         <div className="transaction-items">
           {transactions.map((tx, idx) => (

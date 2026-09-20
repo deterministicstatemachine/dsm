@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// SoFi hub — sub-menu reached from the home `SOFI` brick.  Keeps the
-// home brick set short by tucking the lower-frequency SoFi flows
-// (liquidity, mail) behind one extra tap.  Visual idiom matches the
-// home menu (same `dsm-menu` + `home-brick` CSS classes).
+// SoFi hub — sub-menu reached from the home `SOFI` brick. Keeps the home brick
+// set short by tucking the lower-frequency SoFi flows (liquidity, mail) behind
+// one extra tap. Each destination is one brick with a plain-language line.
 
 import React, { useCallback } from 'react';
+import { ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
 interface Props {
   onNavigate?: (screen: string) => void;
@@ -13,6 +14,7 @@ interface Props {
 type Brick = {
   label: string;
   target: string;
+  glyph: string;
   description: string;
 };
 
@@ -20,47 +22,47 @@ const BRICKS: Brick[] = [
   {
     label: 'SWAP',
     target: 'swap',
-    description: 'Trade against published AMM vaults — picks best route, signs envelope, settles atomically.',
+    glyph: '⇄',
+    description: 'Trade one token for another',
   },
   {
     label: 'LIQUIDITY',
     target: 'liquidity',
-    description: 'AMM vaults you own — reserves, fees, routing ad status, create new.',
+    glyph: '◎',
+    description: 'Fund a vault, earn the fees',
   },
   {
     label: 'MAIL',
     target: 'mail',
-    description: 'Posted-DLV inbox + compose to a Kyber public key.',
+    glyph: '✉',
+    description: 'Send a note to someone offline',
   },
 ];
 
-export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
+export default function SofiHubScreen({ onNavigate }: Props): React.JSX.Element {
   const go = useCallback(
     (target: string) => () => onNavigate?.(target),
     [onNavigate],
   );
 
   return (
-    <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
-      <div className="wallet-header">
-        <h2>SoFi</h2>
-        <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
-          <button
-            type="button"
-            onClick={() => onNavigate?.('home')}
-            className="cancel-button"
-            style={{ fontSize: 11, padding: '4px 10px' }}
-          >
-            Back
-          </button>
-        </div>
-      </div>
-
-      <div className="dsm-menu" role="menu" aria-label="SoFi sub-menu">
+    <ScreenFrame
+      title="SoFi"
+      onBack={() => onNavigate?.('home')}
+      info={(
+        <InfoTip title="SoFi">
+          <p>Sovereign finance: vaults, trades and mail that settle directly between devices, with no exchange in the middle.</p>
+          <p><b>Swap</b> trades one token for another at a vault&apos;s price. You see the exact amount you will get before you confirm; if the vault moves first, the trade is refused and you can quote again.</p>
+          <p><b>Liquidity</b> puts two of your tokens into a vault. Every trade against it pays you the vault&apos;s fee, and you can take everything back at any time.</p>
+          <p><b>Mail</b> sends a note to someone&apos;s key. They do not need to be online: it waits for them on the storage nodes until they claim it.</p>
+        </InfoTip>
+      )}
+    >
+      <div className="sb-menu" role="menu" aria-label="SoFi sub-menu">
         {BRICKS.map((brick) => (
           <div
             key={brick.target}
-            className="dsm-menu-item home-brick"
+            className="sb-menu__item"
             data-label={brick.label}
             role="menuitem"
             tabIndex={0}
@@ -71,20 +73,16 @@ export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
                 go(brick.target)();
               }
             }}
-            title={brick.description}
           >
-            <span className="brick-label visible">{brick.label}</span>
+            <span className="sb-menu__glyph" aria-hidden="true">{brick.glyph}</span>
+            <span className="sb-menu__text">
+              <span className="sb-menu__label">{brick.label}</span>
+              <span className="sb-menu__desc">{brick.description}</span>
+            </span>
+            <span className="sb-menu__chev" aria-hidden="true">{'›'}</span>
           </div>
         ))}
       </div>
-
-      <div style={{ marginTop: 12, padding: '0 12px', fontSize: 10, opacity: 0.6 }}>
-        {BRICKS.map((brick) => (
-          <div key={`hint-${brick.target}`} style={{ marginBottom: 4 }}>
-            <strong>{brick.label}</strong> · {brick.description}
-          </div>
-        ))}
-      </div>
-    </div>
+    </ScreenFrame>
   );
 }

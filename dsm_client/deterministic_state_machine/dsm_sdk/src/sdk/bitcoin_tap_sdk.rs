@@ -4393,12 +4393,18 @@ impl BitcoinTapSdk {
         };
 
         // Fees come out of the delivered amount — they are not a shortfall.
-        // Shortfall only reflects genuinely unroutable liquidity.
-        let shortfall_sats = if candidate.total_gross_exit_sats >= requested_net_sats {
-            0
-        } else {
-            requested_net_sats.saturating_sub(candidate.total_gross_exit_sats)
-        };
+        // Shortfall is what the RECIPIENT does not get: the delivery this plan
+        // could not route, and nothing else.
+        //
+        // Both sides must therefore be net. Comparing the gross exit against the
+        // net request mixed the two and read as zero whenever the fee covered the
+        // gap: a 198_950 net request answered by sweeping a 200_000 vault routes
+        // 197_900 and burns 200_000 gross, which is "not short" by that measure
+        // while the recipient is 1_050 light. Candidates are already classified on
+        // exactly this quantity (`planned_net_sats` equal to, or below,
+        // `requested_net_sats`), so saturating_sub is zero for an exact plan by
+        // construction.
+        let shortfall_sats = requested_net_sats.saturating_sub(candidate.planned_net_sats);
         let mut plan_class = Self::classify_withdrawal_plan(&candidate.legs).to_string();
         let plan_id = Self::compute_withdrawal_plan_id(
             requested_net_sats,
@@ -5747,6 +5753,50 @@ mod tests {
         assert!(!plan.plan_id.is_empty());
         assert_eq!(plan.requested_net_sats, desired_net_sats);
         assert_eq!(plan.legs[0].vault_id, route_b32);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn plan_withdrawal_reports_what_the_recipient_is_short() {
+        init_withdrawal_test_db();
+
+        let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+        let full_fee = estimated_full_withdrawal_fee_sats();
+
+        // One vault, and a request slightly larger than it can deliver. The vault
+        // sweeps in full, so the fee is the only thing between the two figures:
+        // the gross exit clears the net request while the recipient still comes
+        // up short. That is the gap a gross-to-net comparison reported as zero.
+        let vault_sats = 200_000;
+        let vid = vid_from_label("vault-short");
+        put_active_vault(vid, vault_sats);
+        put_active_vault_record(vid, vault_sats, "btc_to_dbtc");
+
+        // The net request sits between what the sweep delivers (vault - fee) and
+        // what it burns (vault). No route lands on it exactly, and no partial one
+        // can either: a partial would have to leave a remainder under the floor.
+        let requested_net = vault_sats - full_fee / 2;
+        let plan = bridge
+            .plan_withdrawal(requested_net + full_fee, "tb1qshortfall", &[0x11; 32])
+            .await
+            .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
+
+        assert_eq!(plan.requested_net_sats, requested_net);
+        assert_eq!(plan.planned_net_sats, vault_sats - full_fee);
+        assert_eq!(plan.total_gross_exit_sats, vault_sats);
+        assert!(
+            plan.total_gross_exit_sats >= requested_net,
+            "the gross exit covers the net request — the old comparison stopped \
+             there and called it whole: gross {} vs requested net {}",
+            plan.total_gross_exit_sats,
+            requested_net
+        );
+        assert_eq!(
+            plan.shortfall_sats,
+            requested_net - plan.planned_net_sats,
+            "shortfall is the delivery this plan could not route"
+        );
+        assert!(plan.shortfall_sats > 0);
     }
 
     #[tokio::test]

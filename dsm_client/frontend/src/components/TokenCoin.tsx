@@ -16,7 +16,7 @@ type Props = {
 };
 
 /** A token's spinning coin, in the look of the built-in token GIFs, for the active theme. */
-export function TokenCoin({ iconUrl, ticker, size = 72, className, alt, fallbackSrc }: Props): JSX.Element | null {
+export function TokenCoin({ iconUrl, ticker, size = 72, className, alt, fallbackSrc }: Props): React.JSX.Element | null {
   const theme = useActiveTheme();
   const [gifs, setGifs] = useState<CoinGifs | null>(null);
   const [url, setUrl] = useState('');
