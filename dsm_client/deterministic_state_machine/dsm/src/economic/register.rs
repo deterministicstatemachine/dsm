@@ -62,7 +62,9 @@
 //! would let the same position resolve to two different registers.
 
 use crate::ccb::{storage_set_id, CcbError, StorageSetMembers};
-use crate::common::domain_tags::TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY;
+use crate::common::domain_tags::{
+    TAG_DSM_ECONOMIC_POSITION_SEED, TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY,
+};
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::identifiers::encode_crockford;
 
@@ -83,6 +85,39 @@ pub fn economic_root_register_key(
     h.update(device_id);
     h.update(&economic_position.to_be_bytes());
     *h.finalize().as_bytes()
+}
+
+/// `s(q)` — the seed of a trader's position cells (Part II §7.2), consumed
+/// by the leader shuffle for `K_ful(q)` and `K_root(q)`. `parent_root` is the
+/// validated economic root at `q - 1`, or the genesis root for the first
+/// position; a verifier passes the root it validated itself.
+pub fn position_seed(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    economic_position: u64,
+    parent_root: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_POSITION_SEED);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(&economic_position.to_be_bytes());
+    h.update(parent_root);
+    *h.finalize().as_bytes()
+}
+
+/// The member that leads a position's cells: `FisherYates(s(q), S)[0]` over
+/// the committed set's member ids (Part II §7). The writer and Core compute
+/// it; a storage node never does.
+pub fn position_leader(
+    seed: &[u8; 32],
+    members: &StorageSetMembers,
+) -> Result<Vec<u8>, crate::sofi::fisher_yates::FisherYatesError> {
+    let ids: Vec<Vec<u8>> = members
+        .entries()
+        .iter()
+        .map(|e| e.member_id().to_vec())
+        .collect();
+    crate::sofi::fisher_yates::first_member(seed, &ids)
 }
 
 /// The register a network's economic roots live in.

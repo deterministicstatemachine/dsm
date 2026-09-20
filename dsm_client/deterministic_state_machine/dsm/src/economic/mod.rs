@@ -24,9 +24,9 @@
 //! ```text
 //! R_econ = SMT {
 //!     balance(policy_commit)
-//!     vault_reserve(vault_id, policy_commit)
-//!     settlement_receipt(vault_id, receipt_id)
 //!     consumed_source(source_id)
+//!     relationship(vault_id)
+//!     vault_creation(vault_id)
 //! }
 //! ```
 //!
@@ -45,14 +45,12 @@
 //! Credit provenance is a separate and **conjunctive** obligation: a closed
 //! write set proves *what changed*, never *why a credit may appear*, and a
 //! verifier that checked only the mutations would accept a trader crediting
-//! itself from nothing. The `CreditSource` algebra (classes
-//! `0x0023`–`0x0028`, plus `0x0030` and `0x0035`) lives in [`provenance`], and class
+//! itself from nothing. The `CreditSource` algebra (classes `0x0023`,
+//! `0x0025`, `0x0028` and `0x0030`) lives in [`provenance`], and class
 //! `0x0029` (`IssuanceAuthorizationBody`, [`issuance`]) is the policy-signed
 //! predicate the `0x0023` arm resolves — the producer is `token.mint`'s
 //! economic admission.
 
-pub mod acceptance_produce;
-pub mod acceptance_verify;
 pub mod admission;
 pub mod authority_evidence;
 pub mod cell_observation;
@@ -69,15 +67,11 @@ pub mod lineage;
 pub mod mutation;
 pub mod peer_acceptance;
 pub mod peer_lineage;
-pub mod proof_artifact;
 pub mod provenance;
 pub mod register;
 pub mod release;
-pub mod reserve_consumption_evidence;
-pub mod settlement_payment_evidence;
 pub mod state;
 pub mod successor_evidence;
-pub mod trader_acceptance;
 pub mod tree;
 pub mod witness;
 pub mod write_set;
@@ -90,19 +84,15 @@ pub use decode::{
     decode_credit_source, decode_leaf_mutation, decode_leaf_state, decode_transition_witness,
 };
 pub use credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
-    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedPeerDebit,
+    CreditSourceVerifiedOfflineReentry,
 };
 pub use classifier::{
     check_tripwire, classify, EconomicEffect, EconomicTripwire, ObservedEconomicChange,
 };
-pub use keys::{balance_key, consumed_source_key, settlement_receipt_key, vault_reserve_key};
+pub use keys::{balance_key, consumed_source_key};
 pub use mutation::EconomicLeafMutation;
-pub use state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
-};
+pub use state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 pub use tree::{empty_economic_root, EconomicSmt, ECONOMIC_SMT_HEIGHT};
 pub use witness::{
     verify_mutation_sequence, EconomicMutationSequence, EconomicTransitionWitness,

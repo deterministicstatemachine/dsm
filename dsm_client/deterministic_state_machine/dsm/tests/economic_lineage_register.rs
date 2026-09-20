@@ -302,10 +302,8 @@ fn a_device_already_holding_value_cannot_call_its_holdings_position_zero() {
     // Each field independently blocks activation. Snapshotting current
     // holdings as position 0 would let the device assert its own opening
     // balances — self-rooting at the base of the lineage.
-    let cases: [(&str, DirtySnapshot); 4] = [
+    let cases: [(&str, DirtySnapshot); 2] = [
         ("balances", |s| s.online_balances_empty = false),
-        ("reserves", |s| s.vault_reserves_empty = false),
-        ("receipts", |s| s.settlement_receipt_state_empty = false),
         ("allocation", |s| s.outstanding_offline_allocation = true),
     ];
     for (name, dirty) in cases {

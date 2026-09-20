@@ -110,9 +110,7 @@ pub enum FulfillmentMechanism {
     /// Reserves are deliberately ABSENT. They used to live here, which made a
     /// vault's advertised liquidity a number asserted inside its own unlock
     /// condition — nothing held it, and a settled swap moved no value at all.
-    /// They now live in the owner's device SMT as encumbered reserve leaves and
-    /// are proved to a trader, so a condition no longer carries the quantities
-    /// it governs.
+    /// A condition never carries the quantities it governs.
     AmmConstantProduct {
         /// Lex-LOWER 32-byte CPTA **policy commit** — NOT a ticker, and not text.
         ///

@@ -21,17 +21,11 @@ use crate::economic::issuance::IssuanceAuthorizationBody;
 use crate::ccb::decode::{invalid, Cursor, DecodeError};
 use crate::ccb::{class, CcbObject};
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
-    CreditSourceDlvRouteReserveConsumption, RouteLegReserveConsumption,
-    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
-    CreditSourceVerifiedOfflineReentry,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedFaucetDistribution,
+    CreditSourceValidatedPeerDebit, CreditSourceVerifiedOfflineReentry,
 };
 use crate::economic::mutation::EconomicLeafMutation;
-use crate::economic::state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
-};
+use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use crate::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
 use crate::economic::witness::EconomicTransitionWitness;
@@ -276,18 +270,6 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 EconomicBalanceState::new(policy_commit, amount).map_err(invalid)?,
             ))
         }
-        class::ECONOMIC_VAULT_RESERVE_STATE => {
-            c.envelope(
-                EconomicVaultReserveState::CLASS,
-                EconomicVaultReserveState::SCHEMA,
-            )?;
-            Ok(EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                vault_id: c.digest32()?,
-                policy_commit: c.digest32()?,
-                amount: c.u64()?,
-                vault_sequence: c.u64()?,
-            }))
-        }
         // The SoFi relationship leaf (P15-6). The class is keyed here because
         // a class-keyed decoder does NOT get an exhaustiveness error when a
         // new enum arm appears — the compiler forced every `match` on the enum
@@ -299,43 +281,6 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
         class::SOFI_VAULT_CREATION => Ok(EconomicLeafState::VaultCreation(
             crate::sofi::wire::VaultCreation::at(c)?,
         )),
-        class::ECONOMIC_SETTLEMENT_RECEIPT_STATE => {
-            c.envelope(
-                EconomicSettlementReceiptState::CLASS,
-                EconomicSettlementReceiptState::SCHEMA,
-            )?;
-            let vault_id = c.digest32()?;
-            let carried_receipt_id = c.digest32()?;
-            let x = c.digest32()?;
-            let parent_sequence = c.u64()?;
-            let new_sequence = c.u64()?;
-            let input_policy_commit = c.digest32()?;
-            let input_amount = c.u64()?;
-            let output_policy_commit = c.digest32()?;
-            let output_amount = c.u64()?;
-            let state = EconomicSettlementReceiptState::new(
-                vault_id,
-                x,
-                parent_sequence,
-                new_sequence,
-                input_policy_commit,
-                input_amount,
-                output_policy_commit,
-                output_amount,
-            )
-            .map_err(invalid)?;
-            // `receipt_id` is DERIVED from (vault_id, x). The constructor
-            // recomputed it; if the bytes carried a different one, the object
-            // was naming something its own contents do not produce.
-            if state.receipt_id != carried_receipt_id {
-                return Err(DecodeError::Invalid(
-                    "settlement receipt: carried receipt_id does not derive from \
-                     (vault_id, x) — a derived name must not be assertable"
-                        .to_string(),
-                ));
-            }
-            Ok(EconomicLeafState::SettlementReceipt(state))
-        }
         class::ECONOMIC_CONSUMED_SOURCE_STATE => {
             c.envelope(
                 EconomicConsumedSourceState::CLASS,
@@ -345,25 +290,6 @@ fn read_leaf_state(c: &mut Cursor<'_>) -> Result<EconomicLeafState, DecodeError>
                 EconomicConsumedSourceState {
                     source_id: c.digest32()?,
                     consumer_economic_operation_id: c.digest32()?,
-                },
-            ))
-        }
-        // The fifth arm (2c-D, `0x0032`). Missing from #852, which added the
-        // encoder, the key, the value and the pre-state match arm but not
-        // this one — so every market settle's witness, inclusion proof and
-        // cached leaf became undecodable. Mirrors the encoder exactly: two
-        // `digest32` and no rejection, because the encoder refuses nothing
-        // and a decoder stricter than its encoder makes valid leaves
-        // unreadable.
-        class::ECONOMIC_BUNDLE_ACCEPTANCE_STATE => {
-            c.envelope(
-                crate::economic::state::EconomicBundleAcceptanceState::CLASS,
-                crate::economic::state::EconomicBundleAcceptanceState::SCHEMA,
-            )?;
-            Ok(EconomicLeafState::BundleAcceptance(
-                crate::economic::state::EconomicBundleAcceptanceState {
-                    bundle: c.digest32()?,
-                    economic_operation_id: c.digest32()?,
                 },
             ))
         }
@@ -385,25 +311,6 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                 },
             ))
         }
-        class::CREDIT_SOURCE_SAME_TRANSITION_MOVE => {
-            c.envelope(
-                CreditSourceSameTransitionMove::CLASS,
-                CreditSourceSameTransitionMove::SCHEMA,
-            )?;
-            let credit_mutation_index = c.u32()?;
-            let debit_mutation_index = c.u32()?;
-            if credit_mutation_index == debit_mutation_index {
-                return Err(DecodeError::Invalid(format!(
-                    "same-transition move: mutation {credit_mutation_index} cannot fund itself"
-                )));
-            }
-            Ok(CreditSource::SameTransitionMove(
-                CreditSourceSameTransitionMove {
-                    credit_mutation_index,
-                    debit_mutation_index,
-                },
-            ))
-        }
         class::CREDIT_SOURCE_VALIDATED_PEER_DEBIT => {
             c.envelope(
                 CreditSourceValidatedPeerDebit::CLASS,
@@ -417,77 +324,6 @@ fn read_credit_source(c: &mut Cursor<'_>) -> Result<CreditSource, DecodeError> {
                     peer_economic_position: c.u64()?,
                     peer_debit_mutation_index: c.u32()?,
                     acceptance_evidence_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION => {
-            c.envelope(
-                CreditSourceDlvReserveConsumption::CLASS,
-                CreditSourceDlvReserveConsumption::SCHEMA,
-            )?;
-            Ok(CreditSource::DlvReserveConsumption(
-                CreditSourceDlvReserveConsumption {
-                    credit_mutation_index: c.u32()?,
-                    vault_id: c.digest32()?,
-                    parent_sequence: c.u64()?,
-                    x: c.digest32()?,
-                    owner_economic_position: c.u64()?,
-                    reserve_consumption_evidence_addr: c.digest32()?,
-                },
-            ))
-        }
-        class::CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION => {
-            c.envelope(
-                CreditSourceDlvRouteReserveConsumption::CLASS,
-                CreditSourceDlvRouteReserveConsumption::SCHEMA,
-            )?;
-            let credit_mutation_index = c.u32()?;
-            let x = c.digest32()?;
-            // The count is bounded BEFORE any entry is read, so a hostile count
-            // sizes neither an allocation nor a loop.
-            let count = c.u32()? as usize;
-            if count == 0 || count > crate::ccb::MAX_TRANSITIONS {
-                return Err(DecodeError::Invalid(format!(
-                    "route reserve consumption: {count} evidence entries is not 1..={}",
-                    crate::ccb::MAX_TRANSITIONS
-                )));
-            }
-            let mut legs = Vec::with_capacity(count);
-            for _ in 0..count {
-                legs.push(RouteLegReserveConsumption {
-                    vault_id: c.digest32()?,
-                    parent_sequence: c.u64()?,
-                    owner_economic_position: c.u64()?,
-                    reserve_consumption_evidence_addr: c.digest32()?,
-                });
-            }
-            let source = CreditSourceDlvRouteReserveConsumption {
-                credit_mutation_index,
-                x,
-                legs,
-            };
-            // The same rules the encoder applies, from these bytes alone. No
-            // correspondence to the operation is established here (H9).
-            if let Some(refusal) = source.entries_refusal() {
-                return Err(invalid(refusal));
-            }
-            Ok(CreditSource::DlvRouteReserveConsumption(source))
-        }
-        class::CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT => {
-            c.envelope(
-                CreditSourceValidatedDlvSettlementPayment::CLASS,
-                CreditSourceValidatedDlvSettlementPayment::SCHEMA,
-            )?;
-            Ok(CreditSource::ValidatedDlvSettlementPayment(
-                CreditSourceValidatedDlvSettlementPayment {
-                    credit_mutation_index: c.u32()?,
-                    vault_id: c.digest32()?,
-                    settlement_receipt_id: c.digest32()?,
-                    parent_sequence: c.u64()?,
-                    trader_genesis: c.digest32()?,
-                    trader_devid: c.digest32()?,
-                    trader_economic_position: c.u64()?,
-                    payment_evidence_addr: c.digest32()?,
                 },
             ))
         }

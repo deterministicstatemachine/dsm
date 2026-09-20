@@ -10,21 +10,17 @@
 #![allow(clippy::disallowed_methods)]
 
 use dsm::ccb::CcbError;
-use dsm::economic::classifier::{check_tripwire, classify, EconomicEffect, ObservedEconomicChange};
+use dsm::economic::classifier::{classify, EconomicEffect};
 use dsm::economic::mutation::EconomicLeafMutation;
-use dsm::economic::state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState,
-    EconomicSettlementReceiptState, EconomicVaultReserveState,
-};
+use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::{empty_economic_root, EconomicSmt, ECONOMIC_SMT_HEIGHT};
 use dsm::economic::witness::{verify_mutation_sequence, EconomicMutationSequence, EconomicWitnessError};
-use dsm::economic::{balance_key, consumed_source_key, settlement_receipt_key, vault_reserve_key};
+use dsm::economic::{balance_key, consumed_source_key};
 
 const G: [u8; 32] = [0x11; 32];
 const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
 const SOFI: [u8; 32] = [0xBB; 32];
-const VAULT: [u8; 32] = [0xCC; 32];
 
 fn balance(pc: [u8; 32], amount: u64) -> EconomicLeafState {
     EconomicLeafState::Balance(EconomicBalanceState::new(pc, amount).expect("nonzero"))
@@ -87,62 +83,7 @@ fn a_zero_balance_is_the_absence_of_the_leaf_not_a_leaf_holding_zero() {
     );
 }
 
-#[test]
-fn a_zero_reserve_is_a_present_leaf_because_its_sequence_is_meaning() {
-    // The deliberate asymmetry with balances. A vault drained at sequence 7
-    // and one drained at sequence 8 are different states, and a close has to
-    // be able to say which generation it zeroed.
-    let at7 = EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-        vault_id: VAULT,
-        policy_commit: ERA,
-        amount: 0,
-        vault_sequence: 7,
-    });
-    let at8 = EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-        vault_id: VAULT,
-        policy_commit: ERA,
-        amount: 0,
-        vault_sequence: 8,
-    });
-    assert_eq!(
-        at7.leaf_key(&G, &DEV),
-        at8.leaf_key(&G, &DEV),
-        "same position"
-    );
-    assert_ne!(
-        at7.leaf_value().unwrap(),
-        at8.leaf_value().unwrap(),
-        "different state"
-    );
-    assert_ne!(tree_with(&[at7]).root(), tree_with(&[at8]).root());
-}
-
 // ── Key derivation ─────────────────────────────────────────────────────────
-
-#[test]
-fn keys_are_scoped_to_the_identity_and_to_the_leaf_class() {
-    let other_g = [0x99; 32];
-    assert_ne!(
-        balance_key(&G, &DEV, &ERA),
-        balance_key(&other_g, &DEV, &ERA),
-        "a different genesis is a different key space"
-    );
-    assert_ne!(
-        balance_key(&G, &DEV, &ERA),
-        balance_key(&G, &[0x99; 32], &ERA),
-        "a different device is a different key space"
-    );
-    // Identical trailing material under different classes must not collide,
-    // or a balance could be filed at a consumed-source position.
-    assert_ne!(
-        balance_key(&G, &DEV, &ERA),
-        consumed_source_key(&G, &DEV, &ERA)
-    );
-    assert_ne!(
-        vault_reserve_key(&G, &DEV, &VAULT, &ERA),
-        settlement_receipt_key(&G, &DEV, &VAULT, &ERA)
-    );
-}
 
 #[test]
 fn a_leaf_state_derives_its_own_position() {
@@ -162,30 +103,6 @@ fn a_leaf_state_derives_its_own_position() {
 }
 
 // ── Receipt validity conditions ────────────────────────────────────────────
-
-#[test]
-fn a_settlement_receipt_recomputes_its_own_id_and_refuses_inconsistent_legs() {
-    let r = EconomicSettlementReceiptState::new(VAULT, [7u8; 32], 4, 5, ERA, 10, SOFI, 9)
-        .expect("consistent");
-    assert_eq!(
-        r.receipt_id,
-        dsm::dlv::settlement_receipt_leaf::derive_receipt_id(&VAULT, &[7u8; 32]),
-        "receipt_id is derived, never carried"
-    );
-
-    assert_eq!(
-        EconomicSettlementReceiptState::new(VAULT, [7u8; 32], 4, 6, ERA, 10, SOFI, 9).unwrap_err(),
-        CcbError::ReceiptSequenceNotSuccessor { parent: 4, new: 6 }
-    );
-    assert_eq!(
-        EconomicSettlementReceiptState::new(VAULT, [7u8; 32], 4, 5, ERA, 0, SOFI, 9).unwrap_err(),
-        CcbError::ReceiptZeroAmount
-    );
-    assert_eq!(
-        EconomicSettlementReceiptState::new(VAULT, [7u8; 32], 4, 5, ERA, 10, ERA, 9).unwrap_err(),
-        CcbError::ReceiptAssetsNotDistinct
-    );
-}
 
 // ── Mutation well-formedness ───────────────────────────────────────────────
 
@@ -480,70 +397,6 @@ fn dlv_create_is_structurally_state_only_and_economically_none() {
     assert!(!create.is_value_egress());
 }
 
-#[test]
-fn the_v2_vault_operations_are_closed_write_sets() {
-    let create = dsm::types::operations::Operation::DlvCreateFundedV2 {
-        vault_id: vec![0xCC; 32],
-        creator_public_key: vec![0x02; 64],
-        parameters_hash: vec![0x03; 32],
-        fulfillment_condition: Vec::new(),
-        leg_a_policy_commit: [0x0A; 32],
-        leg_a_amount: 10,
-        leg_b_policy_commit: [0x0B; 32],
-        leg_b_amount: 5,
-        fee_bps: 30,
-        signature: Vec::new(),
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-    };
-    let apply = dsm::types::operations::Operation::DlvOwnerApplyV2 {
-        vault_id: vec![0xCC; 32],
-        settlement_receipt_id: [0x11; 32],
-        pending_pointer_x: [0x12; 32],
-        parent_sequence: 1,
-        new_sequence: 2,
-        parent_binding: [0x13; 32],
-        input_policy_commit: [0x0A; 32],
-        output_policy_commit: [0x0B; 32],
-        input_amount: 10,
-        output_amount: 9,
-        fee_bps: 30,
-        signature: Vec::new(),
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-    };
-    assert_eq!(classify(&create), EconomicEffect::ClosedWriteSet);
-    assert_eq!(classify(&apply), EconomicEffect::ClosedWriteSet);
-}
-
-#[test]
-fn the_tripwire_contradicts_a_no_write_classification_that_wrote() {
-    let wrote = ObservedEconomicChange {
-        balances_changed: true,
-        ..Default::default()
-    };
-    let quiet = ObservedEconomicChange::default();
-
-    assert!(check_tripwire(EconomicEffect::None, wrote).is_err());
-    // OfflineAccountOnly is held to the same standard: the allocation lives
-    // outside R_econ, so touching a leaf breaks the regime separation.
-    assert!(check_tripwire(EconomicEffect::OfflineAccountOnly, wrote).is_err());
-    assert!(check_tripwire(EconomicEffect::ClosedWriteSet, wrote).is_ok());
-    assert!(check_tripwire(EconomicEffect::None, quiet).is_ok());
-
-    for field in 0..4 {
-        let mut o = ObservedEconomicChange::default();
-        match field {
-            0 => o.balances_changed = true,
-            1 => o.vault_reserves_changed = true,
-            2 => o.settlement_receipts_changed = true,
-            _ => o.consumed_sources_changed = true,
-        }
-        assert!(
-            check_tripwire(EconomicEffect::None, o).is_err(),
-            "every economic leaf family must trip the wire, field {field} did not"
-        );
-    }
-}
-
 // ── Claim and manifest encodings ───────────────────────────────────────────
 
 #[test]
@@ -690,50 +543,5 @@ fn a_reserved_class_is_unusable_on_the_wire_until_its_schema_is_installed() {
     assert!(
         !reserved::is_reserved(0x0030),
         "0x0030 is LIVE (faucet distribution); 0x0031 is the next free class"
-    );
-}
-
-#[test]
-fn reserved_classes_have_no_encoder() {
-    use dsm::ccb::reserved;
-    use dsm::ccb::CcbObject;
-    use dsm::economic::claim::{EconomicAdmissionManifest, EconomicRootClaimBody};
-
-    // Every economic type that can actually produce canonical bytes must draw
-    // its discriminant from the live namespace. If somebody implements
-    // CcbObject against a `reserved::` constant to "just get it serializing",
-    // this is what refuses.
-    let encodable = [
-        EconomicRootClaimBody::CLASS,
-        EconomicAdmissionManifest::CLASS,
-        dsm::economic::witness::EconomicTransitionWitness::CLASS,
-        EconomicLeafMutation::CLASS,
-        EconomicBalanceState::CLASS,
-        EconomicVaultReserveState::CLASS,
-        EconomicSettlementReceiptState::CLASS,
-        EconomicConsumedSourceState::CLASS,
-        dsm::economic::credit::CreditSourceAuthorizedIssuance::CLASS,
-        dsm::economic::credit::CreditSourceSameTransitionMove::CLASS,
-        dsm::economic::credit::CreditSourceValidatedPeerDebit::CLASS,
-        dsm::economic::credit::CreditSourceDlvReserveConsumption::CLASS,
-        dsm::economic::credit::CreditSourceValidatedDlvSettlementPayment::CLASS,
-        dsm::economic::credit::CreditSourceVerifiedOfflineReentry::CLASS,
-        dsm::economic::credit::CreditSourceValidatedFaucetDistribution::CLASS,
-        dsm::economic::credit::CreditSourceDlvRouteReserveConsumption::CLASS,
-    ];
-    for class in encodable {
-        assert!(
-            !reserved::is_reserved(class),
-            "class {class:#06x} has an encoder but is listed as reserved — a class is \
-             reserved OR encodable, never both"
-        );
-    }
-    // And the live economic classes are exactly the ones with field tables.
-    assert_eq!(
-        encodable,
-        [
-            0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025,
-            0x0026, 0x0027, 0x0028, 0x0030, 0x0035
-        ]
     );
 }

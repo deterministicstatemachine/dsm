@@ -30,7 +30,7 @@
 //! shared state instead of guarding it: each ticket is an independent
 //! write-once cell, a poisoned cell costs one ticket out of 800M, and there
 //! is **no** `faucet_sequence`, no mutable `remaining`, no
-//! `parent_state_commitment`, no reserve leaf. Consuming the ticket IS the
+//! `parent_state_commitment`. Consuming the ticket IS the
 //! source depletion:
 //!
 //! ```text

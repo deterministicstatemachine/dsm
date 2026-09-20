@@ -46,7 +46,7 @@ use crate::economic::provenance::{
     FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
 };
 use crate::economic::register::{
-    economic_root_register_key, resolve_for_trader, RegisteredEconomicRoot,
+    economic_root_register_key, position_seed, resolve_for_trader, RegisteredEconomicRoot,
 };
 use crate::economic::successor_evidence::verify_dsm_successor_evidence;
 use crate::types::identifiers::encode_crockford;
@@ -65,31 +65,21 @@ pub trait PeerEvidenceFetcher {
     /// The quorum-agreed winner bytes for one economic-root register cell,
     /// or `None` when no quorum winner exists (⇒ `Incomplete` upstream).
     /// Divergent non-identical values must surface as `Quarantined`.
-    fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+    /// The FINAL value at `K_root(q)` (Part II §13): the leader's first object
+    /// naming the key, held by two other members. `seed` is `s(q)` from the
+    /// root the walker validated at `q - 1`; the fetcher derives the leader
+    /// from it and never from what it reads. `None` while the cell is open.
+    fn register_cell(
+        &self,
+        k_root: &[u8; 32],
+        seed: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
     /// The quorum-agreed winner bytes for one faucet-ticket cell.
     fn faucet_ticket_cell(
         &self,
         faucet_id: &[u8; 32],
         ticket_index: u64,
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
-    /// What the vault's COMMITTED set establishes about the binding of one DLV
-    /// parent state, counted at its committed quorum — never the fetcher's own
-    /// fleet.
-    ///
-    /// `resource_key` is `k_v = H(DSM/binding-keyset ‖ c_n)` and is the only
-    /// coordinate: `c_n` already commits the vault id and the generation.
-    ///
-    /// Returns the observation itself, not an `Option` and not a `Result`: a
-    /// transport failure IS `Unavailable`, so there is no error channel a
-    /// caller could collapse and no `None` that could stand for five different
-    /// things. A caller that needs a narrower answer must match all five arms
-    /// and say what it does with each.
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &crate::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> crate::dlv::binding_observation::BindingObservation;
     /// The network's root-register set as the local catalog resolves it —
     /// CANDIDATE entries the caller must re-derive and check, never authority.
     fn root_register_candidate_set(
@@ -110,21 +100,6 @@ pub trait PeerEvidenceFetcher {
         &self,
         policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
-    /// The vault's composed history up to `target_c_n` — see
-    /// [`ProvenanceResolver::composed_vault_history`]. Fails closed by
-    /// default.
-    fn composed_vault_history(
-        &self,
-        vault_id: &[u8; 32],
-        target_c_n: &[u8; 32],
-        parent: &crate::ccb::VaultStateV2,
-        from_generation: u64,
-    ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        let _ = (vault_id, target_c_n, parent, from_generation);
-        Err(PeerLineageFailure::Incomplete(
-            "this fetcher cannot compose vault state".into(),
-        ))
-    }
 }
 
 /// A trusted starting memo: a coordinate THIS verifier validated earlier
@@ -185,16 +160,6 @@ impl ProvenanceResolver for WalkingResolver<'_> {
             .map(|envelope_bytes| FaucetTicketWin { envelope_bytes })
     }
 
-    fn parent_binding_observation(
-        &self,
-        resource_key: &[u8; 32],
-        storage_set: &crate::ccb::StorageSetMembers,
-        quorum: u32,
-    ) -> crate::dlv::binding_observation::BindingObservation {
-        self.fetcher
-            .parent_binding_observation(resource_key, storage_set, quorum)
-    }
-
     fn root_register_candidate_set(
         &self,
         network_id: &[u8],
@@ -215,17 +180,6 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure> {
         self.fetcher.anchored_policy_bytes(policy_commit)
-    }
-
-    fn composed_vault_history(
-        &self,
-        vault_id: &[u8; 32],
-        target_c_n: &[u8; 32],
-        parent: &crate::ccb::VaultStateV2,
-        from_generation: u64,
-    ) -> Result<crate::dlv::composed_history::ComposedVaultHistory, PeerLineageFailure> {
-        self.fetcher
-            .composed_vault_history(vault_id, target_c_n, parent, from_generation)
     }
 }
 
@@ -354,6 +308,7 @@ fn walk_positions(
         crate::types::operations::Operation,
         [u8; 32],
         [u8; 32],
+        [u8; 32],
     )> = None;
     for position in first_position..=target_position {
         if state.steps_remaining == 0 {
@@ -365,9 +320,16 @@ fn walk_positions(
 
         // 1. The register winner for this position.
         let k_root = economic_root_register_key(peer_genesis, peer_devid, position);
+        // The seed takes the root THIS walk validated at the previous position.
+        let seed = position_seed(
+            peer_genesis,
+            peer_devid,
+            position,
+            &validated.economic_root(),
+        );
         let cell = fetcher
-            .register_cell(&k_root)?
-            .ok_or_else(|| incomplete(format!("position {position} has no quorum winner")))?;
+            .register_cell(&k_root, &seed)?
+            .ok_or_else(|| incomplete(format!("position {position} has no final winner")))?;
         // BY CLASS, and a conditional position is its own answer. Decoding a
         // `C_q` cell with the single-root decoder fails, and mapping that
         // failure to `invalid` would report an honest peer mid-route as an
@@ -501,7 +463,7 @@ fn walk_positions(
             expected_network_id,
             state: std::cell::RefCell::new(&mut *state),
         };
-        let (next, _validity, _funded) = advance_validated(
+        let (next, _funded) = advance_validated(
             &validated,
             &registered,
             &manifest,
@@ -521,11 +483,12 @@ fn walk_positions(
             verified.operation,
             verified.c_dsm_plus,
             verified.embedded_parent,
+            manifest_addr,
         ));
     }
 
-    let (witness, proven_ak, verified_operation, c_dsm_plus, embedded_parent) =
-        last.ok_or_else(|| {
+    let (witness, proven_ak, verified_operation, c_dsm_plus, embedded_parent, manifest_addr) = last
+        .ok_or_else(|| {
             incomplete("walk had no steps — the start memo already covers the target")
         })?;
     // SINGLE-ROOT BY CONSTRUCTION, not by label. Every position this walk
@@ -542,6 +505,7 @@ fn walk_positions(
         c_dsm_plus,
         embedded_parent,
         verified_operation,
+        manifest_addr,
     ))
 }
 
@@ -564,7 +528,11 @@ mod tests {
     }
 
     impl PeerEvidenceFetcher for ConditionalCellFetcher {
-        fn register_cell(&self, k_root: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        fn register_cell(
+            &self,
+            k_root: &[u8; 32],
+            _seed: &[u8; 32],
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
             let want = economic_root_register_key(&PEER_G, &PEER_D, self.position);
             if *k_root == want {
                 return Ok(Some(self.claim.clone()));
@@ -577,17 +545,6 @@ mod tests {
             _ticket_index: u64,
         ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
             Ok(None)
-        }
-        fn parent_binding_observation(
-            &self,
-            _resource_key: &[u8; 32],
-            _storage_set: &crate::ccb::StorageSetMembers,
-            _quorum: u32,
-        ) -> crate::dlv::binding_observation::BindingObservation {
-            crate::dlv::binding_observation::BindingObservation::Unavailable {
-                attributed: 0,
-                required: 3,
-            }
         }
         fn root_register_candidate_set(
             &self,

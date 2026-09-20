@@ -66,7 +66,6 @@
 //! acyclicity rule structural: an external source resolves from a root this
 //! verifier has itself validated, never from the transition being validated.
 
-use crate::dlv::successor_validity::{DlvTransitionKind, SuccessorValidity};
 use crate::economic::claim::{verify_manifest_provenance_index, EconomicAdmissionManifest};
 use crate::economic::provenance::{
     verify_transition_provenance, FundedCredit, ProvenanceContext, ProvenanceError,
@@ -257,12 +256,10 @@ impl AdmittedEconomicPosition {
 /// Every field is a reason activation might be refused. A device that cannot
 /// answer one of these has not established that it holds nothing, and
 /// defaulting an unknown to "empty" would be assuming exactly the thing being
-/// checked — so the caller must state all four.
+/// checked — so the caller must state both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EconomicActivationSnapshot {
     pub online_balances_empty: bool,
-    pub vault_reserves_empty: bool,
-    pub settlement_receipt_state_empty: bool,
     pub outstanding_offline_allocation: bool,
 }
 
@@ -271,8 +268,6 @@ impl EconomicActivationSnapshot {
     pub fn fresh() -> Self {
         Self {
             online_balances_empty: true,
-            vault_reserves_empty: true,
-            settlement_receipt_state_empty: true,
             outstanding_offline_allocation: false,
         }
     }
@@ -289,14 +284,11 @@ impl core::fmt::Display for UnsupportedLegacyEconomicState {
         write!(
             f,
             "cannot activate an economic lineage on a device that already holds value \
-             (balances_empty={}, reserves_empty={}, receipts_empty={}, outstanding_allocation={}): \
+             (balances_empty={}, outstanding_allocation={}): \
              calling the current holdings position 0 would let the device assert its own opening \
              balances, which is self-rooting at the base of the lineage. Beta: use a fresh \
              identity. A migration protocol is future work and must never be an implicit snapshot",
-            self.snapshot.online_balances_empty,
-            self.snapshot.vault_reserves_empty,
-            self.snapshot.settlement_receipt_state_empty,
-            self.snapshot.outstanding_offline_allocation
+            self.snapshot.online_balances_empty, self.snapshot.outstanding_offline_allocation
         )
     }
 }
@@ -311,10 +303,7 @@ impl std::error::Error for UnsupportedLegacyEconomicState {}
 pub fn activate(
     snapshot: EconomicActivationSnapshot,
 ) -> Result<ValidatedEconomicRoot, UnsupportedLegacyEconomicState> {
-    let clean = snapshot.online_balances_empty
-        && snapshot.vault_reserves_empty
-        && snapshot.settlement_receipt_state_empty
-        && !snapshot.outstanding_offline_allocation;
+    let clean = snapshot.online_balances_empty && !snapshot.outstanding_offline_allocation;
     if !clean {
         return Err(UnsupportedLegacyEconomicState { snapshot });
     }
@@ -606,8 +595,7 @@ pub fn advance_validated(
     // claims bind against THIS, because storage-node bearer attribution is
     // not the cryptographic identity binding.
     proven_ak: &[u8],
-) -> Result<(ValidatedEconomicRoot, SuccessorValidity, Vec<FundedCredit>), EconomicValidationError>
-{
+) -> Result<(ValidatedEconomicRoot, Vec<FundedCredit>), EconomicValidationError> {
     if previous.economic_root != witness.pre_economic_root {
         return Err(EconomicValidationError::PreRootIsNotThePredecessor {
             predecessor: previous.economic_root,
@@ -799,59 +787,27 @@ pub fn advance_validated(
     // Central, on the VERIFIED operation, so fund and close are bound even
     // though their SameTransitionMove credits carry no evidence channel.
     // Non-DLV operations pass vacuously.
-    if let Some(op) = accepted.dsm_verified_operation() {
-        crate::economic::provenance::verify_market_leg_policies(op, resolver)
-            .map_err(EconomicValidationError::Provenance)?;
-    }
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
-    // THE C3/C4 SEAM. For a DLV transition, provenance has just established
-    // its conjuncts; say so, typed, instead of discarding it — the KIND, and
-    // nothing more. 2c-C4 ruling V2 deleted the verdict slot rather than
-    // filling it: this path is the trader's own admission, and ruling V1 makes
-    // the ordered third-party composition walk the only authoritative
-    // constructor of a market verdict. A verdict produced here would be
-    // self-attestation to any foreign verifier.
-    let validity = match accepted.dsm_verified_operation() {
-        Some(
-            crate::types::operations::Operation::DlvSettle { .. }
-            | crate::types::operations::Operation::DlvRouteSettle { .. },
-        ) => SuccessorValidity::DlvTransition {
-            kind: DlvTransitionKind::Settle,
-        },
-        Some(crate::types::operations::Operation::DlvClose { .. }) => {
-            SuccessorValidity::DlvTransition {
-                kind: DlvTransitionKind::Close,
-            }
-        }
-        // A SoFi operation cannot reach here — `verify_operation_write_set`
-        // refuses it by name above — and if it ever did, "no DLV transition"
-        // would be a false statement about an operation that moves DLV
-        // reserves. Each carries ITS OWN reason forward rather than one
-        // borrowed from whichever arm was written first.
-        Some(crate::types::operations::Operation::SofiFulfill { .. }) => {
-            return Err(EconomicValidationError::WriteSet(
-                crate::economic::write_set::WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
-            ))
-        }
-        // A SETUP and a CREATION are ordinary transitions that legitimately
-        // reach here now (P15-6, P15-12), and neither is a DLV transition: a
-        // setup writes one relationship leaf, a creation debits and records.
-        // Named rather than left to the catch-all so the answer is a decision.
-        Some(
-            crate::types::operations::Operation::SofiSetup { .. }
-            | crate::types::operations::Operation::SofiVaultCreate { .. },
-        ) => SuccessorValidity::NoDlvTransition,
-        _ => SuccessorValidity::NoDlvTransition,
-    };
+    // A SoFi operation cannot reach here — `verify_operation_write_set`
+    // refuses it by name above — and if it ever did, "no DLV transition"
+    // would be a false statement about an operation that moves DLV
+    // reserves. Each carries ITS OWN reason forward rather than one
+    // borrowed from whichever arm was written first.
+    if let Some(crate::types::operations::Operation::SofiFulfill { .. }) =
+        accepted.dsm_verified_operation()
+    {
+        return Err(EconomicValidationError::WriteSet(
+            crate::economic::write_set::WriteSetError::SofiWriteSetBelongsToTheResolvedPath,
+        ));
+    }
 
     Ok((
         ValidatedEconomicRoot {
             economic_position: registered.economic_position(),
             economic_root: derived,
         },
-        validity,
         funded,
     ))
 }

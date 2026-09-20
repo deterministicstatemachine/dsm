@@ -37,17 +37,12 @@
 use std::collections::BTreeMap;
 
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceDlvReserveConsumption,
-    CreditSourceDlvRouteReserveConsumption, RouteLegReserveConsumption,
-    CreditSourceSameTransitionMove, CreditSourceValidatedDlvSettlementPayment,
-    CreditSourceValidatedFaucetDistribution, CreditSourceValidatedPeerDebit,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedFaucetDistribution,
+    CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::provenance::validated_peer_debit_source_id;
-use crate::economic::state::{
-    EconomicBalanceState, EconomicBundleAcceptanceState, EconomicConsumedSourceState,
-    EconomicLeafState, EconomicSettlementReceiptState, EconomicVaultReserveState,
-};
+use crate::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use crate::economic::tree::EconomicSmt;
 use crate::economic::witness::EconomicTransitionWitness;
 use crate::types::operations::Operation;
@@ -76,9 +71,6 @@ pub enum WriteSetError {
     /// Enabling supply-at-creation is a deliberate three-place diff: this
     /// arm, the route guard, and the accepting-layer refusal.
     CreateTokenInitialSupplyRequiresIssuancePredicate,
-    /// Classified `ClosedWriteSet` but its write set is deferred
-    /// (`DlvSettle`/`DlvClose` — 3.6).
-    OperationWriteSetNotYetSpecified,
     /// The operation touches online value with no defined foreign-verifiable
     /// source predicate.
     UnsupportedValueTransition,
@@ -145,11 +137,6 @@ impl core::fmt::Display for WriteSetError {
                  asset's supply must be issued through Mint against the anchored policy, and \
                  the ERA fee debit must not fund a different asset"
             ),
-            Self::OperationWriteSetNotYetSpecified => write!(
-                f,
-                "this operation's economic write set is not yet specified (deferred to the DLV \
-                 economic integration)"
-            ),
             Self::UnsupportedValueTransition => write!(
                 f,
                 "operation touches online economic value with no defined foreign-verifiable \
@@ -212,17 +199,6 @@ pub enum CreditSourceFacts {
         peer_debit_mutation_index: u32,
         acceptance_evidence_addr: [u8; 32],
     },
-    /// The owner's input-reserve credit, funded by the trader's
-    /// already-admitted settlement payment (0x0027).
-    /// `trader_economic_position` is the UNTRUSTED locator of the trader's
-    /// validated economic ancestry; the evidence addr freezes the receipt
-    /// inclusion bundle. Every other coordinate is read from the OPERATION.
-    DlvSettlementPayment {
-        trader_genesis: [u8; 32],
-        trader_devid: [u8; 32],
-        trader_economic_position: u64,
-        payment_evidence_addr: [u8; 32],
-    },
     /// A policy-authorized issuance (0x0023 -> 0x0029). The evidence address
     /// freezes the bundle carrying the canonical policy bytes, the signed
     /// authorization body and the k-of-N signatures. EVERY other coordinate —
@@ -231,48 +207,19 @@ pub enum CreditSourceFacts {
     AuthorizedIssuance {
         issuance_authorization_addr: [u8; 32],
     },
-    /// A trader's settle output, funded by consuming an owner vault reserve
-    /// (0x0026). `owner_economic_position` is the UNTRUSTED locator of the
-    /// owner's validated economic ancestry; the evidence addr freezes the
-    /// inclusion bundle. Every other coordinate the descriptor needs
-    /// (vault, parent, x) is read from the OPERATION — never supplied twice.
-    DlvReserveConsumption {
-        owner_economic_position: u64,
-        reserve_consumption_evidence_addr: [u8; 32],
-    },
-    /// A route-wide settle's one output credit, funded by consuming a reserve in
-    /// every vault the route crosses (0x0035, amendment 2c-H H9). One entry per
-    /// route leg IN ROUTE ORDER. Every coordinate the descriptor states beside
-    /// them (vault, parent, x) is read from the OPERATION.
-    DlvRouteReserveConsumption { legs: Vec<RouteLegConsumptionFacts> },
-}
-
-/// One route leg's external consumption facts (0x0035): the untrusted owner
-/// locator and the evidence address, for the leg at the same route position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteLegConsumptionFacts {
-    pub owner_economic_position: u64,
-    pub reserve_consumption_evidence_addr: [u8; 32],
 }
 
 /// The producer's authenticated pre-state, decoded. `balances` is keyed by
-/// policy commit; `vault_reserves` by `(vault_id, policy_commit)` — absence
-/// means the leaf is absent. The tree remains the authority: a pre-state that
-/// disagrees with it produces a witness that fails Merkle verification.
+/// policy commit — absence means the leaf is absent. The tree remains the
+/// authority: a pre-state that disagrees with it produces a witness that fails
+/// Merkle verification.
 pub struct EconomicPreState<'a> {
     pub balances: &'a BTreeMap<[u8; 32], u64>,
-    pub vault_reserves: &'a BTreeMap<([u8; 32], [u8; 32]), EconomicVaultReserveState>,
 }
 
-static EMPTY_RESERVES: BTreeMap<([u8; 32], [u8; 32]), EconomicVaultReserveState> = BTreeMap::new();
-
 impl<'a> EconomicPreState<'a> {
-    /// A pre-state with no vault reserves — every non-DLV producer.
-    pub fn balances_only(balances: &'a BTreeMap<[u8; 32], u64>) -> Self {
-        Self {
-            balances,
-            vault_reserves: &EMPTY_RESERVES,
-        }
+    pub fn new(balances: &'a BTreeMap<[u8; 32], u64>) -> Self {
+        Self { balances }
     }
 }
 
@@ -294,12 +241,9 @@ struct PlannedLeaf {
     source: Option<PlannedSource>,
 }
 
-/// How a planned credit is funded. `SameMove` names the DEBIT leaf by key;
-/// the index is resolved only after the key sort, so descriptor indices are
-/// derived facts, never plan-time guesses.
+/// How a planned credit is funded.
 enum PlannedSource {
     External(CreditSourceFacts),
-    SameMove { debit_key: [u8; 32] },
 }
 
 /// The semantic write set of an operation, before proofs: what changes and
@@ -339,67 +283,17 @@ enum SemanticWriteSet {
         leg_b: ([u8; 32], u64),
         creation: crate::sofi::wire::VaultCreation,
     },
-    /// `DlvCreateFundedV2`: two balance debits + two vault-reserve credits at
-    /// generation 0, each reserve credit funded by the matching balance debit
-    /// (`SameTransitionMove`). Legs are canonical (`a < b`), both non-zero.
-    DlvFund {
-        vault_id: [u8; 32],
-        leg_a: ([u8; 32], u64),
-        leg_b: ([u8; 32], u64),
-    },
-    /// `DlvSettle`: the trader's input balance debit, the output balance
-    /// credit, and the settlement-receipt leaf inserted FROM ZERO (the
-    /// write-once non-reuse marker). The output credit is funded by
-    /// `DlvReserveConsumption` (0x0026).
-    DlvSettle {
-        input: DlvLeg,
-        output: DlvLeg,
-        receipt: EconomicSettlementReceiptState,
-    },
-    /// `DlvRouteSettle` (amendment 2c-H H3, H4, H10): ONE net input debit
-    /// (`legs[0]`'s input), ONE net output credit (`legs[N-1]`'s output) funded
-    /// by `DlvRouteReserveConsumption` (0x0035), and one settlement-receipt leaf
-    /// per vault inserted FROM ZERO. Intermediate assets never touch the
-    /// trader's balances.
-    DlvRouteSettle {
-        input: DlvLeg,
-        output: DlvLeg,
-        receipts: Vec<EconomicSettlementReceiptState>,
-    },
-    /// `DlvOwnerApplyV2`: reserve[input] gains `input.1`, reserve[output]
-    /// loses `output.1`, both advancing `parent_sequence -> new_sequence`
-    /// (one step). NO balance movement — the fee accrues inside the reserves
-    /// as LP yield. The input-reserve credit is funded by
-    /// `ValidatedDlvSettlementPayment` (0x0027); non-reuse is the
-    /// reserve-sequence Merkle CAS, so there is no consumed-source leaf.
-    DlvOwnerApply {
-        vault_id: [u8; 32],
-        input: DlvLeg,
-        output: DlvLeg,
-        parent_sequence: u64,
-        new_sequence: u64,
-    },
-    /// `DlvClose`: both reserves `{amount, parent} -> {0, parent+1}` plus the
-    /// matching balance credits, each funded by the reserve it drains
-    /// (`SameTransitionMove`). The zero-amount terminal reserve stays PRESENT.
-    DlvWithdraw {
-        vault_id: [u8; 32],
-        leg_a: ([u8; 32], u64),
-        leg_b: ([u8; 32], u64),
-        parent_sequence: u64,
-        new_sequence: u64,
-    },
 }
 
-/// One asset leg of a DLV pair operation: `(policy_commit, amount)`.
-type DlvLeg = ([u8; 32], u64);
+/// One asset leg of a vault pair: `(policy_commit, amount)`.
+type AssetLeg = ([u8; 32], u64);
 
-/// Validate and project the two signed legs of a DLV pair operation.
-fn dlv_pair_legs(
+/// Validate and project the two signed legs of a vault pair.
+fn pair_legs(
     vault_id: &[u8],
-    leg_a: DlvLeg,
-    leg_b: DlvLeg,
-) -> Result<([u8; 32], DlvLeg, DlvLeg), WriteSetError> {
+    leg_a: AssetLeg,
+    leg_b: AssetLeg,
+) -> Result<([u8; 32], AssetLeg, AssetLeg), WriteSetError> {
     let vault: [u8; 32] =
         vault_id
             .try_into()
@@ -509,195 +403,6 @@ fn semantic_write_set(
                 facts_required: FactsKind::AuthorizedIssuance,
             })
         }
-        Operation::DlvCreateFundedV2 {
-            vault_id,
-            leg_a_policy_commit,
-            leg_a_amount,
-            leg_b_policy_commit,
-            leg_b_amount,
-            ..
-        } => {
-            let (vault_id, leg_a, leg_b) = dlv_pair_legs(
-                vault_id,
-                (*leg_a_policy_commit, *leg_a_amount),
-                (*leg_b_policy_commit, *leg_b_amount),
-            )?;
-            Ok(SemanticWriteSet::DlvFund {
-                vault_id,
-                leg_a,
-                leg_b,
-            })
-        }
-        Operation::DlvClose {
-            vault_id,
-            leg_a_policy_commit,
-            leg_a_amount,
-            leg_b_policy_commit,
-            leg_b_amount,
-            parent_sequence,
-            new_sequence,
-            ..
-        } => {
-            let (vault_id, leg_a, leg_b) = dlv_pair_legs(
-                vault_id,
-                (*leg_a_policy_commit, *leg_a_amount),
-                (*leg_b_policy_commit, *leg_b_amount),
-            )?;
-            if parent_sequence
-                .checked_add(1)
-                .is_none_or(|n| n != *new_sequence)
-            {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "a close advances the vault by exactly one generation",
-                });
-            }
-            Ok(SemanticWriteSet::DlvWithdraw {
-                vault_id,
-                leg_a,
-                leg_b,
-                parent_sequence: *parent_sequence,
-                new_sequence: *new_sequence,
-            })
-        }
-        Operation::DlvSettle {
-            vault_id,
-            input_policy_commit,
-            output_policy_commit,
-            parent_sequence,
-            external_commitment_x,
-            input_amount,
-            output_amount,
-            settlement_receipt_id,
-            ..
-        } => {
-            let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
-                WriteSetError::MalformedVaultOperation {
-                    detail: "vault id is not 32 bytes",
-                }
-            })?;
-            let new_sequence =
-                parent_sequence
-                    .checked_add(1)
-                    .ok_or(WriteSetError::MalformedVaultOperation {
-                        detail: "settlement sequence overflow",
-                    })?;
-            // The receipt constructor IS the validation path: it re-derives
-            // `receipt_id` from `(vault, x)`, requires the unit generation
-            // step, non-zero amounts and distinct assets. The operation's own
-            // `settlement_receipt_id` must equal the derivation — a receipt
-            // id is a name for `(vault, x)`, never an independent field.
-            let receipt = EconomicSettlementReceiptState::new(
-                vault,
-                *external_commitment_x,
-                *parent_sequence,
-                new_sequence,
-                *input_policy_commit,
-                *input_amount,
-                *output_policy_commit,
-                *output_amount,
-            )
-            .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
-            if receipt.receipt_id != *settlement_receipt_id {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "settlement_receipt_id does not derive from (vault_id, x)",
-                });
-            }
-            Ok(SemanticWriteSet::DlvSettle {
-                input: (*input_policy_commit, *input_amount),
-                output: (*output_policy_commit, *output_amount),
-                receipt,
-            })
-        }
-        Operation::DlvRouteSettle {
-            legs,
-            external_commitment_x,
-            ..
-        } => {
-            // RC.1–RC.5, judged from the legs alone.
-            crate::types::operations::DlvRouteLeg::check_route_conservation(legs).map_err(
-                |_| WriteSetError::MalformedVaultOperation {
-                    detail: "a route settle's legs do not conserve (RC.1-RC.5)",
-                },
-            )?;
-            let mut receipts = Vec::with_capacity(legs.len());
-            for leg in legs {
-                let new_sequence = leg.parent_sequence.checked_add(1).ok_or(
-                    WriteSetError::MalformedVaultOperation {
-                        detail: "settlement sequence overflow",
-                    },
-                )?;
-                // One receipt per vault, each through the validating
-                // constructor and each named by its own leg's receipt id.
-                let receipt = EconomicSettlementReceiptState::new(
-                    leg.vault_id,
-                    *external_commitment_x,
-                    leg.parent_sequence,
-                    new_sequence,
-                    leg.input_policy_commit,
-                    leg.input_amount,
-                    leg.output_policy_commit,
-                    leg.output_amount,
-                )
-                .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
-                if receipt.receipt_id != leg.settlement_receipt_id {
-                    return Err(WriteSetError::MalformedVaultOperation {
-                        detail: "a route leg's settlement_receipt_id does not derive from its vault and x",
-                    });
-                }
-                receipts.push(receipt);
-            }
-            let (Some(first), Some(last)) = (legs.first(), legs.last()) else {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "a route settle names no legs",
-                });
-            };
-            Ok(SemanticWriteSet::DlvRouteSettle {
-                input: (first.input_policy_commit, first.input_amount),
-                output: (last.output_policy_commit, last.output_amount),
-                receipts,
-            })
-        }
-        Operation::DlvOwnerApplyV2 {
-            vault_id,
-            parent_sequence,
-            new_sequence,
-            input_policy_commit,
-            output_policy_commit,
-            input_amount,
-            output_amount,
-            ..
-        } => {
-            let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
-                WriteSetError::MalformedVaultOperation {
-                    detail: "vault id is not 32 bytes",
-                }
-            })?;
-            if input_policy_commit == output_policy_commit {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "a settlement cannot name one asset on both legs",
-                });
-            }
-            if *input_amount == 0 || *output_amount == 0 {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "both settlement amounts must be non-zero",
-                });
-            }
-            if parent_sequence
-                .checked_add(1)
-                .is_none_or(|n| n != *new_sequence)
-            {
-                return Err(WriteSetError::MalformedVaultOperation {
-                    detail: "an apply advances the vault by exactly one generation",
-                });
-            }
-            Ok(SemanticWriteSet::DlvOwnerApply {
-                vault_id: vault,
-                input: (*input_policy_commit, *input_amount),
-                output: (*output_policy_commit, *output_amount),
-                parent_sequence: *parent_sequence,
-                new_sequence: *new_sequence,
-            })
-        }
         // SOFI v8 IS REFUSED HERE BY NAME — and the three do not share a
         // reason, which is why they no longer share an arm.
         //
@@ -782,7 +487,7 @@ fn semantic_write_set(
                     detail: "the funded amounts are not the genesis reserves",
                 });
             }
-            let (vault_id, leg_a, leg_b) = dlv_pair_legs(
+            let (vault_id, leg_a, leg_b) = pair_legs(
                 &vault_id,
                 (*funding_a_policy_commit, record.amount_a),
                 (*funding_b_policy_commit, record.amount_b),
@@ -823,41 +528,6 @@ fn balance_state(
 /// id of the PREPARED successor (`H(G ‖ DevID ‖ C_dsm+)`) — the successor is
 /// prepared before the write set is built, which is why this function can
 /// require it rather than a placeholder.
-/// The settlement-bundle context a write set is being built inside.
-///
-/// **Why this is a parameter and not something the builder works out.** `b` is
-/// not intrinsic to the DLV operation — it is the identity of the exact
-/// settlement bundle being composed AROUND that operation, established
-/// upstream from the canonical `B`. A builder that derived it, fetched it, or
-/// read it out of the operation bytes would be manufacturing the very value
-/// the acceptance leaf exists to commit (amendment 2c-D, producer adoption).
-///
-/// It is an ENUM rather than an `Option<[u8; 32]>` on purpose. An optional
-/// digest is a value a caller may omit, and omitting it on a market settle is
-/// exactly the case that must not compile quietly. Threading this through
-/// every call site is the point: each producer of economic state has to
-/// account for whether it has settlement-bundle context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EconomicWriteContext {
-    /// Not a settlement. A `0x0032` leaf is illegal here, and the builder
-    /// emits none.
-    NonSettlement,
-    /// A market `DlvSettle` composed around the bundle whose identity is
-    /// `bundle_id`.
-    DlvSettle {
-        /// `b` — the exact canonical settlement-bundle identity.
-        bundle_id: [u8; 32],
-    },
-}
-
-// The arity is the set of facts a write set is derived FROM, and each one has a
-// different origin: the operation is authenticated, the identity comes from the
-// resolver, the pre-state from the admitted root, the facts from the credit
-// arm, and the context from the composition layer. Bundling them into one
-// struct would let a caller assemble that struct once and reuse it across
-// operations, which is exactly the sharing the separation exists to prevent —
-// and it would hide the explicitness the context parameter was added to create.
-#[allow(clippy::too_many_arguments)]
 pub fn build_write_set(
     operation: &Operation,
     genesis: &[u8; 32],
@@ -866,129 +536,9 @@ pub fn build_write_set(
     pre_state: &EconomicPreState<'_>,
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
-    context: &EconomicWriteContext,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     let pre_balances = pre_state.balances;
     let semantic = semantic_write_set(operation, genesis, device_id)?;
-
-    // OPERATION AND CONTEXT MUST AGREE, checked before anything is planned.
-    // A settle without bundle context cannot produce the acceptance leaf its
-    // realization needs; a non-settlement carrying one would be composing a
-    // bundle around an operation that is not part of any.
-    let bundle_id = match (&semantic, context) {
-        (
-            SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. },
-            EconomicWriteContext::DlvSettle { bundle_id },
-        ) => Some(*bundle_id),
-        (
-            SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. },
-            EconomicWriteContext::NonSettlement,
-        ) => {
-            return Err(WriteSetError::WrongWriteSet {
-                detail: "a market settle needs its settlement-bundle context; without `b` it \
-                         cannot emit the acceptance leaf its realization requires",
-            })
-        }
-        (_, EconomicWriteContext::DlvSettle { .. }) => {
-            return Err(WriteSetError::WrongWriteSet {
-                detail: "settlement-bundle context was supplied for an operation that is not a \
-                         settle",
-            })
-        }
-        (_, EconomicWriteContext::NonSettlement) => None,
-    };
-
-    /// A market settle's planned leaves, single-vault or route-wide (2c-H H3,
-    /// H10): the net input debit, the net output credit funded by the external
-    /// source, one settlement-receipt leaf per consumed vault inserted FROM
-    /// ZERO, and the one bundle-acceptance leaf.
-    #[allow(clippy::too_many_arguments)]
-    fn plan_market_settle(
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        economic_operation_id: &[u8; 32],
-        pre_balances: &BTreeMap<[u8; 32], u64>,
-        tree: &EconomicSmt,
-        facts: &CreditSourceFacts,
-        bundle_id: Option<[u8; 32]>,
-        input: DlvLeg,
-        output: DlvLeg,
-        receipts: Vec<EconomicSettlementReceiptState>,
-    ) -> Result<Vec<PlannedLeaf>, WriteSetError> {
-        let mut planned = Vec::with_capacity(receipts.len() + 3);
-        // Input balance debit.
-        planned.push(plan_balance_debit(
-            genesis,
-            device_id,
-            pre_balances,
-            input.0,
-            input.1,
-        )?);
-        // Output balance credit, funded by the reserve consumption.
-        let (policy_commit, amount) = output;
-        let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
-        let next = have
-            .checked_add(amount)
-            .ok_or(WriteSetError::BalanceOverflow)?;
-        let pre = balance_state(policy_commit, have)?;
-        let post = balance_state(policy_commit, next)?;
-        let key = post
-            .as_ref()
-            .map(|s| s.leaf_key(genesis, device_id))
-            .ok_or(WriteSetError::WrongWriteSet {
-                detail: "settle credit produced no post state",
-            })?;
-        planned.push(PlannedLeaf {
-            key,
-            pre,
-            post,
-            source: Some(PlannedSource::External(facts.clone())),
-        });
-        // The settlement-receipt leaves, each inserted FROM ZERO — write-once:
-        // an existing leaf means that (vault, x) already settled.
-        for receipt in receipts {
-            let receipt_state = EconomicLeafState::SettlementReceipt(receipt);
-            let key = receipt_state.leaf_key(genesis, device_id);
-            if tree.get(&key).is_some() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settlement receipt for this (vault, x) already exists",
-                });
-            }
-            planned.push(PlannedLeaf {
-                key,
-                pre: None,
-                post: Some(receipt_state),
-                source: None,
-            });
-        }
-        // THE BUNDLE-ACCEPTANCE LEAF (amendment 2c-D, producer adoption). `b`
-        // comes from the context — established upstream from the canonical `B`
-        // — while the operation identity comes from the authenticated
-        // transition. The two facts have DIFFERENT ORIGINS on purpose: ruling
-        // D3's three-way binding depends on it.
-        let bundle = bundle_id.ok_or(WriteSetError::WrongWriteSet {
-            detail: "a market settle reached the acceptance leaf without bundle context",
-        })?;
-        let acceptance = EconomicLeafState::BundleAcceptance(EconomicBundleAcceptanceState {
-            bundle,
-            economic_operation_id: *economic_operation_id,
-        });
-        let key = acceptance.leaf_key(genesis, device_id);
-        // Write-once: an existing leaf means this transition already committed
-        // a bundle, and a second would be a different claim at one position.
-        if tree.get(&key).is_some() {
-            return Err(WriteSetError::WrongWriteSet {
-                detail: "a bundle-acceptance leaf for this economic operation already exists",
-            });
-        }
-        planned.push(PlannedLeaf {
-            key,
-            pre: None,
-            post: Some(acceptance),
-            source: None,
-        });
-        Ok(planned)
-    }
 
     let mut planned: Vec<PlannedLeaf> = Vec::new();
 
@@ -1108,160 +658,6 @@ pub fn build_write_set(
                 });
             }
         }
-        SemanticWriteSet::DlvSettle {
-            input,
-            output,
-            receipt,
-        } => {
-            if !matches!(facts, CreditSourceFacts::DlvReserveConsumption { .. }) {
-                return Err(WriteSetError::FactsDoNotMatchOperation);
-            }
-            planned.extend(plan_market_settle(
-                genesis,
-                device_id,
-                economic_operation_id,
-                pre_balances,
-                tree,
-                facts,
-                bundle_id,
-                input,
-                output,
-                vec![receipt],
-            )?);
-        }
-        SemanticWriteSet::DlvRouteSettle {
-            input,
-            output,
-            receipts,
-        } => {
-            if !matches!(facts, CreditSourceFacts::DlvRouteReserveConsumption { .. }) {
-                return Err(WriteSetError::FactsDoNotMatchOperation);
-            }
-            planned.extend(plan_market_settle(
-                genesis,
-                device_id,
-                economic_operation_id,
-                pre_balances,
-                tree,
-                facts,
-                bundle_id,
-                input,
-                output,
-                receipts,
-            )?);
-        }
-        SemanticWriteSet::DlvOwnerApply {
-            vault_id,
-            input,
-            output,
-            parent_sequence,
-            new_sequence,
-        } => {
-            if !matches!(facts, CreditSourceFacts::DlvSettlementPayment { .. }) {
-                return Err(WriteSetError::FactsDoNotMatchOperation);
-            }
-            // The OUTPUT leg is the vault's liquidity being paid out: it must
-            // exist at exactly the parent generation and cover the payout.
-            let out_pre = pre_state.vault_reserves.get(&(vault_id, output.0)).ok_or(
-                WriteSetError::WrongWriteSet {
-                    detail: "the vault holds no output reserve for that settlement",
-                },
-            )?;
-            if out_pre.vault_id != vault_id
-                || out_pre.policy_commit != output.0
-                || out_pre.vault_sequence != parent_sequence
-            {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "the output reserve is not at the consumed parent generation",
-                });
-            }
-            let out_next =
-                out_pre
-                    .amount
-                    .checked_sub(output.1)
-                    .ok_or(WriteSetError::WrongWriteSet {
-                        detail: "the vault cannot pay that settlement output",
-                    })?;
-            // The INPUT leg may be first-time (created at new_sequence); if
-            // it exists it shares the vault's generation.
-            let in_pre = pre_state.vault_reserves.get(&(vault_id, input.0));
-            if let Some(p) = in_pre {
-                if p.vault_id != vault_id
-                    || p.policy_commit != input.0
-                    || p.vault_sequence != parent_sequence
-                {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "the input reserve is at a different vault generation",
-                    });
-                }
-            }
-            let in_have = in_pre.map(|p| p.amount).unwrap_or(0);
-            let in_next = in_have
-                .checked_add(input.1)
-                .ok_or(WriteSetError::BalanceOverflow)?;
-            let reserve = |pc: [u8; 32], amount: u64| {
-                EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                    vault_id,
-                    policy_commit: pc,
-                    amount,
-                    vault_sequence: new_sequence,
-                })
-            };
-            // Input credit, funded by the trader's validated payment.
-            let post = reserve(input.0, in_next);
-            let key = post.leaf_key(genesis, device_id);
-            planned.push(PlannedLeaf {
-                key,
-                pre: in_pre.map(|p| EconomicLeafState::VaultReserve(p.clone())),
-                post: Some(post),
-                source: Some(PlannedSource::External(facts.clone())),
-            });
-            // Output debit. Zero stays PRESENT (the reserve-zero asymmetry).
-            let pre = EconomicLeafState::VaultReserve(out_pre.clone());
-            let key = pre.leaf_key(genesis, device_id);
-            planned.push(PlannedLeaf {
-                key,
-                pre: Some(pre),
-                post: Some(reserve(output.0, out_next)),
-                source: None,
-            });
-        }
-        SemanticWriteSet::DlvFund {
-            vault_id,
-            leg_a,
-            leg_b,
-        } => {
-            if *facts != CreditSourceFacts::None {
-                return Err(WriteSetError::FactsDoNotMatchOperation);
-            }
-            for (policy_commit, amount) in [leg_a, leg_b] {
-                let debit =
-                    plan_balance_debit(genesis, device_id, pre_balances, policy_commit, amount)?;
-                let debit_key = debit.key;
-                planned.push(debit);
-                let reserve = EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                    vault_id,
-                    policy_commit,
-                    amount,
-                    vault_sequence: 0,
-                });
-                let key = reserve.leaf_key(genesis, device_id);
-                // Birth is generation 0 from ABSENT: an existing leaf (any
-                // amount, any generation — a closed vault's terminal zero
-                // included) means this vault id was already used.
-                if tree.get(&key).is_some() {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "a reserve leaf for this vault and asset already exists",
-                    });
-                }
-                planned.push(PlannedLeaf {
-                    key,
-                    pre: None,
-                    post: Some(reserve),
-                    source: Some(PlannedSource::SameMove { debit_key }),
-                });
-            }
-        }
         // P15-6: one relationship insert, from zero, and nothing else.
         SemanticWriteSet::SofiSetup { vault_id, leaf } => {
             if *facts != CreditSourceFacts::None {
@@ -1326,88 +722,11 @@ pub fn build_write_set(
                 source: None,
             });
         }
-        SemanticWriteSet::DlvWithdraw {
-            vault_id,
-            leg_a,
-            leg_b,
-            parent_sequence,
-            new_sequence,
-        } => {
-            if *facts != CreditSourceFacts::None {
-                return Err(WriteSetError::FactsDoNotMatchOperation);
-            }
-            for (policy_commit, amount) in [leg_a, leg_b] {
-                let pre_reserve = pre_state
-                    .vault_reserves
-                    .get(&(vault_id, policy_commit))
-                    .ok_or(WriteSetError::WrongWriteSet {
-                        detail: "close names a reserve leg the pre-state does not hold",
-                    })?;
-                if pre_reserve.vault_id != vault_id
-                    || pre_reserve.policy_commit != policy_commit
-                    || pre_reserve.amount != amount
-                    || pre_reserve.vault_sequence != parent_sequence
-                {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "close must drain the exact reserve amount at the exact \
-                                 parent generation",
-                    });
-                }
-                let pre = EconomicLeafState::VaultReserve(pre_reserve.clone());
-                let reserve_key = pre.leaf_key(genesis, device_id);
-                // Terminal generation: zero amount, PRESENT — never deleted,
-                // which is what makes a closed vault id single-use.
-                let post = EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-                    vault_id,
-                    policy_commit,
-                    amount: 0,
-                    vault_sequence: new_sequence,
-                });
-                planned.push(PlannedLeaf {
-                    key: reserve_key,
-                    pre: Some(pre),
-                    post: Some(post),
-                    source: None,
-                });
-                // The matching balance credit, funded by the reserve it
-                // drains.
-                let have = pre_balances.get(&policy_commit).copied().unwrap_or(0);
-                let next = have
-                    .checked_add(amount)
-                    .ok_or(WriteSetError::BalanceOverflow)?;
-                let pre = balance_state(policy_commit, have)?;
-                let post = balance_state(policy_commit, next)?;
-                let key = post
-                    .as_ref()
-                    .map(|s| s.leaf_key(genesis, device_id))
-                    .ok_or(WriteSetError::WrongWriteSet {
-                        detail: "close credit produced no post state",
-                    })?;
-                planned.push(PlannedLeaf {
-                    key,
-                    pre,
-                    post,
-                    source: Some(PlannedSource::SameMove {
-                        debit_key: reserve_key,
-                    }),
-                });
-            }
-        }
     }
 
     // Key order, then progressive proof capture: mutation i's siblings come
-    // from the tree with mutations 0..i already applied. Indices — including
-    // a SameMove's debit index — exist only after this sort.
+    // from the tree with mutations 0..i already applied.
     planned.sort_by_key(|l| l.key);
-    let index_of_key: BTreeMap<[u8; 32], u32> = planned
-        .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            u32::try_from(i)
-                .map(|i| (l.key, i))
-                .map_err(|_| WriteSetError::Ccb("index overflow".into()))
-        })
-        .collect::<Result<_, _>>()?;
     let mut mutations = Vec::with_capacity(planned.len());
     let mut credit_sources = Vec::new();
     for (index, leaf) in planned.into_iter().enumerate() {
@@ -1426,22 +745,7 @@ pub fn build_write_set(
         if let Some(planned_source) = leaf.source {
             let credit_mutation_index =
                 u32::try_from(index).map_err(|_| WriteSetError::Ccb("index overflow".into()))?;
-            let facts = match planned_source {
-                PlannedSource::SameMove { debit_key } => {
-                    let debit_mutation_index = *index_of_key
-                        .get(&debit_key)
-                        .ok_or(WriteSetError::Ccb("same-move debit key not planned".into()))?;
-                    credit_sources.push(CreditSource::SameTransitionMove(
-                        CreditSourceSameTransitionMove {
-                            credit_mutation_index,
-                            debit_mutation_index,
-                        },
-                    ));
-                    mutations.push(mutation);
-                    continue;
-                }
-                PlannedSource::External(facts) => facts,
-            };
+            let PlannedSource::External(facts) = planned_source;
             let source = match (facts, operation) {
                 // The descriptor carries the evidence ADDRESS and the credit
                 // index, and nothing else: asset, amount, issuer, position and
@@ -1490,94 +794,6 @@ pub fn build_write_set(
                     peer_debit_mutation_index,
                     acceptance_evidence_addr,
                 }),
-                (
-                    CreditSourceFacts::DlvSettlementPayment {
-                        trader_genesis,
-                        trader_devid,
-                        trader_economic_position,
-                        payment_evidence_addr,
-                    },
-                    Operation::DlvOwnerApplyV2 {
-                        vault_id,
-                        settlement_receipt_id,
-                        parent_sequence,
-                        ..
-                    },
-                ) => {
-                    let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
-                        WriteSetError::MalformedVaultOperation {
-                            detail: "vault id is not 32 bytes",
-                        }
-                    })?;
-                    CreditSource::ValidatedDlvSettlementPayment(
-                        CreditSourceValidatedDlvSettlementPayment {
-                            credit_mutation_index,
-                            vault_id: vault,
-                            settlement_receipt_id: *settlement_receipt_id,
-                            parent_sequence: *parent_sequence,
-                            trader_genesis,
-                            trader_devid,
-                            trader_economic_position,
-                            payment_evidence_addr,
-                        },
-                    )
-                }
-                (
-                    CreditSourceFacts::DlvReserveConsumption {
-                        owner_economic_position,
-                        reserve_consumption_evidence_addr,
-                    },
-                    Operation::DlvSettle {
-                        vault_id,
-                        parent_sequence,
-                        external_commitment_x,
-                        ..
-                    },
-                ) => {
-                    let vault: [u8; 32] = vault_id.as_slice().try_into().map_err(|_| {
-                        WriteSetError::MalformedVaultOperation {
-                            detail: "vault id is not 32 bytes",
-                        }
-                    })?;
-                    CreditSource::DlvReserveConsumption(CreditSourceDlvReserveConsumption {
-                        credit_mutation_index,
-                        vault_id: vault,
-                        parent_sequence: *parent_sequence,
-                        x: *external_commitment_x,
-                        owner_economic_position,
-                        reserve_consumption_evidence_addr,
-                    })
-                }
-                (
-                    CreditSourceFacts::DlvRouteReserveConsumption { legs: facts_legs },
-                    Operation::DlvRouteSettle {
-                        legs,
-                        external_commitment_x,
-                        ..
-                    },
-                ) => {
-                    if facts_legs.len() != legs.len() {
-                        return Err(WriteSetError::FactsDoNotMatchOperation);
-                    }
-                    CreditSource::DlvRouteReserveConsumption(
-                        CreditSourceDlvRouteReserveConsumption {
-                            credit_mutation_index,
-                            x: *external_commitment_x,
-                            // E_R in ROUTE-LEG ORDER: entry k is legs[k].
-                            legs: legs
-                                .iter()
-                                .zip(facts_legs)
-                                .map(|(leg, f)| RouteLegReserveConsumption {
-                                    vault_id: leg.vault_id,
-                                    parent_sequence: leg.parent_sequence,
-                                    owner_economic_position: f.owner_economic_position,
-                                    reserve_consumption_evidence_addr: f
-                                        .reserve_consumption_evidence_addr,
-                                })
-                                .collect(),
-                        },
-                    )
-                }
                 _ => return Err(WriteSetError::FactsDoNotMatchOperation),
             };
             credit_sources.push(source);
@@ -1597,13 +813,6 @@ struct ObservedBalance {
     policy_commit: [u8; 32],
     pre_amount: u64,
     post_amount: u64,
-    mutation_index: u32,
-}
-
-/// One observed vault-reserve change in a witness.
-struct ObservedReserve {
-    pre: Option<EconomicVaultReserveState>,
-    post: EconomicVaultReserveState,
     mutation_index: u32,
 }
 
@@ -1641,41 +850,16 @@ pub fn verify_operation_write_set(
 
     let semantic = semantic_write_set(operation, genesis, device_id)?;
 
-    // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN:
-    // vault-reserve leaves exist only in the DLV write sets, and settlement
-    // receipts only in the settle write set (PR3) — everything else refuses
-    // them outright, exactly as before 3.6.
-    let reserves_legal = matches!(
-        semantic,
-        SemanticWriteSet::DlvFund { .. }
-            | SemanticWriteSet::DlvWithdraw { .. }
-            | SemanticWriteSet::DlvOwnerApply { .. }
-    );
-    let receipts_legal = matches!(
-        semantic,
-        SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. }
-    );
-    // Amendment 2c-D. A bundle-acceptance leaf is legal in exactly the write
-    // set that produces the successor it is keyed to — every other operation
-    // refuses the class outright through `classify`, which is how receipts are
-    // already kept out and why no arm needs its own emptiness check.
-    // EACH SOFI LEAF IS LEGAL FOR EXACTLY ONE OPERATION. Adding the enum
-    // variants did not force this — the closure below ends in a catch-all, so
-    // a new class would have been refused outright, and a class authorized for
-    // the wrong operation would never have been noticed. A setup carrying a
-    // creation record, or a creation carrying a relationship leaf, is refused
-    // here by class.
+    // Classify every mutation. The legal leaf classes are VARIANT-DRIVEN, and
+    // EACH SOFI LEAF IS LEGAL FOR EXACTLY ONE OPERATION. The closure below
+    // ends in a catch-all, so a new class is refused outright until an arm
+    // authorizes it for the one write set that produces it. A setup carrying
+    // a creation record, or a creation carrying a relationship leaf, is
+    // refused here by class.
     let relationships_legal = matches!(semantic, SemanticWriteSet::SofiSetup { .. });
     let creations_legal = matches!(semantic, SemanticWriteSet::SofiVaultCreate { .. });
-    let acceptances_legal = matches!(
-        semantic,
-        SemanticWriteSet::DlvSettle { .. } | SemanticWriteSet::DlvRouteSettle { .. }
-    );
     let mut balances: Vec<ObservedBalance> = Vec::new();
     let mut consumed: Vec<(u32, EconomicConsumedSourceState)> = Vec::new();
-    let mut reserves: Vec<ObservedReserve> = Vec::new();
-    let mut receipts: Vec<(u32, EconomicSettlementReceiptState)> = Vec::new();
-    let mut acceptances: Vec<(u32, EconomicBundleAcceptanceState)> = Vec::new();
     let mut relationships: Vec<(u32, crate::sofi::wire::TraderRelationshipLeaf)> = Vec::new();
     let mut creations: Vec<(u32, crate::sofi::wire::VaultCreation)> = Vec::new();
     for (i, m) in witness.mutations.iter().enumerate() {
@@ -1685,9 +869,6 @@ pub fn verify_operation_write_set(
                 None
                 | Some(EconomicLeafState::Balance(_))
                 | Some(EconomicLeafState::ConsumedSource(_)) => Ok(()),
-                Some(EconomicLeafState::VaultReserve(_)) if reserves_legal => Ok(()),
-                Some(EconomicLeafState::SettlementReceipt(_)) if receipts_legal => Ok(()),
-                Some(EconomicLeafState::BundleAcceptance(_)) if acceptances_legal => Ok(()),
                 Some(EconomicLeafState::Relationship(_)) if relationships_legal => Ok(()),
                 Some(EconomicLeafState::VaultCreation(_)) if creations_legal => Ok(()),
                 Some(_) => Err(WriteSetError::UnexpectedLeafClass),
@@ -1696,33 +877,6 @@ pub fn verify_operation_write_set(
         classify(&m.pre_state)?;
         classify(&m.post_state)?;
         match (&m.pre_state, &m.post_state) {
-            (pre, Some(EconomicLeafState::VaultReserve(post))) => {
-                let pre = match pre {
-                    Some(EconomicLeafState::VaultReserve(p)) => Some(p.clone()),
-                    None => None,
-                    _ => {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "a reserve mutation cannot change leaf class",
-                        })
-                    }
-                };
-                reserves.push(ObservedReserve {
-                    pre,
-                    post: post.clone(),
-                    mutation_index: index,
-                });
-            }
-            (None, Some(EconomicLeafState::SettlementReceipt(r))) => {
-                receipts.push((index, r.clone()));
-            }
-            (Some(EconomicLeafState::SettlementReceipt(_)), _) => {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settlement-receipt leaf is write-once; it has no pre-state",
-                })
-            }
-            (None, Some(EconomicLeafState::BundleAcceptance(a))) => {
-                acceptances.push((index, a.clone()));
-            }
             // Both SoFi leaves are INSERT-ONLY, so a pre-state is not a
             // different shape of the same write — it is a different write.
             (None, Some(EconomicLeafState::Relationship(r))) => {
@@ -1739,17 +893,6 @@ pub fn verify_operation_write_set(
             (Some(EconomicLeafState::VaultCreation(_)), _) => {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a creation record is insert-only; a vault is created once",
-                })
-            }
-            (Some(EconomicLeafState::BundleAcceptance(_)), _) => {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a bundle-acceptance leaf is write-once; it has no pre-state",
-                })
-            }
-            (Some(EconomicLeafState::VaultReserve(_)), _) => {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a reserve leaf is never removed — a closed vault's terminal \
-                             zero stays present",
                 })
             }
             (pre, Some(EconomicLeafState::Balance(post))) => {
@@ -1940,314 +1083,6 @@ pub fn verify_operation_write_set(
                 }),
             }
         }
-        SemanticWriteSet::DlvSettle {
-            input,
-            output,
-            receipt,
-        } => {
-            if !consumed.is_empty() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settle's non-reuse is the write-once receipt leaf, not a \
-                             consumed source",
-                });
-            }
-            // Amendment 2c-D, PRODUCER ADOPTION: a market settle carries
-            // EXACTLY ONE bundle-acceptance leaf. #845's transitional rule was
-            // `<= 1`, correct while nothing could produce one; leaving it there
-            // now would preserve a legal settle that can never obtain a `TA_B`
-            // and would stay bound-unrealized forever.
-            expect_exactly_one_acceptance(&acceptances, witness.economic_operation_id)?;
-            if witness.mutations.len() != 4 || balances.len() != 2 || receipts.len() != 1 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settle is exactly one input debit, one output credit, one receipt \
-                             insertion and one bundle-acceptance leaf",
-                });
-            }
-            let debit = expect_one_balance(&balances, input.0)?;
-            if debit.pre_amount.checked_sub(debit.post_amount) != Some(input.1) {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "settle input debit is not exactly the authorized input",
-                });
-            }
-            let credit = expect_one_balance(&balances, output.0)?;
-            if credit.post_amount.checked_sub(credit.pre_amount) != Some(output.1) {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "settle output credit is not exactly the authorized output",
-                });
-            }
-            let (_, observed_receipt) = &receipts[0];
-            if *observed_receipt != receipt {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "the receipt leaf does not equal the operation's own settlement \
-                             facts",
-                });
-            }
-            if witness.credit_sources.len() != 1 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a settle has exactly one credit source",
-                });
-            }
-            match (&witness.credit_sources[0], operation) {
-                (
-                    CreditSource::DlvReserveConsumption(d),
-                    Operation::DlvSettle {
-                        vault_id,
-                        parent_sequence,
-                        external_commitment_x,
-                        ..
-                    },
-                ) => {
-                    if d.credit_mutation_index != credit.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "reserve-consumption source does not fund the output \
-                                     credit",
-                        });
-                    }
-                    if d.vault_id.as_slice() != vault_id.as_slice()
-                        || d.parent_sequence != *parent_sequence
-                        || d.x != *external_commitment_x
-                    {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "reserve-consumption source names different coordinates \
-                                     than the operation",
-                        });
-                    }
-                    Ok(())
-                }
-                _ => Err(WriteSetError::WrongWriteSet {
-                    detail: "credit source kind does not match the operation",
-                }),
-            }
-        }
-        SemanticWriteSet::DlvRouteSettle {
-            input,
-            output,
-            receipts: expected_receipts,
-        } => {
-            if !consumed.is_empty() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a route settle's non-reuse is its write-once receipt leaves, not a \
-                             consumed source",
-                });
-            }
-            expect_exactly_one_acceptance(&acceptances, witness.economic_operation_id)?;
-            let n = expected_receipts.len();
-            if witness.mutations.len() != n + 3 || balances.len() != 2 || receipts.len() != n {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a route settle is exactly one input debit, one output credit, one \
-                             receipt insertion per vault and one bundle-acceptance leaf",
-                });
-            }
-            let debit = expect_one_balance(&balances, input.0)?;
-            if debit.pre_amount.checked_sub(debit.post_amount) != Some(input.1) {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "route settle input debit is not exactly the authorized input",
-                });
-            }
-            let credit = expect_one_balance(&balances, output.0)?;
-            if credit.post_amount.checked_sub(credit.pre_amount) != Some(output.1) {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "route settle output credit is not exactly the authorized output",
-                });
-            }
-            // The receipt leaves are exactly the operation's, one per vault.
-            // Compared keyed by (vault, receipt id): witness order is key order,
-            // the operation's is route order.
-            let mut observed: Vec<&EconomicSettlementReceiptState> =
-                receipts.iter().map(|(_, r)| r).collect();
-            let mut wanted: Vec<&EconomicSettlementReceiptState> =
-                expected_receipts.iter().collect();
-            observed.sort_by_key(|r| (r.vault_id, r.receipt_id));
-            wanted.sort_by_key(|r| (r.vault_id, r.receipt_id));
-            if observed != wanted {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "the receipt leaves are not the route settle's own settlement facts, \
-                             one per vault",
-                });
-            }
-            if witness.credit_sources.len() != 1 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a route settle has exactly one credit source",
-                });
-            }
-            match (&witness.credit_sources[0], operation) {
-                (
-                    CreditSource::DlvRouteReserveConsumption(d),
-                    Operation::DlvRouteSettle {
-                        legs,
-                        external_commitment_x,
-                        ..
-                    },
-                ) => {
-                    if d.credit_mutation_index != credit.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "route reserve-consumption source does not fund the output \
-                                     credit",
-                        });
-                    }
-                    if d.x != *external_commitment_x
-                        || d.legs.len() != legs.len()
-                        || d.legs.iter().zip(legs).any(|(entry, leg)| {
-                            entry.vault_id != leg.vault_id
-                                || entry.parent_sequence != leg.parent_sequence
-                        })
-                    {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "route reserve-consumption source names other coordinates \
-                                     than the operation, or not in route order",
-                        });
-                    }
-                    Ok(())
-                }
-                _ => Err(WriteSetError::WrongWriteSet {
-                    detail: "credit source kind does not match the operation",
-                }),
-            }
-        }
-        SemanticWriteSet::DlvOwnerApply {
-            vault_id,
-            input,
-            output,
-            parent_sequence,
-            new_sequence,
-        } => {
-            if !consumed.is_empty() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "an apply's non-reuse is the reserve-sequence CAS, not a \
-                             consumed source",
-                });
-            }
-            if witness.mutations.len() != 2 || !balances.is_empty() || reserves.len() != 2 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "an apply is exactly two reserve mutations and moves no balances",
-                });
-            }
-            let input_r = expect_one_reserve(&reserves, input.0)?;
-            let in_pre = match &input_r.pre {
-                Some(p) => {
-                    if p.vault_id != vault_id || p.vault_sequence != parent_sequence {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "the input reserve is at a different vault generation",
-                        });
-                    }
-                    p.amount
-                }
-                None => 0,
-            };
-            if input_r.post.vault_id != vault_id
-                || input_r.post.vault_sequence != new_sequence
-                || input_r.post.amount.checked_sub(in_pre) != Some(input.1)
-            {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "input reserve credit is not exactly the authorized input at \
-                             parent + 1",
-                });
-            }
-            let output_r = expect_one_reserve(&reserves, output.0)?;
-            let out_pre = output_r.pre.as_ref().ok_or(WriteSetError::WrongWriteSet {
-                detail: "an apply pays out of an EXISTING output reserve",
-            })?;
-            if out_pre.vault_id != vault_id || out_pre.vault_sequence != parent_sequence {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "the output reserve is not at the consumed parent generation",
-                });
-            }
-            if output_r.post.vault_id != vault_id
-                || output_r.post.vault_sequence != new_sequence
-                || out_pre.amount.checked_sub(output_r.post.amount) != Some(output.1)
-            {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "output reserve debit is not exactly the authorized output at \
-                             parent + 1",
-                });
-            }
-            if witness.credit_sources.len() != 1 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "an apply has exactly one credit source",
-                });
-            }
-            match (&witness.credit_sources[0], operation) {
-                (
-                    CreditSource::ValidatedDlvSettlementPayment(d),
-                    Operation::DlvOwnerApplyV2 {
-                        vault_id: op_vault,
-                        settlement_receipt_id,
-                        parent_sequence: op_parent,
-                        ..
-                    },
-                ) => {
-                    if d.credit_mutation_index != input_r.mutation_index {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "settlement-payment source does not fund the input \
-                                     reserve credit",
-                        });
-                    }
-                    if d.vault_id.as_slice() != op_vault.as_slice()
-                        || d.settlement_receipt_id != *settlement_receipt_id
-                        || d.parent_sequence != *op_parent
-                    {
-                        return Err(WriteSetError::WrongWriteSet {
-                            detail: "settlement-payment source names different coordinates \
-                                     than the operation",
-                        });
-                    }
-                    Ok(())
-                }
-                _ => Err(WriteSetError::WrongWriteSet {
-                    detail: "credit source kind does not match the operation",
-                }),
-            }
-        }
-        SemanticWriteSet::DlvFund {
-            vault_id,
-            leg_a,
-            leg_b,
-        } => {
-            if !consumed.is_empty() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a funded create consumes no external source",
-                });
-            }
-            if witness.mutations.len() != 4 || balances.len() != 2 || reserves.len() != 2 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a funded create is exactly two balance debits plus two reserve \
-                             births",
-                });
-            }
-            if witness.credit_sources.len() != 2 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a funded create has exactly two same-transition-move sources",
-                });
-            }
-            for (policy_commit, amount) in [leg_a, leg_b] {
-                let debit = expect_one_balance(&balances, policy_commit)?;
-                if debit.pre_amount.checked_sub(debit.post_amount) != Some(amount) {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "funding debit is not exactly the signed leg amount",
-                    });
-                }
-                let reserve = expect_one_reserve(&reserves, policy_commit)?;
-                if reserve.pre.is_some() {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "a vault is born from ABSENT reserve leaves",
-                    });
-                }
-                if reserve.post.vault_id != vault_id
-                    || reserve.post.amount != amount
-                    || reserve.post.vault_sequence != 0
-                {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "reserve birth does not equal the signed leg at generation 0",
-                    });
-                }
-                expect_same_move(
-                    &witness.credit_sources,
-                    reserve.mutation_index,
-                    debit.mutation_index,
-                )?;
-            }
-            Ok(())
-        }
         // P15-6: exactly one relationship insert, and NO value movement.
         SemanticWriteSet::SofiSetup { vault_id, leaf } => {
             if !consumed.is_empty() || !balances.is_empty() {
@@ -2311,106 +1146,7 @@ pub fn verify_operation_write_set(
             }
             Ok(())
         }
-        SemanticWriteSet::DlvWithdraw {
-            vault_id,
-            leg_a,
-            leg_b,
-            parent_sequence,
-            new_sequence,
-        } => {
-            if !consumed.is_empty() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a close consumes no external source",
-                });
-            }
-            if witness.mutations.len() != 4 || balances.len() != 2 || reserves.len() != 2 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a close is exactly two reserve drains plus two balance credits",
-                });
-            }
-            if witness.credit_sources.len() != 2 {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "a close has exactly two same-transition-move sources",
-                });
-            }
-            for (policy_commit, amount) in [leg_a, leg_b] {
-                let reserve = expect_one_reserve(&reserves, policy_commit)?;
-                let pre = reserve.pre.as_ref().ok_or(WriteSetError::WrongWriteSet {
-                    detail: "a close drains an EXISTING reserve leaf",
-                })?;
-                if pre.vault_id != vault_id
-                    || pre.amount != amount
-                    || pre.vault_sequence != parent_sequence
-                {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "close must drain the exact reserve amount at the exact \
-                                 parent generation",
-                    });
-                }
-                if reserve.post.vault_id != vault_id
-                    || reserve.post.amount != 0
-                    || reserve.post.vault_sequence != new_sequence
-                {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "close must leave the terminal zero reserve at parent + 1",
-                    });
-                }
-                let credit = expect_one_balance(&balances, policy_commit)?;
-                if credit.post_amount.checked_sub(credit.pre_amount) != Some(amount) {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "close credit is not exactly the drained reserve amount",
-                    });
-                }
-                expect_same_move(
-                    &witness.credit_sources,
-                    credit.mutation_index,
-                    reserve.mutation_index,
-                )?;
-            }
-            Ok(())
-        }
     }
-}
-
-/// EXACTLY one bundle-acceptance leaf, naming THIS operation (amendment 2c-D
-/// §8, tightened at producer adoption from #845's transitional `<= 1`).
-///
-/// **Why this is not left to the key.** The position is derived from the
-/// operation identity alone, so two acceptance leaves for one operation land on
-/// the SAME key and `verify_mutation_sequence`'s strict-ascent rule would
-/// already refuse them as "two disagreeing claims about one leaf". Relying on
-/// that would make the cardinality an accidental consequence of how the tree
-/// stores things — true today, unowned, and silently lost the moment the
-/// ordering rule is relaxed or the key derivation gains an input. The rule is
-/// the protocol's, so it is stated where the write set is admitted.
-///
-/// The correspondence is the other half. The leaf carries an operation id it
-/// does not get to choose: it must equal the enclosing witness's, which
-/// `verify_transition_provenance` in turn requires to equal
-/// `dsm_economic_operation_id(G, DevID, C_dsm+)` for the accepted successor. A
-/// leaf naming another operation would otherwise sit at a well-formed position
-/// in this identity's tree while belonging to a transition that never happened.
-fn expect_exactly_one_acceptance(
-    acceptances: &[(u32, EconomicBundleAcceptanceState)],
-    operation_id: [u8; 32],
-) -> Result<(), WriteSetError> {
-    if acceptances.len() > 1 {
-        return Err(WriteSetError::WrongWriteSet {
-            detail: "more than one bundle-acceptance leaf for one economic operation",
-        });
-    }
-    let Some((_, a)) = acceptances.first() else {
-        return Err(WriteSetError::WrongWriteSet {
-            detail: "a market settle must carry its bundle-acceptance leaf; without one its \
-                     settlement could never be realized",
-        });
-    };
-    if a.economic_operation_id != operation_id {
-        return Err(WriteSetError::WrongWriteSet {
-            detail: "a bundle-acceptance leaf names another economic operation",
-        });
-    }
-    Ok(())
 }
 
 /// Exactly one observed balance mutation for this asset.
@@ -2432,61 +1168,6 @@ fn expect_one_balance(
     found.ok_or(WriteSetError::WrongWriteSet {
         detail: "missing the balance mutation for a signed leg",
     })
-}
-
-/// Exactly one observed reserve mutation for this asset.
-fn expect_one_reserve(
-    reserves: &[ObservedReserve],
-    policy_commit: [u8; 32],
-) -> Result<&ObservedReserve, WriteSetError> {
-    let mut found = None;
-    for r in reserves {
-        if r.post.policy_commit == policy_commit {
-            if found.is_some() {
-                return Err(WriteSetError::WrongWriteSet {
-                    detail: "duplicate reserve mutation for one asset",
-                });
-            }
-            found = Some(r);
-        }
-    }
-    found.ok_or(WriteSetError::WrongWriteSet {
-        detail: "missing the reserve mutation for a signed leg",
-    })
-}
-
-/// Exactly one `SameTransitionMove` source pairing this credit with this
-/// debit — the descriptor indices are checked, and the asset/amount equality
-/// between the two legs is proved independently by the provenance arm.
-fn expect_same_move(
-    sources: &[CreditSource],
-    credit_mutation_index: u32,
-    debit_mutation_index: u32,
-) -> Result<(), WriteSetError> {
-    let mut found = false;
-    for s in sources {
-        if let CreditSource::SameTransitionMove(m) = s {
-            if m.credit_mutation_index == credit_mutation_index {
-                if found || m.debit_mutation_index != debit_mutation_index {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "same-transition-move source does not pair the credit with \
-                                 its own leg's debit",
-                    });
-                }
-                found = true;
-            }
-        } else {
-            return Err(WriteSetError::WrongWriteSet {
-                detail: "a DLV pair operation is funded only by same-transition moves",
-            });
-        }
-    }
-    if !found {
-        return Err(WriteSetError::WrongWriteSet {
-            detail: "no source funds this credit",
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]

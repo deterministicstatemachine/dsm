@@ -122,9 +122,14 @@ impl LegFacts {
         self.cell == CellResolution::Final(*e)
     }
 
-    /// The leg's cell is final on some OTHER operation's commitment.
+    /// Some OTHER operation's commitment got to this key's leader first, or is
+    /// already final there. Either way this operation can never be final at
+    /// the key: `LeaderHeld` settles the race before the copies arrive.
     pub fn final_on_other(&self, e: &[u8; 32]) -> bool {
-        matches!(self.cell, CellResolution::Final(v) if v != *e)
+        matches!(
+            self.cell,
+            CellResolution::Final(v) | CellResolution::LeaderHeld(v) if v != *e
+        )
     }
 }
 
@@ -159,12 +164,12 @@ impl RouteFacts<'_> {
         self.legs.len() > 1
     }
 
-    /// A reserved key of this fulfillment is Dead, or final on another
+    /// A reserved key of this fulfillment was reached first, or is final, on another
     /// commitment.
     fn a_reserved_key_is_lost(&self) -> bool {
         self.legs
             .iter()
-            .any(|l| l.cell == CellResolution::Dead || l.final_on_other(&self.external_commitment))
+            .any(|l| l.final_on_other(&self.external_commitment))
     }
 
     fn a_parent_is_lost(&self) -> bool {
@@ -323,8 +328,6 @@ pub enum AttemptClass {
 /// Why a key is skippable, kept separate so a skip is always attributable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    /// The cell can never reach finality under any completion.
-    Dead,
     /// A final cell of a single-leg operation whose validation is Invalid.
     RejectedFinalSingleLeg,
     /// A final cell of an operation that can never realize.
@@ -334,17 +337,13 @@ pub enum SkipReason {
 /// Classify the attempt key of `leg` under the facts of the registered
 /// fulfillment that reserved it.
 ///
-/// A key is skippable on `Dead`, on a final cell of an operation that can
-/// never realize, or on an objective abort. `AbortFinal` is safe because
-/// `K_ful` exclusivity means the aborted fulfillment is the only one that
-/// could have realized on this key.
+/// A key is skippable only on a final cell of an operation that can never
+/// realize. No key is ever taken: a key is open until an exercise naming it
+/// reaches its leader, and nothing else can close it.
 pub fn classify_attempt(
     facts: &RouteFacts<'_>,
     leg: &LegFacts,
 ) -> (AttemptClass, Option<SkipReason>) {
-    if leg.cell == CellResolution::Dead {
-        return (AttemptClass::Skipped, Some(SkipReason::Dead));
-    }
     if leg.final_on(&facts.external_commitment) {
         // A final cell of an operation that cannot realize is stranded, never
         // a partial execution: nothing rolls back, because the cell was never
@@ -367,6 +366,9 @@ pub fn classify_attempt(
             return (AttemptClass::Consumed, None);
         }
     }
+    // The leader holds another exercise first, or another exercise is final:
+    // that key is the other operation's question, and this walker sees it as
+    // unresolved until that operation's own facts settle it.
     if leg.final_on_other(&facts.external_commitment) {
         // Another operation's commitment sits here. Whether that consumed the
         // parent is that operation's question, not this one's.
@@ -503,7 +505,7 @@ mod tests {
     #[test]
     fn a_pending_parent_outranks_a_lost_leg_instead_of_voiding() {
         let legs = [LegFacts {
-            cell: CellResolution::Dead,
+            cell: CellResolution::LeaderHeld(OTHER_E),
             ..good_leg()
         }];
         let waiting = RouteFacts {
@@ -647,10 +649,10 @@ mod tests {
         assert_eq!(resolve_position(&facts), Resolution::Pending);
     }
 
-    /// A dead attempt index below this one means the fulfillment's own key was
+    /// An earlier attempt key another operation reached first means the fulfillment's own key was
     /// never live, so nothing it holds is a consumption.
     #[test]
-    fn a_dead_earlier_attempt_makes_this_key_not_live_and_not_consumed() {
+    fn an_earlier_attempt_another_operation_reached_first_makes_this_key_not_live() {
         let legs = [LegFacts {
             attempt_live: false,
             ..good_leg()
@@ -700,12 +702,12 @@ mod tests {
 
     /// A reserved key that died, and an objective abort, are both Void.
     #[test]
-    fn a_dead_reserved_key_or_an_abort_voids() {
-        let dead = [LegFacts {
-            cell: CellResolution::Dead,
+    fn a_reserved_key_another_operation_reached_first_voids() {
+        let taken = [LegFacts {
+            cell: CellResolution::LeaderHeld(OTHER_E),
             ..good_leg()
         }];
-        assert_eq!(resolve_position(&realized(&dead)), Resolution::Void);
+        assert_eq!(resolve_position(&realized(&taken)), Resolution::Void);
     }
 
     /// Lean `resolution_is_permanent` and its counterexample
@@ -716,7 +718,7 @@ mod tests {
     #[test]
     fn a_lost_route_waits_for_evidence_instead_of_voiding() {
         let legs = [LegFacts {
-            cell: CellResolution::Dead,
+            cell: CellResolution::LeaderHeld(OTHER_E),
             ..good_leg()
         }];
         let unavailable = RouteFacts {
@@ -768,7 +770,7 @@ mod tests {
         let cells = [
             CellResolution::Final(E),
             CellResolution::Final(OTHER_E),
-            CellResolution::Dead,
+            CellResolution::LeaderHeld(OTHER_E),
             CellResolution::Unresolved,
         ];
         let parents = [
@@ -922,11 +924,12 @@ mod tests {
         assert_eq!(reason, Some(SkipReason::RejectedFinalSingleLeg));
     }
 
-    /// A dead cell is skippable with no reference to the operation at all.
+    /// A cell another operation reached first is that operation's question, not
+    /// this one's: it is never skipped or consumed from these facts alone.
     #[test]
-    fn a_dead_cell_is_skipped_on_the_storage_fact_alone() {
+    fn a_cell_another_operation_reached_first_is_that_operations_question() {
         let legs = [LegFacts {
-            cell: CellResolution::Dead,
+            cell: CellResolution::LeaderHeld(OTHER_E),
             ..good_leg()
         }];
         let facts = RouteFacts {
@@ -935,7 +938,7 @@ mod tests {
         };
         assert_eq!(
             classify_attempt(&facts, &legs[0]),
-            (AttemptClass::Skipped, Some(SkipReason::Dead))
+            (AttemptClass::Unresolved, None)
         );
     }
 
@@ -943,27 +946,29 @@ mod tests {
     /// the same however the budget chunks it.
     #[test]
     fn the_walk_is_chunking_equivalent() {
-        let dead = LegFacts {
-            cell: CellResolution::Dead,
+        // Attempts 0..3 were exercised by another operation whose route is
+        // impossible: final on its E, rejected, so each is skipped. The facts
+        // describe the ROUTE the key belongs to, because a key is consumed
+        // only when its whole operation is.
+        let rejected = LegFacts {
+            cell: CellResolution::Final(OTHER_E),
             ..good_leg()
         };
-        // The facts describe the ROUTE the key belongs to, because a key is
-        // consumed only when its whole operation is.
-        let dead_legs = [dead];
+        let rejected_legs = [rejected];
         let live_legs = [good_leg()];
         let facts_for = |attempt: u64| {
-            let (legs, leg): (&[LegFacts], LegFacts) = if attempt < 3 {
-                (&dead_legs, dead)
+            let (legs, leg, e, validation) = if attempt < 3 {
+                (&rejected_legs, rejected, OTHER_E, Invalid)
             } else {
-                (&live_legs, good_leg())
+                (&live_legs, good_leg(), E, Valid)
             };
             Some((
                 RouteFacts {
-                    external_commitment: E,
+                    external_commitment: e,
                     registered: true,
                     parent: ParentPosition::SingleRoot,
                     parent_pre_root: PRE,
-                    validation: Valid,
+                    validation,
                     storage_resolved: true,
                     legs,
                 },
@@ -1031,23 +1036,25 @@ mod tests {
     /// `u64::MAX` refuses rather than re-examining a key it already decided.
     #[test]
     fn the_attempt_counter_is_checked_not_saturated() {
-        let dead = LegFacts {
-            cell: CellResolution::Dead,
+        // Every key is skipped (final on a rejected exercise), so the walk
+        // would advance forever; at `u64::MAX` it refuses instead.
+        let rejected = LegFacts {
+            cell: CellResolution::Final(OTHER_E),
             ..good_leg()
         };
-        let legs = [dead];
+        let legs = [rejected];
         let facts_for = |_attempt: u64| {
             Some((
                 RouteFacts {
-                    external_commitment: E,
+                    external_commitment: OTHER_E,
                     registered: true,
                     parent: ParentPosition::SingleRoot,
                     parent_pre_root: PRE,
-                    validation: Valid,
+                    validation: Invalid,
                     storage_resolved: true,
                     legs: &legs,
                 },
-                dead,
+                rejected,
             ))
         };
         assert_eq!(
