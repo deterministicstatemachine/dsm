@@ -272,112 +272,120 @@ FAILED [expected-to-fail] ...
 ```
 
 
-## SoFi v8 settlement: DSM_SofiSuccessorCells.tla and DSM_SofiFulfillment.tla
+## SoFi settlement: DSM_SofiSuccessorCells.tla and DSM_SofiFulfillment.tla
 
 A route is one unilateral trader operation, P → G₁…Gₙ → F → realization. Two
 modules check it at two levels, and each leaves the other level alone:
 
 ```text
-lean4/DSMSofiSuccessorCells.lean  the ALGEBRA: 3 + 3 > 5, write-once, Dead sound on a
-lean4/DSMSofiAtomicity.lean       partial read, C = C_q, identities, the ladder
+lean4/DSMSofiSuccessorCells.lean  the ALGEBRA of leader-first cells: members keep every
+                                  value; Final(K,x) iff x is the leader's first object and
+                                  two other members hold it; one final value ever;
+                                  LeaderHeld settles loss; no key is dead; Unknown never
+                                  counts; the attempt walk
+lean4/DSMSofiAtomicity.lean       identities, the hash order, the two Core predicates
+                                  (RouteValidation with SetupValid inside;
+                                  FulfillmentConformance), the ladder, the fence
 
-tla/DSM_SofiSuccessorCells.tla    the MEMBERS: per-value holder counts, one write at a
-                                  time, partial reads and Dead records, registration-
-                                  gated cells, the attempt walk, faults outside F0
+tla/DSM_SofiSuccessorCells.tla    the MEMBERS: leader-first writes, copies, partial reads,
+                                  the position pair written together, exercises at
+                                  attempt keys, faults (a leader chosen by reachability,
+                                  counting without the leader, an unread member counted)
 
-tla/DSM_SofiFulfillment.tla       the OPERATION over registered facts: rivals between
-                                  the witnesses and F, abandonment, completers, late
-                                  evidence, parent canonicality settling, the trader
-                                  parent's branch selection (P15-3), the resolution
-                                  ladder (R14-1), the fence, genesis
+tla/DSM_SofiFulfillment.tla       the OPERATION over the facts Core derives: rivals
+                                  between the witnesses and F, abandonment, relayers,
+                                  late evidence, parent canonicality settling, the
+                                  trader parent's branch selection (P15-3), the
+                                  resolution ladder with its conformance rungs, the
+                                  fence on Core resolution, genesis
 ```
+
+**What the storage cut changed (spec Part II, §42).** No member records, refuses
+or decides anything, so the models hold no Dead record, no outcome register
+`K_out`, no registration written by a member and no ingress rule. Registration
+is the race at the leader of the position pair; completion and permanent defeat
+are derived from the leg reads; FulfillmentConformance and RouteValidation are
+separate three-valued Core predicates and registration supplies no truth value
+for either. Early cell occupancy is reachable (`_EarlyCellReachable`,
+`_EarlyOccupancyReachable`); early cell consumption is not
+(`EarlyCellCannotCauseConsumption`). One arm the walk gained here and the Core
+walk still owes (rebuild step R12): an exercise final at a key whose F can never
+register, because its trader's position already holds another claim, is
+skipped (`LostPosition`, spec §21.1).
 
 **The trader parent (P15-3, R17-3).** `parent` carries the claim at `p` that P
 was built on: `"single"` for an ordinary claim, or one conditional claim as
 `"open"` → `"taken"` / `"other"` / `"none"`, selected once by
-`SelectParentBranch`. Both kinds are initial states, so one run covers each. The
-two rungs sit BELOW registration and ABOVE every route result: `q` is Pending
-while `p` is, and Invalid once `p` selected another root or none. Arm (iv) of
-`RouteImpossible` is that same fact, and it reads no evidence — which is what
-lets a stranded cell of such an operation be skipped while `RouteValidation` is
-still Unavailable. An open parent is in `ProgressEnabled`: the operation is
-waiting on something a completer cannot supply.
+`SelectParentBranch`. Both kinds are initial states, so one run covers each.
 
 **Liveness as quiescence.** Every action in both models is bounded, so every
 behaviour is finite, and under weak fairness on the required actions a behaviour
 ends in a state where none of them is enabled. "A registered F resolves under
-evidence availability" (R13-5) and "witnesses never lock" are therefore
-invariants of the form *quiescent ⇒ resolved*. They run in the standard gate, not
-in the opt-in liveness pass, and their falsifications are ordinary invariant
-violations. Trader actions are discretionary and never required.
+evidence availability" (R13-5) and "witnesses never lock" are invariants of the
+form *quiescent ⇒ resolved*. A trader that still holds a decision (an open
+parent branch, an exercise it carried but never registered) keeps the world
+non-quiescent: those are questions a completer cannot answer.
 
-Each standard config has an `_AdverseFacts` twin (an Invalid operation, and in
-the fulfillment model an unvalidated vault creation) that must pass the same
-invariants, so no falsification below owes its violation to those facts.
+**Expected to fail on the floor (§42.3).** `_UnclassifiableOccupant` is P1: a
+value that names an attempt key but carries nothing Core can classify wins the
+leader and strands the ladder. It stays a falsification config until rebuild
+step R11 makes every successor-key value an exercise carrying its closure, when
+`ExerciseCarriesClosure` flips and the property joins the standard set.
+`_TraderOnlyCompletion` is P2: a write authorization that only the trader
+satisfies leaves a registered F unresolved.
 
 ### Falsifications and non-vacuity (machine-gated)
 
-Each config lists one invariant and must violate exactly it.
+Each config lists one invariant and must violate exactly it; the three standard
+configs per module (`.cfg`, `_AdverseFacts`, and the cells' `_SecondAttempt`)
+carry the full invariant set and must pass.
 
 | Module | Config | Removes / claims | Must violate |
 |---|---|---|---|
-| cells | `_OverwriteAllowed` | write-once | `FinalityIsPermanent` |
-| cells | `_PermanentStoreLoss` | durability (F0) | `FinalityIsPermanent` |
-| cells | `_PermanentStoreLossRegister` | durability of K_ful | `RegistrationIsPermanent` |
-| cells | `_EquivocatingMember` | non-equivocation (F0) | `FinalUnique` |
-| cells | `_QuorumTwo` | finality at three | `FinalUnique` |
-| cells | `_QuorumTwoRegister` | registration at three | `OneFulfillmentPerPosition` |
-| cells | `_UnreadDroppedFromCount` | unread members in `u` | `RecordsNeverContradict` |
-| cells | `_TimeoutRecordsDead` | ArithDead before a Dead record | `RecordsNeverContradict` |
-| cells | `_NumericHole` | `a > 0 ⇒ resolved(a − 1)` | `NoNumericHoles` |
+| cells | `_AdverseFacts` | T's and the rival's operations Invalid, F non-conforming (standard set) | `(standard set)` |
 | cells | `_AttemptLiveOmitted` | AttemptLive | `ConsumedImpliesAttemptLive` |
 | cells | `_AttemptLiveOmittedTwoConsumers` | AttemptLive | `OneConsumerPerParent` |
-| cells | `_CellsBeforeFulfillment` | the registration gate on cells | `CellsOnlyAfterFulfillmentRegistered` |
-| cells | `_CellsBeforeFulfillmentSelfSplit` | the registration gate on cells | `SelfSplitCreatesNoCells` |
-| cells | `_FulfillmentSpray` | the F's own attempt vector | `CellsOnlyAfterFulfillmentRegistered` |
-| cells | `_RelayWithoutKeyBinding` | P's key on F ingress | `RelayNeverForges` |
-| cells | `_UnavailableAsInvalid` | three-valued validation | `UnavailableNeverRejects` |
-| cells | `_InvalidFinalNotSkipped` | the Invalid skip | `ObjectiveRejectionImpliesSkipped` |
+| cells | `_AvailabilityLeader` | the leader is whoever is reachable | `LeaderFromCommittedSet` |
+| cells | `_AvailabilityLeaderTwoFinals` | the leader is whoever is reachable | `AtMostOneFinalPerCoordinate` |
 | cells | `_ConsumptionReachable` | *claim:* nothing is consumed | `NeverConsumed` |
+| cells | `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
+| cells | `_CountWithoutLeaderTwoFinals` | finality counted over any three holders | `AtMostOneFinalPerCoordinate` |
+| cells | `_EarlyOccupancyReachable` | *claim:* a key is never occupied early | `NeverEarlyOccupied` |
+| cells | `_ExerciseCountsAnywhere` | an exercise counts at a key it does not name | `ExerciseNamesItsKey` |
+| cells | `_InvalidFinalNotSkipped` | the Invalid skip | `ObjectiveRejectionImpliesSkipped` |
+| cells | `_LossAtLeaderReachable` | *claim:* the race at a leader is never lost | `NeverLostAtLeader` |
+| cells | `_OccupancyIsConsumption` | a final exercise consumes with no Core predicate | `EarlyCellCannotCauseConsumption` |
+| cells | `_RegistrationIsConformance` | a registered F taken as conforming | `RegistrationIsNotConformance` |
+| cells | `_RegistrationReachable` | *claim:* nothing registers | `NeverRegistered` |
+| cells | `_SecondAttempt` | F names attempt 1, the rival's final at K0 Invalid (standard set) | `(standard set)` |
 | cells | `_SecondAttemptConsumptionReachable` | *claim:* attempt 1 never consumes | `NeverConsumedAtSecondAttempt` |
-| cells | `_DeadRecordReachable` | *claim:* no key is recorded Dead | `NeverDeadRecorded` |
-| cells | `_SelfSplitReachable` | *claim:* a position never splits | `NoSelfSplit` |
-| fulfillment | `_PrecommitAsExercise` | P occupies no position | `PrecommitNonEconomic` |
-| fulfillment | `_LockingPolicyFulfillments` | non-locking witnesses | `PolicyFulfillmentNeverLocks` |
-| fulfillment | `_PartialFulfillment` | the complete witness set | `FulfillmentAtomic` |
+| cells | `_SplitPositionPair` | K_ful(q) and K_root(q) written in two steps | `PositionPairAtomic` |
+| cells | `_UnavailableAsInvalid` | three-valued validation | `UnavailableNeverRejects` |
+| cells | `_UnclassifiableOccupant` | *P1, expected to fail until R11:* a value naming the key but carrying nothing Core can classify wins its leader | `NoUnclassifiableOccupiedAttempt` |
+| cells | `_UnreadCountedAsCopy` | an unread member counts as a holder | `PartialReadIsSound` |
+| fulfillment | `_AdverseFacts` | both routes Invalid, vault B's creation unvalidated (standard set) | `(standard set)` |
+| fulfillment | `_CompleteRejectedNotSkipped` | arm (i) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
 | fulfillment | `_CompleteWithoutCanonicalParents` | established parent canonicality | `OnlyCanonicalParentsConsumed` |
-| fulfillment | `_ThirdPartyAbort` | objective Abort | `AbortOnlyOnObjectiveFailure` |
-| fulfillment | `_LaterKeyAbort` | Abort on the F's OWN keys | `AbortOnlyOnObjectiveFailure` |
-| fulfillment | `_CompleteRejectedNotSkipped` | arm (i) without Complete | `ObjectiveRejectionImpliesSkipped` |
-| fulfillment | `_OrphanNotSkipped` | arm (ii) without Complete | `ObjectiveRejectionImpliesSkipped` |
-| fulfillment | `_StaleLegNotSkipped` | arm (iii′) without Complete | `ObjectiveRejectionImpliesSkipped` |
-| fulfillment | `_VoidBeforeValidation` | R14-1 | `ResolutionPermanent` |
-| fulfillment | `_OrdinaryClaimBypassesFence` | the fence for every claim kind | `AtMostOneStorageUnresolvedFulfillmentPerLineage` |
-| fulfillment | `_DescendantValidatedByStorage` | the Core local fence | `SpeculativeDescendantsNeverCanonicalUnderInvalidBranch` |
-| fulfillment | `_RegisteredGenesisAccepted` | validated creation | `GenesisCanonicalOnlyIfCreationValid` |
-| fulfillment | `_PermanentEvidenceUnavailability` | R13-5's evidence assumption | `QuiescentFulfillmentResolved` |
-| fulfillment | `_TraderOnlyCompletion` | completion by anyone | `QuiescentFulfillmentResolved` |
+| fulfillment | `_ConformanceDropped` | FulfillmentConformance in ConsumedRoute | `RealizedRequiresConformance` |
+| fulfillment | `_DescendantOnStorageResolution` | the fence on Core resolution, not storage resolution | `UnresolvedConditionalNeverPredecessor` |
+| fulfillment | `_EarlyCellReachable` | *claim:* no key holds an exercise before registration | `EarlyCellNeverOccupied` |
 | fulfillment | `_GuaranteedSuccessClaim` | *claim:* valid, canonical F never Voids | `RegisteredValidFulfillmentNeverVoids` |
-| fulfillment | `_RouteRealizable` | *claim:* the route never realizes | `RouteNeverRealized` |
+| fulfillment | `_LockingPolicyFulfillments` | non-locking witnesses | `PolicyFulfillmentNeverLocks` |
+| fulfillment | `_MalformedFulfillmentRegisters` | *claim:* a malformed F never registers | `MalformedFulfillmentNeverRegisters` |
+| fulfillment | `_OccupancyIsConsumption` | final legs consume with no Core predicate | `EarlyCellCannotCauseConsumption` |
+| fulfillment | `_OccupancyIsConsumptionInvalid` | final legs of an Invalid route consume | `InvalidStoredNeverAdmitted` |
+| fulfillment | `_OrdinaryClaimBypassesFence` | the fence for every claim kind | `UnresolvedConditionalNeverPredecessor` |
+| fulfillment | `_OrphanNotSkipped` | arm (ii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_ParentArmReachable` | *claim:* the parent arm never decides Invalid | `ParentArmNeverDecidesInvalid` |
 | fulfillment | `_ParentBranchIgnored` | the branch T0 selected (P15-3) | `MismatchedParentNeverRealizes` |
 | fulfillment | `_PendingParentIsImpossible` | an undecided T0 decides nothing | `PendingParentDecidesNothing` |
-| fulfillment | `_ParentArmReachable` | *claim:* the parent arm never decides Invalid | `ParentArmNeverDecidesInvalid` |
-
-**Plan names that changed, and why.** `UnreadCountedEmpty` → `UnreadDroppedFromCount`:
-under the ruled formula Empty counts toward `u`, so counting an unread member as
-Empty is arithmetically harmless (the Lean module proves it); the unsound variant
-drops the member from the count. `TimeoutAdvancesKey` → `TimeoutRecordsDead`: the
-storage projection refuses the next attempt until the key is resolved, so a timeout
-can only advance the key by being recorded Dead. `NoReservation` /
-`CellsBeforeRegistration` → `CellsBeforeFulfillment`; `ReservationSpray` →
-`FulfillmentSpray`.
-
-**Not modelled here, and why.** `ParentByRootValueOnly`: `K^(0)` hashes the
-vault id with the root, fixed by the Phase B derivation vectors. `InfiniteAdversary`:
-not a premise R13-5 needs. Every register a registered F depends on — its own
-attempt keys, `K_out`, its position — is write-once across five members, so the
-interference any one F can see is bounded by construction; there is no unbounded
-behaviour for the config to exhibit. `StaleArmRequiresRegistration`:
-a final cell already implies a registered F. `ExerciseIsIrreversibleAfterFirstPublication`
-was corrected by R11-4 to registration: `RegistrationIsPermanent` here, and
-`one_member_publication_is_not_exercise` in Lean.
+| fulfillment | `_PermanentEvidenceUnavailability` | R13-5's evidence assumption | `QuiescentFulfillmentResolved` |
+| fulfillment | `_PrecommitAsExercise` | P occupies no position | `PrecommitNonEconomic` |
+| fulfillment | `_ProducerBuildsOnOpenPredecessor` | the producer fails closed on an open predecessor (R6) | `QuiescentFulfillmentResolved` |
+| fulfillment | `_RegisteredGenesisAccepted` | validated creation | `GenesisCanonicalOnlyIfCreationValid` |
+| fulfillment | `_RegistrationIsConformance` | a registered F taken as conforming | `RegistrationIsNotConformance` |
+| fulfillment | `_RouteRealizable` | *claim:* the route never realizes | `RouteNeverRealized` |
+| fulfillment | `_SetupValidRemoved` | SetupValid inside RouteValidation | `RealizedRequiresValidSetup` |
+| fulfillment | `_StaleLegNotSkipped` | arm (iii) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
+| fulfillment | `_TraderOnlyCompletion` | *P2:* completion by anyone (a write authorization) | `QuiescentFulfillmentResolved` |
+| fulfillment | `_VoidBeforeValidation` | Void requires RouteValidation = Valid | `ResolutionPermanent` |
