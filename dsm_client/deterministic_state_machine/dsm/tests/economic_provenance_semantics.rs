@@ -9,27 +9,22 @@
 #![allow(clippy::disallowed_methods)]
 
 use dsm::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceSameTransitionMove,
-    CreditSourceValidatedPeerDebit,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedPeerDebit,
 };
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::provenance::{
-    same_transition_move_source_id, validated_peer_debit_source_id, verify_credit_source,
-    verify_transition_provenance, FaucetTicketWin, ProvenanceContext, ProvenanceError,
-    PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+    validated_peer_debit_source_id, verify_credit_source, verify_transition_provenance,
+    FaucetTicketWin, ProvenanceContext, ProvenanceError, PeerLineageFailure, ProvenanceResolver,
+    ValidatedPeerTransition,
 };
-use dsm::economic::state::{
-    EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState, EconomicVaultReserveState,
-};
+use dsm::economic::state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
 use dsm::economic::tree::ECONOMIC_SMT_HEIGHT;
 use dsm::economic::witness::EconomicTransitionWitness;
 
 const G: [u8; 32] = [0x11; 32];
 const DEV: [u8; 32] = [0x22; 32];
 const ERA: [u8; 32] = [0xAA; 32];
-const SOFI: [u8; 32] = [0xBB; 32];
 const OP_ID: [u8; 32] = [0x0E; 32];
-const VAULT: [u8; 32] = [0xCC; 32];
 
 struct NoPeers;
 impl ProvenanceResolver for NoPeers {
@@ -52,20 +47,6 @@ impl ProvenanceResolver for NoPeers {
     }
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _i: u64) -> Option<FaucetTicketWin> {
         None
-    }
-
-    fn parent_binding_observation(
-        &self,
-        _resource_key: &[u8; 32],
-        _storage_set: &dsm::ccb::StorageSetMembers,
-        _quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // This fixture roots no bindings: it cannot observe the key, which is
-        // not the same as observing it free.
-        dsm::dlv::binding_observation::BindingObservation::Unavailable {
-            attributed: 0,
-            required: 2,
-        }
     }
 
     fn immutable_evidence(
@@ -113,15 +94,6 @@ fn bal(pc: [u8; 32], amount: u64) -> EconomicLeafState {
     EconomicLeafState::Balance(EconomicBalanceState::new(pc, amount).expect("nonzero"))
 }
 
-fn reserve(vault_id: [u8; 32], pc: [u8; 32], amount: u64) -> EconomicLeafState {
-    EconomicLeafState::VaultReserve(EconomicVaultReserveState {
-        vault_id,
-        policy_commit: pc,
-        amount,
-        vault_sequence: 0,
-    })
-}
-
 fn mutation(
     pre: Option<EconomicLeafState>,
     post: Option<EconomicLeafState>,
@@ -137,124 +109,9 @@ fn witness(
         .expect("structurally valid")
 }
 
-/// Debit 30 ERA from the balance at index 0, credit it into a vault reserve
-/// at index 1, funded by the same-transition move.
-///
-/// `SameTransitionMove` is a **move, not a swap**: it relocates the SAME asset
-/// — the `DlvCreateFundedV2` shape, where balance becomes encumbered reserve.
-/// A cross-asset "move" is refused, and that refusal has its own test below.
-fn move_witness(credit_amount: u64) -> EconomicTransitionWitness {
-    witness(
-        vec![
-            mutation(Some(bal(ERA, 100)), Some(bal(ERA, 70))),
-            mutation(None, Some(reserve(VAULT, ERA, credit_amount))),
-        ],
-        vec![CreditSource::SameTransitionMove(
-            CreditSourceSameTransitionMove {
-                credit_mutation_index: 1,
-                debit_mutation_index: 0,
-            },
-        )],
-    )
-}
-
 // ── SourceId derivation ────────────────────────────────────────────────────
 
-#[test]
-fn source_ids_are_derived_and_distinguish_what_they_should() {
-    // Same inputs, same id — so one underlying debit yields one id however
-    // often it is presented, which is what makes "no source funds two credits"
-    // checkable at all.
-    assert_eq!(
-        same_transition_move_source_id(&OP_ID, 0),
-        same_transition_move_source_id(&OP_ID, 0)
-    );
-    // Different debit inside one operation is a different source.
-    assert_ne!(
-        same_transition_move_source_id(&OP_ID, 0),
-        same_transition_move_source_id(&OP_ID, 1)
-    );
-    // The SAME mutation index in a DIFFERENT operation is a different source.
-    // Without operation scoping, two transitions would collide in the
-    // consumed-source space.
-    assert_ne!(
-        same_transition_move_source_id(&OP_ID, 0),
-        same_transition_move_source_id(&[0x0F; 32], 0)
-    );
-
-    // Peer coordinates name exactly one debit in exactly one validated
-    // transition; every component must matter.
-    let base = validated_peer_debit_source_id(&G, &DEV, 4, 1);
-    assert_ne!(
-        base,
-        validated_peer_debit_source_id(&[0x99; 32], &DEV, 4, 1)
-    );
-    assert_ne!(base, validated_peer_debit_source_id(&G, &[0x99; 32], 4, 1));
-    assert_ne!(base, validated_peer_debit_source_id(&G, &DEV, 5, 1));
-    assert_ne!(base, validated_peer_debit_source_id(&G, &DEV, 4, 2));
-
-    // And the two source classes never collide.
-    assert_ne!(base, same_transition_move_source_id(&OP_ID, 1));
-}
-
 // ── The arms ───────────────────────────────────────────────────────────────
-
-#[test]
-fn an_intra_transition_move_is_funded_by_its_own_debit() {
-    let w = move_witness(30);
-    let funded = verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64]))
-        .expect("the debit funds it");
-    assert_eq!(funded.amount, 30);
-    assert_eq!(funded.policy_commit, ERA);
-    assert_eq!(
-        funded.source_id,
-        same_transition_move_source_id(&OP_ID, 0),
-        "derived from the operation and the debit index, never supplied"
-    );
-}
-
-#[test]
-fn a_source_must_fund_this_credit_not_merely_exist() {
-    // A real debit of 30 cannot fund a credit of 500. This is where a
-    // plausible-looking provenance object stops being sufficient.
-    let w = move_witness(500);
-    assert_eq!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
-        ProvenanceError::AmountMismatch {
-            source: 30,
-            credit: 500
-        }
-    );
-
-    // The negative control for the check above: same asset, same amount, so
-    // it must succeed. Without this the AmountMismatch assertion could be
-    // passing for some unrelated reason.
-    let ok = move_witness(30);
-    assert!(
-        verify_credit_source(&ok.credit_sources[0], &ok, &NoPeers, &ctx(1, &[0xAB; 64])).is_ok()
-    );
-}
-
-#[test]
-fn an_asset_mismatch_is_refused() {
-    // Debit SOFI, credit ERA, claiming the SOFI debit funds it.
-    let w = witness(
-        vec![
-            mutation(Some(bal(SOFI, 100)), Some(bal(SOFI, 70))),
-            mutation(None, Some(bal(ERA, 30))),
-        ],
-        vec![CreditSource::SameTransitionMove(
-            CreditSourceSameTransitionMove {
-                credit_mutation_index: 1,
-                debit_mutation_index: 0,
-            },
-        )],
-    );
-    assert!(matches!(
-        verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &ctx(1, &[0xAB; 64])),
-        Err(ProvenanceError::AssetMismatch { .. })
-    ));
-}
 
 /// Issuance is resolvable NOW — class `0x0029` exists — but only against the
 /// authenticated operation it authorizes.
@@ -334,44 +191,6 @@ fn an_unvalidated_peer_debit_fails_closed() {
 // ── Consumed-source records ────────────────────────────────────────────────
 
 #[test]
-fn an_intra_transition_move_needs_no_consumed_source_record() {
-    // Its debit is inside the same write set, so it is consumed by
-    // construction and could never be presented again. Demanding a record
-    // would be bookkeeping for an impossibility.
-    let w = move_witness(30);
-    let funded = verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64])).expect("funded");
-    assert_eq!(funded.len(), 1);
-}
-
-#[test]
-fn duplicate_source_ids_are_refused() {
-    // Two credits, both claiming the SAME debit funds them. Each source is
-    // individually well-formed and the amounts even match; only the derived
-    // ids reveal that one debit is being spent twice.
-    let w = witness(
-        vec![
-            mutation(Some(bal(ERA, 100)), Some(bal(ERA, 70))),
-            mutation(None, Some(reserve(VAULT, ERA, 30))),
-            mutation(None, Some(reserve([0xDD; 32], ERA, 30))),
-        ],
-        vec![
-            CreditSource::SameTransitionMove(CreditSourceSameTransitionMove {
-                credit_mutation_index: 1,
-                debit_mutation_index: 0,
-            }),
-            CreditSource::SameTransitionMove(CreditSourceSameTransitionMove {
-                credit_mutation_index: 2,
-                debit_mutation_index: 0,
-            }),
-        ],
-    );
-    assert_eq!(
-        verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64])).unwrap_err(),
-        ProvenanceError::DuplicateSourceId
-    );
-}
-
-#[test]
 fn a_transition_with_no_credits_needs_no_provenance() {
     let w = witness(
         vec![mutation(Some(bal(ERA, 100)), Some(bal(ERA, 70)))],
@@ -399,144 +218,3 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 }
 
 // ── 2c-H H9: the 0x0035 arm, before it fetches anything ────────────────────
-
-const ROUTE_MID: [u8; 32] = [0x3C; 32];
-const ROUTE_X: [u8; 32] = [0x58; 32];
-
-fn route_leg(
-    vault: u8,
-    parent: u8,
-    input: [u8; 32],
-    output: [u8; 32],
-    input_amount: u64,
-    output_amount: u64,
-) -> dsm::types::operations::DlvRouteLeg {
-    dsm::types::operations::DlvRouteLeg {
-        vault_id: [vault; 32],
-        owner_public_key: vec![0x01; 64],
-        owner_devid: [0x41; 32],
-        owner_genesis: [0x42; 32],
-        input_policy_commit: input,
-        output_policy_commit: output,
-        parent_sequence: 7,
-        parent_binding: [parent; 32],
-        input_amount,
-        output_amount,
-        fee_bps: 30,
-        settlement_receipt_id: dsm::dlv::settlement_receipt_leaf::derive_receipt_id(
-            &[vault; 32],
-            &ROUTE_X,
-        ),
-    }
-}
-
-/// `ERA → ROUTE_MID → SOFI`, settled by this suite's identity under `ak`.
-fn route_settle(ak: &[u8]) -> dsm::types::operations::Operation {
-    dsm::types::operations::Operation::DlvRouteSettle {
-        legs: vec![
-            route_leg(0x03, 0xE1, ERA, ROUTE_MID, 1_000, 453),
-            route_leg(0x04, 0xE2, ROUTE_MID, SOFI, 453, 560),
-        ],
-        route_commit_bytes: vec![0x09; 8],
-        external_commitment_x: ROUTE_X,
-        settler_public_key: ak.to_vec(),
-        settler_devid: DEV,
-        signature: vec![0x77; 48],
-        mode: dsm::types::operations::TransactionMode::Unilateral,
-    }
-}
-
-/// `E_R` naming `(vault, parent_sequence)` per entry, in the order given.
-fn route_source(entries: &[(u8, u64)], x: [u8; 32]) -> CreditSource {
-    CreditSource::DlvRouteReserveConsumption(
-        dsm::economic::credit::CreditSourceDlvRouteReserveConsumption {
-            credit_mutation_index: 0,
-            x,
-            legs: entries
-                .iter()
-                .map(
-                    |(vault, seq)| dsm::economic::credit::RouteLegReserveConsumption {
-                        vault_id: [*vault; 32],
-                        parent_sequence: *seq,
-                        owner_economic_position: 3,
-                        reserve_consumption_evidence_addr: [*vault ^ 0xF0; 32],
-                    },
-                )
-                .collect(),
-        },
-    )
-}
-
-fn route_verdict<'a>(
-    source: CreditSource,
-    op: Option<&'a dsm::types::operations::Operation>,
-    ak: &'a [u8],
-) -> Result<(), ProvenanceError> {
-    let w = witness(vec![mutation(None, Some(bal(SOFI, 560)))], vec![source]);
-    let mut c = ctx(1, ak);
-    c.verified_operation = op;
-    verify_credit_source(&w.credit_sources[0], &w, &NoPeers, &c).map(|_| ())
-}
-
-/// Every coordinate the arm can check before fetching is checked, each alone;
-/// with every coordinate right it reaches the per-vault derivation, whose
-/// evidence fetch this fixture cannot serve — INCOMPLETE, never invalid.
-#[test]
-fn a_route_reserve_consumption_refuses_every_coordinate_it_can_see_before_fetching() {
-    let ak = [0xAB; 64];
-    let op = route_settle(&ak);
-    let good = [(0x03, 7), (0x04, 7)];
-    let refused = |r: Result<(), ProvenanceError>, what: &str| {
-        assert!(
-            matches!(
-                r,
-                Err(ProvenanceError::DlvRouteReserveConsumptionInvalid(_))
-            ),
-            "{what}: {r:?}"
-        );
-    };
-    refused(
-        route_verdict(route_source(&good, ROUTE_X), None, &ak),
-        "no verified operation",
-    );
-    let noop = dsm::types::operations::Operation::Noop;
-    refused(
-        route_verdict(route_source(&good, ROUTE_X), Some(&noop), &ak),
-        "an operation that is not a route settle",
-    );
-    refused(
-        route_verdict(route_source(&good[..1], ROUTE_X), Some(&op), &ak),
-        "one evidence entry for two legs",
-    );
-    refused(
-        route_verdict(route_source(&good, [0x59; 32]), Some(&op), &ak),
-        "another x",
-    );
-    refused(
-        route_verdict(
-            route_source(&[(0x04, 7), (0x03, 7)], ROUTE_X),
-            Some(&op),
-            &ak,
-        ),
-        "E_R not in route-leg order",
-    );
-    refused(
-        route_verdict(
-            route_source(&[(0x03, 7), (0x04, 8)], ROUTE_X),
-            Some(&op),
-            &ak,
-        ),
-        "another generation for leg 1",
-    );
-
-    let reached = route_verdict(route_source(&good, ROUTE_X), Some(&op), &ak);
-    assert!(
-        matches!(
-            reached,
-            Err(ProvenanceError::OwnerLineage(
-                PeerLineageFailure::Incomplete(_)
-            ))
-        ),
-        "{reached:?}"
-    );
-}

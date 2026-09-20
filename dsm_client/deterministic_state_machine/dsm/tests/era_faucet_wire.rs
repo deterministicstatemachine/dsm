@@ -145,20 +145,6 @@ impl ProvenanceResolver for OneTicket {
         })
     }
 
-    fn parent_binding_observation(
-        &self,
-        _resource_key: &[u8; 32],
-        _storage_set: &dsm::ccb::StorageSetMembers,
-        _quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // This fixture roots no bindings: it cannot observe the key, which is
-        // not the same as observing it free.
-        dsm::dlv::binding_observation::BindingObservation::Unavailable {
-            attributed: 0,
-            required: 2,
-        }
-    }
-
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -391,20 +377,6 @@ fn no_quorum_winner_fails_closed_and_out_of_range_is_refused() {
             None
         }
 
-        fn parent_binding_observation(
-            &self,
-            _resource_key: &[u8; 32],
-            _storage_set: &dsm::ccb::StorageSetMembers,
-            _quorum: u32,
-        ) -> dsm::dlv::binding_observation::BindingObservation {
-            // This fixture roots no bindings: it cannot observe the key, which
-            // is not the same as observing it free.
-            dsm::dlv::binding_observation::BindingObservation::Unavailable {
-                attributed: 0,
-                required: 2,
-            }
-        }
-
         fn immutable_evidence(
             &self,
             _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -476,7 +448,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             Some(tip),
             None,
             None,
-            None,
         )
         .expect_err("a claim with no pending admission must not install balance");
     assert!(
@@ -501,7 +472,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             Some(tip),
             None,
             None,
-            None,
         )
         .expect("the admitted operation advances");
     assert_eq!(
@@ -522,7 +492,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             Some(tip),
             None,
             None,
-            None,
         )
         .expect_err("the admission authorizes exactly one operation");
     assert!(err.to_string().contains("does not match the pending"));
@@ -540,7 +509,6 @@ fn faucet_claim_cannot_install_balance_without_the_admission_fence() {
             Some(tip),
             None,
             None,
-            None
         )
         .is_err());
 }
@@ -582,7 +550,6 @@ fn conservation_refuses_anything_but_the_derived_payout() {
                 None,
                 std::slice::from_ref(&delta),
                 Some(tip),
-                None,
                 None,
                 None,
             )

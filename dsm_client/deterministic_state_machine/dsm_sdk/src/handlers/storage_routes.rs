@@ -1941,7 +1941,6 @@ impl AppRouterImpl {
                                 &prereqs.network_id,
                                 &prereqs.set,
                                 &prereqs.validated,
-                                econ_tree.into_inner(),
                                 built.parts.witness,
                                 built.parts.manifest,
                                 signed_op,
@@ -2938,32 +2937,6 @@ impl AppRouterImpl {
                             errors.push(format!("artifact republish sweep failed: {e}"));
                         }
                     }
-                    // RESTART RECOVERY FOR UNRESOLVED BINDINGS (Req 16.5).
-                    // THE one mechanism that re-drives a QuorumBind transaction:
-                    // every unresolved trader-parent fence is reconstructed from
-                    // its persisted record, resumed ABOVE its persisted ballot,
-                    // and driven to a terminal outcome. It runs HERE — after the
-                    // client DB, device identity, storage-set catalog and
-                    // transport are all up, and BEFORE the close-intent pass
-                    // below, which finalizes whatever this resolved.
-                    //
-                    // A fence that cannot be resolved because the fleet is
-                    // unreachable STAYS INTACT and is retried on a later sync.
-                    // It is never turned into "the parent is free".
-                    match crate::sdk::settlement_resume::recover_all().await {
-                        Ok(unresolved) => {
-                            if unresolved > 0 {
-                                log::info!(
-                                    "[storage.sync] {unresolved} binding(s) still unresolved; \
-                                     they stay fenced and retry on a later sync"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("[storage.sync] binding recovery sweep errored: {e}");
-                            errors.push(format!("binding recovery failed: {e}"));
-                        }
-                    }
                     // A PENDING ECONOMIC ADMISSION STRANDED BY A CRASH (3.5b PR4;
                     // ownership ruled 2026-09-15). An advance whose admission never
                     // finished has not produced its post-admission artifacts. For a
@@ -3009,51 +2982,6 @@ impl AppRouterImpl {
                                 );
                                 errors.push(format!("stranded admission resume failed: {e}"));
                             }
-                        }
-                    }
-                    // A vault close that was interrupted between its binding and
-                    // its canonical commit. It no longer re-drives the binding —
-                    // recovery above owns that — and only finalizes the local
-                    // terminal state. Never infers closure: the canonical state
-                    // decides.
-                    match self.resume_close_intents().await {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] close-intent resume errored: {e}");
-                            errors.push(format!("close-intent resume failed: {e}"));
-                        }
-                    }
-                    // A market settlement whose completion was interrupted —
-                    // bound, advanced, its receipt not yet at quorum (2c-D §14,
-                    // D-f). Finishes the SAME settlement; never retries one.
-                    match self.resume_settlement_completions().await {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] settlement completion resume errored: {e}");
-                            errors.push(format!("settlement completion resume failed: {e}"));
-                        }
-                    }
-                    // A released settlement whose Def 14.2 receipt obligation
-                    // was never recorded (2c-F). Rebuilds the record from
-                    // durable facts; never re-certifies, never touches a fence.
-                    match self.resume_receipt_publications().await {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] receipt recovery errored: {e}");
-                            errors.push(format!("receipt recovery failed: {e}"));
-                        }
-                    }
-                    // OWNER CATCH-UP (amendment 2c-G, ruling G2): every
-                    // certified settlement traders realized against this
-                    // device's own vaults while it was away, applied oldest
-                    // first and admitted. LAST, and it gates nothing: a failure
-                    // is local to its vault and retried on a later sync, and it
-                    // never calls sync, so there is no loop.
-                    match self.resume_owner_catch_up().await {
-                        Ok(n) => pushed += n,
-                        Err(e) => {
-                            log::warn!("[storage.sync] owner catch-up errored: {e}");
-                            errors.push(format!("owner catch-up failed: {e}"));
                         }
                     }
                 }
@@ -3595,11 +3523,15 @@ mod tests {
     }
 
     fn seed_sender_contact(devid: [u8; 32], ak: Vec<u8>) -> String {
+        seed_sender_contact_with_genesis(devid, [0xAAu8; 32], ak)
+    }
+
+    fn seed_sender_contact_with_genesis(devid: [u8; 32], genesis: [u8; 32], ak: Vec<u8>) -> String {
         let c = crate::storage::client_db::ContactRecord {
             contact_id: "cid-trust-root".to_string(),
             device_id: devid.to_vec(),
             alias: "sender".to_string(),
-            genesis_hash: [0xAAu8; 32].to_vec(),
+            genesis_hash: genesis.to_vec(),
             public_key: ak,
             kyber_public_key: vec![0xCCu8; 1184],
             current_chain_tip: None,
@@ -3720,12 +3652,9 @@ mod tests {
     /// under (B-canonical target) and carries in its delta: the relationship's
     /// genesis seed (what the sender pins before any step is learned) → an
     /// opaque first child.
-    fn test_b_pair() -> ([u8; 32], [u8; 32]) {
+    fn b_pair_for(a: &[u8; 32], b: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
         (
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &[0x0Au8; 32],
-                &[0x0Bu8; 32],
-            ),
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(a, b),
             [0x72u8; 32],
         )
     }
@@ -3766,8 +3695,8 @@ mod tests {
         let target = compute_receipt_b_canonical_target(
             &commitment,
             &commitment,
-            &test_b_pair().0,
-            &test_b_pair().1,
+            &b_pair_for(&a, &b).0,
+            &b_pair_for(&a, &b).1,
         );
         r.sig_b = sphincs_sign(&ek_sk_b, &target).expect("sig_b");
         r
@@ -3884,8 +3813,12 @@ mod tests {
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
             kyber_ct_b: b.kyber_ct_b,
-            b_parent_tip: test_b_pair().0.to_vec(),
-            b_child_tip: test_b_pair().1.to_vec(),
+            b_parent_tip: b_pair_for(&receipt_with_b.devid_a, &receipt_with_b.devid_b)
+                .0
+                .to_vec(),
+            b_child_tip: b_pair_for(&receipt_with_b.devid_a, &receipt_with_b.devid_b)
+                .1
+                .to_vec(),
             recipient_economic_release_addr: release_addr.map(|a| a.to_vec()).unwrap_or_default(),
         }
         .encode_to_vec();
@@ -3899,6 +3832,7 @@ mod tests {
     struct SeededStep {
         a: [u8; 32],
         b: [u8; 32],
+        b_genesis: [u8; 32],
         b_ak_pk: Vec<u8>,
         b_ak_sk: Vec<u8>,
         parent: [u8; 32],
@@ -3962,13 +3896,73 @@ mod tests {
     fn seed_submitted_step_with_recipient_ak(b_ak_pk: Vec<u8>, b_ak_sk: Vec<u8>) -> SeededStep {
         let (ek_pk_a, ek_sk_a) =
             dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
-        seed_submitted_step_with_keys(b_ak_pk, b_ak_sk, ek_pk_a, ek_sk_a)
+        seed_submitted_step_with_keys(
+            [0x0Bu8; 32],
+            [0xAAu8; 32],
+            b_ak_pk,
+            b_ak_sk,
+            ek_pk_a,
+            ek_sk_a,
+        )
+    }
+
+    /// A REAL recipient: a two-device pair whose B claimed ERA, so B's
+    /// economic lineage at position 1 is registered at its leader, published
+    /// with its manifest and evidence, and walkable by the sender's release
+    /// check. The sender step is then seeded against B's actual identity.
+    struct RealRecipient {
+        pair: crate::test_support::two_device::Pair,
+        position: u64,
+        root: [u8; 32],
+        manifest_addr: [u8; 32],
+    }
+
+    async fn real_recipient() -> RealRecipient {
+        let pair = crate::test_support::two_device::Pair::boot(0, 100).await;
+        pair.b.enter();
+        let (position, root) =
+            crate::storage::client_db::economic_lineage::get_admitted_coordinate()
+                .expect("load admitted")
+                .expect("B's ERA claim is admitted at position 1");
+        let (_, claim_bytes) =
+            crate::storage::client_db::economic_lineage::get_frozen_root_claim(position)
+                .expect("load frozen claim")
+                .expect("B froze its root claim");
+        let claim = dsm::economic::claim_envelope::decode_registered_economic_claim(&claim_bytes)
+            .expect("B's claim decodes");
+        let manifest_addr = claim
+            .single_root()
+            .expect("an ordinary position")
+            .body()
+            .admission_manifest_addr;
+        RealRecipient {
+            pair,
+            position,
+            root,
+            manifest_addr,
+        }
+    }
+
+    /// The sender step against a real recipient: B's device, genesis and AK.
+    fn seed_submitted_step_for(recipient: &RealRecipient) -> SeededStep {
+        let (ek_pk_a, ek_sk_a) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("sender per-step EK");
+        seed_submitted_step_with_keys(
+            recipient.pair.b.device_id,
+            recipient.pair.b.genesis,
+            recipient.pair.b.ak_pk.clone(),
+            recipient.pair.b.ak_sk.clone(),
+            ek_pk_a,
+            ek_sk_a,
+        )
     }
 
     /// As [`seed_submitted_step_with_recipient_ak`], with the sender's per-step
     /// EK supplied so a recipient-side fixture can hold the same `ek_pk_a`
     /// (the A bytes both halves digest must be identical).
     fn seed_submitted_step_with_keys(
+        b: [u8; 32],
+        b_genesis: [u8; 32],
         b_ak_pk: Vec<u8>,
         b_ak_sk: Vec<u8>,
         ek_pk_a: Vec<u8>,
@@ -3979,12 +3973,12 @@ mod tests {
         };
 
         trust_root_test_db();
-        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
+        let a = [0x0Au8; 32];
         let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
 
         // The recipient's AK is the cert-chain genesis root, and it comes from
         // the contact book — never from the wire.
-        seed_sender_contact(b, b_ak_pk.clone());
+        seed_sender_contact_with_genesis(b, b_genesis, b_ak_pk.clone());
 
         crate::sdk::app_state::AppState::set_identity_info(
             a.to_vec(),
@@ -4041,6 +4035,7 @@ mod tests {
         SeededStep {
             a,
             b,
+            b_genesis,
             b_ak_pk,
             b_ak_sk,
             parent,
@@ -4059,122 +4054,55 @@ mod tests {
     /// The recipient-signed release for one step — pure (no I/O), so a
     /// fixture that must insert the reply row before any backing exists can
     /// still carry the exact bytes the sweep will address.
-    fn release_bytes_for(
-        commitment: [u8; 32],
-        recipient_devid: [u8; 32],
-        b_ak_sk: &[u8],
-    ) -> Vec<u8> {
+    /// The recipient's coordinates a release names: its admitted position,
+    /// the root registered there and the manifest the claim cites.
+    #[derive(Clone, Copy)]
+    struct ReleaseCoords {
+        genesis: [u8; 32],
+        devid: [u8; 32],
+        position: u64,
+        root: [u8; 32],
+        manifest_addr: [u8; 32],
+    }
+
+    impl ReleaseCoords {
+        fn of(recipient: &RealRecipient) -> Self {
+            Self {
+                genesis: recipient.pair.b.genesis,
+                devid: recipient.pair.b.device_id,
+                position: recipient.position,
+                root: recipient.root,
+                manifest_addr: recipient.manifest_addr,
+            }
+        }
+
+        /// A synthetic recipient with no lineage behind it — for fixtures
+        /// whose sender never reaches the release check.
+        fn synthetic(devid: [u8; 32]) -> Self {
+            Self {
+                genesis: [0xAAu8; 32],
+                devid,
+                position: RELEASE_POSITION,
+                root: RELEASE_POST_ROOT,
+                manifest_addr: RELEASE_MANIFEST_ADDR,
+            }
+        }
+    }
+
+    fn release_bytes_for(commitment: [u8; 32], at: ReleaseCoords, b_ak_sk: &[u8]) -> Vec<u8> {
         dsm::economic::release::sign_recipient_economic_release(
             &dsm::economic::release::ReleaseFacts {
                 receipt_commitment: commitment,
                 acceptance_evidence_addr: [0xACu8; 32],
-                recipient_genesis: [0xAAu8; 32], // the pinned contact genesis
-                recipient_devid,
-                recipient_economic_position: RELEASE_POSITION,
-                post_economic_root: RELEASE_POST_ROOT,
-                admission_manifest_addr: RELEASE_MANIFEST_ADDR,
+                recipient_genesis: at.genesis,
+                recipient_devid: at.devid,
+                recipient_economic_position: at.position,
+                post_economic_root: at.root,
+                admission_manifest_addr: at.manifest_addr,
             },
             b_ak_sk,
         )
         .expect("sign release")
-    }
-
-    /// The network backing the sender's release verification reads: the
-    /// committed network + canonical fleet, the PUBLISHED release object, and
-    /// the recipient's REGISTERED economic root.
-    async fn seed_release_backing(
-        release_bytes: &[u8],
-        sender_devid: [u8; 32],
-        recipient_devid: [u8; 32],
-        b_ak_pk: &[u8],
-        b_ak_sk: &[u8],
-    ) -> ([u8; 32], crate::handlers::faucet_flow_tests::FleetGuard) {
-        let guard = crate::handlers::faucet_flow_tests::install_canonical_fleet();
-        crate::sdk::storage_io::fake_registers::reset();
-        // The sender's committed network — verify_release_against_register
-        // resolves the canonical set from the STORED genesis record.
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
-        crate::storage::client_db::store_genesis_record_with_verification(
-            &crate::storage::client_db::GenesisRecord {
-                genesis_id: genesis_b32,
-                device_id: crate::util::text_id::encode_base32_crockford(&sender_devid),
-                mpc_proof: "test".into(),
-                device_birth_binding: String::new(),
-                merkle_root: String::new(),
-                participant_count: 1,
-                progress_marker: String::new(),
-                publication_hash: String::new(),
-                storage_nodes: vec![],
-                entropy_hash: String::new(),
-                protocol_version: "v1".into(),
-                hash_chain_proof: None,
-                smt_proof: None,
-                verification_step: None,
-                genesis_nonce: String::new(),
-                genesis_profile: "MnemonicV2".into(),
-                network_id: "dsm-testnet".into(),
-            },
-        )
-        .expect("genesis record");
-        let network =
-            crate::sdk::economic_admission_flow::committed_network_id().expect("committed network");
-        let set =
-            crate::sdk::economic_admission_flow::canonical_set(&network).expect("canonical set");
-
-        let recipient_genesis = [0xAAu8; 32]; // the pinned contact genesis
-        let inner = dsm::economic::release::recipient_economic_release_addr(release_bytes);
-        // Publish the object exactly as the post-admit sweep does.
-        let outer = dsm::storage_object::immutable_addr_from_inner(
-            dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
-            &inner,
-        );
-        crate::sdk::storage_io::put_immutable_to_all_members(
-            &set,
-            core::str::from_utf8(
-                dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE.source_bytes(),
-            )
-            .unwrap(),
-            release_bytes,
-            &crate::util::text_id::encode_base32_crockford(&outer),
-        )
-        .await
-        .expect("publish release");
-        // The recipient's REGISTERED root the sender independently checks.
-        let body = dsm::economic::claim::EconomicRootClaimBody::new(
-            recipient_genesis,
-            recipient_devid,
-            RELEASE_POSITION,
-            RELEASE_POST_ROOT,
-            RELEASE_MANIFEST_ADDR,
-            set.id(),
-            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            b_ak_pk,
-        )
-        .expect("claim body");
-        let claim = dsm::economic::claim_envelope::sign_economic_root_claim(&body, b_ak_sk)
-            .expect("sign claim");
-        {
-            // The recipient registers its own root from ITS session.
-            let _as_recipient = AsDevice::enter(recipient_devid, b_ak_pk.to_vec());
-            crate::sdk::economic_registers::register_economic_root(&set, &claim)
-                .await
-                .expect("register recipient root");
-        }
-        (inner, guard)
-    }
-
-    /// [`seed_release_backing`] for a seeded sender step.
-    async fn seed_release_for(
-        st: &SeededStep,
-    ) -> (
-        Vec<u8>,
-        [u8; 32],
-        crate::handlers::faucet_flow_tests::FleetGuard,
-    ) {
-        let release_bytes = release_bytes_for(st.commitment, st.b, &st.b_ak_sk);
-        let (inner, guard) =
-            seed_release_backing(&release_bytes, st.a, st.b, &st.b_ak_pk, &st.b_ak_sk).await;
-        (release_bytes, inner, guard)
     }
 
     fn proposal_status(commitment: &[u8; 32]) -> String {
@@ -4182,123 +4110,6 @@ mod tests {
             .expect("load")
             .expect("proposal still present")
             .status
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_poisoned_delta_parks_the_step_and_an_honest_delta_still_finalizes() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-            PROPOSAL_ROLLED_BACK,
-        };
-        let st = seed_submitted_step();
-        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
-
-        // ---- 1. A poisoned delta arrives, addressed at the real proposal ----
-        // B material minted over a receipt with a FORGED canonical child, then
-        // carried in a delta naming the honest commitment and the honest A
-        // digest. Its ek_cert_b genuinely verifies (same h_n); its sig_b was
-        // signed over the forged commitment, so it cannot verify once overlaid
-        // onto the sender's OWN A side.
-        let poisoned_receipt = signed_b_receipt(st.a, st.b, st.parent, [0xEEu8; 32], &st.b_ak_sk);
-        let poisoned = delta_for(&poisoned_receipt, st.commitment, st.digest_a);
-        let outcome = super::finalize_from_countersign_delta(&poisoned).await;
-        match &outcome {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("sig_b"),
-                "the forgery must be refused on the countersignature, got: {reason}"
-            ),
-            other => panic!("poisoned delta must be Rejected by the verifier, got {other:?}"),
-        }
-
-        let after_poison = get_sender_proposal_by_commitment(&st.commitment)
-            .expect("load")
-            .expect("proposal still present");
-        assert_eq!(
-            after_poison.status, PROPOSAL_AWAITING_VALID_REPLY,
-            "a rejected artifact must park the step in a state it can leave; \
-             the handler itself must make this transition, not just the DB layer"
-        );
-        assert_ne!(
-            after_poison.status, PROPOSAL_ROLLED_BACK,
-            "NOT a rollback — the recipient may already have applied and credited"
-        );
-        assert_eq!(
-            after_poison.message_id.as_deref(),
-            Some("MSG-658"),
-            "the step keeps its deterministic message id, so the honest copy \
-             addresses the same submitted step rather than a new one"
-        );
-
-        // ---- 2. The honest delta for the SAME step finalizes it ----
-        //
-        // Pin the positive case first: if the "honest" receipt did not actually
-        // verify, the finalize assertion below would be measuring the wrong
-        // thing — a second rejection looks identical to a step that simply
-        // never left `awaiting_valid_reply`.
-        match crate::handlers::online_finalize::verify_acceptance_receipt(
-            &st.a,
-            &st.b,
-            &st.honest,
-            &after_poison,
-            &st.b_ak_pk,
-            None,
-            None,
-            test_b_pair(),
-        )
-        .expect("verification must not error")
-        {
-            crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. } => {}
-            crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason } => {
-                panic!("the honest replacement must verify, but was rejected: {reason}")
-            }
-        }
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_FINALIZED,
-            "recovery is only real if a valid replacement for the same \
-             commitment still finalizes the step through the live handler"
-        );
-        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
-            .expect("outbox")
-            .expect("present");
-        assert_eq!(
-            outbox.status,
-            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
-            "finalized locally; the certificate still has to reach quorum"
-        );
-        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
-            &st.rel_key,
-            &st.parent,
-            &st.proposal.nonce_hash,
-        )
-        .expect("artifacts");
-        assert!(
-            retained.iter().any(|a| a.role
-                == crate::storage::client_db::ArtifactRole::CountersignB
-                && a.envelope_bytes == good.envelope_bytes),
-            "the delta the sender finalized on is retained beside its evidence_a"
-        );
-        assert!(
-            retained.iter().any(|a| a.role
-                == crate::storage::client_db::ArtifactRole::RelationshipFinalized
-                && a.routing_address.is_some()),
-            "the finality certificate is frozen with its own route in the same commit"
-        );
-
-        // A redelivered honest delta is an idempotent no-op.
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::AlreadyFinalized
-        );
     }
 
     /// Anti-vacuity: the poisoned B material must be refused for the RIGHT
@@ -4328,8 +4139,8 @@ mod tests {
             &crate::sdk::receipts::compute_receipt_b_canonical_target(
                 &poisoned_commitment,
                 &poisoned_commitment,
-                &test_b_pair().0,
-                &test_b_pair().1,
+                &b_pair_for(&a, &b).0,
+                &b_pair_for(&a, &b).1,
             ),
         )
         .expect("the poisoned receipt must carry a genuinely valid sig_b");
@@ -4372,307 +4183,6 @@ mod tests {
         );
     }
 
-    /// The delta's A-digest is advisory, but a delta naming A bytes this sender
-    /// never retained is refused BEFORE any signature work and parks the step.
-    /// Positive control in the same fixture: the true digest finalizes.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_delta_whose_digest_does_not_name_the_retained_evidence_is_rejected() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        let st = seed_submitted_step();
-        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
-
-        let mut wrong_digest = st.digest_a;
-        wrong_digest[0] ^= 0x01;
-        let mismatched = delta_for(&st.honest, st.commitment, wrong_digest);
-        match super::finalize_from_countersign_delta(&mismatched).await {
-            CountersignOutcome::DigestMismatch(reason) => {
-                assert!(reason.contains("this sender retained"), "{reason}")
-            }
-            other => panic!("expected DigestMismatch, got {other:?}"),
-        }
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
-        );
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-    }
-
-    /// R5 — the recipient's canonical pair is covered by `sig_b`. A delta whose
-    /// B material is genuine but whose `b_parent_tip` or `b_child_tip` was
-    /// substituted (a middlebox, or a recipient lying about its lineage) fails
-    /// the countersignature check and finalizes NOTHING; the untouched delta
-    /// then finalizes the same step. Mutation M2 (drop the pair from the
-    /// target) turns this red: the flipped deltas would verify.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn r5_a_substituted_recipient_pair_fails_sig_b_and_finalizes_nothing() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        use prost::Message;
-        let st = seed_submitted_step();
-        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-
-        for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
-            let mut body =
-                dsm::types::proto::ReceiptCountersignB::decode(&*good.body).expect("delta");
-            if flip == 0 {
-                body.b_parent_tip[0] ^= 0x01;
-            } else {
-                body.b_child_tip[0] ^= 0x01;
-            }
-            let flipped = crate::sdk::b0x_sdk::CountersignDelta {
-                body: body.encode_to_vec(),
-                ..good.clone()
-            };
-            match super::finalize_from_countersign_delta(&flipped).await {
-                CountersignOutcome::Rejected(reason) => assert!(
-                    reason.contains("sig_b"),
-                    "{label}: a substituted pair must fail on the countersignature, got: {reason}"
-                ),
-                other => panic!("{label}: expected Rejected on sig_b, got {other:?}"),
-            }
-            assert_eq!(
-                proposal_status(&st.commitment),
-                PROPOSAL_AWAITING_VALID_REPLY,
-                "{label}: parked, not finalized"
-            );
-            assert!(
-                crate::storage::client_db::load_cert_chain_head_pubkey(
-                    &st.rel_key,
-                    crate::storage::client_db::CertChainSide::Counterparty,
-                )
-                .expect("head")
-                .is_none(),
-                "{label}: no head advanced"
-            );
-        }
-
-        // Positive control: the untouched delta finalizes the same step.
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-    }
-
-    /// A whole countersigned receipt on the countersign method is refused at
-    /// the wire and changes nothing; the same fixture then finalizes on the
-    /// honest delta, so "nothing changed" is not vacuous. (Which tag trips
-    /// first depends on the receipt's shape — this thin fixture carries no
-    /// proofs, so its first tag past the delta's 8 is `sig_a`'s 13; the
-    /// production-shaped receipt fails on tag 8's width. Both are refusals
-    /// of the same wire discriminator.)
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED};
-        let st = seed_submitted_step();
-        let (_rb, release_addr, _fleet) = seed_release_for(&st).await;
-
-        let full_receipt = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: "TESTFULL0000000000000000000".to_string(),
-            envelope_bytes: vec![0xEDu8; 64],
-            body: st.honest.to_full_protobuf().expect("full receipt"),
-        };
-        match super::finalize_from_countersign_delta(&full_receipt).await {
-            CountersignOutcome::WireRejected(reason) => {
-                assert!(
-                    reason.contains("countersign wire: unknown field 13"),
-                    "{reason}"
-                )
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
-        }
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        assert_eq!(
-            super::finalize_from_countersign_delta(&good).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-    }
-
-    /// THE RELEASE GATE (3.5b PR4): bare `sig_b` cannot finalize the sender.
-    /// The delta is fully honest — countersignature verifies — but carries no
-    /// release; the step parks awaiting a valid replacement. MUTATION
-    /// CONTROL: delete the gate in `finalize_from_countersign_delta` and this
-    /// finalizes on provenance alone — red.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_delta_without_a_release_cannot_finalize_the_sender() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::PROPOSAL_AWAITING_VALID_REPLY;
-        let st = seed_submitted_step();
-        let (_rb, _addr, _fleet) = seed_release_for(&st).await;
-
-        let bare = delta_for(&st.honest, st.commitment, st.digest_a);
-        match super::finalize_from_countersign_delta(&bare).await {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("bare sig_b"),
-                "the refusal names the missing release, got: {reason}"
-            ),
-            other => panic!("bare sig_b must be Rejected, got {other:?}"),
-        }
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY,
-            "parked, not finalized"
-        );
-    }
-
-    /// The sender's INDEPENDENT half: a release whose named root is not (yet)
-    /// registered DEFERS (an outage is never an attack); a release whose
-    /// named root DISAGREES with the registered claim is REJECTED — a hostile
-    /// recipient's private "admitted" flag is never trusted.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn a_release_must_match_the_recipient_registered_root() {
-        use super::CountersignOutcome;
-        let st = seed_submitted_step();
-        let (release_bytes, release_addr, _fleet) = seed_release_for(&st).await;
-
-        // Overwrite the register with a DIFFERENT root at the released
-        // position: same coordinates, different post-root — the claim the
-        // quorum holds disagrees with the release.
-        crate::sdk::storage_io::fake_registers::reset();
-        let set = crate::sdk::economic_admission_flow::canonical_set(
-            &crate::sdk::economic_admission_flow::committed_network_id().unwrap(),
-        )
-        .unwrap();
-        let body = dsm::economic::claim::EconomicRootClaimBody::new(
-            [0xAAu8; 32],
-            st.b,
-            RELEASE_POSITION,
-            [0x66u8; 32], // NOT the released root
-            RELEASE_MANIFEST_ADDR,
-            set.id(),
-            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &st.b_ak_pk,
-        )
-        .unwrap();
-        let claim =
-            dsm::economic::claim_envelope::sign_economic_root_claim(&body, &st.b_ak_sk).unwrap();
-        {
-            let _as_recipient = AsDevice::enter(st.b, st.b_ak_pk.clone());
-            crate::sdk::economic_registers::register_economic_root(&set, &claim)
-                .await
-                .unwrap();
-        }
-
-        let good =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        match super::finalize_from_countersign_delta(&good).await {
-            CountersignOutcome::Rejected(reason) => assert!(
-                reason.contains("does not match the registered economic root"),
-                "got: {reason}"
-            ),
-            other => panic!("a register mismatch must be Rejected, got {other:?}"),
-        }
-
-        // And with NO registered root at all: deferred, never rejected.
-        crate::sdk::storage_io::fake_registers::reset();
-        // Re-publish the release object (the reset wiped registers only, but
-        // keep the fixture self-contained).
-        let _ = release_bytes;
-        let again =
-            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
-        match super::finalize_from_countersign_delta(&again).await {
-            CountersignOutcome::Unverifiable(reason) => assert!(
-                reason.contains("release register read"),
-                "an unregistered root defers, got: {reason}"
-            ),
-            other => panic!("an unregistered root must defer, got {other:?}"),
-        }
-    }
-
-    /// Producer -> consumer with REAL per-step EK material: the recipient's
-    /// real builder over its stored full receipt, decoded by the sender's real
-    /// discriminator, finalized by the live handler. What the fixture-built
-    /// deltas above cannot prove — that the two ends agree byte for byte.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn the_real_delta_builder_output_finalizes_the_sender_through_the_live_handler() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::PROPOSAL_FINALIZED;
-        use prost::Message;
-        use std::sync::Arc;
-        let st = seed_submitted_step();
-        let (release_bytes, _release_addr, _fleet) = seed_release_for(&st).await;
-
-        // Recipient side: identity b, its stored full countersigned receipt.
-        let full_bytes = st.honest.to_full_protobuf().expect("full receipt");
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        let recipient_sdk = crate::sdk::b0x_sdk::B0xSDK::new(
-            crate::util::text_id::encode_base32_crockford(&st.b),
-            core,
-            vec![],
-        )
-        .expect("B0xSDK");
-        let built = recipient_sdk
-            .build_countersign_reply_envelope(
-                &[0xB6u8; 32],
-                &st.proposal.projection_parent,
-                &st.commitment,
-                &full_bytes,
-                test_b_pair(),
-                &release_bytes,
-            )
-            .expect("real delta");
-        assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
-        assert!(
-            built.bytes.len() > 100_000,
-            "two real SPHINCS objects: {}",
-            built.bytes.len()
-        );
-
-        // Sender side: exactly what the poll does with the spooled envelope.
-        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
-        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
-            .expect("discriminated by method");
-        let delta = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: built.message_id_b32.clone(),
-            envelope_bytes: built.bytes.clone(),
-            body,
-        };
-        assert_eq!(
-            super::finalize_from_countersign_delta(&delta).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
-            &st.rel_key,
-            &st.parent,
-            &st.proposal.nonce_hash,
-        )
-        .expect("artifacts");
-        let kept = retained
-            .iter()
-            .find(|a| a.role == crate::storage::client_db::ArtifactRole::CountersignB)
-            .expect("countersign_b retained");
-        assert_eq!(
-            kept.envelope_bytes, built.bytes,
-            "the exact envelope it finalized on"
-        );
-    }
-
     /// The recipient half of the return leg, seeded exactly as the fold leaves
     /// it: a completed acceptance journal row and its undelivered reply row,
     /// both holding the FULL countersigned receipt, plus the endpoint auth the
@@ -4681,6 +4191,7 @@ mod tests {
     struct RecipientHalf {
         a: [u8; 32],
         b: [u8; 32],
+        b_genesis: [u8; 32],
         b_ak_pk: Vec<u8>,
         b_ak_sk: Vec<u8>,
         /// The sender's per-step EK the receipt names as `ek_pk_a`.
@@ -4693,17 +4204,32 @@ mod tests {
         release_bytes: Vec<u8>,
     }
 
-    fn seed_recipient_half(endpoint: &str) -> RecipientHalf {
+    /// `recipient`: `Some` seeds the half against a REAL B (its device, genesis,
+    /// AK and admitted coordinates), which the sender's release check can walk;
+    /// `None` is the synthetic B for fixtures whose sender never gets there.
+    fn seed_recipient_half(endpoint: &str, recipient: Option<&RealRecipient>) -> RecipientHalf {
         use crate::storage::client_db::recipient_receipt_fold::{
             insert_outbound_reply, insert_prepared_acceptance_journal, RecipientAcceptanceJournal,
         };
 
         trust_root_test_db();
-        let (a, b) = ([0x0Au8; 32], [0x0Bu8; 32]);
+        let a = [0x0Au8; 32];
         let (parent, child) = ([0x31u8; 32], [0x32u8; 32]);
-        let (b_ak_pk, b_ak_sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
-        let b_genesis = [0xB6u8; 32];
+        let (b, b_genesis, b_ak_pk, b_ak_sk, at) = match recipient {
+            Some(r) => (
+                r.pair.b.device_id,
+                r.pair.b.genesis,
+                r.pair.b.ak_pk.clone(),
+                r.pair.b.ak_sk.clone(),
+                ReleaseCoords::of(r),
+            ),
+            None => {
+                let (pk, sk) =
+                    dsm::crypto::sphincs::generate_sphincs_keypair().expect("recipient AK");
+                let b = [0x0Bu8; 32];
+                (b, [0xB6u8; 32], pk, sk, ReleaseCoords::synthetic(b))
+            }
+        };
 
         // Identity = B (the recipient). Its contact for A carries A's genesis,
         // which is what the reply route is computed from.
@@ -4757,7 +4283,7 @@ mod tests {
         let projection_parent = [0u8; 32];
         // The post-admission release the reply carries (3.5b PR4) — signed
         // now (pure); its network backing is seeded by the sender-half test.
-        let release_bytes = release_bytes_for(commitment, b, &b_ak_sk);
+        let release_bytes = release_bytes_for(commitment, at, &b_ak_sk);
         let rec = RecipientAcceptanceJournal {
             relationship_key: rel,
             parent_tip: parent,
@@ -4776,8 +4302,8 @@ mod tests {
             receipt_bytes: full_bytes.clone(),
             projection_parent_tip: projection_parent,
             projection_target_tip: [0xBBu8; 32],
-            applied_parent_tip_b: test_b_pair().0,
-            applied_child_tip_b: test_b_pair().1,
+            applied_parent_tip_b: b_pair_for(&a, &b).0,
+            applied_child_tip_b: b_pair_for(&a, &b).1,
             release_bytes: Some(release_bytes.clone()),
             peer_finalized: false,
             status: "prepared".to_string(),
@@ -4816,6 +4342,7 @@ mod tests {
         RecipientHalf {
             a,
             b,
+            b_genesis,
             b_ak_pk,
             b_ak_sk,
             ek_pk_a,
@@ -4825,170 +4352,6 @@ mod tests {
             full_bytes,
             release_bytes,
         }
-    }
-
-    /// The whole return leg, end to end, against a dumb recorder: the
-    /// recipient's REAL sweep posts a delta (not the 218 KB receipt) under the
-    /// deterministic reply id to the sender's route; the sender's REAL
-    /// discriminator + handler take that recorded body and finalize. The
-    /// mutations run on the same recorded body BEFORE the positive step, so
-    /// "status unchanged" is measured against a fixture that then finalizes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial]
-    async fn the_reply_sweep_posts_a_sub_cap_delta_and_the_sender_finalizes_from_it() {
-        use super::CountersignOutcome;
-        use crate::storage::client_db::sender_proposal::{
-            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        };
-        use prost::Message;
-        use std::sync::Arc;
-
-        // ---- recipient half: the sweep puts a delta on the wire ----
-        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
-        let ep = spawn_recorder(log.clone()).expect("recorder");
-        let rh = seed_recipient_half(&ep);
-
-        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
-        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
-            .await
-            .expect("sweep");
-
-        let posts: Vec<RecordedPost> = log.lock().unwrap().clone();
-        let submits: Vec<&RecordedPost> = posts
-            .iter()
-            .filter(|p| p.path == "/api/v2/b0x/submit")
-            .collect();
-        assert_eq!(submits.len(), 1, "exactly one reply POST; got {posts:?}");
-        let post = submits[0];
-        assert_eq!(
-            post.message_id,
-            crate::util::text_id::encode_base32_crockford(&crate::sdk::b0x_sdk::reply_message_id(
-                &rh.commitment,
-                &rh.projection_parent
-            )),
-            "deterministic reply id"
-        );
-        assert_eq!(
-            post.recipient,
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-                &[0xAAu8; 32],
-                &rh.a,
-                &rh.projection_parent
-            )
-            .expect("route"),
-            "addressed to the tip the SENDER polls"
-        );
-        assert!(
-            post.body.len() < 131_072,
-            "the wire body must be under the node cap, got {}",
-            post.body.len()
-        );
-        assert!(
-            post.body.len() > 100_000,
-            "two real SPHINCS objects must be present, got {}",
-            post.body.len()
-        );
-        assert!(
-            crate::storage::client_db::pending_outbound_replies()
-                .expect("pending")
-                .is_empty(),
-            "the row is marked submitted once one endpoint took it"
-        );
-
-        // ---- sender half: the recorded body finalizes the step ----
-        let st = seed_submitted_step_with_keys(
-            rh.b_ak_pk.clone(),
-            rh.b_ak_sk.clone(),
-            rh.ek_pk_a.clone(),
-            rh.ek_sk_a.clone(),
-        );
-        assert_eq!(
-            st.commitment, rh.commitment,
-            "both halves describe the same step"
-        );
-        assert_eq!((st.a, st.b), (rh.a, rh.b));
-        let (_inner, _fleet) =
-            seed_release_backing(&rh.release_bytes, st.a, st.b, &rh.b_ak_pk, &rh.b_ak_sk).await;
-
-        let env = dsm::types::proto::Envelope::decode(&*post.body).expect("Envelope");
-        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
-            .expect("the sender's discriminator recognises the sweep's output");
-        let recorded = crate::sdk::b0x_sdk::CountersignDelta {
-            message_id: post.message_id.clone(),
-            envelope_bytes: post.body.clone(),
-            body: body.clone(),
-        };
-
-        // m1: one bit of the A digest -> DigestMismatch, parked.
-        let mut m1 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        m1.receipt_evidence_digest_a[0] ^= 0x01;
-        let m1 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: m1.encode_to_vec(),
-            ..recorded.clone()
-        };
-        assert!(matches!(
-            super::finalize_from_countersign_delta(&m1).await,
-            CountersignOutcome::DigestMismatch(_)
-        ));
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
-        );
-
-        // m2: the whole receipt on the countersign method -> refused at the wire.
-        let m2 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: rh.full_bytes.clone(),
-            ..recorded.clone()
-        };
-        match super::finalize_from_countersign_delta(&m2).await {
-            CountersignOutcome::WireRejected(r) => {
-                assert!(r.contains("countersign wire: unknown field 13"), "{r}")
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
-        }
-
-        // m3: kyber_ct_b stripped -> refused at the wire, not by the live gate.
-        let mut m3 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        m3.kyber_ct_b.clear();
-        let m3 = crate::sdk::b0x_sdk::CountersignDelta {
-            body: m3.encode_to_vec(),
-            ..recorded.clone()
-        };
-        match super::finalize_from_countersign_delta(&m3).await {
-            CountersignOutcome::WireRejected(r) => {
-                assert!(r.contains("missing required field 6"), "{r}")
-            }
-            other => panic!("expected WireRejected, got {other:?}"),
-        }
-        assert_eq!(
-            proposal_status(&st.commitment),
-            PROPOSAL_AWAITING_VALID_REPLY
-        );
-
-        // Positive: the recorded body as-is finalizes the step.
-        assert_eq!(
-            super::finalize_from_countersign_delta(&recorded).await,
-            CountersignOutcome::Finalized
-        );
-        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
-        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
-            .expect("outbox")
-            .expect("present");
-        assert_eq!(
-            outbox.status,
-            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING
-        );
-        let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
-        assert_eq!(
-            crate::storage::client_db::load_cert_chain_head_pubkey(
-                &st.rel_key,
-                crate::storage::client_db::CertChainSide::Counterparty,
-            )
-            .expect("head")
-            .expect("advanced"),
-            delta.ek_pk_b,
-            "the counterparty cert head advanced to the recipient's per-step EK"
-        );
     }
 
     /// A 413 from every node leaves the reply row for the next sweep — and,
@@ -5001,7 +4364,7 @@ mod tests {
         let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
         let overrides = StatusOverrides::default();
         let ep = spawn_recorder_with_overrides(log.clone(), overrides.clone()).expect("recorder");
-        let rh = seed_recipient_half(&ep);
+        let rh = seed_recipient_half(&ep, None);
         let reply_id = crate::util::text_id::encode_base32_crockford(
             &crate::sdk::b0x_sdk::reply_message_id(&rh.commitment, &rh.projection_parent),
         );
@@ -6271,6 +5634,632 @@ mod tests {
             crate::storage::client_db::recipient_staging::staging_state(key).expect("state"),
             StagingState::Accepted,
             "re-entry must not disturb the durable acceptance"
+        );
+    }
+
+    /// Publish a signed release as an immutable object and record the sender's
+    /// own genesis (the committed network the release check reads). Returns
+    /// the release's inner address. Nothing about the recipient is seeded
+    /// here: B registered its root for real, and the release check walks it.
+    async fn publish_release(release_bytes: &[u8], sender_devid: [u8; 32]) -> [u8; 32] {
+        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&[0xAAu8; 32]);
+        crate::storage::client_db::store_genesis_record_with_verification(
+            &crate::storage::client_db::GenesisRecord {
+                genesis_id: genesis_b32,
+                device_id: crate::util::text_id::encode_base32_crockford(&sender_devid),
+                mpc_proof: "test".into(),
+                device_birth_binding: String::new(),
+                merkle_root: String::new(),
+                participant_count: 1,
+                progress_marker: String::new(),
+                publication_hash: String::new(),
+                storage_nodes: vec![],
+                entropy_hash: String::new(),
+                protocol_version: "v1".into(),
+                hash_chain_proof: None,
+                smt_proof: None,
+                verification_step: None,
+                genesis_nonce: String::new(),
+                genesis_profile: "MnemonicV2".into(),
+                network_id: "dsm-testnet".into(),
+            },
+        )
+        .expect("genesis record");
+        let network =
+            crate::sdk::economic_admission_flow::committed_network_id().expect("committed network");
+        let set =
+            crate::sdk::economic_admission_flow::canonical_set(&network).expect("canonical set");
+        let inner = dsm::economic::release::recipient_economic_release_addr(release_bytes);
+        let outer = dsm::storage_object::immutable_addr_from_inner(
+            dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+            &inner,
+        );
+        crate::sdk::storage_io::put_immutable_to_all_members(
+            &set,
+            core::str::from_utf8(
+                dsm::common::domain_tags::TAG_DSM_RECIPIENT_ECONOMIC_RELEASE.source_bytes(),
+            )
+            .unwrap(),
+            release_bytes,
+            &crate::util::text_id::encode_base32_crockford(&outer),
+        )
+        .await
+        .expect("publish release");
+        inner
+    }
+
+    /// A real recipient, the sender step seeded against it, and its signed
+    /// release published: `(step, release bytes, release inner address,
+    /// recipient)`. The recipient is returned so its fleet outlives the test.
+    async fn seed_step_and_release() -> (SeededStep, Vec<u8>, [u8; 32], RealRecipient) {
+        let recipient = real_recipient().await;
+        let st = seed_submitted_step_for(&recipient);
+        let release_bytes =
+            release_bytes_for(st.commitment, ReleaseCoords::of(&recipient), &st.b_ak_sk);
+        let inner = publish_release(&release_bytes, st.a).await;
+        (st, release_bytes, inner, recipient)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_poisoned_delta_parks_the_step_and_an_honest_delta_still_finalizes() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+            PROPOSAL_ROLLED_BACK,
+        };
+        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
+
+        // ---- 1. A poisoned delta arrives, addressed at the real proposal ----
+        // B material minted over a receipt with a FORGED canonical child, then
+        // carried in a delta naming the honest commitment and the honest A
+        // digest. Its ek_cert_b genuinely verifies (same h_n); its sig_b was
+        // signed over the forged commitment, so it cannot verify once overlaid
+        // onto the sender's OWN A side.
+        let poisoned_receipt = signed_b_receipt(st.a, st.b, st.parent, [0xEEu8; 32], &st.b_ak_sk);
+        let poisoned = delta_for(&poisoned_receipt, st.commitment, st.digest_a);
+        let outcome = super::finalize_from_countersign_delta(&poisoned).await;
+        match &outcome {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("sig_b"),
+                "the forgery must be refused on the countersignature, got: {reason}"
+            ),
+            other => panic!("poisoned delta must be Rejected by the verifier, got {other:?}"),
+        }
+
+        let after_poison = get_sender_proposal_by_commitment(&st.commitment)
+            .expect("load")
+            .expect("proposal still present");
+        assert_eq!(
+            after_poison.status, PROPOSAL_AWAITING_VALID_REPLY,
+            "a rejected artifact must park the step in a state it can leave; \
+             the handler itself must make this transition, not just the DB layer"
+        );
+        assert_ne!(
+            after_poison.status, PROPOSAL_ROLLED_BACK,
+            "NOT a rollback — the recipient may already have applied and credited"
+        );
+        assert_eq!(
+            after_poison.message_id.as_deref(),
+            Some("MSG-658"),
+            "the step keeps its deterministic message id, so the honest copy \
+             addresses the same submitted step rather than a new one"
+        );
+
+        // ---- 2. The honest delta for the SAME step finalizes it ----
+        //
+        // Pin the positive case first: if the "honest" receipt did not actually
+        // verify, the finalize assertion below would be measuring the wrong
+        // thing — a second rejection looks identical to a step that simply
+        // never left `awaiting_valid_reply`.
+        match crate::handlers::online_finalize::verify_acceptance_receipt(
+            &st.a,
+            &st.b,
+            &st.honest,
+            &after_poison,
+            &st.b_ak_pk,
+            None,
+            None,
+            b_pair_for(&st.a, &st.b),
+        )
+        .expect("verification must not error")
+        {
+            crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. } => {}
+            crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason } => {
+                panic!("the honest replacement must verify, but was rejected: {reason}")
+            }
+        }
+
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_FINALIZED,
+            "recovery is only real if a valid replacement for the same \
+             commitment still finalizes the step through the live handler"
+        );
+        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
+            .expect("outbox")
+            .expect("present");
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+            "finalized locally; the certificate still has to reach quorum"
+        );
+        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
+            &st.rel_key,
+            &st.parent,
+            &st.proposal.nonce_hash,
+        )
+        .expect("artifacts");
+        assert!(
+            retained.iter().any(|a| a.role
+                == crate::storage::client_db::ArtifactRole::CountersignB
+                && a.envelope_bytes == good.envelope_bytes),
+            "the delta the sender finalized on is retained beside its evidence_a"
+        );
+        assert!(
+            retained.iter().any(|a| a.role
+                == crate::storage::client_db::ArtifactRole::RelationshipFinalized
+                && a.routing_address.is_some()),
+            "the finality certificate is frozen with its own route in the same commit"
+        );
+
+        // A redelivered honest delta is an idempotent no-op.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::AlreadyFinalized
+        );
+    }
+
+    /// The delta's A-digest is advisory, but a delta naming A bytes this sender
+    /// never retained is refused BEFORE any signature work and parks the step.
+    /// Positive control in the same fixture: the true digest finalizes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_delta_whose_digest_does_not_name_the_retained_evidence_is_rejected() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
+
+        let mut wrong_digest = st.digest_a;
+        wrong_digest[0] ^= 0x01;
+        let mismatched = delta_for(&st.honest, st.commitment, wrong_digest);
+        match super::finalize_from_countersign_delta(&mismatched).await {
+            CountersignOutcome::DigestMismatch(reason) => {
+                assert!(reason.contains("this sender retained"), "{reason}")
+            }
+            other => panic!("expected DigestMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// R5 — the recipient's canonical pair is covered by `sig_b`. A delta whose
+    /// B material is genuine but whose `b_parent_tip` or `b_child_tip` was
+    /// substituted (a middlebox, or a recipient lying about its lineage) fails
+    /// the countersignature check and finalizes NOTHING; the untouched delta
+    /// then finalizes the same step. Mutation M2 (drop the pair from the
+    /// target) turns this red: the flipped deltas would verify.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn r5_a_substituted_recipient_pair_fails_sig_b_and_finalizes_nothing() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        use prost::Message;
+        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+
+        for (label, flip) in [("b_parent_tip", 0usize), ("b_child_tip", 1usize)] {
+            let mut body =
+                dsm::types::proto::ReceiptCountersignB::decode(&*good.body).expect("delta");
+            if flip == 0 {
+                body.b_parent_tip[0] ^= 0x01;
+            } else {
+                body.b_child_tip[0] ^= 0x01;
+            }
+            let flipped = crate::sdk::b0x_sdk::CountersignDelta {
+                body: body.encode_to_vec(),
+                ..good.clone()
+            };
+            match super::finalize_from_countersign_delta(&flipped).await {
+                CountersignOutcome::Rejected(reason) => assert!(
+                    reason.contains("sig_b"),
+                    "{label}: a substituted pair must fail on the countersignature, got: {reason}"
+                ),
+                other => panic!("{label}: expected Rejected on sig_b, got {other:?}"),
+            }
+            assert_eq!(
+                proposal_status(&st.commitment),
+                PROPOSAL_AWAITING_VALID_REPLY,
+                "{label}: parked, not finalized"
+            );
+            assert!(
+                crate::storage::client_db::load_cert_chain_head_pubkey(
+                    &st.rel_key,
+                    crate::storage::client_db::CertChainSide::Counterparty,
+                )
+                .expect("head")
+                .is_none(),
+                "{label}: no head advanced"
+            );
+        }
+
+        // Positive control: the untouched delta finalizes the same step.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// A whole countersigned receipt on the countersign method is refused at
+    /// the wire and changes nothing; the same fixture then finalizes on the
+    /// honest delta, so "nothing changed" is not vacuous. (Which tag trips
+    /// first depends on the receipt's shape — this thin fixture carries no
+    /// proofs, so its first tag past the delta's 8 is `sig_a`'s 13; the
+    /// production-shaped receipt fails on tag 8's width. Both are refusals
+    /// of the same wire discriminator.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_full_receipt_on_the_countersign_method_is_refused_at_the_wire() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED};
+        let (st, _rb, release_addr, _recipient) = seed_step_and_release().await;
+
+        let full_receipt = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: "TESTFULL0000000000000000000".to_string(),
+            envelope_bytes: vec![0xEDu8; 64],
+            body: st.honest.to_full_protobuf().expect("full receipt"),
+        };
+        match super::finalize_from_countersign_delta(&full_receipt).await {
+            CountersignOutcome::WireRejected(reason) => {
+                assert!(
+                    reason.contains("countersign wire: unknown field 13"),
+                    "{reason}"
+                )
+            }
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_SUBMITTED);
+
+        let good =
+            delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(release_addr));
+        assert_eq!(
+            super::finalize_from_countersign_delta(&good).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+    }
+
+    /// THE RELEASE GATE (3.5b PR4): bare `sig_b` cannot finalize the sender.
+    /// The delta is fully honest — countersignature verifies — but carries no
+    /// release; the step parks awaiting a valid replacement. MUTATION
+    /// CONTROL: delete the gate in `finalize_from_countersign_delta` and this
+    /// finalizes on provenance alone — red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_delta_without_a_release_cannot_finalize_the_sender() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::PROPOSAL_AWAITING_VALID_REPLY;
+        let (st, _rb, _addr, _recipient) = seed_step_and_release().await;
+
+        let bare = delta_for(&st.honest, st.commitment, st.digest_a);
+        match super::finalize_from_countersign_delta(&bare).await {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("bare sig_b"),
+                "the refusal names the missing release, got: {reason}"
+            ),
+            other => panic!("bare sig_b must be Rejected, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY,
+            "parked, not finalized"
+        );
+    }
+
+    /// The sender's INDEPENDENT half: a release whose named root is not (yet)
+    /// registered DEFERS (an outage is never an attack); a release whose
+    /// named root DISAGREES with the registered claim is REJECTED — a hostile
+    /// recipient's private "admitted" flag is never trusted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_release_must_match_the_recipient_registered_root() {
+        use super::CountersignOutcome;
+        let (st, release_bytes, release_addr, recipient) = seed_step_and_release().await;
+
+        // Overwrite the register with a DIFFERENT root at the released
+        // position: same coordinates, different post-root — the claim the
+        // quorum holds disagrees with the release.
+        // A release naming a root B's registered lineage never reached: the
+        // sender walks B to the released position and finds another root.
+        let bad = release_bytes_for(
+            st.commitment,
+            ReleaseCoords {
+                root: [0x66u8; 32], // NOT the registered root
+                ..ReleaseCoords::of(&recipient)
+            },
+            &st.b_ak_sk,
+        );
+        let bad_addr = publish_release(&bad, st.a).await;
+        let _ = release_addr;
+
+        let good = delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(bad_addr));
+        match super::finalize_from_countersign_delta(&good).await {
+            CountersignOutcome::Rejected(reason) => assert!(
+                reason.contains("does not match the registered economic root"),
+                "got: {reason}"
+            ),
+            other => panic!("a register mismatch must be Rejected, got {other:?}"),
+        }
+
+        // And with NO registered root at all: deferred, never rejected.
+        // With the register cells gone the walk cannot reach B's position:
+        // that is unavailability, never a mismatch.
+        crate::sdk::storage_io::fake_registers::reset();
+        let good_addr = publish_release(&release_bytes, st.a).await;
+        let again = delta_for_with_release(&st.honest, st.commitment, st.digest_a, Some(good_addr));
+        match super::finalize_from_countersign_delta(&again).await {
+            CountersignOutcome::Unverifiable(reason) => assert!(
+                reason.contains("release register read"),
+                "an unregistered root defers, got: {reason}"
+            ),
+            other => panic!("an unregistered root must defer, got {other:?}"),
+        }
+    }
+
+    /// Producer -> consumer with REAL per-step EK material: the recipient's
+    /// real builder over its stored full receipt, decoded by the sender's real
+    /// discriminator, finalized by the live handler. What the fixture-built
+    /// deltas above cannot prove — that the two ends agree byte for byte.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_real_delta_builder_output_finalizes_the_sender_through_the_live_handler() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::PROPOSAL_FINALIZED;
+        use prost::Message;
+        use std::sync::Arc;
+        let (st, release_bytes, _release_addr, _recipient) = seed_step_and_release().await;
+
+        // Recipient side: identity b, its stored full countersigned receipt.
+        let full_bytes = st.honest.to_full_protobuf().expect("full receipt");
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        let recipient_sdk = crate::sdk::b0x_sdk::B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&st.b),
+            core,
+            vec![],
+        )
+        .expect("B0xSDK");
+        let built = recipient_sdk
+            .build_countersign_reply_envelope(
+                &[0xB6u8; 32],
+                &st.proposal.projection_parent,
+                &st.commitment,
+                &full_bytes,
+                b_pair_for(&st.a, &st.b),
+                &release_bytes,
+            )
+            .expect("real delta");
+        assert!(built.bytes.len() < 131_072, "{}", built.bytes.len());
+        assert!(
+            built.bytes.len() > 100_000,
+            "two real SPHINCS objects: {}",
+            built.bytes.len()
+        );
+
+        // Sender side: exactly what the poll does with the spooled envelope.
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
+            .expect("discriminated by method");
+        let delta = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: built.message_id_b32.clone(),
+            envelope_bytes: built.bytes.clone(),
+            body,
+        };
+        assert_eq!(
+            super::finalize_from_countersign_delta(&delta).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+        let retained = crate::storage::client_db::load_sender_outbox_artifacts(
+            &st.rel_key,
+            &st.parent,
+            &st.proposal.nonce_hash,
+        )
+        .expect("artifacts");
+        let kept = retained
+            .iter()
+            .find(|a| a.role == crate::storage::client_db::ArtifactRole::CountersignB)
+            .expect("countersign_b retained");
+        assert_eq!(
+            kept.envelope_bytes, built.bytes,
+            "the exact envelope it finalized on"
+        );
+    }
+
+    /// The whole return leg, end to end, against a dumb recorder: the
+    /// recipient's REAL sweep posts a delta (not the 218 KB receipt) under the
+    /// deterministic reply id to the sender's route; the sender's REAL
+    /// discriminator + handler take that recorded body and finalize. The
+    /// mutations run on the same recorded body BEFORE the positive step, so
+    /// "status unchanged" is measured against a fixture that then finalizes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn the_reply_sweep_posts_a_sub_cap_delta_and_the_sender_finalizes_from_it() {
+        use super::CountersignOutcome;
+        use crate::storage::client_db::sender_proposal::{
+            PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        };
+        use prost::Message;
+        use std::sync::Arc;
+
+        // ---- recipient half: the sweep puts a delta on the wire ----
+        let log = Arc::new(std::sync::Mutex::new(Vec::<RecordedPost>::new()));
+        let ep = spawn_recorder(log.clone()).expect("recorder");
+        let recipient = real_recipient().await;
+        let rh = seed_recipient_half(&ep, Some(&recipient));
+
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().expect("CoreSDK"));
+        super::deliver_pending_acceptance_replies(std::slice::from_ref(&ep), core)
+            .await
+            .expect("sweep");
+
+        let posts: Vec<RecordedPost> = log.lock().unwrap().clone();
+        let submits: Vec<&RecordedPost> = posts
+            .iter()
+            .filter(|p| p.path == "/api/v2/b0x/submit")
+            .collect();
+        assert_eq!(submits.len(), 1, "exactly one reply POST; got {posts:?}");
+        let post = submits[0];
+        assert_eq!(
+            post.message_id,
+            crate::util::text_id::encode_base32_crockford(&crate::sdk::b0x_sdk::reply_message_id(
+                &rh.commitment,
+                &rh.projection_parent
+            )),
+            "deterministic reply id"
+        );
+        assert_eq!(
+            post.recipient,
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+                &[0xAAu8; 32],
+                &rh.a,
+                &rh.projection_parent
+            )
+            .expect("route"),
+            "addressed to the tip the SENDER polls"
+        );
+        assert!(
+            post.body.len() < 131_072,
+            "the wire body must be under the node cap, got {}",
+            post.body.len()
+        );
+        assert!(
+            post.body.len() > 100_000,
+            "two real SPHINCS objects must be present, got {}",
+            post.body.len()
+        );
+        assert!(
+            crate::storage::client_db::pending_outbound_replies()
+                .expect("pending")
+                .is_empty(),
+            "the row is marked submitted once one endpoint took it"
+        );
+
+        // ---- sender half: the recorded body finalizes the step ----
+        let st = seed_submitted_step_with_keys(
+            rh.b,
+            rh.b_genesis,
+            rh.b_ak_pk.clone(),
+            rh.b_ak_sk.clone(),
+            rh.ek_pk_a.clone(),
+            rh.ek_sk_a.clone(),
+        );
+        assert_eq!(
+            st.commitment, rh.commitment,
+            "both halves describe the same step"
+        );
+        assert_eq!((st.a, st.b), (rh.a, rh.b));
+        let _inner = publish_release(&rh.release_bytes, st.a).await;
+
+        let env = dsm::types::proto::Envelope::decode(&*post.body).expect("Envelope");
+        let body = crate::sdk::b0x_sdk::B0xSDK::decode_countersign_b(&env)
+            .expect("the sender's discriminator recognises the sweep's output");
+        let recorded = crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: post.message_id.clone(),
+            envelope_bytes: post.body.clone(),
+            body: body.clone(),
+        };
+
+        // m1: one bit of the A digest -> DigestMismatch, parked.
+        let mut m1 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        m1.receipt_evidence_digest_a[0] ^= 0x01;
+        let m1 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: m1.encode_to_vec(),
+            ..recorded.clone()
+        };
+        assert!(matches!(
+            super::finalize_from_countersign_delta(&m1).await,
+            CountersignOutcome::DigestMismatch(_)
+        ));
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        // m2: the whole receipt on the countersign method -> refused at the wire.
+        let m2 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: rh.full_bytes.clone(),
+            ..recorded.clone()
+        };
+        match super::finalize_from_countersign_delta(&m2).await {
+            CountersignOutcome::WireRejected(r) => {
+                assert!(r.contains("countersign wire: unknown field 13"), "{r}")
+            }
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+
+        // m3: kyber_ct_b stripped -> refused at the wire, not by the live gate.
+        let mut m3 = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        m3.kyber_ct_b.clear();
+        let m3 = crate::sdk::b0x_sdk::CountersignDelta {
+            body: m3.encode_to_vec(),
+            ..recorded.clone()
+        };
+        match super::finalize_from_countersign_delta(&m3).await {
+            CountersignOutcome::WireRejected(r) => {
+                assert!(r.contains("missing required field 6"), "{r}")
+            }
+            other => panic!("expected WireRejected, got {other:?}"),
+        }
+        assert_eq!(
+            proposal_status(&st.commitment),
+            PROPOSAL_AWAITING_VALID_REPLY
+        );
+
+        // Positive: the recorded body as-is finalizes the step.
+        assert_eq!(
+            super::finalize_from_countersign_delta(&recorded).await,
+            CountersignOutcome::Finalized
+        );
+        assert_eq!(proposal_status(&st.commitment), PROPOSAL_FINALIZED);
+        let outbox = crate::storage::client_db::get_sender_outbox_by_commitment(&st.commitment)
+            .expect("outbox")
+            .expect("present");
+        assert_eq!(
+            outbox.status,
+            crate::storage::client_db::OUTBOX_FINALIZATION_CHECKPOINT_PENDING
+        );
+        let delta = dsm::types::proto::ReceiptCountersignB::decode(&*body).expect("delta");
+        assert_eq!(
+            crate::storage::client_db::load_cert_chain_head_pubkey(
+                &st.rel_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+            )
+            .expect("head")
+            .expect("advanced"),
+            delta.ek_pk_b,
+            "the counterparty cert head advanced to the recipient's per-step EK"
         );
     }
 }

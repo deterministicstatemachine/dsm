@@ -468,14 +468,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               gap: '8px',
             }}
           >
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_dlv')}
-            >
-              DLV TOOLS
-            </button>
 
             <button
               type="button"
@@ -486,14 +478,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               POLICY TOOLS
             </button>
 
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_sofi_launch')}
-            >
-              SOFI LAUNCH
-            </button>
 
             <button
               type="button"

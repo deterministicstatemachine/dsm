@@ -412,9 +412,7 @@ impl TokenStateManager {
             // ── DLV operations ────────────────────────────────────
             //
             // DlvCreate: STATE-ONLY since the legacy value-bearing fields were
-            // deleted (owner directive 2026-08-28) — no balance change; funded
-            // creation moves value through the Fund reserve mutation on the
-            // DlvCreateFundedV2 advance, never through this legacy state path.
+            // deleted (owner directive 2026-08-28) — no balance change.
             // DlvInvalidate: return locked tokens to the creator.
             // DlvClaim: release locked tokens to the claimant.
             // DlvUnlock: state-only transition — no balance change.

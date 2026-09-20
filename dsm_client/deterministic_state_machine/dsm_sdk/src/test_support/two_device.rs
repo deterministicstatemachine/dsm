@@ -409,7 +409,6 @@ impl Pair {
         // Same reasoning for the binding register: a process-global store whose
         // stale member echoes would make a later vault's key answer for the
         // wrong fleet.
-        crate::sdk::binding_fleet_double::reset_all();
         let nodes: Vec<FakeB0xNode> = crate::economic_fixtures::canonical_member_ids()
             .iter()
             .map(|_| FakeB0xNode::spawn())

@@ -478,8 +478,8 @@ pub struct LimboVault {
     /// is the LOCAL authoritative truth — never read from storage.
     ///
     /// Not in `LimboVaultProto`, and deliberately not: it is recovered after a
-    /// restart from the vault's own reserve leaves, which stamp this sequence
-    /// into every leaf value. Storing it here as well would be a second copy of
+    /// restart from the vault's own committed state, which stamps this
+    /// sequence. Storing it here as well would be a second copy of
     /// a fact the device root already authenticates, and the two would
     /// eventually disagree with nothing to say which was right. See
     /// `dsm_sdk::sdk::vault_rehydration`.

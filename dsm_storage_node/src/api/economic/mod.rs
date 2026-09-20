@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Economic write-once registers.
+//! The ERA faucet-ticket register: native emission, outside the cell contract.
 //!
-//! Two independent one-shot registers, each following the settlement-slot
-//! discipline (first-write-wins, exact bytes, attribution before storage) but
-//! sharing NOTHING settlement-flavoured: their own tables, routes, headers and
-//! domains. A shared domain is a shared meaning, and neither of these is a
-//! settlement.
+//! One write-once register (first-write-wins, exact bytes, attribution before
+//! storage) with its own table, routes, headers and domain.
 //!
 //! ## Read attribution is part of the API contract
 //!
@@ -38,12 +35,10 @@ use crate::AppState;
 use dsm_sdk::util::text_id;
 
 pub mod faucet_ticket;
-pub mod root_register;
 
-/// The register incarnation this node serves. Same header the settlement-slot
-/// and binding paths use — one name for one fact, so a client needs no
-/// per-register special case.
-pub use crate::api::storage::binding::INCARNATION_HEADER;
+/// The register incarnation this node serves, Base32-Crockford, stamped on
+/// every faucet-register answer.
+pub const INCARNATION_HEADER: &str = "x-dsm-register-incarnation";
 
 /// An absence must be ASSERTED. A bare 404 proves only that something in this
 /// process declined to serve the path — a route miss reaches the fallback,

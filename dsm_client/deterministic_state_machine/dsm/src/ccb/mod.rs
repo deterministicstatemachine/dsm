@@ -20,12 +20,10 @@
 //! | `0x0009` | `ReleasePolicy` |
 //! | `0x000A` | `FeePolicy` |
 //!
-//! and, since amendment 2c-A.1, the transitive encoding closure of `b`
-//! (`settlement`): `0x000E`, `0x000F`, `0x0010`, `0x0033`, `0x0031`,
-//! `0x000B`, `0x000D`, `0x0015`, `0x0016`. Every one of them ships against a
-//! field table the registry defines; a class the registry has not defined
-//! has no encoder here, and [`declared_unencoded`] keeps it that way
-//! structurally rather than by convention.
+//! Every one of them ships against a field table the registry defines; a
+//! class the registry has not defined has no encoder here, and
+//! [`declared_unencoded`] keeps it that way structurally rather than by
+//! convention.
 //!
 //! ## Decoders are strict, and the conformance parser stays independent
 //!
@@ -48,7 +46,6 @@ use crate::crypto::blake3::dsm_domain_hasher;
 pub mod decode;
 pub mod devtree;
 pub mod genesis;
-pub mod settlement;
 pub mod state;
 
 pub use decode::{
@@ -59,12 +56,6 @@ pub use devtree::{
     RootProgressionDelegation,
 };
 pub use genesis::{genesis_v3_commitment, sigalg, GenesisParamsV3};
-pub use settlement::{
-    Allocation, AllocationBundle, BundleShape, ConsumedDlvTransition, DlvProofMaterial,
-    DsmSuccessorEvidence, MarketTerms, Route, RouteLeg, SettlementBundle, TradeIntent,
-    DLV_ROUTE_SETTLE_DISCRIMINATOR, DLV_SETTLE_DISCRIMINATOR, ENTROPY_LEN, MAX_TRANSITIONS,
-    SPX256F_SIGNATURE_LEN,
-};
 pub use state::{
     EncumbranceClaim, EncumbranceSet, FeePolicy, MarketPolicy, ReleasePolicy, StorageSetEntry,
     StorageSetMembers, VaultStateV2,
@@ -83,27 +74,6 @@ pub mod class {
     pub const MARKET_POLICY: u16 = 0x0007;
     pub const RELEASE_POLICY: u16 = 0x0009;
     pub const FEE_POLICY: u16 = 0x000A;
-    // ── The settlement bundle and what it nests (amendments 2c-A, 2c-B,
-    // 2c-A.1). Encoders live in `settlement`.
-    /// `TradeIntent` (§5.5).
-    pub const TRADE_INTENT: u16 = 0x000B;
-    /// `Route` schema 2 (§5.13); schema 1 burned.
-    pub const ROUTE: u16 = 0x000D;
-    /// `SettlementBundle` `B` (§5.19).
-    pub const SETTLEMENT_BUNDLE: u16 = 0x000E;
-    /// `ConsumedDlvTransition` `T_v` (§5.21).
-    pub const CONSUMED_DLV_TRANSITION: u16 = 0x000F;
-    /// `DlvProofMaterial` `P_v` (§5.22) — zero fields in schema 1.
-    pub const DLV_PROOF_MATERIAL: u16 = 0x0010;
-    /// `Allocation` schema 2 (§5.10); schema 1 burned.
-    pub const ALLOCATION: u16 = 0x0015;
-    /// `AllocationBundle` schema 2 (§5.11); schema 1 burned.
-    pub const ALLOCATION_BUNDLE: u16 = 0x0016;
-    /// Substrate class — `DsmSuccessorEvidence` (§5.23), nested in `0x0033`.
-    pub const DSM_SUCCESSOR_EVIDENCE: u16 = 0x0031;
-    /// `MarketTerms` (§5.20), nested in `0x000E` field 1.
-    pub const MARKET_TERMS: u16 = 0x0033;
-
     /// Substrate class — the Genesis v3 parameter set (registry §5.15).
     pub const GENESIS_PARAMS_V3: u16 = 0x0018;
     /// Substrate class — GRK-signed root-progression delegation (§5.16).
@@ -130,26 +100,7 @@ pub mod class {
     // Leaf-state classes. The class is what says which key derivation
     // applies, so a mutation cannot claim a balance state at a reserve key.
     pub const ECONOMIC_BALANCE_STATE: u16 = 0x001F;
-    pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
-    pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
     pub const ECONOMIC_CONSUMED_SOURCE_STATE: u16 = 0x0022;
-    /// Amendment 2c-D (registry §5.41). The fifth leaf state, and the ONLY one
-    /// whose content a write set cannot bind to the operation: `b` commits
-    /// `trader_successor`, the chain tip over the operation's own bytes, so no
-    /// `DlvSettle` can name it. Its KEY carries the operation binding instead.
-    pub const ECONOMIC_BUNDLE_ACCEPTANCE_STATE: u16 = 0x0032;
-
-    /// `TraderAcceptance` (`TA_B`), amendment 2c-D §6 / registry §5.40. Its
-    /// encoder lives in `crate::economic::trader_acceptance`, not here: `ccb`
-    /// is the transitive encoding closure of `c_n`, and a `TA_B` is not
-    /// reachable from a `VaultStateV2`. The DISCRIMINANT lives here because §3
-    /// is a single namespace.
-    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
-
-    /// `SofiReceipt`, the Def 14.2 settlement receipt — amendment 2c-F,
-    /// registry §5.42. Its encoder lives in `crate::dlv::sofi_receipt`: it is
-    /// a projection of `(B, TA_B)` and is not reachable from a `VaultStateV2`.
-    pub const SOFI_RECEIPT: u16 = 0x0034;
 
     /// A complete pre-root → post-root economic transition, carrying its
     /// mutations and its inline credit sources.
@@ -162,10 +113,7 @@ pub mod class {
     // (`owner_economic_position` / `trader_economic_position`), untrusted,
     // never authority.
     pub const CREDIT_SOURCE_AUTHORIZED_ISSUANCE: u16 = 0x0023;
-    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
     pub const CREDIT_SOURCE_VALIDATED_PEER_DEBIT: u16 = 0x0025;
-    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
-    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
     pub const CREDIT_SOURCE_VERIFIED_OFFLINE_REENTRY: u16 = 0x0028;
 
     /// `0x0029` — the authenticated issuance authorization an `0x0023`
@@ -186,11 +134,6 @@ pub mod class {
     /// The recipient credit of a consumed ERA faucet ticket — the seventh
     /// provenance arm. Scoped to one network through its `faucet_id`.
     pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
-
-    /// The route-wide settle's one output credit, funded by a reserve
-    /// consumption in every vault the route crosses — the eighth provenance
-    /// arm (amendment 2c-H, H9). Schema 1.
-    pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -392,6 +335,37 @@ pub mod burned_class {
     pub const SOFI_RECORD_OUTCOME_ABORT: u16 = 0x0047;
     pub const SOFI_OUTCOME_CELL_COMPLETE: u16 = 0x0048;
     pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
+    /// The old market's credit sources — a vault reserve consumed by a settle,
+    /// a route-wide reserve consumption, and the settlement payment a vault
+    /// owner received — burned with the QuorumBind settlement they funded.
+    pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
+    pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
+    pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
+    /// A credit funded by a debit in the same transition — produced only by
+    /// the old settle write set, burned with it.
+    pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
+    /// The old market's leaf states — a vault reserve leg, a settlement
+    /// receipt and the bundle acceptance — and the trader acceptance and
+    /// receipt objects that certified them. Burned with the QuorumBind
+    /// settlement they recorded.
+    pub const ECONOMIC_VAULT_RESERVE_STATE: u16 = 0x0020;
+    pub const ECONOMIC_SETTLEMENT_RECEIPT_STATE: u16 = 0x0021;
+    pub const ECONOMIC_BUNDLE_ACCEPTANCE_STATE: u16 = 0x0032;
+    pub const TRADER_ACCEPTANCE: u16 = 0x0011;
+    pub const SOFI_RECEIPT: u16 = 0x0034;
+    /// The old market's settlement bundle and everything it nested — the
+    /// trade intent, route, allocations, successor evidence, market terms,
+    /// consumed transition and proof material. Burned with the QuorumBind
+    /// settlement they described.
+    pub const TRADE_INTENT: u16 = 0x000B;
+    pub const ROUTE: u16 = 0x000D;
+    pub const SETTLEMENT_BUNDLE: u16 = 0x000E;
+    pub const CONSUMED_DLV_TRANSITION: u16 = 0x000F;
+    pub const DLV_PROOF_MATERIAL: u16 = 0x0010;
+    pub const ALLOCATION: u16 = 0x0015;
+    pub const ALLOCATION_BUNDLE: u16 = 0x0016;
+    pub const DSM_SUCCESSOR_EVIDENCE: u16 = 0x0031;
+    pub const MARKET_TERMS: u16 = 0x0033;
 
     pub const ALL: &[u16] = &[
         STORAGE_MEMBER_ID,
@@ -405,6 +379,24 @@ pub mod burned_class {
         SOFI_RECORD_OUTCOME_ABORT,
         SOFI_OUTCOME_CELL_COMPLETE,
         SOFI_OUTCOME_CELL_ABORT,
+        CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION,
+        CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT,
+        CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION,
+        CREDIT_SOURCE_SAME_TRANSITION_MOVE,
+        ECONOMIC_VAULT_RESERVE_STATE,
+        ECONOMIC_SETTLEMENT_RECEIPT_STATE,
+        ECONOMIC_BUNDLE_ACCEPTANCE_STATE,
+        TRADER_ACCEPTANCE,
+        SOFI_RECEIPT,
+        TRADE_INTENT,
+        ROUTE,
+        SETTLEMENT_BUNDLE,
+        CONSUMED_DLV_TRANSITION,
+        DLV_PROOF_MATERIAL,
+        ALLOCATION,
+        ALLOCATION_BUNDLE,
+        DSM_SUCCESSOR_EVIDENCE,
+        MARKET_TERMS,
     ];
 
     pub fn is_burned_class(object_class: u16) -> bool {
@@ -443,30 +435,11 @@ pub mod schema {
         (super::class::STORAGE_SET, 2),
         (super::class::ENCUMBRANCE_CLAIM, 1),
         (super::class::ENCUMBRANCE_SET, 1),
-        // The route family moved to schema 2 when `p_v` became `c_n` and legs
-        // began nesting by complete CCB (registry §5.10–§5.14). Schema 1 of
-        // `R` and `Q` stays recorded (2c-A.1 ruling 10) now that 2c-F R1 has
-        // burned both classes outright.
+        // `RouteSet` and `RouteCommitmentBody` schema 1 stay recorded (2c-A.1
+        // ruling 10); 2c-F R1 burned both classes outright, and the node cut
+        // burned the rest of the settlement family with them.
         (super::burned_class::ROUTE_SET, 1),
-        (super::class::ROUTE, 1),
-        (super::class::ALLOCATION, 1),
-        (super::class::ALLOCATION_BUNDLE, 1),
         (super::burned_class::ROUTE_COMMITMENT_BODY, 1),
-        // Amendment 2c-E cut `TradeIntent` to the exact-output model, and the
-        // bump propagates by §2.7 nesting: `0x0033` carries the intent and
-        // `0x000E` carries the terms. Recorded so a schema-1 envelope for any
-        // of the three classifies as BURNED rather than unknown.
-        (super::class::TRADE_INTENT, 1),
-        (super::class::MARKET_TERMS, 1),
-        (super::class::SETTLEMENT_BUNDLE, 1),
-        // Amendment 2c-H H17: `0x0031` field 4 now admits grammar 33 beside 26,
-        // which widens a frozen member's meaning, so `0x0031` schema 1 burns;
-        // by §2.7 nesting `0x0033` schema 2 and `0x000E` schema 2 burn with it.
-        // A 2c-B-conformant schema-1 verifier would otherwise refuse a valid
-        // route-wide bundle while claiming the same schema.
-        (super::class::DSM_SUCCESSOR_EVIDENCE, 1),
-        (super::class::MARKET_TERMS, 2),
-        (super::class::SETTLEMENT_BUNDLE, 2),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live
@@ -545,23 +518,6 @@ pub enum CcbError {
     EmptyBytes { field: &'static str },
     /// A sequence or set that must have at least one element has none.
     EmptySequence { class: u16 },
-    /// The §5.19 shape rule: which side of it was violated.
-    BundleShape(&'static str),
-    /// Beta's transition cardinality is exactly one.
-    TransitionCount { got: usize },
-    /// `V_{n+1}.parent_state_commitment != T_v.parent_binding`.
-    ParentLinkage,
-    /// `MarketTerms.recovery_material.embedded_parent != MarketTerms.trader_parent`
-    /// — the second of 2c-B's two chain-tip equalities, and the half whose
-    /// operands both live inside `B` (2c-A.1 ruling 9: in-bundle structural
-    /// checks are the decoder's). The first half — decoding
-    /// `operation_bytes` as `DlvSettleOperationPreimageV1` and recomputing
-    /// `relationship_chain_tip_v2` — is successor-evidence validity rather
-    /// than byte decoding and lands with 5c-2 Step 2/3, when a real prepared
-    /// preimage exists to carry.
-    EvidenceParentMismatch,
-    /// An owner close whose successor still holds reserves.
-    CloseSuccessorNotRetired { reserve_a: u64, reserve_b: u64 },
     /// A `signature_alg` value the registry does not declare.
     UnknownSignatureAlg { alg: u16 },
     /// A public key whose length is not the declared width for its algorithm.
@@ -572,16 +528,7 @@ pub enum CcbError {
     },
     /// A balance leaf state carried `amount = 0`. Zero balance is the ABSENCE
     /// of the leaf, so a zero-valued balance object has no canonical bytes.
-    /// Reserves are the opposite and deliberately so — see
-    /// `EconomicVaultReserveState`.
     ZeroBalanceLeafMustBeAbsent,
-    /// A settlement-receipt leaf whose `new_sequence` is not
-    /// `parent_sequence + 1`.
-    ReceiptSequenceNotSuccessor { parent: u64, new: u64 },
-    /// A settlement-receipt leaf with a zero amount on either leg.
-    ReceiptZeroAmount,
-    /// A settlement-receipt leaf whose input and output name the same asset.
-    ReceiptAssetsNotDistinct,
     /// A leaf mutation with neither a pre-state nor a post-state. "Absent to
     /// absent" is not a mutation; it is a mutation that should not have been
     /// emitted, and admitting it would let a witness pad its list.
@@ -597,9 +544,6 @@ pub enum CcbError {
     /// An admission manifest naming both substrates, or neither. The object
     /// shape is what states the substrate; exactly one is present.
     ManifestSubstrateNotExactlyOne,
-    /// A `SameTransitionMove` whose credit and debit are the same mutation.
-    /// A mutation cannot fund itself.
-    SameTransitionMoveIsSelfFunding { index: u32 },
     /// An offline reentry naming one boundary as its own predecessor.
     OfflineReentryBoundaryIsItsOwnParent,
     /// Credit sources out of order, or two sources for one credit.
@@ -666,20 +610,6 @@ impl core::fmt::Display for CcbError {
                 "economic balance leaf: amount 0 is the ABSENCE of the leaf, not a leaf \
                  holding zero — a zero-valued balance state has no canonical bytes"
             ),
-            CcbError::ReceiptSequenceNotSuccessor { parent, new } => write!(
-                f,
-                "economic settlement receipt: new_sequence {new} must be parent_sequence \
-                 {parent} + 1"
-            ),
-            CcbError::ReceiptZeroAmount => write!(
-                f,
-                "economic settlement receipt: neither leg may be zero — a zero leg is a \
-                 settlement that moved nothing and cannot fund a credit"
-            ),
-            CcbError::ReceiptAssetsNotDistinct => write!(
-                f,
-                "economic settlement receipt: input and output must name distinct assets"
-            ),
             CcbError::MutationBothStatesAbsent => write!(
                 f,
                 "economic leaf mutation: absent-to-absent is not a mutation; emitting one \
@@ -701,11 +631,6 @@ impl core::fmt::Display for CcbError {
                 "economic admission manifest: exactly one of dsm_successor_evidence_addr \
                  and offline_boundary_evidence_addr must be present — the object shape is \
                  what states the substrate"
-            ),
-            CcbError::SameTransitionMoveIsSelfFunding { index } => write!(
-                f,
-                "credit source: mutation {index} is named as both the credit and the debit — \
-                 a mutation cannot fund itself"
             ),
             CcbError::OfflineReentryBoundaryIsItsOwnParent => write!(
                 f,
@@ -746,28 +671,6 @@ impl core::fmt::Display for CcbError {
             CcbError::EmptySequence { class } => {
                 write!(f, "class {class:#06x}: a sequence with no elements is not defined")
             }
-            CcbError::BundleShape(why) => write!(f, "settlement bundle shape: {why}"),
-            CcbError::TransitionCount { got } => write!(
-                f,
-                "{got} transitions is not a cardinality this bundle shape may carry: a \
-                 market bundle carries 1..={MAX_TRANSITIONS}, and an owner close carries \
-                 exactly one transition"
-            ),
-            CcbError::ParentLinkage => write!(
-                f,
-                "the successor's parent_state_commitment is not the transition's parent_binding"
-            ),
-            CcbError::EvidenceParentMismatch => write!(
-                f,
-                "the successor evidence's embedded_parent is not the market terms' trader_parent"
-            ),
-            CcbError::CloseSuccessorNotRetired {
-                reserve_a,
-                reserve_b,
-            } => write!(
-                f,
-                "an owner close drains both legs; the successor holds ({reserve_a}, {reserve_b})"
-            ),
             CcbError::WitnessHasNoMutations => write!(
                 f,
                 "economic transition witness: no mutations — a transition that changes no \

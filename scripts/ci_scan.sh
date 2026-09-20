@@ -137,7 +137,7 @@ fail_if_found "serde_json reaches into Core/SDK protocol path (seam b)" \
 # or vault-specific execution material. The file currently has zero vault
 # imports; this scan freezes that property.
 fail_if_found "transfer_hooks must stay token-only — no vault/anchor imports (seam c)" \
-  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_routes::|dlv_sdk::|dsm::dlv::' \
+  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_sdk::|dsm::dlv::' \
   dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/transfer_hooks.rs
 
 # 3) Ban clocks/time APIs (protocol layer only)

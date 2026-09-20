@@ -28,19 +28,7 @@ const VALID_NAV_TARGETS = new Set<ScreenType>([
   'tokens',
   'qr',
   'mycontact',
-  'dev_dlv',
   'dev_policy',
-  'dev_sofi_launch',
-  'sofi',
-  'liquidity',
-  'swap',
-  // The SoFi hub's SWAP brick targets this. It was absent, so
-  // `navigate` dropped it on the floor and the brick did nothing — the
-  // trader's only way into the production swap surface. `'swap'` was in
-  // the ScreenType union and handled by AppScreenRouter the whole time,
-  // so the compiler saw a valid target and the runtime silently refused
-  // it.
-  'mail',
   'lock_setup',
   'recovery',
   'nfc_recovery',

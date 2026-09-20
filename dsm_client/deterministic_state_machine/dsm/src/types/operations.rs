@@ -212,138 +212,6 @@ pub fn canonical_offline_bearer_policy() -> AuthorityPolicy {
     }
 }
 
-/// One vault leg of a route-wide settlement, carried in route order inside
-/// [`Operation::DlvRouteSettle`] (amendment 2c-H, H7).
-///
-/// Every digest is a 32-byte array, decoded through `get_arr32`, so a short
-/// field cannot decode into a zero-padded commit that names a different vault
-/// or asset. The owner triple is per leg because each consumed vault has its
-/// own owner, and provenance joins owner identity per vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DlvRouteLeg {
-    /// The vault this leg consumes.
-    pub vault_id: [u8; 32],
-    /// The vault owner's SPHINCS+ public key.
-    pub owner_public_key: Vec<u8>,
-    /// The owner's device id and genesis, under which its reserve leaves are keyed.
-    pub owner_devid: [u8; 32],
-    pub owner_genesis: [u8; 32],
-    /// The pair this leg converts, input to output, as canonical policy commits.
-    pub input_policy_commit: [u8; 32],
-    pub output_policy_commit: [u8; 32],
-    /// The exact vault state consumed: its generation and `c_n`.
-    pub parent_sequence: u64,
-    pub parent_binding: [u8; 32],
-    /// Exact amounts, base units. Leg `k`'s output is leg `k+1`'s input (RC.2).
-    pub input_amount: u64,
-    pub output_amount: u64,
-    pub fee_bps: u32,
-    /// `derive_receipt_id(vault_id, X)`: one settlement receipt per consumed vault.
-    pub settlement_receipt_id: [u8; 32],
-}
-
-/// Why a route's legs do not conserve (amendment 2c-H, H8). Typed, so every
-/// verifier that runs the predicate carries the exact finding rather than a
-/// message; `Display` names the rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteConservationError {
-    /// A route settle names fewer than two legs.
-    TooFewLegs,
-    /// RC.1: leg `leg` outputs a different asset than leg `leg + 1` consumes.
-    AssetChainBroken { leg: usize },
-    /// RC.2: leg `leg` outputs a different amount than leg `leg + 1` consumes.
-    AmountChainBroken { leg: usize },
-    /// RC.3: the route returns to its own input asset.
-    ReturnsToInput,
-    /// RC.4: leg `leg` converts an asset to itself.
-    SelfPair { leg: usize },
-    /// RC.4: leg `leg` moves a zero amount.
-    ZeroAmount { leg: usize },
-    /// RC.5: leg `leg` and a later leg consume the same vault state.
-    VaultStateReused { leg: usize },
-}
-
-impl core::fmt::Display for RouteConservationError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::TooFewLegs => write!(
-                f,
-                "route conservation: a route settle names at least two legs"
-            ),
-            Self::AssetChainBroken { leg } => write!(
-                f,
-                "route conservation RC.1: leg {leg} outputs a different asset than leg {} consumes",
-                leg + 1
-            ),
-            Self::AmountChainBroken { leg } => write!(
-                f,
-                "route conservation RC.2: leg {leg} outputs a different amount than leg {} consumes",
-                leg + 1
-            ),
-            Self::ReturnsToInput => write!(
-                f,
-                "route conservation RC.3: the route returns to its input asset"
-            ),
-            Self::SelfPair { leg } => write!(
-                f,
-                "route conservation RC.4: leg {leg} converts an asset to itself"
-            ),
-            Self::ZeroAmount { leg } => {
-                write!(f, "route conservation RC.4: leg {leg} moves a zero amount")
-            }
-            Self::VaultStateReused { leg } => write!(
-                f,
-                "route conservation RC.5: leg {leg} and a later leg consume the same vault state"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for RouteConservationError {}
-
-impl DlvRouteLeg {
-    /// Route conservation RC.1–RC.5 (amendment 2c-H, H8), judged from the legs
-    /// alone so that every verifier — the producer, `DeviceState::advance`,
-    /// the write set, admission and each vault's certification — runs the same
-    /// predicate without another vault's state.
-    pub fn check_route_conservation(legs: &[DlvRouteLeg]) -> Result<(), RouteConservationError> {
-        let (Some(first), Some(last)) = (legs.first(), legs.last()) else {
-            return Err(RouteConservationError::TooFewLegs);
-        };
-        if legs.len() < 2 {
-            return Err(RouteConservationError::TooFewLegs);
-        }
-        for (k, leg) in legs.iter().enumerate() {
-            if leg.input_policy_commit == leg.output_policy_commit {
-                return Err(RouteConservationError::SelfPair { leg: k });
-            }
-            if leg.input_amount == 0 || leg.output_amount == 0 {
-                return Err(RouteConservationError::ZeroAmount { leg: k });
-            }
-            if let Some(next) = legs.get(k + 1) {
-                if leg.output_policy_commit != next.input_policy_commit {
-                    return Err(RouteConservationError::AssetChainBroken { leg: k });
-                }
-                if leg.output_amount != next.input_amount {
-                    return Err(RouteConservationError::AmountChainBroken { leg: k });
-                }
-            }
-        }
-        if first.input_policy_commit == last.output_policy_commit {
-            return Err(RouteConservationError::ReturnsToInput);
-        }
-        for (i, a) in legs.iter().enumerate() {
-            if legs[i + 1..]
-                .iter()
-                .any(|b| b.parent_binding == a.parent_binding)
-            {
-                return Err(RouteConservationError::VaultStateReused { leg: i });
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM
@@ -740,9 +608,8 @@ pub enum Operation {
     /// Create a new STATE-ONLY Deterministic Limbo Vault, binding it to the
     /// hash chain. Structurally tokenless (owner directive 2026-08-28: the
     /// legacy value-bearing fields `token_id`/`locked_amount` are DELETED, so
-    /// the value-bearing legacy shape can no longer be expressed — every
-    /// funded vault is a `DlvCreateFundedV2`). Moves no economic value and
-    /// may never carry a `Fund` reserve mutation.
+    /// the value-bearing legacy shape can no longer be expressed). Moves no
+    /// economic value.
     DlvCreate {
         /// 32-byte deterministic vault identifier.
         vault_id: Vec<u8>,
@@ -757,185 +624,6 @@ pub enum Operation {
         /// SPHINCS+ signature by the creator over canonical bytes.
         signature: Vec<u8>,
         /// Execution mode (typically Unilateral for vault creation).
-        mode: TransactionMode,
-    },
-    /// FUNDED vault creation, v2 (3.6): the ONLY supported value-bearing
-    /// vault-creation path. Commits BOTH exact funding legs — canonical order
-    /// (`leg_a < leg_b`), both non-zero — so the signed operation states the
-    /// complete economic effect and the `Fund` reserve mutation that rides the
-    /// same advance can be checked against it field-for-field. The legacy
-    /// `DlvCreate` (tag 22) carries a singular display token/amount and stays
-    /// `UnsupportedValueTransition` for any value-bearing shape; its exact
-    /// tokenless shape (no token, no amount, no reserve mutation) classifies
-    /// `EconomicEffect::None` (owner ruling 2026-08-28).
-    DlvCreateFundedV2 {
-        /// 32-byte deterministic vault identifier.
-        vault_id: Vec<u8>,
-        /// SPHINCS+ public key of the vault creator (the owner device's AK).
-        creator_public_key: Vec<u8>,
-        /// BLAKE3("DSM/dlv-params\0" || ...) commitment to vault parameters.
-        parameters_hash: Vec<u8>,
-        /// Serialized FulfillmentMechanism (protobuf bytes).
-        fulfillment_condition: Vec<u8>,
-        /// The lex-lower and lex-higher legs of the pair, as canonical policy
-        /// commits with the exact amounts being encumbered at generation 0.
-        leg_a_policy_commit: [u8; 32],
-        leg_a_amount: u64,
-        leg_b_policy_commit: [u8; 32],
-        leg_b_amount: u64,
-        /// The vault's market fee in basis points — part of the birth state
-        /// the reserves digest derives from.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the creator over the canonical operation
-        /// bytes — signed locally by the owner device, never caller-supplied.
-        signature: Vec<u8>,
-        /// Execution mode (Unilateral: the owner's self-loop).
-        mode: TransactionMode,
-    },
-    /// A trader settling a routed swap against a funded vault.
-    ///
-    /// The two balance deltas this operation carries are the ONLY value movement
-    /// on the trader's chain, and `DeviceState::advance` is the sole guard against
-    /// value creation *regardless of caller* — so everything needed to judge them
-    /// travels here, inside the signed operation, rather than being checked by a
-    /// handler an alternate caller could skip. Two correctly-shaped deltas must not
-    /// be sufficient to mint the output.
-    ///
-    /// The authorization is self-contained by construction: every field is either
-    /// re-derivable from published bytes or a signature over them, so the chokepoint
-    /// can verify it with no network and no local vault.
-    DlvSettle {
-        /// 32-byte vault being settled against, and whose funds are moving.
-        vault_id: Vec<u8>,
-        /// SPHINCS+ public key of the vault owner, and the device id its reserve
-        /// leaves are keyed under.
-        owner_public_key: Vec<u8>,
-        owner_devid: [u8; 32],
-        owner_genesis: [u8; 32],
-        /// The pair, as canonical policy commits — a ticker is not an identity and
-        /// cannot name a reserve leaf.
-        input_policy_commit: [u8; 32],
-        output_policy_commit: [u8; 32],
-        /// The exact vault state consumed: its generation, and its canonical
-        /// identity `c_n = H(DSM/vault-state, CCB(V_n))`. One binding replaces
-        /// the old (reserves digest, SMT root, predicate digest) triple — the
-        /// reserves, the pair and the market policy are FIELDS of the `V_n`
-        /// that `c_n` identifies, so restating any of them here would create a
-        /// second source of truth.
-        parent_sequence: u64,
-        parent_binding: [u8; 32],
-        /// The signed quote and the external commitment it derives.
-        route_commit_bytes: Vec<u8>,
-        external_commitment_x: [u8; 32],
-        /// Exact amounts, base units. The deltas must realize precisely these.
-        input_amount: u64,
-        output_amount: u64,
-        /// Fee in basis points, and the DLV unlock proof σ.
-        fee_bps: u32,
-        sigma: [u8; 32],
-        /// Who is being credited.
-        settler_public_key: Vec<u8>,
-        settler_devid: [u8; 32],
-        /// Identity of the canonical settlement receipt this advance produces —
-        /// the value a pending pointer commits to, and the thing that makes the
-        /// settlement visible to everyone else.
-        settlement_receipt_id: [u8; 32],
-        /// SPHINCS+ signature by the settler over the canonical operation bytes.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// A trader settling a signed multi-vault route as ONE operation
-    /// (amendment 2c-H). One route is one bundle, one binding over the
-    /// complete key set and one trader advance; this is that advance's
-    /// operation. Its balance effect is the route's NET exchange — hop 0's
-    /// input debited, the last hop's output credited — and intermediate assets
-    /// never touch the trader's chain (H3, H4). Grammar 26 (`DlvSettle`) stays
-    /// the single-vault operation; this one always names at least two legs.
-    DlvRouteSettle {
-        /// The consumed vaults, in route order: a sequence, never sorted.
-        legs: Vec<DlvRouteLeg>,
-        /// The one signed quote for the whole route, and the external
-        /// commitment it derives; carried once, not per leg.
-        route_commit_bytes: Vec<u8>,
-        external_commitment_x: [u8; 32],
-        /// Who is being credited.
-        settler_public_key: Vec<u8>,
-        settler_devid: [u8; 32],
-        /// SPHINCS+ signature by the settler over the canonical operation
-        /// bytes; it covers every leg.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// An owner recording a settlement it has already verified (v2 — the
-    /// legacy tag-27 `DlvOwnerApply` is DELETED and its tag burned; it carried
-    /// neither `fee_bps` nor the parent vault-state binding, so it could not
-    /// be equality-checked against the reserve mutation riding the same
-    /// advance).
-    ///
-    /// Authorizes NO balance movement — the trader's credit was final at the
-    /// trader's own advance; the fee accrues inside the reserves as LP yield.
-    /// This operation states the COMPLETE reserve effect — the pair legs, the
-    /// exact amounts, the one-step generation advance, the fee, and the exact
-    /// parent vault state `c_n` it consumes — so `ApplySettlement` is DERIVED
-    /// from it (never a trusted sidecar) and cross-checked field-for-field.
-    DlvOwnerApplyV2 {
-        /// 32-byte vault whose reserves are being reconciled.
-        vault_id: Vec<u8>,
-        /// The receipt being recorded, and the pointer that committed to it.
-        settlement_receipt_id: [u8; 32],
-        pending_pointer_x: [u8; 32],
-        /// The sequence this advances from, and to. Exactly one step.
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The exact parent vault state consumed:
-        /// `c_n = H(DSM/vault-state, CCB(V_n))` at `parent_sequence`.
-        parent_binding: [u8; 32],
-        /// The pair whose leaves move, and by how much: reserve[input] gains
-        /// `input_amount`, reserve[output] loses `output_amount`.
-        input_policy_commit: [u8; 32],
-        output_policy_commit: [u8; 32],
-        input_amount: u64,
-        output_amount: u64,
-        /// The vault's market fee in basis points.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the owner over the canonical operation bytes.
-        signature: Vec<u8>,
-        mode: TransactionMode,
-    },
-    /// The owner CLOSES its AMM vault: the complete remaining reserve set (both
-    /// legs of the pair, exactly, at the current generation) moves back to
-    /// ordinary spendable balance atomically, exactly once, and the vault's
-    /// leaves become `0 @ parent + 1` — the terminal generation. A closed vault
-    /// id is single-use: `Fund` refuses it forever (its leaves exist).
-    ///
-    /// The SIGNED operation binds the WHOLE transition — vault, both legs with
-    /// their amounts, the parent and child generation, and the pair/fee that
-    /// determine the terminal vault-state digest — so no unsigned mutation
-    /// metadata decides what moves. The `Withdraw` reserve mutation that rides
-    /// the same advance must equal these fields field-for-field.
-    ///
-    /// The app request is only `DlvCloseV1 { vault_id }`: every field here is
-    /// DERIVED by the handler from the owner's verified frontier (composition
-    /// at exactly this generation with exactly these reserves), never supplied.
-    DlvClose {
-        /// 32-byte vault being closed.
-        vault_id: Vec<u8>,
-        /// The lex-lower and lex-higher legs of the vault's pair, with the
-        /// amounts being withdrawn — the FULL remaining reserves. Both present,
-        /// canonical order.
-        leg_a_policy_commit: [u8; 32],
-        leg_a_amount: u64,
-        leg_b_policy_commit: [u8; 32],
-        leg_b_amount: u64,
-        /// The generation consumed and the terminal generation produced.
-        /// Exactly one step.
-        parent_sequence: u64,
-        new_sequence: u64,
-        /// The vault's fee (its pair is `leg_a/leg_b`); together they derive
-        /// the terminal reserves digest `digest(a, b, 0, 0, fee)`.
-        fee_bps: u32,
-        /// SPHINCS+ signature by the owner over the canonical operation bytes.
-        signature: Vec<u8>,
         mode: TransactionMode,
     },
     /// Attempt to unlock a vault by providing a fulfillment proof.
@@ -992,8 +680,7 @@ pub enum Operation {
         /// `semantic_write_set` is pure — it cannot resolve
         /// `VaultStateLeaf.market_policy` to a pair — so without these the
         /// debit P15-12 requires cannot be derived from the operation at all,
-        /// and balances would move outside any declared write set. The same
-        /// precedent `DlvCreateFundedV2` already sets with its leg commits.
+        /// and balances would move outside any declared write set.
         ///
         /// The authority remains the market policy the vault state commits:
         /// `genesis_accepted` resolves it by content address and refuses
@@ -1088,25 +775,12 @@ impl Operation {
             | DlvUnlock { .. }
             | DlvClaim { .. }
             | DlvInvalidate { .. }
-            // A settling trader pays its input out. Egress despite also
-            // receiving the output: value leaves this device's control.
-            | DlvSettle { .. }
-            // A route settle pays hop 0's input out, exactly as a settle does.
-            | DlvRouteSettle { .. }
-            // A close moves the vault's reserves OUT of the encumbrance and
-            // back to the owner's spendable balance: value-bearing.
-            | DlvClose { .. }
-            // The funded v2 create encumbers both legs out of spendable
-            // balance; the v2 apply moves the OUTPUT leg out of the vault
-            // reserves — egress for the same reasons as their predecessors.
-            | DlvCreateFundedV2 { .. }
             // A vault creation moves the owner's funding out of its spendable
             // balance, and a fulfillment commits a position whose write set
             // debits the trader. Both are egress; the setup is not, because it
             // writes a relationship leaf and nothing else.
             | SofiVaultCreate { .. }
             | SofiFulfill { .. }
-            | DlvOwnerApplyV2 { .. }
             // Token creation DESTROYS ERA to pay its fee, so it moves the
             // owner's existing funds outward — egress, despite also issuing a
             // new asset. Classifying it as ingress (as it was while nothing
@@ -1131,7 +805,7 @@ impl Operation {
             | Generic { .. }
             | Receive { .. }
             // Structurally state-only since the legacy value-bearing fields
-            // were deleted; funded creation is DlvCreateFundedV2 (egress).
+            // were deleted.
             | DlvCreate { .. }
             // Adoption commits a policy leaf; no value moves.
             | AdoptToken { .. }
@@ -1216,8 +890,7 @@ impl Operation {
                     amount: (*amount).max(0) as u64,
                 }
             }
-            // A state-only create moves nothing — not egress (the funded
-            // path is DlvCreateFundedV2, which names its lex-lower leg).
+            // A state-only create moves nothing — not egress.
             DlvCreate { .. } => EgressAsset::NotEgress,
             // Vault-keyed DLV ops: the asset is determined by the vault, not a token_id.
             DlvUnlock { .. } | DlvClaim { .. } | DlvInvalidate { .. } => EgressAsset::Unidentified,
@@ -1230,61 +903,6 @@ impl Operation {
             // otherwise would be inventing a token id the operation does not
             // carry.
             SofiVaultCreate { .. } | SofiFulfill { .. } => EgressAsset::Unidentified,
-            // Settlement names its asset exactly: the trader's INPUT leg is what
-            // leaves. Unlike the vault-keyed ops above, this is not
-            // `Unidentified` — the authorization carries the policy commit and
-            // the amount, so the recovery egress gate can see precisely what
-            // moved.
-            DlvSettle {
-                input_policy_commit,
-                input_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: input_policy_commit.to_vec(),
-                amount: *input_amount,
-            },
-            // A route settle: the asset that leaves is hop 0's input.
-            // Intermediate assets never touch the trader (2c-H H4). A route
-            // with no legs cannot decode, so `Unidentified` is unreachable
-            // from the wire.
-            DlvRouteSettle { legs, .. } => match legs.first() {
-                Some(leg) => EgressAsset::Asset {
-                    token_id: leg.input_policy_commit.to_vec(),
-                    amount: leg.input_amount,
-                },
-                None => EgressAsset::Unidentified,
-            },
-            // The owner's OUTPUT leg leaves its reserves.
-            DlvOwnerApplyV2 {
-                output_policy_commit,
-                output_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: output_policy_commit.to_vec(),
-                amount: *output_amount,
-            },
-            // The funded v2 create encumbers both legs; name the lex-lower
-            // leg, the same convention as DlvClose below.
-            DlvCreateFundedV2 {
-                leg_a_policy_commit,
-                leg_a_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: leg_a_policy_commit.to_vec(),
-                amount: *leg_a_amount,
-            },
-            // A close releases BOTH legs from the vault's reserves back to the
-            // owner's own spendable balance. Nothing leaves the device's
-            // control, but the encumbrance is what the recovery/bearer gates
-            // watch: name the lex-lower leg so the gate sees a reserve move.
-            DlvClose {
-                leg_a_policy_commit,
-                leg_a_amount,
-                ..
-            } => EgressAsset::Asset {
-                token_id: leg_a_policy_commit.to_vec(),
-                amount: *leg_a_amount,
-            },
 
             // Token creation: the asset that LEAVES is ERA (the burned fee) —
             // NOT the new token, which is issued, not spent. Naming the new
@@ -1430,9 +1048,8 @@ impl Operation {
                 faucet_id,
                 ticket_index,
             } => {
-                // Canonical tag 31. Tags 29/30 belong to
-                // DlvCreateFundedV2 / DlvOwnerApplyV2 by the frozen economic
-                // plan — landing first does not confer the right to take them.
+                // Canonical tag 31. Tags 26, 28, 29, 30 and 33 were the old
+                // market's operations and are burned: retired, never reassigned.
                 put_u8(&mut out, 31);
                 put_bytes(&mut out, faucet_id.as_slice());
                 put_u64(&mut out, *ticket_index);
@@ -1880,167 +1497,6 @@ impl Operation {
                 put_bytes(&mut out, vault_id);
                 put_str(&mut out, reason);
                 put_bytes(&mut out, creator_public_key);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            // Every authorization field is in the canonical bytes, so the
-            // settler's signature covers all of it and none can be swapped
-            // after signing.
-            DlvSettle {
-                vault_id,
-                owner_public_key,
-                owner_devid,
-                owner_genesis,
-                input_policy_commit,
-                output_policy_commit,
-                parent_sequence,
-                parent_binding,
-                route_commit_bytes,
-                external_commitment_x,
-                input_amount,
-                output_amount,
-                fee_bps,
-                sigma,
-                settler_public_key,
-                settler_devid,
-                settlement_receipt_id,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 26);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, owner_public_key);
-                put_bytes(&mut out, owner_devid);
-                put_bytes(&mut out, owner_genesis);
-                put_bytes(&mut out, input_policy_commit);
-                put_bytes(&mut out, output_policy_commit);
-                put_u64(&mut out, *parent_sequence);
-                put_bytes(&mut out, parent_binding);
-                put_bytes(&mut out, route_commit_bytes);
-                put_bytes(&mut out, external_commitment_x);
-                put_u64(&mut out, *input_amount);
-                put_u64(&mut out, *output_amount);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, sigma);
-                put_bytes(&mut out, settler_public_key);
-                put_bytes(&mut out, settler_devid);
-                put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            // 2c-H H7 — `DlvRouteSettleOperationPreimageV1`, in the amendment's
-            // field order; `legs` is written in route order.
-            DlvRouteSettle {
-                legs,
-                route_commit_bytes,
-                external_commitment_x,
-                settler_public_key,
-                settler_devid,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 33);
-                // A leg count beyond `u32` cannot exist in memory; saturating
-                // keeps the encoder total, and the decoder refuses the value.
-                put_u32(&mut out, u32::try_from(legs.len()).unwrap_or(u32::MAX));
-                for leg in legs {
-                    put_bytes(&mut out, &leg.vault_id);
-                    put_bytes(&mut out, &leg.owner_public_key);
-                    put_bytes(&mut out, &leg.owner_devid);
-                    put_bytes(&mut out, &leg.owner_genesis);
-                    put_bytes(&mut out, &leg.input_policy_commit);
-                    put_bytes(&mut out, &leg.output_policy_commit);
-                    put_u64(&mut out, leg.parent_sequence);
-                    put_bytes(&mut out, &leg.parent_binding);
-                    put_u64(&mut out, leg.input_amount);
-                    put_u64(&mut out, leg.output_amount);
-                    put_u32(&mut out, leg.fee_bps);
-                    put_bytes(&mut out, &leg.settlement_receipt_id);
-                }
-                put_bytes(&mut out, route_commit_bytes);
-                put_bytes(&mut out, external_commitment_x);
-                put_bytes(&mut out, settler_public_key);
-                put_bytes(&mut out, settler_devid);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvClose {
-                vault_id,
-                leg_a_policy_commit,
-                leg_a_amount,
-                leg_b_policy_commit,
-                leg_b_amount,
-                parent_sequence,
-                new_sequence,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 28);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, leg_a_policy_commit);
-                put_u64(&mut out, *leg_a_amount);
-                put_bytes(&mut out, leg_b_policy_commit);
-                put_u64(&mut out, *leg_b_amount);
-                put_u64(&mut out, *parent_sequence);
-                put_u64(&mut out, *new_sequence);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvCreateFundedV2 {
-                vault_id,
-                creator_public_key,
-                parameters_hash,
-                fulfillment_condition,
-                leg_a_policy_commit,
-                leg_a_amount,
-                leg_b_policy_commit,
-                leg_b_amount,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 29);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, creator_public_key);
-                put_bytes(&mut out, parameters_hash);
-                put_bytes(&mut out, fulfillment_condition);
-                put_bytes(&mut out, leg_a_policy_commit);
-                put_u64(&mut out, *leg_a_amount);
-                put_bytes(&mut out, leg_b_policy_commit);
-                put_u64(&mut out, *leg_b_amount);
-                put_u32(&mut out, *fee_bps);
-                put_bytes(&mut out, signature);
-                put_mode(&mut out, mode);
-            }
-            DlvOwnerApplyV2 {
-                vault_id,
-                settlement_receipt_id,
-                pending_pointer_x,
-                parent_sequence,
-                new_sequence,
-                parent_binding,
-                input_policy_commit,
-                output_policy_commit,
-                input_amount,
-                output_amount,
-                fee_bps,
-                signature,
-                mode,
-            } => {
-                put_u8(&mut out, 30);
-                put_bytes(&mut out, vault_id);
-                put_bytes(&mut out, settlement_receipt_id);
-                put_bytes(&mut out, pending_pointer_x);
-                put_u64(&mut out, *parent_sequence);
-                put_u64(&mut out, *new_sequence);
-                put_bytes(&mut out, parent_binding);
-                put_bytes(&mut out, input_policy_commit);
-                put_bytes(&mut out, output_policy_commit);
-                put_u64(&mut out, *input_amount);
-                put_u64(&mut out, *output_amount);
-                put_u32(&mut out, *fee_bps);
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -2729,193 +2185,6 @@ impl Operation {
                     mode,
                 }
             }
-            // Mirrors the encode order exactly. A decoder that drifted from its
-            // encoder by one field would produce an operation that reads as
-            // valid and describes a different trade.
-            26 => {
-                let vault_id = get_bytes(&mut input)?;
-                let owner_public_key = get_bytes(&mut input)?;
-                let owner_devid = get_arr32(&mut input)?;
-                let owner_genesis = get_arr32(&mut input)?;
-                let input_policy_commit = get_arr32(&mut input)?;
-                let output_policy_commit = get_arr32(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let parent_binding = get_arr32(&mut input)?;
-                let route_commit_bytes = get_bytes(&mut input)?;
-                let external_commitment_x = get_arr32(&mut input)?;
-                let input_amount = get_u64(&mut input)?;
-                let output_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let sigma = get_arr32(&mut input)?;
-                let settler_public_key = get_bytes(&mut input)?;
-                let settler_devid = get_arr32(&mut input)?;
-                let settlement_receipt_id = get_arr32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvSettle {
-                    vault_id,
-                    owner_public_key,
-                    owner_devid,
-                    owner_genesis,
-                    input_policy_commit,
-                    output_policy_commit,
-                    parent_sequence,
-                    parent_binding,
-                    route_commit_bytes,
-                    external_commitment_x,
-                    input_amount,
-                    output_amount,
-                    fee_bps,
-                    sigma,
-                    settler_public_key,
-                    settler_devid,
-                    settlement_receipt_id,
-                    signature,
-                    mode,
-                }
-            }
-            // 2c-H H7 — `DlvRouteSettleOperationPreimageV1`. The leg count is
-            // bounded BEFORE any leg is read: fewer than two legs is a
-            // grammar-26 settle, and more than `ccb::MAX_TRANSITIONS` cannot be
-            // carried by one settlement bundle.
-            33 => {
-                let leg_count = get_u32(&mut input)? as usize;
-                if !(2..=crate::ccb::MAX_TRANSITIONS).contains(&leg_count) {
-                    return Err(DsmError::invalid_operation(format!(
-                        "DlvRouteSettle names {leg_count} legs; a route settle carries 2..={}",
-                        crate::ccb::MAX_TRANSITIONS
-                    )));
-                }
-                let mut legs = Vec::with_capacity(leg_count);
-                for _ in 0..leg_count {
-                    let vault_id = get_arr32(&mut input)?;
-                    let owner_public_key = get_bytes(&mut input)?;
-                    let owner_devid = get_arr32(&mut input)?;
-                    let owner_genesis = get_arr32(&mut input)?;
-                    let input_policy_commit = get_arr32(&mut input)?;
-                    let output_policy_commit = get_arr32(&mut input)?;
-                    let parent_sequence = get_u64(&mut input)?;
-                    let parent_binding = get_arr32(&mut input)?;
-                    let input_amount = get_u64(&mut input)?;
-                    let output_amount = get_u64(&mut input)?;
-                    let fee_bps = get_u32(&mut input)?;
-                    let settlement_receipt_id = get_arr32(&mut input)?;
-                    legs.push(DlvRouteLeg {
-                        vault_id,
-                        owner_public_key,
-                        owner_devid,
-                        owner_genesis,
-                        input_policy_commit,
-                        output_policy_commit,
-                        parent_sequence,
-                        parent_binding,
-                        input_amount,
-                        output_amount,
-                        fee_bps,
-                        settlement_receipt_id,
-                    });
-                }
-                let route_commit_bytes = get_bytes(&mut input)?;
-                let external_commitment_x = get_arr32(&mut input)?;
-                let settler_public_key = get_bytes(&mut input)?;
-                let settler_devid = get_arr32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvRouteSettle {
-                    legs,
-                    route_commit_bytes,
-                    external_commitment_x,
-                    settler_public_key,
-                    settler_devid,
-                    signature,
-                    mode,
-                }
-            }
-            // Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
-            // 2026-08-28): the shape carried neither fee_bps nor c_n and is
-            // deleted, not deprecated. Its bytes decode as unknown-op-tag.
-            28 => {
-                let vault_id = get_bytes(&mut input)?;
-                let leg_a_policy_commit = get_arr32(&mut input)?;
-                let leg_a_amount = get_u64(&mut input)?;
-                let leg_b_policy_commit = get_arr32(&mut input)?;
-                let leg_b_amount = get_u64(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let new_sequence = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvClose {
-                    vault_id,
-                    leg_a_policy_commit,
-                    leg_a_amount,
-                    leg_b_policy_commit,
-                    leg_b_amount,
-                    parent_sequence,
-                    new_sequence,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
-            // Mirrors the v2 encoders exactly — same one-field-drift hazard as
-            // tag 26 above.
-            29 => {
-                let vault_id = get_bytes(&mut input)?;
-                let creator_public_key = get_bytes(&mut input)?;
-                let parameters_hash = get_bytes(&mut input)?;
-                let fulfillment_condition = get_bytes(&mut input)?;
-                let leg_a_policy_commit = get_arr32(&mut input)?;
-                let leg_a_amount = get_u64(&mut input)?;
-                let leg_b_policy_commit = get_arr32(&mut input)?;
-                let leg_b_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvCreateFundedV2 {
-                    vault_id,
-                    creator_public_key,
-                    parameters_hash,
-                    fulfillment_condition,
-                    leg_a_policy_commit,
-                    leg_a_amount,
-                    leg_b_policy_commit,
-                    leg_b_amount,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
-            30 => {
-                let vault_id = get_bytes(&mut input)?;
-                let settlement_receipt_id = get_arr32(&mut input)?;
-                let pending_pointer_x = get_arr32(&mut input)?;
-                let parent_sequence = get_u64(&mut input)?;
-                let new_sequence = get_u64(&mut input)?;
-                let parent_binding = get_arr32(&mut input)?;
-                let input_policy_commit = get_arr32(&mut input)?;
-                let output_policy_commit = get_arr32(&mut input)?;
-                let input_amount = get_u64(&mut input)?;
-                let output_amount = get_u64(&mut input)?;
-                let fee_bps = get_u32(&mut input)?;
-                let signature = get_bytes(&mut input)?;
-                let mode = dec_mode(&mut input)?;
-                DlvOwnerApplyV2 {
-                    vault_id,
-                    settlement_receipt_id,
-                    pending_pointer_x,
-                    parent_sequence,
-                    new_sequence,
-                    parent_binding,
-                    input_policy_commit,
-                    output_policy_commit,
-                    input_amount,
-                    output_amount,
-                    fee_bps,
-                    signature,
-                    mode,
-                }
-            }
             31 => {
                 // FaucetClaim mirrors its encoder exactly: length-prefixed
                 // 32-byte faucet_id, then the u64 ticket index. This arm was
@@ -3037,11 +2306,6 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvRouteSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. }
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
             | Operation::SofiFulfill { signature, .. }
@@ -3083,11 +2347,6 @@ impl Operation {
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
-            Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvRouteSettle { .. } => "dlv_route_settle",
-            Operation::DlvClose { .. } => "dlv_close",
-            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
-            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
             Operation::SofiSetup { .. } => "sofi_setup",
             Operation::SofiVaultCreate { .. } => "sofi_vault_create",
@@ -3113,11 +2372,6 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvRouteSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. }
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
             | Operation::SofiFulfill { signature, .. } => {
@@ -3147,11 +2401,6 @@ impl Operation {
             | Operation::DlvUnlock { signature, .. }
             | Operation::DlvClaim { signature, .. }
             | Operation::DlvInvalidate { signature, .. }
-            | Operation::DlvSettle { signature, .. }
-            | Operation::DlvRouteSettle { signature, .. }
-            | Operation::DlvClose { signature, .. }
-            | Operation::DlvCreateFundedV2 { signature, .. }
-            | Operation::DlvOwnerApplyV2 { signature, .. }
             | Operation::SofiSetup { signature, .. }
             | Operation::SofiVaultCreate { signature, .. }
             | Operation::SofiFulfill { signature, .. } => {
@@ -3258,11 +2507,6 @@ impl Ops for Operation {
             Operation::DlvCreate { .. } => "dlv_create",
             Operation::DlvUnlock { .. } => "dlv_unlock",
             Operation::DlvClaim { .. } => "dlv_claim",
-            Operation::DlvSettle { .. } => "dlv_settle",
-            Operation::DlvRouteSettle { .. } => "dlv_route_settle",
-            Operation::DlvClose { .. } => "dlv_close",
-            Operation::DlvCreateFundedV2 { .. } => "dlv_create_funded_v2",
-            Operation::DlvOwnerApplyV2 { .. } => "dlv_owner_apply_v2",
             Operation::DlvInvalidate { .. } => "dlv_invalidate",
             Operation::SofiSetup { .. } => "sofi_setup",
             Operation::SofiVaultCreate { .. } => "sofi_vault_create",
@@ -4071,264 +3315,23 @@ mod tests {
             });
         }
 
-        fn route_leg(
-            tag: u8,
-            input: [u8; 32],
-            output: [u8; 32],
-            input_amount: u64,
-            output_amount: u64,
-        ) -> DlvRouteLeg {
-            DlvRouteLeg {
-                vault_id: [tag; 32],
-                owner_public_key: vec![tag.wrapping_add(1); 64],
-                owner_devid: [tag.wrapping_add(2); 32],
-                owner_genesis: [tag.wrapping_add(3); 32],
-                input_policy_commit: input,
-                output_policy_commit: output,
-                parent_sequence: u64::from(tag),
-                parent_binding: [tag.wrapping_add(4); 32],
-                input_amount,
-                output_amount,
-                fee_bps: 30,
-                settlement_receipt_id: [tag.wrapping_add(5); 32],
+        /// Tag 27 (legacy DlvOwnerApply, owner directive 2026-08-28) and tags
+        /// 26, 28, 29, 30 and 33 (the old market's settle, close, funded
+        /// create, owner apply and route settle) are BURNED: the bytes no
+        /// longer name an operation. A tag can be retired but never
+        /// reassigned with a different meaning.
+        #[test]
+        fn the_burned_market_tags_decode_as_unknown() {
+            for tag in [26u8, 27, 28, 29, 30, 33] {
+                let mut bytes = vec![tag];
+                bytes.extend_from_slice(&(32u32).to_le_bytes());
+                bytes.extend_from_slice(&[0x11; 32]);
+                let err = Operation::from_bytes(&bytes).expect_err("burned tag must not decode");
+                assert!(
+                    err.to_string().contains("unknown op tag"),
+                    "tag {tag}: {err}"
+                );
             }
-        }
-
-        /// A two-hop A → B → C route: 1,000 A in, 450 B between, 2,100 C out.
-        fn two_hop_legs() -> Vec<DlvRouteLeg> {
-            vec![
-                route_leg(0x10, [0xA0; 32], [0xB0; 32], 1_000, 450),
-                route_leg(0x20, [0xB0; 32], [0xC0; 32], 450, 2_100),
-            ]
-        }
-
-        fn two_hop_route_settle(route_commit_len: usize, signature_len: usize) -> Operation {
-            Operation::DlvRouteSettle {
-                legs: two_hop_legs(),
-                route_commit_bytes: vec![0x5C; route_commit_len],
-                external_commitment_x: [0x58; 32],
-                settler_public_key: vec![0x61; 64],
-                settler_devid: [0x62; 32],
-                signature: vec![0x63; signature_len],
-                mode: TransactionMode::Unilateral,
-            }
-        }
-
-        #[test]
-        fn dlv_route_settle_round_trips() {
-            roundtrip(&two_hop_route_settle(200, 49_856));
-        }
-
-        /// 2c-H H7, byte for byte: the encoder emits exactly the amendment's
-        /// field table, and the length is the one the amendment derives field
-        /// by field — `50,010 + 348·N + |RC|`, signing form
-        /// `154 + 348·N + |RC|`. The expected bytes are written here from the
-        /// table, not from `to_bytes`, so a reordered or re-widened field in
-        /// the encoder cannot agree with them by construction.
-        #[test]
-        fn the_route_settle_preimage_matches_the_amendment_table_byte_for_byte() {
-            fn b(out: &mut Vec<u8>, x: &[u8]) {
-                out.extend_from_slice(&u32::try_from(x.len()).expect("fits").to_le_bytes());
-                out.extend_from_slice(x);
-            }
-            let op = two_hop_route_settle(200, 49_856);
-            let Operation::DlvRouteSettle {
-                legs,
-                route_commit_bytes,
-                external_commitment_x,
-                settler_public_key,
-                settler_devid,
-                signature,
-                ..
-            } = &op
-            else {
-                unreachable!("fixture is a route settle")
-            };
-            let mut expected = vec![33u8];
-            expected.extend_from_slice(&2u32.to_le_bytes());
-            for leg in legs {
-                b(&mut expected, &leg.vault_id);
-                b(&mut expected, &leg.owner_public_key);
-                b(&mut expected, &leg.owner_devid);
-                b(&mut expected, &leg.owner_genesis);
-                b(&mut expected, &leg.input_policy_commit);
-                b(&mut expected, &leg.output_policy_commit);
-                expected.extend_from_slice(&leg.parent_sequence.to_le_bytes());
-                b(&mut expected, &leg.parent_binding);
-                expected.extend_from_slice(&leg.input_amount.to_le_bytes());
-                expected.extend_from_slice(&leg.output_amount.to_le_bytes());
-                expected.extend_from_slice(&leg.fee_bps.to_le_bytes());
-                b(&mut expected, &leg.settlement_receipt_id);
-            }
-            b(&mut expected, route_commit_bytes);
-            b(&mut expected, external_commitment_x);
-            b(&mut expected, settler_public_key);
-            b(&mut expected, settler_devid);
-            b(&mut expected, signature);
-            expected.push(1);
-            let got = op.to_bytes();
-            assert_eq!(got, expected, "the encoder must emit the H7 table exactly");
-            assert_eq!(got.len(), 50_010 + 348 * 2 + 200, "H7 length formula");
-            let signing = two_hop_route_settle(200, 0).to_bytes();
-            assert_eq!(
-                signing.len(),
-                154 + 348 * 2 + 200,
-                "H7 signing-form formula"
-            );
-        }
-
-        /// The leg count is refused before any leg is read: one leg is a
-        /// grammar-26 settle, and more than `MAX_TRANSITIONS` cannot fit one
-        /// bundle.
-        #[test]
-        fn a_route_settle_outside_two_to_max_legs_does_not_decode() {
-            let bytes = two_hop_route_settle(200, 49_856).to_bytes();
-            for bad in [
-                0u32,
-                1,
-                u32::try_from(crate::ccb::MAX_TRANSITIONS + 1).expect("fits"),
-            ] {
-                let mut patched = bytes.clone();
-                patched[1..5].copy_from_slice(&bad.to_le_bytes());
-                let err = Operation::from_bytes(&patched).expect_err("leg count out of range");
-                assert!(err.to_string().contains("legs"), "count {bad}: {err}");
-            }
-        }
-
-        #[test]
-        fn a_route_settle_with_trailing_bytes_does_not_decode() {
-            let mut bytes = two_hop_route_settle(200, 49_856).to_bytes();
-            bytes.push(0);
-            let err = Operation::from_bytes(&bytes).expect_err("trailing byte");
-            assert!(err.to_string().contains("trailing"), "{err}");
-        }
-
-        /// A short digest inside leg 2 is refused by the width rule, not by
-        /// anything later.
-        #[test]
-        fn a_short_digest_inside_the_second_leg_does_not_decode() {
-            let op = two_hop_route_settle(200, 49_856);
-            let bytes = op.to_bytes();
-            // Offset of leg 2's vault_id length prefix: disc 1 + count 4 + leg 1 (348).
-            let at = 1 + 4 + 348;
-            let mut patched = bytes[..at].to_vec();
-            patched.extend_from_slice(&31u32.to_le_bytes());
-            patched.extend_from_slice(&bytes[at + 4..at + 4 + 31]);
-            patched.extend_from_slice(&bytes[at + 4 + 32..]);
-            assert!(
-                Operation::from_bytes(&patched).is_err(),
-                "a 31-byte vault id must not decode"
-            );
-        }
-
-        #[test]
-        fn route_conservation_accepts_a_chained_route() {
-            DlvRouteLeg::check_route_conservation(&two_hop_legs()).expect("A → B → C conserves");
-        }
-
-        #[test]
-        fn route_conservation_refuses_each_broken_rule_by_name() {
-            let refuses = |legs: Vec<DlvRouteLeg>, rule: &str| {
-                let err = DlvRouteLeg::check_route_conservation(&legs).expect_err(rule);
-                assert!(err.to_string().contains(rule), "expected {rule}: {err}");
-            };
-            let mut token_break = two_hop_legs();
-            token_break[1].input_policy_commit = [0xB1; 32];
-            refuses(token_break, "RC.1");
-            let mut amount_break = two_hop_legs();
-            amount_break[1].input_amount = 451;
-            refuses(amount_break, "RC.2");
-            let mut cycle = two_hop_legs();
-            cycle[1].output_policy_commit = [0xA0; 32];
-            refuses(cycle, "RC.3");
-            let mut self_pair = two_hop_legs();
-            self_pair[0].output_policy_commit = [0xA0; 32];
-            self_pair[1].input_policy_commit = [0xA0; 32];
-            refuses(self_pair, "RC.4");
-            let mut zero = two_hop_legs();
-            zero[0].input_amount = 0;
-            refuses(zero, "RC.4");
-            let mut same_parent = two_hop_legs();
-            same_parent[1].parent_binding = same_parent[0].parent_binding;
-            refuses(same_parent, "RC.5");
-            refuses(vec![two_hop_legs().remove(0)], "at least two legs");
-        }
-
-        /// Grammar 26 keeps its discriminator: the route grammar is beside it,
-        /// not in place of it (2c-H H6).
-        #[test]
-        fn grammar_26_keeps_its_discriminator() {
-            let settle = Operation::DlvSettle {
-                vault_id: vec![0x01; 32],
-                owner_public_key: vec![0x02; 64],
-                owner_devid: [0x03; 32],
-                owner_genesis: [0x04; 32],
-                input_policy_commit: [0x05; 32],
-                output_policy_commit: [0x06; 32],
-                parent_sequence: 1,
-                parent_binding: [0x07; 32],
-                route_commit_bytes: vec![0x08; 16],
-                external_commitment_x: [0x09; 32],
-                input_amount: 10,
-                output_amount: 9,
-                fee_bps: 30,
-                sigma: [0u8; 32],
-                settler_public_key: vec![0x0A; 64],
-                settler_devid: [0x0B; 32],
-                settlement_receipt_id: [0x0C; 32],
-                signature: vec![0x0D; 8],
-                mode: TransactionMode::Unilateral,
-            };
-            assert_eq!(settle.to_bytes()[0], 26);
-            assert_eq!(two_hop_route_settle(200, 8).to_bytes()[0], 33);
-        }
-
-        /// Tag 27 (legacy DlvOwnerApply) is BURNED (owner directive
-        /// 2026-08-28): the byte no longer names an operation. A tag can be
-        /// retired but never reassigned with a different meaning.
-        #[test]
-        fn the_burned_tag_27_decodes_as_unknown() {
-            let mut bytes = vec![27u8];
-            bytes.extend_from_slice(&(32u32).to_le_bytes());
-            bytes.extend_from_slice(&[0x11; 32]);
-            let err = Operation::from_bytes(&bytes).expect_err("burned tag must not decode");
-            assert!(err.to_string().contains("unknown op tag"), "got: {err}");
-        }
-
-        #[test]
-        fn dlv_create_funded_v2() {
-            roundtrip(&Operation::DlvCreateFundedV2 {
-                vault_id: vec![0x01; 32],
-                creator_public_key: vec![0x02; 64],
-                parameters_hash: vec![0x03; 32],
-                fulfillment_condition: vec![0x04; 16],
-                leg_a_policy_commit: [0x0A; 32],
-                leg_a_amount: 10_000,
-                leg_b_policy_commit: [0x0B; 32],
-                leg_b_amount: 5_000,
-                fee_bps: 30,
-                signature: vec![0x06; 48],
-                mode: TransactionMode::Unilateral,
-            });
-        }
-
-        #[test]
-        fn dlv_owner_apply_v2() {
-            roundtrip(&Operation::DlvOwnerApplyV2 {
-                vault_id: vec![0x01; 32],
-                settlement_receipt_id: [0x11; 32],
-                pending_pointer_x: [0x12; 32],
-                parent_sequence: 7,
-                new_sequence: 8,
-                parent_binding: [0x13; 32],
-                input_policy_commit: [0x0A; 32],
-                output_policy_commit: [0x0B; 32],
-                input_amount: 100,
-                output_amount: 90,
-                fee_bps: 30,
-                signature: vec![0x06; 48],
-                mode: TransactionMode::Unilateral,
-            });
         }
 
         #[test]

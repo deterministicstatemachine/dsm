@@ -10,16 +10,17 @@
 //!
 //! - [`infra`]      — cross-cutting plumbing (admin, hardening, rate-limit, network-config)
 //! - [`identity`]   — device & genesis identity (authenticate, device_api, genesis, devtree, tips)
-//! - [`objects`]    — raw byte storage (store, list, bytecommit)
+//! - [`objects`]    — raw byte storage (store, list, bytecommit, immutable)
+//! - [`cells`]      — keyed cells and indexes: bytes in, bytes out
 //! - [`vault`]      — DLV / policy / recovery / paidk
 //! - [`registry`]   — node registry, scaling, discovery, drain-proof
 //! - [`transport`]  — message delivery (b0x, gossip)
 
+pub mod cells;
 pub mod economic;
 pub mod identity;
 pub mod infra;
 pub mod objects;
 pub mod registry;
-pub mod storage;
 pub mod transport;
 pub mod vault;

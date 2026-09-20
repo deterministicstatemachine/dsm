@@ -1046,23 +1046,63 @@ fn closure_index_enforces_bounds_order_and_current_e_exclusion() {
 
 #[test]
 fn successor_arithmetic_and_validation_composition() {
-    use CellObservation::{Empty, Holds, Unknown};
+    use CellObservation::{Holds, Unknown};
     let a = [0xA; 32];
     let b = [0xB; 32];
+    let empty = || Holds(Vec::new());
+    // Leader first: final needs the leader's FIRST value held by two others.
     assert_eq!(
-        resolve(&[Holds(a), Holds(a), Holds(a), Holds(b), Holds(b)]),
+        resolve(
+            &[
+                Holds(vec![a]),
+                Holds(vec![a]),
+                Holds(vec![a]),
+                Holds(vec![b]),
+                Holds(vec![b])
+            ],
+            0
+        ),
         CellResolution::Final(a)
     );
+    // Four members holding B do not make B final while the leader holds A first.
     assert_eq!(
-        resolve(&[Holds(a), Holds(a), Holds(b), Holds(b), Holds([0xC; 32])]),
-        CellResolution::Dead
+        resolve(
+            &[
+                Holds(vec![a, b]),
+                Holds(vec![b]),
+                Holds(vec![b]),
+                Holds(vec![b]),
+                Holds(vec![b])
+            ],
+            0
+        ),
+        CellResolution::LeaderHeld(a)
     );
+    // No key is ever dead: an empty or unreachable leader is Unresolved.
     assert_eq!(
-        resolve(&[Holds(a), Holds(a), Holds(b), Holds(b), Unknown]),
+        resolve(
+            &[
+                empty(),
+                Holds(vec![a]),
+                Holds(vec![a]),
+                Holds(vec![a]),
+                Holds(vec![a])
+            ],
+            0
+        ),
         CellResolution::Unresolved
     );
     assert_eq!(
-        resolve(&[Holds(a), Holds(a), Holds(b), Holds(b), Empty]),
+        resolve(
+            &[
+                Unknown,
+                Holds(vec![a]),
+                Holds(vec![a]),
+                Holds(vec![b]),
+                empty()
+            ],
+            0
+        ),
         CellResolution::Unresolved
     );
     assert_eq!(

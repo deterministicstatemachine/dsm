@@ -79,14 +79,6 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
         // allocation, and the accepting transition refuses the operation
         // without a matching pending admission.
         FaucetClaim { .. } => ClosedWriteSet,
-        // A route settle (amendment 2c-H H10) states its complete effect too:
-        // one net debit, one net credit funded by 0x0035, one receipt leaf per
-        // vault and one acceptance leaf.
-        DlvSettle { .. } | DlvRouteSettle { .. } | DlvClose { .. } => ClosedWriteSet,
-        // The 3.6 v2 vault operations state their complete economic effect
-        // in the signed operation: both funding legs (create), or the exact
-        // reserve movement with the parent vault-state binding (owner apply).
-        DlvCreateFundedV2 { .. } | DlvOwnerApplyV2 { .. } => ClosedWriteSet,
         // One role-dependent economic event, not a Transfer fact and a
         // separate Receive fact: the role follows from whether
         // `to_device_id` is the local device.
@@ -113,11 +105,9 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
             UnsupportedValueTransition
         }
         // DlvCreate is STRUCTURALLY state-only (owner directive 2026-08-28:
-        // the legacy value-bearing fields are deleted from the wire, and the
-        // legacy DlvOwnerApply tag is burned) — it moves nothing, and the
-        // `Fund` arm refuses to ride it. The structural tripwire remains
-        // load-bearing: if balance/reserve/receipt/consumed-source state
-        // changed, `None` is impossible.
+        // the legacy value-bearing fields are deleted from the wire) — it
+        // moves nothing. The structural tripwire remains load-bearing: if
+        // balance/consumed-source state changed, `None` is impossible.
         DlvCreate { .. } => None,
         DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
 
@@ -140,8 +130,6 @@ pub fn classify(operation: &Operation) -> EconomicEffect {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObservedEconomicChange {
     pub balances_changed: bool,
-    pub vault_reserves_changed: bool,
-    pub settlement_receipts_changed: bool,
     pub consumed_sources_changed: bool,
     /// A SoFi relationship leaf moved (P15-6). It carries no amount, but it is
     /// still an `R_econ` write — an operation that claims to touch nothing and
@@ -159,8 +147,6 @@ pub struct ObservedEconomicChange {
 impl ObservedEconomicChange {
     pub fn any(&self) -> bool {
         self.balances_changed
-            || self.vault_reserves_changed
-            || self.settlement_receipts_changed
             || self.consumed_sources_changed
             || self.relationships_changed
             || self.vault_creations_changed
@@ -179,13 +165,10 @@ impl core::fmt::Display for EconomicTripwire {
         write!(
             f,
             "economic tripwire: operation classified {:?} but economic state changed \
-             (balances={}, reserves={}, receipts={}, consumed_sources={}, relationships={}, \
-             vault_creations={}) — the classification is wrong, or the operation reached a \
-             leaf it has no write set for",
+             (balances={}, consumed_sources={}, relationships={}, vault_creations={}) — the \
+             classification is wrong, or the operation reached a leaf it has no write set for",
             self.claimed,
             self.observed.balances_changed,
-            self.observed.vault_reserves_changed,
-            self.observed.settlement_receipts_changed,
             self.observed.consumed_sources_changed,
             self.observed.relationships_changed,
             self.observed.vault_creations_changed
@@ -217,16 +200,7 @@ pub fn observed_from_witness(
         {
             match state {
                 EconomicLeafState::Balance(_) => observed.balances_changed = true,
-                EconomicLeafState::VaultReserve(_) => observed.vault_reserves_changed = true,
-                EconomicLeafState::SettlementReceipt(_) => {
-                    observed.settlement_receipts_changed = true
-                }
                 EconomicLeafState::ConsumedSource(_) => observed.consumed_sources_changed = true,
-                EconomicLeafState::BundleAcceptance(_) => {
-                    // Acceptance rides the settle write set and is accounted
-                    // with the receipts it certifies.
-                    observed.settlement_receipts_changed = true
-                }
                 EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
                 EconomicLeafState::VaultCreation(_) => observed.vault_creations_changed = true,
             }

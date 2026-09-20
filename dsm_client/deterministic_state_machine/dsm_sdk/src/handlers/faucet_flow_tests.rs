@@ -125,7 +125,6 @@ pub(crate) fn setup(seed: u8) -> (CoreSDK, FleetGuard) {
     // (member_id, incarnation) echo — make a later vault's binding key answer
     // for the wrong fleet, and `ensure_registered` will not correct an entry
     // that already exists.
-    crate::sdk::binding_fleet_double::reset_all();
     let (public_key, devid, genesis) = install_testnet_identity(seed);
     let core =
         CoreSDK::new_with_device(DeviceInfo::new(devid, public_key.clone())).expect("core sdk");

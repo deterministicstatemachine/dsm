@@ -384,7 +384,6 @@ pub(crate) mod tests {
             Some(initial_chain_tip_from_device_ids(&me, &me)),
             None,
             None,
-            None,
         )
         .expect("stub advance")
     }

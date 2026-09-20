@@ -56,7 +56,7 @@
     * Quorum registration is abstracted to registered facts; the quorum layer is
       DSMSofiSuccessorCells.
     * `Coherent` restates the storage and walk facts DSMSofiSuccessorCells proves:
-      dead keys hold no final, one outcome value, Abort only on objective evidence,
+      a key lost to another exercise is not final on E, one outcome value, Abort only on objective evidence,
       one consumer per parent, orphaned parents are not canonical.
 
   What this module does NOT claim:
@@ -1032,7 +1032,10 @@ structure Facts where
   canonical : Nat → Bool
   live : Nat → Bool
   cell : Nat → Option Nat
-  dead : Nat → Bool
+  /-- `LegFacts::final_on_other`: another exercise's commitment reached this
+  key's leader first, or is already final there. `LeaderHeld` settles the loss
+  before any copy arrives; no key is ever dead. -/
+  lostTo : Nat → Bool
   consumedElsewhere : Nat → Bool
   orphan : Nat → Bool
   complete : Bool
@@ -1050,7 +1053,7 @@ def ConsumedRoute (x : Facts) (legs : List Nat) (e : Nat) : Bool :=
     && (decide (legs.length < 2) || x.complete) && parentCompatible x.parent
 
 def StorageResolved (x : Facts) (legs : List Nat) : Bool :=
-  x.registered && legs.all (fun R => x.dead R || (x.cell R).isSome)
+  x.registered && legs.all (fun R => x.lostTo R || (x.cell R).isSome)
     && (decide (legs.length < 2) || x.complete || x.abort)
 
 def cellOther (x : Facts) (e R : Nat) : Bool :=
@@ -1059,7 +1062,7 @@ def cellOther (x : Facts) (e R : Nat) : Bool :=
   | none => false
 
 def legLost (x : Facts) (e R : Nat) : Bool :=
-  x.dead R || cellOther x e R || x.consumedElsewhere R || x.orphan R
+  x.lostTo R || cellOther x e R || x.consumedElsewhere R || x.orphan R
 
 def VoidEvidence (x : Facts) (legs : List Nat) (e : Nat) : Bool :=
   legs.any (legLost x e) || x.abort
@@ -1094,12 +1097,13 @@ def resolveLiteral (x : Facts) (legs : List Nat) (e : Nat) : Resolution :=
   else .pending
 
 /-- The storage and walk facts the cell layer proves (DSMSofiSuccessorCells):
-dead keys hold no final, one outcome value, Abort only on objective evidence,
-one consumer per parent, orphaned parents are not canonical. -/
+a key lost to another exercise is not final on E, one outcome value, Abort only
+on objective evidence, one consumer per parent, orphaned parents are not
+canonical. -/
 structure Coherent (x : Facts) (legs : List Nat) (e : Nat) : Prop where
-  dead_not_final : ∀ R, x.dead R = true → x.cell R = none
+  lost_not_final_on_e : ∀ R, x.lostTo R = true → x.cell R ≠ some e
   outcome_unique : ¬ (x.complete = true ∧ x.abort = true)
-  abort_objective : x.abort = true → ∃ R ∈ legs, x.dead R = true ∨ cellOther x e R = true
+  abort_objective : x.abort = true → ∃ R ∈ legs, x.lostTo R = true ∨ cellOther x e R = true
   consumed_route_exclusive : ConsumedRoute x legs e = true → ∀ R ∈ legs, x.consumedElsewhere R = false
   orphan_not_canonical : ∀ R, x.orphan R = true → x.canonical R = false
 
@@ -1109,7 +1113,7 @@ structure Evolves (x x' : Facts) : Prop where
   canonical : ∀ R, x.canonical R = true → x'.canonical R = true
   live : ∀ R, x.live R = true → x'.live R = true
   cell : ∀ R y, x.cell R = some y → x'.cell R = some y
-  dead : ∀ R, x.dead R = true → x'.dead R = true
+  lostTo : ∀ R, x.lostTo R = true → x'.lostTo R = true
   consumedElsewhere : ∀ R, x.consumedElsewhere R = true → x'.consumedElsewhere R = true
   orphan : ∀ R, x.orphan R = true → x'.orphan R = true
   complete : x.complete = true → x'.complete = true
@@ -1129,10 +1133,10 @@ theorem legLost_false_of_ok {x : Facts} {legs : List Nat} {e R : Nat} (hc : Cohe
     (hcr : ConsumedRoute x legs e = true) (hR : R ∈ legs) : legLost x e R = false := by
   obtain ⟨_, _, hall, _, _⟩ := (consumedRoute_iff x legs e).mp hcr
   obtain ⟨hcan, _, hcell⟩ := hall R hR
-  have hd : x.dead R = false := by
-    cases h : x.dead R
+  have hd : x.lostTo R = false := by
+    cases h : x.lostTo R
     · rfl
-    · have := hc.dead_not_final R h; rw [hcell] at this; cases this
+    · exact absurd hcell (hc.lost_not_final_on_e R h)
   have ho : x.orphan R = false := by
     cases h : x.orphan R
     · rfl
@@ -1241,7 +1245,7 @@ def builtOnTheOtherBranch : Facts where
   canonical := fun _ => true
   live := fun _ => true
   cell := fun _ => some 50
-  dead := fun _ => false
+  lostTo := fun _ => false
   consumedElsewhere := fun _ => false
   orphan := fun _ => false
   complete := true
@@ -1306,7 +1310,7 @@ def splitFacts : Facts where
   canonical := fun _ => true
   live := fun _ => true
   cell := fun R => if R = 10 then some 50 else none
-  dead := fun R => R == 11
+  lostTo := fun R => R == 11
   consumedElsewhere := fun _ => false
   orphan := fun _ => false
   complete := false
@@ -1355,14 +1359,14 @@ def contended : Facts where
   canonical := fun _ => true
   live := fun R => R == 11
   cell := fun R => if R = 10 then some 99 else if R = 11 then some 50 else none
-  dead := fun _ => false
+  lostTo := fun _ => false
   consumedElsewhere := fun R => R == 10
   orphan := fun _ => false
   complete := false
   abort := true
 
 theorem contended_is_coherent : Coherent contended [10, 11] 50 where
-  dead_not_final := fun R h => by simp [contended] at h
+  lost_not_final_on_e := fun R h => by simp [contended] at h
   outcome_unique := by simp [contended]
   abort_objective := fun _ => ⟨10, by simp, Or.inr (by decide)⟩
   consumed_route_exclusive := fun h => by simp [ConsumedRoute, contended, legOk] at h
@@ -1397,7 +1401,7 @@ theorem storageResolved_mono {x x' : Facts} (hev : Evolves x x') {legs : List Na
   obtain ⟨⟨hreg, hall⟩, hlen⟩ := h
   refine ⟨⟨hev.registered hreg, fun R hR => ?_⟩, ?_⟩
   · rcases hall R hR with hd | hs
-    · exact Or.inl (hev.dead R hd)
+    · exact Or.inl (hev.lostTo R hd)
     · right
       cases hcell : x.cell R with
       | none => rw [hcell] at hs; cases hs
@@ -1411,7 +1415,7 @@ theorem legLost_mono {x x' : Facts} (hev : Evolves x x') {e R : Nat}
     (h : legLost x e R = true) : legLost x' e R = true := by
   simp only [legLost, Bool.or_eq_true] at h ⊢
   rcases h with ((hd | hco) | hce) | ho
-  · exact Or.inl (Or.inl (Or.inl (hev.dead R hd)))
+  · exact Or.inl (Or.inl (Or.inl (hev.lostTo R hd)))
   · left; left; right
     unfold cellOther at hco ⊢
     cases hcell : x.cell R with
@@ -1497,7 +1501,7 @@ def unavailableThenVoid : Facts where
   canonical := fun _ => true
   live := fun _ => true
   cell := fun _ => none
-  dead := fun _ => true
+  lostTo := fun _ => true
   consumedElsewhere := fun _ => false
   orphan := fun _ => false
   complete := false
@@ -1512,7 +1516,7 @@ theorem literal_ladder_is_not_permanent :
       ∧ resolveLiteral laterInvalid [10] 50 = .invalid
       ∧ resolve unavailableThenVoid [10] 50 = .pending := by
   refine ⟨⟨fun h => h, trivial, fun _ h => h, fun _ h => h, fun _ _ h => h, fun _ h => h,
-    fun _ h => h, fun _ h => h, fun h => h, fun h => h, fun _ => rfl⟩, ⟨fun _ _ => rfl, (by decide),
+    fun _ h => h, fun _ h => h, fun h => h, fun h => h, fun _ => rfl⟩, ⟨(fun _ _ h => nomatch h), (by decide),
     (fun h => by cases h), (fun h => by simp [ConsumedRoute, laterInvalid, unavailableThenVoid] at h),
     (fun _ h => by simp [laterInvalid, unavailableThenVoid] at h)⟩, (by decide), (by decide), (by decide)⟩
 
@@ -1602,7 +1606,7 @@ def orphanedLeg : Facts where
   canonical := fun R => R != 10
   live := fun _ => true
   cell := fun R => if R = 10 then some 50 else none
-  dead := fun R => R == 11
+  lostTo := fun R => R == 11
   consumedElsewhere := fun _ => false
   orphan := fun R => R == 10
   complete := false

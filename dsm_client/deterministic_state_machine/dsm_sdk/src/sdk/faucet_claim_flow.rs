@@ -204,7 +204,6 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 &facts,
                 &authority,
                 extra,
-                &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
             )?;
             let coords = parts.coords;
             let artifacts = parts.artifacts.clone();
@@ -227,7 +226,6 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         network_id,
         &set,
         &validated,
-        tree,
         parts.witness,
         parts.manifest,
         op,

@@ -88,6 +88,17 @@ pub struct MemberPutOutcome {
 /// Result of a keyed fan-out over a canonical storage set. Never short-circuits;
 /// `total` is the SET size (the quorum denominator), not the number of nodes
 /// that happened to be reachable or constructible.
+/// Outcome of a leader-first cell write (Part II §8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CellPutFanout {
+    /// The leader holds the bytes: the race at this key is settled for them
+    /// unless another object got there first.
+    pub leader_reached: bool,
+    /// Other members that hold the bytes.
+    pub copies: u32,
+    pub errors: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyedPutFanout {
     pub outcomes: Vec<MemberPutOutcome>,
@@ -1159,61 +1170,53 @@ impl StorageNodeClient {
         }
     }
 
-    pub async fn post_settlement_slot_claim(
+    /// Part II §12, put at a key: the member stores the bytes after anything
+    /// it already holds there, and interprets nothing. `204` is the only
+    /// success; there is no refusal to classify.
+    pub async fn put_cell(
         &self,
-        envelope: &[u8],
-    ) -> (MemberClaimResult, Option<String>) {
-        let url = format!(
-            "{base}/api/v2/settlement-slot/claim",
-            base = self.node_info.url
-        );
-        let mut req_builder = self
+        namespace: &[u8],
+        key_b32: &str,
+        value: &[u8],
+    ) -> Result<(), String> {
+        let url = format!("{base}/api/v2/cell/{key_b32}", base = self.node_info.url);
+        let ns =
+            core::str::from_utf8(namespace).map_err(|_| "namespace is not UTF-8".to_string())?;
+        let response = self
             .client
             .post(&url)
-            .header("Content-Type", "application/octet-stream");
-        if let Some(auth) = &self.auth {
-            // Transport replay guard only: each submission is its own message.
-            // Register idempotency is by BYTES (identical envelope re-acks), not
-            // by message id.
-            let msg_id = Self::generate_message_id("settlement-slot-claim");
-            req_builder = req_builder
-                .header(
-                    "authorization",
-                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
-                )
-                .header("x-dsm-message-id", msg_id);
+            .header("x-namespace", ns)
+            .body(value.to_vec())
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        match response.status().as_u16() {
+            204 => Ok(()),
+            status => Err(format!("cell put answered HTTP {status}")),
         }
-        let response = match req_builder.body(envelope.to_vec()).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    MemberClaimResult::Unavailable(format!("HTTP request failed: {e}")),
-                    None,
-                )
-            }
-        };
-        let echoed = response
-            .headers()
-            .get("x-dsm-node-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let outcome_hdr = response
-            .headers()
-            .get("x-dsm-slot-outcome")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let held_digest_hdr = response
-            .headers()
-            .get("x-dsm-slot-held-digest")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let result = classify_one_shot_response(
-            response.status().as_u16(),
-            &outcome_hdr,
-            held_digest_hdr.as_deref(),
-        );
-        (result, echoed)
+    }
+
+    /// Part II §12, get: everything the member holds at the key, in the order
+    /// it arrived. `None` when the member could not answer; an empty list is
+    /// an answer, and the bytes prove themselves.
+    pub async fn get_cell(&self, namespace: &[u8], key_b32: &str) -> Option<Vec<Vec<u8>>> {
+        use prost::Message;
+        let url = format!("{base}/api/v2/cell/{key_b32}", base = self.node_info.url);
+        let ns = core::str::from_utf8(namespace).ok()?;
+        let response = self
+            .client
+            .get(&url)
+            .header("x-namespace", ns)
+            .send()
+            .await
+            .ok()?;
+        if response.status().as_u16() != 200 {
+            return None;
+        }
+        let body = response.bytes().await.ok()?;
+        dsm::types::proto::CellValuesV1::decode(body.as_ref())
+            .ok()
+            .map(|page| page.values)
     }
 
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, StorageNodeError> {
@@ -1704,35 +1707,61 @@ impl StorageNodeSDK {
         rows
     }
 
-    pub async fn submit_settlement_slot_claim(
+    /// Part II §8, the write procedure: the leader of the cell (an index into
+    /// `set.members()`, computed by the caller from the seed) gets `value`
+    /// first; the other members get the same bytes after. Nothing here
+    /// decides who won — the leader's first object does, and Core reads it.
+    pub async fn put_cell_leader_first(
         &self,
         set: &crate::sdk::storage_set::StorageSet,
-        envelope: &[u8],
-    ) -> ClaimFanout {
-        let mut outcomes = Vec::with_capacity(set.len());
+        leader: usize,
+        namespace: &[u8],
+        key_b32: &str,
+        value: &[u8],
+    ) -> CellPutFanout {
+        let mut order: Vec<usize> = (0..set.len()).filter(|i| *i != leader).collect();
+        order.insert(0, leader);
+        let mut fanout = CellPutFanout::default();
+        for i in order {
+            let member = &set.members()[i];
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let result = match client {
+                None => Err("no client for this member's endpoint".to_string()),
+                Some(c) => c.put_cell(namespace, key_b32, value).await,
+            };
+            match result {
+                Ok(()) if i == leader => fanout.leader_reached = true,
+                Ok(()) => fanout.copies += 1,
+                Err(e) => fanout.errors.push((member.member_id.clone(), e)),
+            }
+        }
+        fanout
+    }
+
+    /// Part II §13, the raw reads Core turns into `LeaderHeld` and `Final`:
+    /// one answer per member in set order, `None` where a member could not
+    /// answer. No counting happens here.
+    pub async fn get_cell_all(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        namespace: &[u8],
+        key_b32: &str,
+    ) -> Vec<Option<Vec<Vec<u8>>>> {
+        let mut reads = Vec::with_capacity(set.len());
         for member in set.members() {
             let client = self
                 .clients
                 .iter()
                 .find(|c| c.node_info.url == member.endpoint);
-            let (result, echoed_node_id) = match client {
-                None => (
-                    MemberClaimResult::Unavailable("no client for this member's endpoint".into()),
-                    None,
-                ),
-                Some(c) => c.post_settlement_slot_claim(envelope).await,
-            };
-            outcomes.push(MemberClaimOutcome {
-                member_id: member.member_id.clone(),
-                endpoint: member.endpoint.clone(),
-                result,
-                echoed_node_id,
+            reads.push(match client {
+                None => None,
+                Some(c) => c.get_cell(namespace, key_b32).await,
             });
         }
-        ClaimFanout {
-            outcomes,
-            total: set.len() as u32,
-        }
+        reads
     }
 
     /// Keyed PUT of `payload` under `key` to EVERY member of the canonical set

@@ -1,34 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Successor-cell arithmetic over one attempt key — pure, storage-fact only.
+//! Successor-cell resolution over one attempt key — pure, storage-fact only.
 //!
-//! One observation per committed member of the fixed five-member set. The
-//! caller supplies them in committed-set order; members are distinct by
-//! construction of that set, so each position counts once.
+//! A cell is read from every member of the fixed five-member set. Each member
+//! returns EVERYTHING it holds at the key, in the order it arrived; a member
+//! holds bytes and decides nothing. The writer computed the cell's leader from
+//! the committed set and a state root, and wrote there first, so the race at
+//! a key ends at its leader:
 //!
 //! ```text
-//! FinalE(E)  ⟺ #{i : cell_i = E} ≥ 3
-//! Dead       ⟺ max_E #{i : cell_i = E} + #Empty + #Unknown < 3      (max is 0 with no values)
-//! otherwise  Unresolved
+//! LeaderHeld(K, x) ⟺ x is the first object naming K in the leader's read
+//! Final(K, x)      ⟺ LeaderHeld(K, x) ∧ #{ m ∈ S ∖ {leader} : m holds x } ≥ 2
 //! ```
 //!
-//! `Unknown` covers an unread member, a timeout, and any contacted member whose
-//! response is malformed or unverifiable. It counts toward `u` exactly like
-//! `Empty` — it could be empty or could hold any value — and it is NEVER
-//! treated as empty for a finality count. That is what makes a Dead verdict on
-//! a partial observation sound: every completion of the unknown cells is also
-//! Dead. This module decides storage facts only; whether a final E is valid,
-//! canonical or live is not its business.
+//! No key is ever dead: a key is open until an object naming it reaches its
+//! leader, and nothing else can close it. `Unknown` covers an unread member,
+//! a timeout, and any response that is not a well-formed list; it is never
+//! read as empty and never counted toward finality. This module decides
+//! storage facts only; whether a final value is valid, canonical or live is
+//! not its business.
+//!
+//! Which values in a member's list are objects that name the key — and which
+//! are noise that counts as nothing — is the caller's question, answered from
+//! the bytes. This module is handed the digest of each value already
+//! classified as an object naming `K`, in arrival order.
 
 use super::wire::{STORAGE_FINALITY_COUNT, STORAGE_MEMBER_COUNT};
 
 /// What one committed member's cell at one attempt key was observed to hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellObservation {
-    /// A well-formed held value.
-    Holds([u8; 32]),
-    /// An authenticated read of an empty cell.
-    Empty,
+    /// The digests of every object naming the key that this member holds, in
+    /// arrival order. Empty means an authenticated read of a cell that holds
+    /// no such object.
+    Holds(Vec<[u8; 32]>),
     /// Unread, unavailable, timed out, or an unverifiable response.
     Unknown,
 }
@@ -36,98 +41,135 @@ pub enum CellObservation {
 /// The storage-level resolution of one attempt key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellResolution {
-    /// Three matching cells hold this value.
+    /// The leader's first object, held by at least two other members.
     Final([u8; 32]),
-    /// No value can reach three under any completion of the observation.
-    Dead,
-    /// Neither is established yet.
+    /// The leader's first object, not yet held by two others. Settles that
+    /// no other value will ever be final here.
+    LeaderHeld([u8; 32]),
+    /// The leader holds no object naming the key, or has not answered.
     Unresolved,
 }
 
-/// Resolve one attempt key from exactly one observation per committed member.
-pub fn resolve(observations: &[CellObservation; STORAGE_MEMBER_COUNT]) -> CellResolution {
-    let mut values: Vec<([u8; 32], usize)> = Vec::new();
-    let mut open = 0usize;
-    for obs in observations {
-        match obs {
-            CellObservation::Holds(v) => match values.iter_mut().find(|(k, _)| k == v) {
-                Some((_, n)) => *n += 1,
-                None => values.push((*v, 1)),
-            },
-            CellObservation::Empty | CellObservation::Unknown => open += 1,
-        }
-    }
-    if let Some((v, _)) = values.iter().find(|(_, n)| *n >= STORAGE_FINALITY_COUNT) {
-        return CellResolution::Final(*v);
-    }
-    let max = values.iter().map(|(_, n)| *n).max().unwrap_or(0);
-    if max + open < STORAGE_FINALITY_COUNT {
-        CellResolution::Dead
+/// Resolve one attempt key from one observation per committed member, with
+/// the leader's observation at `leader` (its position in the committed
+/// set, which the caller computed from the seed and never from availability).
+///
+/// Non-leader observations are copies: they contribute only to the count of
+/// members holding the leader's first value. A value the leader does not hold
+/// first is never final, whatever the other members hold.
+pub fn resolve(
+    observations: &[CellObservation; STORAGE_MEMBER_COUNT],
+    leader: usize,
+) -> CellResolution {
+    let first = match observations.get(leader) {
+        Some(CellObservation::Holds(values)) => match values.first() {
+            Some(v) => *v,
+            None => return CellResolution::Unresolved,
+        },
+        _ => return CellResolution::Unresolved,
+    };
+    let copies = observations
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != leader)
+        .filter(|(_, obs)| matches!(obs, CellObservation::Holds(values) if values.contains(&first)))
+        .count();
+    if copies + 1 >= STORAGE_FINALITY_COUNT {
+        CellResolution::Final(first)
     } else {
-        CellResolution::Unresolved
+        CellResolution::LeaderHeld(first)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use CellObservation::{Empty, Holds, Unknown};
 
     const A: [u8; 32] = [0xA; 32];
     const B: [u8; 32] = [0xB; 32];
-    const C: [u8; 32] = [0xC; 32];
 
-    #[test]
-    fn three_matching_cells_are_final() {
-        assert_eq!(
-            resolve(&[Holds(A), Holds(A), Holds(A), Empty, Unknown]),
-            CellResolution::Final(A)
-        );
+    fn holds(v: &[[u8; 32]]) -> CellObservation {
+        CellObservation::Holds(v.to_vec())
+    }
+    fn empty() -> CellObservation {
+        CellObservation::Holds(Vec::new())
     }
 
     #[test]
-    fn two_two_one_is_dead() {
-        assert_eq!(
-            resolve(&[Holds(A), Holds(A), Holds(B), Holds(B), Holds(C)]),
-            CellResolution::Dead
-        );
+    fn the_leaders_first_value_held_by_two_others_is_final() {
+        let obs = [
+            holds(&[A]),
+            holds(&[A]),
+            holds(&[A]),
+            empty(),
+            CellObservation::Unknown,
+        ];
+        assert_eq!(resolve(&obs, 0), CellResolution::Final(A));
     }
 
     #[test]
-    fn two_two_unknown_is_unresolved_never_dead() {
-        assert_eq!(
-            resolve(&[Holds(A), Holds(A), Holds(B), Holds(B), Unknown]),
-            CellResolution::Unresolved
-        );
+    fn three_non_leaders_agreeing_is_not_final() {
+        // The leader holds nothing: whatever the others hold, the race has not
+        // ended, and nothing is final. This is what replaces counting.
+        let obs = [empty(), holds(&[A]), holds(&[A]), holds(&[A]), holds(&[A])];
+        assert_eq!(resolve(&obs, 0), CellResolution::Unresolved);
     }
 
     #[test]
-    fn four_distinct_values_and_one_unknown_is_dead() {
-        let d = [0xD; 32];
-        assert_eq!(
-            resolve(&[Holds(A), Holds(B), Holds(C), Holds(d), Unknown]),
-            CellResolution::Dead
-        );
+    fn a_later_value_at_the_leader_never_becomes_final() {
+        // B arrived at the leader after A. Four members hold B; A is the
+        // winner because it got to the leader first.
+        let obs = [
+            holds(&[A, B]),
+            holds(&[B]),
+            holds(&[B]),
+            holds(&[B]),
+            holds(&[B]),
+        ];
+        assert_eq!(resolve(&obs, 0), CellResolution::LeaderHeld(A));
     }
 
     #[test]
-    fn all_empty_is_unresolved() {
-        assert_eq!(resolve(&[Empty; 5]), CellResolution::Unresolved);
+    fn leader_held_settles_the_race_before_finality() {
+        let obs = [
+            holds(&[A]),
+            empty(),
+            CellObservation::Unknown,
+            empty(),
+            empty(),
+        ];
+        assert_eq!(resolve(&obs, 0), CellResolution::LeaderHeld(A));
     }
 
-    /// Soundness of Dead under partial observation: every completion of the
-    /// Unknown cells into Empty or any value among a small alphabet is also
-    /// Dead. Exhaustive over the alphabet `{Empty, A, B, C, D}`.
     #[test]
-    fn dead_on_a_partial_read_survives_every_completion() {
-        let d = [0xD; 32];
-        let alphabet = [Empty, Holds(A), Holds(B), Holds(C), Holds(d)];
-        let partial = [Holds(A), Holds(B), Holds(C), Holds(d), Unknown];
-        assert_eq!(resolve(&partial), CellResolution::Dead);
-        for fill in alphabet {
-            let mut full = partial;
-            full[4] = fill;
-            assert_eq!(resolve(&full), CellResolution::Dead, "completion {fill:?}");
-        }
+    fn copies_count_wherever_the_value_sits_in_a_copys_list() {
+        // A copy may hold other values too; it holds A, so it counts.
+        let obs = [
+            holds(&[A]),
+            holds(&[B, A]),
+            holds(&[A, B]),
+            empty(),
+            empty(),
+        ];
+        assert_eq!(resolve(&obs, 0), CellResolution::Final(A));
+    }
+
+    #[test]
+    fn an_unreachable_leader_resolves_nothing_and_no_member_stands_in() {
+        let obs = [
+            CellObservation::Unknown,
+            holds(&[A]),
+            holds(&[A]),
+            holds(&[A]),
+            holds(&[A]),
+        ];
+        assert_eq!(resolve(&obs, 0), CellResolution::Unresolved);
+    }
+
+    #[test]
+    fn the_leader_position_is_the_callers_and_changes_the_answer() {
+        let obs = [holds(&[A]), holds(&[B]), holds(&[B]), holds(&[B]), empty()];
+        assert_eq!(resolve(&obs, 0), CellResolution::LeaderHeld(A));
+        assert_eq!(resolve(&obs, 1), CellResolution::Final(B));
     }
 }

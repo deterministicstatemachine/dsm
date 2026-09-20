@@ -28,7 +28,6 @@ type ScreenType =
   | 'qr'
   | 'mycontact'
   | 'pending_bilateral'
-  | 'dev_dlv'
   | 'dev_policy';
 
 interface Props {

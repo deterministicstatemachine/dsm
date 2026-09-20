@@ -136,19 +136,6 @@ impl ProvenanceResolver for IssuanceResolver {
     fn winning_faucet_ticket(&self, _f: &[u8; 32], _t: u64) -> Option<FaucetTicketWin> {
         None
     }
-    fn parent_binding_observation(
-        &self,
-        _resource_key: &[u8; 32],
-        _storage_set: &dsm::ccb::StorageSetMembers,
-        _quorum: u32,
-    ) -> dsm::dlv::binding_observation::BindingObservation {
-        // This fixture roots no bindings: it cannot observe the key, which is
-        // not the same as observing it free.
-        dsm::dlv::binding_observation::BindingObservation::Unavailable {
-            attributed: 0,
-            required: 2,
-        }
-    }
     fn immutable_evidence(
         &self,
         _namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
@@ -244,12 +231,11 @@ fn fixture(
         &G,
         &DEV,
         &[0x42u8; 32],
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,
         },
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("the REAL builder builds the issuance write set");
     let witness = EconomicTransitionWitness::new(
@@ -327,12 +313,11 @@ fn fixture_with_stranger(signer_count: usize, amount: u64) -> Fixture {
         &G,
         &DEV,
         &[0x42u8; 32],
-        &EconomicPreState::balances_only(&balances),
+        &EconomicPreState::new(&balances),
         &mut tree,
         &CreditSourceFacts::AuthorizedIssuance {
             issuance_authorization_addr: evidence_addr,
         },
-        &dsm::economic::write_set::EconomicWriteContext::NonSettlement,
     )
     .expect("builder");
     let witness = EconomicTransitionWitness::new(

@@ -37,14 +37,6 @@ pub const TAG_DSM_ECONOMIC_LEAF_STATE: TaggedHashDomain<'static> =
 /// `balance` leaf key: `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ policy_commit)`.
 pub const TAG_DSM_ECONOMIC_BALANCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-balance-key/v1");
-/// `vault_reserve` leaf key:
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ vault_id ‖ policy_commit)`.
-pub const TAG_DSM_ECONOMIC_VAULT_RESERVE_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-vault-reserve-key/v1");
-/// `settlement_receipt` leaf key:
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ vault_id ‖ receipt_id)`.
-pub const TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-settlement-receipt-key/v1");
 /// `consumed_source` leaf key: `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ source_id)`.
 ///
 /// Every key derivation binds `G ‖ DevID`, so one identity's economic tree
@@ -52,18 +44,6 @@ pub const TAG_DSM_ECONOMIC_SETTLEMENT_RECEIPT_KEY: TaggedHashDomain<'static> =
 /// construction rather than by the tree being private.
 pub const TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-consumed-source-key/v1");
-/// `bundle_acceptance` leaf key:
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ economic_operation_id)`.
-///
-/// Amendment 2c-D §5 (ruling D3). The identifying field is the authenticated
-/// economic operation identity, which is itself
-/// `H(G ‖ DevID ‖ C_dsm+)` — so the position stays tied to the exact accepted
-/// transition even though the leaf's CONTENT commits `b`, which no operation
-/// can name. Keying on `operation_digest` would name what was performed but
-/// not which successor performed it; keying on `b` would make the position
-/// caller-chooseable, which amendment 2c §9.1 rules the worse defect.
-pub const TAG_DSM_ECONOMIC_BUNDLE_ACCEPTANCE_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/economic-bundle-acceptance-key/v1");
 
 /// The signed preimage of an issuance authorization (class `0x0029`):
 /// `m = H(tag ‖ 0x00 ‖ CCB(IssuanceAuthorizationBody))`.
@@ -109,39 +89,22 @@ pub const TAG_DSM_ECONOMIC_ADMISSION_MANIFEST: TaggedHashDomain<'static> =
 pub const TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/trader-economic-root-register-key/v1");
 
-/// `SourceId` for an intra-transition move:
-/// `H(tag ‖ 0x00 ‖ economic_operation_id ‖ u32_be(debit_mutation_index))`.
-///
-/// Scoped to the operation that contains it, because the move exists only
-/// inside that transition. Two transitions moving value at the same mutation
-/// index are different sources, and must not collide in the consumed-source
-/// space.
-/// SourceId for a DLV reserve consumption (0x0026):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ parent_sequence_be ‖ x)` — one consumption of
-/// one vault generation by one trade; the write-once settlement-receipt leaf
-/// is the non-reuse marker, so no consumed-source leaf exists for this arm.
-pub const TAG_DSM_ECON_SOURCE_DLV_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/dlv-reserve-consumption/v1");
-/// SourceId for a DLV route reserve consumption (0x0035, amendment 2c-H H9):
-/// `H(tag ‖ 0x00 ‖ x ‖ u32_be(N) ‖ for each leg in route order: vault_id ‖
-/// parent_sequence_be)` — one route consuming one generation of each vault it
-/// crosses; the N write-once settlement-receipt leaves are the non-reuse
-/// markers, so no consumed-source leaf exists for this arm.
-pub const TAG_DSM_ECON_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/dlv-route-reserve-consumption/v1");
+/// The seed of a trader position's cells (Part II §7.2):
+/// `s(q) = H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64be(q) ‖ R_p)`, where `R_p` is the
+/// validated economic root at `p = q - 1`, or the genesis root for the first
+/// position. `K_ful(q)` and `K_root(q)` take their leader from it, so a writer
+/// cannot choose where its position is decided, and a verifier computes the
+/// leader from a root it validated — never from a root carried in the value
+/// it reads.
+pub const TAG_DSM_ECONOMIC_POSITION_SEED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic/position-seed/v1");
+
 /// Immutable namespace for the 0x0026 evidence bundle
 /// (`ReserveConsumptionEvidenceV1`: exact CCB(V_n) + the owner's vault-bound
 /// authority evidence + both reserve pre-leaves with their 256-sibling
 /// inclusion witnesses). Transport proto — no CCB class.
 pub const TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/dlv-reserve-consumption-evidence/v1");
-/// SourceId for a validated DLV settlement payment (0x0027):
-/// `H(tag ‖ 0x00 ‖ vault_id ‖ settlement_receipt_id)` — one receipt funds
-/// the owner's input-reserve credit exactly once; the non-reuse mechanism
-/// is the reserve-sequence Merkle CAS (after the first apply the reserve
-/// pre-state at n no longer exists in the owner's validated lineage).
-pub const TAG_DSM_ECON_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/validated-dlv-settlement-payment/v1");
 /// Immutable namespace for the 0x0027 evidence bundle
 /// (`SettlementPaymentEvidenceV1`: the trader's receipt leaf + inclusion
 /// witness). Transport proto — no CCB class.
@@ -156,8 +119,6 @@ pub const TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE: TaggedHashDomain<'static> =
 /// use the same object.
 pub const TAG_DSM_ECONOMIC_PROOF_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-proof-artifact/v1");
-pub const TAG_DSM_ECON_SOURCE_SAME_TRANSITION_MOVE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/same-transition-move/v1");
 
 /// `SourceId` for a peer's validated debit:
 /// `H(tag ‖ 0x00 ‖ peer_genesis ‖ peer_devid ‖ u64_be(peer_economic_position)

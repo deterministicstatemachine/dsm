@@ -1,32 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tier 2 Foundation DLV primitives Ã¢ÂÂ pure-crypto helpers that the
-//! `dsm_sdk` and storage layers compose into the off-device SoFi
-//! flow.  This module deliberately holds no proto / I/O / runtime
-//! state; each submodule is a self-contained crypto primitive.
+//! Pure-crypto vault primitives that outlive the old market: the deployed
+//! beta storage profile, the one route arithmetic, and the owner-signed
+//! baseline over the canonical state identity. No proto, I/O or runtime
+//! state lives here.
 
-pub mod beta_storage_profile; // the deployed five-member beta profile Ã¢ÂÂ fixed, not a formula
-pub mod binding_observation; // what a set of binding reads establishes about ONE resource key
-pub mod close_authorization; // the owner signature over the exact DLV release successor
-pub mod composed_history; // the SoFi composed-state rule as DLV reserve provenance
-pub mod controller_rotation;
-pub mod market_evidence; // 2c-B G1-G4 — the validity half of market successor evidence
-pub mod market_producer; // 5c-2 Step 2 — the genuine market bundle producer; nothing invented
-pub mod pair_identity;
-pub mod published_receipt; // Req 21.16 — a receipt's facts proven under the VALIDATED R_T^+
-pub mod quorum_bind; // Def 6.21 Ã¢ÂÂ Class K sans-IO quorum-binding decision engine
+pub mod beta_storage_profile; // the deployed five-member beta profile — fixed, not a formula
 pub mod route_commit;
-pub mod settlement_bundle; // Def 6.14 — the canonical immutable SettlementBundle + K(B)
-pub mod settlement_receipt_leaf;
-pub mod settlement_slot_claim; // write-once claim envelope for the settlement-slot quorum register
-pub mod sofi_receipt; // 2c-F — the Def 14.2 settlement receipt: a projection, never authority
-pub mod successor_validity; // 2c-C3 — ValidDlvSuccessorCore: what makes a DLV continuation valid
-pub mod trader_fence; // Req 6.23 â the initiating-trader parent fence (pure state machine)
-pub mod vault_pending_pointer;
-pub mod vault_reserve_inclusion;
-pub mod vault_reserve_leaf;
-pub mod vault_smt_leaf;
 // vault_state_anchor (V1) and vault_state_anchor_v2 are DELETED by the
 // state-identity cut. Their names and domains are burned, never reused; the
 // only anchor form is V3 below, whose sole content is c_n.
-pub mod vault_state_anchor_v3; // Def 6.4a Ã¢ÂÂ owner baseline over c_n; the only anchor form after the cut
+pub mod vault_state_anchor_v3; // Def 6.4a — owner baseline over c_n; the only anchor form after the cut

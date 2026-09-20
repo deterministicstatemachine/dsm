@@ -40,7 +40,7 @@ class Selector(unittest.TestCase):
         self.assertEqual(groups(layers), {"dsm", "dsm_sdk", "workspace-rest"})
 
     def test_sdk_only_change(self):
-        layers, full = sel([SDK + "handlers/dlv_routes.rs"])
+        layers, full = sel([SDK + "handlers/storage_routes.rs"])
         self.assertFalse(full)
         self.assertEqual(layers, {"SDK", "JNI_ANDROID", "FORMAL"})
         self.assertEqual(groups(layers), {"dsm_sdk", "workspace-rest"})

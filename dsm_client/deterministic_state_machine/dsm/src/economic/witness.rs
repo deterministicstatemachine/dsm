@@ -136,23 +136,6 @@ impl EconomicTransitionWitness {
                     mutation_index: index,
                 });
             }
-            if let CreditSource::SameTransitionMove(m) = source {
-                let debit = usize::try_from(m.debit_mutation_index).map_err(|_| {
-                    CcbError::CreditIndexOutOfRange {
-                        index: m.debit_mutation_index,
-                        mutations: self.mutations.len(),
-                    }
-                })?;
-                if debit >= self.mutations.len() {
-                    return Err(CcbError::CreditIndexOutOfRange {
-                        index: m.debit_mutation_index,
-                        mutations: self.mutations.len(),
-                    });
-                }
-                if debit == position {
-                    return Err(CcbError::SameTransitionMoveIsSelfFunding { index });
-                }
-            }
         }
 
         // The other half of the bijection: every credit is funded. Checked
