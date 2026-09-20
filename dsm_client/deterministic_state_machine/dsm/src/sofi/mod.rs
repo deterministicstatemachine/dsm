@@ -18,7 +18,8 @@
 //!
 //! The byte-exact wire registry and the pure derivations: field tables and
 //! strict codecs ([`wire`]), domain-separated keys and identities
-//! ([`derive`]), the routing permutation ([`fisher_yates`]), successor-cell
+//! ([`derive`]), the seeded permutation ([`fisher_yates`]) and the leader of
+//! a cell over the committed set ([`leader`]), successor-cell
 //! arithmetic ([`arith`]), the storage facts for objects and indexes
 //! ([`storage`]), three-valued validation composition and the mechanical
 //! fulfillment-against-precommit checks ([`conformance`]), and the
@@ -36,6 +37,7 @@ pub mod arith;
 pub mod conformance;
 pub mod derive;
 pub mod fisher_yates;
+pub mod leader;
 pub mod lineage;
 pub mod resolution;
 pub mod signature;

@@ -78,7 +78,8 @@ pub const TAG_DSM_SOFI_SUCC_ATTEMPT: TaggedHashDomain<'static> =
 /// `s_{v,n} = H(tag ‖ v ‖ R_n)` — the Fisher-Yates seed.
 pub const TAG_DSM_SOFI_STORAGE_SEED_V4: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/storage-seed/v4");
-/// `H(tag ‖ s ‖ u32be(i) ‖ u32be(ctr))` — Fisher-Yates PRF words. Routing only.
+/// `H(tag ‖ s ‖ u32be(i) ‖ u32be(ctr))` — Fisher-Yates PRF words; the shuffle
+/// of the committed set that names a cell's leader (Part II §7).
 pub const TAG_DSM_SOFI_FY_PRF: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/fy-prf/v1");
 

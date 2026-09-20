@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Root-seeded Fisher-Yates ordering of a caller-local availability view.
+//! Root-seeded Fisher-Yates ordering of the COMMITTED storage set — Part II §7.
 //!
-//! **Routing only.** This chooses where an honest client sends its first
-//! write. It has no security role: storage members do not enforce it, the
-//! view `A` is caller-local and never committed, and no safety property
-//! depends on two clients agreeing on it. It is frozen by vectors, not proved.
+//! The first member of the ordering is the leader of a cell: the member whose
+//! first object naming the key is the winner there, the one place a race at a
+//! key ends. The writer and Core compute it from a seed and the committed set
+//! `S`; a storage node never does. Availability, the caller's identity and
+//! node ids never enter a seed, and an offline member stays in `S`, so the
+//! leader of a cell never depends on who is online. The input to `permute` is
+//! `S`, not a caller's view of who is reachable — a caller that passed what it
+//! could reach would compute a different function (`leader.rs`,
+//! `a_reachable_subset_can_name_another_leader`). The ordering is frozen by
+//! vectors (`dsm/tests/sofi_v8_independent.rs`); its safety role is stated in
+//! `tla/DSM_SofiSuccessorCells.tla` (`LeaderFromCommittedSet`).
 //!
 //! ## Normative algorithm
 //!
-//! 1. `A` is canonicalized by sorting member ids ascending (raw bytes); a
+//! 1. `S` is canonicalized by sorting member ids ascending (raw bytes); a
 //!    duplicate member id is refused.
 //! 2. `s = H(DSM/sofi/storage-seed/v4 ‖ v ‖ R_n)` (see `derive::storage_seed`).
 //! 3. For `i` from `n − 1` down to `1`: draw `j` uniformly from `0..=i` and swap
@@ -63,7 +70,8 @@ fn uniform_draw(seed: &[u8; 32], index: u32, range: u64) -> Result<u64, FisherYa
     }
 }
 
-/// The canonical Fisher-Yates permutation of `view` under `seed`.
+/// The canonical Fisher-Yates permutation of the committed set `view` under
+/// `seed`.
 pub fn permute(seed: &[u8; 32], view: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, FisherYatesError> {
     if view.is_empty() {
         return Err(FisherYatesError::EmptyView);
@@ -84,7 +92,8 @@ pub fn permute(seed: &[u8; 32], view: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, Fisher
     Ok(perm)
 }
 
-/// `p(A) = π(A)[0]` — the first member an honest client writes to.
+/// `L = π(S)[0]` — the leader of the cell, where the writer writes first and
+/// where Core reads the winner.
 pub fn first_member(seed: &[u8; 32], view: &[Vec<u8>]) -> Result<Vec<u8>, FisherYatesError> {
     Ok(permute(seed, view)?.swap_remove(0))
 }
