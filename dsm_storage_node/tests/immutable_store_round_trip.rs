@@ -9,6 +9,9 @@
 //! row that no longer hashes to its own key. Neither side decodes the payload,
 //! so the payload here is deliberately arbitrary: not a protocol object.
 
+// The in-memory harness is the SQLite backend; under the Postgres feature
+// `db::create_pool` is the Postgres pool and `:memory:` is not a DSN.
+#![cfg(feature = "local-dev")]
 #![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
