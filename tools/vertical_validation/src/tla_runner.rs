@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 62;
+pub const EXPECTED_STANDARD_SPECS: usize = 67;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -575,18 +575,27 @@ impl TlaRunner {
             // gate and must violate it; a *-reachable / *-claim config states
             // something false (a witness must exist) and must violate it.
             // ── SoFi successor cells and the position pair, at the members ────
-            // Leader-first finality (Part II §7-8, §13): members keep every value,
-            // decide nothing; Core derives LeaderHeld and Final; no key is dead.
-            // Standard, adverse-facts and second-attempt configs carry the full
-            // invariant set. `unclassifiable-occupant` is P1 (spec §42.3): it is
-            // EXPECTED to fail until rebuild step R11 flips
-            // `ExerciseCarriesClosure`. The algebra is lean4/DSMSofiSuccessorCells.lean.
+            // Raw member storage takes any bytes from anyone; Core's recognition
+            // is the only way from bytes to a protocol object, and every cell
+            // fact (LeaderHeld, Final, consumption) is derived over the
+            // recognized view (Part II §7-8, §13, §17.5). Unrecognized bytes
+            // never occupy, finalize or consume; a recognized occupant names its
+            // key and is constructible; the `recognize-any-bytes*` configs weaken
+            // recognition and each named invariant falls. Standard, adverse-facts
+            // and second-attempt configs carry the full invariant set. The
+            // algebra is lean4/DSMSofiSuccessorCells.lean.
             TlaSpec {
                 label: "SofiSuccessorCells".into(),
                 spec_file: "DSM_SofiSuccessorCells.tla".into(),
                 config_file: "DSM_SofiSuccessorCells.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
                     "FinalRequiresLeader".into(),
                     "AtMostOneFinalPerCoordinate".into(),
                     "LeaderFromCommittedSet".into(),
@@ -615,6 +624,12 @@ impl TlaRunner {
                 config_file: "DSM_SofiSuccessorCells_AdverseFacts.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
                     "FinalRequiresLeader".into(),
                     "AtMostOneFinalPerCoordinate".into(),
                     "LeaderFromCommittedSet".into(),
@@ -692,6 +707,18 @@ impl TlaRunner {
                 "ExerciseNamesItsKey",
             ),
             expect_violation(
+                "SofiSuccessorCells/exercise-counts-anywhere-recognized",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_ExerciseCountsAnywhereRecognized.cfg",
+                "RecognizedAttemptNamesItsKey",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/garbage-first-reachable",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_GarbageFirstReachable.cfg",
+                "GarbageNeverArrivesFirst",
+            ),
+            expect_violation(
                 "SofiSuccessorCells/invalid-final-not-skipped",
                 "DSM_SofiSuccessorCells.tla",
                 "DSM_SofiSuccessorCells_InvalidFinalNotSkipped.cfg",
@@ -708,6 +735,30 @@ impl TlaRunner {
                 "DSM_SofiSuccessorCells.tla",
                 "DSM_SofiSuccessorCells_OccupancyIsConsumption.cfg",
                 "EarlyCellCannotCauseConsumption",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytes.cfg",
+                "UnrecognizedBytesNeverOccupy",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-constructible",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesConstructible.cfg",
+                "RecognizedImpliesConstructible",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-consume",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesConsume.cfg",
+                "UnrecognizedBytesNeverConsume",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/recognize-any-bytes-final",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_RecognizeAnyBytesFinal.cfg",
+                "UnrecognizedBytesNeverFinalize",
             ),
             expect_violation(
                 "SofiSuccessorCells/registration-is-conformance",
@@ -727,6 +778,12 @@ impl TlaRunner {
                 config_file: "DSM_SofiSuccessorCells_SecondAttempt.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "UnrecognizedBytesNeverFinalize".into(),
+                    "UnrecognizedBytesNeverConsume".into(),
+                    "RecognizedAttemptNamesItsKey".into(),
+                    "FinalImpliesRecognized".into(),
+                    "RecognizedImpliesConstructible".into(),
                     "FinalRequiresLeader".into(),
                     "AtMostOneFinalPerCoordinate".into(),
                     "LeaderFromCommittedSet".into(),
@@ -768,12 +825,6 @@ impl TlaRunner {
                 "UnavailableNeverRejects",
             ),
             expect_violation(
-                "SofiSuccessorCells/unclassifiable-occupant",
-                "DSM_SofiSuccessorCells.tla",
-                "DSM_SofiSuccessorCells_UnclassifiableOccupant.cfg",
-                "NoUnclassifiableOccupiedAttempt",
-            ),
-            expect_violation(
                 "SofiSuccessorCells/unread-counted-as-copy",
                 "DSM_SofiSuccessorCells.tla",
                 "DSM_SofiSuccessorCells_UnreadCountedAsCopy.cfg",
@@ -785,7 +836,8 @@ impl TlaRunner {
             // position pair, RouteValidation (with SetupValid inside) and
             // FulfillmentConformance as separate predicates, the fence on Core
             // resolution. `producer-builds-on-open-predecessor` is the producer
-            // mutation of spec §42.2; `trader-only-completion` is P2 (§42.3).
+            // mutation of spec §42.2; `trader-only-completion` is the mutation of
+            // P2 (§42.3), which the standard set proves.
             TlaSpec {
                 label: "SofiFulfillment".into(),
                 spec_file: "DSM_SofiFulfillment.tla".into(),

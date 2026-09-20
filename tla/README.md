@@ -272,6 +272,30 @@ FAILED [expected-to-fail] ...
 ```
 
 
+## The foundation: lean4/DSMRecognition.lean
+
+Every DSM proof hangs under one theorem about what may become DSM state at
+all:
+
+```text
+RecognizedDSM(x)  ⇒  ConstructibleDSM(x)  ⇒  ValidDSM(x)
+```
+
+Raw bytes from anyone are one universe; protocol objects are another; Core's
+deterministic recognition (rebuild the candidate, keep it only if every
+recomputation agrees) is the only way across. `DSMRecognition.lean` models an
+adversary that can craft any object and sign with any key it holds, defines
+`Constructible` by Core's constructor and `Valid` by independent semantic
+predicates (authority, ancestry, naming, availability, conservation, proof
+soundness), and proves that nothing crosses the boundary unless the
+construction constraints hold — and then it is exactly what Core built. Seven
+mutation controls remove one recomputation each (signature binding, ancestry
+binding, coordinate derivation, canonical encoding, proof verification,
+consumed-key exclusion, the bound) and the named theorems rest on `sorryAx`.
+Conservation, the tripwire, SoFi atomicity and leader finality are refinements
+of that boundary: none of them rescues DSM from an invalid state after the
+fact, because no invalid state is admissible.
+
 ## SoFi settlement: DSM_SofiSuccessorCells.tla and DSM_SofiFulfillment.tla
 
 A route is one unilateral trader operation, P → G₁…Gₙ → F → realization. Two
@@ -287,10 +311,13 @@ lean4/DSMSofiAtomicity.lean       identities, the hash order, the two Core predi
                                   (RouteValidation with SetupValid inside;
                                   FulfillmentConformance), the ladder, the fence
 
-tla/DSM_SofiSuccessorCells.tla    the MEMBERS: leader-first writes, copies, partial reads,
-                                  the position pair written together, exercises at
-                                  attempt keys, faults (a leader chosen by reachability,
-                                  counting without the leader, an unread member counted)
+tla/DSM_SofiSuccessorCells.tla    the MEMBERS, behind the recognition boundary: raw
+                                  member storage takes any bytes from anyone in arrival
+                                  order; LeaderHeld and Final are derived over Core's
+                                  recognized view; leader-first writes, copies, partial
+                                  reads, the position pair written together, faults (a
+                                  leader chosen by reachability, counting without the
+                                  leader, an unread member counted, recognition weakened)
 
 tla/DSM_SofiFulfillment.tla       the OPERATION over the facts Core derives: rivals
                                   between the witnesses and F, abandonment, relayers,
@@ -313,6 +340,19 @@ walk still owes (rebuild step R12): an exercise final at a key whose F can never
 register, because its trader's position already holds another claim, is
 skipped (`LostPosition`, spec §21.1).
 
+**The recognition boundary at a cell (P1 of §42.3).** The cells model keeps
+hostile bytes: `G` is bytes any caller may send that no recognition rebuilds
+into an object, and it may physically arrive first at a leader and be held by
+every copy member (`_GarbageFirstReachable`). It is never the occupant, never
+final and never consumes: the winner at a key is the first RECOGNIZED object
+at the leader, not the first bytes received (`UnrecognizedBytesNeverOccupy`,
+`UnrecognizedBytesNeverFinalize`, `UnrecognizedBytesNeverConsume`,
+`RecognizedAttemptNamesItsKey`, `FinalImpliesRecognized`,
+`RecognizedImpliesConstructible`). The `_RecognizeAnyBytes*` configs weaken
+recognition and each named invariant falls. There is no protocol state, before
+or after rebuild step R11, in which unclassifiable material occupies a key;
+R11 fixes the concrete `SOFI_EXERCISE` encoding that recognition rebuilds.
+
 **The trader parent (P15-3, R17-3).** `parent` carries the claim at `p` that P
 was built on: `"single"` for an ordinary claim, or one conditional claim as
 `"open"` → `"taken"` / `"other"` / `"none"`, selected once by
@@ -324,14 +364,10 @@ ends in a state where none of them is enabled. "A registered F resolves under
 evidence availability" (R13-5) and "witnesses never lock" are invariants of the
 form *quiescent ⇒ resolved*. A trader that still holds a decision (an open
 parent branch, an exercise it carried but never registered) keeps the world
-non-quiescent: those are questions a completer cannot answer.
-
-**Expected to fail on the floor (§42.3).** `_UnclassifiableOccupant` is P1: a
-value that names an attempt key but carries nothing Core can classify wins the
-leader and strands the ladder. It stays a falsification config until rebuild
-step R11 makes every successor-key value an exercise carrying its closure, when
-`ExerciseCarriesClosure` flips and the property joins the standard set.
-`_TraderOnlyCompletion` is P2: a write authorization that only the trader
+non-quiescent: those are questions a completer cannot answer. P2 of §42.3
+(a registered fulfillment can be completed by anyone) is proved by the standard
+set — `QuiescentFulfillmentResolved` with no write authorization — and
+`_TraderOnlyCompletion` is its mutation: an authorization only the trader
 satisfies leaves a registered F unresolved.
 
 ### Falsifications and non-vacuity (machine-gated)
@@ -351,17 +387,22 @@ carry the full invariant set and must pass.
 | cells | `_CountWithoutLeader` | finality counted over any three holders | `FinalRequiresLeader` |
 | cells | `_CountWithoutLeaderTwoFinals` | finality counted over any three holders | `AtMostOneFinalPerCoordinate` |
 | cells | `_EarlyOccupancyReachable` | *claim:* a key is never occupied early | `NeverEarlyOccupied` |
-| cells | `_ExerciseCountsAnywhere` | an exercise counts at a key it does not name | `ExerciseNamesItsKey` |
+| cells | `_ExerciseCountsAnywhere` | an exercise consuming at a key it does not name | `ExerciseNamesItsKey` |
+| cells | `_ExerciseCountsAnywhereRecognized` | recognition: an exercise read at a key it does not name | `RecognizedAttemptNamesItsKey` |
+| cells | `_GarbageFirstReachable` | *claim:* garbage never arrives first at a leader (it does; the exercise behind it is still the occupant, and final) | `GarbageNeverArrivesFirst` |
 | cells | `_InvalidFinalNotSkipped` | the Invalid skip | `ObjectiveRejectionImpliesSkipped` |
 | cells | `_LossAtLeaderReachable` | *claim:* the race at a leader is never lost | `NeverLostAtLeader` |
 | cells | `_OccupancyIsConsumption` | a final exercise consumes with no Core predicate | `EarlyCellCannotCauseConsumption` |
+| cells | `_RecognizeAnyBytes` | recognition: bytes that rebuild into no object are read as one | `UnrecognizedBytesNeverOccupy` |
+| cells | `_RecognizeAnyBytesConstructible` | recognition: an occupant Core could not construct | `RecognizedImpliesConstructible` |
+| cells | `_RecognizeAnyBytesConsume` | recognition, at consumption | `UnrecognizedBytesNeverConsume` |
+| cells | `_RecognizeAnyBytesFinal` | recognition, at finality | `UnrecognizedBytesNeverFinalize` |
 | cells | `_RegistrationIsConformance` | a registered F taken as conforming | `RegistrationIsNotConformance` |
 | cells | `_RegistrationReachable` | *claim:* nothing registers | `NeverRegistered` |
 | cells | `_SecondAttempt` | F names attempt 1, the rival's final at K0 Invalid (standard set) | `(standard set)` |
 | cells | `_SecondAttemptConsumptionReachable` | *claim:* attempt 1 never consumes | `NeverConsumedAtSecondAttempt` |
 | cells | `_SplitPositionPair` | K_ful(q) and K_root(q) written in two steps | `PositionPairAtomic` |
 | cells | `_UnavailableAsInvalid` | three-valued validation | `UnavailableNeverRejects` |
-| cells | `_UnclassifiableOccupant` | *P1, expected to fail until R11:* a value naming the key but carrying nothing Core can classify wins its leader | `NoUnclassifiableOccupiedAttempt` |
 | cells | `_UnreadCountedAsCopy` | an unread member counts as a holder | `PartialReadIsSound` |
 | fulfillment | `_AdverseFacts` | both routes Invalid, vault B's creation unvalidated (standard set) | `(standard set)` |
 | fulfillment | `_CompleteRejectedNotSkipped` | arm (i) without an all-legs-final premise | `ObjectiveRejectionImpliesSkipped` |
