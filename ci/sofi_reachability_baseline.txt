@@ -9,7 +9,6 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs setup_ref  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs policy_fulfillment_id  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs fulfillment_register_key  # R9
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs successor_attempt_key  # R11
-dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs storage_seed  # R3
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs preimage_locator  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs advance_resolved  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14

@@ -245,8 +245,7 @@ pub fn settlement_core_digest(canonical_core: &[u8]) -> D32 {
 
 /// Single-vault `E = H(atomic-ext/v4 ‖ v ‖ R_n ‖ ρ ‖ c_T° ‖ c_V° ‖ b° ‖ X_route)`.
 ///
-/// No attempt index, availability view, routing order, first member or witness
-/// enters E.
+/// No attempt index, member set, shuffle order, leader or witness enters E.
 #[allow(clippy::too_many_arguments)]
 pub fn external_commitment_single(
     vault_id: &D32,

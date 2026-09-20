@@ -324,6 +324,30 @@ pub(crate) fn leader_index(
         })
 }
 
+/// Part II §7.2, the vault seed: the member that leads every successor cell of
+/// `vault_id` at `parent_root`, as an index into `set.members()`. `set` is the
+/// committed set the vault state names (`storage_set_id`, resolved through the
+/// catalog) — never the members this device can reach. Computed here and by
+/// Core (`dsm::sofi::leader::successor_cell_leader`); never by a node.
+pub fn successor_cell_leader_index(
+    set: &crate::sdk::storage_set::StorageSet,
+    vault_id: &[u8; 32],
+    parent_root: &[u8; 32],
+) -> Result<usize, DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
+    let leader = dsm::sofi::leader::successor_cell_leader(vault_id, parent_root, &members)
+        .map_err(|e| DsmError::storage(format!("leader shuffle: {e:?}"), None::<std::io::Error>))?;
+    set.members()
+        .iter()
+        .position(|m| m.member_id.as_bytes() == leader.as_slice())
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the shuffled leader is not a member of the set".to_string(),
+                None::<std::io::Error>,
+            )
+        })
+}
+
 /// Part II §8: write `value` at `key` under `namespace`, the leader of `seed`
 /// first and the other members after. Nothing is checked or compared on the
 /// way; the winner at the key is whatever object reached the leader first,
@@ -1668,5 +1692,75 @@ mod sofi_storage_tests {
         ))
         .expect("resolve");
         assert_eq!(gone, Resolved::Unavailable);
+    }
+}
+
+/// R3 correspondence: the leader of a cell is a function of the seed and the
+/// committed set alone. Availability never enters (Part II §7).
+#[cfg(test)]
+mod sofi_leader_tests {
+    use super::fake_fleet;
+    use crate::sdk::storage_set::{StorageMember, StorageSet};
+    use serial_test::serial;
+
+    fn member(i: u8) -> StorageMember {
+        StorageMember {
+            member_id: format!("m{i}"),
+            register_incarnation_id: [i; 32],
+            endpoint: format!("http://m{i}"),
+        }
+    }
+
+    fn five() -> StorageSet {
+        StorageSet::new((1..=5u8).map(member).collect()).expect("five distinct members")
+    }
+
+    /// The same set, the same seed, the same leader — whichever members are
+    /// down, including the leader itself. MUTATION CONTROL (executed): make
+    /// `successor_cell_leader_index` shuffle only the members the fake fleet
+    /// has not failed, and this test goes red.
+    #[test]
+    #[serial]
+    fn availability_never_changes_the_leader() {
+        fake_fleet::reset();
+        let set = five();
+        let (v, r) = ([0xA1u8; 32], [0xB2u8; 32]);
+        let leader = super::successor_cell_leader_index(&set, &v, &r).expect("leader");
+        let leader_id = set.members()[leader].member_id.clone();
+        // Every other member goes down: the leader is unchanged.
+        for m in set.members() {
+            if m.member_id != leader_id {
+                fake_fleet::fail_member(&m.member_id);
+            }
+        }
+        assert_eq!(
+            super::successor_cell_leader_index(&set, &v, &r).expect("leader"),
+            leader
+        );
+        // The leader itself goes down: still the leader. An offline member
+        // stays in S; its cells wait, nobody stands in.
+        fake_fleet::fail_member(&leader_id);
+        assert_eq!(
+            super::successor_cell_leader_index(&set, &v, &r).expect("leader"),
+            leader
+        );
+        // The witness of what the mutation would do: the reachable subset is a
+        // different set and, for some root, names a different member.
+        let without_leader = StorageSet::new(
+            set.members()
+                .iter()
+                .filter(|m| m.member_id != leader_id)
+                .cloned()
+                .collect(),
+        )
+        .expect("four members");
+        let differs = (0u8..64).any(|b| {
+            let r = [b; 32];
+            let full = super::successor_cell_leader_index(&set, &v, &r).expect("leader");
+            let sub = super::successor_cell_leader_index(&without_leader, &v, &r).expect("leader");
+            set.members()[full].member_id != without_leader.members()[sub].member_id
+        });
+        assert!(differs);
+        fake_fleet::reset();
     }
 }
