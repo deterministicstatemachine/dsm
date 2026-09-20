@@ -175,7 +175,6 @@ pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> 
     });
     api::economic::faucet_ticket::create_write_router()
         .merge(api::economic::root_register::create_write_router())
-        .merge(api::sofi::create_write_router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::device_auth,
@@ -208,7 +207,6 @@ pub fn generic_binding_read_router(state: Arc<AppState>) -> axum::Router<()> {
 /// the conformance suite mounts it bare.
 pub fn economic_register_read_router(state: Arc<AppState>) -> axum::Router<()> {
     api::economic::faucet_ticket::create_read_router(state.clone())
-        .merge(api::sofi::create_read_router(state.clone()))
         .merge(api::economic::root_register::create_read_router(state))
 }
 

@@ -229,20 +229,6 @@ pub mod class {
     /// `PolicyFulfillmentAuxRef` — a content-addressed auxiliary evidence
     /// candidate. Never an identity field, never a singleton slot.
     pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
-    /// Resolution record: fulfillment registered.
-    pub const SOFI_RECORD_FULFILLMENT_REGISTERED: u16 = 0x0043;
-    /// Resolution record: successor key arithmetically dead.
-    pub const SOFI_RECORD_SUCCESSOR_DEAD: u16 = 0x0044;
-    /// Resolution record: successor key final with one E.
-    pub const SOFI_RECORD_SUCCESSOR_FINAL: u16 = 0x0045;
-    /// Resolution record: route outcome final Complete.
-    pub const SOFI_RECORD_OUTCOME_COMPLETE: u16 = 0x0046;
-    /// Resolution record: route outcome final Abort.
-    pub const SOFI_RECORD_OUTCOME_ABORT: u16 = 0x0047;
-    /// Route-outcome cell value `Complete` — zero fields.
-    pub const SOFI_OUTCOME_CELL_COMPLETE: u16 = 0x0048;
-    /// Route-outcome cell value `Abort` — zero fields.
-    pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
     /// `Γ` — the canonical route-leg set folded into a route E.
     pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;
 
@@ -395,12 +381,30 @@ pub mod burned_class {
     /// (registry §2.10), so no separate `Q` object exists; schema 2 never
     /// shipped an encoder.
     pub const ROUTE_COMMITMENT_BODY: u16 = 0x0017;
+    /// The SoFi resolution-record family and the route-outcome cell values,
+    /// `0x0043` to `0x0049` — burned by the demolition. Every fact they
+    /// carried is derived by Core from raw member reads, so no stored record
+    /// can be an authority for it.
+    pub const SOFI_RECORD_FULFILLMENT_REGISTERED: u16 = 0x0043;
+    pub const SOFI_RECORD_SUCCESSOR_DEAD: u16 = 0x0044;
+    pub const SOFI_RECORD_SUCCESSOR_FINAL: u16 = 0x0045;
+    pub const SOFI_RECORD_OUTCOME_COMPLETE: u16 = 0x0046;
+    pub const SOFI_RECORD_OUTCOME_ABORT: u16 = 0x0047;
+    pub const SOFI_OUTCOME_CELL_COMPLETE: u16 = 0x0048;
+    pub const SOFI_OUTCOME_CELL_ABORT: u16 = 0x0049;
 
     pub const ALL: &[u16] = &[
         STORAGE_MEMBER_ID,
         EXTERNAL_COMMITMENT_BODY,
         ROUTE_SET,
         ROUTE_COMMITMENT_BODY,
+        SOFI_RECORD_FULFILLMENT_REGISTERED,
+        SOFI_RECORD_SUCCESSOR_DEAD,
+        SOFI_RECORD_SUCCESSOR_FINAL,
+        SOFI_RECORD_OUTCOME_COMPLETE,
+        SOFI_RECORD_OUTCOME_ABORT,
+        SOFI_OUTCOME_CELL_COMPLETE,
+        SOFI_OUTCOME_CELL_ABORT,
     ];
 
     pub fn is_burned_class(object_class: u16) -> bool {

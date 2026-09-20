@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The generic conditional-binding properties, ON WHICHEVER BACKEND IS
-//! COMPILED (SoFi Rev 15 Req 15.6, 15.9, 15.11): all-or-none over a key set,
+//! COMPILED: all-or-none over a key set,
 //! exactly one winner among concurrent exchanges from the same expectation,
 //! rounds that only move forward, overlapping key sets that serialise, and
 //! a record set that survives re-opening the store. CI executes this file

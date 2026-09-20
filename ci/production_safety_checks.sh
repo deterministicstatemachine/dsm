@@ -60,10 +60,13 @@ bash ci/peer_debit_lineage_authoritative.sh
 # live hole the day that writer lands. Only a static check holds this.
 bash ci/admitted_predecessor_readers_fenced.sh
 
-# `C_q` is derived by the member that accepts `F`, never posted. The endpoint
-# refuses it today only because the single-root decoder cannot parse it, and
-# E2 is about to make that endpoint handle every claim kind.
-bash ci/root_register_refuses_posted_cq.sh
+# The root register accepts only single root claims signed by the caller. A
+# conditional claim carries no caller signature, so the endpoint must never
+# decode that kind.
+bash ci/root_register_accepts_signed_claims_only.sh
+
+# The storage node holds bytes and knows nothing about SoFi.
+bash ci/storage_is_dumb.sh
 
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
