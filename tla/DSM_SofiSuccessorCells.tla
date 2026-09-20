@@ -77,7 +77,9 @@ CONSTANTS
     RegistrationIsConformance,\* [FALSE] a registered F is taken as conforming
     AttemptLiveOmitted,       \* [FALSE] consumption without AttemptLive
     UnavailableAsInvalid,     \* [FALSE] missing evidence rejects a final
-    InvalidFinalNotSkipped    \* [FALSE] an Invalid final is not skipped
+    InvalidFinalNotSkipped,   \* [FALSE] an Invalid final is not skipped
+    MemberRefusesSecondValue, \* [FALSE] R2 fault: a member drops bytes arriving at an occupied key
+    MemberReplacesValue       \* [FALSE] R2 fault: a member overwrites what it holds with the latest bytes
 
 ASSUME N = 5 /\ MaxStep \in Nat /\ AttemptT \in {0, 1}
 
@@ -116,6 +118,7 @@ Slots == {L, A}
 
 VARIABLES
     raw,        \* [AttemptKeys -> [Slots -> Seq(bytes)]]: what the leader and the alternate hold, in arrival order
+    given,      \* [AttemptKeys -> [Slots -> Seq(bytes)]]: everything ever sent to that member, in arrival order (R2)
     first,      \* [{KF, KR} -> [Slots -> value]]: the first object naming the position key at that member
     copies,     \* [Keys -> [AllValues -> 0..3]]: the three copy members holding the value
     leaderUp,   \* the seeded leader is reachable (changes only under AvailabilityLeader)
@@ -124,7 +127,7 @@ VARIABLES
     everFinal,  \* [Keys -> values ever Final there]
     consHist    \* E values ever observed consuming the parent
 
-vars == <<raw, first, copies, leaderUp, signedF, evid, everFinal, consHist>>
+vars == <<raw, given, first, copies, leaderUp, signedF, evid, everFinal, consHist>>
 
 \* ---- the recognition boundary ------------------------------------------
 \* THE FACT: b is a canonical object whose own fields name attempt key k
@@ -236,13 +239,20 @@ Holds(seq, b) == \E i \in 1..Len(seq) : seq[i] = b
 
 \* Anyone sends any bytes to the leader of an attempt key. The member keeps
 \* them after whatever it already holds. Nothing is checked: recognition
-\* happens at READ time, in Core, never here.
+\* happens at READ time, in Core, never here. `given` records what was sent;
+\* a correct member's `raw` IS `given` (R2, Part II §12). The two faults a
+\* member is forbidden — dropping a later arrival, overwriting an earlier one
+\* — are the mutations `MemberRefusesSecondValue` and `MemberReplacesValue`.
 PutRaw(k, b) ==
     /\ k \in AttemptKeys
     /\ b \in RawAt(k)
     /\ Producible(b)
-    /\ ~Holds(raw[k][Lead], b)
-    /\ raw' = [raw EXCEPT ![k][Lead] = Append(@, b)]
+    /\ ~Holds(given[k][Lead], b)
+    /\ given' = [given EXCEPT ![k][Lead] = Append(@, b)]
+    /\ raw' = [raw EXCEPT ![k][Lead] =
+                 CASE MemberRefusesSecondValue /\ @ # <<>> -> @
+                   [] MemberReplacesValue -> <<b>>
+                   [] OTHER -> Append(@, b)]
     /\ Hist
     /\ UNCHANGED <<first, copies, leaderUp, signedF, evid>>
 
@@ -258,7 +268,7 @@ PutCopy(k, b) ==
     /\ copies[k][b] < CopyCap
     /\ copies' = [copies EXCEPT ![k][b] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<raw, first, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, leaderUp, signedF, evid>>
 
 \* Garbage copies land anywhere, any time: a hostile caller spraying members.
 PutGarbageCopy(k) ==
@@ -266,14 +276,14 @@ PutGarbageCopy(k) ==
     /\ copies[k][G] < CopyCap
     /\ copies' = [copies EXCEPT ![k][G] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<raw, first, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, leaderUp, signedF, evid>>
 
 \* The ordinary claim S races C at K_root(q)'s leader.
 PutOrdinaryClaim ==
     /\ first[KR][Lead] = NONE
     /\ first' = [first EXCEPT ![KR][Lead] = S]
     /\ Hist
-    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
 
 \* The trader's position pair is written together at its one leader (Section 9).
 PutPair ==
@@ -283,7 +293,7 @@ PutPair ==
     /\ first' = [first EXCEPT ![KF][Lead] = F,
                               ![KR][Lead] = IF first[KR][Lead] = NONE THEN C ELSE @]
     /\ Hist
-    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
 
 PutHalf(k) ==
     /\ SplitPositionPair
@@ -292,33 +302,33 @@ PutHalf(k) ==
     /\ first[k][Lead] = NONE
     /\ first' = [first EXCEPT ![k][Lead] = IF k = KF THEN F ELSE C]
     /\ Hist
-    /\ UNCHANGED <<raw, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
 
 SignF ==
     /\ ~signedF
     /\ signedF' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, first, copies, leaderUp, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, leaderUp, evid>>
 
 PublishEvidence ==
     /\ ~evid
     /\ evid' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, first, copies, leaderUp, signedF>>
+    /\ UNCHANGED <<raw, given, first, copies, leaderUp, signedF>>
 
 Crash ==
     /\ AvailabilityLeader
     /\ leaderUp
     /\ leaderUp' = FALSE
     /\ Hist
-    /\ UNCHANGED <<raw, first, copies, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, signedF, evid>>
 
 Recover ==
     /\ AvailabilityLeader
     /\ ~leaderUp
     /\ leaderUp' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, first, copies, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, signedF, evid>>
 
 Idle == UNCHANGED vars
 
@@ -337,6 +347,7 @@ Next ==
 
 Init ==
     /\ raw = [k \in AttemptKeys |-> [s \in Slots |-> <<>>]]
+    /\ given = [k \in AttemptKeys |-> [s \in Slots |-> <<>>]]
     /\ first = [k \in {KF, KR} |-> [s \in Slots |-> NONE]]
     /\ copies = [k \in Keys |-> [v \in AllValues |-> 0]]
     /\ leaderUp = TRUE
@@ -352,10 +363,15 @@ Spec == Init /\ [][Next]_vars
 \* =============================================================================
 
 TypeOK ==
-    /\ \A k \in AttemptKeys, s \in Slots : Len(raw[k][s]) <= 3
+    /\ \A k \in AttemptKeys, s \in Slots : Len(raw[k][s]) <= 3 /\ Len(given[k][s]) <= 3
     /\ first \in [{KF, KR} -> [Slots -> AllValues \cup {NONE}]]
     /\ copies \in [Keys -> [AllValues -> 0..3]]
     /\ evid \in BOOLEAN
+
+\* ---- R2: storage keeps what it is given (Part II §12) ---------------------
+\* What a member holds at a key is exactly everything it was sent there, in
+\* arrival order: nothing refused, nothing replaced, nothing compared.
+MembersKeepEverything == \A k \in AttemptKeys, s \in Slots : raw[k][s] = given[k][s]
 
 \* ---- the recognition boundary (P1 of Section 42.3, as invariants) ----------
 \* Whatever bytes arrived, and in whatever order, an occupant is a recognized

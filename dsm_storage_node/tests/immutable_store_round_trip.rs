@@ -16,10 +16,10 @@
 
 use std::sync::Arc;
 
-use axum::{body::Body, http::Request, http::StatusCode, Extension, Router};
+use axum::{body::Body, http::Request, http::StatusCode, Router};
 use dsm_sdk::util::text_id;
 use dsm_storage_node::{
-    api, db,
+    db,
     replication::{ReplicationConfig, ReplicationManager},
     AppState,
 };
@@ -50,10 +50,8 @@ async fn member() -> Router {
         pool,
         rm,
     ));
-    Router::new()
-        .merge(api::objects::immutable::create_read_router(state.clone()))
-        .merge(api::objects::immutable::create_write_router())
-        .layer(Extension(state))
+    // The binary's own assembly (R2): what this suite drives is what is served.
+    dsm_storage_node::storage_contract_router(state)
 }
 
 async fn put(app: &Router, namespace: &str, bytes: &[u8]) -> (StatusCode, String) {
@@ -142,6 +140,26 @@ async fn re_putting_identical_bytes_acks_and_the_read_is_unchanged() {
     let (status, _, got) = get(&app, &addr).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, payload);
+}
+
+/// R2: no write authorization anywhere. The put carries no `authorization`
+/// header and no device token exists, and the member takes the bytes — on
+/// the assembly the binary serves. MUTATION CONTROL (executed): layer
+/// `auth::device_auth` onto the write router in `storage_contract_router` and
+/// this test goes red with 401.
+#[tokio::test]
+async fn a_put_with_no_authorization_is_taken_on_the_served_assembly() {
+    let app = member().await;
+    let (status, addr) = put(
+        &app,
+        "DSM/demolition-positive-control",
+        b"unauthorized bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "no token, no header, taken");
+    let (status, _, got) = get(&app, &addr).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, b"unauthorized bytes");
 }
 
 /// An address nothing was put under is absent, not invented.

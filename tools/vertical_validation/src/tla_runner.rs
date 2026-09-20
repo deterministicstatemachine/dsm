@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 67;
+pub const EXPECTED_STANDARD_SPECS: usize = 69;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -590,6 +590,7 @@ impl TlaRunner {
                 config_file: "DSM_SofiSuccessorCells.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "MembersKeepEverything".into(),
                     "UnrecognizedBytesNeverOccupy".into(),
                     "UnrecognizedBytesNeverFinalize".into(),
                     "UnrecognizedBytesNeverConsume".into(),
@@ -624,6 +625,7 @@ impl TlaRunner {
                 config_file: "DSM_SofiSuccessorCells_AdverseFacts.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "MembersKeepEverything".into(),
                     "UnrecognizedBytesNeverOccupy".into(),
                     "UnrecognizedBytesNeverFinalize".into(),
                     "UnrecognizedBytesNeverConsume".into(),
@@ -778,6 +780,7 @@ impl TlaRunner {
                 config_file: "DSM_SofiSuccessorCells_SecondAttempt.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
+                    "MembersKeepEverything".into(),
                     "UnrecognizedBytesNeverOccupy".into(),
                     "UnrecognizedBytesNeverFinalize".into(),
                     "UnrecognizedBytesNeverConsume".into(),
@@ -829,6 +832,20 @@ impl TlaRunner {
                 "DSM_SofiSuccessorCells.tla",
                 "DSM_SofiSuccessorCells_UnreadCountedAsCopy.cfg",
                 "PartialReadIsSound",
+            ),
+            // R2 (Part II §12): a member that drops a later arrival, or
+            // overwrites an earlier one, no longer holds what it was given.
+            expect_violation(
+                "SofiSuccessorCells/member-refuses-second-value",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_MemberRefusesSecondValue.cfg",
+                "MembersKeepEverything",
+            ),
+            expect_violation(
+                "SofiSuccessorCells/member-replaces-value",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_MemberReplacesValue.cfg",
+                "MembersKeepEverything",
             ),
             // ── SoFi: one unilateral trader operation, run concurrently ───────
             // P -> G -> F -> realization over the facts Core derives: no outcome

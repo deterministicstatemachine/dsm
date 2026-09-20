@@ -194,6 +194,22 @@ pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state)
 }
 
+/// The four operations of the storage contract (Part II §12) — put object,
+/// put at a key, append to an index, get — as ONE assembly, used by the
+/// binary and by the contract suites, so what the suites drive is what the
+/// binary serves.
+///
+/// No write authorization on any of them (rebuild step R2): a member never
+/// checks who carries the bytes, because every object carries its own
+/// authority and derived objects need none. The device token stays only on
+/// the other mounts (the DLV object store, the identity mirrors, the faucet
+/// register), never here.
+pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
+    api::cells::create_router(state.clone())
+        .merge(api::objects::immutable::create_read_router(state.clone()))
+        .merge(api::objects::immutable::create_write_router().layer(Extension(state)))
+}
+
 /// Echo this node's configured protocol identity on EVERY response.
 ///
 /// A client fanning a keyed write out over a canonical storage set counts an

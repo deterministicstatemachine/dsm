@@ -333,11 +333,14 @@ lean4/DSMSofiStorage.lean         the STORAGE FACTS for objects and indexes (R1)
 
 tla/DSM_SofiSuccessorCells.tla    the MEMBERS, behind the recognition boundary: raw
                                   member storage takes any bytes from anyone in arrival
-                                  order; LeaderHeld and Final are derived over Core's
-                                  recognized view; leader-first writes, copies, partial
-                                  reads, the position pair written together, faults (a
-                                  leader chosen by reachability, counting without the
-                                  leader, an unread member counted, recognition weakened)
+                                  order and holds exactly what it was given
+                                  (MembersKeepEverything, R2); LeaderHeld and Final are
+                                  derived over Core's recognized view; leader-first
+                                  writes, copies, partial reads, the position pair
+                                  written together, faults (a leader chosen by
+                                  reachability, counting without the leader, an unread
+                                  member counted, recognition weakened, a member that
+                                  refuses a second value or replaces what it holds)
 
 tla/DSM_SofiFulfillment.tla       the OPERATION over the facts Core derives: rivals
                                   between the witnesses and F, abandonment, relayers,

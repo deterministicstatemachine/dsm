@@ -48,7 +48,8 @@ async fn member() -> Router {
         pool,
         rm,
     ));
-    dsm_storage_node::cells_router(state)
+    // The binary's own assembly (R2): what this suite drives is what is served.
+    dsm_storage_node::storage_contract_router(state)
 }
 
 fn key(tag: u8) -> String {
