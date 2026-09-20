@@ -2,7 +2,7 @@
   The recognition boundary — DSM's foundational theorem — self-contained
   Lean 4 (no Mathlib, no imports)
 
-    RecognizedDSM(x)  ⇒  ConstructibleDSM(x)  ⇒  ValidDSM(x)
+    ConstructibleDSM(x)  ⇒  RecognizedDSM(x)  ⇒  ValidDSM(x)
 
   Everything else DSM proves — conservation, the tripwire, SoFi atomicity,
   leader finality — is a refinement of this: a statement about what a valid
@@ -19,21 +19,39 @@
   An adversary supplies arbitrary bytes: malformed objects, conflicting
   objects, wrong signatures, wrong ancestry, wrong coordinates, wrong proofs,
   consumed sources. Storage keeps all of it. Recognition is Core's ONE
-  deterministic function from bytes to objects: it rebuilds the candidate and
-  keeps it only if every recomputation agrees. The adversary is not assumed
+  deterministic function from bytes to objects: it rebuilds the candidate,
+  verifies the signature under the owner key the state names, and keeps the
+  candidate only if every recomputation agrees. The adversary is not assumed
   away; the theorem is that nothing it can produce crosses the boundary
-  unless the construction predicates hold — and then it is exactly what
-  Core's own constructor would have produced.
+  unless every construction constraint holds.
+
+  TWO STATEMENTS, KEPT APART
+    the producer ladder             Core's canonical producer
+                                        ↓  `constructible_implies_recognized`
+                                    Constructible
+                                        ↓  `recognized_implies_valid`
+                                    Recognized by deterministic rules
+                                        ↓
+                                    Valid
+    the security statement          adversarial bytes
+                                        ↓  verification + recognition
+                                    cannot become recognized state unless
+                                    all DSM predicates hold
+                                    (`recognized_implies_valid`,
+                                     `hostile_bytes_never_become_state`)
 
   WHAT IS PROVED
-    - RECOGNIZED ⇒ CONSTRUCTIBLE  `recognized_implies_constructible`: a
-      recognized object is, field for field, the output of Core's constructor
-      on some (seed, operation). Core is the only constructor.
-    - CONSTRUCTIBLE ⇒ VALID        `constructible_implies_valid`: the
-      constructor's output satisfies the SEMANTIC predicates, which are
-      defined on their own terms (authority, ancestry, naming, availability,
+    - CONSTRUCTIBLE ⇒ RECOGNIZED   `constructible_implies_recognized`: what
+      Core's constructor emits, Core recognizes (round-trip soundness and the
+      canonical codec). The non-vacuity witness for `Recognized`.
+    - RECOGNIZED ⇒ VALID           `recognized_implies_valid`: whatever bytes
+      arrived, if Core recognizes them then every field but the signature is
+      Core's own derivation from the state — encoding, parent, coordinate,
+      proof — the source is available, the amount is within the balance, and
+      the signature VERIFIES under the lineage owner's key. `Valid` is stated
+      on its own terms (authority, ancestry, naming, availability,
       conservation, proof soundness), never as "recognized".
-    - RECOGNIZED ⇒ VALID           `recognized_implies_valid`, the chain.
+    - CONSTRUCTIBLE ⇒ VALID        `constructible_implies_valid`, the chain.
     - HOSTILE BYTES ARE NOT STATE  `hostile_bytes_never_become_state`: an
       adversary that holds no seed of the lineage owner's key can get an
       object recognized on that lineage only by re-presenting an honest
@@ -43,9 +61,20 @@
       coordinate, a non-canonical encoding, a wrong proof, a consumed source,
       an overdraft — each is not recognized.
     - NOT A TAUTOLOGY              `valid_is_not_recognized_by_definition`:
-      `Valid` is stated over the decoded operation and the state, `Recognized`
-      over recomputed hashes and a verification predicate; the two are
+      `Valid` is stated over the operation the bytes encode and the state,
+      `Recognized` over the decoder and recomputed derivations; the two are
       proved equivalent, not defined equal.
+
+  WHAT IS NOT CLAIMED. Recognized ⇒ Constructible is NOT a theorem here.
+  It would need "every signature that verifies under pk on m is byte for
+  byte the deterministic signer's output on m", which is stronger than
+  EUF-CMA and stronger than DSM's verifier: `verify` receives (pk, m, sig)
+  only, has no `sk_prf`, and cannot recompute the deterministic
+  `R = H(sk_prf ∥ m)` to demand that the supplied signature be the exact
+  output of `sign`. Deterministic `R` is a signer construction rule, not a
+  verifier check. So the recognized object is Core's shape with a verifying
+  signature; whether the signature bytes equal Core's own is neither
+  assumed nor needed for any theorem below.
 
   CRYPTOGRAPHIC ASSUMPTIONS — the model of DSMCertChain.lean, stated as
   fields of `Crypto` so the theorems are parametric in them:
@@ -55,25 +84,20 @@
       DSMCryptoBinding.
     * `keyGen`, `sign`, `verify`: a SPHINCS+ keypair from a seed, DETERMINISTIC
       signing (whitepaper §11: the Cat-5 'f' deterministic variant), and a
-      verification predicate.
+      verification predicate. Nothing is assumed about `sign` as a function
+      of its key, and a public key tells nothing about its seed.
     * `sign_verify_round_trip`: a signature produced with the secret half of
-      a keypair verifies under its public half (soundness).
+      a keypair verifies under its public half (soundness). Exactly
+      `sphincs_sign_verify_round_trip` in DSMCertChain.
     * `signature_message_binding`: for a fixed (pk, sig) at most one message
-      verifies (deterministic signing + verification binds (pk, m, sig)).
-    * `verify_implies_signed`: EXISTENTIAL UNFORGEABILITY under deterministic
-      signing, as its protocol-level consequence: a signature that verifies
-      under pk on m IS the signature the holder of pk's seed computes on m.
-      EUF-CMA says no one without the seed produces a verifying signature;
-      determinism says the seed holder produces exactly one. We do NOT prove
-      SPHINCS+ security; we state its consequence. Nothing is assumed about
-      `sign` as a function of its key (no injectivity), and a public key
-      tells nothing about its seed.
-    * `Adversary.euf`: what the adversary can OUTPUT. Any signature it presents
-      that verifies under pk on some message was made with a seed it holds
-      whose public half is pk, or was observed on the wire as an honest
-      signature under pk. This is EUF-CMA phrased over the adversary's
-      outputs, with replay allowed: the adversary may copy any signature it
-      has seen and attach it to any fields it likes.
+      verifies. Exactly `sphincs_signature_message_binding` in DSMCertChain.
+    * `Adversary.euf`: existential unforgeability, phrased over what the
+      adversary can OUTPUT. Any signature it presents that verifies under pk
+      on some message was made with a seed it holds whose public half is
+      pk, or was observed on the wire as an honest signature under pk. This
+      is EUF-CMA with replay allowed: the adversary may copy any signature it
+      has seen and attach it to any fields it likes. We do NOT prove
+      SPHINCS+ security; we state its consequence for the adversary.
     * The canonical codec decodes only what it encoded (`decode_sound`,
       proved from `H_inj`). The Rust encoders are injective by the Phase B
       vectors.
@@ -83,21 +107,24 @@
 
   MUTATION CONTROLS, executed rather than asserted. Each removes one
   recomputation from `Recognized` (the constraint stays in `Valid`, which is
-  the point) and the named theorems rest on `sorryAx`:
-     1. signature binding dropped         -> `recognized_implies_constructible`,
+  the point) and the named theorems rest on `sorryAx`;
+  `constructible_implies_recognized` stays green under every one of them,
+  which is why it is the witness and not a control:
+     1. signature binding dropped         -> `recognized_implies_valid`,
                                              `forged_signature_is_not_recognized`,
                                              `hostile_bytes_never_become_state`
-     2. ancestry binding dropped          -> `recognized_implies_constructible`,
+     2. ancestry binding dropped          -> `recognized_implies_valid`,
                                              `wrong_parent_is_not_recognized`
-     3. coordinate derivation dropped     -> `recognized_implies_constructible`,
+     3. coordinate derivation dropped     -> `recognized_implies_valid`,
                                              `wrong_coordinate_is_not_recognized`
-     4. canonical encoding dropped        -> `recognized_implies_constructible`,
+     4. canonical encoding dropped        -> `recognized_implies_valid`,
+        (executed as `∃ o : Op, True`, keeping o typed)
                                              `non_canonical_encoding_is_not_recognized`
-     5. proof verification dropped        -> `recognized_implies_constructible`,
+     5. proof verification dropped        -> `recognized_implies_valid`,
                                              `wrong_proof_is_not_recognized`
-     6. consumed-key exclusion dropped    -> `recognized_implies_constructible`,
+     6. consumed-key exclusion dropped    -> `recognized_implies_valid`,
                                              `consumed_source_is_not_recognized`
-     7. the bound dropped                 -> `recognized_implies_constructible`,
+     7. the bound dropped                 -> `recognized_implies_valid`,
                                              `overdraft_is_not_recognized`
   Run: `lean -DwarningAsError=true DSMRecognition.lean`
 -/
@@ -106,8 +133,9 @@ namespace DSMRecognition
 
 /-- The primitives and their assumptions: BLAKE3 as an injective
 domain-separated hash; deterministic SPHINCS+ as (keyGen, sign, verify) with
-round-trip soundness, message binding and existential unforgeability. `H`
-is domain-separated by its leading tag. -/
+round-trip soundness and message binding — the DSMCertChain model, nothing
+more. Unforgeability is a statement about the adversary (`Adversary.euf`),
+not about `verify`. `H` is domain-separated by its leading tag. -/
 structure Crypto where
   H : List Nat → Nat
   /-- Collision resistance, as its protocol-level consequence. -/
@@ -124,10 +152,6 @@ structure Crypto where
   /-- Message binding: one verifying message per (pk, sig). -/
   signature_message_binding :
     ∀ pk m₁ m₂ sig, verify pk m₁ sig → verify pk m₂ sig → m₁ = m₂
-  /-- Existential unforgeability under deterministic signing, as its
-  consequence: a verifying signature is the seed holder's signature. -/
-  verify_implies_signed :
-    ∀ pk m sig, verify pk m sig → ∃ seed, (keyGen seed).1 = pk ∧ sig = sign (keyGen seed).2 m
 
 /-- An operation as its author intends it. -/
 structure Op where
@@ -226,17 +250,20 @@ def construct (s : St) (seed : Nat) (o : Op) : Option Obj :=
            proof := prove c parent o.source }
   else none
 
-/-- ConstructibleDSM: some seed and some operation make Core produce exactly x. -/
+/-- ConstructibleDSM: Core's canonical producer emitted exactly x — some seed
+and some operation make `construct` produce it, signature bytes included. -/
 def Constructible (s : St) (x : Obj) : Prop :=
   ∃ seed o, construct c s seed o = some x
 
 -- ── ValidDSM: the semantic predicates, on their own terms ─────────────────
 
-/-- The lineage's owner authorized this object: the holder of the owner
-key's seed signed its message. -/
+/-- The lineage's owner authorized this object: its signature verifies under
+the owner key the state names, over this object's own message. Signature
+validity IS the verification relation; that no one without the owner's seed
+can produce a new verifying pair is `Adversary.euf`, stated where it
+belongs. -/
 def Authorized (s : St) (o : Op) (x : Obj) : Prop :=
-  ∃ seed, (c.keyGen seed).1 = s.owner o.lineage
-    ∧ x.sig = c.sign (c.keyGen seed).2 (msgOf c x.payload x.parent x.coord)
+  c.verify (s.owner o.lineage) (msgOf c x.payload x.parent x.coord) x.sig
 
 /-- The object extends the lineage's current head, not some other state. -/
 def ExtendsHead (s : St) (o : Op) (x : Obj) : Prop := x.parent = s.tip o.lineage
@@ -255,7 +282,7 @@ def Conserves (s : St) (o : Op) : Prop := o.amount ≤ s.balance o.lineage
 def ProofSound (o : Op) (x : Obj) : Prop := x.proof = prove c x.parent o.source
 
 /-- ValidDSM: stated over the operation the bytes ENCODE and the state.
-Nothing here mentions recognition or verification. -/
+Nothing here mentions recognition or decoding. -/
 def Valid (s : St) (x : Obj) : Prop :=
   ∃ o, x.payload = encode c o
     ∧ Authorized c s o x ∧ ExtendsHead s o x ∧ NamesItsCoordinate c o x
@@ -278,31 +305,22 @@ def Recognized (s : St) (x : Obj) : Prop :=
 
 -- ── THE THEOREM ─────────────────────────────────────────────────────────────
 
-/-- RECOGNIZED ⇒ CONSTRUCTIBLE. Whatever bytes arrived, if Core recognizes
-them, the object is exactly what Core's constructor produces for the
-operation they encode, signed by the seed whose public half is the owner's
-(`verify_implies_signed`). Core is the only constructor. -/
-theorem recognized_implies_constructible {s : St} {x : Obj} (h : Recognized c s x) :
-    Constructible c s x := by
+/-- RECOGNIZED ⇒ VALID. Whatever bytes arrived, if Core recognizes them then
+every field but the signature is Core's own derivation from the state —
+encoding, parent, coordinate, proof — the source is available, the amount is
+within the balance, and the signature verifies under the owner's key. This
+is the security half of the boundary: it holds over the verification
+relation alone. -/
+theorem recognized_implies_valid {s : St} {x : Obj} (h : Recognized c s x) : Valid c s x := by
   obtain ⟨o, hdec, hpar, hcoord, hver, hproof, hcons, hamt⟩ := h
-  obtain ⟨seed, hpk, hsig⟩ := c.verify_implies_signed _ _ _ hver
-  refine ⟨seed, o, ?_⟩
-  unfold construct
-  rw [if_pos ⟨hpk, hamt, hcons⟩]
-  have hpay : x.payload = encode c o := (decode_sound c hdec).symm
-  cases x
-  simp only at hpay hpar hcoord hsig hproof
-  subst hpay hpar
-  subst hcoord
-  subst hproof
-  subst hsig
-  rfl
+  exact ⟨o, (decode_sound c hdec).symm, hver, hpar, hcoord, hcons, hamt, hproof⟩
 
-/-- CONSTRUCTIBLE ⇒ VALID. The constructor's output satisfies every semantic
-predicate: its guard is the precondition and its fields are the
-derivations. -/
-theorem constructible_implies_valid {s : St} {x : Obj} (h : Constructible c s x) :
-    Valid c s x := by
+/-- CONSTRUCTIBLE ⇒ RECOGNIZED. What Core's constructor emits, Core
+recognizes: the codec decodes what it encoded and the owner's signature
+verifies by round-trip soundness. The producer half of the boundary, and the
+non-vacuity witness for `Recognized`. -/
+theorem constructible_implies_recognized {s : St} {x : Obj} (h : Constructible c s x) :
+    Recognized c s x := by
   obtain ⟨seed, o, hc⟩ := h
   unfold construct at hc
   split at hc
@@ -310,12 +328,17 @@ theorem constructible_implies_valid {s : St} {x : Obj} (h : Constructible c s x)
     obtain ⟨hpk, hamt, hcons⟩ := hg
     injection hc with hx
     subst hx
-    exact ⟨o, rfl, ⟨seed, hpk, rfl⟩, rfl, rfl, hcons, hamt, rfl⟩
+    -- Not a fixed-arity tuple on purpose: removing any conjunct from
+    -- `Recognized` (the mutation controls) must leave this witness green.
+    refine ⟨o, ?_⟩
+    simp only [decode_encode, hcons, hamt, and_true, true_and]
+    all_goals (rw [← hpk]; exact c.sign_verify_round_trip seed _)
   · cases hc
 
-/-- RECOGNIZED ⇒ VALID: the chain. -/
-theorem recognized_implies_valid {s : St} {x : Obj} (h : Recognized c s x) : Valid c s x :=
-  constructible_implies_valid c (recognized_implies_constructible c h)
+/-- CONSTRUCTIBLE ⇒ VALID: the chain. -/
+theorem constructible_implies_valid {s : St} {x : Obj} (h : Constructible c s x) :
+    Valid c s x :=
+  recognized_implies_valid c (constructible_implies_recognized c h)
 
 -- ── THE ADVERSARY ───────────────────────────────────────────────────────────
 
@@ -439,33 +462,24 @@ theorem overdraft_is_not_recognized {s : St} {x : Obj} {o : Op}
 
 -- ── not a tautology ───────────────────────────────────────────────────────
 
-/-- VALID ⇒ RECOGNIZED: a valid object's recomputations agree, and its
-authorization verifies by round-trip soundness. Its own content, separate
-from the chain above. -/
+/-- VALID ⇒ RECOGNIZED: a valid object's bytes decode to its operation and
+its recomputations agree. Its own content, separate from the chain above. -/
 theorem valid_implies_recognized {s : St} {x : Obj} (h : Valid c s x) : Recognized c s x := by
-  obtain ⟨o, hpay, ⟨seed, hpk, hsig⟩, hpar, hcoord, hcons, hamt, hproof⟩ := h
-  refine ⟨o, ?_, hpar, hcoord, ?_, hproof, hcons, hamt⟩
-  · rw [hpay]; exact decode_encode c o
-  · rw [hsig, ← hpk]; exact c.sign_verify_round_trip seed _
+  obtain ⟨o, hpay, hver, hpar, hcoord, hcons, hamt, hproof⟩ := h
+  refine ⟨o, ?_, hpar, hcoord, hver, hproof, hcons, hamt⟩
+  rw [hpay]; exact decode_encode c o
 
 /-- `Valid` and `Recognized` are different predicates that agree on every
-object: `Valid` mentions no verification and no decoding, `Recognized` no
-seed; each direction has its own proof. The two are proved equivalent here,
-not defined equal. -/
+object: `Valid` is stated over the operation the bytes encode, `Recognized`
+over the decoder; each direction has its own proof. The two are proved
+equivalent here, not defined equal. -/
 theorem valid_is_not_recognized_by_definition {s : St} {x : Obj} :
     Valid c s x ↔ Recognized c s x :=
   ⟨valid_implies_recognized c, recognized_implies_valid c⟩
 
-/-- The admissible state space, then, is exactly the constructible one: what
-Core recognizes, Core built, and it is valid. -/
-theorem admissible_state_space {s : St} {x : Obj} :
-    Recognized c s x ↔ Constructible c s x :=
-  ⟨recognized_implies_constructible c,
-   fun h => valid_implies_recognized c (constructible_implies_valid c h)⟩
-
-#print axioms recognized_implies_constructible
-#print axioms constructible_implies_valid
+#print axioms constructible_implies_recognized
 #print axioms recognized_implies_valid
+#print axioms constructible_implies_valid
 #print axioms hostile_bytes_never_become_state
 #print axioms replayed_signature_pins_the_fields
 #print axioms forged_signature_is_not_recognized
@@ -477,6 +491,5 @@ theorem admissible_state_space {s : St} {x : Obj} :
 #print axioms overdraft_is_not_recognized
 #print axioms valid_implies_recognized
 #print axioms valid_is_not_recognized_by_definition
-#print axioms admissible_state_space
 
 end DSMRecognition

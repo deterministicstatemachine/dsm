@@ -278,25 +278,33 @@ Every DSM proof hangs under one theorem about what may become DSM state at
 all:
 
 ```text
-RecognizedDSM(x)  ⇒  ConstructibleDSM(x)  ⇒  ValidDSM(x)
+ConstructibleDSM(x)  ⇒  RecognizedDSM(x)  ⇒  ValidDSM(x)
 ```
 
 Raw bytes from anyone are one universe; protocol objects are another; Core's
 deterministic recognition (rebuild the candidate, keep it only if every
 recomputation agrees) is the only way across. `DSMRecognition.lean` models an
 adversary that can craft any object and sign with any key it holds, defines
-`Constructible` by Core's constructor and `Valid` by independent semantic
-predicates (authority, ancestry, naming, availability, conservation, proof
-soundness), and proves that nothing crosses the boundary unless the
-construction constraints hold — and then it is exactly what Core built. Seven
-mutation controls remove one recomputation each (signature binding, ancestry
-binding, coordinate derivation, canonical encoding, proof verification,
-consumed-key exclusion, the bound) and the named theorems rest on `sorryAx`.
-The cryptography is the model of `DSMCertChain.lean`: an injective
-domain-separated hash and deterministic SPHINCS+ as `(keyGen, sign, verify)`
-with round-trip soundness, message binding and existential unforgeability
-stated as their protocol-level consequences; nothing is assumed about `sign`
-as a function of its key, and a public key tells nothing about its seed.
+`Constructible` by Core's canonical producer and `Valid` by independent
+semantic predicates (authority as the verification relation under the owner
+key, ancestry, naming, availability, conservation, proof soundness), and
+keeps two statements apart: the producer ladder, what Core emits Core
+recognizes and it is valid (`constructible_implies_recognized`, the witness);
+and the security statement, nothing crosses the boundary unless every
+construction constraint holds (`recognized_implies_valid`,
+`hostile_bytes_never_become_state`). Recognized ⇒ Constructible is not
+claimed: it would need every verifying signature to be byte for byte the
+deterministic signer's output, which is stronger than EUF-CMA and than the
+verifier, which has no `sk_prf` and cannot recompute the deterministic `R`.
+Seven mutation controls remove one recomputation each (signature binding,
+ancestry binding, coordinate derivation, canonical encoding, proof
+verification, consumed-key exclusion, the bound); the named theorems rest on
+`sorryAx` and the witness stays green. The cryptography is exactly the model
+of `DSMCertChain.lean`: an injective domain-separated hash and deterministic
+SPHINCS+ as `(keyGen, sign, verify)` with round-trip soundness and message
+binding; unforgeability is stated over the adversary's outputs, with replay
+allowed; nothing is assumed about `sign` as a function of its key, and a
+public key tells nothing about its seed.
 Conservation, the tripwire, SoFi atomicity and leader finality are refinements
 of that boundary: none of them rescues DSM from an invalid state after the
 fact, because no invalid state is admissible.
