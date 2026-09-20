@@ -263,21 +263,16 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
     });
     let object_write_router = api::objects::store::create_write_router()
         .layer(axum::middleware::from_fn_with_state(
-            object_write_auth_state.clone(),
-            auth::device_auth,
-        ))
-        .layer(Extension(state.clone()));
-    // Immutable content-addressed store (Area 4): reads public, writes behind
-    // the same device auth as the mutable object store. The node is
-    // content-blind on this path — no payload decode, ever.
-    let immutable_read_router =
-        api::objects::immutable::create_read_router(state.clone()).layer(public_rate_layer.clone());
-    let immutable_write_router = api::objects::immutable::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
             object_write_auth_state,
             auth::device_auth,
         ))
         .layer(Extension(state.clone()));
+    // The storage contract's four operations (Part II §12): the immutable
+    // content-addressed store and the keyed cells and indexes, ONE public
+    // assembly with no write authorization (R2). The node is content-blind on
+    // every one of them — no payload decode, ever.
+    let storage_contract_router =
+        dsm_storage_node::storage_contract_router(state.clone()).layer(public_rate_layer.clone());
     let object_list_router =
         api::objects::list::create_router(state.clone()).layer(public_rate_layer.clone());
     let registry_router =
@@ -304,8 +299,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         api::vault::slot::create_router(state.clone()).layer(public_rate_layer.clone());
     // Keyed cells and indexes: bytes in, bytes out. No write authorization;
     // a member keeps everything it is given and refuses nothing.
-    let cells_router =
-        dsm_storage_node::cells_router(state.clone()).layer(public_rate_layer.clone());
     // ERA faucet-ticket register (native emission, its own contract): writes behind
     // device auth (attribution against the authenticated key AND device),
     // reads public. The x-dsm-node-id echo is NORMATIVE for this register:
@@ -351,8 +344,7 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .route("/api/v2/health", get(|| async { (StatusCode::OK, "ok") }))
         .merge(object_read_router)
         .merge(object_write_router)
-        .merge(immutable_read_router)
-        .merge(immutable_write_router)
+        .merge(storage_contract_router)
         .merge(object_list_router)
         .merge(registry_router) // exposes /api/v2/registry/* as in your tests
         .merge(policy_router)
@@ -362,7 +354,6 @@ fn build_router(state: Arc<AppState>, config: &ServerConfig, benchmark_mode: boo
         .merge(tips_router)
         .merge(genesis_router)
         .merge(dlv_slot_router)
-        .merge(cells_router)
         .merge(economic_register_write_router)
         .merge(economic_register_read_router)
         .merge(recovery_capsule_router)
