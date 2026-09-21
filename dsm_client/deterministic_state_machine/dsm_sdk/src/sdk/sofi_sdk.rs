@@ -348,6 +348,7 @@ fn draft(
     legs: Vec<PrecommitLeg>,
     realize_root: D32,
     void_root: D32,
+    evidence: &Evidence,
 ) -> Result<PrecommitDraft, BuildError> {
     admissible(&settlement).map_err(BuildError::NotAdmissible)?;
 
@@ -367,13 +368,12 @@ fn draft(
         ctx.claimant_public_key,
     )?;
 
-    // THE EVIDENCE-INDEPENDENT REFUSAL. With no evidence at all, a verifier
-    // answers Unavailable for everything that needs a fetched object and
-    // Invalid for everything it can already decide — route chaining, the ends
-    // against the intent, the legs against the cores, E against the preimage.
-    // Invalid here means the trader would be building something already
-    // refused, so it is refused now instead.
-    if let Err(Refusal::Invalid(reason)) = validate(&precommit, &preimage, &Evidence::default()) {
+    // THE VERIFIER'S OWN REFUSAL, over the evidence the producer ACQUIRED
+    // (`sofi_evidence::acquire_evidence`, rebuild step R5) — never a default.
+    // Invalid means the trader would be building something a verifier already
+    // refuses, so it is refused now instead. Unavailable is what the producer
+    // stops on in rebuild step R6.
+    if let Err(Refusal::Invalid(reason)) = validate(&precommit, &preimage, evidence) {
         return Err(BuildError::StaticallyInvalid(reason));
     }
 
@@ -390,8 +390,16 @@ pub fn draft_trade(
     ctx: &TraderContext<'_>,
     realize_root: D32,
     void_root: D32,
+    evidence: &Evidence,
 ) -> Result<PrecommitDraft, BuildError> {
-    draft_route(vec![hop], vec![core], ctx, realize_root, void_root)
+    draft_route(
+        vec![hop],
+        vec![core],
+        ctx,
+        realize_root,
+        void_root,
+        evidence,
+    )
 }
 
 /// A route over one or more vaults. Beta executes at most two hops, and this
@@ -403,6 +411,7 @@ pub fn draft_route(
     ctx: &TraderContext<'_>,
     realize_root: D32,
     void_root: D32,
+    evidence: &Evidence,
 ) -> Result<PrecommitDraft, BuildError> {
     let (first, last) = match (hops.first(), hops.last()) {
         (Some(f), Some(l)) => (*f, *l),
@@ -440,7 +449,15 @@ pub fn draft_route(
         dlv_cores: core_digests,
         closure: PreEClosureIndex::new(Vec::new())?,
     };
-    draft(settlement, ctx, sorted_cores, legs, realize_root, void_root)
+    draft(
+        settlement,
+        ctx,
+        sorted_cores,
+        legs,
+        realize_root,
+        void_root,
+        evidence,
+    )
 }
 
 /// A full close of one vault by its origin owner.
@@ -459,6 +476,7 @@ pub fn draft_close(
     ctx: &TraderContext<'_>,
     realize_root: D32,
     void_root: D32,
+    evidence: &Evidence,
 ) -> Result<PrecommitDraft, BuildError> {
     let settlement = SettlementBody::Close {
         vault_id,
@@ -482,6 +500,7 @@ pub fn draft_close(
         }],
         realize_root,
         void_root,
+        evidence,
     )
 }
 
@@ -596,6 +615,16 @@ mod tests {
         [byte; 32]
     }
 
+    /// No evidence at all — what a verifier holds before any acquisition. A
+    /// draft over it is refused only for what needs no evidence.
+    fn no_evidence() -> Evidence {
+        Evidence::acquired(
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )
+    }
+
     /// The vault's market policy, and the address it is committed by. Derived
     /// from the bytes so a fixture cannot commit one market and present
     /// another.
@@ -701,6 +730,7 @@ mod tests {
             &one_hop_ctx(),
             d(0xA1),
             PRE_ROOT,
+            &no_evidence(),
         )
         .unwrap()
     }
@@ -810,6 +840,7 @@ mod tests {
                 &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1), d(0xC2)])),
                 d(0xA1),
                 PRE_ROOT,
+                &no_evidence()
             ),
             Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
                 hop: 1
@@ -829,6 +860,7 @@ mod tests {
             &ctx(trader_core(d(0x40), d(0x42), &[d(0xC1), d(0xC2)])),
             d(0xA1),
             PRE_ROOT,
+            &no_evidence(),
         )
         .unwrap();
         let produced = build_fulfillment(
@@ -851,6 +883,7 @@ mod tests {
                 &one_hop_ctx(),
                 d(0xA1),
                 d(0x6F),
+                &no_evidence()
             ),
             Err(BuildError::StaticallyInvalid(
                 Invalid::VoidRootIsNotThePreRoot
@@ -896,6 +929,7 @@ mod tests {
                 &ctx(trader_core(d(0x40), d(0x43), &vaults)),
                 d(0xA1),
                 PRE_ROOT,
+                &no_evidence()
             ),
             Err(BuildError::NotAdmissible(NotAdmissible::TooManyLegs {
                 legs: 3,
@@ -918,6 +952,7 @@ mod tests {
             &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1)])),
             d(0xA1),
             PRE_ROOT,
+            &no_evidence(),
         )
         .unwrap();
         let produced = build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xC1), 0)]).unwrap();

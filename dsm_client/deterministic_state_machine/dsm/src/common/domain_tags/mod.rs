@@ -145,7 +145,7 @@ mod tests {
     /// here only to make an accidental edit to the registry loud.
     // 389 since E1c-2a froze `DSM/sofi/vault-creation-key/v1`, the R_econ key
     // the owner's creation record occupies (P15-12).
-    const EXPECTED_TAG_COUNT: usize = 377;
+    const EXPECTED_TAG_COUNT: usize = 378;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

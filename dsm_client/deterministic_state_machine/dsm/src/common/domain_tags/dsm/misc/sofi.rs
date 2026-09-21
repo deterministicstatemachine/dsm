@@ -113,9 +113,15 @@ pub const TAG_DSM_SOFI_PREIMAGE_LOCATOR: TaggedHashDomain<'static> =
 /// `v = H(tag ‖ G_o ‖ DevID_o ‖ u64be(p_create))`.
 pub const TAG_DSM_SOFI_VAULT_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-id/v1");
-/// `H(tag ‖ v)` — where `VaultGenesisPreimage` is stored.
+/// `H(tag ‖ v)` — the locator under which a vault's genesis preimage is
+/// indexed (Part II §11).
 pub const TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-genesis-locator/v1");
+/// Immutable-store namespace of the EXACT `VaultGenesisPreimage` bytes
+/// (Part II §10): `addr = immutable_addr(tag, bytes)`; the reader recomputes
+/// it and `vault_id()` from the bytes.
+pub const TAG_DSM_SOFI_VAULT_GENESIS_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-genesis-object/v1");
 
 // ── The DLV tree's leaves, and the route digest (P15-4, P15-8) ─────────────
 
@@ -171,6 +177,7 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_PREIMAGE_LOCATOR,
     TAG_DSM_SOFI_VAULT_ID,
     TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
     TAG_DSM_SOFI_VAULT_CREATION_KEY,
     TAG_DSM_SOFI_VAULT_STATE_KEY,
     TAG_DSM_SOFI_VAULT_LEAF_STATE,

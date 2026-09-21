@@ -69,6 +69,9 @@ bash ci/admitted_predecessor_readers_fenced.sh
 # The storage node holds bytes and knows nothing about SoFi.
 bash ci/storage_is_dumb.sh
 
+# Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
+bash ci/sofi_no_default_evidence.sh
+
 # Run TLA+ model checking for formal verification
 echo "Running TLA+ formal verification..."
 cd tla

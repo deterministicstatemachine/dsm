@@ -471,6 +471,21 @@ pub async fn resolve_locator<T>(
     ))
 }
 
+/// Part II §10 by address: the exact bytes at `addr` once three members
+/// return bytes that re-hash to it, `None` otherwise. For an acquisition
+/// that holds the address (a vault state commits its policies by address)
+/// and not the inner identity.
+pub(crate) async fn read_stored_bytes(
+    set: &crate::sdk::storage_set::StorageSet,
+    addr: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    let reads = read_object_raw(set, addr).await?;
+    Ok(match dsm::sofi::storage::stored(addr, &reads) {
+        dsm::sofi::storage::StoredFact::Stored(bytes) => Some(bytes),
+        dsm::sofi::storage::StoredFact::Unavailable => None,
+    })
+}
+
 /// The raw object reads at `addr`, one per member of `set` in set order.
 async fn read_object_raw(
     set: &crate::sdk::storage_set::StorageSet,
