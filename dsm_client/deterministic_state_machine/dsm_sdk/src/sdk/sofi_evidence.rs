@@ -17,8 +17,10 @@
 //!
 //! Anything that is not fetched is simply absent from the evidence, and Core
 //! answers `Unavailable` for it — never `Invalid`, never a filled-in value.
-//! A vault past its genesis is such a case until the successor walk of rebuild
-//! step R12 extends the fetch.
+//! A vault past its genesis is such a case until the generation walk of
+//! rebuild step R13 (the resolved vault state's successor generation) extends
+//! the fetch; the attempt walk of R12 (`sofi_resolve`) finds the consumer,
+//! not the post state.
 
 use std::collections::BTreeMap;
 
