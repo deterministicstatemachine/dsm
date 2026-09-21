@@ -280,11 +280,11 @@ jobs:
   #
   # The `rust` job above runs the storage node with
   # `--no-default-features --features local-dev,strict`, i.e. SQLite. That
-  # meant the node's three write-once economic registers — settlement slot,
-  # faucet ticket, economic root — had their non-equivocation properties
-  # asserted only against a backend nobody deploys. A safety property is not
-  # proven on a backend that never executed it, so this job runs the node's
-  # DEFAULT features (`strict,postgres`) against a real server.
+  # meant the node's keyed cells and indexes — what a member owes the client
+  # (Part II §12) — had their properties asserted only against a backend
+  # nobody deploys. A safety property is not proven on a backend that never
+  # executed it, so this job runs the node's DEFAULT features
+  # (`strict,postgres`) against a real server.
   #
   # The property tests refuse to run without `DSM_TEST_DATABASE_URL` rather
   # than skipping, so a job that lost its service container fails loudly
@@ -317,7 +317,7 @@ jobs:
           --health-retries 20
     env:
       # TWO names, ONE database, and they are not redundant:
-      #   DSM_TEST_DATABASE_URL is what the write-once register properties
+      #   DSM_TEST_DATABASE_URL is what the cell and index properties
       #   read. On a Postgres build its ABSENCE makes them fail rather than
       #   skip, which is the whole point of this job.
       #   DSM_DATABASE_URL is the node's own config variable, which
@@ -363,15 +363,16 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p dsm_storage_node --release --lib -- --test-threads=1 \
-            db::write_once_properties db::cell_properties db::pg::durable_posture_tests | tee registers.log
+            db::cell_properties db::pg::durable_posture_tests | tee registers.log
           passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' registers.log | head -1)
           echo "cell/register/durability tests executed on Postgres: ${passed:-0}"
           # May only grow. If a test is legitimately added, raise this floor in
           # the same commit; if the count DROPS, the board stopped proving
-          # something it used to prove. (The settlement-slot, binding and
-          # economic-root register properties left with those registers; the
-          # cell and index properties are what the member owes now.)
-          test "${passed:-0}" -ge 13
+          # something it used to prove. (The settlement-slot, binding,
+          # economic-root and faucet-ticket register properties left with
+          # those registers; the cell and index properties are what the
+          # member owes now.)
+          test "${passed:-0}" -ge 10
 
   # --------------------------------------------------------------------------
   # Formal validation: TLA+ model checking + real-code bridge harness
@@ -717,7 +718,7 @@ jobs:
       - name: Kernel-check every module, sorry-free
         run: |
           set -euo pipefail
-          expected=15
+          expected=16
           found=$(ls lean4/*.lean | wc -l)
           if [ "$found" -ne "$expected" ]; then
             echo "::error::lean4/ has $found modules, expected $expected."

@@ -31,7 +31,7 @@ use crate::tla_trace_replay::{
 /// `expected=12` module count in CI, and it exists for the same reason: an
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
-pub const EXPECTED_STANDARD_SPECS: usize = 69;
+pub const EXPECTED_STANDARD_SPECS: usize = 75;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -473,103 +473,107 @@ impl TlaRunner {
                 expect_violation: None,
                 exhaustive: false,
             },
-            // ── Economic register, observed concurrently (amendment 2c-C2) ──
-            // The write-once economic register read under concurrency:
-            // competing claimants, member outage, register REBUILD, and a
-            // NON-ATOMIC read round whose samples interleave with all of them.
-            // Owns the BEHAVIOURAL half of observe_cell
-            // (dsm/src/economic/cell_observation.rs:122-175); the algebraic
-            // half -- canonical quorum, 2q > n -- is Lean's
-            // (lean4/DSMEconomicSmtSeparation.lean §10) and is deliberately
-            // not restated here.
+            // ── The native ERA reserve: one lineage, released leader first ────
+            // Part IX §51, rebuild step R4, owner ruling 2026-09-20. The
+            // reserve's successor cell at the members while claimants, garbage,
+            // outages and the background carry interleave; Core recognizes,
+            // resolves leader first, and advances the reserve by exactly the
+            // amount the final release names. Finality (leader + two copies) and
+            // all-member replication are two properties, kept apart. The Rust
+            // twins are dsm/src/economic/native_reserve.rs and
+            // dsm_sdk/src/sdk/native_reserve.rs; the algebra is
+            // lean4/DSMNativeReserve.lean.
             TlaSpec {
-                label: "EconRegisterObservation".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation.cfg".into(),
+                label: "NativeReserveRelease".into(),
+                spec_file: "DSM_NativeReserveRelease.tla".into(),
+                config_file: "DSM_NativeReserveRelease.cfg".into(),
                 invariants: vec![
                     "TypeOK".into(),
-                    "EmptinessIsGrounded".into(),
-                    "EmptyAtQuorumIsWitnessed".into(),
-                    "NoEmptyAtQuorumAfterClaimed".into(),
-                    "TwoAtQuorumIsConflict".into(),
-                    "VerdictMatchesObservation".into(),
+                    "Conservation".into(),
+                    "NoValidReserveTransitionMints".into(),
+                    "NoCreatorBackout".into(),
+                    "RecipientIsClaimant".into(),
+                    "ReleaseAccounting".into(),
+                    "FinalRequiresLeader".into(),
+                    "AtMostOneFinal".into(),
+                    "LeaderFromCommittedSet".into(),
+                    "UnrecognizedBytesNeverOccupy".into(),
+                    "ThreeHoldersIsFinal".into(),
+                    "UnavailableNonLeaderNeverBlocks".into(),
+                    "ReplicasDoNotAlterTheWinner".into(),
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
                 supports_trace_replay: false,
                 expect_violation: None,
-                exhaustive: false,
+                exhaustive: true,
             },
-            // ── DELIBERATE FALSIFICATIONS ───────────────────────────────────
-            // Each models a REAL shipped defect and must violate the named
-            // invariant. A green run here means the invariant has no teeth.
-            TlaSpec {
-                label: "EconRegisterObservation/flatten-collapse".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_FlattenCollapse.cfg".into(),
-                invariants: vec!["EmptinessIsGrounded".into()],
-                properties: vec![],
-                linked_implementation_traces: vec![],
-                supports_trace_replay: false,
-                // peer_lineage.rs:165-169 -- .ok().flatten() delivers a
-                // quarantined write-once cell as emptiness.
-                expect_violation: Some("EmptinessIsGrounded".into()),
-                exhaustive: false,
-            },
-            TlaSpec {
-                label: "EconRegisterObservation/unavailable-is-none".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_UnavailableIsNone.cfg".into(),
-                invariants: vec!["EmptinessIsGrounded".into()],
-                properties: vec![],
-                linked_implementation_traces: vec![],
-                supports_trace_replay: false,
-                // economic_registers.rs:232 -- Unavailable => Ok(None).
-                expect_violation: Some("EmptinessIsGrounded".into()),
-                exhaustive: false,
-            },
-            TlaSpec {
-                label: "EconRegisterObservation/error-is-empty".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_ErrorIsEmpty.cfg".into(),
-                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
-                properties: vec![],
-                linked_implementation_traces: vec![],
-                supports_trace_replay: false,
-                // The historical defect cell_observation.rs exists to remove:
-                // an unusable answer classified as "no value".
-                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
-                exhaustive: false,
-            },
-            TlaSpec {
-                label: "EconRegisterObservation/no-incarnation-echo".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_NoIncarnationEcho.cfg".into(),
-                invariants: vec!["EmptyAtQuorumIsWitnessed".into()],
-                properties: vec![],
-                linked_implementation_traces: vec![],
-                supports_trace_replay: false,
-                // Attribution on node id alone -- the live economic read path
-                // before the incarnation header was stamped. A rebuilt member's
-                // absence is counted as attributable when it is not.
-                expect_violation: Some("EmptyAtQuorumIsWitnessed".into()),
-                exhaustive: false,
-            },
-            TlaSpec {
-                label: "EconRegisterObservation/conflict-reachable".into(),
-                spec_file: "DSM_EconRegisterObservation.tla".into(),
-                config_file: "DSM_EconRegisterObservation_Reachability.cfg".into(),
-                invariants: vec!["ConflictUnreachable".into()],
-                properties: vec![],
-                linked_implementation_traces: vec![],
-                supports_trace_replay: false,
-                // NON-VACUITY. Conflict must be REACHABLE from two claimants
-                // racing one write-once cell, with no misbehaviour at all.
-                // Without this, the falsification configs above could pass for
-                // the wrong reason.
-                expect_violation: Some("ConflictUnreachable".into()),
-                exhaustive: false,
-            },
+            expect_violation(
+                "NativeReserveRelease/count-without-leader",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_CountWithoutLeader.cfg",
+                "FinalRequiresLeader",
+            ),
+            expect_violation(
+                "NativeReserveRelease/availability-leader",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AvailabilityLeader.cfg",
+                "LeaderFromCommittedSet",
+            ),
+            expect_violation(
+                "NativeReserveRelease/all-member-finality",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AllMemberFinality.cfg",
+                "ThreeHoldersIsFinal",
+            ),
+            expect_violation(
+                "NativeReserveRelease/unavailable-non-leader-blocks",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_UnavailableNonLeaderBlocks.cfg",
+                "UnavailableNonLeaderNeverBlocks",
+            ),
+            expect_violation(
+                "NativeReserveRelease/overdraft-recognized",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_OverdraftRecognized.cfg",
+                "NoValidReserveTransitionMints",
+            ),
+            expect_violation(
+                "NativeReserveRelease/mint-arm",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_MintArm.cfg",
+                "Conservation",
+            ),
+            expect_violation(
+                "NativeReserveRelease/creator-backout",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_CreatorBackout.cfg",
+                "NoCreatorBackout",
+            ),
+            expect_violation(
+                "NativeReserveRelease/recipient-substitution",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_RecipientSubstitution.cfg",
+                "RecipientIsClaimant",
+            ),
+            expect_violation(
+                "NativeReserveRelease/release-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_ReleaseReachable.cfg",
+                "NeverReleased",
+            ),
+            expect_violation(
+                "NativeReserveRelease/all-members-hold-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_AllMembersHoldReachable.cfg",
+                "NeverAllHold",
+            ),
+            expect_violation(
+                "NativeReserveRelease/loss-at-leader-reachable",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_LossAtLeaderReachable.cfg",
+                "NeverLostAtLeader",
+            ),
             // ── DELIBERATE FALSIFICATIONS AND NON-VACUITY, SoFi ───────────────
             // Each config lists exactly one invariant. A mutation config flips one
             // gate and must violate it; a *-reachable / *-claim config states

@@ -29,12 +29,12 @@ mod cert_resync;
 mod contacts;
 pub mod counterparty_canonical_heads;
 pub mod economic_admission;
-pub mod economic_faucet;
 pub mod economic_lineage;
 mod export;
 pub mod frozen_publication_artifact; // publish-exact-bytes-to-quorum (namespaced; no glob re-export)
 mod genesis;
 mod manifold_seeds;
+pub mod native_reserve;
 mod nonces;
 mod online_outbox;
 mod pending_transactions;
@@ -386,12 +386,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// written before any external step so recovery resumes instead of re-signing).
 /// Also durable protocol state that decides what "published", "which set" and
 /// "which claim" mean; same rule as v4 — the version is the authority, no shim.
-/// 8: ERA faucet claim flow — `faucet_ticket_claim_local` (this device's
-/// frozen ticket-claim envelopes, keyed `(faucet_id, ticket_index)`, replayed
-/// byte-identically: the register compares exact bytes, and SPHINCS+ signing
-/// is deterministic, so a REGENERATED envelope is indistinguishable from a
-/// replayed one — the machinery to regenerate must be absent);
-/// `economic_root_claim_local` (the frozen economic-root claim envelope per
+/// 8: ERA faucet claim flow — `economic_root_claim_local` (the frozen economic-root claim envelope per
 /// position, signed ONCE and durably retained BEFORE the first
 /// register-member write); `economic_admitted_v2` (the device's admitted
 /// economic position + root — the durable coordinate 3.4 deferred, written in
@@ -427,7 +422,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// DAG only); `recipient_outbound_reply` gains `held` (the B→A release is
 /// frozen at accept and promoted to deliverable in the terminal admission
 /// transaction — ECON_ADMITTED releases it atomically).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 14;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 15;
 
 /// Honest incompatibility detection — NOT legacy support.
 ///
@@ -585,17 +580,45 @@ fn create_schema(conn: &Connection) -> Result<()> {
             pins INTEGER NOT NULL CHECK (pins > 0)
         ) WITHOUT ROWID;
 
-        -- v8: this device's frozen ERA faucet-ticket claim envelopes. Exact
-        -- bytes, written before the first register write, replayed verbatim
-        -- on every retry. Never regenerated: deterministic signing makes a
-        -- rebuilt envelope indistinguishable from a replayed one, so the only
-        -- safe design is for regeneration to be impossible.
-        CREATE TABLE IF NOT EXISTS faucet_ticket_claim_local(
-            faucet_id     BLOB NOT NULL,     -- 32B
-            ticket_index  INTEGER NOT NULL,
-            envelope      BLOB NOT NULL,     -- exact FaucetTicketClaimV1 bytes
+        -- v15: the native ERA reserve (R4). This device's frozen release at
+        -- one parent root — exact bytes, written before the first member
+        -- write, replayed verbatim on every retry, never regenerated.
+        CREATE TABLE IF NOT EXISTS native_reserve_release_local(
+            reserve_id    BLOB NOT NULL CHECK (length(reserve_id) = 32),
+            parent_root   BLOB NOT NULL CHECK (length(parent_root) = 32),
+            envelope      BLOB NOT NULL,     -- exact NativeReserveReleaseV1 bytes
             created_at    INTEGER NOT NULL,
-            PRIMARY KEY (faucet_id, ticket_index)
+            PRIMARY KEY (reserve_id, parent_root)
+        );
+
+        -- v15: the reserve lineage memo — every FINAL release a walk
+        -- established, with the state it succeeded. Finality is permanent,
+        -- so a memoised state is a sound start for the next walk. A cache of
+        -- Core's conclusions, never authority over a cell.
+        CREATE TABLE IF NOT EXISTS native_reserve_lineage_memo(
+            reserve_id         BLOB NOT NULL CHECK (length(reserve_id) = 32),
+            generation         INTEGER NOT NULL CHECK (generation > 0),
+            parent_remaining   INTEGER NOT NULL,
+            remaining          INTEGER NOT NULL,
+            recipient_genesis  BLOB NOT NULL CHECK (length(recipient_genesis) = 32),
+            recipient_devid    BLOB NOT NULL CHECK (length(recipient_devid) = 32),
+            recipient_position INTEGER NOT NULL,
+            envelope           BLOB NOT NULL,
+            PRIMARY KEY (reserve_id, generation)
+        );
+
+        -- v15: the carry queue — every reserve successor this device wrote,
+        -- and the members that hold it, until all of them do. All-member
+        -- replication is asynchronous and never a condition of finality.
+        CREATE TABLE IF NOT EXISTS native_reserve_carry(
+            cell_key   BLOB PRIMARY KEY CHECK (length(cell_key) = 32),
+            namespace  BLOB NOT NULL,
+            value      BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS native_reserve_carry_member(
+            cell_key   BLOB NOT NULL CHECK (length(cell_key) = 32),
+            member_id  TEXT NOT NULL,
+            PRIMARY KEY (cell_key, member_id)
         );
 
         -- v8: the frozen economic-root claim envelope for one position.

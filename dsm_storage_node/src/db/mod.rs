@@ -19,11 +19,6 @@ mod sqlite;
 #[cfg(feature = "local-dev")]
 pub use sqlite::*;
 
-/// The write-once properties the faucet-ticket register owes, stated once and
-/// run against whichever backend is compiled.
-#[cfg(test)]
-pub(crate) mod write_once_properties;
-
 /// The keyed-cell and index properties a member owes, run against whichever
 /// backend is compiled.
 #[cfg(test)]

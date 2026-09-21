@@ -4,8 +4,8 @@
 //! claim per position, the admitted coordinate, the producer leaf cache, and
 //! the device-local memo of peer positions THIS verifier validated.
 //!
-//! Split out of `economic_faucet.rs`: only the ticket table is
-//! faucet-specific; everything here serves every admission kind.
+//! Nothing here is faucet-specific; everything serves every admission kind.
+//! The native reserve's own state lives in `native_reserve.rs`.
 //!
 //! The peer memo is a cache of the verifier's OWN conclusions and is never
 //! authority over a live register read — a walk that fails `Invalid` from a

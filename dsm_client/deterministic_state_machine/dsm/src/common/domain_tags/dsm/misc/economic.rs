@@ -131,37 +131,40 @@ pub const TAG_DSM_ECONOMIC_PROOF_ARTIFACT: TaggedHashDomain<'static> =
 pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/econ-source/validated-peer-debit/v1");
 
-/// The canonical, NETWORK-SCOPED ERA faucet identity:
-/// `era_faucet_id(network_id) = H(tag ‖ 0x00 ‖ network_id ‖ ERA_POLICY_COMMIT)`.
+/// The canonical, NETWORK-SCOPED native ERA reserve identity:
+/// `era_reserve_id(network_id) = H(tag ‖ 0x00 ‖ network_id ‖ ERA_POLICY_COMMIT)`.
 ///
-/// Network-scoped because claims are won in the register set the claimant's
-/// `network_id` resolves: an asset-only id would let two networks each consume
-/// ticket `i` and each validate +100 ERA — the 80B cap silently multiplied by
-/// the number of networks. One finite allocation PER DSM network; the verifier
-/// derives `network_id` from the AUTHENTICATED Genesis v3, never from the
-/// claimant.
-pub const TAG_DSM_ERA_FAUCET_ID: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-id/v1");
-/// The signed preimage of a faucet ticket claim:
-/// `m = H(tag ‖ 0x00 ‖ canonical FaucetTicketClaimBodyV1 bytes)`.
-pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM_SIGN: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim-sign/v1");
-/// Immutable-store namespace for the EXACT signed `FaucetTicketClaimV1`
-/// envelope bytes — what `faucet_claim_evidence_addr` addresses.
-pub const TAG_DSM_ERA_FAUCET_TICKET_CLAIM: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-claim/v1");
-/// Client-side ticket SEARCH seed (strategy, not validity — any in-range
-/// ticket is valid; this only decides where a claimant looks first):
-/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ u64_be(target_economic_position) ‖ u64_be(attempt))`.
-/// The position is in the seed so each admitted position gets its own
-/// deterministic sequence rather than re-walking every consumed ticket.
-pub const TAG_DSM_ERA_FAUCET_TICKET_SELECT: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/era-faucet-ticket-select/v1");
-/// `SourceId` for a consumed faucet ticket:
-/// `H(tag ‖ 0x00 ‖ faucet_id ‖ u64_be(ticket_index))`. Inherits the network
-/// scope through `faucet_id`.
-pub const TAG_DSM_ECON_SOURCE_ERA_FAUCET_TICKET: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/econ-source/era-faucet-ticket/v1");
+/// One reserve per DSM network. Network-scoped because the reserve's cells
+/// live in the register set the network pins; an asset-only id would let two
+/// networks release the same genesis supply twice. The verifier derives
+/// `network_id` from the AUTHENTICATED Genesis v3, never from the claimant.
+pub const TAG_DSM_NATIVE_RESERVE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-id/v1");
+/// The root of a native reserve state:
+/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖ storage_set_id)`.
+pub const TAG_DSM_NATIVE_RESERVE_STATE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-state/v1");
+/// The successor cell of a reserve state: `K = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`.
+/// Its source bytes are also the cell namespace at a member.
+pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-cell/v1");
+/// The seed of a reserve state's successor cell (Part II §7):
+/// `s = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`; the leader is `FisherYates(s, S)[0]`.
+pub const TAG_DSM_NATIVE_RESERVE_SEED: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-seed/v1");
+/// The signed preimage of a reserve release:
+/// `m = H(tag ‖ 0x00 ‖ canonical NativeReserveReleaseBodyV1 bytes)`.
+pub const TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-release-sign/v1");
+/// Immutable-store namespace for the EXACT signed `NativeReserveReleaseV1`
+/// envelope bytes — what `release_evidence_addr` addresses.
+pub const TAG_DSM_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-release/v1");
+/// `SourceId` for a reserve release:
+/// `H(tag ‖ 0x00 ‖ reserve_id ‖ u64_be(generation))`. Inherits the network
+/// scope through `reserve_id`; one generation releases exactly once.
+pub const TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/native-reserve-release/v1");
 /// Digest of an ordinary DSM operation for economic binding:
 /// `operation_digest_dsm = H(tag ‖ 0x00 ‖ exact Operation::to_bytes())`.
 pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =

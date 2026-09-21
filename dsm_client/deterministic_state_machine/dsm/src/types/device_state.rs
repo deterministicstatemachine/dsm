@@ -420,13 +420,13 @@ fn validate_conservation(
     match operation {
         Operation::FaucetClaim { .. } => {
             // The economics are DERIVED, never carried: exactly one credit of
-            // exactly the fixed payout of exactly builtin ERA. The operation
+            // exactly the beta payout of exactly builtin ERA. The operation
             // has no amount/asset fields to lie with, and this arm is what
             // stops a delta smuggling a different quantity in beside it.
             let era = crate::core::token::token_state_manager::era_policy_commit();
             if deltas.len() != 1
                 || deltas[0].direction != BalanceDirection::Credit
-                || deltas[0].amount != crate::economic::faucet::ERA_FAUCET_PAYOUT
+                || deltas[0].amount != crate::economic::native_reserve::ERA_FAUCET_PAYOUT
                 || deltas[0].policy_commit != era
             {
                 return Err(DsmError::invalid_operation(
@@ -1043,7 +1043,7 @@ impl DeviceState {
                  new",
             )));
         }
-        let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+        let op_digest = crate::economic::admission::dsm_operation_digest(&operation.to_bytes());
         if pending.operation_digest != op_digest {
             return Err(DsmError::invalid_operation(format!(
                 "advance: refusing {what} whose digest does not match the pending economic \
@@ -1096,7 +1096,7 @@ impl DeviceState {
                  nothing new",
             )));
         }
-        let op_digest = crate::economic::faucet::dsm_operation_digest(&operation.to_bytes());
+        let op_digest = crate::economic::admission::dsm_operation_digest(&operation.to_bytes());
         if pending.operation_digest != op_digest {
             return Err(DsmError::invalid_operation(format!(
                 "advance: refusing {what} whose digest does not match the pending \
@@ -1166,7 +1166,7 @@ impl DeviceState {
                 crate::economic::admission::PendingAdmissionKind::DsmBacked,
                 1,
                 [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&operation.to_bytes()),
+                crate::economic::admission::dsm_operation_digest(&operation.to_bytes()),
             ),
         );
         staged.advance(
@@ -1181,24 +1181,25 @@ impl DeviceState {
     }
 
     /// TEST-ONLY. ERA through the faucet, at the core layer: one admitted
-    /// `FaucetClaim` on this device's self-loop, crediting exactly the
-    /// protocol payout (`ERA_FAUCET_PAYOUT`) of builtin ERA. A test that
-    /// needs more claims more tickets — there is no amount to ask for,
-    /// because the faucet has none.
+    /// `FaucetClaim` on this device's self-loop, crediting exactly the beta
+    /// payout (`ERA_FAUCET_PAYOUT`) of builtin ERA, as the release at
+    /// `generation` of the reserve. A test that needs more claims more
+    /// generations — there is no amount to ask for, because the claim has
+    /// none.
     #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_faucet_claim(&self, ticket_index: u64) -> Result<Self, DsmError> {
+    pub fn admitted_faucet_claim(&self, generation: u64) -> Result<Self, DsmError> {
         let (rel_key, initial_tip) = self.self_loop_coordinates();
         self.advance_admitted(
             rel_key,
             self.devid,
             Operation::FaucetClaim {
-                faucet_id: crate::economic::faucet::era_faucet_id(b"dsm-testnet"),
-                ticket_index,
+                reserve_id: crate::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
+                generation: generation.max(1),
             },
             &[BalanceDelta {
                 policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
                 direction: BalanceDirection::Credit,
-                amount: crate::economic::faucet::ERA_FAUCET_PAYOUT,
+                amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
             }],
             Some(initial_tip),
             None,
@@ -1453,17 +1454,17 @@ impl DeviceState {
         // locally clears it holds value NO FOREIGN VERIFIER accepts — which
         // is the economic-root guarantee doing its job.
         //
-        // Range is enforced here too; the CANONICAL faucet_id is enforced
-        // where the authenticated network_id exists (the provenance verifier,
-        // and the register node) — this layer has only the genesis DIGEST and
-        // cannot recompute era_faucet_id(network_id) without un-hashing it.
-        if let Operation::FaucetClaim { ticket_index, .. } = &operation {
-            if *ticket_index >= crate::economic::faucet::ERA_FAUCET_TICKET_COUNT {
-                return Err(DsmError::invalid_operation(format!(
-                    "advance: faucet ticket_index {ticket_index} is not a coordinate that \
-                     exists — the allocation is exactly {} tickets",
-                    crate::economic::faucet::ERA_FAUCET_TICKET_COUNT
-                )));
+        // A release is never generation 0 (that is the genesis state); the
+        // CANONICAL reserve_id is enforced where the authenticated network_id
+        // exists (the provenance verifier) — this layer has only the genesis
+        // DIGEST and cannot recompute era_reserve_id(network_id) without
+        // un-hashing it.
+        if let Operation::FaucetClaim { generation, .. } = &operation {
+            if *generation == 0 {
+                return Err(DsmError::invalid_operation(
+                    "advance: a faucet claim names the reserve generation its release \
+                     installs, which is never the genesis generation 0",
+                ));
             }
             self.require_attached_dsm_admission(&operation, "a faucet claim")?;
         }
@@ -1506,8 +1507,9 @@ impl DeviceState {
         //
         // The builtin arm stays UNCONDITIONAL and is keyed on the COMMIT, not
         // the ticker: builtin issuance is not self-authorizable under any
-        // admission — ERA enters through the faucet's bootstrap tickets, and
-        // dBTC arrives with the Bitcoin tap integration.
+        // admission — ERA leaves the network's native reserve by release
+        // (the beta faucet), and dBTC arrives with the Bitcoin tap
+        // integration.
         if let Operation::Mint {
             policy_commit,
             amount,
@@ -1521,7 +1523,7 @@ impl DeviceState {
             {
                 return Err(DsmError::invalid_operation(format!(
                     "advance: refusing to mint the builtin token {name} — builtin issuance is not \
-                     self-authorizable; ERA is distributed by the faucet's bootstrap tickets and \
+                     self-authorizable; ERA is released from the network's native reserve and \
                      dBTC issuance arrives with the Bitcoin tap integration"
                 )));
             }
@@ -2378,7 +2380,7 @@ mod tests {
             .expect("a zero-supply creation is an ordinary fee spend");
         assert_eq!(
             out.new_device_state.balance(&era),
-            crate::economic::faucet::ERA_FAUCET_PAYOUT - 100,
+            crate::economic::native_reserve::ERA_FAUCET_PAYOUT - 100,
             "the fee is an ordinary debit of the claimed ERA"
         );
         assert_eq!(out.new_device_state.balance(&pc_new), 0);
@@ -2512,7 +2514,7 @@ mod tests {
             crate::economic::admission::PendingAdmissionKind::DsmBacked,
             1,
             [0u8; 32],
-            crate::economic::faucet::dsm_operation_digest(&op.to_bytes()),
+            crate::economic::admission::dsm_operation_digest(&op.to_bytes()),
         )
     }
 
@@ -2688,7 +2690,7 @@ mod tests {
                 crate::economic::admission::PendingAdmissionKind::DsmBacked,
                 1,
                 [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&credit_op.to_bytes()),
+                crate::economic::admission::dsm_operation_digest(&credit_op.to_bytes()),
             ),
         ));
         (dev, credit_op)
@@ -2863,7 +2865,7 @@ mod tests {
                 crate::economic::admission::PendingAdmissionKind::DsmBacked,
                 1,
                 [0u8; 32],
-                crate::economic::faucet::dsm_operation_digest(&credit_op.to_bytes()),
+                crate::economic::admission::dsm_operation_digest(&credit_op.to_bytes()),
             ),
         ));
         let outcome = bob
@@ -3924,7 +3926,7 @@ mod tests {
     fn a_sofi_fulfillment_cannot_advance_without_its_own_admission() {
         use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
         use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-        use crate::economic::faucet::dsm_operation_digest;
+        use crate::economic::admission::dsm_operation_digest;
         use crate::sofi::derive;
         use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
 
@@ -4032,7 +4034,7 @@ mod tests {
     fn the_sofi_admission_must_name_this_fulfillment() {
         use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
         use crate::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
-        use crate::economic::faucet::dsm_operation_digest;
+        use crate::economic::admission::dsm_operation_digest;
         use crate::sofi::derive;
         use crate::sofi::wire::{AttemptEntry, TraderFulfillmentBody};
 
@@ -4213,7 +4215,7 @@ mod tests {
 
         // 3. Wrong kind: an offline-boundary admission authorizes no online
         // credit.
-        let op_digest = crate::economic::faucet::dsm_operation_digest(&op.to_bytes());
+        let op_digest = crate::economic::admission::dsm_operation_digest(&op.to_bytes());
         let wrong_kind =
             head.clone()
                 .with_pending_economic_admission(Some(PendingEconomicAdmission::prepared(

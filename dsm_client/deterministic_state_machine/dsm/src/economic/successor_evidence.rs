@@ -114,7 +114,7 @@ pub fn sign_dsm_successor_evidence(
         entropy,
         encapsulated_entropy,
     );
-    let operation_digest = crate::economic::faucet::dsm_operation_digest(operation_bytes);
+    let operation_digest = crate::economic::admission::dsm_operation_digest(operation_bytes);
     let digest = substrate_signing_digest(genesis, device_id, &c_dsm_plus, &operation_digest);
     let sigma_dsm = crate::crypto::sphincs::sphincs_sign(ak_secret_key, &digest)
         .map_err(|e| SuccessorEvidenceError::Malformed(format!("sign: {e}")))?;
@@ -182,7 +182,7 @@ pub fn verify_dsm_successor_evidence(
             "operation bytes are non-canonical".to_string(),
         ));
     }
-    let operation_digest = crate::economic::faucet::dsm_operation_digest(&ev.operation_bytes);
+    let operation_digest = crate::economic::admission::dsm_operation_digest(&ev.operation_bytes);
 
     let digest = substrate_signing_digest(genesis, device_id, &carried, &operation_digest);
     let ok = crate::crypto::sphincs::sphincs_verify(proven_ak, &digest, &ev.sigma_dsm)

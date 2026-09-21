@@ -88,7 +88,7 @@ fn facts() -> (ValidatedEconomicRoot, EconomicTransitionWitness, Operation) {
         pre_root,
         tree.root(),
         [0x0E; 32],
-        dsm::economic::faucet::dsm_operation_digest(&operation.to_bytes()),
+        dsm::economic::admission::dsm_operation_digest(&operation.to_bytes()),
         vec![mutation],
         Vec::new(),
     )

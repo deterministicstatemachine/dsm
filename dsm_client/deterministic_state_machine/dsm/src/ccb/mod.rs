@@ -131,9 +131,11 @@ pub mod class {
     /// asset.
     pub const ISSUANCE_AUTHORIZATION_BODY: u16 = 0x0029;
 
-    /// The recipient credit of a consumed ERA faucet ticket — the seventh
-    /// provenance arm. Scoped to one network through its `faucet_id`.
-    pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
+    /// The recipient credit of a native reserve release (Part IX §51): one
+    /// generation of the network's ONE ERA reserve lineage, released leader
+    /// first to the recipient the release names. Scoped to one network
+    /// through its `reserve_id`. Replaces the burned `0x0030` ticket credit.
+    pub const CREDIT_SOURCE_NATIVE_RESERVE_RELEASE: u16 = 0x005D;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -341,6 +343,10 @@ pub mod burned_class {
     pub const CREDIT_SOURCE_DLV_RESERVE_CONSUMPTION: u16 = 0x0026;
     pub const CREDIT_SOURCE_VALIDATED_DLV_SETTLEMENT_PAYMENT: u16 = 0x0027;
     pub const CREDIT_SOURCE_DLV_ROUTE_RESERVE_CONSUMPTION: u16 = 0x0035;
+    /// The recipient credit of a consumed ERA faucet ticket — burned by
+    /// rebuild step R4 with the ticket universe it named. ERA leaves the
+    /// network's one native reserve by release (`0x005D`), never by ticket.
+    pub const CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION: u16 = 0x0030;
     /// A credit funded by a debit in the same transition — produced only by
     /// the old settle write set, burned with it.
     pub const CREDIT_SOURCE_SAME_TRANSITION_MOVE: u16 = 0x0024;
@@ -440,6 +446,12 @@ pub mod schema {
         // burned the rest of the settlement family with them.
         (super::burned_class::ROUTE_SET, 1),
         (super::burned_class::ROUTE_COMMITMENT_BODY, 1),
+        // The ticket credit: its coordinate space (800M write-once tickets)
+        // went with the faucet register. A credit naming it is unfunded.
+        (
+            super::burned_class::CREDIT_SOURCE_VALIDATED_FAUCET_DISTRIBUTION,
+            1,
+        ),
     ];
 
     /// Whether a `(class, schema)` pair is retired. Never true for a live

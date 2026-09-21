@@ -21,10 +21,6 @@ version = "0.1.0-beta.3"
 description = "DSM Protocol storage node"
 endpoint = "DYNAMIC_FROM_ENV_CONFIG"  # Loaded from ../dsm_env_config.json
 public_key = "YOUR_NODE_PUBLIC_KEY_HERE"  # Generate with: openssl genrsa 2048 | openssl rsa -pubout
-# The DSM network this node serves. REQUIRED for the ERA faucet-ticket
-# register: with no network configured the node fails closed (503) on every
-# faucet claim, because the canonical faucet id is era_faucet_id(network_id).
-network_id = "dsm-testnet"
 
 # Storage configuration
 [storage]

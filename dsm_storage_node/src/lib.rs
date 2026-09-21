@@ -41,13 +41,6 @@ pub struct AppState {
     /// Stamped on every generic-binding answer so a caller can tell this
     /// register history from a rebuilt one wearing the same node id.
     pub own_register_incarnation: Option<[u8; 32]>,
-    /// The DSM network this node serves (`node.network_id` in config). Gates
-    /// the ERA faucet-ticket register: the canonical faucet identity is
-    /// NETWORK-SCOPED (`era_faucet_id(network_id)`), so a node that does not
-    /// know its network cannot tell the canonical faucet from an invented
-    /// one and refuses every ticket claim (fail closed) rather than
-    /// defaulting. `None` = faucet register inactive.
-    pub network_id: Option<Arc<Vec<u8>>>,
 }
 
 /// This node's view of the canonical storage set it belongs to.
@@ -141,16 +134,10 @@ impl AppState {
             current_tick: Arc::new(AtomicI64::new(0)),
             storage_set: None,
             own_register_incarnation: None,
-            network_id: None,
         }
     }
 
     /// Attach this node's canonical storage set (see [`NodeStorageSet`]).
-    pub fn with_network_id(mut self, network_id: Vec<u8>) -> Self {
-        self.network_id = Some(Arc::new(network_id));
-        self
-    }
-
     /// Record the register incarnation this node established at startup.
     pub fn with_register_incarnation(mut self, incarnation: [u8; 32]) -> Self {
         self.own_register_incarnation = Some(incarnation);
@@ -161,30 +148,6 @@ impl AppState {
         self.storage_set = Some(Arc::new(set));
         self
     }
-}
-
-/// The device-authenticated WRITE half of the ERA faucet-ticket register,
-/// behind `auth::device_auth` so attribution runs against the authenticated
-/// key AND device. Native emission, outside the cell contract.
-///
-/// ONE assembly, used by the binary's router and by the register conformance
-/// suite, so what the suite drives is what the binary serves.
-pub fn economic_register_write_router(state: Arc<AppState>) -> axum::Router<()> {
-    let auth_state = Arc::new(auth::AuthState {
-        db_pool: state.db_pool.clone(),
-    });
-    api::economic::faucet_ticket::create_write_router()
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            auth::device_auth,
-        ))
-        .layer(Extension(state))
-}
-
-/// The public READ half of the faucet-ticket register. The binary rate-limits
-/// it; the conformance suite mounts it bare.
-pub fn economic_register_read_router(state: Arc<AppState>) -> axum::Router<()> {
-    api::economic::faucet_ticket::create_read_router(state)
 }
 
 /// Keyed cells and indexes: no write authorization, nothing refused, nothing
@@ -202,8 +165,7 @@ pub fn cells_router(state: Arc<AppState>) -> axum::Router<()> {
 /// No write authorization on any of them (rebuild step R2): a member never
 /// checks who carries the bytes, because every object carries its own
 /// authority and derived objects need none. The device token stays only on
-/// the other mounts (the DLV object store, the identity mirrors, the faucet
-/// register), never here.
+/// the other mounts (the DLV object store, the identity mirrors), never here.
 pub fn storage_contract_router(state: Arc<AppState>) -> axum::Router<()> {
     api::cells::create_router(state.clone())
         .merge(api::objects::immutable::create_read_router(state.clone()))

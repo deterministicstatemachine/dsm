@@ -43,7 +43,7 @@ use crate::economic::lineage::{
     EconomicActivationSnapshot, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
-    FaucetTicketWin, PeerLineageFailure, ProvenanceResolver, ValidatedPeerTransition,
+    PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
 };
 use crate::economic::register::{
     economic_root_register_key, position_seed, resolve_for_trader, RegisteredEconomicRoot,
@@ -74,12 +74,15 @@ pub trait PeerEvidenceFetcher {
         k_root: &[u8; 32],
         seed: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
-    /// The quorum-agreed winner bytes for one faucet-ticket cell.
-    fn faucet_ticket_cell(
+    /// The release that installed `generation` of the native reserve
+    /// `reserve_id`, established FINAL by a walk of the reserve lineage from
+    /// its genesis state, with the state it succeeded. `None` while the
+    /// lineage has not reached that generation.
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure>;
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure>;
     /// The network's root-register set as the local catalog resolves it —
     /// CANDIDATE entries the caller must re-derive and check, never authority.
     fn root_register_candidate_set(
@@ -120,7 +123,7 @@ struct WalkState {
     memo: HashMap<([u8; 32], [u8; 32], u64), ValidatedPeerTransition>,
 }
 
-/// The walker's re-entrant resolver: answers faucet-ticket questions from
+/// The walker's re-entrant resolver: answers reserve-release questions from
 /// the fetcher and peer-transition questions by walking THAT peer, sharing
 /// the budget, memo, depth cap and cycle set.
 struct WalkingResolver<'a> {
@@ -148,16 +151,15 @@ impl ProvenanceResolver for WalkingResolver<'_> {
         )
     }
 
-    fn winning_faucet_ticket(
+    fn native_reserve_release(
         &self,
-        faucet_id: &[u8; 32],
-        ticket_index: u64,
-    ) -> Option<FaucetTicketWin> {
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Option<ReserveReleaseWin> {
         self.fetcher
-            .faucet_ticket_cell(faucet_id, ticket_index)
+            .native_reserve_release(reserve_id, generation)
             .ok()
             .flatten()
-            .map(|envelope_bytes| FaucetTicketWin { envelope_bytes })
     }
 
     fn root_register_candidate_set(
@@ -539,11 +541,11 @@ mod tests {
             }
             Ok(None)
         }
-        fn faucet_ticket_cell(
+        fn native_reserve_release(
             &self,
-            _faucet_id: &[u8; 32],
-            _ticket_index: u64,
-        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            _reserve_id: &[u8; 32],
+            _generation: u64,
+        ) -> Result<Option<ReserveReleaseWin>, PeerLineageFailure> {
             Ok(None)
         }
         fn root_register_candidate_set(

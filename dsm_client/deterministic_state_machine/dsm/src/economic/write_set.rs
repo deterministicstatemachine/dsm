@@ -37,7 +37,7 @@
 use std::collections::BTreeMap;
 
 use crate::economic::credit::{
-    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceValidatedFaucetDistribution,
+    CreditSource, CreditSourceAuthorizedIssuance, CreditSourceNativeReserveRelease,
     CreditSourceValidatedPeerDebit,
 };
 use crate::economic::mutation::EconomicLeafMutation;
@@ -187,10 +187,10 @@ impl std::error::Error for WriteSetError {}
 pub enum CreditSourceFacts {
     /// Debit-only write set.
     None,
-    /// A faucet claim's evidence address (the exact winning envelope bytes).
-    FaucetTicket {
-        faucet_claim_evidence_addr: [u8; 32],
-    },
+    /// A faucet claim's evidence address: the exact bytes of the reserve
+    /// release that won its generation. The reserve and generation are read
+    /// from the operation, never supplied twice.
+    NativeReserveRelease { release_evidence_addr: [u8; 32] },
     /// A recipient credit funded by the sender's validated debit.
     PeerDebit {
         peer_genesis: [u8; 32],
@@ -315,7 +315,7 @@ fn pair_legs(
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 enum FactsKind {
-    FaucetTicket,
+    NativeReserveRelease,
     PeerDebit,
     AuthorizedIssuance,
 }
@@ -380,10 +380,14 @@ fn semantic_write_set(
                 amount: *fee_amount,
             })
         }
+        // The beta faucet: one balance credit of exactly the beta payout of
+        // builtin ERA, funded by one release of the network's native reserve.
+        // The operation carries no amount; the claim policy fixes it, and the
+        // provenance arm requires the release to carry exactly that.
         Operation::FaucetClaim { .. } => Ok(SemanticWriteSet::Credit {
             policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
-            amount: crate::economic::faucet::ERA_FAUCET_PAYOUT,
-            facts_required: FactsKind::FaucetTicket,
+            amount: crate::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            facts_required: FactsKind::NativeReserveRelease,
         }),
         // ISSUANCE: one balance credit of exactly the operation's amount,
         // funded by the 0x0023 arm resolving a 0x0029 authorization. The
@@ -597,8 +601,8 @@ pub fn build_write_set(
             let matches = matches!(
                 (facts, facts_required),
                 (
-                    CreditSourceFacts::FaucetTicket { .. },
-                    FactsKind::FaucetTicket
+                    CreditSourceFacts::NativeReserveRelease { .. },
+                    FactsKind::NativeReserveRelease
                 ) | (CreditSourceFacts::PeerDebit { .. }, FactsKind::PeerDebit)
                     | (
                         CreditSourceFacts::AuthorizedIssuance { .. },
@@ -762,21 +766,19 @@ pub fn build_write_set(
                     issuance_authorization_addr,
                 }),
                 (
-                    CreditSourceFacts::FaucetTicket {
-                        faucet_claim_evidence_addr,
+                    CreditSourceFacts::NativeReserveRelease {
+                        release_evidence_addr,
                     },
                     Operation::FaucetClaim {
-                        faucet_id,
-                        ticket_index,
+                        reserve_id,
+                        generation,
                     },
-                ) => CreditSource::ValidatedFaucetDistribution(
-                    CreditSourceValidatedFaucetDistribution {
-                        credit_mutation_index,
-                        faucet_id: *faucet_id,
-                        ticket_index: *ticket_index,
-                        faucet_claim_evidence_addr,
-                    },
-                ),
+                ) => CreditSource::NativeReserveRelease(CreditSourceNativeReserveRelease {
+                    credit_mutation_index,
+                    reserve_id: *reserve_id,
+                    generation: *generation,
+                    release_evidence_addr,
+                }),
                 (
                     CreditSourceFacts::PeerDebit {
                         peer_genesis,
@@ -992,28 +994,29 @@ pub fn verify_operation_write_set(
             let source = &witness.credit_sources[0];
             match (facts_required, source, operation) {
                 (
-                    FactsKind::FaucetTicket,
-                    CreditSource::ValidatedFaucetDistribution(d),
+                    FactsKind::NativeReserveRelease,
+                    CreditSource::NativeReserveRelease(d),
                     Operation::FaucetClaim {
-                        faucet_id,
-                        ticket_index,
+                        reserve_id,
+                        generation,
                     },
                 ) => {
                     if !consumed.is_empty() || witness.mutations.len() != 1 {
                         return Err(WriteSetError::WrongWriteSet {
                             detail: "a faucet claim is exactly one balance credit — its \
-                                     non-reuse is the envelope's position+digest binding, not a \
+                                     non-reuse is the release's position+digest binding, not a \
                                      consumed-source leaf",
                         });
                     }
                     if d.credit_mutation_index != b.mutation_index {
                         return Err(WriteSetError::WrongWriteSet {
-                            detail: "faucet source does not fund the balance credit",
+                            detail: "reserve release does not fund the balance credit",
                         });
                     }
-                    if d.faucet_id != *faucet_id || d.ticket_index != *ticket_index {
+                    if d.reserve_id != *reserve_id || d.generation != *generation {
                         return Err(WriteSetError::WrongWriteSet {
-                            detail: "faucet source names a different ticket than the operation",
+                            detail: "reserve release names a different generation than the \
+                                     operation",
                         });
                     }
                     Ok(())
