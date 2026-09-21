@@ -24,11 +24,10 @@
 use crate::economic::lineage::ValidatedEconomicRoot;
 
 use super::derive;
-use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 use super::resolution::Resolution;
 use super::wire::{
     next_position, ParentClaimRef, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody,
-    VaultCreation, VaultGenesisPreimage, VaultStateLeaf, VAULT_STATUS_ACTIVE,
+    VaultStateLeaf,
 };
 
 type D32 = [u8; 32];
@@ -261,116 +260,38 @@ pub fn descendant_fence(
     }
 }
 
-/// The funding pair a `SofiVaultCreate` STATES, extracted from the operation
-/// itself.
+/// Why a vault's market policy is not the one its genesis state commits.
 ///
-/// **Not a tuple, on purpose.** `genesis_accepted` previously took
-/// `(D32, D32)`, which a caller could simply assert — and the evidence the
-/// predicate holds cannot contradict it: `VaultCreation` carries
-/// `vault_id`, `genesis_root`, `amount_a`, `amount_b` and NO asset commits,
-/// so proving the creation leaf into the owner's root establishes the AMOUNTS
-/// and never which balances were debited. A caller handing `(A, B)` for a
-/// creation that actually debited `X/Y` would be believed.
-///
-/// The only constructor reads the pair off the signed operation, so it cannot
-/// be conjured. What it deliberately does NOT establish is that this
-/// operation is the accepted creation transition at `p_create` — see the
-/// blocker on [`genesis_accepted`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CreationFunding {
-    a: D32,
-    b: D32,
-}
-
-impl CreationFunding {
-    /// The pair AN operation states — not proof it is THE operation.
-    ///
-    /// `stated_by`, not `proven_by`, and the difference is the whole point.
-    /// This reads two fields off a signed `SofiVaultCreate`. It establishes
-    /// that some creation named this pair; it establishes NOTHING about
-    /// whether that creation is the one whose verified write set produced the
-    /// accepted owner transition holding this vault's `VaultCreation` leaf.
-    ///
-    /// A caller that has not already bound the operation to that exact
-    /// transition is presenting "an operation", and F10 needs "the
-    /// operation" — see the blocker on [`genesis_accepted`]. A
-    /// `CreationFunding` must never be treated as a `VerifiedVaultCreation`;
-    /// they are different strengths of evidence.
-    pub fn stated_by(operation: &crate::types::operations::Operation) -> Option<Self> {
-        match operation {
-            crate::types::operations::Operation::SofiVaultCreate {
-                funding_a_policy_commit,
-                funding_b_policy_commit,
-                ..
-            } => Some(Self {
-                a: *funding_a_policy_commit,
-                b: *funding_b_policy_commit,
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn pair(&self) -> (D32, D32) {
-        (self.a, self.b)
-    }
-}
-
-/// Why a vault's genesis is not acceptable.
+/// WHAT THIS NO LONGER IS. It was the refusal set of `genesis_accepted`, a
+/// twelve-conjunct predicate that established a vault genesis from a
+/// PRESENTED creation operation. That predicate could never acquire a
+/// production caller — `VaultCreation` carries no asset commitments, so
+/// proving the creation leaf establishes the AMOUNTS and never which balances
+/// were debited — and a CI gate existed to keep it callerless. Owner ruling
+/// Section 44.4 settled it: the standalone production predicate was the stale
+/// piece, not the gate. Genesis validity is established by the vault genesis
+/// constructor and recognizer with the accepted genesis root, the predicate
+/// survives as the formal definition (`lean4/DSMSofiAtomicity.lean`,
+/// `GenesisAccepted`; `tla/DSM_SofiFulfillment.tla`,
+/// `GenesisCanonicalOnlyIfCreationValid`), and what remains here is the
+/// market-policy half that `build_vault_create` actually uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenesisError {
-    /// `vault_id` is not the owner's own derivation at the inserting position.
-    VaultIdIsNotTheDerivation { expected: D32, named: D32 },
-    /// `V_0` is not exactly `VaultState_0`: a generation, a status, or a
-    /// relationship leaf that has no business in a genesis.
-    GenesisStateIsNotInitial,
-    /// The funded amounts are not the reserves the genesis state commits.
-    FundingIsNotTheReserves,
-    /// The recomputed `R_0` is not the root the creation record names.
-    GenesisRootMismatch { expected: D32, named: D32 },
     /// The pair is not strictly ordered, so the market policy would admit two
     /// encodings of one market.
     TokenPairNotOrdered,
-    /// The vault is pinned to a storage set that is not this network's.
-    StorageSetIsNotNetworkPinned,
-    /// The owner's root at the inserting position is not validated.
-    OwnerRootIsNotValidated { validated: u64, create: u64 },
     /// The supplied market-policy bytes do not re-derive the address the vault
     /// state commits. They establish nothing about this vault's market:
     /// non-verifying bytes are not evidence, they are noise.
     MarketPolicyIsNotTheCommittedOne,
     /// The market-policy bytes are not a canonical `MarketPolicy`.
     MarketPolicyDoesNotDecode,
-    /// The operation funds the creation from assets that are not the vault's
-    /// own pair, or names them out of canonical order.
-    FundingIsNotTheMarketPair,
-    /// The creation record is not committed under the owner's validated root.
-    /// A vault whose creation nothing proves was never created on this lineage.
-    CreationIsNotCommitted,
 }
 
 impl core::fmt::Display for GenesisError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::VaultIdIsNotTheDerivation { .. } => {
-                write!(
-                    f,
-                    "vault_id is not H(vault-id/v1 ‖ G_o ‖ DevID_o ‖ p_create)"
-                )
-            }
-            Self::GenesisStateIsNotInitial => {
-                write!(f, "V_0 is not the initial state a genesis fixes")
-            }
-            Self::FundingIsNotTheReserves => {
-                write!(f, "the funded amounts are not the committed reserves")
-            }
-            Self::GenesisRootMismatch { .. } => write!(f, "R_0 is not the recomputed genesis root"),
             Self::TokenPairNotOrdered => write!(f, "the token pair is not strictly ordered"),
-            Self::StorageSetIsNotNetworkPinned => {
-                write!(f, "the vault's storage set is not the network's pinned set")
-            }
-            Self::OwnerRootIsNotValidated { .. } => {
-                write!(f, "the owner's root at p_create is not validated")
-            }
             Self::MarketPolicyIsNotTheCommittedOne => write!(
                 f,
                 "the market-policy bytes do not re-derive the address the vault state \
@@ -382,193 +303,11 @@ impl core::fmt::Display for GenesisError {
                     "the market-policy bytes are not a canonical MarketPolicy"
                 )
             }
-            Self::FundingIsNotTheMarketPair => write!(
-                f,
-                "the creation is funded from assets that are not the vault's own pair, \
-                 in canonical order"
-            ),
-            Self::CreationIsNotCommitted => write!(
-                f,
-                "the creation record does not prove into the owner's validated root: \
-                 nothing shows this vault was created on that lineage"
-            ),
         }
     }
 }
 
 impl std::error::Error for GenesisError {}
-
-/// `GenesisAccepted` (P15-12, F10): the conjunction that turns stored genesis
-/// bytes into a vault a route may reference.
-///
-/// `GenesisStored` is mechanical and is a storage member's business. This is
-/// the verifier's, and every conjunct is checked against something it derived
-/// or already validated — the vault id from the owner's identity, `R_0` from
-/// the state, the reserves from the creation record, the storage set from the
-/// network, and the owner's position from its own validated lineage.
-///
-/// # E2 BLOCKER — a genesis is NOT yet consumable on this evidence alone
-///
-/// This predicate has no production caller, and it must not acquire a naive
-/// one. The evidence it holds does not establish **which balances the
-/// creation actually debited**:
-///
-/// - `VaultCreation` carries `vault_id`, `genesis_root`, `amount_a`,
-///   `amount_b` — and no asset commits. Proving that leaf into the owner's
-///   validated root therefore establishes the AMOUNTS, never the assets.
-/// - [`CreationFunding`] reads the pair off a signed `SofiVaultCreate`, which
-///   stops a caller inventing one, but does NOT establish that the operation
-///   it came from is the accepted creation transition at `p_create`.
-///
-/// So a vault whose policy names `A/B`, created by an operation that actually
-/// debited `X/Y`, could still be accepted here by handing in that operation's
-/// own `A/B`-shaped sibling. That is not "the owner made a useless vault" —
-/// it is an asset-provenance and conservation failure.
-///
-/// F10 must therefore derive the pair from the EXACT verified creation
-/// transition, not from an operation presented alongside the leaf:
-///
-/// ```text
-/// exact accepted owner transition at p_create
-///     -> exact verified SofiVaultCreate
-///     -> funding_{a,b}_policy_commit
-///     -> verified write set produced the creation transition
-///     -> exact VaultCreation insertion
-///     -> owner validated lineage
-/// ```
-///
-/// and only then compare that pair with the one the authenticated market
-/// policy decodes. The intended shape is an opaque `VerifiedVaultCreation`
-/// capability whose sole constructor establishes the accepted transition,
-/// with this function consuming it instead of a `CreationFunding`. Missing
-/// transition, policy or path evidence is `Unavailable`; authenticated
-/// disagreement is `Invalid`.
-///
-/// No byte change is owed: `SofiVaultCreate` already signs both funding
-/// commits in its canonical unsigned bytes, so the information the proof
-/// needs is frozen in the right object. What is owed is the binding from that
-/// signed operation to the economically accepted owner transition.
-pub fn genesis_accepted(
-    preimage: &VaultGenesisPreimage,
-    creation: &VaultCreation,
-    owner_validated: &ValidatedEconomicRoot,
-    network_storage_set_id: &D32,
-    // `market_policy_bytes`: the EXACT bytes of the market policy the vault
-    // state commits. Not a pair and not a decoded policy — either would be the
-    // caller's assertion about this vault's market, and this function would be
-    // trusting the thing it exists to establish. They are re-addressed against
-    // `VaultStateLeaf.market_policy` before anything is read out of them.
-    //
-    // `funding`: the two commits, read off the signed operation by
-    // `CreationFunding::stated_by` and checked against the pair the
-    // authenticated policy decodes — never used AS the pair, and no longer
-    // assertable as a bare tuple.
-    //
-    // `creation_siblings`: the path proving the creation leaf into the owner's
-    // validated root.
-    market_policy_bytes: &[u8],
-    funding: CreationFunding,
-    creation_siblings: &[D32; ECONOMIC_SMT_HEIGHT],
-) -> Result<D32, GenesisError> {
-    let vault_id = preimage.vault_id();
-    if creation.vault_id != vault_id {
-        return Err(GenesisError::VaultIdIsNotTheDerivation {
-            expected: vault_id,
-            named: creation.vault_id,
-        });
-    }
-    let state = &preimage.state;
-    if state.owner_genesis != preimage.owner_genesis
-        || state.owner_device_id != preimage.owner_device_id
-        || state.create_position != preimage.create_position
-    {
-        return Err(GenesisError::GenesisStateIsNotInitial);
-    }
-    // Generation 0, Active, and both reserves funded: a genesis has no history
-    // to carry and nothing may have happened to it yet.
-    if state.generation != 0 || state.status != VAULT_STATUS_ACTIVE {
-        return Err(GenesisError::GenesisStateIsNotInitial);
-    }
-    if state.reserve_a != creation.amount_a || state.reserve_b != creation.amount_b {
-        return Err(GenesisError::FundingIsNotTheReserves);
-    }
-    if state.reserve_a == 0 || state.reserve_b == 0 {
-        return Err(GenesisError::GenesisStateIsNotInitial);
-    }
-    // THE PAIR IS DERIVED, NOT ACCEPTED. Re-address the bytes under the market
-    // policy's own namespace and require them to be the address the vault
-    // state commits; only then read a pair out of them. Bytes that do not
-    // re-derive establish nothing at all.
-    let derived_addr = crate::ccb::decode::policy_object_address(
-        crate::ccb::class::MARKET_POLICY,
-        market_policy_bytes,
-    )
-    .ok_or(GenesisError::MarketPolicyDoesNotDecode)?;
-    if derived_addr != state.market_policy {
-        return Err(GenesisError::MarketPolicyIsNotTheCommittedOne);
-    }
-    let market = crate::ccb::decode::decode_market_policy(market_policy_bytes)
-        .map_err(|_| GenesisError::MarketPolicyDoesNotDecode)?;
-    let (token_a, token_b) = (*market.token_a(), *market.token_b());
-    if token_a >= token_b {
-        return Err(GenesisError::TokenPairNotOrdered);
-    }
-    // The signed operation funds the creation from exactly that pair, in that
-    // order. The commits are execution coordinates; this is where they are
-    // held to the authority.
-    if funding.pair() != (token_a, token_b) {
-        return Err(GenesisError::FundingIsNotTheMarketPair);
-    }
-    if state.storage_set_id != *network_storage_set_id {
-        return Err(GenesisError::StorageSetIsNotNetworkPinned);
-    }
-    // THE CREATION IS PROVEN INTO THE OWNER'S VALIDATED ROOT.
-    //
-    // The position comparison this replaces established only that the owner's
-    // lineage had reached `p_create` — it never read the root, so a genesis
-    // whose creation was never committed, or was committed in a transition the
-    // lineage later abandoned, passed on the counter alone.
-    //
-    // What proves it is the leaf itself: the creation record is insert-only at
-    // `vault_creation_key(G_o, DevID_o, v)`, so its presence under a root this
-    // verifier has validated IS the statement that this vault was created on
-    // this lineage. The key is derived from the owner's coordinates rather
-    // than supplied, and the leaf value is recomputed from the record — a
-    // caller supplies only the path.
-    if owner_validated.economic_position() < preimage.create_position {
-        return Err(GenesisError::OwnerRootIsNotValidated {
-            validated: owner_validated.economic_position(),
-            create: preimage.create_position,
-        });
-    }
-    let creation_key = derive::vault_creation_key(
-        &preimage.owner_genesis,
-        &preimage.owner_device_id,
-        &vault_id,
-    );
-    let creation_value = crate::economic::state::EconomicLeafState::VaultCreation(*creation)
-        .leaf_value()
-        .map_err(|_| GenesisError::CreationIsNotCommitted)?;
-    let proved = crate::economic::tree::root_from_path(
-        &creation_key,
-        &crate::economic::tree::leaf_node(&creation_key, Some(&creation_value)),
-        creation_siblings,
-    );
-    if proved != owner_validated.economic_root() {
-        return Err(GenesisError::CreationIsNotCommitted);
-    }
-    // `V_0` holds exactly the state leaf and nothing else, so `R_0` is a pure
-    // function of the genesis state.
-    let root =
-        genesis_root(&vault_id, state).map_err(|_| GenesisError::GenesisStateIsNotInitial)?;
-    if creation.genesis_root != root {
-        return Err(GenesisError::GenesisRootMismatch {
-            expected: root,
-            named: creation.genesis_root,
-        });
-    }
-    Ok(vault_id)
-}
 
 /// The vault's leaves at `R_0`, for the keys an acquisition needs: the state
 /// leaf at its key, and `Absent` at every other — nobody has traded with it
@@ -606,6 +345,7 @@ pub fn genesis_root(vault_id: &D32, state: &VaultStateLeaf) -> Result<D32, SofiW
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
+    use crate::sofi::wire::{VaultCreation, VaultGenesisPreimage, VAULT_STATUS_ACTIVE};
     use crate::economic::state::EconomicLeafState;
     use crate::sofi::wire::{PrecommitLeg, TraderRelationshipLeaf};
 
@@ -832,22 +572,6 @@ mod tests {
         }
     }
 
-    /// The market policy this vault commits, and its content address. The
-    /// address is DERIVED from the bytes, so the fixture cannot hand
-    /// `genesis_accepted` a pair that the policy does not actually say.
-    /// The funding pair as the SIGNED OPERATION states it — the only way to
-    /// obtain one, so a test cannot assert a pair production could not.
-    fn funding(a: D32, b: D32) -> CreationFunding {
-        CreationFunding::stated_by(&crate::types::operations::Operation::SofiVaultCreate {
-            genesis_preimage: Vec::new(),
-            creation: Vec::new(),
-            funding_a_policy_commit: a,
-            funding_b_policy_commit: b,
-            signature: Vec::new(),
-        })
-        .expect("a creation")
-    }
-
     fn market() -> (crate::ccb::state::MarketPolicy, Vec<u8>, D32) {
         let policy =
             crate::ccb::state::MarketPolicy::beta_constant_product(d(0x40), d(0x41)).unwrap();
@@ -856,33 +580,6 @@ mod tests {
             crate::ccb::decode::policy_object_address(crate::ccb::class::MARKET_POLICY, &bytes)
                 .unwrap();
         (policy, bytes, addr)
-    }
-
-    /// The owner's validated root WITH the creation record committed in it,
-    /// plus the path that proves it. This is the shape P15-12 requires: the
-    /// record is a leaf, and its inclusion is the proof the vault was created.
-    fn owner_root_committing(
-        preimage: &VaultGenesisPreimage,
-        creation: &VaultCreation,
-    ) -> (ValidatedEconomicRoot, [D32; ECONOMIC_SMT_HEIGHT]) {
-        let key = derive::vault_creation_key(
-            &preimage.owner_genesis,
-            &preimage.owner_device_id,
-            &preimage.vault_id(),
-        );
-        let value = crate::economic::state::EconomicLeafState::VaultCreation(*creation)
-            .leaf_value()
-            .unwrap();
-        let mut tree = crate::economic::tree::EconomicSmt::new();
-        tree.insert(key, value);
-        let validated = ValidatedEconomicRoot::rehydrate_from_admitted_store(
-            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                economic_position: P_POS,
-                economic_root: tree.root(),
-            },
-        )
-        .expect("an ordinary admitted position");
-        (validated, tree.siblings(&key))
     }
 
     fn genesis_parts() -> (VaultGenesisPreimage, VaultCreation) {
@@ -901,234 +598,6 @@ mod tests {
             amount_b: 2_000,
         };
         (preimage, creation)
-    }
-
-    /// A WELL-FORMED GENESIS IS ACCEPTED — with the market pair DERIVED from
-    /// authenticated policy bytes and the creation record PROVEN into the
-    /// owner's validated root.
-    #[test]
-    fn a_well_formed_genesis_is_accepted() {
-        let (preimage, creation) = genesis_parts();
-        let (_, policy_bytes, _) = market();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &owner,
-                &d(0x77),
-                &policy_bytes,
-                funding(d(0x40), d(0x41)),
-                &path,
-            ),
-            Ok(preimage.vault_id())
-        );
-    }
-
-    /// THE PAIR IS NOT THE CALLER'S TO ASSERT. Bytes that do not re-derive the
-    /// address the vault state commits establish nothing — they are not this
-    /// vault's market, whatever pair they happen to contain.
-    #[test]
-    fn market_policy_bytes_that_are_not_the_committed_ones_establish_nothing() {
-        let (preimage, creation) = genesis_parts();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-        // A perfectly valid policy — for a different market.
-        let other = crate::ccb::state::MarketPolicy::beta_constant_product(d(0x50), d(0x51))
-            .unwrap()
-            .encode();
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &owner,
-                &d(0x77),
-                &other,
-                funding(d(0x50), d(0x51)),
-                &path,
-            ),
-            Err(GenesisError::MarketPolicyIsNotTheCommittedOne)
-        );
-        // Bytes that are not a policy at all.
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &owner,
-                &d(0x77),
-                &[0xAB; 8],
-                funding(d(0x40), d(0x41)),
-                &path,
-            ),
-            Err(GenesisError::MarketPolicyIsNotTheCommittedOne)
-        );
-    }
-
-    /// The signed funding commits are held to the AUTHENTICATED pair, in
-    /// canonical order. They are execution coordinates, not a second market.
-    #[test]
-    fn funding_must_be_the_authenticated_pair_in_order() {
-        let (preimage, creation) = genesis_parts();
-        let (_, policy_bytes, _) = market();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-        for (wa, wb) in [
-            (d(0x40), d(0x42)), // one asset is not the vault's
-            (d(0x41), d(0x40)), // the pair, reversed
-            (d(0x50), d(0x51)), // another market entirely
-        ] {
-            let wrong = funding(wa, wb);
-            assert_eq!(
-                genesis_accepted(
-                    &preimage,
-                    &creation,
-                    &owner,
-                    &d(0x77),
-                    &policy_bytes,
-                    wrong,
-                    &path,
-                ),
-                Err(GenesisError::FundingIsNotTheMarketPair)
-            );
-        }
-    }
-
-    /// THE FUNDING PAIR CANNOT BE CONJURED — and what that still leaves open.
-    ///
-    /// `CreationFunding`'s only constructor reads the pair off a signed
-    /// `SofiVaultCreate`, so no caller can hand `genesis_accepted` a pair from
-    /// thin air. That is the half this branch closes.
-    ///
-    /// The half it does NOT close, asserted here so the gap is a test rather
-    /// than only prose: the creation record carries no asset commits, so
-    /// proving the leaf into the owner's root says nothing about WHICH
-    /// balances were debited. Two operations that debit different assets
-    /// produce the SAME creation record, hence the same leaf and the same
-    /// inclusion proof. Only binding the funding pair to the exact accepted
-    /// creation transition closes it, and that is E2's.
-    #[test]
-    fn the_funding_pair_comes_from_an_operation_but_is_not_yet_bound_to_the_transition() {
-        // Not conjurable: only a creation yields one.
-        assert!(CreationFunding::stated_by(&crate::types::operations::Operation::Noop).is_none());
-        assert_eq!(funding(d(0x40), d(0x41)).pair(), (d(0x40), d(0x41)));
-
-        // THE OPEN GAP. The same creation record — same leaf, same inclusion
-        // proof — is produced whichever assets the operation debits.
-        let (preimage, creation) = genesis_parts();
-        let (_, policy_bytes, _) = market();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-
-        let honest = funding(d(0x40), d(0x41));
-        let dishonest = funding(d(0x50), d(0x51));
-        assert_ne!(honest.pair(), dishonest.pair());
-
-        // The predicate distinguishes them only because the PAIR differs...
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &owner,
-                &d(0x77),
-                &policy_bytes,
-                honest,
-                &path
-            ),
-            Ok(preimage.vault_id())
-        );
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &owner,
-                &d(0x77),
-                &policy_bytes,
-                dishonest,
-                &path
-            ),
-            Err(GenesisError::FundingIsNotTheMarketPair)
-        );
-        // ...and NOT because the leaf says anything about assets: the record
-        // accepted in both calls is byte-identical.
-        assert_eq!(creation.encode(), creation.encode());
-        let record = crate::sofi::wire::VaultCreation::decode(&creation.encode()).unwrap();
-        assert_eq!(record, creation);
-        // A record naming assets would have a field for them. It has none.
-        assert_eq!(
-            creation.encode().len(),
-            4 + 32 + 32 + 8 + 8,
-            "vault_id, genesis_root, amount_a, amount_b — and no asset commits"
-        );
-    }
-
-    /// Every other genesis conjunct still refuses on its own. Restored after
-    /// the signature change: a rewrite is not a licence to drop coverage.
-    #[test]
-    fn genesis_is_refused_on_each_missing_check() {
-        let (preimage, creation) = genesis_parts();
-        let (_, policy_bytes, _) = market();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-        let pair = funding(d(0x40), d(0x41));
-        let run = |pre: &VaultGenesisPreimage,
-                   c: &VaultCreation,
-                   own: &ValidatedEconomicRoot,
-                   set: &D32,
-                   sib: &[D32; ECONOMIC_SMT_HEIGHT]| {
-            genesis_accepted(pre, c, own, set, &policy_bytes, pair, sib)
-        };
-
-        // A creation naming another vault.
-        let other = VaultCreation {
-            vault_id: d(0x09),
-            ..creation
-        };
-        assert!(matches!(
-            run(&preimage, &other, &owner, &d(0x77), &path),
-            Err(GenesisError::VaultIdIsNotTheDerivation { .. })
-        ));
-
-        // A genesis with history.
-        let aged = VaultGenesisPreimage {
-            state: genesis_state(1_000, 2_000, 1),
-            ..preimage.clone()
-        };
-        let aged_creation = VaultCreation {
-            vault_id: aged.vault_id(),
-            genesis_root: genesis_root(&aged.vault_id(), &aged.state).unwrap(),
-            ..creation
-        };
-        let (aged_owner, aged_path) = owner_root_committing(&aged, &aged_creation);
-        assert_eq!(
-            run(&aged, &aged_creation, &aged_owner, &d(0x77), &aged_path),
-            Err(GenesisError::GenesisStateIsNotInitial)
-        );
-
-        // Funding that is not the reserves.
-        let underfunded = VaultCreation {
-            amount_a: 999,
-            ..creation
-        };
-        let (under_owner, under_path) = owner_root_committing(&preimage, &underfunded);
-        assert_eq!(
-            run(&preimage, &underfunded, &under_owner, &d(0x77), &under_path),
-            Err(GenesisError::FundingIsNotTheReserves)
-        );
-
-        // Another network's storage set.
-        assert_eq!(
-            run(&preimage, &creation, &owner, &d(0x7F), &path),
-            Err(GenesisError::StorageSetIsNotNetworkPinned)
-        );
-
-        // An owner whose lineage has not reached the inserting position.
-        let behind = ValidatedEconomicRoot::rehydrate_from_admitted_store(
-            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                economic_position: P_POS - 1,
-                economic_root: owner.economic_root(),
-            },
-        )
-        .expect("an ordinary admitted position");
-        assert!(matches!(
-            run(&preimage, &creation, &behind, &d(0x77), &path),
-            Err(GenesisError::OwnerRootIsNotValidated { .. })
-        ));
     }
 
     /// `R_0` holds the state leaf and nothing else.
@@ -1191,58 +660,6 @@ mod tests {
             derive::vault_genesis_locator(&d(0xC1))
         );
         assert_eq!(state.credit_amount(), None);
-    }
-
-    /// THE CREATION MUST BE COMMITTED. A position counter cannot distinguish a
-    /// creation that happened from one that did not: the record is insert-only
-    /// at its own key, so its inclusion under a validated root IS the proof.
-    #[test]
-    fn a_creation_not_committed_under_the_owner_root_is_refused() {
-        let (preimage, creation) = genesis_parts();
-        let (_, policy_bytes, _) = market();
-        let (owner, path) = owner_root_committing(&preimage, &creation);
-
-        // The owner's lineage is at the right position and the root simply
-        // does not contain the record — the exact case the old position-only
-        // check accepted.
-        let empty = ValidatedEconomicRoot::rehydrate_from_admitted_store(
-            crate::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-                economic_position: P_POS,
-                economic_root: crate::economic::tree::empty_economic_root(),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &creation,
-                &empty,
-                &d(0x77),
-                &policy_bytes,
-                funding(d(0x40), d(0x41)),
-                &path,
-            ),
-            Err(GenesisError::CreationIsNotCommitted)
-        );
-
-        // A DIFFERENT record at the same key does not prove this one: the leaf
-        // value is recomputed from the record, never taken from the path.
-        let other = VaultCreation {
-            amount_a: creation.amount_a + 1,
-            ..creation
-        };
-        assert_eq!(
-            genesis_accepted(
-                &preimage,
-                &other,
-                &owner,
-                &d(0x77),
-                &policy_bytes,
-                funding(d(0x40), d(0x41)),
-                &path,
-            ),
-            Err(GenesisError::FundingIsNotTheReserves)
-        );
     }
 
     // ── the core-local fence ─────────────────────────────────────────────
