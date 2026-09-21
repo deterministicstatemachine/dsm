@@ -301,158 +301,17 @@ pub async fn read_registration(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
-    use std::sync::OnceLock;
-
     use dsm::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
-    use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-    use dsm::sofi::signature::SigningPayload;
-    use dsm::sofi::wire::{SofiResolutionClaim, SofiSetupBody};
-    use dsm::types::operations::Operation;
+    use dsm::sofi::wire::SofiResolutionClaim;
     use serial_test::serial;
 
     use super::*;
     use crate::sdk::economic_registers::{read_economic_root_cell, register_economic_root};
-    use crate::sdk::sofi_publish::publish_produced;
-    use crate::sdk::sofi_sdk::{build_fulfillment, draft_route, Produced, ToPublish};
     use crate::sdk::sofi_test_fixtures::{
-        all_policies, d, five, token, RouteFixture, DEV, G, OWNER_DEV, OWNER_G, P_CREATE, P_POS,
+        block_on, d, install_request as request, pair_bytes, signed_route as rig,
+        trader_keys as keys, trader_sign as sign, DEV, G,
     };
-    use crate::sdk::storage_io::{fake_fleet, fake_registers, leader_index};
-
-    fn keys() -> &'static (Vec<u8>, Vec<u8>) {
-        static KEYS: OnceLock<(Vec<u8>, Vec<u8>)> = OnceLock::new();
-        KEYS.get_or_init(|| generate_sphincs_keypair().unwrap())
-    }
-
-    fn sign(message: &[u8]) -> Vec<u8> {
-        sphincs_sign(&keys().1, message).unwrap()
-    }
-
-    fn block_on<T>(f: impl core::future::Future<Output = T>) -> T {
-        crate::runtime::get_runtime().block_on(f)
-    }
-
-    /// A two-hop route whose legs carry the `ρ` of real setups, everything
-    /// published to the fake fleet — the setups too, when asked — and the
-    /// signed exercise ready to install.
-    struct Rig {
-        set: StorageSet,
-        precommit: TraderPrecommitBody,
-        p_sig: Vec<u8>,
-        preimage: SettlementPreimage,
-        fulfillment: TraderFulfillmentBody,
-        f_sig: Vec<u8>,
-        own: BTreeMap<ValidationRef, Vec<u8>>,
-        setups: Vec<SofiSetupBody>,
-    }
-
-    fn produced_setup(body: &SofiSetupBody) -> Produced {
-        Produced {
-            operation: Operation::SofiSetup {
-                setup_body: body.encode(),
-                signature: Vec::new(),
-            },
-            signs: SigningPayload::SetupDigest(derive::setup_signing_digest(body)),
-            publish: vec![ToPublish::Setup(body.clone())],
-        }
-    }
-
-    fn rig(publish_setups: bool) -> Rig {
-        fake_fleet::reset();
-        fake_registers::reset();
-        let set = five();
-        let setups: Vec<SofiSetupBody> = (0..2)
-            .map(|j| {
-                let vault_id = derive::vault_id(&OWNER_G, &OWNER_DEV, P_CREATE + j as u64);
-                SofiSetupBody::new(
-                    G,
-                    DEV,
-                    P_POS - 1,
-                    vault_id,
-                    d(0x0B),
-                    d(0x0C),
-                    ALG,
-                    &keys().0,
-                )
-                .unwrap()
-            })
-            .collect();
-        let rhos: Vec<D32> = setups.iter().map(derive::setup_ref).collect();
-        let fx = RouteFixture::swap_with_setups(
-            2,
-            set.id(),
-            |j| (token(j), token(j + 1)),
-            |j, _| rhos[j],
-        );
-        fx.publish(&set, &all_policies());
-        let evidence = fx.acquire(&set);
-        let draft = draft_route(
-            fx.hops.clone(),
-            fx.cores.clone(),
-            &fx.ctx(&keys().0),
-            fx.realize_root,
-            fx.void_root,
-            &evidence,
-        )
-        .unwrap();
-        let p_sig = sign(&draft.precommit_signing_digest());
-        let attempts: Vec<(D32, u64)> = draft
-            .precommit()
-            .legs()
-            .iter()
-            .map(|l| (l.vault_id, 0))
-            .collect();
-        let produced = build_fulfillment(&draft, p_sig.clone(), &attempts).unwrap();
-        let f_sig = sign(produced.signs.bytes());
-        block_on(publish_produced(&set, &produced, &f_sig)).unwrap();
-        if publish_setups {
-            for body in &setups {
-                let sig = sign(&derive::setup_signing_digest(body));
-                block_on(publish_produced(&set, &produced_setup(body), &sig)).unwrap();
-            }
-        }
-        let fulfillment = produced
-            .publish
-            .iter()
-            .find_map(|p| match p {
-                ToPublish::Fulfillment(f) => Some(f.clone()),
-                _ => None,
-            })
-            .unwrap();
-        Rig {
-            set,
-            precommit: draft.precommit().clone(),
-            p_sig,
-            preimage: draft.preimage().clone(),
-            fulfillment,
-            f_sig,
-            own: BTreeMap::new(),
-            setups,
-        }
-    }
-
-    fn request(r: &Rig) -> InstallRequest<'_> {
-        InstallRequest {
-            precommit: &r.precommit,
-            precommit_signature: &r.p_sig,
-            preimage: &r.preimage,
-            fulfillment: &r.fulfillment,
-            fulfillment_signature: &r.f_sig,
-            own_objects: &r.own,
-        }
-    }
-
-    fn pair_bytes(r: &Rig) -> (Vec<u8>, Vec<u8>) {
-        (
-            Publication::Fulfillment {
-                body: &r.fulfillment,
-                signature: &r.f_sig,
-            }
-            .object_bytes()
-            .unwrap(),
-            derive::resolution_claim(&r.precommit, &r.fulfillment).encode(),
-        )
-    }
+    use crate::sdk::storage_io::{fake_registers, leader_index};
 
     fn ful_ns() -> &'static [u8] {
         TAG_DSM_SOFI_FULFILLMENT.source_bytes()

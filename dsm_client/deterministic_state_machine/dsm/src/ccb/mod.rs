@@ -233,6 +233,14 @@ pub mod class {
     /// canonical body, so a different valid signature encoding over the same
     /// body is the same object, not a second one.
     pub const SOFI_SIGNED_OBJECT: u16 = 0x005C;
+    /// The exercise (Section 17.5, rebuild step R11): the value written to
+    /// every successor key of a route — the signed envelope of `F`, the
+    /// signed envelope of `P`, `P(E)`, every `G_j` in leg order, and every
+    /// object `𝒞_E^pre` references. It proves itself from its own bytes and
+    /// state the reader already holds, and names its own attempt, so it
+    /// cannot count at another key. `0x005D` is the native-reserve credit
+    /// source (R4), which is why this is `0x005E`.
+    pub const SOFI_EXERCISE: u16 = 0x005E;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
