@@ -310,24 +310,11 @@ impl Resolver<'_> {
                 fulfillment_signature: &exercise.fulfillment.signature,
                 own_objects: &own,
             };
-            let mut evidence = acquire_conformance_evidence(self.set, &request).await?;
-            for entry in fulfillment.attempts() {
-                let Some(earlier) = entry.attempt.checked_sub(1) else {
-                    continue;
-                };
-                let Some(leg) = precommit
-                    .legs()
-                    .iter()
-                    .find(|l| l.vault_id == entry.vault_id)
-                else {
-                    continue;
-                };
-                let (cell, _) =
-                    read_attempt_cell(self.set, &leg.vault_id, &leg.parent_root, earlier).await?;
-                evidence
-                    .prior_attempts
-                    .insert((entry.vault_id, earlier), cell);
-            }
+            // Item 5's cells come from the one shared acquisition (R9/R12,
+            // owner ruling §44.4), so the producer and the verifier read the
+            // same keys the same way and cannot disagree about what an
+            // attempt skipped past.
+            let evidence = acquire_conformance_evidence(self.set, &request).await?;
             let conformance =
                 fulfillment_conformance(fulfillment, &exercise.fulfillment.signature, &evidence)
                     .verdict();
