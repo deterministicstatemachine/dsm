@@ -152,7 +152,9 @@ PermanentlyResolved(k, e) == FinalE(k, e) \/ LostTo(k, e)
 \* FulfillmentConformance (Section 20.2), for the registered F of tr:
 \* item 3 (complete canonical witness set), item 5 (an earlier attempt has a
 \* permanent storage resolution), evidence availability. Registration supplies
-\* no truth value.
+\* no truth value. The Rust predicate over all eight items is
+\* `sofi::conformance::fulfillment_conformance` (R7), with the same shape:
+\* a fact about bytes in hand is Invalid, an unmade read is Unavailable.
 \* The structural fact, as the spec states it.
 TrueConformance(tr) ==
     IF ~Registered(tr) THEN "Unavailable"
