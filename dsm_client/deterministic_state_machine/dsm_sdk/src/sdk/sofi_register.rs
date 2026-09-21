@@ -37,9 +37,13 @@ use dsm::sofi::wire::{
 };
 use dsm::types::error::DsmError;
 
-use crate::sdk::economic_registers::economic_root_namespace;
-use crate::sdk::sofi_publish::fetch_setup;
-use crate::sdk::storage_io::{read_stored_bytes, write_cells_leader_first};
+use dsm::sofi::arith::resolve_objects;
+use dsm::sofi::registration::{fulfillment_registered, names_fulfillment_key, Registration};
+
+use crate::sdk::economic_registers::{economic_root_namespace, names_root_key};
+use crate::sdk::sofi_evidence::LOCATOR_BUDGET;
+use crate::sdk::sofi_publish::{fetch_precommit, fetch_setup};
+use crate::sdk::storage_io::{leader_index, read_cell_raw, read_stored_bytes, write_cells_leader_first};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -230,6 +234,68 @@ pub async fn install_fulfillment(
         leader_reached: true,
         copies: write.copies,
     })
+}
+
+/// `FulfillmentRegistered` at position `q` of trader `(G, DevID)`, derived
+/// from raw reads of the two cells (Part II §13, rebuild step R10). `parent_root`
+/// is `R_p`, the root the verifier validated itself, from which `s(q)` and
+/// the leader follow. No member computes or writes any of this.
+///
+/// The recognized view at `K_ful(q)` needs each candidate's `P`: every
+/// fulfillment envelope any member holds at the key names one, and those are
+/// fetched by id (R8), at most `LOCATOR_BUDGET` of them. A candidate whose
+/// `P` is not in hand names nothing yet — the read answers `Unresolved`, and
+/// a later read can answer.
+pub async fn read_registration(
+    set: &StorageSet,
+    genesis: &D32,
+    device_id: &D32,
+    position: u64,
+    parent_root: &D32,
+) -> Result<Registration, DsmError> {
+    let k_ful = derive::fulfillment_register_key(genesis, device_id, position);
+    let k_root = economic_root_register_key(genesis, device_id, position);
+    let seed = position_seed(genesis, device_id, position, parent_root);
+    let leader = leader_index(set, &seed)?;
+    let ful_reads = read_cell_raw(set, TAG_DSM_SOFI_FULFILLMENT.source_bytes(), &k_ful).await?;
+    let root_reads = read_cell_raw(set, economic_root_namespace(), &k_root).await?;
+
+    // The precommits the candidates name, fetched by id: the only way to
+    // learn whose fulfillment a candidate is, and what its C_q would be.
+    let mut precommits: BTreeMap<D32, TraderPrecommitBody> = BTreeMap::new();
+    let mut examined = 0usize;
+    for value in ful_reads.iter().flatten().flatten() {
+        let Some((_, signed)) = dsm::sofi::publication::recognize_fulfillment(value) else {
+            continue;
+        };
+        let pid = *signed.body.precommit_id();
+        if precommits.contains_key(&pid) {
+            continue;
+        }
+        examined += 1;
+        if examined > LOCATOR_BUDGET {
+            break;
+        }
+        if let Resolved::Kept(p) = fetch_precommit(set, &pid).await? {
+            precommits.insert(pid, p.body);
+        }
+    }
+
+    let arity = |e: dsm::sofi::arith::ArityError| DsmError::verification(e.to_string());
+    let fulfillment = resolve_objects(&ful_reads, leader, |bytes| {
+        names_fulfillment_key(bytes, genesis, device_id, position, &precommits).is_some()
+    })
+    .map_err(arity)?;
+    let root = resolve_objects(&root_reads, leader, |bytes| names_root_key(bytes, &k_root))
+        .map_err(arity)?;
+    Ok(fulfillment_registered(
+        &fulfillment,
+        &root,
+        genesis,
+        device_id,
+        position,
+        &precommits,
+    ))
 }
 
 #[cfg(test)]
@@ -561,6 +627,225 @@ mod tests {
             block_on(read_economic_root_cell(&r.set, &at.k_root, &at.seed)).unwrap(),
             Some(c_bytes),
             "the first object naming the key at the leader is what is final"
+        );
+    }
+
+    // ── R10: FulfillmentRegistered, derived from the two cells ─────────────
+
+    /// Part II §13: after the install, the two cells' final values ARE the
+    /// registration — nothing else was written anywhere, and the reader
+    /// derives the fact from raw reads with the same leader an install used.
+    #[test]
+    #[serial]
+    fn a_registration_is_derived_from_the_two_cells_and_no_member_writes_it() {
+        let r = rig(true);
+        let at = position_of(&r.precommit, &r.fulfillment);
+        assert_eq!(
+            block_on(read_registration(
+                &r.set,
+                &G,
+                &DEV,
+                at.position,
+                r.precommit.void_root()
+            ))
+            .unwrap(),
+            Registration::Unresolved,
+            "an open position"
+        );
+        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
+        assert_eq!(
+            block_on(read_registration(
+                &r.set,
+                &G,
+                &DEV,
+                at.position,
+                r.precommit.void_root()
+            ))
+            .unwrap(),
+            Registration::Registered(Signed {
+                body: r.fulfillment.clone(),
+                signature: r.f_sig.clone(),
+            })
+        );
+        // Exactly the two values, one per cell, at every member: no
+        // registration record exists to be read.
+        for reads in [
+            fake_registers::get_cells(&r.set, ful_ns(), &at.k_ful),
+            fake_registers::get_cells(&r.set, economic_root_namespace(), &at.k_root),
+        ] {
+            assert!(reads.iter().all(|m| m.as_ref().map(|v| v.len()) == Some(1)));
+        }
+    }
+
+    /// `LeaderHeld` is not `Final`: the pair at the leader and one copy is
+    /// not a registration, and becomes one once two other members hold it.
+    #[test]
+    #[serial]
+    fn held_at_the_leader_but_not_copied_is_not_registered() {
+        let r = rig(true);
+        let at = position_of(&r.precommit, &r.fulfillment);
+        let leader = leader_index(&r.set, &at.seed).unwrap();
+        let others: Vec<String> = r
+            .set
+            .members()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != leader)
+            .map(|(_, m)| m.member_id.clone())
+            .collect();
+        for m in &others[..3] {
+            fake_registers::fail_member(m, true);
+        }
+        let installed = block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
+        assert_eq!(installed.copies, 1);
+        let read = || {
+            block_on(read_registration(
+                &r.set,
+                &G,
+                &DEV,
+                at.position,
+                r.precommit.void_root(),
+            ))
+            .unwrap()
+        };
+        assert_eq!(read(), Registration::Unresolved, "one copy is not final");
+        for m in &others[..3] {
+            fake_registers::fail_member(m, false);
+        }
+        // Anyone may carry the same bytes to the members not reached — one
+        // half at a time here, so that each cell's finality is isolated.
+        let (f_bytes, c_bytes) = pair_bytes(&r);
+        let carry_to: Vec<usize> = r
+            .set
+            .members()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| others[..2].contains(&m.member_id))
+            .map(|(i, _)| i)
+            .collect();
+        for i in &carry_to {
+            fake_registers::put_cell_to_member(
+                &r.set,
+                *i,
+                economic_root_namespace(),
+                &at.k_root,
+                &c_bytes,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            read(),
+            Registration::Unresolved,
+            "K_root(q) final beside a merely leader-held F is not a registration"
+        );
+        for i in &carry_to {
+            fake_registers::put_cell_to_member(&r.set, *i, ful_ns(), &at.k_ful, &f_bytes).unwrap();
+        }
+        assert_eq!(
+            read(),
+            Registration::Registered(Signed {
+                body: r.fulfillment.clone(),
+                signature: r.f_sig.clone(),
+            }),
+            "leader plus two copies at both cells"
+        );
+    }
+
+    /// PairMutualExclusion: a claim that reached the leader of `K_root(q)`
+    /// first — here another fulfillment's `C_q'`, standing for any ordinary
+    /// transition at `q` — settles that this `F` is never registered, even
+    /// though `F` itself is final at `K_ful(q)`.
+    #[test]
+    #[serial]
+    fn a_claim_first_at_the_root_cell_settles_that_the_fulfillment_never_registers() {
+        let r = rig(true);
+        let at = position_of(&r.precommit, &r.fulfillment);
+        let leader = leader_index(&r.set, &at.seed).unwrap();
+        let rival_f = TraderFulfillmentBody::new(
+            *r.fulfillment.precommit_id(),
+            r.fulfillment.policy_fulfillment_set().to_vec(),
+            r.fulfillment
+                .attempts()
+                .iter()
+                .map(|a| dsm::sofi::wire::AttemptEntry {
+                    vault_id: a.vault_id,
+                    attempt: a.attempt + 1,
+                })
+                .collect(),
+            r.fulfillment.position(),
+            ALG,
+            &keys().0,
+        )
+        .unwrap();
+        let rival_claim = derive::resolution_claim(&r.precommit, &rival_f).encode();
+        fake_registers::put_cell(
+            &r.set,
+            leader,
+            economic_root_namespace(),
+            &at.k_root,
+            &rival_claim,
+        );
+        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
+        assert_eq!(
+            block_on(read_registration(
+                &r.set,
+                &G,
+                &DEV,
+                at.position,
+                r.precommit.void_root()
+            ))
+            .unwrap(),
+            Registration::NeverRegistered {
+                fulfillment: Signed {
+                    body: r.fulfillment.clone(),
+                    signature: r.f_sig.clone(),
+                },
+                settled_at: dsm::sofi::registration::PositionCell::Root,
+            }
+        );
+    }
+
+    /// Bytes that are not an object naming `K_ful(q)` — garbage, and a
+    /// well-formed fulfillment of a precommit nobody published — are nothing
+    /// at the cell, however early they arrived at the leader: the trader's
+    /// own `F` is the leader's first RECOGNIZED object and registers.
+    #[test]
+    #[serial]
+    fn a_fulfillment_that_names_no_published_precommit_is_nothing_at_the_key() {
+        let r = rig(true);
+        let at = position_of(&r.precommit, &r.fulfillment);
+        let leader = leader_index(&r.set, &at.seed).unwrap();
+        fake_registers::put_cell(&r.set, leader, ful_ns(), &at.k_ful, b"not an envelope");
+        let orphan = TraderFulfillmentBody::new(
+            d(0x0F),
+            r.fulfillment.policy_fulfillment_set().to_vec(),
+            r.fulfillment.attempts().to_vec(),
+            r.fulfillment.position(),
+            ALG,
+            &keys().0,
+        )
+        .unwrap();
+        let orphan_bytes = Publication::Fulfillment {
+            body: &orphan,
+            signature: &sign(&derive::fulfillment_signing_digest(&orphan)),
+        }
+        .object_bytes()
+        .unwrap();
+        fake_registers::put_cell(&r.set, leader, ful_ns(), &at.k_ful, &orphan_bytes);
+        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
+        assert_eq!(
+            block_on(read_registration(
+                &r.set,
+                &G,
+                &DEV,
+                at.position,
+                r.precommit.void_root()
+            ))
+            .unwrap(),
+            Registration::Registered(Signed {
+                body: r.fulfillment.clone(),
+                signature: r.f_sig.clone(),
+            })
         );
     }
 }

@@ -34,6 +34,10 @@
     - ORDERING          no numeric holes in attempt indices; counters never wrap
     - STORAGEREACHABLE  a noncanonical DAG whose producer is (parent, E) — never the
                         attempt; reachable is not canonical
+    - REGISTRATION      (R10) FulfillmentRegistered is both cells final with the root
+                        on this F's own claim — a conclusion from reads, never a
+                        record; a rival first at the leader settles loss; the root
+                        final on another claim never registers
   Modelling premises:
     * Members are positions of the frozen five-member set; a store is the
       members' lists at ONE key. Members are read truthfully or not at all:
@@ -74,6 +78,8 @@
      6. `AttemptLive` dropped from Consumed     -> `walk_consumes_at_most_once`
         (replaced by True)                       (`attempt_live_is_load_bearing` is the
                                                   witness of what that admits and stays green)
+     7. (R10) `registered` accepting a leader-  -> `registration_needs_both_finals`
+        held F at K_ful
   Run: `lean -DwarningAsError=true DSMSofiSuccessorCells.lean`
 -/
 
@@ -888,6 +894,61 @@ theorem storage_reachable_does_not_imply_canonical :
 #print axioms index_skip_without_projection
 #print axioms checked_counters_never_wrap
 #print axioms storage_reachable_producer_identity_excludes_attempt
+-- ── registration: the two position cells (rebuild step R10) ──────────────
+
+/-- `FulfillmentRegistered(F)` (`sofi::registration::fulfillment_registered`):
+`F` final at `K_ful(q)` and, at `K_root(q)`, this `F`'s own claim final —
+`claimOf` is `resolution_claim(P, F)`. Nothing else: no member's word, no
+record. -/
+def registered (ful root : Res) (f : Val) (claimOf : Val → Val) : Bool :=
+  match ful, root with
+  | .final f', .final c => f' == f && c == claimOf f
+  | _, _ => false
+
+/-- REGISTRATION NEEDS BOTH FINALS
+(`registration_needs_both_cells_final_and_the_root_on_this_claim`): a pair
+held at the leader but not copied is not registered, and neither is a final
+`F` beside a root cell that is not final on its claim. Mutation: `registered`
+accepting `.leaderHeld f` at `K_ful` — this fails. -/
+theorem registration_needs_both_finals (ful root : Res) (f : Val) (claimOf : Val → Val)
+    (h : registered ful root f claimOf = true) : ful = .final f ∧ root = .final (claimOf f) := by
+  cases ful <;> cases root <;> simp [registered] at h
+  rename_i f' c
+  obtain ⟨hf, hc⟩ := h
+  subst hf; subst hc
+  exact ⟨rfl, rfl⟩
+
+/-- A RIVAL FIRST AT THE LEADER SETTLES LOSS
+(`a_claim_first_at_the_root_cell_settles_that_the_fulfillment_never_registers`,
+`held_at_the_leader_but_not_copied_is_not_registered`): once the leader's
+first object at `K_ful(q)` is some `u ≠ f`, no read — partial or full —
+registers `f`, because `resolve` names the leader's first value and only it
+can be final (`resolve_names_leader_first`). -/
+theorem a_rival_first_at_the_leader_settles_loss (obs : Nat → Obs) (leader : Nat) (u f : Val)
+    (hu : leaderFirst obs leader = some u) (hne : u ≠ f) (root : Res) (claimOf : Val → Val) :
+    registered (resolve obs leader) root f claimOf = false := by
+  unfold resolve
+  simp only [hu]
+  split
+  · cases root with
+    | final c => simp [registered, hne]
+    | leaderHeld _ => rfl
+    | unresolved => rfl
+  · cases root <;> rfl
+
+/-- THE ROOT CELL FINAL ON ANOTHER CLAIM NEVER REGISTERS (PairMutualExclusion): with
+`K_root(q)` final on `c ≠ claimOf f`, `f` is not registered whatever
+`K_ful(q)` holds. -/
+theorem root_final_on_another_claim_never_registers (ful : Res) (c f : Val) (claimOf : Val → Val)
+    (hne : c ≠ claimOf f) : registered ful (.final c) f claimOf = false := by
+  cases ful with
+  | final f' => simp [registered, hne]
+  | leaderHeld _ => rfl
+  | unresolved => rfl
+
+#print axioms registration_needs_both_finals
+#print axioms a_rival_first_at_the_leader_settles_loss
+#print axioms root_final_on_another_claim_never_registers
 #print axioms storage_reachable_producer_unique
 #print axioms storage_reachable_generation_acyclic
 #print axioms storage_reachable_does_not_imply_canonical

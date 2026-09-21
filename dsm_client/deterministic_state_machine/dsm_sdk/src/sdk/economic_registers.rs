@@ -73,7 +73,7 @@ pub(crate) fn economic_root_namespace() -> &'static [u8] {
 /// claim and a fulfillment's claim race at the one leader of `s(q)` through
 /// this single rule. Bytes that are not one count as nothing (Part II §8):
 /// they are neither a rival nor a winner.
-fn names_root_key(value: &[u8], k_root: &[u8; 32]) -> bool {
+pub(crate) fn names_root_key(value: &[u8], k_root: &[u8; 32]) -> bool {
     dsm::economic::claim_envelope::decode_registered_economic_claim(value)
         .map(|claim| {
             let (genesis, devid) = claim.trader();
