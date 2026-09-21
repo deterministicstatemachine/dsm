@@ -1,6 +1,6 @@
 /-
   SoFi storage facts for objects and indexes — Part II §10, §11, §13 —
-  rebuild step R1 — self-contained Lean 4 (no Mathlib, no imports)
+  rebuild steps R1 and R5 — self-contained Lean 4 (no Mathlib, no imports)
 
   A member stores bytes under the hash of the bytes and appends content
   addresses under locators; it interprets nothing. Core turns raw member
@@ -34,6 +34,13 @@
                                      candidate is Unavailable, never None
     - within_budget_exhausted_is_none
                                      every candidate examined, none verifies ⇒ None
+    - acquired_bytes_are_stored      (R5) acquisition holds only Stored bytes,
+                                     at the addresses the preimage needs
+    - nothing_is_defaulted           (R5) nothing needed, or nothing read ⇒ the
+      silence_acquires_nothing       evidence holds nothing; never filled in
+    - missing_evidence_is_unavailable_never_invalid
+                                     (R5) a check over an unfetched item is
+                                     Unavailable; acquisition_decides_nothing
 
   MUTATION CONTROLS, executed against the Rust module (each turns the named
   Rust test red) and against this file (each puts the named theorem on
@@ -45,6 +52,8 @@
     3. keep a candidate without recomputing     -> kept_verifies,
        its identity                                garbage_is_never_kept
     4. over budget reported as None             -> over_budget_is_unavailable_never_none
+    5. (R5) acquire defaults an unread address  -> acquired_bytes_are_stored,
+       (`| none => some 0` in `acquire`)           silence_acquires_nothing
   Run: `lean -DwarningAsError=true DSMSofiStorage.lean`
 -/
 
@@ -279,6 +288,68 @@ theorem within_budget_exhausted_is_none {α : Type} (R : Recognizer α) (L : Nat
           · exact ih b hlen' hg'
         · exact ih b hlen' hg'
 
+
+-- ── §13 acquisition — rebuild step R5 ─────────────────────────────────────
+
+/-- Evidence, as Core holds it: bytes by address, or nothing. Production code
+builds it only by acquisition (`Evidence::acquired` at the end of
+`sdk::sofi_evidence::acquire_evidence`); `Default` exists only under
+`cfg(test)` (gate G2). -/
+def Evidence := Nat → Option Nat
+
+/-- Acquisition: for every address a preimage needs, the Stored bytes at that
+address, and nothing else. An address that is not needed, or whose bytes are
+not Stored, is absent — never filled in. -/
+def acquire (needs : List Nat) (reads : Nat → List Read) : Evidence :=
+  fun a => if a ∈ needs then stored h a (reads a) else none
+
+/-- What a check needs, three-valued: an absent item is Unavailable, never
+Invalid, and never a value. -/
+inductive Verdict where
+  | valid
+  | invalid
+  | unavailable
+  deriving DecidableEq
+
+def need (item : Option Nat) (check : Nat → Verdict) : Verdict :=
+  match item with
+  | some p => check p
+  | none => .unavailable
+
+/-- Every acquired item is Stored at its address: acquisition adds nothing a
+member did not return three times over. -/
+theorem acquired_bytes_are_stored {needs : List Nat} {reads : Nat → List Read} {a p : Nat}
+    (hq : acquire h needs reads a = some p) : stored h a (reads a) = some p := by
+  unfold acquire at hq
+  split at hq
+  · exact hq
+  · exact Option.noConfusion hq
+
+/-- Nothing is defaulted: with nothing needed, or nothing read, the evidence
+holds nothing. -/
+theorem nothing_is_defaulted (reads : Nat → List Read) (a : Nat) :
+    acquire h [] reads a = none := by
+  simp [acquire]
+
+theorem silence_acquires_nothing (needs : List Nat) (a : Nat) :
+    acquire h needs (fun _ => []) a = none := by
+  unfold acquire
+  split
+  · rfl
+  · rfl
+
+/-- Missing evidence is Unavailable, never Invalid: a check over an item the
+acquisition did not fetch cannot refuse the operation. -/
+theorem missing_evidence_is_unavailable_never_invalid (ev : Evidence) (a : Nat)
+    (check : Nat → Verdict) (hm : ev a = none) : need (ev a) check = .unavailable := by
+  simp [need, hm]
+
+/-- And a fetched item is judged by its check alone: acquisition decides
+nothing. -/
+theorem acquisition_decides_nothing (ev : Evidence) (a p : Nat) (check : Nat → Verdict)
+    (hp : ev a = some p) : need (ev a) check = check p := by
+  simp [need, hp]
+
 #print axioms stored_returns_exact_bytes
 #print axioms counting_reads_agree
 #print axioms wrong_bytes_never_count
@@ -289,5 +360,8 @@ theorem within_budget_exhausted_is_none {α : Type} (R : Recognizer α) (L : Nat
 #print axioms garbage_is_never_kept
 #print axioms over_budget_is_unavailable_never_none
 #print axioms within_budget_exhausted_is_none
+#print axioms acquired_bytes_are_stored
+#print axioms nothing_is_defaulted
+#print axioms missing_evidence_is_unavailable_never_invalid
 
 end DSMSofiStorage

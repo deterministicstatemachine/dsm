@@ -3,7 +3,6 @@
 # rebuild step expected to wire it. A step that wires one DELETES its line;
 # this file only shrinks; R14 deletes it and G1 passes with no exceptions.
 dsm_client/deterministic_state_machine/dsm/src/sofi/admission.rs preimage_admissible  # R6
-dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs vault_genesis_locator  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs relationship_index_key  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs setup_ref  # R8
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs policy_fulfillment_id  # R8
