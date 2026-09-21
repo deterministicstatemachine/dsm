@@ -41,7 +41,7 @@
 //! Dark: nothing calls these yet.
 
 use dsm::core::state_machine::transition::operation_signing_bytes;
-use dsm::sofi::admission::{admissible, NotAdmissible};
+use dsm::sofi::admission::{preimage_admissible, NotAdmissible};
 use dsm::sofi::conformance::{
     check_fulfillment_against_precommit, derive_policy_fulfillments, FulfillmentConformanceError,
 };
@@ -50,7 +50,7 @@ use dsm::economic::lineage::ValidatedEconomicRoot;
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::lineage::GenesisError;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
-use dsm::sofi::validation::{validate, Evidence, Invalid, Refusal};
+use dsm::sofi::validation::{validate, Evidence, Invalid, Missing, Refusal};
 use dsm::sofi::wire::{
     AttemptEntry, DlvCore, OwnerAuthority, ParentClaimRef, PreEClosureIndex, PrecommitLeg,
     SettlementBody, SettlementPreimage, SofiSetupBody, SofiWireError, SwapHop, TraderCore,
@@ -69,10 +69,13 @@ pub enum BuildError {
     NotAdmissible(NotAdmissible),
     /// The fulfillment is not a mechanical fulfillment of its precommit.
     Conformance(FulfillmentConformanceError),
-    /// A verifier would call this Invalid with no evidence at all, for this
-    /// named reason. Producing it would hand the trader an operation that is
-    /// already refused.
+    /// A verifier calls this Invalid, for this named reason. Producing it
+    /// would hand the trader an operation that is already refused.
     StaticallyInvalid(Invalid),
+    /// Rule T5: evidence the verifier needs is not in hand, so the producer
+    /// stops — it never publishes, exercises or advances on Unavailable.
+    /// Nothing about the operation is wrong; what is missing is named.
+    Unavailable(Missing),
     /// `P` is not validly signed, so the fulfillment would name a precommit
     /// storage refuses.
     PrecommitSignature(SignatureError),
@@ -96,8 +99,13 @@ impl core::fmt::Display for BuildError {
             Self::Conformance(e) => write!(f, "{e:?}"),
             Self::StaticallyInvalid(reason) => write!(
                 f,
-                "a verifier refuses this operation with no evidence at all \
-                 ({reason:?}); it is not a trade, it is a way to strand one"
+                "a verifier refuses this operation ({reason:?}); it is not a trade, it is a \
+                 way to strand one"
+            ),
+            Self::Unavailable(missing) => write!(
+                f,
+                "the producer stops: evidence a verifier needs is not in hand ({missing:?}); \
+                 nothing is published, exercised or advanced on Unavailable"
             ),
             Self::Genesis(e) => write!(f, "{e}"),
             Self::PreTreeIsNotThePredecessor => write!(
@@ -350,9 +358,9 @@ fn draft(
     void_root: D32,
     evidence: &Evidence,
 ) -> Result<PrecommitDraft, BuildError> {
-    admissible(&settlement).map_err(BuildError::NotAdmissible)?;
-
     let preimage = SettlementPreimage::new(settlement, ctx.trader_core.clone(), cores)?;
+    // Beta will not execute this, so nothing here will build it.
+    preimage_admissible(&preimage).map_err(BuildError::NotAdmissible)?;
     let e = derive::recompute_e(&preimage)?;
     let precommit = TraderPrecommitBody::new(
         ctx.genesis,
@@ -368,13 +376,18 @@ fn draft(
         ctx.claimant_public_key,
     )?;
 
-    // THE VERIFIER'S OWN REFUSAL, over the evidence the producer ACQUIRED
+    // THE VERIFIER'S OWN VERDICT, over the evidence the producer ACQUIRED
     // (`sofi_evidence::acquire_evidence`, rebuild step R5) — never a default.
-    // Invalid means the trader would be building something a verifier already
-    // refuses, so it is refused now instead. Unavailable is what the producer
-    // stops on in rebuild step R6.
-    if let Err(Refusal::Invalid(reason)) = validate(&precommit, &preimage, evidence) {
-        return Err(BuildError::StaticallyInvalid(reason));
+    // Any result but Valid stops the producer (rebuild step R6): Invalid means
+    // the trader would be building something a verifier already refuses;
+    // Unavailable means the verifier could not decide, and rule T5 says a
+    // producer never publishes, exercises or advances on that. The three-valued
+    // conjunction never lets missing evidence hide a refusal, and never lets
+    // it pass for one.
+    match validate(&precommit, &preimage, evidence) {
+        Ok(()) => {}
+        Err(Refusal::Invalid(reason)) => return Err(BuildError::StaticallyInvalid(reason)),
+        Err(Refusal::Unavailable(missing)) => return Err(BuildError::Unavailable(missing)),
     }
 
     Ok(PrecommitDraft {
@@ -723,24 +736,111 @@ mod tests {
         ctx(trader_core(d(0x40), d(0x41), &[d(0xC1)]))
     }
 
-    fn draft_one_hop() -> PrecommitDraft {
-        draft_trade(
+    /// THE ROUTE MUST CHAIN, and a producer refuses one that does not — with
+    /// no evidence fetched at all, because a verifier needs none to know.
+    /// This test previously built exactly this pair and PASSED, which is what
+    /// made it a demonstration of the bug rather than a test of the gate.
+    #[test]
+    fn a_producer_refuses_a_route_that_does_not_chain() {
+        // hop0 gives 0x41/90; hop1 takes 0x40/100. Neither end matches.
+        let broken = vec![
             hop(0xC1, 0x40, 100, 0x41, 90),
-            dlv_core(0xC1),
-            &one_hop_ctx(),
-            d(0xA1),
-            PRE_ROOT,
-            &no_evidence(),
+            hop(0xC2, 0x40, 100, 0x41, 90),
+        ];
+        assert_eq!(
+            draft_route(
+                broken,
+                vec![dlv_core(0xC1), dlv_core(0xC2)],
+                &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1), d(0xC2)])),
+                d(0xA1),
+                PRE_ROOT,
+                &no_evidence()
+            ),
+            Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
+                hop: 1
+            }))
+        );
+    }
+
+    /// `P.void_root` IS `T°.pre_root` (P15-2) — evidence-independent, so the
+    /// producer refuses a draft that guesses it.
+    #[test]
+    fn a_producer_refuses_a_void_root_that_is_not_the_pre_root() {
+        assert_eq!(
+            draft_trade(
+                hop(0xC1, 0x40, 100, 0x41, 90),
+                dlv_core(0xC1),
+                &one_hop_ctx(),
+                d(0xA1),
+                d(0x6F),
+                &no_evidence()
+            ),
+            Err(BuildError::StaticallyInvalid(
+                Invalid::VoidRootIsNotThePreRoot
+            ))
+        );
+    }
+
+    /// Beta's hop cap is refused before anything is assembled (R16-6).
+    #[test]
+    fn a_producer_refuses_a_route_beta_will_not_execute() {
+        let hops = vec![
+            hop(0xC1, 0x40, 100, 0x41, 90),
+            hop(0xC2, 0x41, 90, 0x42, 80),
+            hop(0xC3, 0x42, 80, 0x43, 70),
+        ];
+        let vaults = [d(0xC1), d(0xC2), d(0xC3)];
+        assert_eq!(
+            draft_route(
+                hops,
+                vaults.iter().map(|v| dlv_core(v[0])).collect(),
+                &ctx(trader_core(d(0x40), d(0x43), &vaults)),
+                d(0xA1),
+                PRE_ROOT,
+                &no_evidence()
+            ),
+            Err(BuildError::NotAdmissible(NotAdmissible::TooManyLegs {
+                legs: 3,
+                max: 2
+            }))
+        );
+    }
+
+    // ── Over ACQUIRED evidence: the producer builds only what a verifier
+    // validates, and stops on what it cannot decide (rebuild step R6) ────
+
+    use crate::sdk::sofi_test_fixtures::{all_policies, five, RouteFixture};
+    use crate::sdk::storage_io::fake_fleet;
+    use dsm::sofi::validation::Missing;
+    use serial_test::serial;
+
+    /// A one-hop swap at a vault's genesis, published to the fake fleet, its
+    /// evidence acquired, and the draft the producer builds over it.
+    fn one_hop() -> (RouteFixture, PrecommitDraft) {
+        fake_fleet::reset();
+        let set = five();
+        let fx = RouteFixture::swap(1, set.id());
+        fx.publish(&set, &all_policies());
+        let evidence = fx.acquire(&set);
+        let draft = draft_route(
+            fx.hops.clone(),
+            fx.cores.clone(),
+            &fx.ctx(&keypair().0),
+            fx.realize_root,
+            fx.void_root,
+            &evidence,
         )
-        .unwrap()
+        .expect("acquired evidence validates the draft");
+        (fx, draft)
     }
 
     /// An exercise is signed TWICE, and the draft is the first stage: it hands
     /// back `m_P` and nothing else. (The producer this replaces returned one
     /// object and dropped P's signature on the floor.)
     #[test]
+    #[serial]
     fn an_exercise_is_signed_twice_and_p_travels_with_its_signature() {
-        let draft = draft_one_hop();
+        let (fx, draft) = one_hop();
         assert_eq!(
             draft.precommit_signing_digest(),
             derive::precommit_signing_digest(draft.precommit()),
@@ -748,7 +848,8 @@ mod tests {
         );
 
         let p_signature = sign_precommit(&draft);
-        let produced = build_fulfillment(&draft, p_signature.clone(), &[(d(0xC1), 0)]).unwrap();
+        let produced =
+            build_fulfillment(&draft, p_signature.clone(), &[(fx.vaults[0].vault_id, 0)]).unwrap();
         // The second signature is over `m_F` — the fulfillment's OWN digest,
         // which is what a storage member checks on the bare object.
         assert_eq!(
@@ -785,9 +886,10 @@ mod tests {
     /// for non-empty bytes would let the trader sign `m_F` — the irreversible
     /// half — against a precommit storage then refuses.
     #[test]
+    #[serial]
     fn a_producer_refuses_a_precommit_that_is_not_validly_signed() {
-        let draft = draft_one_hop();
-        let attempts = [(d(0xC1), 0)];
+        let (fx, draft) = one_hop();
+        let attempts = [(fx.vaults[0].vault_id, 0)];
 
         assert_eq!(
             build_fulfillment(&draft, Vec::new(), &attempts),
@@ -822,80 +924,40 @@ mod tests {
         assert!(build_fulfillment(&draft, sign_precommit(&draft), &attempts).is_ok());
     }
 
-    /// THE ROUTE MUST CHAIN, and a producer refuses one that does not — with
-    /// no evidence fetched at all, because a verifier needs none to know.
-    /// This test previously built exactly this pair and PASSED, which is what
-    /// made it a demonstration of the bug rather than a test of the gate.
+    /// A route that chains builds, at the beta cap — over acquired evidence
+    /// for both vaults.
     #[test]
-    fn a_producer_refuses_a_route_that_does_not_chain() {
-        // hop0 gives 0x41/90; hop1 takes 0x40/100. Neither end matches.
-        let broken = vec![
-            hop(0xC1, 0x40, 100, 0x41, 90),
-            hop(0xC2, 0x40, 100, 0x41, 90),
-        ];
-        assert_eq!(
-            draft_route(
-                broken,
-                vec![dlv_core(0xC1), dlv_core(0xC2)],
-                &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1), d(0xC2)])),
-                d(0xA1),
-                PRE_ROOT,
-                &no_evidence()
-            ),
-            Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
-                hop: 1
-            }))
-        );
-    }
-
-    /// A route that chains builds, at the beta cap.
-    #[test]
+    #[serial]
     fn a_two_hop_route_that_chains_builds() {
+        fake_fleet::reset();
+        let set = five();
+        let fx = RouteFixture::swap(2, set.id());
+        fx.publish(&set, &all_policies());
+        let evidence = fx.acquire(&set);
         let draft = draft_route(
-            vec![
-                hop(0xC1, 0x40, 100, 0x41, 90),
-                hop(0xC2, 0x41, 90, 0x42, 80),
-            ],
-            vec![dlv_core(0xC1), dlv_core(0xC2)],
-            &ctx(trader_core(d(0x40), d(0x42), &[d(0xC1), d(0xC2)])),
-            d(0xA1),
-            PRE_ROOT,
-            &no_evidence(),
+            fx.hops.clone(),
+            fx.cores.clone(),
+            &fx.ctx(&keypair().0),
+            fx.realize_root,
+            fx.void_root,
+            &evidence,
         )
         .unwrap();
         let produced = build_fulfillment(
             &draft,
             sign_precommit(&draft),
-            &[(d(0xC1), 0), (d(0xC2), 1)],
+            &[(fx.vaults[0].vault_id, 0), (fx.vaults[1].vault_id, 1)],
         )
         .unwrap();
         assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
     }
 
-    /// `P.void_root` IS `T°.pre_root` (P15-2) — evidence-independent, so the
-    /// producer refuses a draft that guesses it.
-    #[test]
-    fn a_producer_refuses_a_void_root_that_is_not_the_pre_root() {
-        assert_eq!(
-            draft_trade(
-                hop(0xC1, 0x40, 100, 0x41, 90),
-                dlv_core(0xC1),
-                &one_hop_ctx(),
-                d(0xA1),
-                d(0x6F),
-                &no_evidence()
-            ),
-            Err(BuildError::StaticallyInvalid(
-                Invalid::VoidRootIsNotThePreRoot
-            ))
-        );
-    }
-
     /// The attempt vector is chosen at exercise time, and one that does not
     /// cover P's legs is refused here rather than at a member's ingress.
     #[test]
+    #[serial]
     fn a_producer_refuses_attempts_that_do_not_cover_the_legs() {
-        let draft = draft_one_hop();
+        let (_fx, draft) = one_hop();
         // An attempt for a vault this P never names.
         assert_eq!(
             build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xCF), 0)]),
@@ -913,49 +975,33 @@ mod tests {
         ));
     }
 
-    /// Beta's hop cap is refused before anything is assembled (R16-6).
-    #[test]
-    fn a_producer_refuses_a_route_beta_will_not_execute() {
-        let hops = vec![
-            hop(0xC1, 0x40, 100, 0x41, 90),
-            hop(0xC2, 0x41, 90, 0x42, 80),
-            hop(0xC3, 0x42, 80, 0x43, 70),
-        ];
-        let vaults = [d(0xC1), d(0xC2), d(0xC3)];
-        assert_eq!(
-            draft_route(
-                hops,
-                vaults.iter().map(|v| dlv_core(v[0])).collect(),
-                &ctx(trader_core(d(0x40), d(0x43), &vaults)),
-                d(0xA1),
-                PRE_ROOT,
-                &no_evidence()
-            ),
-            Err(BuildError::NotAdmissible(NotAdmissible::TooManyLegs {
-                legs: 3,
-                max: 2
-            }))
-        );
-    }
-
     /// A close is the same operation variant as a trade — the branch lives in
-    /// `B°` — and no producer can name the reserved authority (R18-1).
+    /// `B°` — and no producer can name the reserved authority (R18-1). Over
+    /// acquired evidence: the owner closes its own vault at genesis.
     #[test]
+    #[serial]
     fn a_close_is_the_same_variant_and_only_the_origin_owner() {
+        fake_fleet::reset();
+        let set = five();
+        let fx = RouteFixture::close(set.id());
+        fx.publish(&set, &all_policies());
+        let evidence = fx.acquire(&set);
+        let vault = &fx.vaults[0];
         let draft = draft_close(
-            d(0xC1),
-            d(0x62),
+            vault.vault_id,
+            vault.parent_root,
             d(0x55),
-            1_000,
-            2_000,
-            dlv_core(0xC1),
-            &ctx(trader_core(d(0x40), d(0x41), &[d(0xC1)])),
-            d(0xA1),
-            PRE_ROOT,
-            &no_evidence(),
+            vault.state().reserve_a,
+            vault.state().reserve_b,
+            fx.cores[0].clone(),
+            &fx.ctx(&keypair().0),
+            fx.realize_root,
+            fx.void_root,
+            &evidence,
         )
         .unwrap();
-        let produced = build_fulfillment(&draft, sign_precommit(&draft), &[(d(0xC1), 0)]).unwrap();
+        let produced =
+            build_fulfillment(&draft, sign_precommit(&draft), &[(vault.vault_id, 0)]).unwrap();
         assert!(matches!(produced.operation, Operation::SofiFulfill { .. }));
         match draft.preimage().settlement() {
             SettlementBody::Close {
@@ -963,6 +1009,87 @@ mod tests {
             } => assert_eq!(*owner_authority, OwnerAuthority::Origin),
             _ => panic!("a close"),
         }
+    }
+
+    /// GATE G5 — rule T5: Unavailable stops the producer. Each evidence item
+    /// withheld in turn — every policy object, then the vault genesis — and
+    /// the draft is refused naming what is missing; no `PrecommitDraft`
+    /// exists, so nothing is published, exercised or advanced. The R6
+    /// mutation control: let the producer proceed on Unavailable and this
+    /// goes red.
+    #[test]
+    #[serial]
+    fn unavailable_stops_the_producer_and_nothing_is_produced() {
+        for withheld in all_policies() {
+            fake_fleet::reset();
+            let set = five();
+            let fx = RouteFixture::swap(1, set.id());
+            let published: Vec<u16> = all_policies()
+                .into_iter()
+                .filter(|c| *c != withheld)
+                .collect();
+            fx.publish(&set, &published);
+            let evidence = fx.acquire(&set);
+            let (addr, _) = fx.vaults[0].policy(withheld);
+            let refused = draft_route(
+                fx.hops.clone(),
+                fx.cores.clone(),
+                &fx.ctx(&keypair().0),
+                fx.realize_root,
+                fx.void_root,
+                &evidence,
+            );
+            assert_eq!(
+                refused.map(|_| ()),
+                Err(BuildError::Unavailable(Missing::Policy { addr })),
+                "withholding {withheld:#06x} stops the producer, naming the missing policy"
+            );
+        }
+        // The vault genesis withheld: nothing about the vault is in hand.
+        fake_fleet::reset();
+        let set = five();
+        let fx = RouteFixture::swap(1, set.id());
+        for (class, bytes) in &fx.vaults[0].policies {
+            let _ = (class, bytes);
+        }
+        let evidence = fx.acquire(&set);
+        assert!(matches!(
+            draft_route(
+                fx.hops.clone(),
+                fx.cores.clone(),
+                &fx.ctx(&keypair().0),
+                fx.realize_root,
+                fx.void_root,
+                &evidence,
+            ),
+            Err(BuildError::Unavailable(
+                Missing::VaultLeaf { .. } | Missing::VaultState { .. }
+            ))
+        ));
+    }
+
+    /// Missing evidence never hides a refusal: with every object withheld, a
+    /// route that does not chain is still Invalid, not Unavailable.
+    #[test]
+    #[serial]
+    fn missing_evidence_never_hides_a_refusal() {
+        fake_fleet::reset();
+        let set = five();
+        let fx = RouteFixture::swap(2, set.id());
+        let evidence = fx.acquire(&set);
+        let mut broken = fx.hops.clone();
+        broken.swap(0, 1);
+        assert!(matches!(
+            draft_route(
+                broken,
+                fx.cores.clone(),
+                &fx.ctx(&keypair().0),
+                fx.realize_root,
+                fx.void_root,
+                &evidence,
+            ),
+            Err(BuildError::StaticallyInvalid(_))
+        ));
     }
 
     /// The vault-create signature is the OPERATION's frozen rule — the
