@@ -896,9 +896,11 @@ pub(crate) async fn finish_admission(
 
     let had_post_admit = !post_admit_artifacts.is_empty();
     core.admit_economic_position(
-        new_validated.economic_position(),
+        dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+            economic_position: new_validated.economic_position(),
+            economic_root: new_validated.economic_root(),
+        },
         &operation_digest,
-        &new_validated.economic_root(),
         &leaves,
         &set.id(),
         &post_admit_artifacts,
@@ -930,6 +932,22 @@ pub(crate) async fn resume_pending_admission(
     network_id: &[u8],
     pending: PendingEconomicAdmission,
 ) -> Result<AdmittedOutcome, DsmError> {
+    // A fulfillment's admission is finished by the route's RESOLUTION
+    // (`sofi_advance::resolve_pending_position`, R13) — facts that arrive at
+    // storage, not a witness this device froze — so this path, which rebuilds
+    // a DSM-backed admission from its frozen witness, has nothing to resume
+    // and must not guess. The fence stands until the position resolves.
+    if let dsm::economic::admission::PendingAdmissionKind::SofiFulfillment { fulfillment_id } =
+        pending.kind
+    {
+        return Err(DsmError::invalid_operation(format!(
+            "the pending admission at position {} is a SoFi fulfillment ({}): the position is \
+             finished by its route's resolution, not by resuming an admission — resolve it \
+             before staging anything after it",
+            pending.economic_position,
+            crate::util::text_id::encode_base32_crockford(&fulfillment_id)
+        )));
+    }
     let head = core
         .device_head()
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
