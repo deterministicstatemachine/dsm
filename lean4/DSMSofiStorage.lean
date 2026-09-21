@@ -1,6 +1,6 @@
 /-
   SoFi storage facts for objects and indexes — Part II §10, §11, §13 —
-  rebuild steps R1 and R5 — self-contained Lean 4 (no Mathlib, no imports)
+  rebuild steps R1, R5 and R6 — self-contained Lean 4 (no Mathlib, no imports)
 
   A member stores bytes under the hash of the bytes and appends content
   addresses under locators; it interprets nothing. Core turns raw member
@@ -41,6 +41,10 @@
     - missing_evidence_is_unavailable_never_invalid
                                      (R5) a check over an unfetched item is
                                      Unavailable; acquisition_decides_nothing
+    - unavailable_stops_the_producer (R6) rule T5: no conjunction holding an
+      the_producer_proceeds_only_on_valid
+                                     Unavailable is Valid; the producer moves
+                                     on Valid alone; Invalid dominates
 
   MUTATION CONTROLS, executed against the Rust module (each turns the named
   Rust test red) and against this file (each puts the named theorem on
@@ -54,6 +58,8 @@
     4. over budget reported as None             -> over_budget_is_unavailable_never_none
     5. (R5) acquire defaults an unread address  -> acquired_bytes_are_stored,
        (`| none => some 0` in `acquire`)           silence_acquires_nothing
+    6. (R6) `and` reads Unavailable as Valid     -> unavailable_stops_the_producer,
+       (`| .unavailable, v => v` in `Verdict.and`)  the_producer_proceeds_only_on_valid
   Run: `lean -DwarningAsError=true DSMSofiStorage.lean`
 -/
 
@@ -350,6 +356,54 @@ theorem acquisition_decides_nothing (ev : Evidence) (a p : Nat) (check : Nat →
     (hp : ev a = some p) : need (ev a) check = check p := by
   simp [need, hp]
 
+
+-- ── §13 the producer, rebuild step R6 ──────────────────────────────────────
+
+/-- The three-valued conjunction of `sofi::conformance::Validation::and`: any
+Invalid is Invalid; otherwise any Unavailable is Unavailable; otherwise
+Valid. -/
+def Verdict.and : Verdict → Verdict → Verdict
+  | .invalid, _ => .invalid
+  | _, .invalid => .invalid
+  | .unavailable, _ => .unavailable
+  | _, .unavailable => .unavailable
+  | .valid, .valid => .valid
+
+/-- Rule T5: a producer proceeds on Valid and on nothing else. -/
+def proceeds : Verdict → Bool
+  | .valid => true
+  | _ => false
+
+/-- `invalid_dominates_and_unavailable_never_becomes_invalid` (Rust,
+`sofi::conformance`): missing evidence never masks a refusal, and is never
+read as one. -/
+theorem invalid_dominates_and_unavailable_never_becomes_invalid :
+    Verdict.and .unavailable .invalid = .invalid ∧
+    Verdict.and .invalid .unavailable = .invalid ∧
+    Verdict.and .valid .unavailable = .unavailable ∧
+    Verdict.and .unavailable .valid = .unavailable := by
+  refine ⟨rfl, rfl, rfl, rfl⟩
+
+/-- Unavailable stops the producer: no conjunction containing it is Valid,
+whatever the other conjuncts say. -/
+theorem unavailable_stops_the_producer (v : Verdict) :
+    proceeds (Verdict.and .unavailable v) = false ∧
+    proceeds (Verdict.and v .unavailable) = false := by
+  cases v <;> exact ⟨rfl, rfl⟩
+
+/-- Missing evidence never hides a refusal: with an item unfetched, a check
+that is Invalid keeps the whole verdict Invalid — the producer refuses for the
+reason, not for the gap. -/
+theorem missing_evidence_never_hides_a_refusal (ev : Evidence) (a : Nat)
+    (check : Nat → Verdict) (hm : ev a = none) :
+    Verdict.and (need (ev a) check) .invalid = .invalid := by
+  simp [need, hm, Verdict.and]
+
+/-- And only a conjunction of Valid verdicts lets the producer proceed. -/
+theorem the_producer_proceeds_only_on_valid (u v : Verdict) :
+    proceeds (Verdict.and u v) = true ↔ u = .valid ∧ v = .valid := by
+  cases u <;> cases v <;> simp [Verdict.and, proceeds]
+
 #print axioms stored_returns_exact_bytes
 #print axioms counting_reads_agree
 #print axioms wrong_bytes_never_count
@@ -363,5 +417,7 @@ theorem acquisition_decides_nothing (ev : Evidence) (a p : Nat) (check : Nat →
 #print axioms acquired_bytes_are_stored
 #print axioms nothing_is_defaulted
 #print axioms missing_evidence_is_unavailable_never_invalid
+#print axioms unavailable_stops_the_producer
+#print axioms the_producer_proceeds_only_on_valid
 
 end DSMSofiStorage
