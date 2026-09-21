@@ -23,7 +23,8 @@
 //! arithmetic ([`arith`]), the storage facts for objects and indexes
 //! ([`storage`]), three-valued validation composition and the mechanical
 //! fulfillment-against-precommit checks ([`conformance`]), what a producer
-//! publishes and how a reader recognizes it ([`publication`]), and the
+//! publishes and how a reader recognizes it ([`publication`]), the exercise
+//! boundary derived from the two position cells ([`registration`]), and the
 //! persistent DLV tree with structurally shared shadows ([`smt`]).
 //!
 //! ## What it is not
@@ -41,6 +42,7 @@ pub mod fisher_yates;
 pub mod leader;
 pub mod lineage;
 pub mod publication;
+pub mod registration;
 pub mod resolution;
 pub mod signature;
 pub mod smt;

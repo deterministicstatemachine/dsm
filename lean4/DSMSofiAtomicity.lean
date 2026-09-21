@@ -65,8 +65,9 @@
 
     * `HashModel`: a content address is injective, and no address is an input to
       its own preimage. `encModel` shows the two are jointly satisfiable.
-    * Quorum registration is abstracted to registered facts; the quorum layer is
-      DSMSofiSuccessorCells.
+    * Registration is abstracted to registered facts; the leader-first cell layer
+      (LeaderHeld and Final from raw reads — nothing votes, nothing is counted
+      against a threshold) is DSMSofiSuccessorCells.
     * `Coherent` restates the storage and walk facts DSMSofiSuccessorCells proves:
       a key lost to another exercise is not final on E, one outcome value, Abort only on objective evidence,
       one consumer per parent, orphaned parents are not canonical.
@@ -862,7 +863,8 @@ theorem unretrieved_objects_never_establish_a_violation (s : Sizes)
 -- ── §6 what storing P, G and F does ───────────────────────────────────────
 
 /-- One trader lineage and the DLV parents it references, at the level of
-registered facts (the quorum layer is DSMSofiSuccessorCells). -/
+registered facts (the leader-first cell layer is DSMSofiSuccessorCells; nothing
+votes and nothing is counted against a threshold). -/
 structure Sys where
   ps : List PBody
   gs : List GBody
