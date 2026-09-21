@@ -17,10 +17,11 @@
 //!
 //! Anything that is not fetched is simply absent from the evidence, and Core
 //! answers `Unavailable` for it — never `Invalid`, never a filled-in value.
-//! A vault past its genesis is such a case until the generation walk of
-//! rebuild step R13 (the resolved vault state's successor generation) extends
-//! the fetch; the attempt walk of R12 (`sofi_resolve`) finds the consumer,
-//! not the post state.
+//! A vault PAST its genesis is served by the vault head and evidence store
+//! (`client_db::sofi_vault_head`, spec §44.4): the post state a resolved
+//! transition selected, which this device kept for exactly this. The record
+//! must be the head the core was built on, and it must reproduce its own
+//! root, or the leaves stay unfetched and Core answers `Unavailable`.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +33,8 @@ use dsm::sofi::derive;
 use dsm::sofi::lineage::{genesis_root, vault_leaves_at_genesis};
 use dsm::sofi::storage::Resolved;
 use dsm::sofi::validation::{Evidence, EvidenceNeeds, TraderLeafPre, VaultLeafPre};
+
+use crate::storage::client_db::sofi_vault_head;
 use dsm::sofi::wire::{SettlementPreimage, VaultGenesisPreimage};
 use dsm::types::error::DsmError;
 
@@ -168,20 +171,47 @@ pub async fn acquire_evidence(
         let Some(genesis) = fetch_vault_genesis(set, vault_id).await? else {
             continue;
         };
-        // The core names the parent root it was built against; the genesis
-        // is that state only when the roots agree. A vault past R_0 needs the
-        // successor walk, which is not this step: its leaves stay unfetched.
-        let at_genesis = preimage
+        // The core names the parent root it was built against. At `R_0` the
+        // genesis IS that state. PAST it, the leaves come from the vault head
+        // store — the post state a resolved transition selected, which this
+        // device kept for exactly this (spec §44.4). A vault this device
+        // never resolved has no record, and its leaves stay unfetched so Core
+        // answers `Unavailable`.
+        let pre_root = preimage
             .dlv_cores()
             .iter()
             .find(|core| core.vault_id() == vault_id)
-            .map(|core| genesis_root(vault_id, &genesis.state).ok() == Some(*core.pre_root()))
-            .unwrap_or(true);
-        if !at_genesis {
-            continue;
-        }
-        vault_leaves.extend(vault_leaves_at_genesis(vault_id, &genesis.state, keys));
-        for (_class, addr) in EvidenceNeeds::policies_of(&genesis.state) {
+            .map(|core| *core.pre_root());
+        let genesis_at = genesis_root(vault_id, &genesis.state).ok();
+        let state_for_policies = match pre_root {
+            // A vault no core names: nothing to acquire for it. This used to
+            // default to "at genesis" and load its leaves anyway.
+            None => continue,
+            Some(root) if genesis_at == Some(root) => {
+                vault_leaves.extend(vault_leaves_at_genesis(vault_id, &genesis.state, keys));
+                genesis.state.clone()
+            }
+            Some(root) => {
+                let head = sofi_vault_head::leaves_at_head(vault_id, keys)
+                    .map_err(|e| storage_err("vault head", e))?;
+                // The record must be the head the core was built on. A record
+                // of another generation is not evidence for this operation.
+                let Some((head, leaves)) = head.filter(|(h, _)| h.root == root) else {
+                    continue;
+                };
+                let state_key = derive::vault_state_key(vault_id);
+                let Some(VaultLeafPre::State(state)) = leaves.get(&(*vault_id, state_key)).cloned()
+                else {
+                    // The head's own state leaf is what names its policies; a
+                    // record without it cannot price anything.
+                    continue;
+                };
+                let _ = head;
+                vault_leaves.extend(leaves);
+                state
+            }
+        };
+        for (_class, addr) in EvidenceNeeds::policies_of(&state_for_policies) {
             if let Some(bytes) = crate::sdk::storage_io::read_stored_bytes(set, &addr).await? {
                 objects.insert(addr, bytes);
             }

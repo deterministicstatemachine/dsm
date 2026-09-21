@@ -445,6 +445,11 @@ impl CoreSDK {
         leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
         storage_set_id: &[u8; 32],
         post_admit_artifacts: &[(String, Vec<u8>, &'static str)],
+        // The vault heads this position selected (spec §44.4), recorded in
+        // THIS transaction so a head and the position that chose it cannot
+        // disagree. Empty for every admission that is not a resolved SoFi
+        // position.
+        vault_heads: &[dsm::sofi::validation::VaultPostState],
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
         let economic_position = admitted.economic_position();
@@ -500,6 +505,14 @@ impl CoreSDK {
                 &tx, &admitted, leaves, now,
             )
             .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
+            for post in vault_heads {
+                crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(
+                    &tx, post, now,
+                )
+                .map_err(|e| {
+                    DsmError::storage(format!("admit vault head: {e}"), None::<std::io::Error>)
+                })?;
+            }
             crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
                 &tx, &devid,
             )
@@ -5557,6 +5570,7 @@ mod tests {
             &[0x12; 32],
             &[],
             &[0x13; 32],
+            &[],
             &[],
         );
         assert!(stale.is_err(), "a stale admit must refuse");
