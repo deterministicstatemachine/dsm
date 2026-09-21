@@ -476,6 +476,35 @@ pub async fn resolve_locator<T>(
     ))
 }
 
+/// Part II §11, discovery under an index of references: EVERY candidate
+/// under `locator` whose `Stored` bytes recognize to `locator`, in append
+/// order (`dsm::sofi::storage::keep_all_verifying`). It establishes what is
+/// published under the locator and decides nothing about which applies.
+pub async fn resolve_locator_all<T>(
+    set: &crate::sdk::storage_set::StorageSet,
+    index_namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+    recognize: impl Fn(&[u8]) -> Option<([u8; 32], T)>,
+) -> Result<dsm::sofi::storage::Resolved<Vec<T>>, DsmError> {
+    use dsm::sofi::storage::{IndexCandidates, Resolved, StoredFact};
+    let candidates = match read_index_candidates(set, index_namespace, locator, budget).await? {
+        IndexCandidates::Unavailable => return Ok(Resolved::Unavailable),
+        IndexCandidates::Candidates(c) => c,
+    };
+    let mut fetched: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidates.len().min(budget + 1));
+    for addr in candidates.iter().take(budget + 1) {
+        let reads = read_object_raw(set, addr).await?;
+        fetched.push(match dsm::sofi::storage::stored(addr, &reads) {
+            StoredFact::Stored(bytes) => Some(bytes),
+            StoredFact::Unavailable => None,
+        });
+    }
+    Ok(dsm::sofi::storage::keep_all_verifying(
+        locator, &fetched, budget, recognize,
+    ))
+}
+
 /// Part II §10 by address: the exact bytes at `addr` once three members
 /// return bytes that re-hash to it, `None` otherwise. For an acquisition
 /// that holds the address (a vault state commits its policies by address)

@@ -53,6 +53,12 @@
                                      (R8) whatever was appended under the locator
                                      first, a candidate that does not recompute
                                      to it is passed over, never returned
+    - discovered_recognizes_to_the_locator
+      every_published_match_is_discovered
+                                     (R8) an index of references (the relationship
+                                     index) discovers every recognized match, in
+                                     order, and prefers none: which applies is
+                                     Core's, by the identity the operation names
 
   MUTATION CONTROLS, executed against the Rust module (each turns the named
   Rust test red) and against this file (each puts the named theorem on
@@ -70,6 +76,7 @@
        (`| .unavailable, v => v` in `Verdict.and`)  the_producer_proceeds_only_on_valid
     7. (R8) `publish` without `appendIndex`      -> published_is_found,
                                                     published_is_found_past_foreign_candidates
+    8. (R8) `keepAll` stopping at the first match -> every_published_match_is_discovered
   Run: `lean -DwarningAsError=true DSMSofiStorage.lean`
 -/
 
@@ -518,9 +525,99 @@ theorem published_is_found_past_foreign_candidates {α : Type} (st : Store) (R :
           exact ih hl'
   exact this _ (fun _ ha => ha)
 
+/-- Discovery under an index of references (`keep_all_verifying`,
+`fetch_setup_for`): every candidate that is Stored and recognizes to `L`, in
+order. It selects nothing; a scan over budget is Unavailable as in `keep`. -/
+def keepAll {α : Type} (R : Recognizer α) (L : Nat) :
+    List (Option Nat) → Nat → Resolved (List α)
+  | [], _ => .kept []
+  | _ :: _, 0 => .unavailable
+  | none :: cs, b + 1 => keepAll R L cs b
+  | some bytes :: cs, b + 1 =>
+    match R.recognize bytes with
+    | some (id, o) =>
+      if id = L then
+        match keepAll R L cs b with
+        | .kept os => .kept (o :: os)
+        | r => r
+      else keepAll R L cs b
+    | none => keepAll R L cs b
+
+def findAll {α : Type} (st : Store) (R : Recognizer α) (L b : Nat) : Resolved (List α) :=
+  keepAll R L ((st.index L).map fun a => stored h a (st.held a)) b
+
+/-- Whatever `keepAll` keeps, it kept the objects that recognize to `L` and
+nothing else (the twin of `kept_verifies` for discovery). -/
+theorem discovered_recognizes_to_the_locator {α : Type} (R : Recognizer α) (L : Nat) :
+    ∀ (cs : List (Option Nat)) (b : Nat) (os : List α) (o : α),
+      keepAll R L cs b = .kept os → o ∈ os →
+      ∃ bytes, some bytes ∈ cs ∧ R.recognize bytes = some (L, o) := by
+  intro cs
+  induction cs with
+  | nil =>
+    intro b os o hk ho
+    cases b <;> (simp [keepAll] at hk; subst hk; simp at ho)
+  | cons c cs ih =>
+    intro b os o hk ho
+    cases b with
+    | zero => simp [keepAll] at hk
+    | succ b =>
+      match c with
+      | none =>
+        obtain ⟨bytes, hm, hr⟩ := ih b os o (by simpa [keepAll] using hk) ho
+        exact ⟨bytes, List.mem_cons_of_mem _ hm, hr⟩
+      | some bytes =>
+        simp only [keepAll] at hk
+        split at hk
+        · rename_i id o' hrec
+          split at hk
+          · rename_i hid
+            rw [hid] at hrec
+            cases hrest : keepAll R L cs b with
+            | kept os' =>
+              rw [hrest] at hk
+              cases hk
+              rcases List.mem_cons.mp ho with rfl | hmem
+              · exact ⟨bytes, List.mem_cons_self .., hrec⟩
+              · obtain ⟨bytes', hm, hr⟩ := ih b os' o hrest hmem
+                exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+            | none => rw [hrest] at hk; cases hk
+            | unavailable => rw [hrest] at hk; cases hk
+          · obtain ⟨bytes', hm, hr⟩ := ih b os o hk ho
+            exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+        · obtain ⟨bytes', hm, hr⟩ := ih b os o hk ho
+          exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+
+/-- EVERY PUBLISHED MATCH IS DISCOVERED
+(`a_relationship_index_discovers_every_setup_and_decides_nothing`): two
+objects published under one locator, both recognizing to it, are both
+discovered, in order — the index prefers neither. Mutation: `keepAll` stopping
+at the first match (`keep`'s arm) — this fails. -/
+theorem every_published_match_is_discovered {α : Type} (st : Store) (R : Recognizer α)
+    (ns₁ p₁ ns₂ p₂ L : Nat) (o₁ o₂ : α) (hfresh : st.index L = [])
+    (h₁ : R.recognize p₁ = some (L, o₁)) (h₂ : R.recognize p₂ = some (L, o₂))
+    (hne : addr h ns₁ p₁ ≠ addr h ns₂ p₂) :
+    findAll h (publish h (publish h st ns₁ p₁ L) ns₂ p₂ L) R L 2 = .kept [o₁, o₂] := by
+  unfold findAll
+  rw [publish_indexes_the_address, publish_indexes_the_address, hfresh]
+  have hsecond : stored h (addr h ns₂ p₂)
+      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₂ p₂)) = some p₂ :=
+    published_is_stored h _ ns₂ p₂ L
+  have hfirst : stored h (addr h ns₁ p₁)
+      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₁ p₁)) = some p₁ := by
+    have : (publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₁ p₁)
+        = (publish h st ns₁ p₁ L).held (addr h ns₁ p₁) := by
+      simp [publish, appendIndex, putAll]
+      exact fun e => absurd e hne
+    rw [this]
+    exact published_is_stored h st ns₁ p₁ L
+  simp [List.map, hfirst, hsecond, keepAll, h₁, h₂]
+
 #print axioms published_is_found
 #print axioms unindexed_is_not_found
 #print axioms published_is_found_past_foreign_candidates
+#print axioms discovered_recognizes_to_the_locator
+#print axioms every_published_match_is_discovered
 #print axioms stored_returns_exact_bytes
 #print axioms counting_reads_agree
 #print axioms wrong_bytes_never_count
