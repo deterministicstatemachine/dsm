@@ -21,7 +21,7 @@
 //! that form the installed root are recomputed by Core too
 //! (`trader_post_states`) and bound to the values `T°` states; the cache is
 //! written only once it recomputes exactly that root.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use dsm::economic::admission::{
     dsm_operation_digest, AcceptedAdmissionCoords, PendingAdmissionKind, PendingEconomicAdmission,
@@ -32,7 +32,7 @@ use dsm::economic::state::EconomicLeafState;
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::arith::{resolve_objects, ObjectResolution};
 use dsm::sofi::derive;
-use dsm::sofi::lineage::{advance_resolved, descendant_fence, genesis_root, RegisteredClaims};
+use dsm::sofi::lineage::{advance_resolved, descendant_fence, RegisteredClaims};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{ParentPosition, PositionEffect, Resolution};
@@ -49,12 +49,14 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
 use crate::sdk::economic_registers::{economic_root_namespace, names_root_key};
-use crate::sdk::sofi_evidence::{acquire_evidence, fetch_vault_genesis, LocalLeaves};
+use crate::sdk::sofi_evidence::{acquire_evidence, LocalLeaves};
 use crate::sdk::sofi_exercise::{build_exercise, read_attempt_cell, write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_register::{
     acquire_conformance_evidence, install_fulfillment, read_registration, InstallRequest, Installed,
 };
+use crate::sdk::sofi_chain::ChainWalker;
+use dsm::sofi::resolution::VaultChain;
 use crate::sdk::sofi_resolve::{Resolver, WALK_BUDGET};
 use crate::sdk::storage_io::{leader_index, read_cell_raw};
 use crate::sdk::storage_set::StorageSet;
@@ -583,10 +585,9 @@ pub async fn resolve_pending_position(
     };
 
     // What this verifier brings: its leaves, the position it resolved
-    // itself, and the vault ancestry it has established — a leg's parent
-    // is canonical here when it is the vault's accepted genesis root; a
-    // parent past genesis is established by the generation walk (R14) and
-    // keeps the route unresolved until then.
+    // itself, and the canonical chain of each vault a leg names — walked
+    // forward from the genesis or from the generations this device already
+    // recorded, so a parent past genesis is decided rather than deferred.
     let local = LocalLeaves::of_validated(&validated)?;
     let mut parents = BTreeMap::new();
     if let AdmittedEconomicPosition::ResolvedSofi {
@@ -600,19 +601,28 @@ pub async fn resolve_pending_position(
             ParentPosition::ConditionalSelected { selected_root },
         );
     }
-    let mut canonical = BTreeSet::new();
+    // The canonical chain of every vault a leg names, walked forward over
+    // successor cells from what this device already recorded (R14). This is
+    // what lets a parent be REFUTED rather than only waited on: a chain
+    // carries a generation, and the set of walked pairs it replaced did not.
+    let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
+    let walker = ChainWalker {
+        set,
+        local: &local,
+        parents: &parents,
+        now: crate::util::deterministic_time::tick() as i64,
+    };
     for leg in precommit.legs() {
-        if let Some(genesis) = fetch_vault_genesis(set, &leg.vault_id).await? {
-            if genesis_root(&leg.vault_id, &genesis.state).ok() == Some(leg.parent_root) {
-                canonical.insert((leg.vault_id, leg.parent_root));
-            }
+        if chains.contains_key(&leg.vault_id) {
+            continue;
         }
+        chains.insert(leg.vault_id, walker.chain(&leg.vault_id).await?);
     }
     let resolver = Resolver {
         set,
         local: &local,
         parents: &parents,
-        canonical: &canonical,
+        chains: &chains,
     };
     let _ = WALK_BUDGET;
     let resolved = resolver.resolve_recognized(exercise.clone()).await?;
@@ -706,6 +716,8 @@ pub async fn resolve_pending_position(
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
+    use dsm::sofi::resolution::ParentStatus;
+    use std::collections::BTreeSet;
     use dsm::crypto::sphincs::sphincs_sign;
     use dsm::economic::claim::EconomicRootClaimBody;
     use dsm::economic::claim_envelope::sign_economic_root_claim;
@@ -1094,6 +1106,122 @@ mod tests {
             assert_ne!(post.root, post.pre_root);
             assert_eq!(post.state.generation, 1, "one trade, one generation");
         }
+    }
+
+    /// Forget everything this device recorded about a vault, keeping only the
+    /// committed set.
+    fn forget_vault(vault_id: &D32) {
+        let binding = crate::storage::client_db::get_connection().unwrap();
+        let conn = binding.lock().unwrap();
+        for table in ["sofi_vault_root", "sofi_vault_leaf"] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE vault_id = ?1"),
+                rusqlite::params![vault_id.as_slice()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// THE INDUCTION, WITHOUT THE RECORD. A settlement is resolved, and then
+    /// everything this device recorded about the vault is DELETED. The walk
+    /// must rebuild that generation from the committed set alone: find the
+    /// exercise that consumed the genesis, RECOMPUTE what it did rather than
+    /// read back what its producer stated, restore the full leaf set so the
+    /// record reproduces its own root again, and then CONTINUE — reaching an
+    /// open head at the new generation and refusing to refute anything there.
+    ///
+    /// This is what makes a vault past its genesis a derived lineage fact
+    /// instead of a cache hit. A verifier that never traded with this vault
+    /// holds exactly what this test leaves behind: the cells, and nothing.
+    #[test]
+    #[serial]
+    fn the_walk_rebuilds_a_consumed_generation_from_storage_and_continues() {
+        let r = rig(0xD7);
+        let b = build(&r, r.parent_claim);
+        let own = BTreeMap::new();
+        let req = request(&b, &own);
+        block_on(fulfill(&r.core, &r.set, &req)).unwrap();
+        block_on(complete_pending_fulfillment(&r.core, &r.set)).unwrap();
+        block_on(resolve_pending_position(&r.core, &r.set)).unwrap();
+
+        let evidence = r.fx.acquire(&r.set);
+        let expected = vault_post_states(&b.precommit, &b.preimage, &evidence).unwrap();
+        let post = expected[0].clone();
+        let vault_id = post.vault_id;
+        assert_eq!(post.pre_generation, 0);
+        assert_eq!(post.state.generation, 1);
+        assert_ne!(post.root, post.pre_root);
+
+        forget_vault(&vault_id);
+        assert_eq!(sofi_vault_head::root_at(&vault_id, 0).unwrap(), None);
+        assert_eq!(sofi_vault_head::head(&vault_id).unwrap(), None);
+
+        let parents = BTreeMap::new();
+        let walker = ChainWalker {
+            set: &r.set,
+            local: &r.fx.local,
+            parents: &parents,
+            now: 0,
+        };
+        let chain = block_on(walker.chain(&vault_id)).unwrap();
+
+        // Both generations, in order, derived and not remembered.
+        assert_eq!(
+            chain.roots,
+            vec![post.pre_root, post.root],
+            "the genesis, then the root the realized consumption produced"
+        );
+        assert_eq!(chain.head(), Some((1, post.root)));
+        assert_eq!(chain.status_of(0, &post.pre_root), ParentStatus::Canonical);
+        assert_eq!(chain.status_of(1, &post.root), ParentStatus::Canonical);
+        assert_eq!(
+            chain.status_of(1, &post.pre_root),
+            ParentStatus::Orphaned,
+            "the genesis is not the root of generation one"
+        );
+
+        // THE NEXT FULL LEAF STATE, rebuilt: the record reproduces its own
+        // root, which is exactly what an incomplete one cannot do.
+        let state_key = derive::vault_state_key(&vault_id);
+        let rel_key =
+            derive::relationship_key(b.precommit.genesis(), b.precommit.device_id(), &vault_id);
+        let keys: BTreeSet<D32> = [state_key, rel_key].into_iter().collect();
+        let (head, leaves) = sofi_vault_head::leaves_at_head(&vault_id, &keys)
+            .unwrap()
+            .expect("the rebuilt record reproduces its own root");
+        assert_eq!(head.generation, 1);
+        assert_eq!(head.root, post.root);
+        assert_eq!(
+            leaves.get(&(vault_id, state_key)),
+            Some(&VaultLeafPre::State(post.state.clone())),
+            "the state PREIMAGE the next trade stands on"
+        );
+        let (_, rel) = post.relationship.unwrap();
+        assert_eq!(
+            leaves.get(&(vault_id, rel_key)),
+            Some(&VaultLeafPre::Relationship(rel))
+        );
+
+        // AND IT CONTINUED. Nothing has consumed generation one, so the walk
+        // stopped at an open head — and an open head refutes nothing.
+        assert_eq!(
+            chain.status_of(2, &post.root),
+            ParentStatus::Unavailable,
+            "a generation nothing has produced yet is not a refuted one"
+        );
+        assert_ne!(chain.status_of(2, &post.root), ParentStatus::Orphaned);
+
+        // WALKED AGAIN, now from the record it just wrote. The same chain,
+        // and contiguously: a reader that took the HIGHEST recorded
+        // generation rather than the contiguous prefix from zero would align
+        // `roots[g]` to the wrong g, and every correct parent below the head
+        // would read as refuted.
+        let again = block_on(walker.chain(&vault_id)).unwrap();
+        assert_eq!(
+            again.roots, chain.roots,
+            "the record round-trips the chain the walk derived"
+        );
+        assert_eq!(again.status_of(0, &post.pre_root), ParentStatus::Canonical);
     }
 
     /// THE RECORD IS CHECKED, NEVER TRUSTED. It is this device's own cache,

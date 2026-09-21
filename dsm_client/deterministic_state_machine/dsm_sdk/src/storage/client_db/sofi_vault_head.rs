@@ -183,6 +183,14 @@ pub fn head(vault_id: &D32) -> Result<Option<VaultHead>> {
 pub fn root_at(vault_id: &D32, generation: u64) -> Result<Option<D32>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    root_at_with_conn(&conn, vault_id, generation)
+}
+
+fn root_at_with_conn(
+    conn: &rusqlite::Connection,
+    vault_id: &D32,
+    generation: u64,
+) -> Result<Option<D32>> {
     conn.query_row(
         "SELECT root FROM sofi_vault_root WHERE vault_id = ?1 AND generation = ?2",
         params![
@@ -194,6 +202,42 @@ pub fn root_at(vault_id: &D32, generation: u64) -> Result<Option<D32>> {
     .optional()?
     .map(|root| digest32(root, "vault root"))
     .transpose()
+}
+
+/// Record a post state the FORWARD WALK established (R14), in its own
+/// transaction.
+///
+/// Same writer as the resolved path, deliberately. The walk is not a party to
+/// the transition it records — it reconstructs another trader's realized
+/// consumption — but it establishes it by the SAME predicate: Core classified
+/// that attempt key `Consumed`, which is `resolve_position` over the whole
+/// operation, and `vault_post_states` recomputed the post state rather than
+/// reading back what the producer stated. Two callers, one writer, one
+/// meaning for a row.
+///
+/// It never rewrites a generation. `R*_g` is unique — a successor cell admits
+/// at most one realized consumption per attempt key — so a second, different
+/// answer at the same generation is a contradiction, not an update, and this
+/// refuses it instead of silently preferring the later one.
+pub fn record_walked(post: &VaultPostState, now: i64) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    for (generation, root) in [
+        (post.pre_generation, post.pre_root),
+        (post.state.generation, post.root),
+    ] {
+        if let Some(existing) = root_at_with_conn(&conn, &post.vault_id, generation)? {
+            if existing != root {
+                return Err(anyhow!(
+                    "generation {generation} of this vault already established another root"
+                ));
+            }
+        }
+    }
+    let tx = conn.transaction()?;
+    record_resolved_with_conn(&tx, post, now)?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// The stored leaves of a vault, as rows.
