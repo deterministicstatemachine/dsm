@@ -63,13 +63,16 @@ impl core::fmt::Display for RegisterError {
 }
 
 /// The namespace of the economic root cells: the key domain's own bytes.
-fn economic_root_namespace() -> &'static [u8] {
+pub(crate) fn economic_root_namespace() -> &'static [u8] {
     dsm::common::domain_tags::TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY.source_bytes()
 }
 
 /// An object naming `K_root(q)`: a registered economic claim whose own
-/// coordinates derive that key. Bytes that are not one count as nothing
-/// (Part II §8): they are neither a rival nor a winner.
+/// coordinates derive that key. The decoder's `ConditionalSofi` arm makes a
+/// SoFi conditional claim `C_q` (Part II §17.4) one of these, so an ordinary
+/// claim and a fulfillment's claim race at the one leader of `s(q)` through
+/// this single rule. Bytes that are not one count as nothing (Part II §8):
+/// they are neither a rival nor a winner.
 fn names_root_key(value: &[u8], k_root: &[u8; 32]) -> bool {
     dsm::economic::claim_envelope::decode_registered_economic_claim(value)
         .map(|claim| {
