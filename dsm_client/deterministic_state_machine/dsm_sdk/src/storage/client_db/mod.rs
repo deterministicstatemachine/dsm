@@ -45,6 +45,7 @@ pub mod recipient_staging;
 pub mod recovery;
 pub mod sender_outbox;
 pub mod sender_proposal;
+pub mod sofi_vault_head; // the vault head and evidence store (spec §44.4)
 mod system_peers;
 pub mod token_registry;
 mod tokens;
@@ -569,6 +570,32 @@ fn create_schema(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS sofi_smt_pins;
         DROP TABLE IF EXISTS sofi_smt_nodes_v2;
         DROP TABLE IF EXISTS sofi_smt_pins_v2;
+
+        -- v16: the vault head and evidence store (spec §44.4). The post
+        -- state a resolved transition SELECTED, kept so the next trade
+        -- against that vault has evidence to stand on. It decides no
+        -- canonicality: `advance_resolved` already selected the state.
+        --
+        -- The roots are a chain, one row per generation, kept forever because
+        -- a parent's status is asked about a GENERATION. The leaves are the
+        -- CURRENT head's only and are replaced wholesale, because evidence
+        -- needs leaf PREIMAGES and a mixture of two generations is not a tree.
+        CREATE TABLE IF NOT EXISTS sofi_vault_root(
+            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation >= 0),
+            root       BLOB NOT NULL CHECK (length(root) = 32),
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (vault_id, generation)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS sofi_vault_leaf(
+            vault_id   BLOB NOT NULL CHECK (length(vault_id) = 32),
+            leaf_key   BLOB NOT NULL CHECK (length(leaf_key) = 32),
+            leaf_value BLOB NOT NULL CHECK (length(leaf_value) = 32),
+            kind       INTEGER NOT NULL,
+            preimage   BLOB NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (vault_id, leaf_key)
+        ) WITHOUT ROWID;
 
         -- v15: the native ERA reserve (R4). This device's frozen release at
         -- one parent root — exact bytes, written before the first member

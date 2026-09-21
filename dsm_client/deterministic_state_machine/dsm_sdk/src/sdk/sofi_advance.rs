@@ -37,7 +37,7 @@ use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{ParentPosition, PositionEffect, Resolution};
 use dsm::sofi::storage::Resolved;
-use dsm::sofi::validation::trader_post_states;
+use dsm::sofi::validation::{trader_post_states, vault_post_states};
 use dsm::sofi::wire::{
     next_position, ParentClaimRef, SettlementPreimage, TraderFulfillmentBody, TraderPrecommitBody,
     ValidationRef,
@@ -655,11 +655,19 @@ pub async fn resolve_pending_position(
     // verdict was reached on. Either way the cache must recompute the root
     // before it is written.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
+    let mut vault_heads = Vec::new();
     let leaves = match resolution {
         Resolution::Realized => {
             let evidence = acquire_evidence(set, &exercise.preimage, &local).await?;
             let post = trader_post_states(&precommit, &exercise.preimage, &evidence)
                 .map_err(|e| refuse(format!("post states: {e:?}")))?;
+            // The vaults moved too, and this device is the one that resolved
+            // it: the post state each leg selected is kept so the NEXT trade
+            // against that vault has evidence to stand on (§44.4). Recomputed
+            // from the same evidence the verdict used, and bound to what each
+            // `V°` states — never read back from anything the producer said.
+            vault_heads = vault_post_states(&precommit, &exercise.preimage, &evidence)
+                .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
             post_leaf_cache(current, &post)?
         }
         Resolution::Void => current,
@@ -686,6 +694,7 @@ pub async fn resolve_pending_position(
         &leaves,
         &set.id(),
         &[],
+        &vault_heads,
     )?;
     Ok(Advanced::Installed {
         resolution,
@@ -713,6 +722,8 @@ mod tests {
         OWNER_DEV, OWNER_G, P_CREATE, P_POS, SIG_ALG,
     };
     use crate::sdk::sofi_relay::relay_fulfillment;
+    use crate::storage::client_db::sofi_vault_head;
+    use dsm::sofi::validation::VaultLeafPre;
     use crate::sdk::storage_io::{fake_fleet, fake_registers};
     use dsm::common::domain_tags::TAG_DSM_SOFI_SUCC_CELL_V2;
     use dsm::sofi::arith::CellResolution;
@@ -1010,6 +1021,125 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("no pending admission"));
+    }
+
+    /// R14: the vault head past its genesis. After the route resolves, the
+    /// post state each leg selected is kept, and it is exactly what the NEXT
+    /// trade against that vault acquires as evidence.
+    ///
+    /// Before this, `acquire_evidence` gave up on any vault whose core named
+    /// a root other than its genesis, so a second trade against the same
+    /// vault could never be validated by anyone.
+    #[test]
+    #[serial]
+    fn a_resolved_route_leaves_the_vault_head_the_next_trade_stands_on() {
+        let r = rig(0xD5);
+        let b = build(&r, r.parent_claim);
+        let own = BTreeMap::new();
+        let req = request(&b, &own);
+        block_on(fulfill(&r.core, &r.set, &req)).unwrap();
+        block_on(complete_pending_fulfillment(&r.core, &r.set)).unwrap();
+        let advanced = block_on(resolve_pending_position(&r.core, &r.set)).unwrap();
+        assert!(matches!(
+            advanced,
+            Advanced::Installed {
+                resolution: Resolution::Realized,
+                ..
+            }
+        ));
+
+        let evidence = r.fx.acquire(&r.set);
+        let expected = vault_post_states(&b.precommit, &b.preimage, &evidence).unwrap();
+        assert_eq!(expected.len(), b.precommit.legs().len());
+
+        for post in &expected {
+            // THE CHAIN, BOTH ENDS. A store of post roots alone would be a
+            // set; a parent's status is asked about a generation.
+            assert_eq!(
+                sofi_vault_head::root_at(&post.vault_id, post.pre_generation).unwrap(),
+                Some(post.pre_root),
+                "the root this operation was built on, at its own generation"
+            );
+            assert_eq!(
+                sofi_vault_head::root_at(&post.vault_id, post.state.generation).unwrap(),
+                Some(post.root)
+            );
+            let head = sofi_vault_head::head(&post.vault_id).unwrap().unwrap();
+            assert_eq!(head.generation, post.state.generation);
+            assert_eq!(head.root, post.root);
+
+            // The leaves the next trade needs, CHECKED against that root.
+            let state_key = derive::vault_state_key(&post.vault_id);
+            let rel_key = derive::relationship_key(
+                b.precommit.genesis(),
+                b.precommit.device_id(),
+                &post.vault_id,
+            );
+            let keys: BTreeSet<D32> = [state_key, rel_key].into_iter().collect();
+            let (got_head, leaves) = sofi_vault_head::leaves_at_head(&post.vault_id, &keys)
+                .unwrap()
+                .expect("the record reproduces its own root");
+            assert_eq!(got_head, head);
+            assert_eq!(
+                leaves.get(&(post.vault_id, state_key)),
+                Some(&VaultLeafPre::State(post.state.clone())),
+                "the state leaf PREIMAGE, which a node store could never return"
+            );
+            let (_, rel) = post.relationship.unwrap();
+            assert_eq!(
+                leaves.get(&(post.vault_id, rel_key)),
+                Some(&VaultLeafPre::Relationship(rel))
+            );
+            // A vault moves: the head is not the genesis it started from.
+            assert_ne!(post.root, post.pre_root);
+            assert_eq!(post.state.generation, 1, "one trade, one generation");
+        }
+    }
+
+    /// THE RECORD IS CHECKED, NEVER TRUSTED. It is this device's own cache,
+    /// so `leaves_at_head` rebuilds the tree from every stored leaf and
+    /// requires the recomputed root to equal the recorded one. That equality
+    /// is what detects an INCOMPLETE record — a vault another trader moved
+    /// between our trades leaves us missing their leaf — and an incomplete
+    /// record yields nothing, so Core answers `Unavailable` and the position
+    /// waits rather than standing on a state this device never established.
+    #[test]
+    #[serial]
+    fn a_vault_record_that_cannot_reproduce_its_own_root_is_not_evidence() {
+        let r = rig(0xD6);
+        let b = build(&r, r.parent_claim);
+        let own = BTreeMap::new();
+        block_on(fulfill(&r.core, &r.set, &request(&b, &own))).unwrap();
+        block_on(complete_pending_fulfillment(&r.core, &r.set)).unwrap();
+        block_on(resolve_pending_position(&r.core, &r.set)).unwrap();
+
+        let vault_id = b.precommit.legs()[0].vault_id;
+        let state_key = derive::vault_state_key(&vault_id);
+        let keys: BTreeSet<D32> = [state_key].into_iter().collect();
+        assert!(sofi_vault_head::leaves_at_head(&vault_id, &keys)
+            .unwrap()
+            .is_some());
+
+        // Drop one leaf, as an unseen trade by another trader would.
+        {
+            let binding = client_db::get_connection().unwrap();
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "DELETE FROM sofi_vault_leaf WHERE vault_id = ?1 AND leaf_key != ?2",
+                rusqlite::params![vault_id.as_slice(), state_key.as_slice()],
+            )
+            .unwrap();
+        }
+        assert!(
+            sofi_vault_head::leaves_at_head(&vault_id, &keys)
+                .unwrap()
+                .is_none(),
+            "a record that cannot reproduce its own root is not evidence"
+        );
+        // The chain itself survives: what this device established about which
+        // root belongs to which generation is a different fact from whether
+        // it still holds the leaves.
+        assert!(sofi_vault_head::root_at(&vault_id, 1).unwrap().is_some());
     }
 
     /// DEVICE SCENARIO 4 (§44.1): `F` registered, the trader offline, a

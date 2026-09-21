@@ -423,6 +423,122 @@ pub fn route_validation(
     }
 }
 
+/// One vault's state after the operation: the root its tree holds, and the
+/// leaf preimages that root commits for the keys this operation touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultPostState {
+    pub vault_id: D32,
+    /// `R_g`: the root this operation was built on, as the core states it.
+    /// Carried so a recorded head is its own chain link — a store that kept
+    /// only the post root would hold a set of roots and not a chain, and a
+    /// parent's status is asked about a GENERATION.
+    pub pre_root: D32,
+    /// `g`: the generation `pre_root` belongs to, from the pre state.
+    pub pre_generation: u64,
+    /// `R_{g+1}`: the post root the vault core's own entries fold to against
+    /// the pre-root the core states. The same value `validate` computes and
+    /// discards, returned here because the vault head store needs it.
+    pub root: D32,
+    /// The vault state leaf at `vault_state_key(v)`, with its generation
+    /// advanced and its reserves priced by the vault's own policies.
+    pub state: VaultStateLeaf,
+    /// The relationship leaf this operation advanced, at its own key: the
+    /// trader's leaf in THIS vault's tree, which is not the trader's own
+    /// relationship leaf in its own tree.
+    pub relationship: Option<(D32, VaultRelationshipLeaf)>,
+}
+
+/// Every vault's state after the operation, recomputed from the pre states the
+/// evidence holds and the settlement's own terms — never read back from
+/// anything the producer stated.
+///
+/// This is the vault side of [`trader_post_states`], and it exists for the
+/// same reason: a verifier that resolves a position has to be able to keep
+/// the state that position selected, or the next trade against that vault has
+/// no evidence to stand on. It decides no canonicality. `advance_resolved`
+/// already selected the state; this only says what the state IS.
+///
+/// The root is the fold's, so it is authenticated by the same arithmetic the
+/// verdict used: the core's entries against the pre-root the core states. A
+/// caller that stored a root from anywhere else would be storing an opinion.
+pub fn vault_post_states(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Vec<VaultPostState>, Refusal> {
+    let e = *precommit.external_commitment();
+    let mut out = Vec::with_capacity(preimage.dlv_cores().len());
+    for core in preimage.dlv_cores() {
+        let vault_id = *core.vault_id();
+        let pre_state = evidence.vault_state(&vault_id)?;
+        let post_state = match preimage.settlement() {
+            SettlementBody::Swap { hops, .. } => {
+                let (index, hop) = hops
+                    .iter()
+                    .enumerate()
+                    .find(|(_, h)| h.vault_id == vault_id)
+                    .ok_or(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))?;
+                let policies = Policies::resolve(evidence, &pre_state)?;
+                swap_vault_post(&pre_state, &policies, hop, index)?
+            }
+            SettlementBody::Close { .. } => {
+                let generation = pre_state.generation.checked_add(1).ok_or(Refusal::Invalid(
+                    Invalid::CheckedArithmetic {
+                        what: "vault generation",
+                    },
+                ))?;
+                VaultStateLeaf {
+                    generation,
+                    reserve_a: 0,
+                    reserve_b: 0,
+                    status: VAULT_STATUS_RETIRED,
+                    ..pre_state.clone()
+                }
+            }
+        };
+        // The state the core STATES must be the state the arithmetic reaches.
+        // Without this the store would keep a state nothing verified.
+        let state_key = derive::vault_state_key(&vault_id);
+        let stated_post = core
+            .entries()
+            .iter()
+            .find(|entry| entry.key() == state_key)
+            .map(|entry| stated(entry).1)
+            .ok_or(Refusal::Invalid(Invalid::WriteSetNotExact { core: "V°" }))?;
+        let computed = derive::vault_state_leaf_value(&post_state)
+            .map_err(|_| Refusal::Invalid(Invalid::LeafPostValueMismatch))?;
+        require(
+            stated_post == Some(computed),
+            Invalid::LeafPostValueMismatch,
+        )?;
+
+        // The relationship leaf this operation advanced, if it advanced one.
+        let relationship = core.entries().iter().find_map(|entry| match entry {
+            CoreEntry::Relationship { base, .. } => Some((
+                entry.key(),
+                VaultRelationshipLeaf {
+                    trader_genesis: *core.trader_genesis(),
+                    trader_device_id: *core.trader_device_id(),
+                    leaf: derive::relationship_leaf_next(base, &e),
+                },
+            )),
+            _ => None,
+        });
+
+        let entries = dlv_fold_entries(core, &e, evidence)?;
+        let root = fold_core(&entries, core.pre_root())?;
+        out.push(VaultPostState {
+            vault_id,
+            pre_root: *core.pre_root(),
+            pre_generation: pre_state.generation,
+            root,
+            state: post_state,
+            relationship,
+        });
+    }
+    Ok(out)
+}
+
 /// The trader's leaves after the operation, for the keys `T°` touches — the
 /// post STATE behind each post value the core states, so a verifier that
 /// installs `P.R_realize` (stage 10 of §31, R13) also holds the leaves that
@@ -2686,6 +2802,109 @@ mod tests {
         let precommit = rebind(&f, &preimage);
         assert_eq!(
             validate(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
+        );
+    }
+
+    /// R14: a vault's post state is recomputed from the pre state and the
+    /// settlement's own terms, and bound to what `V°` states. The root is the
+    /// fold's — the same value the verdict used — so a store that keeps it
+    /// keeps an authenticated root and not an opinion.
+    #[test]
+    fn vault_post_states_are_recomputed_and_bound_to_the_stated_values() {
+        let f = fixtures::swap_fixture_n(2);
+        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(posts.len(), f.preimage.dlv_cores().len());
+        for post in &posts {
+            let core = f
+                .preimage
+                .dlv_cores()
+                .iter()
+                .find(|c| *c.vault_id() == post.vault_id)
+                .unwrap();
+            let pre = f.evidence.vault_state(&post.vault_id).unwrap();
+            // The generation advanced by exactly one and the vault stays live.
+            assert_eq!(post.state.generation, pre.generation + 1);
+            assert_eq!(post.state.status, VAULT_STATUS_ACTIVE);
+            // The reserves moved by the hop, in the pool's own direction.
+            assert_ne!(
+                (post.state.reserve_a, post.state.reserve_b),
+                (pre.reserve_a, pre.reserve_b)
+            );
+            // The root is the fold's, against the pre-root the core states.
+            let entries =
+                dlv_fold_entries(core, f.precommit.external_commitment(), &f.evidence).unwrap();
+            assert_eq!(post.root, fold_core(&entries, core.pre_root()).unwrap());
+            assert_ne!(post.root, *core.pre_root(), "the vault moved");
+            // The record is its own chain link: where it came from, and at
+            // which generation.
+            assert_eq!(post.pre_root, *core.pre_root());
+            assert_eq!(post.pre_generation, pre.generation);
+            assert_eq!(post.state.generation, post.pre_generation + 1);
+            // The relationship leaf advanced is this trader's, in the VAULT's
+            // tree. It sits at the SAME key as the trader's own relationship
+            // leaf — one derivation, `relationship_key(G, DevID, v)` — in a
+            // DIFFERENT tree, and the two leaves carry different shapes: the
+            // vault's names the trader, the trader's names the vault. A first
+            // draft of this test asserted the keys differ, and the values
+            // above are what corrected it.
+            let (key, leaf) = post.relationship.unwrap();
+            assert_eq!(leaf.trader_genesis, *core.trader_genesis());
+            assert_eq!(leaf.trader_device_id, *core.trader_device_id());
+            assert_eq!(
+                key,
+                derive::relationship_key(
+                    f.precommit.genesis(),
+                    f.precommit.device_id(),
+                    &post.vault_id
+                ),
+                "one key derivation, two trees"
+            );
+            // The two leaves at that key are not interchangeable: the vault's
+            // holds the trader's identity, the trader's holds the vault id,
+            // and they hash under different tags.
+            let in_vault = derive::vault_relationship_leaf_value(&leaf);
+            let in_trader = derive::trader_relationship_leaf_value(&TraderRelationshipLeaf {
+                vault_id: post.vault_id,
+                leaf: leaf.leaf,
+            });
+            assert_ne!(in_vault, in_trader);
+        }
+        assert_ne!(posts[0].root, posts[1].root, "two vaults, two roots");
+    }
+
+    /// A `V°` that states a post state the arithmetic does not reach is
+    /// refused, so nothing unverified can be stored as a vault head.
+    #[test]
+    fn a_vault_core_stating_another_post_state_yields_no_head() {
+        let f = fixtures::swap_fixture_n(1);
+        let core = &f.preimage.dlv_cores()[0];
+        let state_key = derive::vault_state_key(core.vault_id());
+        let mut entries = core.entries().to_vec();
+        let i = entries
+            .iter()
+            .position(|entry| entry.key() == state_key)
+            .unwrap();
+        if let CoreEntry::Mutation { post, .. } = &mut entries[i] {
+            *post = fixtures::token(0x7E);
+        }
+        let bent = DlvCore::new(
+            *core.vault_id(),
+            *core.pre_root(),
+            *core.trader_genesis(),
+            *core.trader_device_id(),
+            *core.relationship_base(),
+            entries,
+        )
+        .unwrap();
+        let preimage = SettlementPreimage::new(
+            f.preimage.settlement().clone(),
+            f.preimage.trader_core().clone(),
+            vec![bent],
+        )
+        .unwrap();
+        assert_eq!(
+            vault_post_states(&f.precommit, &preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
         );
     }
