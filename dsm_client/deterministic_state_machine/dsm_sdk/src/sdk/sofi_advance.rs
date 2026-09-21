@@ -32,7 +32,7 @@ use dsm::economic::state::EconomicLeafState;
 use dsm::economic::tree::EconomicSmt;
 use dsm::sofi::arith::{resolve_objects, ObjectResolution};
 use dsm::sofi::derive;
-use dsm::sofi::lineage::{advance_resolved, descendant_fence, RegisteredClaims};
+use dsm::sofi::lineage::{advance_resolved, descendant_fence, RealizedReceipt, RegisteredClaims};
 use dsm::sofi::publication::Publication;
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{ParentPosition, PositionEffect, Resolution};
@@ -651,12 +651,29 @@ pub async fn resolve_pending_position(
         parent,
         conditional: derive::claim_ref(&conditional_bytes),
     };
+    // The evidence this verdict was reached on, acquired BEFORE the advance:
+    // the adoption gate inside `advance_resolved` derives this operation's
+    // credits from these same bytes, so it cannot be handed a different
+    // settlement's. A Void moves nothing and needs none.
+    let evidence = match resolution {
+        Resolution::Realized => Some(acquire_evidence(set, &exercise.preimage, &local).await?),
+        _ => None,
+    };
+    let receipt = evidence.as_ref().map(|evidence| RealizedReceipt {
+        preimage: &exercise.preimage,
+        evidence,
+        // `S_pre`: the state this advance succeeds. Adoption must PRECEDE
+        // receipt, so it is this head's adoptions that decide, not the ones
+        // the operation would leave behind.
+        receiver: &head,
+    });
     let advanced = advance_resolved(
         &validated,
         &precommit,
         &fulfillment.body,
         &claims,
         resolution,
+        receipt.as_ref(),
     )
     .map_err(|e| refuse(e.to_string()))?;
 
@@ -668,15 +685,17 @@ pub async fn resolve_pending_position(
     let mut vault_heads = Vec::new();
     let leaves = match resolution {
         Resolution::Realized => {
-            let evidence = acquire_evidence(set, &exercise.preimage, &local).await?;
-            let post = trader_post_states(&precommit, &exercise.preimage, &evidence)
+            let evidence = evidence
+                .as_ref()
+                .ok_or_else(|| refuse("unreachable: a realized advance without evidence"))?;
+            let post = trader_post_states(&precommit, &exercise.preimage, evidence)
                 .map_err(|e| refuse(format!("post states: {e:?}")))?;
             // The vaults moved too, and this device is the one that resolved
             // it: the post state each leg selected is kept so the NEXT trade
             // against that vault has evidence to stand on (§44.4). Recomputed
             // from the same evidence the verdict used, and bound to what each
             // `V°` states — never read back from anything the producer said.
-            vault_heads = vault_post_states(&precommit, &exercise.preimage, &evidence)
+            vault_heads = vault_post_states(&precommit, &exercise.preimage, evidence)
                 .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
             post_leaf_cache(current, &post)?
         }
@@ -746,6 +765,13 @@ mod tests {
     /// registered there frozen locally — the premise every seam test starts
     /// from. Returns the device, its keys, the fixture and the parent claim
     /// `P` must name.
+    /// The tokens the route fixture CREDITS to this device: a two-hop swap's
+    /// endpoint, and a close's two reserve assets. The intermediate is
+    /// deliberately absent — the trader never receives it.
+    fn fixture_output_tokens() -> Vec<D32> {
+        vec![token(0), token(1), token(2), token(3)]
+    }
+
     struct Rig {
         core: CoreSDK,
         _fleet: crate::handlers::faucet_flow_tests_support::FleetGuard,
@@ -761,6 +787,23 @@ mod tests {
         let (core, fleet) = setup(seed);
         fake_fleet::reset();
         fake_registers::reset();
+        // PRE-ADD, THEN TRADE. The adoption gate on the resolved seam refuses
+        // to credit a token this device has not adopted, exactly as
+        // `DeviceState::advance` does for ordinary credits — so the rig has to
+        // do what production must: install the output token's policy here
+        // FIRST, through the real `AdoptToken` operation, before any route
+        // can deliver value under it.
+        //
+        // Before this existed, every seam test below was landing an unadopted
+        // custom token, which is the bypass the gate closes.
+        let head = core.device_head().unwrap();
+        let adopted = fixture_output_tokens()
+            .into_iter()
+            .try_fold(head, |state, policy_commit| {
+                state.adopt_token(policy_commit)
+            })
+            .unwrap();
+        core.set_device_head_for_testing(adopted);
         let head = core.device_head().unwrap();
         let (genesis, device_id) = (head.genesis_digest(), head.devid());
         let (pk, sk) = crate::sdk::signing_authority::current_keypair().unwrap();

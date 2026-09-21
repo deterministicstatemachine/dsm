@@ -22,6 +22,9 @@
 //! position exists, it is terminal, and it moved nothing.
 
 use crate::economic::lineage::ValidatedEconomicRoot;
+use crate::sofi::validation::{trader_credits, Evidence};
+use crate::sofi::wire::SettlementPreimage;
+use crate::types::device_state::DeviceState;
 
 use super::derive;
 use super::resolution::Resolution;
@@ -52,6 +55,17 @@ pub enum AdvanceError {
     /// The position resolved Invalid: the lineage is terminal here, and no
     /// root follows it.
     LineageIsTerminal,
+    /// A realized position was handed no receipt, so the tokens it credits
+    /// could not be checked against the receiver's adoptions.
+    RealizedWithoutReceipt,
+    /// The credits of a realized position could not be derived from the
+    /// evidence the verdict was reached on.
+    CreditsNotDerivable,
+    /// A realized position credits a token this device has not adopted.
+    TokenNotAdopted { policy_commit: D32 },
+    /// The receipt describes a different operation from the one being
+    /// installed: its settlement does not recompute this `P`'s `E`.
+    ReceiptIsNotThisOperation { expected: D32, derived: D32 },
     /// A counter has no successor.
     Counter(SofiWireError),
 }
@@ -83,6 +97,28 @@ impl core::fmt::Display for AdvanceError {
             Self::LineageIsTerminal => {
                 write!(f, "the position resolved Invalid: no root follows it")
             }
+            Self::RealizedWithoutReceipt => write!(
+                f,
+                "a realized position was handed no receipt: its credits cannot be checked"
+            ),
+            Self::CreditsNotDerivable => write!(
+                f,
+                "the credits of this realized position are not derivable from its evidence"
+            ),
+            Self::TokenNotAdopted { policy_commit } => write!(
+                f,
+                "advance: refusing to credit token {} — this device has not adopted its \
+                 policy; adoption (ADD TOKEN) must precede receipt, and a settlement that \
+                 roots the token on the receiver's behalf does not satisfy it",
+                crate::types::identifiers::encode_crockford(policy_commit)
+            ),
+            Self::ReceiptIsNotThisOperation { expected, derived } => write!(
+                f,
+                "the receipt is for another operation: E {} was expected, its settlement \
+                 recomputes {}",
+                crate::types::identifiers::encode_crockford(expected),
+                crate::types::identifiers::encode_crockford(derived)
+            ),
             Self::Counter(e) => write!(f, "{e}"),
         }
     }
@@ -103,6 +139,72 @@ pub struct RegisteredClaims {
     pub conditional: D32,
 }
 
+/// What a REALIZED resolution must present beyond its claim: the settlement
+/// whose credits are about to land, the evidence its verdict was reached on,
+/// and the receiving device's own pre-state.
+///
+/// A `Void` needs none of it, because a void moves nothing. A `Realized`
+/// cannot be advanced without one — which is the point. The credits are
+/// DERIVED here from the preimage and the evidence, never supplied by the
+/// caller, so no producer can present a short list and no producer can skip
+/// the check by omitting the argument.
+pub struct RealizedReceipt<'a> {
+    pub preimage: &'a SettlementPreimage,
+    pub evidence: &'a Evidence,
+    /// `S_pre`: the state this advance is about to succeed. Its adoptions are
+    /// the ones that count, because adoption must PRECEDE receipt.
+    pub receiver: &'a DeviceState,
+}
+
+/// THE ADOPTION INVARIANT, on the resolved SoFi seam:
+///
+/// ```text
+/// SoFiRealized(T°)  =>  for every token T credited by T°, Adopted(S_pre, T)
+/// ```
+///
+/// This mirrors the gate `DeviceState::advance` applies to ordinary credits.
+/// The resolved SoFi path does not pass through `advance` — it recomputes
+/// `trader_post_states`, recomputes the economic root and admits the position
+/// directly — so without this the gate was simply absent on that path, and a
+/// realized route could land a token the receiver never adopted.
+///
+/// **Nobody adopts on the receiver's behalf.** A token's policy is anchored
+/// to ITS CREATOR's chain, which is a different anchor from the DLV policy's
+/// owner and usually a different party, so a vault's market policy naming a
+/// token establishes nothing about the receiver having adopted it. The
+/// adoption leaf lives in the receiver's own state and gets there by its own
+/// `AddToken`, before any value under that policy arrives — which is what
+/// keeps receipt verifiable offline.
+///
+/// Only CREDITS are gated. A debit is the trader spending what it already
+/// holds, and the multi-hop intermediate is never credited to the trader at
+/// all (see [`trader_credits`]), so a route passing through an asset does not
+/// oblige the trader to adopt it — that asset is the DLVs' across the hop.
+fn adoption_admits(
+    precommit: &TraderPrecommitBody,
+    receipt: &RealizedReceipt<'_>,
+) -> Result<(), AdvanceError> {
+    // The receipt must describe THIS operation. Without this, a producer
+    // could present the evidence of some other, fully adopted settlement and
+    // install this one's root behind it — the gate would be checking an
+    // operation nobody was installing. `E` is what `P` commits its settlement
+    // by, so recomputing it from the receipt's own bytes is the binding.
+    let derived =
+        derive::recompute_e(receipt.preimage).map_err(|_| AdvanceError::CreditsNotDerivable)?;
+    let expected = *precommit.external_commitment();
+    if derived != expected {
+        return Err(AdvanceError::ReceiptIsNotThisOperation { expected, derived });
+    }
+    let credits = trader_credits(receipt.preimage, receipt.evidence)
+        .map_err(|_| AdvanceError::CreditsNotDerivable)?;
+    for policy_commit in credits {
+        if !receipt.receiver.has_adopted(&policy_commit) {
+            return Err(AdvanceError::TokenNotAdopted { policy_commit });
+        }
+    }
+    Ok(())
+}
+
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
 ///
 /// Every conjunct is independent and each one is a separate reason to refuse:
@@ -116,6 +218,7 @@ pub fn advance_resolved(
     fulfillment: &TraderFulfillmentBody,
     claims: &RegisteredClaims,
     resolution: Resolution,
+    receipt: Option<&RealizedReceipt<'_>>,
 ) -> Result<ValidatedEconomicRoot, AdvanceError> {
     let q = next_position(precommit.position()).map_err(AdvanceError::Counter)?;
     if fulfillment.position() != q || previous.economic_position() != precommit.position() {
@@ -146,7 +249,15 @@ pub fn advance_resolved(
         });
     }
     let root = match resolution {
-        Resolution::Realized => *precommit.realize_root(),
+        Resolution::Realized => {
+            // The adoption invariant, inside the function that installs the
+            // root, so that no caller can reach a realized advance without it.
+            adoption_admits(
+                precommit,
+                receipt.ok_or(AdvanceError::RealizedWithoutReceipt)?,
+            )?;
+            *precommit.realize_root()
+        }
         // Zero mutations: the lineage continues exactly where it was.
         Resolution::Void => previous.economic_root(),
         Resolution::Invalid => return Err(AdvanceError::LineageIsTerminal),
@@ -411,22 +522,47 @@ mod tests {
         .expect("an ordinary admitted position")
     }
 
+    /// The fixture's own one-hop swap, and a receiver that HAS adopted what
+    /// it credits. The receipt must describe this very operation — its
+    /// settlement has to recompute `P`'s `E` — so these tests stand on the
+    /// real rig rather than the synthetic precommit above, whose `E` is a
+    /// literal no settlement could produce.
+    fn realized_rig() -> (crate::sofi::validation::fixtures::Fixture, DeviceState) {
+        let fx = crate::sofi::validation::fixtures::swap_fixture_n(1);
+        let mut receiver = DeviceState::new(G, DEV, vec![0x01; 32], 64);
+        for policy_commit in trader_credits(&fx.preimage, &fx.evidence).unwrap() {
+            receiver = receiver.adopt_token(policy_commit).unwrap();
+        }
+        (fx, receiver)
+    }
+
+    fn receipt<'a>(
+        fx: &'a crate::sofi::validation::fixtures::Fixture,
+        receiver: &'a DeviceState,
+    ) -> RealizedReceipt<'a> {
+        RealizedReceipt {
+            preimage: &fx.preimage,
+            evidence: &fx.evidence,
+            receiver,
+        }
+    }
+
     #[test]
     fn a_realized_position_installs_the_realize_root() {
-        let pre = d(0xA0);
-        let realize = d(0xA1);
-        let p = precommit(pre, realize);
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
         let f = fulfillment(&p);
         let advanced = advance_resolved(
-            &previous(pre),
+            &previous(*p.void_root()),
             &p,
             &f,
             &claims(&p, &f),
             Resolution::Realized,
+            Some(&receipt(&fx, &receiver)),
         )
         .unwrap();
         assert_eq!(advanced.economic_position(), P_POS + 1);
-        assert_eq!(advanced.economic_root(), realize);
+        assert_eq!(advanced.economic_root(), *p.realize_root());
     }
 
     /// SofiVoid has zero mutations: the position exists, it is terminal, and
@@ -436,8 +572,15 @@ mod tests {
         let pre = d(0xA0);
         let p = precommit(pre, d(0xA1));
         let f = fulfillment(&p);
-        let advanced =
-            advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), Resolution::Void).unwrap();
+        let advanced = advance_resolved(
+            &previous(pre),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Void,
+            None,
+        )
+        .unwrap();
         assert_eq!(advanced.economic_position(), P_POS + 1);
         assert_eq!(advanced.economic_root(), pre);
     }
@@ -448,11 +591,25 @@ mod tests {
         let p = precommit(pre, d(0xA1));
         let f = fulfillment(&p);
         assert_eq!(
-            advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), Resolution::Pending),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Pending,
+                None
+            ),
             Err(AdvanceError::NotResolved)
         );
         assert_eq!(
-            advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), Resolution::Invalid),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Invalid,
+                None
+            ),
             Err(AdvanceError::LineageIsTerminal)
         );
     }
@@ -480,7 +637,8 @@ mod tests {
                 &p,
                 &f,
                 &good,
-                Resolution::Realized
+                Resolution::Realized,
+                None,
             ),
             Err(AdvanceError::PositionIsNotSuccessor { .. })
         ));
@@ -499,13 +657,27 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            advance_resolved(&previous(pre), &p, &wrong_q, &good, Resolution::Realized),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &wrong_q,
+                &good,
+                Resolution::Realized,
+                None
+            ),
             Err(AdvanceError::PositionIsNotSuccessor { .. })
         ));
 
         // P was built on another root (P15-2).
         assert!(matches!(
-            advance_resolved(&previous(d(0xBB)), &p, &f, &good, Resolution::Realized),
+            advance_resolved(
+                &previous(d(0xBB)),
+                &p,
+                &f,
+                &good,
+                Resolution::Realized,
+                None
+            ),
             Err(AdvanceError::PreRootIsNotThePredecessor { .. })
         ));
 
@@ -517,7 +689,14 @@ mod tests {
             ..good
         };
         assert_eq!(
-            advance_resolved(&previous(pre), &p, &f, &other_parent, Resolution::Realized),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                &other_parent,
+                Resolution::Realized,
+                None
+            ),
             Err(AdvanceError::ParentClaimMismatch)
         );
 
@@ -527,7 +706,14 @@ mod tests {
             ..good
         };
         assert!(matches!(
-            advance_resolved(&previous(pre), &p, &f, &other_cq, Resolution::Realized),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                &other_cq,
+                Resolution::Realized,
+                None
+            ),
             Err(AdvanceError::ResolutionClaimMismatch { .. })
         ));
     }
@@ -548,7 +734,8 @@ mod tests {
                 &p,
                 &other_f,
                 &claims(&p, &f),
-                Resolution::Realized
+                Resolution::Realized,
+                None,
             ),
             Err(AdvanceError::ResolutionClaimMismatch { .. })
         ));
@@ -721,7 +908,14 @@ mod tests {
         let f = fulfillment(&p);
         // 1. Terminal yields no validated root, so the chain stops here.
         assert_eq!(
-            advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), Resolution::Invalid),
+            advance_resolved(
+                &previous(pre),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Invalid,
+                None
+            ),
             Err(AdvanceError::LineageIsTerminal)
         );
 
@@ -764,18 +958,174 @@ mod tests {
         );
     }
 
+    /// THE ADOPTION INVARIANT on the resolved SoFi seam. Everything else about
+    /// this operation is in order — positions chain, roots match, the claim is
+    /// the one `P` names — and it is still refused, because the token it would
+    /// credit was never adopted here. Nobody adopts on the receiver's behalf.
+    #[test]
+    fn a_realized_position_crediting_an_unadopted_token_is_refused() {
+        let (fx, _) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
+        assert_eq!(credits.len(), 1, "a one-hop swap credits its output only");
+
+        // A receiver that has adopted NOTHING.
+        let bare = DeviceState::new(G, DEV, vec![0x01; 32], 64);
+        assert!(!bare.has_adopted(&credits[0]));
+        assert_eq!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Realized,
+                Some(&receipt(&fx, &bare)),
+            ),
+            Err(AdvanceError::TokenNotAdopted {
+                policy_commit: credits[0]
+            })
+        );
+
+        // The same bytes, once the policy was installed here first.
+        let adopter = bare.adopt_token(credits[0]).unwrap();
+        assert!(advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Realized,
+            Some(&receipt(&fx, &adopter)),
+        )
+        .is_ok());
+    }
+
+    /// The gate cannot be skipped by declining to present a receipt: a
+    /// realized advance without one is refused, so there is no argument a
+    /// caller can omit to avoid being checked.
+    #[test]
+    fn a_realized_position_cannot_advance_without_a_receipt() {
+        let (fx, _) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        assert_eq!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Realized,
+                None,
+            ),
+            Err(AdvanceError::RealizedWithoutReceipt)
+        );
+    }
+
+    /// Nor by presenting SOMEBODY ELSE'S receipt. A producer holding the
+    /// evidence of a fully adopted settlement could otherwise install this
+    /// operation's root behind it, and the gate would be checking an
+    /// operation nobody was installing. `E` is the binding.
+    #[test]
+    fn a_receipt_for_another_operation_is_refused() {
+        let (fx, receiver) = realized_rig();
+        let other = crate::sofi::validation::fixtures::swap_fixture_n(2);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        assert!(matches!(
+            advance_resolved(
+                &previous(*p.void_root()),
+                &p,
+                &f,
+                &claims(&p, &f),
+                Resolution::Realized,
+                Some(&RealizedReceipt {
+                    preimage: &other.preimage,
+                    evidence: &other.evidence,
+                    receiver: &receiver,
+                }),
+            ),
+            Err(AdvanceError::ReceiptIsNotThisOperation { .. })
+        ));
+    }
+
+    /// A VOID moves nothing, so it needs no receipt and no adoption: refusing
+    /// it would strand a lineage over a token that never arrived.
+    #[test]
+    fn a_void_needs_no_adoption() {
+        let (fx, _) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let advanced = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Void,
+            None,
+        )
+        .unwrap();
+        assert_eq!(advanced.economic_root(), *p.void_root());
+    }
+
+    /// THE MULTI-HOP CASE. A route `A -> B -> C` obliges the trader to have
+    /// adopted `C` and nothing else. `B` is held by the DLVs across the hop
+    /// and never becomes a trader balance leaf, so requiring its adoption
+    /// would refuse a route over an asset the trader never receives.
+    #[test]
+    fn a_route_does_not_oblige_the_trader_to_adopt_what_it_passes_through() {
+        let fx = crate::sofi::validation::fixtures::swap_fixture_n(2);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let hops = match fx.preimage.settlement() {
+            crate::sofi::wire::SettlementBody::Swap { hops, .. } => hops.clone(),
+            crate::sofi::wire::SettlementBody::Close { .. } => unreachable!("a swap fixture"),
+        };
+        assert_eq!(hops.len(), 2);
+        let intermediate = hops[0].token_out;
+        assert_eq!(
+            intermediate, hops[1].token_in,
+            "B is what the hops chain on"
+        );
+
+        let credits = trader_credits(&fx.preimage, &fx.evidence).unwrap();
+        assert_eq!(credits, vec![hops[1].token_out], "the route's END, only");
+        assert!(
+            !credits.contains(&intermediate),
+            "the trader is never credited what the route passes through"
+        );
+
+        // A receiver that adopted the OUTPUT only — not the intermediate.
+        let receiver = DeviceState::new(G, DEV, vec![0x01; 32], 64)
+            .adopt_token(hops[1].token_out)
+            .unwrap();
+        assert!(!receiver.has_adopted(&intermediate));
+        assert!(advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            &claims(&p, &f),
+            Resolution::Realized,
+            Some(&receipt(&fx, &receiver)),
+        )
+        .is_ok());
+    }
+
     /// The fence and the advance agree: a position that `advance_resolved`
     /// produced is exactly one a descendant may build on, and the root it
     /// installed is the only one admissible.
     #[test]
     fn the_fence_admits_exactly_what_the_advance_installed() {
-        let pre = d(0xA0);
-        let realize = d(0xA1);
-        let p = precommit(pre, realize);
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
+        let (pre, realize) = (*p.void_root(), *p.realize_root());
         let f = fulfillment(&p);
+        let r = receipt(&fx, &receiver);
         for (resolution, expected) in [(Resolution::Realized, realize), (Resolution::Void, pre)] {
+            // A void needs no receipt; a realized one cannot advance without.
+            let carried = matches!(resolution, Resolution::Realized).then_some(&r);
             let advanced =
-                advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), resolution).unwrap();
+                advance_resolved(&previous(pre), &p, &f, &claims(&p, &f), resolution, carried)
+                    .unwrap();
             assert_eq!(
                 descendant_fence(
                     PredecessorClaim::ConditionalResolved {
