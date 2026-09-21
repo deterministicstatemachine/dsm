@@ -14,7 +14,10 @@
                     conditional claim can, and conditional references are
                     structurally earlier
     - CONFORMANCE   a conforming F carries the complete canonical policy set, one
-                    attempt per leg, q = p + 1 and P's key
+                    attempt per leg, q = p + 1 and P's key; over fetched evidence
+                    (R7) the eight-item predicate is Valid exactly when that holds
+                    and every storage fact is established, more evidence only
+                    refines, and an unmade read is never a refusal
     - REGISTRATION  the race at the leader of the position pair, and nothing
                     else: no member checks P, a witness, conformance or a parent
                     (Part II). Registered is not conforming and stored is not
@@ -135,6 +138,10 @@
     32. Void selecting the Realize root        -> `route_validation_excludes_parent_canonicality`
     33. the parent's selected branch unchecked -> `conditional_parent_on_another_branch_is_invalid`
     34. an undecided parent read as terminal   -> `conditional_parent_pending_keeps_the_position_pending`
+    35. a missing P read as Invalid (R7)       -> `a_missing_p_waits_and_only_an_unsigned_f_refuses`,
+                                                  `more_evidence_only_refines`
+    36. an unfetched setup read as Invalid (R7) -> `unread_storage_is_unavailable_never_invalid`,
+                                                  `more_evidence_only_refines`
 
   `p_g_f_hash_order_acyclic` is not a mutation target: acyclicity follows from the
   hash order itself, so admitting a current-E class cannot falsify it. The design
@@ -2309,6 +2316,291 @@ theorem later_setups_confer_no_authority (p k q k0 : Nat) (rest : List (Nat × N
 #print axioms at_most_one_candidate_registers_per_position
 #print axioms a_candidate_that_never_registers_stays_pending
 #print axioms no_guarantee_without_prepare_lock
+-- ── §10 FulfillmentConformance over fetched evidence (rebuild step R7) ─────
+
+/-- What a verifier fetched for `FulfillmentConformance(F)` — the twin of
+`sofi::conformance::ConformanceEvidence`. A `none` or a `false` storage field
+is a read that established nothing, never a refusal. `fSigned` and
+`setupNamesLeg` are facts about bytes in hand. -/
+structure ConfEvidence where
+  /-- Item 1: the exact P, in a copy whose envelope verifies. -/
+  precommit : Option PBody
+  /-- Item 2: F's own envelope verifies under the key F commits. -/
+  fSigned : Bool
+  /-- Items 3, 7 and 8: `P(E)` — the preimage that recomputes E — as the
+  shadow it commits per `(vault, parent)`. -/
+  preimage : Option (Nat → Nat → Nat)
+  /-- Item 5: `K^(a)` of vault `v` has a permanent storage resolution. -/
+  priorResolved : Nat → Nat → Bool
+  /-- Item 6: `Stored(setup body)` under `ρ`. -/
+  setupStored : Nat → Bool
+  /-- Item 7: the body at `ρ` names this trader and its leg's vault, before
+  the operation. Meaningful once the body is in hand. -/
+  setupNamesLeg : Nat → Bool
+  /-- Item 8: every reference of `𝒞_E^pre` fetched and re-derived. -/
+  closureVerified : Bool
+
+/-- A fact about bytes in hand: false is a refusal. -/
+def known (b : Bool) : Validation := if b then .valid else .invalid
+
+/-- A storage read: false established nothing. -/
+def fetched (b : Bool) : Validation := if b then .valid else .unavailable
+
+/-- Without the exact P nothing but item 2's own-signature half is decidable:
+an unsigned F is refused, a signed one waits. -/
+def withoutP (ev : ConfEvidence) : Validation := (known ev.fSigned).and .unavailable
+
+/-- Items 1 to 8 of Section 20.2, in order, under the three-valued conjunction.
+A fetched P that is not the one F names is no P at all. -/
+def conformance (hm : HashModel) (F : FBody) (ev : ConfEvidence) : Validation :=
+  match ev.precommit with
+  | none => withoutP ev
+  | some P =>
+    if F.pid = pid hm P then
+      allV
+        [ known (decide (P.p < U64_MAX ∧ F.q = P.p + 1))
+        , known (ev.fSigned && decide (F.key = P.key))
+        , (match ev.preimage with
+            | none => .unavailable
+            | some sh => known (decide (F.gset = canonSet hm sh P)))
+        , known (decide (F.attempts.map Prod.fst = P.legs.map Leg.vault))
+        , allV (F.attempts.map fun a =>
+            if a.2 = 0 then .valid else fetched (ev.priorResolved a.1 (a.2 - 1)))
+        , allV (P.legs.map fun l => fetched (ev.setupStored l.setup))
+        , allV (P.legs.map fun l =>
+            if ev.setupStored l.setup then known (ev.setupNamesLeg l.setup) else .unavailable)
+        , (match ev.preimage with
+            | none => .unavailable
+            | some _ => fetched ev.closureVerified) ]
+    else withoutP ev
+
+theorem known_valid_iff (b : Bool) : known b = .valid ↔ b = true := by
+  cases b <;> simp [known]
+
+theorem fetched_valid_iff (b : Bool) : fetched b = .valid ↔ b = true := by
+  cases b <;> simp [fetched]
+
+theorem fetched_ne_invalid (b : Bool) : fetched b ≠ .invalid := by
+  cases b <;> simp [fetched]
+
+theorem withoutP_ne_valid (ev : ConfEvidence) : withoutP ev ≠ .valid := by
+  unfold withoutP known
+  cases ev.fSigned <;> decide
+
+theorem allV_map_valid_iff {α : Type} (l : List α) (f : α → Validation) :
+    allV (l.map f) = .valid ↔ ∀ x ∈ l, f x = .valid := by
+  rw [allV_valid_iff]
+  exact List.forall_mem_map
+
+theorem item5_valid_iff (z : Prop) [Decidable z] (b : Bool) :
+    (if z then Validation.valid else fetched b) = .valid ↔ (¬ z → b = true) := by
+  by_cases hz : z <;> simp [hz, fetched_valid_iff]
+
+theorem item7_valid_iff (s n : Bool) :
+    (if s = true then known n else Validation.unavailable) = .valid ↔ s = true ∧ n = true := by
+  cases s <;> cases n <;> simp [known]
+
+/-- CORRESPONDENCE (the Core test `a_fulfillment_with_everything_in_hand_is_valid`
+and the eight `item_n_*` tests): the predicate is Valid exactly when the
+structural `Conforming` holds over the exact P and P(E), F is signed, and every
+storage fact it depends on is established. -/
+theorem conformance_valid_iff (hm : HashModel) (F : FBody) (ev : ConfEvidence) :
+    conformance hm F ev = .valid ↔
+      ∃ P sh, ev.precommit = some P ∧ ev.preimage = some sh ∧ Conforming hm sh P F
+        ∧ ev.fSigned = true
+        ∧ (∀ a ∈ F.attempts, a.2 ≠ 0 → ev.priorResolved a.1 (a.2 - 1) = true)
+        ∧ (∀ l ∈ P.legs, ev.setupStored l.setup = true ∧ ev.setupNamesLeg l.setup = true)
+        ∧ ev.closureVerified = true := by
+  cases hp : ev.precommit with
+  | none => simp [conformance, hp, withoutP_ne_valid]
+  | some P =>
+    simp only [conformance, hp]
+    by_cases hid : F.pid = pid hm P
+    · rw [if_pos hid]
+      cases hpre : ev.preimage with
+      | none => simp [allV_valid_iff]
+      | some sh =>
+        simp only [allV_valid_iff, List.forall_mem_cons, List.forall_mem_map, known_valid_iff,
+          fetched_valid_iff, item5_valid_iff, item7_valid_iff, decide_eq_true_eq,
+          Bool.and_eq_true, Option.some.injEq]
+        constructor
+        · rintro ⟨⟨h1a, h1b⟩, ⟨h2a, h2b⟩, h3, h4, h5, h6, h7, h8, -⟩
+          exact ⟨P, sh, rfl, rfl, ⟨hid, h3, h4, h1a, h1b, h2b⟩, h2a, h5,
+            fun l hl => ⟨h6 l hl, (h7 l hl).2⟩, h8⟩
+        · rintro ⟨P', sh', hP', hsh', ⟨_, h3, h4, h1a, h1b, h2b⟩, h2a, h5, h67, h8⟩
+          cases hP'
+          cases hsh'
+          exact ⟨⟨h1a, h1b⟩, ⟨h2a, h2b⟩, h3, h4, h5, fun l hl => (h67 l hl).1,
+            fun l hl => h67 l hl, h8, by simp⟩
+    · rw [if_neg hid]
+      simp only [withoutP_ne_valid, false_iff]
+      rintro ⟨P', sh', hP', _, ⟨hid', _⟩, _⟩
+      cases hP'
+      exact hid hid'
+
+/-- `ev'` has everything `ev` has: the same objects where `ev` had them, and
+every storage fact `ev` established. What was not read may now be read. -/
+def Extends (ev ev' : ConfEvidence) : Prop :=
+  (ev.precommit = none ∨ ev'.precommit = ev.precommit)
+    ∧ ev'.fSigned = ev.fSigned
+    ∧ (ev.preimage = none ∨ ev'.preimage = ev.preimage)
+    ∧ (∀ v a, ev.priorResolved v a = true → ev'.priorResolved v a = true)
+    ∧ (∀ r, ev.setupStored r = true → ev'.setupStored r = true)
+    ∧ (∀ r, ev.setupStored r = true → ev'.setupNamesLeg r = ev.setupNamesLeg r)
+    ∧ (ev.closureVerified = true → ev'.closureVerified = true)
+
+theorem Refines.rfl (v : Validation) : Refines v v := by
+  cases v <;> simp [Refines]
+
+theorem fetched_refines {b b' : Bool} (h : b = true → b' = true) :
+    Refines (fetched b) (fetched b') := by
+  cases b <;> cases b' <;> simp_all [fetched, Refines]
+
+theorem allV_map_refines' {α : Type} (xs : List α) {f f' : α → Validation}
+    (h : ∀ x ∈ xs, Refines (f x) (f' x)) : Refines (allV (xs.map f)) (allV (xs.map f')) := by
+  induction xs with
+  | nil => simp [allV, Refines]
+  | cons x xs ih =>
+    exact and_refines (h x (List.mem_cons_self ..))
+      (ih fun y hy => h y (List.mem_cons_of_mem _ hy))
+
+/-- MORE EVIDENCE ONLY REFINES (the Core tests `item_5_*`, `item_6_*`,
+`item_8_*` and `invalid_dominates_unavailable_in_item_order`): reading more
+turns Unavailable into an answer and never changes one. Invalid is permanent
+and is never produced by an unmade read; Valid is never withdrawn. -/
+theorem more_evidence_only_refines (hm : HashModel) (F : FBody) {ev ev' : ConfEvidence}
+    (h : Extends ev ev') : Refines (conformance hm F ev) (conformance hm F ev') := by
+  obtain ⟨hp, hs, hpre, hprior, hstored, hnames, hcl⟩ := h
+  cases hev : ev.precommit with
+  | none =>
+    -- Without P only the own-signature half of item 2 was decided; it is a
+    -- fact about F, and ev' carries the same fact.
+    simp only [conformance, hev]
+    unfold withoutP known
+    rw [hs]
+    cases hf : ev.fSigned
+    · -- an unsigned F is refused whatever else is read
+      cases hev' : ev'.precommit with
+      | none => simp [Refines, Validation.and]
+      | some P' =>
+        simp only []
+        by_cases hid : F.pid = pid hm P'
+        · rw [if_pos hid]
+          -- item 2 is Invalid on the same fact, so the whole conjunction is
+          show Validation.invalid = allV _
+          exact ((allV_invalid_iff _).mpr (by simp)).symm
+        · rw [if_neg hid]
+          simp [Refines, Validation.and]
+    · simp [Refines, Validation.and]
+  | some P =>
+    have hev' : ev'.precommit = some P := by
+      rcases hp with hnone | heq
+      · rw [hev] at hnone; exact absurd hnone (by simp)
+      · rw [heq, hev]
+    simp only [conformance, hev, hev']
+    by_cases hid : F.pid = pid hm P
+    · rw [if_pos hid, if_pos hid]
+      simp only [allV]
+      refine and_refines (Refines.rfl _) (and_refines ?_ (and_refines ?_ (and_refines (Refines.rfl _)
+        (and_refines ?_ (and_refines ?_ (and_refines ?_ (and_refines ?_ (Refines.rfl _))))))))
+      · rw [hs]; exact Refines.rfl _
+      · cases hpr : ev.preimage with
+        | none => simp [Refines]
+        | some sh =>
+          have : ev'.preimage = some sh := by
+            rcases hpre with hnone | heq
+            · rw [hpr] at hnone; exact absurd hnone (by simp)
+            · rw [heq, hpr]
+          rw [this]; exact Refines.rfl _
+      · refine allV_map_refines' _ fun a _ => ?_
+        by_cases hz : a.2 = 0
+        · simp [hz, Refines]
+        · simp only [hz, if_false]
+          exact fetched_refines (hprior _ _)
+      · exact allV_map_refines' _ fun l _ => fetched_refines (hstored _)
+      · refine allV_map_refines' _ fun l _ => ?_
+        cases hst : ev.setupStored l.setup
+        · simp [Refines]
+        · rw [hstored _ hst, hnames _ hst]
+          exact Refines.rfl _
+      · cases hpr : ev.preimage with
+        | none => simp [Refines]
+        | some sh =>
+          have : ev'.preimage = some sh := by
+            rcases hpre with hnone | heq
+            · rw [hpr] at hnone; exact absurd hnone (by simp)
+            · rw [heq, hpr]
+          rw [this]
+          exact fetched_refines hcl
+    · rw [if_neg hid, if_neg hid]
+      unfold withoutP
+      rw [hs]
+      exact Refines.rfl _
+
+/-- A MISSING P WAITS (the Core test `item_1_*`, and
+`invalid_dominates_unavailable_in_item_order`): with the exact P not in hand
+nothing about the fulfillment is refused except that it is unsigned. Mutation:
+read a missing P as Invalid — this and `more_evidence_only_refines` fail. -/
+theorem a_missing_p_waits_and_only_an_unsigned_f_refuses (hm : HashModel) (F : FBody)
+    (ev : ConfEvidence) (h : ev.precommit = none) :
+    conformance hm F ev = (if ev.fSigned then .unavailable else .invalid) := by
+  simp only [conformance, h]
+  unfold withoutP known
+  cases ev.fSigned <;> rfl
+
+theorem allV_map_ne_invalid {α : Type} (xs : List α) {g : α → Validation}
+    (h : ∀ x, g x ≠ .invalid) : allV (xs.map g) ≠ .invalid := by
+  intro hi
+  rw [allV_invalid_iff, List.mem_map] at hi
+  obtain ⟨x, _, hx⟩ := hi
+  exact h x hx
+
+theorem allV_eq_unavailable_of {l : List Validation} (hinv : ∀ v ∈ l, v ≠ .invalid)
+    (hun : .unavailable ∈ l) : allV l = .unavailable := by
+  induction l with
+  | nil => simp at hun
+  | cons v vs ih =>
+    have hv : v ≠ .invalid := hinv v (List.mem_cons_self ..)
+    have hvs : ∀ w ∈ vs, w ≠ .invalid := fun w hw => hinv w (List.mem_cons_of_mem _ hw)
+    simp only [allV]
+    rcases List.mem_cons.mp hun with rfl | hmem
+    · cases h : allV vs
+      · rfl
+      · exact absurd ((allV_invalid_iff vs).mp h) (fun hm => hvs _ hm rfl)
+      · rfl
+    · rw [ih hvs hmem]
+      cases v <;> simp_all [Validation.and]
+
+/-- UNREAD STORAGE IS UNAVAILABLE, NEVER INVALID (the Core tests `item_5_*`,
+`item_6_*`, `item_8_*`): a conforming, signed F over its exact P and P(E) whose
+storage facts were not read is Unavailable. Mutation: read an unfetched setup
+as Invalid (`fetched` → `known` in item 6) — this fails. -/
+theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat → Nat → Nat}
+    {P : PBody} {F : FBody} (hc : Conforming hm sh P F) :
+    conformance hm F
+      ⟨some P, true, some sh, fun _ _ => false, fun _ => false, fun _ => false, false⟩
+      = .unavailable := by
+  obtain ⟨hid, h3, h4, h1a, h1b, h2b⟩ := hc
+  simp only [conformance, if_pos hid]
+  apply allV_eq_unavailable_of
+  · intro v hv
+    simp only [List.mem_cons, List.mem_nil_iff, or_false] at hv
+    rcases hv with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    · simp [known, h1a, h1b]
+    · simp [known, h2b]
+    · simp [known, h3]
+    · simp [known, h4]
+    · exact allV_map_ne_invalid _ fun a => by split <;> simp [fetched]
+    · exact allV_map_ne_invalid _ fun l => by simp [fetched]
+    · exact allV_map_ne_invalid _ fun l => by simp
+    · simp [fetched]
+  · simp [fetched]
+
+#print axioms conformance_valid_iff
+#print axioms more_evidence_only_refines
+#print axioms a_missing_p_waits_and_only_an_unsigned_f_refuses
+#print axioms unread_storage_is_unavailable_never_invalid
+
 #print axioms selected_root_is_committed
 #print axioms route_validation_excludes_parent_canonicality
 #print axioms registered_fulfillment_resolves_under_evidence_availability
