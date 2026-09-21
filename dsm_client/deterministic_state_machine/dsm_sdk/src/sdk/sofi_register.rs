@@ -37,11 +37,12 @@ use dsm::sofi::wire::{
 };
 use dsm::types::error::DsmError;
 
-use dsm::sofi::arith::resolve_objects;
+use dsm::sofi::arith::{resolve_objects, CellResolution};
 use dsm::sofi::registration::{fulfillment_registered, names_fulfillment_key, Registration};
 
 use crate::sdk::economic_registers::{economic_root_namespace, names_root_key};
 use crate::sdk::sofi_evidence::LOCATOR_BUDGET;
+use crate::sdk::sofi_exercise::read_attempt_cell;
 use crate::sdk::sofi_publish::{fetch_precommit, fetch_setup};
 use crate::sdk::storage_io::{leader_index, read_cell_raw, read_stored_bytes, write_cells_leader_first};
 use crate::sdk::storage_set::StorageSet;
@@ -137,13 +138,65 @@ pub struct Installed {
     pub copies: u32,
 }
 
+/// Cells read per leg when acquiring what an attempt skipped past. The same
+/// bound the walk uses (`sofi_resolve::WALK_BUDGET`), for the same reason:
+/// past it the earlier keys are unread, never assumed skipped.
+pub const PRIOR_ATTEMPT_BUDGET: usize = crate::sdk::sofi_resolve::WALK_BUDGET;
+
+/// The cells an attempt above zero skips past, read from the committed set:
+/// for every leg the fulfillment names at attempt `a`, the resolution of
+/// `K^(0) … K^(a-1)` of that leg's vault at its parent root.
+///
+/// ONE PATH, SHARED (owner ruling, §44.4). The producer's install (R9) and
+/// the verifier's resolution (R12) read the same cells the same way, because
+/// they answer the same question: conformance item 5 requires the key before
+/// this one to have a permanent storage resolution, and a route's liveness
+/// requires every earlier key to be skipped. A key that could not be read is
+/// simply absent from the map, and conformance answers `Unavailable` for it.
+///
+/// AN EMPTY MAP NEVER MEANS "THERE WERE NO PRIOR ATTEMPTS". It means nothing
+/// was read — which is what the producer's install used to hand conformance
+/// unconditionally, so item 5 answered `Unavailable(PriorAttempt)` for every
+/// attempt above zero and NO RETRY IN THE SYSTEM COULD EVER INSTALL. An
+/// attempt of zero has no earlier key and contributes no entry, which is the
+/// one case where the map is legitimately empty.
+///
+/// `budget` bounds the cells read per leg, as the walk's does: past it the
+/// earlier keys are unread, so they are `Unavailable` and the position waits.
+pub async fn acquire_prior_attempts(
+    set: &StorageSet,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    budget: usize,
+) -> Result<BTreeMap<(D32, u64), CellResolution>, DsmError> {
+    let mut cells = BTreeMap::new();
+    for entry in fulfillment.attempts() {
+        let Some(leg) = precommit
+            .legs()
+            .iter()
+            .find(|l| l.vault_id == entry.vault_id)
+        else {
+            // F names a leg P does not: conformance item 4 refuses it, and
+            // there is no parent root to read a cell at.
+            continue;
+        };
+        let reach = usize::try_from(entry.attempt)
+            .unwrap_or(usize::MAX)
+            .min(budget);
+        for earlier in 0..reach as u64 {
+            let (cell, _) =
+                read_attempt_cell(set, &leg.vault_id, &leg.parent_root, earlier).await?;
+            cells.insert((entry.vault_id, earlier), cell);
+        }
+    }
+    Ok(cells)
+}
+
 /// Acquire what `FulfillmentConformance(F)` reads, from storage and the
 /// request. Items 1, 2 and 8 come with the request; item 6's setups are
 /// fetched under their `ρ` (R8); the closure objects are fetched by the rule
-/// of each reference kind. Item 5's earlier attempt keys are cells, not
-/// objects, and are not fetched here: the resolver (`sofi_resolve`, R12)
-/// reads them into `prior_attempts` from the exercises at those keys; the
-/// producer's install has none, so an attempt above zero stops it.
+/// of each reference kind; item 5's earlier attempt cells come from
+/// [`acquire_prior_attempts`], the one path the verifier uses too.
 pub async fn acquire_conformance_evidence(
     set: &StorageSet,
     request: &InstallRequest<'_>,
@@ -178,7 +231,13 @@ pub async fn acquire_conformance_evidence(
         preimage: Some(request.preimage.clone()),
         closure,
         setups,
-        prior_attempts: BTreeMap::new(),
+        prior_attempts: acquire_prior_attempts(
+            set,
+            request.precommit,
+            request.fulfillment,
+            PRIOR_ATTEMPT_BUDGET,
+        )
+        .await?,
     })
 }
 
@@ -312,7 +371,12 @@ mod tests {
         block_on, d, install_request as request, pair_bytes, signed_route as rig,
         trader_keys as keys, trader_sign as sign, DEV, G,
     };
+    use crate::sdk::sofi_exercise::{build_exercise, write_exercise};
+    use crate::sdk::sofi_test_fixtures::SignedRoute;
     use crate::sdk::storage_io::{fake_registers, leader_index};
+    use dsm::sofi::conformance::{fulfillment_conformance, Validation};
+    use dsm::sofi::exercise::recognize_exercise;
+    use dsm::sofi::wire::AttemptEntry;
 
     fn ful_ns() -> &'static [u8] {
         TAG_DSM_SOFI_FULFILLMENT.source_bytes()
@@ -608,6 +672,155 @@ mod tests {
                 signature: r.f_sig.clone(),
             }),
             "leader plus two copies at both cells"
+        );
+    }
+
+    /// The route's own exercise, written to every leg's key, so the cells
+    /// `K^(a)` the next attempt skips past are Final.
+    fn exercise_at(r: &SignedRoute, fulfillment: &TraderFulfillmentBody, signature: &[u8]) {
+        let req = InstallRequest {
+            precommit: &r.precommit,
+            precommit_signature: &r.p_sig,
+            preimage: &r.preimage,
+            fulfillment,
+            fulfillment_signature: signature,
+            own_objects: &r.own,
+        };
+        let evidence = block_on(acquire_conformance_evidence(&r.set, &req)).unwrap();
+        let exercise = build_exercise(&req, &evidence).unwrap();
+        let recognized = recognize_exercise(&exercise.encode()).unwrap();
+        block_on(write_exercise(&r.set, &exercise, &recognized)).unwrap();
+    }
+
+    /// The same `P`, exercised at `attempt` on every leg, signed by the trader.
+    fn fulfillment_at(r: &SignedRoute, attempt: u64) -> (TraderFulfillmentBody, Vec<u8>) {
+        let f = TraderFulfillmentBody::new(
+            *r.fulfillment.precommit_id(),
+            r.fulfillment.policy_fulfillment_set().to_vec(),
+            r.fulfillment
+                .attempts()
+                .iter()
+                .map(|a| AttemptEntry {
+                    vault_id: a.vault_id,
+                    attempt,
+                })
+                .collect(),
+            r.fulfillment.position(),
+            ALG,
+            &keys().0,
+        )
+        .unwrap();
+        let signature = sign(&derive::fulfillment_signing_digest(&f));
+        (f, signature)
+    }
+
+    fn request_at<'a>(
+        r: &'a SignedRoute,
+        f: &'a TraderFulfillmentBody,
+        signature: &'a [u8],
+    ) -> InstallRequest<'a> {
+        InstallRequest {
+            precommit: &r.precommit,
+            precommit_signature: &r.p_sig,
+            preimage: &r.preimage,
+            fulfillment: f,
+            fulfillment_signature: signature,
+            own_objects: &r.own,
+        }
+    }
+
+    /// A RETRY INSTALLS. Conformance item 5 requires the key before this one
+    /// to have a permanent storage resolution, and the acquisition now reads
+    /// it. Before this change `prior_attempts` was handed to conformance
+    /// empty, so every attempt above zero answered
+    /// `Unavailable(PriorAttempt)` and no retry in the system could install.
+    ///
+    /// Executed at attempt 1 AND attempt 2 (owner ruling §44.4): the second
+    /// proves the acquisition reads the whole run `K^(0) … K^(a-1)` and not
+    /// just the key immediately before.
+    #[test]
+    #[serial]
+    fn an_attempt_above_zero_installs_once_the_keys_it_skips_are_final() {
+        let r = rig(true);
+        block_on(install_fulfillment(&r.set, &request(&r))).unwrap();
+        exercise_at(&r, &r.fulfillment, &r.f_sig);
+
+        // Attempt 1: K^(0) is final on every leg.
+        let (f1, s1) = fulfillment_at(&r, 1);
+        let req1 = request_at(&r, &f1, &s1);
+        let ev1 = block_on(acquire_conformance_evidence(&r.set, &req1)).unwrap();
+        for leg in r.precommit.legs() {
+            assert!(
+                matches!(
+                    ev1.prior_attempts.get(&(leg.vault_id, 0)),
+                    Some(CellResolution::Final(_))
+                ),
+                "the acquisition reads K^(0) of every leg, not an empty map"
+            );
+        }
+        assert_eq!(
+            fulfillment_conformance(&f1, &s1, &ev1).verdict(),
+            Validation::Valid
+        );
+        assert!(block_on(install_fulfillment(&r.set, &req1)).is_ok());
+        exercise_at(&r, &f1, &s1);
+
+        // Attempt 2: the whole run 0..=1, not just the key before.
+        let (f2, s2) = fulfillment_at(&r, 2);
+        let req2 = request_at(&r, &f2, &s2);
+        let ev2 = block_on(acquire_conformance_evidence(&r.set, &req2)).unwrap();
+        for leg in r.precommit.legs() {
+            for earlier in 0..2u64 {
+                assert!(
+                    matches!(
+                        ev2.prior_attempts.get(&(leg.vault_id, earlier)),
+                        Some(CellResolution::Final(_))
+                    ),
+                    "K^({earlier}) of every leg is read at attempt 2"
+                );
+            }
+        }
+        assert_eq!(
+            fulfillment_conformance(&f2, &s2, &ev2).verdict(),
+            Validation::Valid
+        );
+        assert!(block_on(install_fulfillment(&r.set, &req2)).is_ok());
+    }
+
+    /// An unread or unresolved earlier key is `Unavailable`, never a pass:
+    /// the same attempt 1 with `K^(0)` still open waits, and nothing is
+    /// installed. An empty map means nothing was read — never that there
+    /// were no prior attempts.
+    #[test]
+    #[serial]
+    fn an_attempt_whose_earlier_key_is_open_waits_and_installs_nothing() {
+        let r = rig(true);
+        let (f1, s1) = fulfillment_at(&r, 1);
+        let req1 = request_at(&r, &f1, &s1);
+        let ev1 = block_on(acquire_conformance_evidence(&r.set, &req1)).unwrap();
+        let leg = &r.precommit.legs()[0];
+        assert_eq!(
+            ev1.prior_attempts.get(&(leg.vault_id, 0)),
+            Some(&CellResolution::Unresolved),
+            "the key was read and is open — present, and not Final"
+        );
+        assert_eq!(
+            fulfillment_conformance(&f1, &s1, &ev1).verdict(),
+            Validation::Unavailable
+        );
+        assert!(matches!(
+            block_on(install_fulfillment(&r.set, &req1)),
+            Err(InstallError::Unavailable(
+                ConformanceMissing::PriorAttempt { attempt: 0, .. }
+            ))
+        ));
+        // An attempt of zero has no earlier key and contributes no entry:
+        // the one case where the map is legitimately empty.
+        let ev0 = block_on(acquire_conformance_evidence(&r.set, &request(&r))).unwrap();
+        assert!(ev0.prior_attempts.is_empty());
+        assert_eq!(
+            fulfillment_conformance(&r.fulfillment, &r.f_sig, &ev0).verdict(),
+            Validation::Valid
         );
     }
 
