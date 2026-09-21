@@ -142,6 +142,7 @@
                                                   `more_evidence_only_refines`
     36. an unfetched setup read as Invalid (R7) -> `unread_storage_is_unavailable_never_invalid`,
                                                   `more_evidence_only_refines`
+    37. `fulfillStep` writes K_ful only (R9)   -> `position_pair_atomic`
 
   `p_g_f_hash_order_acyclic` is not a mutation target: acyclicity follows from the
   hash order itself, so admitting a current-E class cannot falsify it. The design
@@ -920,6 +921,33 @@ inductive SysStep (hm : HashModel) (shadowOf : Nat → Nat → Nat) : Sys → Sy
 inductive SysReach (hm : HashModel) (shadowOf : Nat → Nat → Nat) : Sys → Sys → Prop
   | refl (s : Sys) : SysReach hm shadowOf s s
   | tail {a b c : Sys} : SysReach hm shadowOf a b → SysStep hm shadowOf b c → SysReach hm shadowOf a c
+
+/-- POSITION PAIR ATOMIC (rebuild step R9, `no_member_ever_holds_one_half_of_a_position`):
+`K_ful(q)` is never held without `K_root(q)`. The only step that writes
+`K_ful` is `fulfillStep`, and it writes both keys in one transaction; the
+other steps leave `K_ful` alone and never clear `K_root`. Mutation:
+`fulfillStep` writing `kful` only — this fails. -/
+theorem position_pair_atomic (hm : HashModel) (shadowOf : Nat → Nat → Nat) {s₀ s : Sys}
+    (h₀ : ∀ q, s₀.kful q = none) (hr : SysReach hm shadowOf s₀ s) :
+    ∀ q F, s.kful q = some F → s.kroot q ≠ none := by
+  induction hr with
+  | refl => intro q F h; rw [h₀ q] at h; cases h
+  | tail _ hstep ih =>
+    intro q F h
+    cases hstep with
+    | storeP P _ => exact ih q F h
+    | storeG g _ => exact ih q F h
+    | fulfill P F' _ =>
+      simp only [fulfillStep] at h ⊢
+      by_cases hq : q = F'.q
+      · simp [hq]
+      · simp only [hq, if_false] at h ⊢; exact ih q F h
+    | root q' c _ =>
+      simp only [rootStep] at h ⊢
+      by_cases hq : q = q'
+      · simp [hq]
+      · simp only [hq, if_false]; exact ih q F h
+    | consume R e _ => exact ih q F h
 
 /-- P IS NON-ECONOMIC: storing it occupies no position and changes no economic
 fact or any guard that does not name it. Abandoning it has no effect. -/
@@ -2596,6 +2624,7 @@ theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat �
     · simp [fetched]
   · simp [fetched]
 
+#print axioms position_pair_atomic
 #print axioms conformance_valid_iff
 #print axioms more_evidence_only_refines
 #print axioms a_missing_p_waits_and_only_an_unsigned_f_refuses

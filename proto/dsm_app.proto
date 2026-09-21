@@ -4309,6 +4309,21 @@ message CellValuesV1 {
   repeated bytes values = 1 [(dsm_max_len)=262144];
 }
 
+// One value for one key, as a batch put carries it. The member keeps it
+// after anything already at the key, exactly as a single put would.
+message CellPutV1 {
+  bytes namespace = 1 [(dsm_max_len)=128];
+  bytes key       = 2 [(dsm_fixed_len)=32];
+  bytes value     = 3 [(dsm_max_len)=262144];
+}
+
+// Several keys taken in ONE local transaction at the member: all of them or
+// none of them (Part II §17.4, the two position cells). The member still
+// decodes none of the values and refuses none of them.
+message CellPutsV1 {
+  repeated CellPutV1 entries = 1;
+}
+
 message IndexEntryV1 {
   int64 seq  = 1;
   bytes addr = 2 [(dsm_fixed_len)=32];

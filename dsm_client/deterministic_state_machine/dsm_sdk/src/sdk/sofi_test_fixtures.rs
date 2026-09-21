@@ -227,6 +227,18 @@ impl RouteFixture {
         storage_set_id: D32,
         market_of: impl Fn(usize) -> (D32, D32),
     ) -> Self {
+        Self::swap_with_setups(n, storage_set_id, market_of, |j, _| d(0x55 + j as u8))
+    }
+
+    /// `swap_with`, with each hop's `ρ` chosen by `setup_ref_of(j, vault_id)`
+    /// — for the install tests (R9), whose legs must name real published
+    /// setups for conformance to hold.
+    pub fn swap_with_setups(
+        n: usize,
+        storage_set_id: D32,
+        market_of: impl Fn(usize) -> (D32, D32),
+        setup_ref_of: impl Fn(usize, &D32) -> D32,
+    ) -> Self {
         let vaults: Vec<VaultAtGenesis> = (0..n)
             .map(|j| {
                 VaultAtGenesis::new(
@@ -266,7 +278,7 @@ impl RouteFixture {
             hops.push(SwapHop {
                 vault_id: vault.vault_id,
                 parent_root: vault.parent_root,
-                setup_ref: d(0x55 + j as u8),
+                setup_ref: setup_ref_of(j, &vault.vault_id),
                 token_in,
                 amount_in: amount,
                 token_out,

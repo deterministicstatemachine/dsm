@@ -922,6 +922,34 @@ impl StorageNodeClient {
         }
     }
 
+    /// Part II §17.4: several keys in ONE local transaction at the member —
+    /// all of them or none of them. Each entry is `(namespace, key, value)`.
+    pub async fn put_cells(&self, entries: &[(Vec<u8>, [u8; 32], Vec<u8>)]) -> Result<(), String> {
+        use prost::Message;
+        let url = format!("{base}/api/v2/cells", base = self.node_info.url);
+        let batch = dsm::types::proto::CellPutsV1 {
+            entries: entries
+                .iter()
+                .map(|(namespace, key, value)| dsm::types::proto::CellPutV1 {
+                    namespace: namespace.clone(),
+                    key: key.to_vec(),
+                    value: value.clone(),
+                })
+                .collect(),
+        };
+        let response = self
+            .client
+            .post(&url)
+            .body(batch.encode_to_vec())
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
+        match response.status().as_u16() {
+            204 => Ok(()),
+            status => Err(format!("cells put answered HTTP {status}")),
+        }
+    }
+
     /// Part II §12, get: everything the member holds at the key, in the order
     /// it arrived. `None` when the member could not answer; an empty list is
     /// an answer, and the bytes prove themselves.
@@ -1405,6 +1433,37 @@ impl StorageNodeSDK {
             let result = match client {
                 None => Err("no client for this member's endpoint".to_string()),
                 Some(c) => c.put_cell(namespace, key_b32, value).await,
+            };
+            match result {
+                Ok(()) if i == leader => fanout.leader_reached = true,
+                Ok(()) => fanout.copies += 1,
+                Err(e) => fanout.errors.push((member.member_id.clone(), e)),
+            }
+        }
+        fanout
+    }
+
+    /// Part II §8 for a batch of keys taken together (§17.4): the leader
+    /// first, then every other member, each taking all the entries in one
+    /// local transaction or none of them.
+    pub async fn put_cells_leader_first(
+        &self,
+        set: &crate::sdk::storage_set::StorageSet,
+        leader: usize,
+        entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
+    ) -> CellPutFanout {
+        let mut order: Vec<usize> = (0..set.len()).filter(|i| *i != leader).collect();
+        order.insert(0, leader);
+        let mut fanout = CellPutFanout::default();
+        for i in order {
+            let member = &set.members()[i];
+            let client = self
+                .clients
+                .iter()
+                .find(|c| c.node_info.url == member.endpoint);
+            let result = match client {
+                None => Err("no client for this member's endpoint".to_string()),
+                Some(c) => c.put_cells(entries).await,
             };
             match result {
                 Ok(()) if i == leader => fanout.leader_reached = true,

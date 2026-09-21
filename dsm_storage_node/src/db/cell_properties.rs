@@ -99,6 +99,58 @@ async fn every_value_put_at_a_key_is_held_in_arrival_order() {
     );
 }
 
+/// PositionPairAtomic at the member: a batch is one transaction. Both keys
+/// hold their value after it, or — when an entry names no cell — neither
+/// does. Mutation: two separate inserts instead of one transaction, and the
+/// first key keeps its value while the batch reports failure.
+#[tokio::test]
+async fn a_batch_put_lands_every_key_or_none() {
+    let pool = fresh_pool().await;
+    let (k1, k2) = (unique_key(0x35), unique_key(0x36));
+    db::put_cell(&pool, NS, &k1, b"already here")
+        .await
+        .expect("put");
+    db::put_cells(
+        &pool,
+        &[
+            (NS.to_vec(), k1.to_vec(), b"half one".to_vec()),
+            (NS.to_vec(), k2.to_vec(), b"half two".to_vec()),
+        ],
+    )
+    .await
+    .expect("a batch is a put");
+    assert_eq!(
+        db::get_cell_values(&pool, NS, &k1).await.expect("read"),
+        vec![b"already here".to_vec(), b"half one".to_vec()],
+        "after anything already there"
+    );
+    assert_eq!(
+        db::get_cell_values(&pool, NS, &k2).await.expect("read"),
+        vec![b"half two".to_vec()]
+    );
+
+    let (k3, k4) = (unique_key(0x37), unique_key(0x38));
+    let refused = db::put_cells(
+        &pool,
+        &[
+            (NS.to_vec(), k3.to_vec(), b"would be held".to_vec()),
+            (Vec::new(), k4.to_vec(), b"names no cell".to_vec()),
+        ],
+    )
+    .await;
+    assert!(
+        refused.is_err(),
+        "an entry that names no cell fails the batch"
+    );
+    assert!(
+        db::get_cell_values(&pool, NS, &k3)
+            .await
+            .expect("read")
+            .is_empty(),
+        "the first entry was rolled back with the second: none, not one"
+    );
+}
+
 #[tokio::test]
 async fn a_key_nothing_was_put_under_reads_as_an_empty_list() {
     let pool = fresh_pool().await;

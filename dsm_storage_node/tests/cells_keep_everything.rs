@@ -121,6 +121,79 @@ async fn page(app: &Router, locator: &str, query: &str) -> Vec<(i64, Vec<u8>)> {
 
 /// The property the old registers broke: a second, different value at a
 /// key is KEPT, after the first. Nothing is refused and nothing is compared.
+async fn put_batch(app: &Router, entries: Vec<(Vec<u8>, [u8; 32], Vec<u8>)>) -> StatusCode {
+    let batch = dsm::types::proto::CellPutsV1 {
+        entries: entries
+            .into_iter()
+            .map(|(namespace, key, value)| dsm::types::proto::CellPutV1 {
+                namespace,
+                key: key.to_vec(),
+                value,
+            })
+            .collect(),
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v2/cells")
+        .body(Body::from(batch.encode_to_vec()))
+        .expect("request");
+    app.clone().oneshot(req).await.expect("oneshot").status()
+}
+
+/// Part II §17.4: the two position cells are taken in ONE local transaction
+/// on the served assembly — both after anything already there, or, for a
+/// batch that names no cell, neither.
+#[tokio::test]
+async fn a_batch_put_takes_every_key_or_none_on_the_served_assembly() {
+    let app = member().await;
+    let (k1, k2) = (key(0x21), key(0x22));
+    assert_eq!(
+        put(&app, Some(NS), &k1, b"already here").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put_batch(
+            &app,
+            vec![
+                (NS.as_bytes().to_vec(), [0x21; 32], b"half one".to_vec()),
+                (NS.as_bytes().to_vec(), [0x22; 32], b"half two".to_vec()),
+            ],
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        get(&app, &k1).await.1,
+        vec![b"already here".to_vec(), b"half one".to_vec()]
+    );
+    assert_eq!(get(&app, &k2).await.1, vec![b"half two".to_vec()]);
+
+    // A batch with an entry that names no cell is refused whole: the shape
+    // is checked before anything is written.
+    let (k3, k4) = (key(0x23), key(0x24));
+    assert_eq!(
+        put_batch(
+            &app,
+            vec![
+                (
+                    NS.as_bytes().to_vec(),
+                    [0x23; 32],
+                    b"would be held".to_vec()
+                ),
+                (
+                    b"not a namespace".to_vec(),
+                    [0x24; 32],
+                    b"names no cell".to_vec()
+                ),
+            ],
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(get(&app, &k3).await.1.is_empty(), "none, not one");
+    assert!(get(&app, &k4).await.1.is_empty());
+}
+
 #[tokio::test]
 async fn a_second_value_at_a_key_is_kept_after_the_first_never_refused() {
     let app = member().await;

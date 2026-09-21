@@ -61,6 +61,7 @@ pub mod device_admission_sdk;
 pub mod dlv_sdk;
 /// SoFi v8 producers: setup, vault creation, trade, route and close.
 pub mod sofi_publish;
+pub mod sofi_register;
 pub mod sofi_sdk;
 // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_publication; // publication-quorum lifecycle for device identities

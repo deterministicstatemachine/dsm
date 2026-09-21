@@ -344,6 +344,33 @@ pub(crate) async fn write_cell_leader_first(
     }
 }
 
+/// Part II §17.4: write several keys as ONE local transaction per member,
+/// the leader of `seed` first and the other members after. Every member
+/// takes all the entries or none of them; nothing is checked or compared.
+pub(crate) async fn write_cells_leader_first(
+    set: &crate::sdk::storage_set::StorageSet,
+    seed: &[u8; 32],
+    entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
+) -> Result<CellWrite, DsmError> {
+    let leader = leader_index(set, seed)?;
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        Ok(fake_registers::put_cells(set, leader, entries))
+    }
+    #[cfg(not(any(test, feature = "test-utils")))]
+    {
+        let sdk = member_sdk_with_auth(set).await?;
+        let fanout = sdk.put_cells_leader_first(set, leader, entries).await;
+        for (member, error) in &fanout.errors {
+            log::warn!("cells write: member {member} did not take the batch: {error}");
+        }
+        Ok(CellWrite {
+            leader_reached: fanout.leader_reached,
+            copies: fanout.copies,
+        })
+    }
+}
+
 /// Part II §8 step 5: carry `value` at `key` under `namespace` to one member
 /// of `set`, by index. Any party may carry the bytes to a member not reached
 /// at write time; a member keeps what it is given.
@@ -583,6 +610,9 @@ pub mod fake_registers {
         /// `(namespace, key)`, in arrival order.
         keyed: HashMap<String, HashMap<(Vec<u8>, [u8; 32]), Vec<Vec<u8>>>>,
         failing: HashSet<String>,
+        /// A member that cannot take one particular cell: the seam that shows
+        /// a batch is one transaction — its other entries do not land either.
+        failing_cells: HashSet<(String, Vec<u8>, [u8; 32])>,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -609,6 +639,57 @@ pub mod fake_registers {
                 s.failing.remove(member_id);
             }
         })
+    }
+
+    /// Make one cell at one member fail: the seam for a partial outage. A
+    /// single put of that cell fails; a batch containing it fails WHOLE.
+    pub fn fail_cell(member_id: &str, namespace: &[u8], key: &[u8; 32]) {
+        with_state(|s| {
+            s.failing_cells
+                .insert((member_id.to_string(), namespace.to_vec(), *key));
+        })
+    }
+
+    /// Part II §17.4 at a fake member: every entry lands at the member, or
+    /// none does — one transaction, as the node's batch put is one.
+    pub fn put_cells(
+        set: &StorageSet,
+        leader: usize,
+        entries: &[(Vec<u8>, [u8; 32], Vec<u8>)],
+    ) -> super::CellWrite {
+        let mut order: Vec<usize> = (0..set.len()).filter(|i| *i != leader).collect();
+        order.insert(0, leader);
+        let mut write = super::CellWrite::default();
+        for i in order {
+            let member = &set.members()[i];
+            let taken = with_state(|s| {
+                if s.failing.contains(&member.member_id)
+                    || entries.iter().any(|(ns, key, _)| {
+                        s.failing_cells
+                            .contains(&(member.member_id.clone(), ns.clone(), *key))
+                    })
+                {
+                    return false;
+                }
+                for (ns, key, value) in entries {
+                    s.keyed
+                        .entry(member.member_id.clone())
+                        .or_default()
+                        .entry((ns.clone(), *key))
+                        .or_default()
+                        .push(value.clone());
+                }
+                true
+            });
+            if taken {
+                if i == leader {
+                    write.leader_reached = true;
+                } else {
+                    write.copies += 1;
+                }
+            }
+        }
+        write
     }
 
     /// Part II §8 at a fake member: append at the leader first, then at the
@@ -645,7 +726,10 @@ pub mod fake_registers {
     ) -> Result<(), String> {
         let member = &set.members()[member];
         with_state(|s| {
-            if s.failing.contains(&member.member_id) {
+            if s.failing.contains(&member.member_id)
+                || s.failing_cells
+                    .contains(&(member.member_id.clone(), namespace.to_vec(), *key))
+            {
                 return Err("injected outage".to_string());
             }
             s.keyed

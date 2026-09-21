@@ -4,9 +4,7 @@
 # this file only shrinks, except that a Core-only step landing a predicate
 # ahead of the steps that call it adds that one line (R7); R14 deletes the
 # file and G1 passes with no exceptions.
-dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs fulfillment_register_key  # R9
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs successor_attempt_key  # R11
-dsm_client/deterministic_state_machine/dsm/src/sofi/conformance.rs fulfillment_conformance  # R9: the producer obtains Valid before it writes F; R12: the ladder's conjunct. Landed at R7 ahead of both, by the build order; `setup_ref` is reached through it
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs advance_resolved  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14
 dsm_client/deterministic_state_machine/dsm/src/sofi/resolution.rs effect_of  # R12
