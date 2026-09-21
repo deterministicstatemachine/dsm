@@ -146,6 +146,8 @@
     37. `fulfillStep` writes K_ful only (R9)   -> `position_pair_atomic`
     38. (R13) Pending counted as validated     -> `an_undecided_or_terminal_position_extends_nothing`,
         ancestry                                  `descendant_requires_resolved_predecessor`
+    39. (R14) `legOk` accepts any parent that   -> `an_unestablished_parent_neither_consumes_nor_defeats`
+        is not `.orphaned`
 
   `p_g_f_hash_order_acyclic` is not a mutation target: acyclicity follows from the
   hash order itself, so admitting a current-E class cannot falsify it. The design
@@ -1071,6 +1073,17 @@ theorem parent_compatible_is_not_pending {q : ParentState} (h : parentCompatible
     parentPending q = false ∧ parentImpossible q = false := by
   cases q <;> simp_all [parentCompatible, parentImpossible, parentPending]
 
+/-- What a verifier has established about a leg's named parent. -/
+inductive ParentStatus where
+  /-- `R = R*_g`: the root that vault's lineage took. -/
+  | canonical
+  /-- `R ≠ R*_g`: that generation went elsewhere, so this parent is
+  permanently refuted. -/
+  | orphaned
+  /-- `R*_g` is not established. A parent not reached is not refuted. -/
+  | unavailable
+  deriving DecidableEq, Repr
+
 /-- What a verifier has established about one fulfillment at one position. A
 fulfillment that has not registered is carried with `registered := false`, and
 the ladder answers Pending for it — the position's terminal answer comes from
@@ -1087,7 +1100,13 @@ structure Facts where
   /-- `FulfillmentConformance(F)` (Section 20.2). Registration supplies no
   truth value for it: a registered `F` may be `Invalid`. -/
   conformance : Validation := .valid
-  canonical : Nat → Bool
+  /-- The parent `(v, g, R)` this leg names, against `R*_g`, the validated
+  canonical root of that vault at that generation (owner ruling §44.4).
+  THREE VALUED: this replaced a pair of booleans whose false-false corner
+  meant two different things — a parent not reached, and a parent walked
+  past — so `Coherent` had to ASSUME they were exclusive. There is now no
+  value that is both, and the assumption is gone. -/
+  parentStatus : Nat → ParentStatus
   live : Nat → Bool
   cell : Nat → Option Nat
   /-- `LegFacts::final_on_other`: another exercise's commitment reached this
@@ -1095,12 +1114,12 @@ structure Facts where
   before any copy arrives; no key is ever dead. -/
   lostTo : Nat → Bool
   consumedElsewhere : Nat → Bool
-  orphan : Nat → Bool
   /-- The claim at `p` this operation was built on. An ordinary parent is the
   default, which is what every pre-P15-3 fact set means. -/
   parent : ParentState := .single
 
-def legOk (x : Facts) (e R : Nat) : Bool := x.canonical R && x.live R && x.cell R == some e
+def legOk (x : Facts) (e R : Nat) : Bool :=
+  x.parentStatus R == .canonical && x.live R && x.cell R == some e
 
 /-- `RouteValidation(P, G, E)` = SetupValid ∧ the leg predicates, under the
 three-valued conjunction. Removing SetupValid from here is the mutation
@@ -1136,7 +1155,7 @@ def cellOther (x : Facts) (e R : Nat) : Bool :=
   | none => false
 
 def legLost (x : Facts) (e R : Nat) : Bool :=
-  x.lostTo R || cellOther x e R || x.consumedElsewhere R || x.orphan R
+  x.lostTo R || cellOther x e R || x.consumedElsewhere R || x.parentStatus R == .orphaned
 
 def VoidEvidence (x : Facts) (legs : List Nat) (e : Nat) : Bool :=
   legs.any (legLost x e)
@@ -1179,26 +1198,36 @@ canonical. -/
 structure Coherent (x : Facts) (legs : List Nat) (e : Nat) : Prop where
   lost_not_final_on_e : ∀ R, x.lostTo R = true → x.cell R ≠ some e
   consumed_route_exclusive : ConsumedRoute x legs e = true → ∀ R ∈ legs, x.consumedElsewhere R = false
-  orphan_not_canonical : ∀ R, x.orphan R = true → x.canonical R = false
+
+/-- A parent status only becomes more established: `unavailable` may settle
+either way, and a settled one never moves. -/
+def StatusRefines : ParentStatus → ParentStatus → Prop
+  | .unavailable, _ => True
+  | s, s' => s = s'
+
+theorem statusRefines_settled {s s' : ParentStatus} (h : StatusRefines s s')
+    (hs : s ≠ .unavailable) : s' = s := by
+  cases s <;> cases s' <;> simp_all [StatusRefines]
 
 structure Evolves (x x' : Facts) : Prop where
   registered : x.registered = true → x'.registered = true
   validation : Refines x.validation x'.validation
   setupValid : Refines x.setupValid x'.setupValid := by intro; trivial
   conformance : Refines x.conformance x'.conformance := by intro; trivial
-  canonical : ∀ R, x.canonical R = true → x'.canonical R = true
+  /-- A parent status only ever becomes MORE established: `unavailable` may
+  settle either way, and a settled one never moves. -/
+  parentStatus : ∀ R, StatusRefines (x.parentStatus R) (x'.parentStatus R)
   live : ∀ R, x.live R = true → x'.live R = true
   cell : ∀ R y, x.cell R = some y → x'.cell R = some y
   lostTo : ∀ R, x.lostTo R = true → x'.lostTo R = true
   consumedElsewhere : ∀ R, x.consumedElsewhere R = true → x'.consumedElsewhere R = true
-  orphan : ∀ R, x.orphan R = true → x'.orphan R = true
   /-- An open branch may be selected; a terminal one never changes. -/
   parent : x.parent ≠ .openBranch → x'.parent = x.parent := by intro _; rfl
 
 theorem consumedRoute_iff (x : Facts) (legs : List Nat) (e : Nat) :
     ConsumedRoute x legs e = true ↔
       x.registered = true ∧ x.conformance = .valid ∧ x.routeValidation = .valid
-        ∧ (∀ R ∈ legs, x.canonical R = true ∧ x.live R = true ∧ x.cell R = some e)
+        ∧ (∀ R ∈ legs, x.parentStatus R = .canonical ∧ x.live R = true ∧ x.cell R = some e)
         ∧ parentCompatible x.parent = true := by
   simp [ConsumedRoute, legOk, and_assoc]
 
@@ -1210,12 +1239,57 @@ theorem legLost_false_of_ok {x : Facts} {legs : List Nat} {e R : Nat} (hc : Cohe
     cases h : x.lostTo R
     · rfl
     · exact absurd hcell (hc.lost_not_final_on_e R h)
-  have ho : x.orphan R = false := by
-    cases h : x.orphan R
-    · rfl
-    · have := hc.orphan_not_canonical R h; rw [hcan] at this; cases this
+  -- THE EXCLUSION IS THE TYPE. `Coherent` used to assume an orphaned parent
+  -- is never canonical; with three values in one field there is nothing to
+  -- assume, and `hcan` settles it by constructor.
+  have ho : (x.parentStatus R == ParentStatus.orphaned) = false := by
+    rw [hcan]; rfl
   have hce := hc.consumed_route_exclusive hcr R hR
   simp [legLost, cellOther, hd, ho, hce, hcell]
+
+/-- THE EXCLUSION IS THE TYPE (owner ruling §44.4). `Coherent` used to carry
+`orphan_not_canonical` as an ASSUMPTION, because a parent was described by two
+booleans and nothing stopped both being set. With three values in one field
+there is no value that is both, so the assumption is gone and this is what
+replaces it. -/
+theorem orphaned_is_never_canonical (s : ParentStatus) :
+    ¬ (s = .canonical ∧ s = .orphaned) := by
+  cases s <;> simp
+
+/-- A concrete position whose every leg names a parent the verifier has NOT
+established: registered, conforming, statically valid, every cell final on
+this `E`, nothing lost — and still Pending. `unavailable` is not `canonical`,
+so nothing consumes; it is not `orphaned`, so nothing is defeated.
+
+This is the corner the pair of booleans could not express. A verifier with no
+producer for orphaning wrote `orphan := false` beside `canonical := false` and
+the ladder read the first as "not refuted" while the truth was "not
+established". Without this witness the theorems above would hold vacuously of
+a value no fact set ever takes.
+
+Mutation: widen `legOk` to accept any status that is not `.orphaned` -- this
+goes red, because the route then consumes on a parent nobody established. -/
+def parentNotEstablished : Facts where
+  registered := true
+  validation := .valid
+  parentStatus := fun _ => .unavailable
+  live := fun _ => true
+  cell := fun _ => some 50
+  lostTo := fun _ => false
+  consumedElsewhere := fun _ => false
+
+theorem an_unestablished_parent_neither_consumes_nor_defeats :
+    ConsumedRoute parentNotEstablished [10] 50 = false
+      ∧ VoidEvidence parentNotEstablished [10] 50 = false
+      ∧ resolve parentNotEstablished [10] 50 = .pending :=
+  ⟨by decide, by decide, by decide⟩
+
+/-- And the same fact set with the parent ESTABLISHED as another root is
+defeated rather than waiting: Void, never Invalid, because the route itself
+was valid and conforming. -/
+theorem the_same_route_with_an_orphaned_parent_voids :
+    resolve { parentNotEstablished with parentStatus := fun _ => .orphaned } [10] 50 = .void :=
+  by decide
 
 /-- REALIZED AND VOID ARE EXCLUSIVE. -/
 theorem realized_excludes_void_evidence {x : Facts} {legs : List Nat} {e : Nat}
@@ -1318,12 +1392,11 @@ registration, or a registered F that does not conform. -/
 def cellsFinalUnregistered : Facts where
   registered := false
   validation := .valid
-  canonical := fun _ => true
+  parentStatus := fun _ => .canonical
   live := fun _ => true
   cell := fun _ => some 50
   lostTo := fun _ => false
   consumedElsewhere := fun _ => false
-  orphan := fun _ => false
 
 def registeredNotConforming : Facts := { cellsFinalUnregistered with registered := true, conformance := .invalid }
 def registeredConformanceUnknown : Facts := { cellsFinalUnregistered with registered := true, conformance := .unavailable }
@@ -1384,12 +1457,11 @@ that never holds. -/
 def builtOnTheOtherBranch : Facts where
   registered := true
   validation := .valid
-  canonical := fun _ => true
+  parentStatus := fun _ => .canonical
   live := fun _ => true
   cell := fun _ => some 50
   lostTo := fun _ => false
   consumedElsewhere := fun _ => false
-  orphan := fun _ => false
   parent := .otherBranch
 
 def awaitingItsParent : Facts := { builtOnTheOtherBranch with parent := .openBranch }
@@ -1447,12 +1519,11 @@ def legConsumedAlone (x : Facts) (e R : Nat) : Bool :=
 def splitFacts : Facts where
   registered := true
   validation := .valid
-  canonical := fun _ => true
+  parentStatus := fun _ => .canonical
   live := fun _ => true
   cell := fun R => if R = 10 then some 50 else none
   lostTo := fun R => R == 11
   consumedElsewhere := fun _ => false
-  orphan := fun _ => false
 
 theorem per_leg_consumption_is_partial_execution :
     legConsumedAlone splitFacts 50 10 = true ∧ legConsumedAlone splitFacts 50 11 = false
@@ -1464,7 +1535,7 @@ or consumed by another E, no fulfillment of P — at any attempt vector — can 
 consumed. -/
 theorem route_impossible_orphan_and_consumed_elsewhere_arms {x : Facts} {legs : List Nat}
     {e R : Nat} (hc : Coherent x legs e) (hR : R ∈ legs)
-    (h : x.orphan R = true ∨ x.consumedElsewhere R = true) : ConsumedRoute x legs e = false := by
+    (h : x.parentStatus R = .orphaned ∨ x.consumedElsewhere R = true) : ConsumedRoute x legs e = false := by
   cases hcr : ConsumedRoute x legs e
   · rfl
   · have := legLost_false_of_ok hc hcr hR
@@ -1476,7 +1547,7 @@ another parent is lost consumes nothing, and resolves Void once storage-resolved
 under valid evidence. -/
 theorem stranded_e_cell_is_not_partial_execution {x : Facts} {legs : List Nat} {e R R' : Nat}
     (hc : Coherent x legs e) (hR' : R' ∈ legs) (hstranded : x.cell R = some e)
-    (hlost : x.orphan R' = true ∨ x.consumedElsewhere R' = true) :
+    (hlost : x.parentStatus R' = .orphaned ∨ x.consumedElsewhere R' = true) :
     (x.cell R = some e ∧ ∀ R'', ConsumedLeg x legs e R'' = false)
       ∧ (x.registered = true → x.conformance = .valid → x.routeValidation = .valid →
           StorageResolved x legs = true → parentCompatible x.parent = true →
@@ -1495,17 +1566,15 @@ theorem stranded_e_cell_is_not_partial_execution {x : Facts} {legs : List Nat} {
 def contended : Facts where
   registered := true
   validation := .valid
-  canonical := fun _ => true
+  parentStatus := fun _ => .canonical
   live := fun R => R == 11
   cell := fun R => if R = 10 then some 99 else if R = 11 then some 50 else none
   lostTo := fun _ => false
   consumedElsewhere := fun R => R == 10
-  orphan := fun _ => false
 
 theorem contended_is_coherent : Coherent contended [10, 11] 50 where
   lost_not_final_on_e := fun R h => by simp [contended] at h
   consumed_route_exclusive := fun h => by simp [ConsumedRoute, contended, legOk] at h
-  orphan_not_canonical := fun R h => by simp [contended] at h
 
 /-- A FULFILLMENT MAY VOID UNDER CONTENTION: registered, every witness valid,
 and still Void. -/
@@ -1527,7 +1596,9 @@ theorem consumedRoute_mono {x x' : Facts} (hev : Evolves x x') {legs : List Nat}
     have := routeValidation_refines hev; rw [hv] at this; exact valid_refines_only_to_valid this
   refine (consumedRoute_iff x' legs e).mpr ⟨hev.registered hreg, hconf', hv', fun R hR => ?_, ?_⟩
   · obtain ⟨a, b, c⟩ := hall R hR
-    exact ⟨hev.canonical R a, hev.live R b, hev.cell R e c⟩
+    have hs : x'.parentStatus R = x.parentStatus R :=
+      statusRefines_settled (hev.parentStatus R) (by rw [a]; decide)
+    exact ⟨by rw [hs, a], hev.live R b, hev.cell R e c⟩
   · have hne : x.parent ≠ .openBranch := by
       intro hq; rw [hq] at hcompat; exact absurd hcompat (by decide)
     rw [hev.parent hne]; exact hcompat
@@ -1555,7 +1626,12 @@ theorem legLost_mono {x x' : Facts} (hev : Evolves x x') {e R : Nat}
     | none => rw [hcell] at hco; cases hco
     | some y => rw [hcell] at hco; rw [hev.cell R y hcell]; exact hco
   · exact Or.inl (Or.inr (hev.consumedElsewhere R hce))
-  · exact Or.inr (hev.orphan R ho)
+  · refine Or.inr ?_
+    have := hev.parentStatus R
+    have hR : x.parentStatus R = .orphaned := by
+      simpa using ho
+    rw [statusRefines_settled this (by rw [hR]; exact fun h => by cases h), hR]
+    rfl
 
 theorem voidEvidence_mono {x x' : Facts} (hev : Evolves x x') {legs : List Nat} {e : Nat}
     (h : VoidEvidence x legs e = true) : VoidEvidence x' legs e = true := by
@@ -1651,12 +1727,11 @@ lineage that Void had continued. -/
 def unavailableThenVoid : Facts where
   registered := true
   validation := .unavailable
-  canonical := fun _ => true
+  parentStatus := fun _ => .canonical
   live := fun _ => true
   cell := fun _ => none
   lostTo := fun _ => true
   consumedElsewhere := fun _ => false
-  orphan := fun _ => false
 
 def laterInvalid : Facts := { unavailableThenVoid with validation := .invalid }
 
@@ -1666,10 +1741,10 @@ theorem literal_ladder_is_not_permanent :
       ∧ resolveLiteral unavailableThenVoid [10] 50 = .void
       ∧ resolveLiteral laterInvalid [10] 50 = .invalid
       ∧ resolve unavailableThenVoid [10] 50 = .pending := by
-  refine ⟨⟨fun h => h, trivial, rfl, rfl, fun _ h => h, fun _ h => h, fun _ _ h => h, fun _ h => h,
+  refine ⟨⟨fun h => h, trivial, rfl, rfl, fun _ => rfl, fun _ h => h, fun _ _ h => h,
     fun _ h => h, fun _ h => h, fun _ => rfl⟩, ⟨(fun _ _ h => nomatch h),
-    (fun h => by simp [ConsumedRoute, laterInvalid, unavailableThenVoid, Facts.routeValidation, Validation.and] at h),
-    (fun _ h => by simp [laterInvalid, unavailableThenVoid] at h)⟩, (by decide), (by decide), (by decide)⟩
+    (fun h => by simp [ConsumedRoute, laterInvalid, unavailableThenVoid, Facts.routeValidation, Validation.and] at h)⟩,
+    (by decide), (by decide), (by decide)⟩
 
 /-- REGISTERED ≠ VALIDATED: a registered fulfillment without evidence is
 Pending and selects no root. -/
@@ -1750,17 +1825,16 @@ theorem selected_root_is_committed (r : Resolution) (P : PBody) {root : Nat}
 
 /-- The rejected verdict: parent canonicality inside RouteValidation. -/
 def validationWithCanonicality (x : Facts) (legs : List Nat) : Validation :=
-  if legs.any x.orphan then .invalid else x.validation
+  if legs.any (fun R => x.parentStatus R == .orphaned) then .invalid else x.validation
 
 def orphanedLeg : Facts where
   registered := true
   validation := .valid
-  canonical := fun R => R != 10
+  parentStatus := fun R => if R = 10 then .orphaned else .canonical
   live := fun _ => true
   cell := fun R => if R = 10 then some 50 else none
   lostTo := fun R => R == 11
   consumedElsewhere := fun _ => false
-  orphan := fun R => R == 10
 
 /-- ROUTE VALIDATION EXCLUDES PARENT CANONICALITY (R11-1). A parent orphaned by
 its own lineage makes the operation Void — the trader continues from `R_void` —
@@ -1780,7 +1854,7 @@ theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
     (hev : x.validation ≠ .unavailable) (hsv : x.setupValid ≠ .unavailable)
     (hcf : x.conformance ≠ .unavailable) (hsr : StorageResolved x legs = true)
     (hpar : parentPending x.parent = false)
-    (hfate : ∀ R ∈ legs, (x.canonical R = true ∧ x.live R = true) ∨ x.orphan R = true
+    (hfate : ∀ R ∈ legs, (x.parentStatus R = .canonical ∧ x.live R = true) ∨ x.parentStatus R = .orphaned
       ∨ x.consumedElsewhere R = true) :
     resolve x legs e ≠ .pending := by
   have h1 : ¬ x.registered = false := by simp [hreg]
@@ -1818,7 +1892,7 @@ theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
       have hve : VoidEvidence x legs e = true := by
         simp only [StorageResolved, Bool.and_eq_true, Bool.or_eq_true, List.all_eq_true] at hsr
         obtain ⟨_, hall⟩ := hsr
-        have hall_ok : ¬ ∀ R ∈ legs, x.canonical R = true ∧ x.live R = true ∧ x.cell R = some e := by
+        have hall_ok : ¬ ∀ R ∈ legs, x.parentStatus R = .canonical ∧ x.live R = true ∧ x.cell R = some e := by
           intro hok
           apply hcr
           exact (consumedRoute_iff x legs e).mpr ⟨hreg, hcv, hv, hok, hcompat⟩
@@ -1844,7 +1918,7 @@ theorem registered_fulfillment_resolves_under_evidence_availability {x : Facts}
               rw [hcell] at hco
               simp at hco
               rw [hco]
-        · rw [ho] at h; cases h
+        · rw [h] at ho; simp at ho
         · rw [hce] at h; cases h
       rw [if_pos ⟨hv, hsr, hve⟩]
       decide
@@ -2659,6 +2733,9 @@ theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat �
 #print axioms registered_fulfillment_resolves_under_evidence_availability
 #print axioms without_evidence_a_registered_fulfillment_stays_pending
 #print axioms invalid_terminates_lineage
+#print axioms orphaned_is_never_canonical
+#print axioms an_unestablished_parent_neither_consumes_nor_defeats
+#print axioms the_same_route_with_an_orphaned_parent_voids
 #print axioms descendant_requires_resolved_predecessor
 #print axioms advance_extends_validated_lineage
 #print axioms an_undecided_or_terminal_position_extends_nothing

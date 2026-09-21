@@ -12,13 +12,20 @@
 //!
 //! Nothing here is defaulted. A fact the verifier has not established is
 //! its unestablished value — an unread cell is `Unresolved`, an unwalked
-//! parent is not canonical, an unresolved conditional parent is
-//! `ConditionalPending` — and every such value keeps the walk unresolved and
-//! the position Pending. One fact this step leaves unestablished for every
-//! leg is orphaning: a parent is orphaned once its predecessor's canonical
-//! successor resolved to something else, which the generation walk of
-//! rebuild step R13 establishes; until then a defeated leg is seen through
-//! the consumer the walk finds at its chain, or waits.
+//! parent is `ParentStatus::Unavailable`, an unresolved conditional parent
+//! is `ConditionalPending` — and every such value keeps the walk unresolved
+//! and the position Pending.
+//!
+//! One fact this step leaves unestablished for every leg is ORPHANING, and
+//! it is now unestablished VISIBLY. Producing `ParentStatus::Orphaned` needs
+//! the validated canonical root of that vault at that GENERATION, and this
+//! verifier holds a set of `(vault, root)` pairs it walked to, which carries
+//! no generation. So a parent it has not reached is `Unavailable` and the
+//! position waits — where the pair of booleans this replaced wrote
+//! `parent_orphaned: false` beside `canonical_parent: false` and the ladder
+//! read "not refuted". Until the vault head store supplies that root, a
+//! defeated leg is seen through the consumer the walk finds at its chain,
+//! or it waits.
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -28,8 +35,8 @@ use dsm::sofi::conformance::{fulfillment_conformance, Validation};
 use dsm::sofi::exercise::{recognize_exercise, RecognizedExercise};
 use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{
-    effect_of, resolve_position, walk, LegFacts, ParentPosition, PositionEffect, Resolution,
-    RouteFacts, WalkOutcome,
+    effect_of, resolve_position, walk, LegFacts, ParentPosition, ParentStatus, PositionEffect,
+    Resolution, RouteFacts, WalkOutcome,
 };
 use dsm::sofi::validation::route_validation;
 use dsm::sofi::wire::{ParentClaimRef, SofiExercise, ValidationRef};
@@ -69,8 +76,14 @@ pub struct Resolver<'a> {
     /// verifier, and the position built on it waits (`ConditionalPending`).
     pub parents: &'a BTreeMap<D32, ParentPosition>,
     /// The `(vault_id, root)` pairs this verifier walked to from a vault's
-    /// genesis (Section 30): its established canonical ancestry. A leg whose
-    /// parent is not here is not established canonical and never consumes.
+    /// genesis (Section 30): its established canonical ancestry.
+    ///
+    /// A parent in this set is [`ParentStatus::Canonical`]. A parent NOT in
+    /// it is [`ParentStatus::Unavailable`], and the position waits. It is
+    /// never [`ParentStatus::Orphaned`] from this set alone: orphaning means
+    /// a DIFFERENT root was established for that vault at that generation,
+    /// and a set of pairs carries no generation, so the fact that would
+    /// refute the parent is not in it. The vault head store produces it.
     pub canonical: &'a BTreeSet<(D32, D32)>,
 }
 
@@ -356,9 +369,8 @@ impl Resolver<'_> {
                     // refuses it; the leg has no key to read.
                     legs.push(LegFacts {
                         cell: CellResolution::Unresolved,
-                        canonical_parent: false,
+                        parent: ParentStatus::Unavailable,
                         attempt_live: false,
-                        parent_orphaned: false,
                         parent_consumed_elsewhere: false,
                     });
                     continue;
@@ -372,8 +384,15 @@ impl Resolver<'_> {
                             .0
                     }
                 };
-                let canonical_parent =
-                    here.is_some() || self.canonical.contains(&(leg.vault_id, leg.parent_root));
+                // Canonical when this verifier walked to exactly this root,
+                // Unavailable otherwise. Never Orphaned: see `canonical`.
+                let parent = if here.is_some()
+                    || self.canonical.contains(&(leg.vault_id, leg.parent_root))
+                {
+                    ParentStatus::Canonical
+                } else {
+                    ParentStatus::Unavailable
+                };
                 // `AttemptLive`: every earlier key of this leg's chain is
                 // skipped. The walk established it for the key it reached;
                 // any other leg's chain is walked over its earlier keys.
@@ -401,9 +420,8 @@ impl Resolver<'_> {
                 };
                 legs.push(LegFacts {
                     cell,
-                    canonical_parent,
+                    parent,
                     attempt_live,
-                    parent_orphaned: false,
                     parent_consumed_elsewhere,
                 });
             }
@@ -501,6 +519,70 @@ mod tests {
                 Some(r.fulfillment.clone())
             );
         }
+    }
+
+    /// A leg whose parent this verifier has NOT walked to is
+    /// [`ParentStatus::Unavailable`], so the route WAITS. Everything else is
+    /// in place — registered, conforming, statically valid, every cell final
+    /// on this `E` — and the position is still Pending. It is not Void
+    /// either: a parent nobody established is not a parent that was refuted.
+    ///
+    /// THIS TEST EXISTS BECAUSE ITS MUTATION WAS GREEN. Reporting an unwalked
+    /// parent as `Canonical` — the reading the pair of booleans gave, where
+    /// `canonical_parent: false` sat beside `parent_orphaned: false` and the
+    /// ladder saw "not refuted" — passed every resolver test in this module,
+    /// because each of them walks to every leg. The mapping was never
+    /// exercised at the only boundary where it decides anything.
+    #[test]
+    #[serial]
+    fn a_leg_whose_parent_this_verifier_never_walked_to_waits() {
+        let r = signed_route(true);
+        block_on(install_fulfillment(&r.set, &install_request(&r))).unwrap();
+        let x = exercised(&r);
+        let parents = BTreeMap::new();
+
+        // Every head this verifier walked to EXCEPT the first leg's.
+        let partial: BTreeSet<(D32, D32)> = r
+            .precommit
+            .legs()
+            .iter()
+            .skip(1)
+            .map(|l| (l.vault_id, l.parent_root))
+            .collect();
+        assert_eq!(partial.len(), r.precommit.legs().len() - 1);
+        let waiting = Resolver {
+            set: &r.set,
+            local: &r.local,
+            parents: &parents,
+            canonical: &partial,
+        };
+        let resolved = block_on(waiting.resolve_trader_position(&x)).unwrap();
+        assert!(resolved.registered);
+        assert_eq!(resolved.conformance, Validation::Valid);
+        assert_eq!(resolved.validation, Validation::Valid);
+        assert_eq!(
+            resolved.resolution,
+            Resolution::Pending,
+            "an unestablished parent waits; it does not consume and does not defeat"
+        );
+        assert_eq!(resolved.effect, PositionEffect::None);
+
+        // The same bytes, the same fleet, the same everything — once the
+        // verifier has walked to that head, the route realizes.
+        let walked = walked_heads(&r);
+        let complete = Resolver {
+            set: &r.set,
+            local: &r.local,
+            parents: &parents,
+            canonical: &walked,
+        };
+        assert_eq!(
+            block_on(complete.resolve_trader_position(&x))
+                .unwrap()
+                .resolution,
+            Resolution::Realized,
+            "the only difference is what this verifier established"
+        );
     }
 
     /// Lean `realized_requires_conformance`, TLA `_ConformanceDropped`, at
