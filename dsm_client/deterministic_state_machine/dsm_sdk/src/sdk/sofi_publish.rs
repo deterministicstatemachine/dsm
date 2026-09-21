@@ -40,6 +40,7 @@ use crate::sdk::sofi_evidence::LOCATOR_BUDGET;
 use crate::sdk::sofi_sdk::{Produced, ToPublish};
 use crate::sdk::storage_io::{
     append_to_index, put_immutable_to_all_members, read_stored_bytes, resolve_locator,
+    resolve_locator_all,
 };
 use crate::sdk::storage_set::StorageSet;
 
@@ -150,19 +151,29 @@ pub async fn fetch_setup(
     .await
 }
 
-/// The one setup of trader `(G, DevID)` for vault `v`, by the relationship
-/// index key.
+/// DISCOVERY of the setups trader `(G, DevID)` published for vault `v`, by
+/// the relationship index key: every recognized setup envelope whose body
+/// names that relationship, in append order.
+///
+/// The relationship index is references, never authority. A trader has one
+/// setup per vault by construction — the relationship leaf is inserted from
+/// absent exactly once in the trader's own tree, and the producer refuses a
+/// second — but nothing stops a trader from PUBLISHING more than one body
+/// (one never admitted, one built later at another `p`), and the index holds
+/// them all. Which one applies is Core's question, answered by `ρ`: the
+/// reference a precommit leg names and conformance checks (`fetch_setup`),
+/// never by which arrived first here.
 pub async fn fetch_setup_for(
     set: &StorageSet,
     genesis: &D32,
     device_id: &D32,
     vault_id: &D32,
-) -> Result<Resolved<Signed<SofiSetupBody>>, DsmError> {
-    fetch(
+) -> Result<Resolved<Vec<Signed<SofiSetupBody>>>, DsmError> {
+    resolve_locator_all(
         set,
         TAG_DSM_SOFI_REL_INDEX.source_bytes(),
-        TAG_DSM_SOFI_SETUP_OBJECT,
         &derive::relationship_index_key(genesis, device_id, vault_id),
+        LOCATOR_BUDGET,
         recognize_setup_by_relationship,
     )
     .await
@@ -334,7 +345,7 @@ mod tests {
             signature: sig.clone(),
         };
         assert_eq!(by_ref, Resolved::Kept(expected.clone()));
-        assert_eq!(by_relationship, Resolved::Kept(expected));
+        assert_eq!(by_relationship, Resolved::Kept(vec![expected]));
         let Resolved::Kept(fetched) = by_ref else {
             unreachable!()
         };
@@ -446,6 +457,42 @@ mod tests {
             fulfillment_conformance(&f, &f_sig, &no_conformance_evidence()),
             FulfillmentConformance::Unavailable(ConformanceMissing::Precommit)
         );
+    }
+
+    /// Lean `every_published_match_is_discovered`: the relationship index is
+    /// references, not authority. Two setups the same trader published for
+    /// one vault are both discovered, in append order, and neither is "the"
+    /// setup by arriving first: each is the setup exactly under its own `ρ`,
+    /// which is what a precommit leg names and conformance checks.
+    #[test]
+    #[serial]
+    fn a_relationship_index_discovers_every_setup_and_decides_nothing() {
+        fake_fleet::reset();
+        let set = five();
+        let first = setup_body();
+        let later = SofiSetupBody::new(G, DEV, 9, VAULT, d(0x0B), d(0x0D), ALG, &keys().0).unwrap();
+        let mut signed = Vec::new();
+        for body in [&first, &later] {
+            let sig = sign(&derive::setup_signing_digest(body));
+            block_on(publish_produced(&set, &produced_setup(body), &sig)).unwrap();
+            signed.push(Signed {
+                body: body.clone(),
+                signature: sig,
+            });
+        }
+        assert_eq!(
+            block_on(fetch_setup_for(&set, &G, &DEV, &VAULT)).unwrap(),
+            Resolved::Kept(signed.clone()),
+            "both, in append order, neither preferred"
+        );
+        // Under its own ρ each is exactly itself, and never the other.
+        for s in &signed {
+            assert_eq!(
+                block_on(fetch_setup(&set, &derive::setup_ref(&s.body))).unwrap(),
+                Resolved::Kept(s.clone())
+            );
+        }
+        assert_ne!(derive::setup_ref(&first), derive::setup_ref(&later));
     }
 
     /// Lean `unindexed_is_not_found`: an object put at every member but
