@@ -52,25 +52,6 @@ pub struct VaultHead {
     pub root: D32,
 }
 
-/// Record a vault's accepted GENESIS as generation zero, inside the caller's
-/// transaction. The genesis is the one head nobody resolved: it is where the
-/// chain starts, and without it the first trade's parent has no status.
-pub fn record_genesis_with_conn(
-    tx: &Transaction<'_>,
-    vault_id: &D32,
-    root: &D32,
-    state: &VaultStateLeaf,
-    now: i64,
-) -> Result<()> {
-    let leaf = (
-        derive::vault_state_key(vault_id),
-        derive::vault_state_leaf_value(state).map_err(|e| anyhow!("state leaf value: {e}"))?,
-        KIND_STATE,
-        state.encode().map_err(|e| anyhow!("state leaf: {e}"))?,
-    );
-    write(tx, vault_id, 0, root, &[leaf], now)
-}
-
 /// Record the post state a resolved transition selected, inside the caller's
 /// transaction — the same one that makes the position durable, so a head and
 /// the position that chose it cannot disagree.
