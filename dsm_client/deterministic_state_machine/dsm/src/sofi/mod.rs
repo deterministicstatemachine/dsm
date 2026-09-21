@@ -24,7 +24,8 @@
 //! ([`storage`]), three-valued validation composition and the mechanical
 //! fulfillment-against-precommit checks ([`conformance`]), what a producer
 //! publishes and how a reader recognizes it ([`publication`]), the exercise
-//! boundary derived from the two position cells ([`registration`]), and the
+//! boundary derived from the two position cells ([`registration`]), the
+//! exercise object and what counts at a successor key ([`exercise`]), and the
 //! persistent DLV tree with structurally shared shadows ([`smt`]).
 //!
 //! ## What it is not
@@ -38,6 +39,7 @@ pub mod admission;
 pub mod arith;
 pub mod conformance;
 pub mod derive;
+pub mod exercise;
 pub mod fisher_yates;
 pub mod leader;
 pub mod lineage;

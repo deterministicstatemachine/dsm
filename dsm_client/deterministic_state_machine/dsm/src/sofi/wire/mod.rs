@@ -97,6 +97,14 @@
 //! Both leaf values are `H(vault-leaf-state/v1 ‖ CCB(leaf))`. One tag is safe
 //! because the leaf's own envelope is inside the preimage.
 //!
+//! `0x005E SofiExercise` (the value at a successor key, Section 17.5): 1
+//! `fulfillment` var bytes (a `0x005C` envelope over `F`) · 2 `precommit` var
+//! bytes (a `0x005C` envelope over `P`) · 3 `preimage` var bytes (`0x0059`) ·
+//! 4 `witnesses` `seq<var bytes>` of `0x0038`, `1..=CANONICAL_MAX_LEGS`, in
+//! P's leg order · 5 `closure` `seq<var bytes>`, `0..=MAX_CLOSURE_REFS`, in
+//! `𝒞_E^pre` reference order. The whole object is bounded by
+//! `MAX_EXERCISE_BYTES`, a member's cell value cap.
+//!
 //! `0x004D TraderRelationshipLeaf` (the `R_econ` leaf state, at `k_{T,v}`):
 //! 1 `vault_id` digest32 · 2 `leaf` digest32 (`hʲ`).
 //!
@@ -202,6 +210,9 @@ pub const VAULT_STATUS_RETIRED: u16 = 0x0002;
 
 /// Distinct `ValidationRef` values in one closure; duplicates are malformed.
 pub const MAX_CLOSURE_REFS: usize = 64;
+/// The largest exercise a member's cell takes (`MAX_CELL_VALUE_BYTES` at the
+/// node). Two SPHINCS+ envelopes and a beta preimage sit well inside it.
+pub const MAX_EXERCISE_BYTES: usize = 256 * 1024;
 /// Canonical encoded bytes of one referenced object (transport excluded).
 pub const MAX_CLOSURE_OBJECT_BYTES: usize = 256 * 1024;
 /// Authorization envelopes one candidate may require.

@@ -34,6 +34,9 @@
     - ORDERING          no numeric holes in attempt indices; counters never wrap
     - STORAGEREACHABLE  a noncanonical DAG whose producer is (parent, E) — never the
                         attempt; reachable is not canonical
+    - THE EXERCISE      (R11) an exercise names its key through its own legs and
+                        counts at one key per vault; the first exercise naming the
+                        key is the occupant, whatever junk precedes it (P1)
     - REGISTRATION      (R10) FulfillmentRegistered is both cells final with the root
                         on this F's own claim — a conclusion from reads, never a
                         record; a rival first at the leader settles loss; the root
@@ -80,6 +83,7 @@
                                                   witness of what that admits and stays green)
      7. (R10) `registered` accepting a leader-  -> `registration_needs_both_finals`
         held F at K_ful
+     8. (R11) `namesKey` ignoring the attempt    -> `an_exercise_counts_at_one_key_per_vault`
   Run: `lean -DwarningAsError=true DSMSofiSuccessorCells.lean`
 -/
 
@@ -946,6 +950,78 @@ theorem root_final_on_another_claim_never_registers (ful : Res) (c f : Val) (cla
   | leaderHeld _ => rfl
   | unresolved => rfl
 
+-- ── the exercise: what counts at a successor key (rebuild step R11) ────────
+
+/-- An exercise, as a successor key sees it: the `(v, a)` its `F` names and
+the `(v, R_n)` its `P` names, per leg — one attempt per vault, one parent per
+vault (`sofi::exercise::RecognizedExercise`). -/
+structure Exercise where
+  legs : List (Nat × Nat × Nat)   -- (vault, parent, attempt)
+
+/-- A successor key: `K^(attempt)` of `vault` at `parent`. -/
+structure Key where
+  vault : Nat
+  parent : Nat
+  attempt : Nat
+  deriving DecidableEq
+
+/-- `exercise_names_key`: the value counts at `k` iff some leg of the exercise
+is exactly `k`'s `(v, R_n, a)`. -/
+def namesKey (x : Exercise) (k : Key) : Bool :=
+  x.legs.any fun l => decide (l = (k.vault, k.parent, k.attempt))
+
+/-- P1, OnlyExercisesCount, at the level of one cell's occupant: what a key
+holds is the first object that names it; bytes that rebuild into no exercise
+(`none`) or into one naming another key are passed over. -/
+def occupant (held : List (Option Exercise)) (k : Key) : Option Exercise :=
+  held.findSome? fun o => match o with
+    | some x => if namesKey x k then some x else none
+    | none => none
+
+/-- AN EXERCISE NAMES ITS KEY THROUGH ITS OWN LEGS
+(`an_exercise_names_exactly_the_keys_its_fulfillment_and_precommit_name`,
+`an_exercise_cannot_count_at_another_key`): an exercise whose legs each name
+one vault once counts at a key only for the attempt and parent its leg
+names — two keys of one vault it counts at are the same key. Mutation:
+`namesKey` ignoring the attempt — this fails. -/
+theorem Key.ext' {a b : Key} (h1 : a.vault = b.vault) (h2 : a.parent = b.parent)
+    (h3 : a.attempt = b.attempt) : a = b := by
+  cases a; cases b; simp_all
+
+theorem an_exercise_counts_at_one_key_per_vault (x : Exercise) (k k' : Key)
+    (hone : ∀ l ∈ x.legs, ∀ l' ∈ x.legs, l.1 = l'.1 → l = l')
+    (hk : namesKey x k = true) (hk' : namesKey x k' = true) (hv : k.vault = k'.vault) :
+    k = k' := by
+  unfold namesKey at hk hk'
+  simp only [List.any_eq_true, decide_eq_true_eq] at hk hk'
+  obtain ⟨l, hl, hle⟩ := hk
+  obtain ⟨l', hl', hle'⟩ := hk'
+  have hll : l = l' := hone l hl l' hl' (by rw [hle, hle']; exact hv)
+  rw [hle, hle'] at hll
+  simp only [Prod.mk.injEq] at hll
+  exact Key.ext' hv hll.2.1 hll.2.2
+
+/-- ONLY AN EXERCISE NAMING THE KEY COUNTS (`only_an_exercise_naming_the_key_counts`):
+whatever is held before it — unrecognized bytes, exercises naming other keys —
+the first exercise naming the key is the occupant. -/
+theorem only_an_exercise_naming_the_key_counts (junk : List (Option Exercise)) (x : Exercise)
+    (k : Key) (hx : namesKey x k = true)
+    (hjunk : ∀ o ∈ junk, ∀ y, o = some y → namesKey y k = false) (rest : List (Option Exercise)) :
+    occupant (junk ++ some x :: rest) k = some x := by
+  induction junk with
+  | nil => simp [occupant, hx]
+  | cons o os ih =>
+    have hos : ∀ o' ∈ os, ∀ y, o' = some y → namesKey y k = false :=
+      fun o' h y hy => hjunk o' (List.mem_cons_of_mem _ h) y hy
+    have := ih hos
+    cases o with
+    | none => simpa [occupant, List.findSome?] using this
+    | some y =>
+      have hy : namesKey y k = false := hjunk (some y) (List.mem_cons_self ..) y rfl
+      simpa [occupant, List.findSome?, hy] using this
+
+#print axioms an_exercise_counts_at_one_key_per_vault
+#print axioms only_an_exercise_naming_the_key_counts
 #print axioms registration_needs_both_finals
 #print axioms a_rival_first_at_the_leader_settles_loss
 #print axioms root_final_on_another_claim_never_registers

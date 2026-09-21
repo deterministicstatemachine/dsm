@@ -9,7 +9,7 @@ use crate::ccb::{class, push_bytes, push_digest32, push_u16, push_u32, push_u64,
 use crate::economic::tree::ECONOMIC_SMT_HEIGHT;
 
 use super::{
-    SofiWireError, CANONICAL_MAX_LEGS, MAX_CLOSURE_REFS, MAX_CORE_ENTRIES,
+    SofiWireError, CANONICAL_MAX_LEGS, MAX_CLOSURE_REFS, MAX_CORE_ENTRIES, MAX_EXERCISE_BYTES,
     MAX_SETTLEMENT_PREIMAGE_BYTES, ROUTE_MIN_LEGS, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
@@ -753,6 +753,152 @@ fn read_var_bytes(c: &mut Cursor<'_>, max: usize) -> Result<Vec<u8>, DecodeError
 }
 
 // ── ValidationRef: 0x003D..=0x0040 ─────────────────────────────────────────
+
+// ── 0x005E SofiExercise ─────────────────────────────────────────────────────
+
+/// The exercise: the value written to every successor key of a route
+/// (Section 17.5). Everything a reader needs to classify it is inside — `F`
+/// and `P` in the envelopes their signatures travel in, `P(E)`, the witnesses
+/// and the closure objects — and everything is bound to `F` by hashed
+/// preimages. It names its own attempt through `F` and its own parents
+/// through `P`, so it cannot count at another key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SofiExercise {
+    fulfillment: Vec<u8>,
+    precommit: Vec<u8>,
+    preimage: Vec<u8>,
+    witnesses: Vec<Vec<u8>>,
+    closure: Vec<Vec<u8>>,
+}
+
+const MAX_EXERCISE_PART_BYTES: usize = MAX_SETTLEMENT_PREIMAGE_BYTES + MAX_SIGNATURE_BYTES;
+
+impl SofiExercise {
+    /// The only constructor. Each part is the canonical bytes of the object
+    /// it carries; the codec bounds the parts and the whole. What the parts
+    /// MEAN — that the envelopes decode, that `F` is `P`'s, that the
+    /// witnesses are the canonical set — is recognition (`sofi::exercise`),
+    /// not construction.
+    pub fn new(
+        fulfillment: Vec<u8>,
+        precommit: Vec<u8>,
+        preimage: Vec<u8>,
+        witnesses: Vec<Vec<u8>>,
+        closure: Vec<Vec<u8>>,
+    ) -> Result<Self, SofiWireError> {
+        for (field, bytes) in [
+            ("fulfillment", &fulfillment),
+            ("precommit", &precommit),
+            ("preimage", &preimage),
+        ] {
+            if bytes.is_empty() || bytes.len() > MAX_EXERCISE_PART_BYTES {
+                return Err(SofiWireError::ObjectTooLarge {
+                    field,
+                    bytes: bytes.len(),
+                    max: MAX_EXERCISE_PART_BYTES,
+                });
+            }
+        }
+        check_count("witnesses", 1, CANONICAL_MAX_LEGS, witnesses.len())?;
+        check_count("closure objects", 0, MAX_CLOSURE_REFS, closure.len())?;
+        for (field, list) in [("witness", &witnesses), ("closure object", &closure)] {
+            for bytes in list {
+                if bytes.is_empty() || bytes.len() > MAX_EXERCISE_PART_BYTES {
+                    return Err(SofiWireError::ObjectTooLarge {
+                        field,
+                        bytes: bytes.len(),
+                        max: MAX_EXERCISE_PART_BYTES,
+                    });
+                }
+            }
+        }
+        let v = Self {
+            fulfillment,
+            precommit,
+            preimage,
+            witnesses,
+            closure,
+        };
+        let total = v.encode().len();
+        if total > MAX_EXERCISE_BYTES {
+            return Err(SofiWireError::ObjectTooLarge {
+                field: "exercise",
+                bytes: total,
+                max: MAX_EXERCISE_BYTES,
+            });
+        }
+        Ok(v)
+    }
+
+    pub fn fulfillment(&self) -> &[u8] {
+        &self.fulfillment
+    }
+
+    pub fn precommit(&self) -> &[u8] {
+        &self.precommit
+    }
+
+    pub fn preimage(&self) -> &[u8] {
+        &self.preimage
+    }
+
+    pub fn witnesses(&self) -> &[Vec<u8>] {
+        &self.witnesses
+    }
+
+    pub fn closure(&self) -> &[Vec<u8>] {
+        &self.closure
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_EXERCISE);
+        let _ = push_bytes(&mut out, &self.fulfillment);
+        let _ = push_bytes(&mut out, &self.precommit);
+        let _ = push_bytes(&mut out, &self.preimage);
+        push_u32(&mut out, self.witnesses.len() as u32);
+        for w in &self.witnesses {
+            let _ = push_bytes(&mut out, w);
+        }
+        push_u32(&mut out, self.closure.len() as u32);
+        for o in &self.closure {
+            let _ = push_bytes(&mut out, o);
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() > MAX_EXERCISE_BYTES {
+            return Err(DecodeError::Invalid(format!(
+                "exercise of {} bytes exceeds {MAX_EXERCISE_BYTES}",
+                bytes.len()
+            )));
+        }
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_EXERCISE, SCHEMA_V1)?;
+        let fulfillment = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let precommit = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let preimage = read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?;
+        let n = read_count(&mut c, "witnesses", 1, CANONICAL_MAX_LEGS)?;
+        let mut witnesses = Vec::with_capacity(n);
+        for _ in 0..n {
+            witnesses.push(read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?);
+        }
+        let m = read_count(&mut c, "closure objects", 0, MAX_CLOSURE_REFS)?;
+        let mut closure = Vec::with_capacity(m);
+        for _ in 0..m {
+            closure.push(read_var_bytes(&mut c, MAX_EXERCISE_PART_BYTES)?);
+        }
+        let v = Self {
+            fulfillment,
+            precommit,
+            preimage,
+            witnesses,
+            closure,
+        };
+        finish(&c, v)
+    }
+}
 
 /// One typed validation reference. Each variant has exactly one fetch and
 /// verification rule, and randomized signature envelopes are never
