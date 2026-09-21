@@ -672,6 +672,8 @@ pub struct SignedRoute {
     pub f_sig: Vec<u8>,
     pub own: BTreeMap<ValidationRef, Vec<u8>>,
     pub setups: Vec<SofiSetupBody>,
+    /// The trader's own leaves at `R_p`, as the resolver reads them.
+    pub local: LocalLeaves,
 }
 
 pub fn produced_setup(body: &SofiSetupBody) -> Produced {
@@ -752,6 +754,7 @@ pub fn signed_route(publish_setups: bool) -> SignedRoute {
         f_sig,
         own: BTreeMap::new(),
         setups,
+        local: fx.local,
     }
 }
 

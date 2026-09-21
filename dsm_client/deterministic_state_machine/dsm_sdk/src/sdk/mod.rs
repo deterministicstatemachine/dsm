@@ -63,6 +63,7 @@ pub mod dlv_sdk;
 pub mod sofi_exercise;
 pub mod sofi_publish;
 pub mod sofi_register;
+pub mod sofi_resolve;
 pub mod sofi_sdk;
 // pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_publication; // publication-quorum lifecycle for device identities

@@ -140,9 +140,10 @@ pub struct Installed {
 /// Acquire what `FulfillmentConformance(F)` reads, from storage and the
 /// request. Items 1, 2 and 8 come with the request; item 6's setups are
 /// fetched under their `ρ` (R8); the closure objects are fetched by the rule
-/// of each reference kind. Item 5's earlier attempt keys are resolved by the
-/// exercise objects of rebuild step R11 and are not fetched here: an attempt
-/// above zero waits, and the producer stops on it.
+/// of each reference kind. Item 5's earlier attempt keys are cells, not
+/// objects, and are not fetched here: the resolver (`sofi_resolve`, R12)
+/// reads them into `prior_attempts` from the exercises at those keys; the
+/// producer's install has none, so an attempt above zero stops it.
 pub async fn acquire_conformance_evidence(
     set: &StorageSet,
     request: &InstallRequest<'_>,

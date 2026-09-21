@@ -6,12 +6,7 @@
 # file and G1 passes with no exceptions.
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs advance_resolved  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/lineage.rs genesis_accepted  # R14
-dsm_client/deterministic_state_machine/dsm/src/sofi/resolution.rs effect_of  # R12
-dsm_client/deterministic_state_machine/dsm/src/sofi/resolution.rs resolve_position  # R12
-dsm_client/deterministic_state_machine/dsm/src/sofi/resolution.rs walk  # R12
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/fold.rs verify_batch  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs commit_shadow  # R13
 dsm_client/deterministic_state_machine/dsm/src/sofi/smt/tree.rs prove  # R13
-dsm_client/deterministic_state_machine/dsm/src/sofi/validation.rs route_validation  # R12: the verdict wrapper the resolution ladder consumes; the producer takes the reason from `validate`
-dsm_client/deterministic_state_machine/dsm/src/sofi/wire/mod.rs next_attempt  # R12: the walk advances the attempt counter; R11 takes the attempts from F
 dsm_client/deterministic_state_machine/dsm/src/sofi/wire/mod.rs next_generation  # R13: the resolved vault state's successor generation
