@@ -127,6 +127,83 @@ pub enum ParentStatus {
     Unavailable,
 }
 
+/// The status of the parent `(v, g, R)` a leg names, decided against the one
+/// fact that can decide it: `R*_g`, the canonical root this verifier itself
+/// established for that vault at that generation.
+///
+/// `established` is `Some(R*_g)` when the verifier's chain for `v` reaches
+/// generation `g`, and `None` when it does not. Nothing else is consulted,
+/// because nothing else can settle it.
+///
+/// **ABSENCE NEVER REFUTES.** The tempting rule — a root the chain does not
+/// name is orphaned — is wrong, and wrong in the direction that costs the
+/// most. A vault's head is open precisely so that the NEXT root can still
+/// arrive, so a root missing from a chain may be one an in-flight operation
+/// is about to realize. Refuting it answers `Orphaned`, which is a
+/// `RouteImpossible` arm and therefore a permanent `Void`, against a route
+/// whose only defect is that this verifier looked early. That is the
+/// unknown-as-verdict failure `ParentStatus` exists to remove, one layer up.
+///
+/// Only a DIFFERENT root at the SAME generation refutes, and that refutation
+/// is permanent: `R*_g` is unique and never changes once established, because
+/// a successor cell admits at most one realized consumption per attempt key
+/// (`OneConsumerPerParent`, model-checked across crash and recover in
+/// `tla/DSM_SofiSuccessorCells.tla`). So this decision inherits its
+/// uniqueness from the storage layer and needs no argument of its own.
+pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> ParentStatus {
+    match established {
+        Some(root) if root == *claimed => ParentStatus::Canonical,
+        Some(_) => ParentStatus::Orphaned,
+        None => ParentStatus::Unavailable,
+    }
+}
+
+/// The canonical roots a verifier established for one vault, in generation
+/// order: `roots[g]` is `R*_g`.
+///
+/// Contiguous from generation zero, because the generation of a root is its
+/// POSITION here. A gap would shift every generation after it and turn a
+/// correct parent into a refuted one, so the builder stops at the first gap
+/// rather than recording past it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VaultChain {
+    pub roots: Vec<[u8; 32]>,
+}
+
+impl VaultChain {
+    /// The status of a parent asked about at `generation` — [`parent_status`]
+    /// over what this chain established there.
+    pub fn status_of(&self, generation: u64, claimed: &[u8; 32]) -> ParentStatus {
+        let established = usize::try_from(generation)
+            .ok()
+            .and_then(|g| self.roots.get(g))
+            .copied();
+        parent_status(established, claimed)
+    }
+
+    /// Whether this chain names `root` at any generation.
+    ///
+    /// POSITIVE EVIDENCE ONLY. Naming it establishes `Canonical`; not naming
+    /// it establishes NOTHING, because the chain may simply be short. Callers
+    /// use this where a root has to be established before something else can
+    /// proceed, never to refute one.
+    pub fn names(&self, root: &[u8; 32]) -> bool {
+        self.roots.contains(root)
+    }
+
+    /// The generation `root` sits at, when this chain names it.
+    pub fn generation_of(&self, root: &[u8; 32]) -> Option<u64> {
+        self.roots.iter().position(|r| r == root).map(|g| g as u64)
+    }
+
+    /// The highest generation this chain established.
+    pub fn head(&self) -> Option<(u64, [u8; 32])> {
+        self.roots
+            .last()
+            .map(|r| ((self.roots.len() - 1) as u64, *r))
+    }
+}
+
 /// The facts about one DLV leg of a registered fulfillment, at the attempt key
 /// that fulfillment fixed for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,6 +580,47 @@ mod tests {
     const OTHER_E: [u8; 32] = [0x11; 32];
     const PRE: [u8; 32] = [0x99; 32];
     const OTHER_ROOT: [u8; 32] = [0x77; 32];
+
+    #[test]
+    fn the_established_root_of_that_generation_is_canonical() {
+        assert_eq!(parent_status(Some(PRE), &PRE), ParentStatus::Canonical);
+    }
+
+    #[test]
+    fn a_different_root_at_the_same_generation_orphans_permanently() {
+        // R*_g is established and it is not what the leg names. Nothing later
+        // restores this parent: a generation has one realized consumer.
+        assert_eq!(
+            parent_status(Some(OTHER_ROOT), &PRE),
+            ParentStatus::Orphaned
+        );
+    }
+
+    #[test]
+    fn a_generation_the_chain_has_not_reached_waits_and_is_never_orphaned() {
+        // THE CASE THAT MUST NOT BECOME A VERDICT. A head is open so that the
+        // next root can still arrive, so a root this verifier cannot place is
+        // not thereby refuted -- it may be the one an in-flight operation is
+        // about to realize. Answering Orphaned here would Void it permanently.
+        assert_eq!(parent_status(None, &PRE), ParentStatus::Unavailable);
+        assert_ne!(parent_status(None, &PRE), ParentStatus::Orphaned);
+    }
+
+    #[test]
+    fn an_unreached_generation_neither_consumes_nor_defeats_a_route() {
+        // The status is not read in isolation: an Unavailable parent must
+        // leave the route Pending, where an Orphaned one would Void it.
+        let waiting = [LegFacts {
+            parent: parent_status(None, &PRE),
+            ..good_leg()
+        }];
+        assert_eq!(resolve_position(&realized(&waiting)), Resolution::Pending);
+        let refuted = [LegFacts {
+            parent: parent_status(Some(OTHER_ROOT), &PRE),
+            ..good_leg()
+        }];
+        assert_eq!(resolve_position(&realized(&refuted)), Resolution::Void);
+    }
 
     /// A leg that consumed its canonical parent on this operation's E.
     fn good_leg() -> LegFacts {

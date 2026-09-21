@@ -1256,6 +1256,67 @@ theorem orphaned_is_never_canonical (s : ParentStatus) :
     ¬ (s = .canonical ∧ s = .orphaned) := by
   cases s <;> simp
 
+/-! ### R14: the PRODUCER of `ParentStatus` — a vault's canonical chain
+
+`Facts.parentStatus` above is an oracle: the ladder is handed a status per leg
+and never asks where it came from. That is exactly the shape the Rust had
+before this section's twin landed — `ParentStatus::Orphaned` was a value no
+code could produce, so a permanently defeated route waited forever instead of
+being defeated.
+
+This supplies the missing half, the twin of `sofi::resolution::parent_status`
+and `VaultChain::status_of`. A chain is read POSITIONALLY: `c g` is `R*_g`
+when the walk reached generation `g`, and `none` when it did not. -/
+
+/-- The canonical root a verifier established at each generation. -/
+abbrev VaultChain := Nat → Option Nat
+
+/-- Rust `sofi::resolution::parent_status`. -/
+def parentStatusOf (established : Option Nat) (claimed : Nat) : ParentStatus :=
+  match established with
+  | some r => if r = claimed then .canonical else .orphaned
+  | none => .unavailable
+
+/-- Rust `VaultChain::status_of`. -/
+def VaultChain.statusOf (c : VaultChain) (g claimed : Nat) : ParentStatus :=
+  parentStatusOf (c g) claimed
+
+/-- ABSENCE NEVER REFUTES — the theorem this whole section exists for.
+
+A generation the chain did not reach is `unavailable`, never `orphaned`. The
+tempting rule is the opposite one (a root the chain does not name is refuted),
+and it is wrong: a head is open precisely so the NEXT root can still arrive,
+so a root the chain does not name may be one an in-flight operation is about
+to realize. Since `orphaned` is a `RouteImpossible` arm, refuting it would
+Void a route permanently for the sole defect of being looked at early. -/
+theorem unreached_generation_is_unavailable (claimed : Nat) :
+    parentStatusOf none claimed = ParentStatus.unavailable := by
+  simp [parentStatusOf]
+
+/-- The same, through a chain: a generation it did not reach refutes nothing. -/
+theorem unreached_generation_never_refutes (c : VaultChain) (g claimed : Nat)
+    (h : c g = none) : c.statusOf g claimed ≠ ParentStatus.orphaned := by
+  simp [VaultChain.statusOf, parentStatusOf, h]
+
+/-- The root the chain names at that generation is canonical. -/
+theorem named_root_is_canonical (c : VaultChain) (g r : Nat) (h : c g = some r) :
+    c.statusOf g r = ParentStatus.canonical := by
+  simp [VaultChain.statusOf, parentStatusOf, h]
+
+/-- ONLY a different root at the SAME generation refutes. This is the exact
+boundary: with `R*_g` established, the claimed root is refuted precisely when
+it differs, and never otherwise. -/
+theorem refutes_iff_a_different_root_at_that_generation
+    (c : VaultChain) (g claimed r : Nat) (h : c g = some r) :
+    c.statusOf g claimed = ParentStatus.orphaned ↔ r ≠ claimed := by
+  simp [VaultChain.statusOf, parentStatusOf, h]
+
+/-- A chain that established nothing anywhere refutes nothing anywhere: the
+verifier that never saw the vault does not thereby defeat its traders. -/
+theorem an_empty_chain_refutes_nothing (g claimed : Nat) :
+    VaultChain.statusOf (fun _ => none) g claimed = ParentStatus.unavailable := by
+  simp [VaultChain.statusOf, parentStatusOf]
+
 /-- A concrete position whose every leg names a parent the verifier has NOT
 established: registered, conforming, statically valid, every cell final on
 this `E`, nothing lost — and still Pending. `unavailable` is not `canonical`,
@@ -2761,5 +2822,10 @@ theorem unread_storage_is_unavailable_never_invalid (hm : HashModel) {sh : Nat �
 #print axioms leaf_chain_binds_each_operation
 #print axioms close_by_current_authority
 #print axioms later_setups_confer_no_authority
+#print axioms unreached_generation_is_unavailable
+#print axioms unreached_generation_never_refutes
+#print axioms named_root_is_canonical
+#print axioms refutes_iff_a_different_root_at_that_generation
+#print axioms an_empty_chain_refutes_nothing
 
 end DSMSofiAtomicity
